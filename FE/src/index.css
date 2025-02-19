@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  @apply m-0 flex items-center min-w-screen min-h-screen;
+}
+
+h1 {
+  @apply text-4xl leading-tight;
+}
+
+a {
+  @apply font-medium text-blue-600;
+}
+a:hover {
+  @apply text-blue-500;
+}
+
+button {
+  @apply rounded px-4 py-2 border border-transparent text-base font-medium text-white bg-gray-800 hover:border-blue-600;
+}
+button:hover {
+  @apply border-blue-600;
+}
+button:focus,
+button:focus-visible {
+  @apply outline-none ring-2 ring-blue-600;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    @apply text-gray-900 bg-white;
+  }
+  a:hover {
+    @apply text-blue-700;
+  }
+  button {
+    @apply bg-gray-100;
+  }
+}

@@ -1,0 +1,245 @@
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { MinioClientService } from '../minio-client/minio-client.service';
+import { NomadService } from '../nomad/nomad.service';
+import { CreateFunctionDto } from './dto/create-function.dto';
+import { UpdateFunctionDto } from './dto/update-function.dto';
+import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
+import { Function, FunctionStatus } from './entities/function.entity';
+
+@Injectable()
+export class FunctionsService {
+  constructor(
+    @InjectRepository(Function)
+    private functionsRepository: Repository<Function>,
+    @InjectRepository(FunctionInvocation)
+    private invocationsRepository: Repository<FunctionInvocation>,
+    private minioClientService: MinioClientService,
+    private nomadService: NomadService,
+    private configService: ConfigService,
+  ) {}
+
+  async create(createFunctionDto: CreateFunctionDto, userId: string): Promise<Function> {
+    const function_ = this.functionsRepository.create({
+      ...createFunctionDto,
+      userId: '1',
+      status: FunctionStatus.CREATING,
+    });
+
+    const savedFunction = await this.functionsRepository.save(function_);
+    try {
+      const basePath = `${savedFunction.id}`;
+      
+      // Upload code to MinIO
+      const codePath = `${basePath}/code.${this.getFileExtension(savedFunction.runtime)}`;
+      await this.minioClientService.uploadCode(codePath, savedFunction.code);
+
+      // Upload package.json
+      const packageJsonPath = `${basePath}/package.json`;
+      const packageJsonContent = this.generatePackageJson(savedFunction.runtime);
+      await this.minioClientService.uploadCode(packageJsonPath, packageJsonContent);
+
+      // Upload tsconfig.json
+      const tsconfigPath = `${basePath}/tsconfig.json`;
+      const tsconfigContent = this.generateTsConfig();
+      await this.minioClientService.uploadCode(tsconfigPath, tsconfigContent);
+      console.log('here')
+      // Deploy to Nomad
+      await this.nomadService.deployFunction(savedFunction);
+
+      // Update status to ACTIVE
+      savedFunction.status = FunctionStatus.ACTIVE;
+      await this.functionsRepository.save(savedFunction);
+
+      return savedFunction;
+    } catch (error) {
+      savedFunction.status = FunctionStatus.ERROR;
+      savedFunction.error = error.message;
+      await this.functionsRepository.save(savedFunction);
+      throw new BadRequestException(error.message);
+    }
+  }
+
+  async findAllByUser(userId: string): Promise<Function[]> {
+    return this.functionsRepository.find({
+      where: { userId },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  async findOne(id: string): Promise<Function> {
+    const function_ = await this.functionsRepository.findOne({ where: { id } });
+    if (!function_) {
+      throw new NotFoundException(`Function with ID ${id} not found`);
+    }
+    return function_;
+  }
+
+  async update(id: string, updateFunctionDto: UpdateFunctionDto): Promise<Function> {
+    const function_ = await this.findOne(id);
+
+    if (updateFunctionDto.code) {
+      try {
+        const codePath = `${id}/code.${this.getFileExtension(function_.runtime)}`;
+        await this.minioClientService.uploadCode(codePath, updateFunctionDto.code);
+        await this.nomadService.updateFunction({ ...function_, ...updateFunctionDto });
+      } catch (error) {
+        throw new BadRequestException(error.message);
+      }
+    }
+
+    Object.assign(function_, updateFunctionDto);
+    return this.functionsRepository.save(function_);
+  }
+
+  async remove(id: string): Promise<void> {
+    const function_ = await this.findOne(id);
+    
+    try {
+      // Remove from Nomad
+      await this.nomadService.removeFunction(function_);
+      
+      // Remove code from MinIO
+      const codePath = `${id}/code.${this.getFileExtension(function_.runtime)}`;
+      await this.minioClientService.deleteCode(codePath);
+      
+      // Delete from database
+      await this.functionsRepository.remove(function_);
+    } catch (error) {
+      throw new BadRequestException(error.message);
+    }
+  }
+
+  async invoke(id: string, input?: Record<string, any>): Promise<any> {
+    const function_ = await this.findOne(id);
+
+    if (function_.status !== FunctionStatus.ACTIVE) {
+      throw new BadRequestException('Function is not active');
+    }
+
+    const invocation = this.invocationsRepository.create({
+      functionId: id,
+      input: input || {},
+      status: InvocationStatus.RUNNING,
+    });
+
+    await this.invocationsRepository.save(invocation);
+
+    try {
+      const result = await this.nomadService.invokeFunction(function_, input);
+
+      // Update invocation with results and metrics
+      invocation.output = result.output || result;
+      invocation.memoryUsed = result.memoryUsed;
+      invocation.cpuUsed = result.cpuUsed;
+      invocation.status = InvocationStatus.COMPLETED;
+      await this.invocationsRepository.save(invocation);
+
+      // Return both invocation details and metrics
+      return {
+        id: invocation.id,
+        status: invocation.status,
+        input: invocation.input,
+        output: invocation.output,
+        metrics: {
+          memoryUsed: invocation.memoryUsed,
+          cpuUsed: invocation.cpuUsed,
+          startTime: invocation.createdAt,
+          endTime: invocation.updatedAt,
+          duration: invocation.updatedAt.getTime() - invocation.createdAt.getTime()
+        }
+      };
+
+    } catch (error) {
+      invocation.status = InvocationStatus.ERROR;
+      invocation.error = error.message;
+      await this.invocationsRepository.save(invocation);
+      throw new BadRequestException(error.message);
+    }
+  }
+
+  async getInvocations(
+    functionId: string,
+    limit: number,
+    offset: number,
+  ): Promise<{ invocations: FunctionInvocation[]; total: number }> {
+    const [invocations, total] = await this.invocationsRepository.findAndCount({
+      where: { functionId },
+      order: { createdAt: 'DESC' },
+      take: limit,
+      skip: offset,
+    });
+
+    console.log(invocations, total)
+
+    return { invocations, total };
+  }
+
+  private getFileExtension(runtime: string): string {
+    switch (runtime) {
+      case 'nodejs':
+        return 'ts';
+      case 'python':
+        return 'py';
+      default:
+        return 'txt';
+    }
+  }
+
+  private generatePackageJson(runtime: string): string {
+    return JSON.stringify({
+      "name": "serverless-function",
+      "version": "1.0.0",
+      "description": "Serverless function",
+      "main": "dist/wrapper.js",
+      "scripts": {
+        "build": "npx tsc",
+        "start": "npx ts-node wrapper.ts"
+      },
+      "dependencies": {
+        "express": "^4.18.2",
+        "body-parser": "^1.20.2"
+      },
+      "devDependencies": {
+        "@types/node": "^18.0.0",
+        "@types/express": "^4.17.21",
+        "typescript": "^5.0.0"
+      }
+    }, null, 2);
+  }
+
+  private generateTsConfig(): string {
+    return JSON.stringify({
+      "compilerOptions": {
+        "target": "ES2021",
+        "module": "commonjs",
+        "lib": ["ES2021","dom" ],
+        "declaration": true,
+        "removeComments": true,
+        "emitDecoratorMetadata": true,
+        "experimentalDecorators": true,
+        "allowSyntheticDefaultImports": true,
+        "allowJs": true,
+        "sourceMap": true,
+        "outDir": "./dist",
+        "baseUrl": "./",
+        "incremental": true,
+        "skipLibCheck": true,
+        "strictNullChecks": true,
+        "noImplicitAny": true,
+        "strictBindCallApply": true,
+        "forceConsistentCasingInFileNames": true,
+        "noFallthroughCasesInSwitch": true,
+        "esModuleInterop": true,
+        "typeRoots": [
+          "node_modules/@types"
+        ]
+      },
+      "include": [ "*.ts"]
+    
+    }
+    , null, 2);
+  }
+}
