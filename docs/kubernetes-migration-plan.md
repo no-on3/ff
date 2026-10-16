@@ -290,7 +290,7 @@ The rules:
   - `hack/k8s/env.sh`: sets `PATH`, `KUBECONFIG=hack/.kube/ff-dev.kubeconfig`, the cluster name, the k3s image, and the API port 6550. Never touches `~/.kube/config`.
   - `hack/k8s/cluster-up.sh`: runs the resource check (minimum 3,000 MB memory), then:
     ```
-    k3d cluster create ff-dev --image rancher/k3s:v1.37.1-k3s1 --servers 1 --agents 0 \
+    k3d cluster create ff-dev --image rancher/k3s:v1.37.1-k3s1 --servers 1 --agents 0 --no-lb \
       --api-port 127.0.0.1:6550 --servers-memory 2g \
       --k3s-arg "--disable=traefik@server:0" --k3s-arg "--disable=metrics-server@server:0" \
       --kubeconfig-update-default=false --kubeconfig-switch-context=false --wait --timeout 180s
@@ -555,8 +555,8 @@ The rules:
 | K-00 Preparation | ✅ Done | `0f1ced0` (baseline snapshot), `992cd63` | Resource guard: exit 0 at defaults, exit 1 on each violated threshold; ignore rules verified |
 | K-01 Plan and ADR | ✅ Done | `e197d16` | `hack/check-docs.py` passes on this plan, ADR 0001, and the parent plan; a negative test catches a bad table row, a broken link, and an unclosed fence |
 | K-02 Test harness | ✅ Done | `c26a44b` | `tsc --noEmit` exit 0; `npm test`: 1 suite, 3 tests pass, imported through the `@/` alias; `npm run test:it` selects only `*.it.spec.ts` (none yet) |
-| K-03 Orchestrator abstraction | ✅ Done | `7acb5f7` (build fix found while verifying), (this commit) | `tsc` exit 0; `npm test`: 4 suites, 15 tests; `NomadService` is referenced only by its driver; `nest build` now emits `dist/main.js` (it was `dist/src/main.js`, which broke `start:prod`). Only deliberate behaviour change: the metrics loop skips functions deleted during the window, instead of writing metrics for a missing row |
-| K-04 Dev cluster, RBAC, admission policy | ⏳ Planned | | |
+| K-03 Orchestrator abstraction | ✅ Done | `7acb5f7` (build fix found while verifying), `9ed8dd1` | `tsc` exit 0; `npm test`: 4 suites, 15 tests; `NomadService` is referenced only by its driver; `nest build` now emits `dist/main.js` (it was `dist/src/main.js`, which broke `start:prod`). Only deliberate behaviour change: the metrics loop skips functions deleted during the window, instead of writing metrics for a missing row |
+| K-04 Dev cluster, RBAC, admission policy | ✅ Done | (this commit) | • kubectl v1.37.1 and k3d v5.9.0 installed with SHA-256 verified; a re-run skips; a tampered file is rejected.<br>• Cluster up in about 47 s (k3s v1.37.1); node idles at 368 MiB of its 2 GiB cap.<br>• `test-rbac.sh`: **25/25** (7 grants, 7 denials, 9 admission-policy cases, node and token identity), no leftovers.<br>• `env.sh` fixed to work when sourced from zsh as well as bash. |
 | K-05 Node.js runtime image | ⏳ Planned | | |
 | K-06 KubernetesOrchestrator | ⏳ Planned | | |
 | K-07 Wiring, scaling, dev tenancy | ⏳ Planned | | |

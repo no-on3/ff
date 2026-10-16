@@ -1,0 +1,62 @@
+# Narrows the ff-controller's cluster-wide RBAC to tenant namespaces.
+# Every create/update/delete made by the ff-controller ServiceAccount must
+# target either:
+#   - a Namespace named ff-t-* labelled app.kubernetes.io/managed-by=ff-controller, or
+#   - a namespaced object inside such a namespace.
+# Anything else (kube-system, default, ff-system, unlabelled namespaces) is
+# denied, even though RBAC alone would allow it. Requests from other users
+# are not affected (matchConditions).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ff-controller-scope
+  labels:
+    app.kubernetes.io/part-of: ff
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["namespaces", "configmaps", "services", "resourcequotas", "limitranges"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["deployments", "deployments/scale"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["networkpolicies"]
+  matchConditions:
+    - name: only-ff-controller
+      expression: "request.userInfo.username == 'system:serviceaccount:ff-system:ff-controller'"
+  variables:
+    # The namespace the request is about: the Namespace object itself for
+    # namespace requests, otherwise the namespace of the target object.
+    - name: ns
+      expression: >-
+        request.resource.resource == 'namespaces'
+          ? (request.operation == 'DELETE' ? oldObject : object)
+          : namespaceObject
+  validations:
+    - expression: >-
+        variables.ns != null &&
+        variables.ns.metadata.name.startsWith('ff-t-') &&
+        has(variables.ns.metadata.labels) &&
+        'app.kubernetes.io/managed-by' in variables.ns.metadata.labels &&
+        variables.ns.metadata.labels['app.kubernetes.io/managed-by'] == 'ff-controller'
+      message: >-
+        ff-controller may only manage ff-t-* namespaces labelled
+        app.kubernetes.io/managed-by=ff-controller, and objects inside them
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ff-controller-scope
+  labels:
+    app.kubernetes.io/part-of: ff
+spec:
+  policyName: ff-controller-scope
+  validationActions: ["Deny"]

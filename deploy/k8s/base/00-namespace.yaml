@@ -1,0 +1,12 @@
+# Namespace for FF platform components (the backend runs here in production).
+# Tenant namespaces (ff-t-*) allow ingress only from this namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ff-system
+  labels:
+    app.kubernetes.io/part-of: ff
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
