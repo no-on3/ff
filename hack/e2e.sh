@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# L4 end-to-end test of the whole stack, driven through the public REST API:
+#   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003)
+#   + the k3d dev cluster + the backend (built, started on a free port).
+# Scenario: create → invoke → history → update → invoke → delete, with checks
+# on the Kubernetes side. Removes its compose project (including its volumes),
+# its tenant namespace and the backend process on exit. Keeps the cluster
+# unless --teardown is given.
+#   hack/e2e.sh [--teardown]
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
+
+teardown=false
+[ "${1:-}" = "--teardown" ] && teardown=true
+
+project=ff-e2e
+export FF_PG_PORT="${FF_E2E_PG_PORT:-55432}"
+export FF_S3_PORT="${FF_E2E_S3_PORT:-59003}"
+# A free port chosen by the OS, so the test never collides with other servers on the machine.
+be_port="${FF_E2E_BE_PORT:-$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")}"
+api="http://127.0.0.1:$be_port"
+work="$FF_REPO_ROOT/hack/.e2e"
+tenant="e2e-$(date +%s)-$$"
+tenant_ns="ff-t-$(printf %s "$tenant" | sha256sum | cut -c1-12)"
+compose=(docker compose -p "$project" -f "$FF_REPO_ROOT/docker-compose.yml")
+be_pid=""
+passed=0
+mkdir -p "$work"
+
+cleanup() {
+  local status=$?
+  if [ -n "$be_pid" ] && kill -0 "$be_pid" 2>/dev/null; then
+    kill "$be_pid"
+    wait "$be_pid" 2>/dev/null || true
+  fi
+  kubectl delete namespace "$tenant_ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  if $teardown; then "$FF_REPO_ROOT/hack/k8s/cluster-down.sh" >/dev/null 2>&1 || true; fi
+  if [ "$status" -ne 0 ]; then
+    echo "e2e: FAILED. Last backend log lines ($work/backend.log):" >&2
+    tail -20 "$work/backend.log" >&2 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+fail() {
+  echo "  FAIL $1" >&2
+  exit 1
+}
+check() { # <description> <expected> <actual>
+  if [ "$2" = "$3" ]; then
+    echo "  ok   $1"
+    passed=$((passed + 1))
+  else
+    fail "$1 (expected '$2', got '$3')"
+  fi
+}
+# http <method> <path> [json-body]: prints the body; the status code goes to $work/status.
+http() {
+  local args=(-sS -o "$work/body" -w '%{http_code}' -X "$1" -H 'content-type: application/json')
+  if [ -n "${3:-}" ]; then args+=(--data "$3"); fi
+  curl "${args[@]}" "$api$2" >"$work/status"
+  cat "$work/body"
+}
+status() { cat "$work/status"; }
+
+echo "== resources"
+MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3500}" "$FF_REPO_ROOT/hack/check-resources.sh"
+
+echo "== dependencies (compose project $project)"
+"${compose[@]}" up -d --wait postgres s3 >/dev/null 2>&1 || fail "compose dependencies did not become healthy"
+echo "  postgres on 127.0.0.1:$FF_PG_PORT, s3 on 127.0.0.1:$FF_S3_PORT"
+
+echo "== cluster"
+k3d cluster get "$FF_CLUSTER_NAME" >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/cluster-up.sh" >/dev/null
+"$FF_REPO_ROOT/hack/k8s/mint-token.sh" >/dev/null
+docker image inspect ff-runtime-nodejs:24-v1 >/dev/null 2>&1 ||
+  docker build -q -t ff-runtime-nodejs:24-v1 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
+"$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v1 >/dev/null 2>&1
+echo "  $FF_CLUSTER_NAME ready, runtime image imported"
+
+echo "== backend"
+(cd "$FF_REPO_ROOT/BE" && npm run build >/dev/null)
+(
+  cd "$FF_REPO_ROOT/BE"
+  export NODE_ENV=development PORT="$be_port" \
+    DB_HOST=127.0.0.1 DB_PORT="$FF_PG_PORT" DB_USERNAME=postgres DB_PASSWORD=postgres DB_NAME=serverless_platform \
+    MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$FF_S3_PORT" MINIO_USE_SSL=false MINIO_BUCKET_NAME=functions \
+    MINIO_ACCESS_KEY=ffdevaccesskey MINIO_SECRET_KEY=ffdevsecretkey-local-only \
+    ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy \
+    K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" FF_DEV_USER_ID="$tenant"
+  exec node dist/main.js
+) >"$work/backend.log" 2>&1 &
+be_pid=$!
+for _ in $(seq 1 60); do
+  kill -0 "$be_pid" 2>/dev/null || fail "backend exited during startup"
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")" = 200 ] && break
+  sleep 1
+done
+check "backend answers on $api" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")"
+
+echo "== scenario (tenant $tenant → namespace $tenant_ns)"
+v1='export async function handler(event: { body: { name?: string } }) {
+  return { version: 1, message: `Hello ${event.body.name ?? "world"}` };
+}'
+created="$(http POST /functions "$(jq -n --arg code "$v1" '{name: "e2e-hello", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+check "create returns 201" 201 "$(status)"
+check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
+id="$(jq -r .id <<<"$created")"
+check "its Deployment runs in the tenant namespace" "fn-$id" \
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.metadata.name}' 2>/dev/null)"
+
+invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"e2e"}}')"
+check "invoke returns 201" 201 "$(status)"
+check "invocation is COMPLETED" COMPLETED "$(jq -r .status <<<"$invoked")"
+check "handler output is returned" "Hello e2e" "$(jq -r .output.message <<<"$invoked")"
+
+history="$(http GET "/functions/$id/invocations")"
+check "history lists the invocation" 1 "$(jq -r .total <<<"$history")"
+check "a duration was recorded" true "$(jq -r '.invocations[0].duration > 0' <<<"$history")"
+
+v2="${v1//version: 1/version: 2}"
+http PUT "/functions/$id" "$(jq -n --arg code "$v2" '{code: $code}')" >/dev/null
+check "update returns 200" 200 "$(status)"
+check "the new code is live after the update" 2 \
+  "$(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.version)"
+
+http DELETE "/functions/$id" >/dev/null
+check "delete returns 200" 200 "$(status)"
+gone=false
+for _ in $(seq 1 30); do
+  if ! kubectl -n "$tenant_ns" get deployment "fn-$id" >/dev/null 2>&1; then
+    gone=true
+    break
+  fi
+  sleep 1
+done
+check "its Deployment is removed from the cluster" true "$gone"
+http GET "/functions/$id" >/dev/null
+check "the function record is gone" 404 "$(status)"
+
+echo "e2e: $passed checks passed"

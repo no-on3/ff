@@ -1,4 +1,8 @@
-version: '3.8'
+# Local development dependencies.
+#   docker compose up -d --wait               → PostgreSQL + S3 storage (what the backend needs)
+#   docker compose --profile full up -d       → also Prometheus, Grafana, containerized BE/FE
+# Functions run on the Kubernetes dev cluster (hack/k8s/cluster-up.sh), not here.
+# Host ports bind to 127.0.0.1 only and can be moved: FF_PG_PORT, FF_S3_PORT.
 
 services:
   postgres:
@@ -8,46 +12,60 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${FF_PG_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d serverless_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
-  minio:
-    image: minio/minio
+  # S3-compatible object storage. SeaweedFS replaces the MinIO community
+  # image, which is no longer published (ADR-002 in the parent plan, H-12).
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    command: >-
+      server -dir=/data -s3 -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+      -master.volumeSizeLimitMB=256
     ports:
-      - "9002:9002"
-      - "9003:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server --console-address ":9001" /data
+      - "127.0.0.1:${FF_S3_PORT:-9003}:8333"
     volumes:
-      - minio_data:/data
+      - s3_data:/data
+      - ./infrastructure/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8333 && wget -qO- http://127.0.0.1:9333/cluster/status >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
   prometheus:
+    profiles: ["full"]
     image: prom/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./infrastructure/prometheus:/etc/prometheus
       - prometheus_data:/prometheus
 
   grafana:
+    profiles: ["full"]
     image: grafana/grafana
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
       - grafana_data:/var/lib/grafana
 
   backend:
+    profiles: ["full"]
     build:
       context: ./BE
       dockerfile: Dockerfile.dev
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./BE:/app
       - /app/node_modules
@@ -55,14 +73,15 @@ services:
       - NODE_ENV=development
     depends_on:
       - postgres
-      - minio
+      - s3
 
   frontend:
+    profiles: ["full"]
     build:
       context: ./FE
       dockerfile: Dockerfile.dev
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     volumes:
       - ./FE:/app
       - /app/node_modules
@@ -71,6 +90,6 @@ services:
 
 volumes:
   postgres_data:
-  minio_data:
+  s3_data:
   prometheus_data:
   grafana_data:

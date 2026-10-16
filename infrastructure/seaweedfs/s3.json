@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "ff_dev",
+      "credentials": [
+        {
+          "accessKey": "ffdevaccesskey",
+          "secretKey": "ffdevsecretkey-local-only"
+        }
+      ],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}

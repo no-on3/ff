@@ -165,3 +165,6 @@ scripts
 hack/bin/
 hack/.kube/
 *.kubeconfig
+
+# End-to-end test work files (K-08)
+hack/.e2e/

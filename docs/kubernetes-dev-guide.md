@@ -66,6 +66,36 @@ hack/k8s/test-it.sh                       # L3: re-imports the images, then runs
 
 It deletes everything it creates. The default `npm test` skips these suites.
 
+## Running the backend against the cluster
+
+```bash
+docker compose up -d --wait               # PostgreSQL (127.0.0.1:5432) + SeaweedFS S3 (127.0.0.1:9003)
+hack/k8s/cluster-up.sh                    # prints the K8S_* settings
+hack/k8s/load-images.sh
+cp BE/.env.example BE/.env                # first time only; the defaults match the steps above
+cd BE && npm run start:dev
+```
+
+- **Nothing runs without a tenant.** Without authentication, the backend needs `FF_DEV_USER_ID` set, as `.env.example` does. Otherwise every request returns 401. `FF_DEV_USER_ID=1` keeps functions created by the old hard-coded user visible. This is a development-only stand-in until real authentication (parent plan F-01) is switched on.
+- **What `docker compose up` starts.** Only PostgreSQL and S3. Prometheus, Grafana, and the containerized backend and frontend are behind `--profile full`.
+- **S3 storage.** SeaweedFS replaces the MinIO community image, which is no longer published. Its dev credentials are in `infrastructure/seaweedfs/s3.json` (local use only).
+
+## End-to-end test
+
+```bash
+hack/e2e.sh                # L4: the whole stack through the REST API (~2 min)
+hack/e2e.sh --teardown     # … and delete the cluster afterwards
+```
+
+The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ensures the cluster and runtime image are ready, builds the backend, and starts it on a free port. It then runs:
+1. create (waits for ACTIVE);
+2. invoke;
+3. history (with duration);
+4. update (new code live);
+5. delete (Deployment gone, record gone).
+
+It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
+
 ## Credentials
 
 Everything lives in `hack/.kube/` (git-ignored, mode 0700, files 0600):
