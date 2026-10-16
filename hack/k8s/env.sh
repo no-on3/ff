@@ -13,6 +13,12 @@ export FF_K3S_IMAGE="${FF_K3S_IMAGE:-rancher/k3s:v1.37.1-k3s1}"
 export FF_API_PORT="${FF_API_PORT:-6550}"
 # Hard memory cap for the k3s node container (covers every pod in the cluster).
 export FF_NODE_MEMORY="${FF_NODE_MEMORY:-2g}"
+# kubelet deletes unused images once the image filesystem passes the high
+# threshold (default 85%). On a shared, nearly full disk this removes the
+# imported ff-runtime-* images, which have no registry to be re-pulled from.
+# 95% leaves about the same headroom as hack/check-resources.sh enforces.
+export FF_IMAGE_GC_HIGH_THRESHOLD="${FF_IMAGE_GC_HIGH_THRESHOLD:-95}"
+export FF_IMAGE_GC_LOW_THRESHOLD="${FF_IMAGE_GC_LOW_THRESHOLD:-90}"
 
 export FF_KUBE_DIR="$FF_REPO_ROOT/hack/.kube"
 # Admin credentials (cluster setup and debugging only).

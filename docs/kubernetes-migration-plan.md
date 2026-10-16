@@ -293,6 +293,8 @@ The rules:
     k3d cluster create ff-dev --image rancher/k3s:v1.37.1-k3s1 --servers 1 --agents 0 --no-lb \
       --api-port 127.0.0.1:6550 --servers-memory 2g \
       --k3s-arg "--disable=traefik@server:0" --k3s-arg "--disable=metrics-server@server:0" \
+      --k3s-arg "--kubelet-arg=image-gc-high-threshold=95@server:0" \
+      --k3s-arg "--kubelet-arg=image-gc-low-threshold=90@server:0" \
       --kubeconfig-update-default=false --kubeconfig-switch-context=false --wait --timeout 180s
     ```
     It then writes the kubeconfig (mode 0600), waits for the node to be Ready, applies `deploy/k8s/base`, and runs `mint-token.sh`.

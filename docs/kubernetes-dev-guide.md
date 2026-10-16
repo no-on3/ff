@@ -53,7 +53,7 @@ Function pods use the FF runtime images (`ff-runtime-nodejs:24-v1`, …). In dev
 ```bash
 runtimes/nodejs/test/container-smoke.sh   # builds ff-runtime-nodejs:24-v1 and checks it hardened
 hack/k8s/load-images.sh                   # imports every local ff-runtime-* image into ff-dev
-cd BE && npm run test:it                  # L3: KubernetesOrchestrator against the live cluster (~80 s)
+hack/k8s/test-it.sh                       # L3: re-imports the images, then runs BE `npm run test:it` (~75 s)
 ```
 
 `npm run test:it` deploys real functions with the `ff-controller` token into a throw-away `ff-t-*` namespace. It checks:
@@ -93,3 +93,4 @@ See [`deploy/k8s/README.md`](../deploy/k8s/README.md). In short:
 | `kubectl: command not found` after `source` | Source from the repository root: `source hack/k8s/env.sh`. |
 | `Unauthorized` from the backend after a day | The token expired: run `hack/k8s/mint-token.sh`. |
 | System pods stuck in `ContainerCreating` | Images are still being pulled inside the node; `kubectl -n kube-system get events` shows progress. |
+| Function pods in `ImagePullBackOff` for `ff-runtime-*` | kubelet's image GC deleted the imported image; it has no registry to re-pull from. GC runs when the disk passes the high threshold, which this cluster raises from 85% to 95% (`FF_IMAGE_GC_HIGH_THRESHOLD`). Re-import with `hack/k8s/load-images.sh`; `hack/k8s/test-it.sh` does this automatically. |

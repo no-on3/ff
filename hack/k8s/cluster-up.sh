@@ -23,6 +23,8 @@ else
     --servers-memory "$FF_NODE_MEMORY" \
     --k3s-arg "--disable=traefik@server:0" \
     --k3s-arg "--disable=metrics-server@server:0" \
+    --k3s-arg "--kubelet-arg=image-gc-high-threshold=$FF_IMAGE_GC_HIGH_THRESHOLD@server:0" \
+    --k3s-arg "--kubelet-arg=image-gc-low-threshold=$FF_IMAGE_GC_LOW_THRESHOLD@server:0" \
     --kubeconfig-update-default=false \
     --kubeconfig-switch-context=false \
     --wait --timeout 180s
