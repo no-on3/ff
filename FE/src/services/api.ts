@@ -73,11 +73,33 @@ export const functionsApi = {
   
   // Invoke function
   invokeFunction: (id: string, input: any) => 
-    api.post<InvocationResponse>(`/functions/${id}/invoke`, { input }),
+    api.post<InvocationResponse>(`/functions/${id}/invoke`, { ...input }),
   
   // Get function invocations
   getFunctionInvocations: (id: string) => 
     api.get<FunctionInvocation[]>(`/functions/${id}/invocations`),
+};
+
+// Metrics API endpoints
+export const getMetrics = async (functionId: string, start: Date, end: Date) => {
+  const response = await api.get(`/metrics/${functionId}`, {
+    params: {
+      start: start.toISOString(),
+      end: end.toISOString(),
+    },
+  });
+  return response.data;
+};
+
+// Scaling Configuration API endpoints
+export const getScalingConfig = async (functionId: string) => {
+  const response = await api.get(`/functions/${functionId}/scaling-config`);
+  return response.data;
+};
+
+export const updateScalingConfig = async (functionId: string, config: any) => {
+  const response = await api.put(`/functions/${functionId}/scaling-config`, config);
+  return response.data;
 };
 
 export const monitoringApi = {

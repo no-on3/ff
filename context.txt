@@ -1,0 +1,507 @@
+Project Requirements Document for AI (Claude)
+Objective
+
+Build a platform where users can:
+
+    Register, log in, and manage subscription plans.
+
+    Upload JavaScript and Python serverless functions.
+
+    Deploy and execute serverless functions in a pay-as-you-go model.
+
+    Monitor function executions and view analytics in a dashboard.
+
+Chosen Tools and Services
+
+    Frontend: React.js
+
+    Backend: Node.js (Express.js)
+
+    Authentication: Auth0
+
+    Database: PostgreSQL
+
+    Serverless Runtime: Custom Docker-based runtime orchestrated by Nomad.
+
+    Storage: MinIO (S3-compatible storage)
+
+    Billing: Stripe
+
+    Monitoring: Prometheus + Grafana
+
+    Containerization: Docker
+
+    Orchestration: Nomad (by HashiCorp)
+
+High-Level Architecture
+
+    Frontend:
+
+        Built with React.js.
+
+        Hosted on a CDN (e.g., Netlify or CloudFront).
+
+        Communicates with the backend via RESTful APIs.
+
+    Backend:
+
+        Built with Node.js (Express.js).
+
+        Handles user authentication, function uploads, billing, and monitoring.
+
+        Stores data in PostgreSQL.
+
+    Serverless Runtime:
+
+        Users' functions are packaged into Docker containers.
+
+        Deployed and orchestrated using Nomad.
+
+        Executed on-demand in a pay-as-you-go model.
+
+    Storage:
+
+        MinIO is used to store uploaded function code.
+
+    Billing:
+
+        Stripe handles payment processing and subscription management.
+
+    Monitoring:
+
+        Prometheus collects metrics (e.g., function executions, latency).
+
+        Grafana provides a dashboard for visualizing metrics.
+
+Step-by-Step Instructions for AI (Claude)
+1. User Management
+
+    Authentication:
+
+        Use Auth0 for user registration and login.
+
+        Store user data (e.g., email, password hash, subscription plan) in PostgreSQL.
+
+    Subscription Plans:
+
+        Create a plans table in PostgreSQL to store subscription details (e.g., free, pro, enterprise).
+
+        Assign a default plan (e.g., free) to new users during registration.
+
+    API Endpoints:
+
+        Build RESTful APIs for user management:
+
+            POST /register (user registration)
+
+            POST /login (user login)
+
+            POST /upgrade-plan (upgrade subscription plan)
+
+2. Billing Module
+
+    Payment Gateway:
+
+        Integrate Stripe for payment processing.
+
+        Use Stripe webhooks to handle payment events (e.g., successful payment, subscription cancellation).
+
+    Usage Tracking:
+
+        Track function executions in a usage_records table in PostgreSQL.
+
+        Log details like user_id, function_id, execution_time, and cost.
+
+    Billing API:
+
+        Build APIs for billing-related actions:
+
+            GET /usage (fetch usage records for a user)
+
+            GET /invoice (generate and fetch invoices)
+
+3. Serverless Function Management
+
+    Function Upload:
+
+        Create an API endpoint (POST /upload-function) for users to upload their JavaScript or Python code.
+
+        Store the uploaded code in MinIO.
+
+    Function Deployment:
+
+        Package the uploaded code into Docker containers.
+
+        Use Nomad to deploy and manage the containers.
+
+        Store function metadata (e.g., function_id, user_id, runtime, status) in PostgreSQL.
+
+    Function Execution:
+
+        Expose an API endpoint (POST /execute-function) to trigger function execution.
+
+        Use Nomad to dynamically allocate resources for function execution.
+
+4. Monitoring Dashboard
+
+    Metrics Collection:
+
+        Use Prometheus to collect metrics (e.g., function execution count, latency, error rate).
+
+        Use Fluentd or Logstash to collect logs from deployed functions.
+
+    Visualization:
+
+        Use Grafana to build a monitoring dashboard.
+
+        Display metrics like:
+
+            Function execution counts
+
+            Error rates
+
+            Latency
+
+            Resource usage (CPU, memory)
+
+    API for Metrics:
+
+        Build an API (GET /metrics) to fetch metrics for the frontend dashboard.
+
+5. Backend Infrastructure
+
+    API Gateway:
+
+        Build a RESTful API gateway using Node.js (Express.js).
+
+        Secure endpoints using JWT-based authentication.
+
+    Database:
+
+        Use PostgreSQL to store:
+
+            User data
+
+            Function metadata
+
+            Usage records
+
+    Serverless Runtime:
+
+        Use Nomad to manage serverless function deployments.
+
+        Package functions into Docker containers and deploy them using Nomad.
+
+    Storage:
+
+        Use MinIO to store uploaded function code.
+
+Function Runtime Details
+
+    Cold Start Management:
+        Implement function pre-warming for frequently used functions
+        Cache container images locally on worker nodes
+        Use lightweight base images to minimize startup time
+        Implement concurrent request queuing during cold starts
+
+    Function Limits and Quotas:
+        Maximum execution time: 300 seconds
+        Maximum memory allocation: 2048 MB
+        Maximum concurrent executions per function: 100
+        Maximum function package size: 50 MB
+        Supported runtimes: Node.js 18.x, Python 3.9+
+
+    Auto-scaling Strategy:
+        Implement horizontal pod autoscaling based on:
+            CPU utilization (target: 70%)
+            Memory usage (target: 80%)
+            Concurrent requests (target: 50 per instance)
+        Scale to zero when no requests for 5 minutes
+        Maximum scale out: 100 instances per function
+
+    Network and VPC:
+        Allow functions to run in isolated VPC environments
+        Provide VPC connectivity options for accessing private resources
+        Implement network policies for function-to-function communication
+        Set up egress rules for external service access
+
+Deployment and CI/CD
+
+    Containerization:
+
+        Package your backend services and serverless runtime in Docker containers.
+
+    Orchestration:
+
+        Use Nomad to manage and scale your platform.
+
+    CI/CD Pipeline:
+
+        Use GitHub Actions or GitLab CI to automate testing and deployment.
+
+Detailed Implementation Steps
+
+1. Auth0 Integration Implementation
+    Configuration:
+        Create Auth0 tenant and application
+        Configure allowed callback URLs: 
+            - https://your-domain.com/callback
+            - https://your-domain.com/silent-refresh
+        Set up social identity providers (Google, GitHub)
+        Enable passwordless authentication
+
+    Backend Integration:
+        Install dependencies:
+            npm install express-oauth2-jwt-bearer
+        Implement middleware:
+            const auth = require('express-oauth2-jwt-bearer');
+            const checkJwt = auth({
+                audience: 'YOUR_API_IDENTIFIER',
+                issuerBaseURL: 'https://YOUR_DOMAIN'
+            });
+        Protect routes:
+            app.get('/api/protected', checkJwt, (req, res) => {...});
+
+    Frontend Integration:
+        Install Auth0 SDK:
+            npm install @auth0/auth0-react
+        Implement authentication context:
+            import { Auth0Provider } from '@auth0/auth0-react';
+            <Auth0Provider
+                domain="YOUR_DOMAIN"
+                clientId="YOUR_CLIENT_ID"
+                redirectUri={window.location.origin}
+            >
+
+2. Stripe Integration Implementation
+    Initial Setup:
+        Create Stripe account and get API keys
+        Configure webhook endpoints
+        Set up products and pricing plans
+
+    Backend Implementation:
+        Install Stripe SDK:
+            npm install stripe
+        Initialize Stripe:
+            const stripe = require('stripe')('sk_test_...');
+        
+        Implement payment endpoints:
+            // Create payment intent
+            app.post('/create-payment-intent', async (req, res) => {
+                const paymentIntent = await stripe.paymentIntents.create({
+                    amount: calculateAmount(req.body),
+                    currency: 'usd'
+                });
+                res.json({clientSecret: paymentIntent.client_secret});
+            });
+
+        Implement webhook handler:
+            app.post('/webhook', express.raw({type: 'application/json'}), (req, res) => {
+                const sig = req.headers['stripe-signature'];
+                let event;
+                try {
+                    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+                } catch (err) {
+                    return res.status(400).send(`Webhook Error: ${err.message}`);
+                }
+                // Handle event types
+                switch (event.type) {
+                    case 'payment_intent.succeeded':
+                        handleSuccessfulPayment(event.data.object);
+                        break;
+                }
+                res.json({received: true});
+            });
+
+3. Nomad Configuration and Setup
+    Cluster Setup:
+        Install Nomad on servers:
+            wget https://releases.hashicorp.com/nomad/1.6.0/nomad_1.6.0_linux_amd64.zip
+            unzip nomad_1.6.0_linux_amd64.zip
+            sudo mv nomad /usr/local/bin/
+
+        Basic server configuration (/etc/nomad.d/server.hcl):
+            datacenter = "dc1"
+            data_dir = "/opt/nomad/data"
+            server {
+                enabled = true
+                bootstrap_expect = 3
+            }
+
+        Client configuration (/etc/nomad.d/client.hcl):
+            client {
+                enabled = true
+                servers = ["nomad-server-1:4647", "nomad-server-2:4647", "nomad-server-3:4647"]
+                options {
+                    "driver.raw_exec.enable" = "1"
+                    "docker.privileged.enabled" = "true"
+                }
+            }
+
+    Function Job Template:
+        job "function-${function_id}" {
+            datacenters = ["dc1"]
+            type = "service"
+
+            group "function" {
+                count = 1
+
+                scaling {
+                    enabled = true
+                    min = 0
+                    max = 100
+                    policy {
+                        cooldown = "1m"
+                        evaluation_interval = "1m"
+                        check "cpu" {
+                            strategy "threshold" {
+                                threshold = 70
+                            }
+                        }
+                    }
+                }
+
+                task "server" {
+                    driver = "docker"
+                    config {
+                        image = "${function_image}"
+                        port_map {
+                            http = 8080
+                        }
+                    }
+
+                    resources {
+                        cpu    = 500
+                        memory = 256
+                        network {
+                            port "http" {}
+                        }
+                    }
+
+                    service {
+                        name = "function-${function_id}"
+                        port = "http"
+                        check {
+                            type     = "http"
+                            path     = "/health"
+                            interval = "10s"
+                            timeout  = "2s"
+                        }
+                    }
+                }
+            }
+        }
+
+Security Best Practices
+
+1. Authentication and Authorization
+    - Implement role-based access control (RBAC)
+    - Use short-lived JWT tokens (max 1 hour)
+    - Implement token refresh mechanism
+    - Store sensitive data in HashiCorp Vault
+    - Enable MFA for admin accounts
+    - Implement API rate limiting
+
+2. Network Security
+    - Use TLS 1.3 for all communications
+    - Implement WAF rules
+    - Set up network segmentation
+    - Use private subnets for internal services
+    - Implement strict CORS policies
+    - Regular security scanning and penetration testing
+
+3. Function Runtime Security
+    - Run functions in isolated containers
+    - Implement resource quotas
+    - Scan function code for vulnerabilities
+    - Use read-only file systems
+    - Implement function timeout limits
+    - Monitor for suspicious activities
+
+Scalability Best Practices
+
+1. Database Optimization
+    - Implement connection pooling
+    - Use read replicas for heavy read workloads
+    - Implement query caching
+    - Regular database maintenance
+    - Implement database sharding for large datasets
+
+2. Caching Strategy
+    - Implement Redis for session storage
+    - Cache frequently accessed function metadata
+    - Use CDN for static assets
+    - Implement browser caching
+    - Cache API responses where appropriate
+
+3. Load Balancing
+    - Implement layer 7 load balancing
+    - Use sticky sessions when needed
+    - Geographic distribution of resources
+    - Implement circuit breakers
+    - Use health checks for services
+
+Cost Optimization
+
+1. Resource Management
+    - Implement auto-scaling based on demand
+    - Use spot instances where appropriate
+    - Implement function cold start optimization
+    - Regular cleanup of unused resources
+    - Monitor and optimize resource utilization
+
+2. Storage Optimization
+    - Implement tiered storage
+    - Regular cleanup of old logs
+    - Compress stored data
+    - Implement lifecycle policies
+    - Use appropriate storage classes
+
+3. Network Optimization
+    - Optimize API payload sizes
+    - Use WebSocket for real-time communications
+    - Implement request batching
+    - Use appropriate instance types
+    - Optimize data transfer patterns
+
+Monitoring and Alerting
+
+1. Metrics Collection
+    - Function execution metrics
+    - Error rates and types
+    - Resource utilization
+    - API latency
+    - Cost per function
+
+2. Alert Configuration
+    - High error rate alerts
+    - Resource utilization thresholds
+    - Cost anomaly detection
+    - Security incident alerts
+    - System health alerts
+
+Example Workflow
+
+    User Registration:
+
+        User signs up and is assigned a free plan.
+
+    Function Upload:
+
+        User uploads a JavaScript/Python function via the /upload-function API.
+
+    Function Deployment:
+
+        The platform packages the code into a Docker container and deploys it using Nomad.
+
+    Function Execution:
+
+        User triggers the function via the /execute-function API.
+
+    Billing:
+
+        The platform tracks function executions and calculates costs.
+
+    Monitoring:
+
+        User views function metrics and logs in the Grafana dashboard.

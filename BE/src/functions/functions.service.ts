@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { NomadService } from '../nomad/nomad.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
@@ -19,6 +20,7 @@ export class FunctionsService {
     private minioClientService: MinioClientService,
     private nomadService: NomadService,
     private configService: ConfigService,
+    private metricsService: MetricsService,
   ) {}
 
   async create(createFunctionDto: CreateFunctionDto, userId: string): Promise<Function> {
@@ -112,9 +114,8 @@ export class FunctionsService {
     }
   }
 
-  async invoke(id: string, input?: Record<string, any>): Promise<any> {
+  async invoke(id: string, input?: Record<string, any>): Promise<FunctionInvocation> {
     const function_ = await this.findOne(id);
-
     if (function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
     }
@@ -128,7 +129,18 @@ export class FunctionsService {
     await this.invocationsRepository.save(invocation);
 
     try {
+      const startTime = Date.now();
       const result = await this.nomadService.invokeFunction(function_, input);
+      const duration = Date.now() - startTime;
+
+      // Record metrics
+      await this.metricsService.recordMetric(
+        id,
+        duration,
+        result.cpuUsed || 0,
+        result.memoryUsed || 0,
+        false
+      );
 
       // Update invocation with results and metrics
       invocation.output = result.output || result;
@@ -137,22 +149,17 @@ export class FunctionsService {
       invocation.status = InvocationStatus.COMPLETED;
       await this.invocationsRepository.save(invocation);
 
-      // Return both invocation details and metrics
-      return {
-        id: invocation.id,
-        status: invocation.status,
-        input: invocation.input,
-        output: invocation.output,
-        metrics: {
-          memoryUsed: invocation.memoryUsed,
-          cpuUsed: invocation.cpuUsed,
-          startTime: invocation.createdAt,
-          endTime: invocation.updatedAt,
-          duration: invocation.updatedAt.getTime() - invocation.createdAt.getTime()
-        }
-      };
-
+      return invocation;
     } catch (error) {
+      // Record error metrics
+      await this.metricsService.recordMetric(
+        id,
+        Date.now() - invocation.createdAt.getTime(),
+        0,
+        0,
+        true
+      );
+
       invocation.status = InvocationStatus.ERROR;
       invocation.error = error.message;
       await this.invocationsRepository.save(invocation);

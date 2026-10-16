@@ -1,4 +1,4 @@
-import { MigrationInterface, QueryRunner, Table } from 'typeorm';
+import { MigrationInterface, QueryRunner, Table, TableForeignKey } from 'typeorm';
 
 export class CreateMonitoringTables1707235165434 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -74,42 +74,45 @@ export class CreateMonitoringTables1707235165434 implements MigrationInterface {
             default: 'CURRENT_TIMESTAMP',
           },
         ],
+        foreignKeys: [
+          {
+            name: 'fk_function_metrics_function',
+            columnNames: ['functionId'],
+            referencedTableName: 'functions',
+            referencedColumnNames: ['id'],
+            onDelete: 'CASCADE',
+          },
+          {
+            name: 'fk_function_metrics_invocation',
+            columnNames: ['invocationId'],
+            referencedTableName: 'function_invocations',
+            referencedColumnNames: ['id'],
+            onDelete: 'SET NULL',
+          },
+        ],
       }),
       true,
     );
-
-    // Add foreign keys
-    await queryRunner.query(`
-      ALTER TABLE function_metrics
-      ADD CONSTRAINT fk_function_metrics_function
-      FOREIGN KEY ("functionId")
-      REFERENCES functions(id)
-      ON DELETE CASCADE;
-    `);
-
-    await queryRunner.query(`
-      ALTER TABLE function_metrics
-      ADD CONSTRAINT fk_function_metrics_invocation
-      FOREIGN KEY ("invocationId")
-      REFERENCES function_invocations(id)
-      ON DELETE SET NULL;
-    `);
 
     // Create indexes for better query performance
     await queryRunner.query(`
       CREATE INDEX idx_metrics_name ON metrics(name);
       CREATE INDEX idx_metrics_timestamp ON metrics(timestamp);
-      CREATE INDEX idx_function_metrics_function_id ON function_metrics("functionId");
+      CREATE INDEX idx_function_metrics_functionid ON function_metrics("functionId");
       CREATE INDEX idx_function_metrics_timestamp ON function_metrics(timestamp);
     `);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP INDEX IF EXISTS idx_function_metrics_timestamp;`);
-    await queryRunner.query(`DROP INDEX IF EXISTS idx_function_metrics_function_id;`);
-    await queryRunner.query(`DROP INDEX IF EXISTS idx_metrics_timestamp;`);
-    await queryRunner.query(`DROP INDEX IF EXISTS idx_metrics_name;`);
-    
+    // Drop indexes
+    await queryRunner.query(`
+      DROP INDEX IF EXISTS idx_metrics_name;
+      DROP INDEX IF EXISTS idx_metrics_timestamp;
+      DROP INDEX IF EXISTS idx_function_metrics_functionid;
+      DROP INDEX IF EXISTS idx_function_metrics_timestamp;
+    `);
+
+    // Drop tables (foreign keys will be dropped automatically)
     await queryRunner.dropTable('function_metrics');
     await queryRunner.dropTable('metrics');
   }

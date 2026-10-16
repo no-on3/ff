@@ -107,4 +107,23 @@ export class FunctionsController {
     // }
     return this.functionsService.getInvocations(id, limit, offset);
   }
+
+  @Get(':id/scaling-config')
+  @ApiOperation({ summary: 'Get function scaling configuration' })
+  @ApiResponse({ status: 200, description: 'Scaling configuration details' })
+  async getScalingConfig(
+    @Param('id') id: string,
+    @User() userId: string,
+  ) {
+    const func = await this.functionsService.findOne(id);
+    // if (func.userId !== userId) {
+    //   throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
+    // }
+    return {
+      minInstances: func.minInstances || 0,
+      maxInstances: func.maxInstances || 1,
+      targetConcurrency: func.targetConcurrency || 100,
+      scaleToZero: func.scaleToZero !== false,
+    };
+  }
 }

@@ -63,6 +63,18 @@ export class Function {
   @Column({ nullable: true })
   error?: string;
 
+  @Column({ default: 0 })
+  minInstances: number;
+
+  @Column({ default: 1 })
+  maxInstances: number;
+
+  @Column({ default: 100 })
+  targetConcurrency: number;
+
+  @Column({ default: true })
+  scaleToZero: boolean;
+
   @OneToMany(() => FunctionInvocation, invocation => invocation.function)
   invocations: FunctionInvocation[];
 

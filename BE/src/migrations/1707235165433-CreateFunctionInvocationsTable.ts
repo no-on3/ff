@@ -2,6 +2,16 @@ import { MigrationInterface, QueryRunner, Table, TableForeignKey } from 'typeorm
 
 export class CreateFunctionInvocationsTable1707235165433 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
+    // Create the status enum type if it doesn't exist
+    await queryRunner.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'function_invocations_status_enum') THEN
+          CREATE TYPE function_invocations_status_enum AS ENUM ('SUCCESS', 'ERROR', 'TIMEOUT');
+        END IF;
+      END$$;
+    `);
+
     await queryRunner.createTable(
       new Table({
         name: 'function_invocations',
@@ -28,8 +38,7 @@ export class CreateFunctionInvocationsTable1707235165433 implements MigrationInt
           },
           {
             name: 'status',
-            type: 'enum',
-            enum: ['SUCCESS', 'ERROR', 'TIMEOUT'],
+            type: 'function_invocations_status_enum',
           },
           {
             name: 'duration',
@@ -57,6 +66,7 @@ export class CreateFunctionInvocationsTable1707235165433 implements MigrationInt
     await queryRunner.createForeignKey(
       'function_invocations',
       new TableForeignKey({
+        name: 'FK_function_invocations_function',
         columnNames: ['functionId'],
         referencedColumnNames: ['id'],
         referencedTableName: 'functions',
@@ -67,15 +77,15 @@ export class CreateFunctionInvocationsTable1707235165433 implements MigrationInt
 
   public async down(queryRunner: QueryRunner): Promise<void> {
     const table = await queryRunner.getTable('function_invocations');
-    if (!table) {
-      return; // Table doesn't exist, nothing to drop
+    if (table) {
+      const foreignKey = table.foreignKeys.find(
+        fk => fk.columnNames.indexOf('functionId') !== -1,
+      );
+      if (foreignKey) {
+        await queryRunner.dropForeignKey('function_invocations', foreignKey);
+      }
+      await queryRunner.dropTable('function_invocations');
     }
-    const foreignKey = table.foreignKeys.find(
-      fk => fk.columnNames.indexOf('functionId') !== -1,
-    );
-    if (foreignKey) {
-      await queryRunner.dropForeignKey('function_invocations', foreignKey);
-    }
-    await queryRunner.dropTable('function_invocations');
+    await queryRunner.query('DROP TYPE IF EXISTS function_invocations_status_enum');
   }
 }

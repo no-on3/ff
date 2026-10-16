@@ -153,6 +153,66 @@ export class NomadService {
 
   }
 
+  async getActiveInstanceCount(functionId: string): Promise<number> {
+    try {
+      const allocResponse = await this.nomadApi.get(`/job/${functionId}/allocations`);
+      return allocResponse.data.filter(
+        (alloc: any) => alloc.ClientStatus === 'running'
+      ).length;
+    } catch (error) {
+      console.error(`Error getting active instances for function ${functionId}:`, error);
+      return 0;
+    }
+  }
+
+  async scaleFunction(functionId: string, targetInstances: number): Promise<void> {
+    try {
+      const jobSpec = await this.getJobSpec(functionId);
+      if (!jobSpec) {
+        throw new Error(`Job spec not found for function ${functionId}`);
+      }
+
+      // Update the count in the job specification
+      jobSpec.TaskGroups[0].Count = targetInstances;
+
+      // Deploy the updated job specification
+      const hostel = new Hostel({
+        connection: {
+          hostname: this.configService.get<string>('nomad.host') as string,
+          port: 4646,
+          ssl: {
+            ca: this.configService.get<string>('nomad.ssl.ca'),
+            cert: this.configService.get<string>('nomad.ssl.cert'),
+            privateKey: this.configService.get<string>('nomad.ssl.key')
+          },
+          ignoreTLSWarning: !this.configService.get<boolean>('nomad.tlsVerify', true)
+        }
+      });
+      await hostel.initialize();
+
+      await hostel.jobs.create({
+        jobId: functionId,
+        Job: jobSpec,
+        PolicyOverride: false
+      });
+
+      console.log(`Successfully scaled function ${functionId} to ${targetInstances} instances`);
+    } catch (error) {
+      console.error(`Error scaling function ${functionId}:`, error);
+      throw error;
+    }
+  }
+
+  private async getJobSpec(functionId: string): Promise<any> {
+    try {
+      const response = await this.nomadApi.get(`/job/${functionId}`);
+      return response.data.Job;
+    } catch (error) {
+      console.error(`Error getting job spec for function ${functionId}:`, error);
+      return null;
+    }
+  }
+
   private async createJobSpec(function_: Function): Promise<any> {
     const runtimePath = path.join(this.templatePath, function_.runtime);
     const basePath = `${function_.id}`;
