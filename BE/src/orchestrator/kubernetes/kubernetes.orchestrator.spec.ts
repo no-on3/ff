@@ -164,6 +164,18 @@ describe('KubernetesOrchestrator', () => {
       expect(error.message).toContain('Runtime.ImportModuleError');
     });
 
+    it('reports why no pods could be created, e.g. an unknown RuntimeClass', async () => {
+      const reason = 'pods "fn-x" is forbidden: pod rejected: RuntimeClass "gvisor" not found';
+      api.objects.set(deploymentPath, {
+        ...rolledOut(1),
+        status: { observedGeneration: 1, conditions: [{ type: 'ReplicaFailure', status: 'True', reason: 'FailedCreate', message: reason }] },
+      });
+
+      const error = await orchestrator.waitUntilReady(fn, 30).catch((err) => err);
+
+      expect(error.message).toContain(`no pods were created: ${reason}`);
+    });
+
     it('fails immediately when the Deployment does not exist', async () => {
       await expect(orchestrator.waitUntilReady(fn, 1000)).rejects.toThrow('does not exist');
     });

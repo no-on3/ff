@@ -5,8 +5,9 @@
 # Scenario: create → invoke → history → update → invoke → delete, with checks
 # on the Kubernetes side, then the same lifecycle for a Python function. Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
-# unless --teardown is given.
-#   hack/e2e.sh [--teardown]
+# unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
+# gVisor (hack/k8s/gvisor-up.sh installs it).
+#   [K8S_RUNTIME_CLASS=gvisor] hack/e2e.sh [--teardown]
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 
@@ -90,7 +91,8 @@ echo "== backend"
     MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$FF_S3_PORT" MINIO_USE_SSL=false MINIO_BUCKET_NAME=functions \
     MINIO_ACCESS_KEY=ffdevaccesskey MINIO_SECRET_KEY=ffdevsecretkey-local-only \
     ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy \
-    K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" FF_DEV_USER_ID="$tenant"
+    K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" FF_DEV_USER_ID="$tenant" \
+    K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
   exec node dist/main.js
 ) >"$work/backend.log" 2>&1 &
 be_pid=$!
@@ -113,6 +115,10 @@ check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
 id="$(jq -r .id <<<"$created")"
 check "its Deployment runs in the tenant namespace" "fn-$id" \
   "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.metadata.name}' 2>/dev/null)"
+if [ -n "${K8S_RUNTIME_CLASS:-}" ]; then
+  check "its pods use RuntimeClass $K8S_RUNTIME_CLASS" "$K8S_RUNTIME_CLASS" \
+    "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.runtimeClassName}')"
+fi
 
 invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"e2e"}}')"
 check "invoke returns 201" 201 "$(status)"

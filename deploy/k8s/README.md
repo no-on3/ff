@@ -10,6 +10,12 @@
 | `30-clusterrolebinding.yaml` | ClusterRoleBinding | Binds the role to the ServiceAccount |
 | `40-admission-policy.yaml` | ValidatingAdmissionPolicy + binding `ff-controller-scope` | Confines the ServiceAccount's writes to FF tenant namespaces |
 
+## Optional
+
+| File | Object | Purpose |
+|---|---|---|
+| `optional/runtimeclass-gvisor.yaml` | RuntimeClass `gvisor` (handler `runsc`) | Runs function pods in gVisor when the backend has `K8S_RUNTIME_CLASS=gvisor`. Only on nodes labelled `ff.dev/gvisor=true`, with 40 Mi / 25m pod overhead. The nodes need gVisor installed first: see [Sandboxing with gVisor](../../docs/kubernetes-dev-guide.md#sandboxing-with-gvisor). |
+
 ## Permissions
 
 | Resource | Verbs | Why |

@@ -7,5 +7,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 "$FF_REPO_ROOT/hack/k8s/load-images.sh"
+# The sandboxed case runs where the gvisor RuntimeClass exists (hack/k8s/gvisor-up.sh).
+if kubectl get runtimeclass gvisor >/dev/null 2>&1; then
+  export K8S_IT_RUNTIME_CLASS="${K8S_IT_RUNTIME_CLASS:-gvisor}"
+  echo "gvisor RuntimeClass found: the sandboxed case runs"
+else
+  echo "no gvisor RuntimeClass: the sandboxed case is skipped (hack/k8s/gvisor-up.sh installs it)"
+fi
 cd "$FF_REPO_ROOT/BE"
 npm run test:it -- "$@"

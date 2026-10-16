@@ -13,6 +13,9 @@ import { LABELS, functionResourceName, tenantNamespace } from './naming';
 import { settings, workload } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' ? describe : describe.skip;
+// Set by hack/k8s/test-it.sh when the gvisor RuntimeClass exists (hack/k8s/gvisor-up.sh).
+const sandboxClass = process.env.K8S_IT_RUNTIME_CLASS;
+const itSandboxed = sandboxClass ? it : it.skip;
 const kubeDir = path.resolve(__dirname, '../../../../hack/.kube');
 
 const greeter = (version: number) => `
@@ -49,6 +52,13 @@ export async function handler(event: { body: { hog?: boolean } }) {
   while (event.body.hog) hoard.push(new Array(100_000).fill('x'.repeat(8)));
   return 'ok';
 }`;
+
+// gVisor reports its own kernel version ("4.19.0-gvisor"), not the node's.
+const kernelProbe: Record<Runtime, string> = {
+  [Runtime.NODEJS]: `import * as os from 'node:os';
+export async function handler() { return { kernel: os.release() }; }`,
+  [Runtime.PYTHON]: 'import platform\n\n\ndef handler(event, context):\n    return {"kernel": platform.release()}\n',
+};
 
 interface PodStatus {
   status?: { containerStatuses?: Array<{ restartCount: number }> };
@@ -211,6 +221,41 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
       expect(pods.map((pod) => pod.status?.containerStatuses?.[0]?.restartCount)).toEqual([0]);
     } finally {
       await orchestrator.remove(hog);
+    }
+  });
+
+  itSandboxed(`runs Node.js and Python functions inside the ${sandboxClass} sandbox, network policy intact`, async () => {
+    const sandboxed = new KubernetesOrchestrator({ ...s, runtimeClass: sandboxClass! }, client);
+    const fns = [
+      ...[Runtime.NODEJS, Runtime.PYTHON].map((runtime) =>
+        workload({ id: randomUUID(), userId: tenant, name: `it-sandbox-${runtime}`, runtime, code: kernelProbe[runtime], memory: 128, timeout: 5 }),
+      ),
+      workload({ id: randomUUID(), userId: tenant, name: 'it-sandbox-network', code: networkProbe, memory: 128, timeout: 10 }),
+    ];
+    try {
+      for (const f of fns) await sandboxed.deploy(f);
+      for (const f of fns) await sandboxed.waitUntilReady(f, 90_000);
+      const outputs: unknown[] = [];
+      for (const f of fns) outputs.push((await sandboxed.invoke(f, {})).output);
+
+      expect(outputs).toEqual([
+        { kernel: expect.stringContaining('gvisor') },
+        { kernel: expect.stringContaining('gvisor') },
+        { dnsLookup: true, kubeDnsTcp53: true, apiServer: false },
+      ]);
+    } finally {
+      for (const f of fns) await sandboxed.remove(f);
+    }
+  });
+
+  it('explains a missing RuntimeClass instead of waiting silently', async () => {
+    const misconfigured = new KubernetesOrchestrator({ ...s, runtimeClass: 'ff-missing' }, client);
+    const lost = workload({ id: randomUUID(), userId: tenant, name: 'it-no-runtimeclass', code: greeter(1), timeout: 3 });
+    try {
+      await misconfigured.deploy(lost);
+      await expect(misconfigured.waitUntilReady(lost, 15_000)).rejects.toThrow(/no pods were created: .*RuntimeClass "ff-missing" not found/);
+    } finally {
+      await misconfigured.remove(lost);
     }
   });
 

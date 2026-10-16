@@ -29,6 +29,7 @@ interface Deployment extends K8sObject {
     updatedReplicas?: number;
     readyReplicas?: number;
     availableReplicas?: number;
+    conditions?: Array<{ type: string; status: string; message?: string }>;
   };
 }
 
@@ -142,24 +143,31 @@ export class KubernetesOrchestrator implements Orchestrator {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const deadline = Date.now() + timeoutMs;
+    let deployment: Deployment | null;
     for (;;) {
-      const deployment = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
+      deployment = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
       if (!deployment) throw new OrchestratorError(`Deployment ${ns}/${name} does not exist`);
       if (isRolledOut(deployment)) return;
       if (Date.now() >= deadline) break;
       await sleep(this.pollIntervalMs);
     }
-    const diagnostics = await this.diagnose(fn, ns);
+    const diagnostics = await this.diagnose(fn, ns, deployment);
     throw new OrchestratorError(
       `Function "${fn.name}" did not become ready within ${Math.round(timeoutMs / 1000)} s${diagnostics ? `: ${diagnostics}` : ''}`,
     );
   }
 
   /** Why pods are not ready: container waiting reasons plus the newest pod's last log lines. */
-  private async diagnose(fn: FunctionWorkload, ns: string): Promise<string> {
+  private async diagnose(fn: FunctionWorkload, ns: string, deployment: Deployment): Promise<string> {
     try {
       const pods = await this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
-      if (pods.length === 0) return 'no pods were created (check the tenant ResourceQuota and events)';
+      if (pods.length === 0) {
+        // Pods that cannot even be created (quota exceeded, unknown RuntimeClass) show up here.
+        const failure = deployment.status?.conditions?.find((c) => c.type === 'ReplicaFailure' && c.status === 'True');
+        return failure?.message
+          ? `no pods were created: ${failure.message}`
+          : 'no pods were created (check the tenant ResourceQuota and events)';
+      }
       const reasons = new Set<string>();
       for (const pod of pods) {
         for (const status of pod.status?.containerStatuses ?? []) {

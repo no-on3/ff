@@ -54,7 +54,7 @@ Function pods use the FF runtime images `ff-runtime-nodejs:24-v1` and `ff-runtim
 runtimes/nodejs/test/container-smoke.sh    # builds ff-runtime-nodejs:24-v1 and checks it hardened
 runtimes/python/tests/container-smoke.sh   # builds ff-runtime-python:3.13-v1 and checks it hardened
 hack/k8s/load-images.sh                    # imports every local ff-runtime-* image into ff-dev
-hack/k8s/test-it.sh                        # L3: re-imports the images, then runs BE `npm run test:it` (~85 s)
+hack/k8s/test-it.sh                        # L3: re-imports the images, then runs BE `npm run test:it` (~3 min)
 ```
 
 `npm run test:it` deploys real functions with the `ff-controller` token into a throw-away `ff-t-*` namespace. It checks:
@@ -62,8 +62,10 @@ hack/k8s/test-it.sh                        # L3: re-imports the images, then run
 - a code rollout;
 - scale to zero and cold start;
 - the tenant network policy (DNS allowed, the API server blocked);
-- init-failure diagnostics;
+- init-failure diagnostics, and a missing RuntimeClass explained;
 - a Python function (deploy, invoke, and Lambda error names);
+- a Python and a Node.js memory hog: each gets `Runtime.OutOfMemory`, the next invocation works, and the container is never restarted;
+- functions of both runtimes inside gVisor, with the network policy still enforced (only where the `gvisor` RuntimeClass exists; see [Sandboxing with gVisor](#sandboxing-with-gvisor));
 - clean-up.
 
 It deletes everything it creates. The default `npm test` skips these suites.
@@ -98,6 +100,56 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 6. the same create, invoke, and delete for a Python function.
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
+
+## Sandboxing with gVisor
+
+This is optional. With `K8S_RUNTIME_CLASS=gvisor`, every function pod runs in [gVisor](https://gvisor.dev), a user-space kernel that answers the pod's system calls. Tenant code then never talks to the node's kernel directly. This adds a layer on top of the default isolation (non-root, read-only root filesystem, no capabilities, seccomp `RuntimeDefault`, a NetworkPolicy and quota per tenant), for untrusted code. To switch it off, unset the variable. Functions pick up the change at their next deploy or update.
+
+### In the dev cluster
+
+```bash
+hack/k8s/gvisor-up.sh                      # first run about 80 s: downloads 130 MB, restarts the cluster once
+hack/k8s/test-it.sh                        # now also runs the sandboxed case
+K8S_RUNTIME_CLASS=gvisor hack/e2e.sh       # the whole stack, every function in gVisor
+```
+
+The script:
+- installs the pinned release (20260928.0, SHA-512 checked) into the k3d node;
+- registers `runsc` with containerd;
+- applies `deploy/k8s/optional/runtimeclass-gvisor.yaml` and labels the node `ff.dev/gvisor=true`;
+- checks the result with a pod that must report gVisor's kernel (`4.19.0-gvisor`).
+
+It works nested because k3d nodes are privileged containers, and gVisor's default `systrap` platform needs no KVM. A recreated cluster needs the script again.
+
+### On real nodes (k3s, RKE2, containerd)
+
+On every node that should run sandboxed functions:
+1. **Install the binaries.** Download `https://storage.googleapis.com/gvisor/releases/release/<release>/<arch>/gvisor.tar.zstd` and its `.sha512`, then check it with `sha512sum -c`. Extract `runsc`, `containerd-shim-runsc-v1`, and the `gvisor-bin/` directory into `/usr/local/bin`. `runsc` looks for the `gvisor-bin/` helpers next to itself and refuses to start a sandbox without them.
+2. **Register the runtime** with containerd (containerd 2, configuration version 3): `[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]` with `runtime_type = "io.containerd.runsc.v1"`.
+   - k3s: put it, with `version = 3` on top, in `/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/10-gvisor.toml`. k3s imports that directory. Then restart k3s.
+   - RKE2 generates its containerd configuration the same way, under `/var/lib/rancher/rke2/agent/etc/containerd/`. Check that the generated `config.toml` has an `imports` line for `config-v3.toml.d`. If it does not, use `config-v3.toml.tmpl`.
+   - Plain containerd: add the section to `/etc/containerd/config.toml` and restart containerd.
+3. **Label the node:** `kubectl label node <node> ff.dev/gvisor=true`.
+
+Then, once for the cluster, run `kubectl apply -f deploy/k8s/optional/runtimeclass-gvisor.yaml` and set `K8S_RUNTIME_CLASS=gvisor` for the backend.
+
+**Verification checklist:**
+- A test pod with `runtimeClassName: gvisor` reports a `-gvisor` kernel (`uname -r`, or `os.release()` in Node.js).
+- `hack/k8s/test-it.sh`, pointed at the cluster, passes the sandboxed case. That case also checks that the tenant NetworkPolicy still applies inside gVisor.
+- After the switch, the Deployments of new and updated functions show `runtimeClassName: gvisor`. `hack/e2e.sh` checks this when `K8S_RUNTIME_CLASS` is set.
+- If the RuntimeClass is missing, no pod can be created, and the backend reports the reason: `no pods were created: … RuntimeClass "gvisor" not found`.
+
+### Costs and differences (measured on k3d)
+
+| | runc | gVisor |
+|---|---|---|
+| Memory of an idle pod | 48 MiB (Node.js), 21 MiB (Python) | +29 MiB, +36 MiB. The RuntimeClass declares 40 Mi of overhead, so this is not taken from the function's memory. |
+| Idle CPU | 0 | about 2m |
+| Cold start at 128 MB / 100m CPU, pod created to Ready (Node.js) | about 10 s | 12 to 15 s |
+
+- gVisor reports its own kernel version (4.19.0-gvisor) and implements most, but not all, Linux system calls. Code that inspects kernel features can behave differently.
+- The Python runtime's memory budget relies on `RLIMIT_DATA`, which gVisor does not enforce (verified). Under gVisor, a function that outgrows its memory meets the sandbox's limit instead.
+- The 10 s cold start without gVisor comes from the 100m CPU limit, which slows every start-up step roughly tenfold. See the migration plan, K-13.
 
 ## Credentials
 

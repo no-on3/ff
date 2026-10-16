@@ -164,6 +164,7 @@ and calls functions directly at http://fn-<id>.<ns>.svc:8080 (K8S_INVOKE_MODE=di
 | Node.js runtime base | `node:24-alpine` | Node 24 LTS = Lambda `nodejs24.x`; the digest is recorded in the runtime README |
 | Python runtime base | `python:3.13-slim` | Lambda `python3.13` |
 | TypeScript (in-runtime transpiler) | 5.7.3 | Same as the backend |
+| gVisor (optional, K-11) | release `20260928.0` | SHA-512 checked against the release bucket; installed by `hack/k8s/gvisor-up.sh` |
 | SeaweedFS | `chrislusf/seaweedfs:4.48` | Index digest `sha256:4e61d15f…7872d`, identical to the cached `latest`, so pinning downloads nothing |
 
 ---
@@ -520,13 +521,37 @@ The rules:
 ### K-11: gVisor RuntimeClass (optional isolation layer)
 - **Goal:** make sandboxed execution a configuration switch.
 - **Design:**
-  - `deploy/k8s/optional/runtimeclass-gvisor.yaml` (`handler: runsc`).
-  - The dev guide documents installing gVisor on k3s or RKE2 nodes: install the `runsc` and `containerd-shim-runsc-v1` binaries, then add a runtime entry to the containerd config template.
-  - `K8S_RUNTIME_CLASS=gvisor` sets `runtimeClassName` on function pods.
+  - `deploy/k8s/optional/runtimeclass-gvisor.yaml`:
+    - `handler: runsc`;
+    - `scheduling.nodeSelector: ff.dev/gvisor=true`, so pods only land on nodes that have gVisor;
+    - `overhead.podFixed` 40Mi / 25m. This is measured: the Sentry adds 29–36 MiB to an idle pod, and it runs in the pod's cgroup, so without the overhead it would use part of the function's memory.
+  - `K8S_RUNTIME_CLASS=gvisor` sets `runtimeClassName` on function pods (from K-06).
+  - A missing RuntimeClass no longer surfaces as a silent timeout: the readiness diagnostics now include the Deployment's `ReplicaFailure` message.
+  - `hack/k8s/gvisor-up.sh` (development):
+    - pins release 20260928.0, at least two weeks old;
+    - checks the release tarball's SHA-512 and extracts only `runsc`, the shim, and the `gvisor-bin/` sidecars, which this release requires;
+    - installs them into the k3d node and adds a containerd drop-in (`config-v3.toml.d/10-gvisor.toml`);
+    - restarts the cluster only when that changes;
+    - applies the RuntimeClass, labels the node, and checks the result with a pod.
+  - The dev guide documents installation on real k3s, RKE2, and containerd nodes, with a verification checklist.
+  - *Corrected:* the original plan said k3d nodes can't run gVisor. They can. The nodes are privileged containers, and gVisor's default `systrap` platform needs no KVM.
 - **Tests:**
-  - L1: the manifest includes `runtimeClassName` only when configured.
-  - A manual verification checklist for real nodes (`dmesg` inside the pod shows gVisor). k3d nodes can't run gVisor, which is documented.
-- **Rollback:** unset the variable.
+  - L1: `runtimeClassName` only when configured (K-06); `ReplicaFailure` diagnostics.
+  - L3: `hack/k8s/test-it.sh` runs the sandboxed case wherever the RuntimeClass exists. Node.js and Python functions must report gVisor's kernel, and the NetworkPolicy must still hold. A missing RuntimeClass must be explained.
+  - L4: `K8S_RUNTIME_CLASS=gvisor hack/e2e.sh` checks the Deployments' `runtimeClassName`.
+- **Rollback:** unset the variable. Functions return to runc at their next deploy or update.
+
+### K-13: Cold-start performance (proposed, not started)
+- **Found in K-11.** At the smallest size, 128 MB with a 100m CPU limit and request equal to limit, a pod takes about 10 s from creation to Ready, even without gVisor (measured on k3d). Breakdown:
+  - Node.js: 7.8 s from listening to initialized for a `.ts` function, and 5.9 s for a `.js` one. `ts-hook.ts` imports the TypeScript compiler (about 9 MB of JavaScript) eagerly, and FF stores every Node.js function as `function.ts`.
+  - Python: 3.9 s to listening and 1.3 s to initialized.
+  - The 0.1 CPU limit slows every one of these start-up steps roughly tenfold.
+- **Options:**
+  1. CPU burst. Keep the proportional CPU *request*, but set a higher *limit*, for example 1 CPU. This would have the biggest effect for every runtime. It is a product decision: it affects tenant fairness, and it moves away from Lambda's strictly proportional CPU.
+  2. Node.js: bake a V8 compile cache (`NODE_COMPILE_CACHE`) for the runtime and TypeScript into the image, and load TypeScript only for `.ts` files.
+  3. Python: defer heavy imports in the main process, such as `http.server`'s email parsing.
+  4. Minimum instances and warm pools (parent plan S-02) hide the remaining cold starts.
+- **Tests:** a cold-start benchmark (pod created to first successful invocation) per runtime and size, as an L3 report.
 
 ### K-12: Documentation and plan synchronization
 - **Goal:** the documentation matches reality.
@@ -548,7 +573,7 @@ The rules:
 | The network-policy engine blocks the development proxy path | **Checked in K-06: not blocked on k3s**. API-server proxy calls reach pods under the default-deny policy. `K8S_INGRESS_ALLOW_CIDRS` remains for other CNIs; production uses `direct` mode from `ff-system`. |
 | The ConfigMap code limit (1 MiB) | 900 KiB limit enforced with a clear error. The zip artifact pipeline (parent plan R-02) lifts it. |
 | Machine overload during tests | §5.1 protocol, capped node memory, quotas, one heavy step at a time |
-| Cold start from zero is slow (pod scheduling) | Readiness-gated waits; minimum instances; warm pools are a later optimization (parent plan S-02) |
+| Cold start from zero is slow | Readiness-gated waits; minimum instances; warm pools later (parent plan S-02). Measured in K-11: about 10 s at 128 MB / 100m, mostly CPU-limited start-up. Options are in K-13. |
 
 ---
 
@@ -566,6 +591,7 @@ The rules:
 | K-07 Wiring, scaling, dev tenancy | ✅ Done | `bd156c4` (dev cluster image-GC fix found while verifying), `ecef3bd` | • L1 `npm test`: **12 suites / 123 tests**, adding `decideReplicas` table tests (incl. the former divide-by-zero), idle sweep (eligibility, skipped on Nomad, fault isolation), `resolveUserId`, create/update/invoke flows (readiness wait, rollout only on relevant fields, nothing saved on failed rollout, duration persisted, `TIMEOUT` status).<br>• L3 `hack/k8s/test-it.sh`: **6/6** after the GC fix.<br>• New interface flag `supportsScaleToZero` (Kubernetes true, Nomad false), so the idle sweep never parks Nomad functions at zero. |
 | K-08 Dev stack and e2e | ✅ Done | `dbe2ce3` (cascade-delete fix found by the e2e test), `5bb644f` | • L4 `hack/e2e.sh`: **14/14** through the REST API (create → ACTIVE → Deployment in tenant namespace → invoke → output → history with duration → update → new code live → delete → Deployment and record gone).<br>• Its first runs found two real bugs: port 3100 taken by another project (the script now picks a free port), and the cascade-delete bug (fixed in `dbe2ce3`, with a regression test that fails without it).<br>• Cleanup verified: 0 `ff-e2e` containers and volumes, no tenant namespace, no backend process, other projects untouched. |
 | K-09 Remove Nomad | ✅ Done | `83ed1b0` | • Deleted the Nomad service and module, the Nomad adapter, `script.ts`, the hostel type shim, `BE/templates/` and `BE/job.json`.<br>• Uninstalled `@chatsight/hostel`, `@pulumi/nomad`, `@pulumi/pulumi` (221 packages removed) and `axios` (only Nomad used it).<br>• Nomad-only `package.json`/`tsconfig.json` uploads removed. Only `kubernetes` is accepted as a driver; `nomad` now fails at boot.<br>• L0 build ✓; L1 **122/122**; L3 **6/6**; L4 **14/14**. `nomad-vagrant/` kept and marked `DEPRECATED.md`. |
-| K-10 Python runtime | ✅ Done | `815d600` (test-hygiene fix found while verifying), (this commit) | • L1 `python3 -m unittest`: **22/22** in about 6 s, stable over 4 runs. It mirrors the Node.js suite: context, Lambda log lines, serial execution, error mapping, timeout, a CPU-bound loop stopped while `/healthz` stays up, OOM, `sys.exit`, six init-failure kinds, 413/400/429/404, no environment in logs. It adds `Decimal` and UTF-8 output, `Runtime.MarshalError`, chunked bodies, and a graceful `SIGTERM`.<br>• L2 `container-smoke.sh`: **10/10**, hardened. Inside a 256 MB container, a hoarding function gets `Runtime.OutOfMemory` and the container is not OOM-killed.<br>• L3 `hack/k8s/test-it.sh`: **7/7**, with a new Python case (deploy, invoke, `ValueError` mapping) at 6.8 s. L4 `hack/e2e.sh`: **19/19**, with a new Python lifecycle.<br>• Verified by hand: numpy 2.5.4 runs in a 128 MB function, and an oversized allocation gets `Runtime.OutOfMemory` and then recovers. Kubernetes sets `memory.oom.group=1` on containers (k3s v1.37.1), so the runtime's own limit is what keeps a container alive.<br>• Image 119 MB on `python:3.13-slim` (Python 3.13.16). Main process 22 MB plus a 15 MB worker. Found while verifying: the e2e backend start budget rose from 60 s to 180 s, because the repository's 5400 rpm disk with a cold page cache took 23 s just to load the modules. Also, a K-06 test left a timer that made Jest force-exit a worker (`815d600`). |
-| K-11 gVisor RuntimeClass | ⏳ Planned | | |
+| K-10 Python runtime | ✅ Done | `815d600` (test-hygiene fix found while verifying), `8a986b8` | • L1 `python3 -m unittest`: **22/22** in about 6 s, stable over 4 runs. It mirrors the Node.js suite: context, Lambda log lines, serial execution, error mapping, timeout, a CPU-bound loop stopped while `/healthz` stays up, OOM, `sys.exit`, six init-failure kinds, 413/400/429/404, no environment in logs. It adds `Decimal` and UTF-8 output, `Runtime.MarshalError`, chunked bodies, and a graceful `SIGTERM`.<br>• L2 `container-smoke.sh`: **10/10**, hardened. Inside a 256 MB container, a hoarding function gets `Runtime.OutOfMemory` and the container is not OOM-killed.<br>• L3 `hack/k8s/test-it.sh`: **7/7**, with a new Python case (deploy, invoke, `ValueError` mapping) at 6.8 s. L4 `hack/e2e.sh`: **19/19**, with a new Python lifecycle.<br>• Verified by hand: numpy 2.5.4 runs in a 128 MB function, and an oversized allocation gets `Runtime.OutOfMemory` and then recovers. Kubernetes sets `memory.oom.group=1` on containers (k3s v1.37.1), so the runtime's own limit is what keeps a container alive.<br>• Image 119 MB on `python:3.13-slim` (Python 3.13.16). Main process 22 MB plus a 15 MB worker. Found while verifying: the e2e backend start budget rose from 60 s to 180 s, because the repository's 5400 rpm disk with a cold page cache took 23 s just to load the modules. Also, a K-06 test left a timer that made Jest force-exit a worker (`815d600`). |
+| K-11 gVisor RuntimeClass | ✅ Done | `a0932f7` and `d7d15bf` (runtime fixes found while verifying), (this commit) | • **gVisor works on k3d**, contrary to the plan: `hack/k8s/gvisor-up.sh` takes 83 s from scratch on a fresh cluster (download, SHA-512, install, drop-in, one restart, check pod: kernel `4.19.0-gvisor`) and 6 s when re-run.<br>• L1 backend: orchestrator suite 72/72, with a new `ReplicaFailure` diagnostics test.<br>• L3 **11/11**: Node.js and Python inside gVisor with the NetworkPolicy intact; missing RuntimeClass explained; Python and Node.js memory hogs in 128 MB get `Runtime.OutOfMemory` with 0 restarts.<br>• L4: **20/20** with `K8S_RUNTIME_CLASS=gvisor`, **19/19** without.<br>• Measured: +29/+36 MiB per idle pod (declared as 40Mi overhead); cold start 12–15 s against about 10 s with runc (K-13).<br>• Found while verifying, and fixed in their own commits: Python replacement workers died with their connection (`PR_SET_PDEATHSIG` is per thread); a failed thread start could freeze the Python accept loop; both runtimes' memory budgets let the kernel kill the whole container. gVisor does not enforce `RLIMIT_DATA` (documented). |
 | K-12 Docs and plan sync | ⏳ Planned | | |
+| K-13 Cold-start performance | 💡 Proposed | | Measurements and options in K-13; needs a product decision on CPU burst |

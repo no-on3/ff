@@ -1,0 +1,28 @@
+# Optional isolation layer: run function pods in gVisor (https://gvisor.dev),
+# a user-space kernel that serves the pods' system calls, so tenant code never
+# reaches the node's kernel directly. Not part of base/: it needs runsc on the
+# nodes first (docs/kubernetes-dev-guide.md, "Sandboxing with gVisor").
+#   kubectl apply -f deploy/k8s/optional/runtimeclass-gvisor.yaml
+#   kubectl label node <node> ff.dev/gvisor=true   # every node that has runsc
+# Then set K8S_RUNTIME_CLASS=gvisor in the backend.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+  labels:
+    app.kubernetes.io/part-of: ff
+# The containerd runtime name configured on the nodes.
+handler: runsc
+# The sandbox (gVisor's Sentry) runs in the pod's cgroup. Without this, it
+# would use part of the function's own memory. Measured on k3d with an idle
+# function: +29 MiB (Node.js) and +36 MiB (Python), with about 2m of idle CPU.
+# The CPU leaves room for system-call-heavy work in the smallest functions
+# (100m). The scheduler and the tenant ResourceQuota count this overhead.
+overhead:
+  podFixed:
+    memory: 40Mi
+    cpu: 25m
+scheduling:
+  # Only nodes with gVisor installed; elsewhere the pod could not start.
+  nodeSelector:
+    ff.dev/gvisor: "true"

@@ -96,6 +96,6 @@ Platform events (start, initialization, timeouts, restarts) are one-line JSON. *
 ```bash
 cd runtimes/nodejs
 npm install
-npm test                       # L1: 21 protocol tests on real processes, ~8 s, no Docker
+npm test                       # L1: 22 protocol tests on real processes, ~10 s, no Docker
 test/container-smoke.sh        # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```
