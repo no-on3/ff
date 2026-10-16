@@ -19,7 +19,14 @@ export default () => ({
   },
   orchestrator: {
     // Scheduler driver behind the ORCHESTRATOR token (see OrchestratorModule).
-    driver: process.env.ORCHESTRATOR || 'nomad',
+    driver: process.env.ORCHESTRATOR || 'kubernetes',
+    // How long create/update wait for a function to become ready.
+    readyTimeoutSeconds: parseInt(process.env.FF_READY_TIMEOUT_SECONDS || '90', 10),
+  },
+  scaling: {
+    // Idle time before a function with scaleToZero and minInstances 0 is scaled to zero.
+    scaleToZeroIdleSeconds: parseInt(process.env.FF_SCALE_TO_ZERO_IDLE_SECONDS || '900', 10),
+    maxRequestsPerInstance: parseInt(process.env.MAX_REQUESTS_PER_INSTANCE || '2', 10),
   },
   // Kubernetes driver settings (docs/kubernetes-migration-plan.md §4.5).
   kubernetes: {

@@ -10,6 +10,9 @@ import { FunctionWorkload, InvokeResult, Orchestrator } from '../orchestrator.ty
  */
 @Injectable()
 export class NomadOrchestrator implements Orchestrator {
+  /** invokeFunction needs a running allocation; there is no cold start from zero. */
+  readonly supportsScaleToZero = false;
+
   constructor(private readonly nomadService: NomadService) {}
 
   deploy(fn: FunctionWorkload): Promise<void> {

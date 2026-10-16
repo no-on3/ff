@@ -2,9 +2,10 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nest
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, Repository } from 'typeorm';
-import { Function } from '../functions/entities/function.entity';
+import { Function, FunctionStatus } from '../functions/entities/function.entity';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { FunctionMetrics } from './entities/function-metrics.entity';
+import { decideReplicas, shouldScaleToZero } from './scaling';
 
 interface MetricsWindow {
   requestCount: number;
@@ -14,12 +15,21 @@ interface MetricsWindow {
   memoryUsage: number[];
 }
 
+/**
+ * Aggregates invocation metrics per one-minute window, adjusts replicas from
+ * them (decideReplicas), and scales idle functions to zero when the driver
+ * supports cold starts. Runs in the API process and assumes a single backend
+ * replica; multi-replica deployments need leader election (parent plan R-06).
+ */
 @Injectable()
 export class MetricsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MetricsService.name);
   private metricsWindows: Map<string, MetricsWindow> = new Map();
   private readonly windowSize = 60 * 1000; // 1 minute window
   private aggregationTimer?: NodeJS.Timeout;
+  /** Epoch ms of each function's last invocation seen by this process. */
+  private readonly lastInvokedAt = new Map<string, number>();
+  private readonly startedAt = Date.now();
 
   constructor(
     @InjectRepository(FunctionMetrics)
@@ -31,7 +41,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    this.startMetricsAggregation();
+    this.aggregationTimer = setInterval(() => void this.tick(), this.windowSize);
   }
 
   onModuleDestroy() {
@@ -62,80 +72,102 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     window.responseTimes.push(responseTime);
     window.cpuUsage.push(cpuUsage);
     window.memoryUsage.push(memoryUsage);
+    this.lastInvokedAt.set(functionId, Date.now());
   }
 
-  private startMetricsAggregation() {
-    this.aggregationTimer = setInterval(async () => {
-      try {
-        const timestamp = new Date();
-        const promises: Promise<void>[] = [];
-
-        for (const [functionId, window] of this.metricsWindows.entries()) {
-          if (window.requestCount === 0) continue;
-
-          const function_ = await this.functionRepository.findOne({ where: { id: functionId } });
-          if (!function_) continue; // deleted since the window opened
-
-          // Sort response times for percentile calculations
-          window.responseTimes.sort((a, b) => a - b);
-          const len = window.responseTimes.length;
-
-          const metrics = new FunctionMetrics();
-          metrics.functionId = functionId;
-          metrics.timestamp = timestamp;
-          metrics.requestCount = window.requestCount;
-          metrics.errorCount = window.errorCount;
-          metrics.responseTimeP50 = this.getPercentile(window.responseTimes, 50);
-          metrics.responseTimeP95 = this.getPercentile(window.responseTimes, 95);
-          metrics.responseTimeP99 = this.getPercentile(window.responseTimes, 99);
-          metrics.cpuUsage = this.average(window.cpuUsage);
-          metrics.memoryUsage = this.average(window.memoryUsage);
-
-          metrics.activeInstances = await this.orchestrator.readyInstances(function_);
-
-          promises.push(this.metricsRepository.save(metrics).then());
-
-          // Check scaling conditions
-          await this.checkScalingConditions(function_, metrics);
-        }
-
-        // Clear the windows after saving
-        this.metricsWindows.clear();
-
-        await Promise.all(promises);
-      } catch (error) {
-        this.logger.error('Error in metrics aggregation:', error);
-      }
-    }, this.windowSize);
-  }
-
-  private async checkScalingConditions(function_: Function, metrics: FunctionMetrics) {
-    const functionId = function_.id;
+  /** One window: persist metrics and adjust replicas, then scale idle functions to zero. */
+  async tick(): Promise<void> {
     try {
-      const maxRequestsPerInstance = this.configService.get('MAX_REQUESTS_PER_INSTANCE', 2);
-      const maxCpuUtilization = this.configService.get('MAX_CPU_UTILIZATION', 80);
-      const minCpuUtilization = this.configService.get('MIN_CPU_UTILIZATION', 40);
-
-      const requestsPerInstance = metrics.requestCount / metrics.activeInstances;
-      const shouldScaleUp =
-        requestsPerInstance > maxRequestsPerInstance ||
-        metrics.cpuUsage > maxCpuUtilization ||
-        metrics.responseTimeP95 > 1000; // 1 second response time threshold
-
-      const shouldScaleDown =
-        metrics.activeInstances > 1 && // Never scale down to 0
-        requestsPerInstance < (maxRequestsPerInstance * 0.6) && // Less than 60% capacity
-        metrics.cpuUsage < minCpuUtilization;
-
-      if (shouldScaleUp) {
-        await this.orchestrator.scale(function_, metrics.activeInstances + 1);
-        this.logger.log(`Scaling up function ${functionId} to ${metrics.activeInstances + 1} instances`);
-      } else if (shouldScaleDown) {
-        await this.orchestrator.scale(function_, metrics.activeInstances - 1);
-        this.logger.log(`Scaling down function ${functionId} to ${metrics.activeInstances - 1} instances`);
-      }
+      await this.aggregate();
     } catch (error) {
-      this.logger.error(`Error checking scaling conditions for function ${functionId}:`, error);
+      this.logger.error('Error in metrics aggregation:', error);
+    }
+    try {
+      await this.sweepIdleFunctions();
+    } catch (error) {
+      this.logger.error('Error in idle sweep:', error);
+    }
+  }
+
+  async aggregate(): Promise<void> {
+    const timestamp = new Date();
+    // Swap first, so invocations recorded while this runs land in the next window.
+    const windows = this.metricsWindows;
+    this.metricsWindows = new Map();
+
+    for (const [functionId, window] of windows) {
+      if (window.requestCount === 0) continue;
+      try {
+        const function_ = await this.functionRepository.findOne({ where: { id: functionId } });
+        if (!function_) continue; // deleted since the window opened
+
+        window.responseTimes.sort((a, b) => a - b);
+        const metrics = new FunctionMetrics();
+        metrics.functionId = functionId;
+        metrics.timestamp = timestamp;
+        metrics.requestCount = window.requestCount;
+        metrics.errorCount = window.errorCount;
+        metrics.responseTimeP50 = this.getPercentile(window.responseTimes, 50);
+        metrics.responseTimeP95 = this.getPercentile(window.responseTimes, 95);
+        metrics.responseTimeP99 = this.getPercentile(window.responseTimes, 99);
+        metrics.cpuUsage = this.average(window.cpuUsage);
+        metrics.memoryUsage = this.average(window.memoryUsage);
+        metrics.activeInstances = await this.orchestrator.readyInstances(function_);
+
+        await this.metricsRepository.save(metrics);
+        await this.applyScalingDecision(function_, metrics);
+      } catch (error) {
+        this.logger.error(`Error aggregating metrics for function ${functionId}:`, error);
+      }
+    }
+  }
+
+  private async applyScalingDecision(function_: Function, metrics: FunctionMetrics): Promise<void> {
+    const target = decideReplicas({
+      activeInstances: metrics.activeInstances,
+      requestCount: metrics.requestCount,
+      responseTimeP95: metrics.responseTimeP95,
+      minInstances: function_.minInstances,
+      maxInstances: function_.maxInstances,
+      maxRequestsPerInstance: this.configService.get<number>('scaling.maxRequestsPerInstance', 2),
+    });
+    if (target === null) return;
+    await this.orchestrator.scale(function_, target);
+    this.logger.log(`Scaled function ${function_.id} from ${metrics.activeInstances} to ${target} instances`);
+  }
+
+  /** Scales eligible functions (scaleToZero, minInstances 0) to zero after the idle period. */
+  async sweepIdleFunctions(nowMs = Date.now()): Promise<void> {
+    if (!this.orchestrator.supportsScaleToZero) return;
+    const idleSeconds = this.configService.get<number>('scaling.scaleToZeroIdleSeconds', 900);
+    const candidates = await this.functionRepository.find({
+      where: { status: FunctionStatus.ACTIVE, scaleToZero: true, minInstances: 0 },
+    });
+
+    for (const function_ of candidates) {
+      // Without a recorded invocation (e.g. after a restart), count from boot or the last change.
+      const lastActivityMs = Math.max(
+        this.lastInvokedAt.get(function_.id) ?? 0,
+        this.startedAt,
+        function_.updatedAt?.getTime() ?? 0,
+      );
+      if (nowMs - lastActivityMs < idleSeconds * 1000) continue; // not idle: skip the API call
+      try {
+        const readyInstances = await this.orchestrator.readyInstances(function_);
+        const eligible = shouldScaleToZero({
+          scaleToZero: function_.scaleToZero,
+          minInstances: function_.minInstances,
+          readyInstances,
+          lastActivityMs,
+          nowMs,
+          idleSeconds,
+        });
+        if (!eligible) continue;
+        await this.orchestrator.scale(function_, 0);
+        this.logger.log(`Scaled idle function ${function_.id} to zero (no invocations for ${idleSeconds} s)`);
+      } catch (error) {
+        this.logger.error(`Error scaling idle function ${function_.id} to zero:`, error);
+      }
     }
   }
 

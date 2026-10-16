@@ -33,6 +33,8 @@ export interface InvokeResult {
 }
 
 export interface Orchestrator {
+  /** Whether invoke() starts an instance when none is running (cold start from zero). */
+  readonly supportsScaleToZero: boolean;
   /** Create or replace everything needed to run the function. Idempotent. */
   deploy(fn: FunctionWorkload): Promise<void>;
   /** Roll out new code or configuration for an existing function. */

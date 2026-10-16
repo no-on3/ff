@@ -4,11 +4,15 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
+import { FunctionRuntimeError, FunctionTimeoutError } from '../orchestrator/orchestrator.errors';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
+
+/** Fields whose change requires rolling out a new version of the function. */
+const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout'] as const;
 
 @Injectable()
 export class FunctionsService {
@@ -23,10 +27,14 @@ export class FunctionsService {
     private metricsService: MetricsService,
   ) {}
 
+  private readyTimeoutMs(): number {
+    return this.configService.get<number>('orchestrator.readyTimeoutSeconds', 90) * 1000;
+  }
+
   async create(createFunctionDto: CreateFunctionDto, userId: string): Promise<Function> {
     const function_ = this.functionsRepository.create({
       ...createFunctionDto,
-      userId: '1',
+      userId,
       status: FunctionStatus.CREATING,
     });
 
@@ -47,10 +55,11 @@ export class FunctionsService {
       const tsconfigPath = `${basePath}/tsconfig.json`;
       const tsconfigContent = this.generateTsConfig();
       await this.minioClientService.uploadCode(tsconfigPath, tsconfigContent);
-      console.log('here')
-      await this.orchestrator.deploy(savedFunction);
 
-      // Update status to ACTIVE
+      await this.orchestrator.deploy(savedFunction);
+      // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
+      await this.orchestrator.waitUntilReady(savedFunction, this.readyTimeoutMs());
+
       savedFunction.status = FunctionStatus.ACTIVE;
       await this.functionsRepository.save(savedFunction);
 
@@ -80,12 +89,20 @@ export class FunctionsService {
 
   async update(id: string, updateFunctionDto: UpdateFunctionDto): Promise<Function> {
     const function_ = await this.findOne(id);
+    const updated = { ...function_, ...updateFunctionDto } as Function;
+    const needsRollout = ROLLOUT_FIELDS.some(
+      (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
+    );
 
-    if (updateFunctionDto.code) {
+    if (needsRollout) {
       try {
-        const codePath = `${id}/code.${this.getFileExtension(function_.runtime)}`;
-        await this.minioClientService.uploadCode(codePath, updateFunctionDto.code);
-        await this.orchestrator.update({ ...function_, ...updateFunctionDto });
+        if (updateFunctionDto.code !== undefined) {
+          const codePath = `${id}/code.${this.getFileExtension(updated.runtime)}`;
+          await this.minioClientService.uploadCode(codePath, updated.code);
+        }
+        await this.orchestrator.update(updated);
+        // The old version keeps serving during the rollout; record the change only once it's live.
+        await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
       } catch (error) {
         throw new BadRequestException(error.message);
       }
@@ -126,12 +143,12 @@ export class FunctionsService {
 
     await this.invocationsRepository.save(invocation);
 
+    const startTime = Date.now();
     try {
-      const startTime = Date.now();
       const result = await this.orchestrator.invoke(function_, input || {});
       const duration = Date.now() - startTime;
 
-      // Record metrics
+      // Record metrics (end-to-end latency, as seen by callers)
       await this.metricsService.recordMetric(
         id,
         duration,
@@ -140,8 +157,10 @@ export class FunctionsService {
         false
       );
 
-      // Update invocation with results and metrics
+      // Update invocation with results and metrics. Duration is the execution
+      // time reported by the runtime (the basis for metering), else end-to-end.
       invocation.output = result.output as Record<string, any>;
+      invocation.duration = result.durationMs ?? duration;
       invocation.memoryUsed = result.memoryUsedMb;
       invocation.cpuUsed = result.cpuUsed;
       invocation.status = InvocationStatus.COMPLETED;
@@ -149,19 +168,14 @@ export class FunctionsService {
 
       return invocation;
     } catch (error) {
-      // Record error metrics
-      await this.metricsService.recordMetric(
-        id,
-        Date.now() - invocation.createdAt.getTime(),
-        0,
-        0,
-        true
-      );
+      const duration = Date.now() - startTime;
+      await this.metricsService.recordMetric(id, duration, 0, 0, true);
 
-      invocation.status = InvocationStatus.ERROR;
-      invocation.error = error.message;
+      invocation.duration = duration;
+      invocation.status = error instanceof FunctionTimeoutError ? InvocationStatus.TIMEOUT : InvocationStatus.ERROR;
+      invocation.error = error instanceof FunctionRuntimeError ? `${error.errorType}: ${error.message}` : error.message;
       await this.invocationsRepository.save(invocation);
-      throw new BadRequestException(error.message);
+      throw new BadRequestException(invocation.error);
     }
   }
 

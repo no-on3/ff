@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
+import { FunctionRuntimeError, FunctionTimeoutError, OrchestratorError } from '../orchestrator/orchestrator.errors';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
@@ -27,7 +28,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     ({
       id: 'fn-1',
       name: 'hello',
-      userId: '1',
+      userId: 'user-1',
       runtime: Runtime.NODEJS,
       code: 'export const handler = async () => 1;',
       memory: 128,
@@ -50,6 +51,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     invocationsRepo.create.mockImplementation((dto) => ({ ...dto, createdAt: new Date() }));
     invocationsRepo.save.mockImplementation(async (entity) => entity);
     orchestrator = {
+      supportsScaleToZero: true,
       deploy: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),
@@ -66,7 +68,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { provide: getRepositoryToken(FunctionInvocation), useValue: invocationsRepo },
         { provide: MinioClientService, useValue: storage },
         { provide: ORCHESTRATOR, useValue: orchestrator },
-        { provide: ConfigService, useValue: { get: jest.fn() } },
+        // Return each key's default, as ConfigService does without overrides.
+        { provide: ConfigService, useValue: { get: jest.fn((_key: string, fallback?: unknown) => fallback) } },
         { provide: MetricsService, useValue: metrics },
       ],
     }).compile();
@@ -76,11 +79,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   describe('create', () => {
     const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
 
-    it('stores the code, deploys through the orchestrator, then marks the function ACTIVE', async () => {
-      const result = await service.create(dto, 'user-1');
+    it('creates the function for the calling tenant, deploys it, waits until ready, then marks it ACTIVE', async () => {
+      const result = await service.create(dto, 'user-42');
 
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'x');
-      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1', name: 'hello' }));
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1', userId: 'user-42' }));
+      expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 90_000);
       expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ACTIVE]);
       expect(result.status).toBe(FunctionStatus.ACTIVE);
     });
@@ -93,6 +97,60 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(functionsRepo.save).toHaveBeenLastCalledWith(
         expect.objectContaining({ status: FunctionStatus.ERROR, error: 'scheduler unavailable' }),
       );
+    });
+
+    it('marks the function ERROR with the diagnostics when it never becomes ready', async () => {
+      orchestrator.waitUntilReady.mockRejectedValue(
+        new OrchestratorError('Function "hello" did not become ready within 90 s: CrashLoopBackOff'),
+      );
+
+      await expect(service.create(dto, 'user-1')).rejects.toThrow('CrashLoopBackOff');
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: FunctionStatus.ERROR, error: expect.stringContaining('did not become ready') }),
+      );
+    });
+  });
+
+  describe('update', () => {
+    it('rolls out code changes, waits until they are live, then saves them', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      const result = await service.update('fn-1', { code: 'v2' });
+
+      expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'v2');
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: 'v2' }));
+      expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ code: 'v2' }), 90_000);
+      expect(result.code).toBe('v2');
+    });
+
+    it.each([
+      ['memory', { memory: 256 }],
+      ['timeout', { timeout: 30 }],
+      ['runtime', { runtime: Runtime.PYTHON }],
+    ])('rolls out a %s change', async (_field, change) => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      await service.update('fn-1', change);
+
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining(change));
+    });
+
+    it('does not roll out when only the name changes, or when values are unchanged', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      await service.update('fn-1', { name: 'renamed' });
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      await service.update('fn-1', { memory: 128 });
+
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(functionsRepo.save).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the stored function unchanged when the rollout fails', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.waitUntilReady.mockRejectedValue(new OrchestratorError('did not become ready'));
+
+      await expect(service.update('fn-1', { code: 'broken' })).rejects.toBeInstanceOf(BadRequestException);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
     });
   });
 
@@ -108,10 +166,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   });
 
   describe('invoke', () => {
-    it('maps the orchestrator result onto a COMPLETED invocation and records metrics', async () => {
+    it('stores output, runtime-reported duration and memory on a COMPLETED invocation', async () => {
       const fn = activeFunction();
       functionsRepo.findOne.mockResolvedValue(fn);
-      orchestrator.invoke.mockResolvedValue({ output: { hello: 'world' }, memoryUsedMb: 12, cpuUsed: 3 });
+      orchestrator.invoke.mockResolvedValue({ output: { hello: 'world' }, durationMs: 12.5, memoryUsedMb: 12, cpuUsed: 3 });
 
       const invocation = await service.invoke('fn-1', { a: 1 });
 
@@ -119,22 +177,45 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(invocation).toMatchObject({
         status: InvocationStatus.COMPLETED,
         output: { hello: 'world' },
+        duration: 12.5,
         memoryUsed: 12,
         cpuUsed: 3,
       });
       expect(metrics.recordMetric).toHaveBeenCalledWith('fn-1', expect.any(Number), 3, 12, false);
     });
 
-    it('sends an empty payload when no input is given', async () => {
+    it('falls back to the measured end-to-end duration when the runtime reports none', async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       orchestrator.invoke.mockResolvedValue({ output: null });
 
-      await service.invoke('fn-1');
+      const invocation = await service.invoke('fn-1');
 
       expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {});
+      expect(invocation.duration).toBeGreaterThanOrEqual(0);
     });
 
-    it('records an ERROR invocation and an error metric when the call fails', async () => {
+    it('records a TIMEOUT invocation for function timeouts', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockRejectedValue(new FunctionTimeoutError('Task timed out after 5.00 seconds'));
+
+      await expect(service.invoke('fn-1', {})).rejects.toThrow('Sandbox.Timedout: Task timed out after 5.00 seconds');
+      expect(invocationsRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: InvocationStatus.TIMEOUT, duration: expect.any(Number) }),
+      );
+      expect(metrics.recordMetric).toHaveBeenCalledWith('fn-1', expect.any(Number), 0, 0, true);
+    });
+
+    it('records the runtime error type for function errors', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockRejectedValue(new FunctionRuntimeError('TypeError', 'bad input'));
+
+      await expect(service.invoke('fn-1', {})).rejects.toBeInstanceOf(BadRequestException);
+      expect(invocationsRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: InvocationStatus.ERROR, error: 'TypeError: bad input' }),
+      );
+    });
+
+    it('records an ERROR invocation when the platform fails', async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       orchestrator.invoke.mockRejectedValue(new Error('connection refused'));
 
@@ -142,7 +223,6 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(invocationsRepo.save).toHaveBeenLastCalledWith(
         expect.objectContaining({ status: InvocationStatus.ERROR, error: 'connection refused' }),
       );
-      expect(metrics.recordMetric).toHaveBeenCalledWith('fn-1', expect.any(Number), 0, 0, true);
     });
 
     it('rejects functions that are not ACTIVE without calling the orchestrator', async () => {
