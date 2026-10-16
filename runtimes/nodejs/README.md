@@ -58,6 +58,8 @@ export async function handler(event, context) { … }
 
 `getRemainingTimeInMillis()` counts down from the start of *this* invocation, not from process start.
 
+`.ts` files are transpiled without type checking, so type errors don't stop a function. Syntax errors do: they fail initialization with `Runtime.UserCodeSyntaxError` and the position, for example `function.ts:2:11 Property assignment expected.`. The first version let the transpiler recover and run different code instead.
+
 ## Environment
 
 | Variable | Default | Meaning |
@@ -96,6 +98,6 @@ Platform events (start, initialization, timeouts, restarts) are one-line JSON. *
 ```bash
 cd runtimes/nodejs
 npm install
-npm test                       # L1: 22 protocol tests on real processes, ~10 s, no Docker
+npm test                       # L1: 23 protocol tests on real processes, ~10 s, no Docker
 test/container-smoke.sh        # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```

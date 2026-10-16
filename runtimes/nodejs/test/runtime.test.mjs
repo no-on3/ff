@@ -265,6 +265,8 @@ describe('initialization failures keep the pod unready', () => {
   const cases = [
     ['init-error', 'Runtime.ImportModuleError', /boom at init/],
     ['syntax-error', 'Runtime.UserCodeSyntaxError', /SyntaxError/],
+    // The TypeScript transpiler would recover from this and run `return {}`.
+    ['ts-syntax-error', 'Runtime.UserCodeSyntaxError', /function\.ts:3:\d+ Property assignment expected/],
     ['no-handler', 'Runtime.HandlerNotFound', /function\.handler is undefined/],
     ['empty', 'Runtime.ImportModuleError', /Cannot find module 'function'/],
   ];
