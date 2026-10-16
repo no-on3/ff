@@ -28,9 +28,8 @@ describe('MetricsService', () => {
   let metricsRepository: { save: jest.Mock; find: jest.Mock };
   let service: MetricsService;
 
-  const create = (supportsScaleToZero = true, idleSeconds = 900) => {
+  const create = (idleSeconds = 900) => {
     orchestrator = {
-      supportsScaleToZero,
       deploy: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),
@@ -116,16 +115,6 @@ describe('MetricsService', () => {
 
       await service.sweepIdleFunctions(Date.now() + 1_000); // the backend just started
 
-      expect(orchestrator.scale).not.toHaveBeenCalled();
-    });
-
-    it('does nothing when the driver cannot cold-start from zero', async () => {
-      create(false);
-      functionRepository.find.mockResolvedValue([fn()]);
-
-      await service.sweepIdleFunctions(now + 3_600_000);
-
-      expect(functionRepository.find).not.toHaveBeenCalled();
       expect(orchestrator.scale).not.toHaveBeenCalled();
     });
 

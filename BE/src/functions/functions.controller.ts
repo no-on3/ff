@@ -19,10 +19,13 @@ import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 
+/**
+ * Every endpoint needs a tenant (@User: 401 without one). Ownership is checked
+ * on update and delete only; tenant-scoped reads and invokes come with
+ * authentication (parent plan F-01).
+ */
 @ApiTags('functions')
 @Controller('functions')
-// @UseGuards(AuthGuard('jwt'))
-// @ApiBearerAuth()
 export class FunctionsController {
   constructor(private readonly functionsService: FunctionsService) {}
 
@@ -44,11 +47,7 @@ export class FunctionsController {
   @ApiOperation({ summary: 'Get a function by ID' })
   @ApiResponse({ status: 200, description: 'Function details', type: Function })
   async findOne(@Param('id') id: string, @User() userId: string): Promise<Function> {
-    const func = await this.functionsService.findOne(id);
-    // if (func.userId !== userId) {
-    //   throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    // }
-    return func;
+    return this.functionsService.findOne(id);
   }
 
   @Put(':id')
@@ -85,10 +84,6 @@ export class FunctionsController {
     @Body() invokeFunctionDto: InvokeFunctionDto,
     @User() userId: string,
   ): Promise<FunctionInvocation> {
-    const func = await this.functionsService.findOne(id);
-    // if (func.userId !== userId) {
-    //   throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    // }
     return this.functionsService.invoke(id, invokeFunctionDto.input);
   }
 
@@ -101,10 +96,7 @@ export class FunctionsController {
     @Query('offset') offset = 0,
     @User() userId: string,
   ): Promise<{ invocations: FunctionInvocation[]; total: number }> {
-    const func = await this.functionsService.findOne(id);
-    // if (func.userId !== userId) {
-    //   throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    // }
+    await this.functionsService.findOne(id); // 404 for an unknown function
     return this.functionsService.getInvocations(id, limit, offset);
   }
 
@@ -116,9 +108,6 @@ export class FunctionsController {
     @User() userId: string,
   ) {
     const func = await this.functionsService.findOne(id);
-    // if (func.userId !== userId) {
-    //   throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    // }
     return {
       minInstances: func.minInstances || 0,
       maxInstances: func.maxInstances || 1,

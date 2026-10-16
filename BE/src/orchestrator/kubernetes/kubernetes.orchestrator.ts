@@ -68,7 +68,6 @@ export function isRolledOut(deployment: Deployment): boolean {
  * front. See docs/kubernetes-migration-plan.md, K-06.
  */
 export class KubernetesOrchestrator implements Orchestrator {
-  readonly supportsScaleToZero = true;
   private readonly logger = new Logger(KubernetesOrchestrator.name);
 
   constructor(

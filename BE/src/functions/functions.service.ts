@@ -179,7 +179,6 @@ export class FunctionsService {
       skip: offset,
     });
 
-    console.log(invocations, total)
 
     return { invocations, total };
   }

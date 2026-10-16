@@ -51,7 +51,6 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     invocationsRepo.create.mockImplementation((dto) => ({ ...dto, createdAt: new Date() }));
     invocationsRepo.save.mockImplementation(async (entity) => entity);
     orchestrator = {
-      supportsScaleToZero: true,
       deploy: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),

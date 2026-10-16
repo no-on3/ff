@@ -1,8 +1,9 @@
 import { createParamDecorator, ExecutionContext, UnauthorizedException } from '@nestjs/common';
 
 /**
- * The caller's tenant ID: the authenticated user (JwtStrategy puts the token's
- * `sub` on request.user), or FF_DEV_USER_ID when no authentication is in place.
+ * The caller's tenant ID: the authenticated user's `sub` on request.user (set
+ * by an authentication guard, once parent plan F-01 adds one), or
+ * FF_DEV_USER_ID when no authentication is in place.
  *
  * FF_DEV_USER_ID is a development-only stand-in until real authentication is
  * switched on (parent plan F-01). Without either, the request is rejected.

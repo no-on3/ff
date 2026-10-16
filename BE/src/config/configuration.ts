@@ -55,18 +55,4 @@ export default () => ({
       memory: process.env.K8S_TENANT_QUOTA_MEMORY || '8Gi',
     },
   },
-  auth: {
-    domain: process.env.AUTH0_DOMAIN || '',
-    audience: process.env.AUTH0_AUDIENCE || '',
-  },
-  monitoring: {
-    prometheusEnabled: process.env.ENABLE_PROMETHEUS === 'true',
-    tracingEnabled: process.env.ENABLE_TRACING === 'true',
-  },
-  function: {
-    defaultMemory: parseInt(process.env.DEFAULT_FUNCTION_MEMORY || '128', 10),
-    defaultTimeout: parseInt(process.env.DEFAULT_FUNCTION_TIMEOUT || '30', 10),
-    maxMemory: parseInt(process.env.MAX_FUNCTION_MEMORY || '1024', 10),
-    maxTimeout: parseInt(process.env.MAX_FUNCTION_TIMEOUT || '300', 10),
-  },
 });

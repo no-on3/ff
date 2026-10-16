@@ -1265,7 +1265,7 @@ The status column records what the [Kubernetes migration](kubernetes-migration-p
 | H-11 | F-10 → B-08 | 0 / 2 | Open. The dev CORS origin now matches the console's Vite port (K-12). |
 | H-12 | F-15 replace MinIO (ADR-002), AWS SDK S3 client | 0 | Partly done. SeaweedFS replaces MinIO in docker-compose (K-08). The backend still uses the `minio` npm client against it. |
 | M-1 | F-09 | 0 | Open |
-| M-2 | F-05 | 0 | Open |
+| M-2 | F-05 | 0 | Partly done. `BE/.env.example` lists only variables the code reads (82 → 32), and unused configuration sections were removed. The validated schema is open. |
 | M-4 | R-01 Lambda naming and limits | 1 | Open |
 | M-5 | F-13 | 0 | Done (K-09) |
 | M-7, M-8, M-9, L-1, L-2 | F-11, F-12 | 0 | Partly done. docker-compose works (K-08), and the README was rewritten (K-12). |

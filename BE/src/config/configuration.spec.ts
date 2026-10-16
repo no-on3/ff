@@ -27,12 +27,6 @@ describe('configuration', () => {
     expect(config.minio).toMatchObject({ port: 9003, useSSL: false, bucketName: 'functions' });
     expect(config.orchestrator).toEqual({ driver: 'kubernetes', readyTimeoutSeconds: 90 });
     expect(config.scaling).toEqual({ scaleToZeroIdleSeconds: 900, maxRequestsPerInstance: 2 });
-    expect(config.function).toEqual({
-      defaultMemory: 128,
-      defaultTimeout: 30,
-      maxMemory: 1024,
-      maxTimeout: 300,
-    });
   });
 
   it('applies environment overrides and parses numbers and booleans', () => {

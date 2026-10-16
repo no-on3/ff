@@ -138,7 +138,6 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
 
   /** Scales eligible functions (scaleToZero, minInstances 0) to zero after the idle period. */
   async sweepIdleFunctions(nowMs = Date.now()): Promise<void> {
-    if (!this.orchestrator.supportsScaleToZero) return;
     const idleSeconds = this.configService.get<number>('scaling.scaleToZeroIdleSeconds', 900);
     const candidates = await this.functionRepository.find({
       where: { status: FunctionStatus.ACTIVE, scaleToZero: true, minInstances: 0 },

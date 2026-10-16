@@ -22,7 +22,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Dashboard:** a React + Vite frontend in `FE/`.
 
 **Not implemented yet**, despite what older documents say:
-- **Authentication is not enforced.** Auth0 JWT validation exists, but its guard is disabled, and development uses a fixed tenant (`FF_DEV_USER_ID`).
+- **Authentication is not enforced.** Development uses a fixed tenant (`FF_DEV_USER_ID`), and ownership is checked only on update and delete. Auth0 code that was never switched on has been removed; parent plan F-01 adds authentication (Keycloak).
 - Billing and payments: no Stripe or local gateways yet; see the market plan.
 - Custom domains and function versioning.
 - Multi-file packages with dependencies, which need the zip pipeline (parent plan R-02).
