@@ -39,11 +39,14 @@ Nomad is no longer used. `nomad-vagrant/` is kept only for reference.
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
 | `infrastructure/` | SeaweedFS (S3) identities, Prometheus, and Grafana configuration for `docker-compose.yml` |
-| `docs/` | Plans, ADRs, and the [Kubernetes dev guide](docs/kubernetes-dev-guide.md) |
+| `docs/` | The [getting-started guide](docs/getting-started.md), plans, ADRs, and the [Kubernetes dev guide](docs/kubernetes-dev-guide.md) |
+| `examples/` | Example functions (Node.js and Python) used by the getting-started guide |
 | `cli/`, `cli-rust/`, `lambda-func/`, `scripts/` | Earlier prototypes (packaging CLIs, the old function wrapper, old setup scripts); not used by the current stack |
 | `nomad-vagrant/` | Deprecated Nomad VM |
 
 ## Quick start (development)
+
+For a step-by-step setup and the everyday commands (create, invoke, update, logs, cold starts, tests, reset), follow **[Getting started](docs/getting-started.md)**. The short version:
 
 You need Docker 24+, Node.js 24, Python 3.11+ (for the Python runtime tests), `curl`, and `jq`. Plan for at least 3.5 GB of free memory and 6 GB free on Docker's disk; the [dev guide](docs/kubernetes-dev-guide.md) has the details. The scripts check resources before every heavy step (`hack/check-resources.sh`).
 
@@ -85,6 +88,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 
 ## Documentation
 
+- [Getting started](docs/getting-started.md): local setup from a fresh clone, and how to use FF day to day.
 - [Kubernetes dev guide](docs/kubernetes-dev-guide.md): cluster, images, tests, gVisor, troubleshooting.
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.

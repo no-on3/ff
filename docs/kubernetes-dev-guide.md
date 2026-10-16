@@ -1,6 +1,6 @@
 # Kubernetes development guide
 
-FF runs functions on Kubernetes ([ADR 0001](adr/0001-orchestrator-kubernetes.md)). This guide covers the local development cluster. The migration itself is tracked in the [migration plan](kubernetes-migration-plan.md).
+FF runs functions on Kubernetes ([ADR 0001](adr/0001-orchestrator-kubernetes.md)). This guide covers the local development cluster. The migration itself is tracked in the [migration plan](kubernetes-migration-plan.md). New to the project? Start with [Getting started](getting-started.md), which takes you from a fresh clone to a working setup and shows the everyday commands.
 
 ## Requirements
 
