@@ -86,7 +86,7 @@ cd BE && npm run start:dev
 ```
 
 - **Nothing runs without a tenant.** Without authentication, the backend needs `FF_DEV_USER_ID` set, as `.env.example` does. Otherwise every request returns 401. `FF_DEV_USER_ID=1` keeps functions created by the old hard-coded user visible. This is a development-only stand-in until real authentication (parent plan F-01) is switched on.
-- **What `docker compose up` starts.** Only PostgreSQL and S3. Prometheus, Grafana, and the containerized backend and frontend are behind `--profile full`.
+- **What `docker compose up` starts.** Only PostgreSQL and S3. The backend and the dashboard run on the host (`npm run start:dev`, `npm run dev`).
 - **S3 storage.** SeaweedFS replaces the MinIO community image, which is no longer published. Its dev credentials are in `infrastructure/seaweedfs/s3.json` (local use only).
 
 ## End-to-end test

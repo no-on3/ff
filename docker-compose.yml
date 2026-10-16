@@ -1,6 +1,6 @@
 # Local development dependencies.
 #   docker compose up -d --wait               → PostgreSQL + S3 storage (what the backend needs)
-#   docker compose --profile full up -d       → also Prometheus, Grafana, containerized BE/FE
+# The backend and the dashboard run on the host (see docs/getting-started.md).
 # Functions run on the Kubernetes dev cluster (hack/k8s/cluster-up.sh), not here.
 # Host ports bind to 127.0.0.1 only and can be moved: FF_PG_PORT, FF_S3_PORT.
 
@@ -40,56 +40,6 @@ services:
       timeout: 3s
       retries: 30
 
-  prometheus:
-    profiles: ["full"]
-    image: prom/prometheus
-    ports:
-      - "127.0.0.1:9090:9090"
-    volumes:
-      - ./infrastructure/prometheus:/etc/prometheus
-      - prometheus_data:/prometheus
-
-  grafana:
-    profiles: ["full"]
-    image: grafana/grafana
-    ports:
-      - "127.0.0.1:3001:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      - grafana_data:/var/lib/grafana
-
-  backend:
-    profiles: ["full"]
-    build:
-      context: ./BE
-      dockerfile: Dockerfile.dev
-    ports:
-      - "127.0.0.1:3000:3000"
-    volumes:
-      - ./BE:/app
-      - /app/node_modules
-    environment:
-      - NODE_ENV=development
-    depends_on:
-      - postgres
-      - s3
-
-  frontend:
-    profiles: ["full"]
-    build:
-      context: ./FE
-      dockerfile: Dockerfile.dev
-    ports:
-      - "127.0.0.1:5173:5173"
-    volumes:
-      - ./FE:/app
-      - /app/node_modules
-    environment:
-      - NODE_ENV=development
-
 volumes:
   postgres_data:
   s3_data:
-  prometheus_data:
-  grafana_data:

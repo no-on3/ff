@@ -38,7 +38,7 @@ Nomad is no longer used; its development VM was removed.
 | `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol v1 |
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
-| `infrastructure/` | SeaweedFS (S3) identities, Prometheus, and Grafana configuration for `docker-compose.yml` |
+| `infrastructure/` | SeaweedFS (S3) identities for `docker-compose.yml` |
 | `docs/` | The [getting-started guide](docs/getting-started.md), plans, ADRs, and the [Kubernetes dev guide](docs/kubernetes-dev-guide.md) |
 | `examples/` | Example functions (Node.js and Python) used by the getting-started guide |
 
