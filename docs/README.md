@@ -3,6 +3,7 @@
 | Document | What it is for |
 |---|---|
 | [Getting started](getting-started.md) | Set up FF locally from a fresh clone, and the everyday commands |
+| [How FF works](how-it-works.html) | Every feature from request to result, as step-by-step simulations with the messages, records, and Kubernetes objects at each hop. Open it in a browser |
 | [Kubernetes dev guide](kubernetes-dev-guide.md) | The local cluster, runtime images, tests, the gVisor sandbox, troubleshooting |
 | [Kubernetes migration plan](kubernetes-migration-plan.md) | How FF moved from Nomad to Kubernetes, task by task (K-00 to K-13) |
 | [CLI plan](cli-plan.md) | The `ff` command-line tool, in four phases (proposed) |

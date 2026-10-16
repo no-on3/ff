@@ -87,6 +87,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 ## Documentation
 
 - [Getting started](docs/getting-started.md): local setup from a fresh clone, and how to use FF day to day.
+- [How FF works](docs/how-it-works.html): every feature from request to result, as step-by-step simulations with the messages and records at each hop (open it in a browser).
 - [Kubernetes dev guide](docs/kubernetes-dev-guide.md): cluster, images, tests, gVisor, troubleshooting.
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.

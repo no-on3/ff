@@ -1,0 +1,1663 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How FF works</title>
+<meta name="description" content="How FF works end to end, from creating a function to the result of an invocation, with step-by-step simulations of every feature and the data at each hop.">
+<style>
+  :root {
+    --bg: #f6f6f3;
+    --surface: #ffffff;
+    --surface-2: #f0f0ec;
+    --text: #1d201c;
+    --muted: #5f645d;
+    --border: #d8dbd4;
+    --accent: #0f6f5c;
+    --accent-soft: #dcefe9;
+    --resp: #a8510d;
+    --danger: #b42318;
+    --ok: #1a7f37;
+    --hot: #e5a50a;
+    --c-user: #5654d0;
+    --c-api: #0f6f5c;
+    --c-db: #2561c9;
+    --c-s3: #a8510d;
+    --c-k8s: #7a3ad6;
+    --c-node: #5b6676;
+    --c-pod: #0b7489;
+    --c-worker: #b8186a;
+    --code-bg: #f3f4f0;
+    --j-key: #2561c9;
+    --j-str: #0f6f5c;
+    --j-num: #a8510d;
+    --j-lit: #7a3ad6;
+    --shadow: 0 1px 2px rgba(20, 24, 20, .06), 0 4px 14px rgba(20, 24, 20, .05);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121412;
+      --surface: #1b1e1b;
+      --surface-2: #242824;
+      --text: #e7eae5;
+      --muted: #a1a79e;
+      --border: #363c35;
+      --accent: #43c3a5;
+      --accent-soft: #173a32;
+      --resp: #f0a35e;
+      --danger: #ff7b6e;
+      --ok: #5fd07c;
+      --hot: #f2c14e;
+      --c-user: #9b99ff;
+      --c-api: #43c3a5;
+      --c-db: #6ea1ff;
+      --c-s3: #f0a35e;
+      --c-k8s: #b98bff;
+      --c-node: #9aa6b6;
+      --c-pod: #4dc6dc;
+      --c-worker: #ff70b5;
+      --code-bg: #151815;
+      --j-key: #8ab4ff;
+      --j-str: #6fd8bc;
+      --j-num: #f5b37a;
+      --j-lit: #c9a2ff;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 14px rgba(0, 0, 0, .3);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121412;
+    --surface: #1b1e1b;
+    --surface-2: #242824;
+    --text: #e7eae5;
+    --muted: #a1a79e;
+    --border: #363c35;
+    --accent: #43c3a5;
+    --accent-soft: #173a32;
+    --resp: #f0a35e;
+    --danger: #ff7b6e;
+    --ok: #5fd07c;
+    --hot: #f2c14e;
+    --c-user: #9b99ff;
+    --c-api: #43c3a5;
+    --c-db: #6ea1ff;
+    --c-s3: #f0a35e;
+    --c-k8s: #b98bff;
+    --c-node: #9aa6b6;
+    --c-pod: #4dc6dc;
+    --c-worker: #ff70b5;
+    --code-bg: #151815;
+    --j-key: #8ab4ff;
+    --j-str: #6fd8bc;
+    --j-num: #f5b37a;
+    --j-lit: #c9a2ff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 14px rgba(0, 0, 0, .3);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  code, pre, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12.5px; }
+  kbd { border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; background: var(--surface); }
+  a { color: var(--accent); }
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 0 16px; }
+
+  header.top { background: var(--surface); border-bottom: 1px solid var(--border); }
+  header.top .wrap { display: flex; align-items: center; gap: 16px; padding-top: 18px; padding-bottom: 14px; flex-wrap: wrap; }
+  header.top h1 { margin: 0; font-size: 24px; letter-spacing: -.01em; }
+  header.top p { margin: 2px 0 0; color: var(--muted); }
+  header.top .grow { flex: 1 1 320px; min-width: 0; }
+  nav.toc { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--border); }
+  nav.toc .wrap { display: flex; gap: 4px; overflow-x: auto; padding-top: 6px; padding-bottom: 6px; }
+  nav.toc a { white-space: nowrap; text-decoration: none; color: var(--muted); padding: 6px 10px; border-radius: 8px; font-size: 14px; }
+  nav.toc a:hover { color: var(--text); background: var(--surface-2); }
+
+  section { padding: 28px 0 8px; scroll-margin-top: 44px; }
+  section > .wrap > h2 { margin: 0 0 6px; font-size: 21px; }
+  h3 { font-size: 16px; margin: 22px 0 8px; }
+  .lead { color: var(--muted); margin: 0 0 16px; max-width: 940px; }
+  .note { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+  .pad { padding: 14px 16px; }
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr); gap: 16px; align-items: start; }
+  .grid2.sim { grid-template-columns: minmax(0, 1.85fr) minmax(330px, 1fr); }
+  @media (max-width: 1180px) { .grid2.sim { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 960px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+  .scrollx { overflow-x: auto; }
+  .scrollx svg.diagram { min-width: 720px; }
+  .capped { max-width: 1080px; margin: 0 auto; }
+
+  button, .btn {
+    font: inherit; font-size: 14px; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 11px; cursor: pointer; line-height: 1.3;
+  }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+  .chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+  .chip { border-radius: 999px; padding: 5px 12px; font-size: 13.5px; }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); }
+
+  /* Architecture maps */
+  svg text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .arch-box rect.b { fill: var(--surface); stroke: var(--border); stroke-width: 1.4; }
+  .arch-box text { fill: var(--text); font-size: 13px; }
+  .arch-box text.sub { fill: var(--muted); font-size: 11px; }
+  .arch-box[tabindex], .arch-zone[tabindex] { cursor: pointer; }
+  .arch-box[tabindex]:hover rect.b, .arch-zone[tabindex]:hover > rect { stroke: var(--accent); }
+  .arch-box.hot rect.b { stroke: var(--hot); stroke-width: 3; fill: color-mix(in srgb, var(--hot) 16%, var(--surface)); }
+  .arch-box.sel rect.b { stroke: var(--accent); stroke-width: 2.6; }
+  .arch-zone > rect { fill: transparent; stroke: var(--border); stroke-width: 1.3; stroke-dasharray: 5 4; }
+  .arch-zone > text { fill: var(--muted); font-size: 12px; }
+  .arch-zone.hot > rect { stroke: var(--hot); stroke-width: 2.6; stroke-dasharray: none; fill: color-mix(in srgb, var(--hot) 7%, transparent); }
+  .arch-zone.sel > rect { stroke: var(--accent); stroke-width: 2; stroke-dasharray: none; }
+  .arch-group rect { fill: none; stroke: var(--border); stroke-dasharray: 5 4; stroke-width: 1.2; }
+  .arch-group text { fill: var(--muted); font-size: 12px; }
+  .arch-comp { pointer-events: none; }
+  .arch-comp rect { fill: var(--surface-2); stroke: var(--border); }
+  .arch-comp text { fill: var(--muted); font-size: 11.5px; }
+  .arch-link path { fill: none; stroke: var(--muted); stroke-width: 1.4; }
+  .arch-link text { fill: var(--muted); font-size: 10.5px; }
+  .arch-info h3 { margin: 0 0 4px; font-size: 16px; }
+  .arch-info p { margin: 6px 0; }
+  .arch-info .where { color: var(--muted); font-size: 13px; }
+
+  /* Simulator */
+  .sim-summary { margin: 0 0 12px; color: var(--muted); max-width: 940px; }
+  .seq-wrap { overflow-x: auto; }
+  .seq-inner { margin: 0 auto; }
+  .seq-body { max-height: 62vh; overflow-y: auto; border-top: 1px solid var(--border); }
+  .seq-svg { display: block; }
+  .lane-head rect { fill: var(--surface); stroke-width: 2; }
+  .lane-head text { font-size: 12.5px; fill: var(--text); font-weight: 600; }
+  .lane-head text.sub { font-size: 10.5px; fill: var(--muted); font-weight: 400; }
+  .lifeline { stroke: var(--border); stroke-width: 1.4; stroke-dasharray: 4 4; }
+  .row { cursor: pointer; transition: opacity .2s; }
+  .row .hit { fill: transparent; }
+  .row:hover .hit { fill: var(--surface-2); }
+  .row.current .hit { fill: color-mix(in srgb, var(--hot) 16%, transparent); }
+  .row.future { opacity: .32; }
+  .row.past { opacity: .8; }
+  .row .num circle { fill: var(--surface-2); stroke: var(--border); }
+  .row.current .num circle { fill: var(--hot); stroke: var(--hot); }
+  .row .num text { font-size: 11px; fill: var(--text); font-weight: 600; }
+  .row path.msg { fill: none; stroke-width: 1.7; }
+  .row.current path.msg { stroke-width: 2.8; }
+  .row text.lbl { font-size: 12px; fill: var(--text); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+  .row.current text.lbl { font-weight: 700; }
+  .k-req path.msg { stroke: var(--accent); }
+  .k-res path.msg { stroke: var(--resp); stroke-dasharray: 6 4; }
+  .k-int path.msg { stroke: var(--muted); }
+  .k-err path.msg { stroke: var(--danger); stroke-dasharray: 6 4; }
+  .packet { fill: var(--hot); stroke: var(--surface); stroke-width: 2; }
+  .controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 10px 12px; border-top: 1px solid var(--border); }
+  .controls .sp { flex: 1; }
+  .controls .count { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font-size: 12.5px; padding: 8px 12px 10px; border-top: 1px solid var(--border); }
+  .legend i { display: inline-block; width: 22px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 6px; }
+  .progress { height: 4px; background: var(--surface-2); }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+  .sticky { position: sticky; top: 56px; }
+  @media (max-width: 1180px) { .sticky { position: static; } }
+  .step-title { margin: 6px 0 6px; font-size: 17px; }
+  .step-text { color: var(--text); margin: 0; }
+  .step-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+  .step-meta code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; overflow-wrap: anywhere; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding: 0 12px; }
+  .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 8px; color: var(--muted); }
+  .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .tabpanel { padding: 12px 14px 14px; }
+  pre.wire { margin: 0 0 10px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow: auto; max-height: 52vh; white-space: pre-wrap; overflow-wrap: anywhere; }
+  pre.wire .first { font-weight: 700; color: var(--text); }
+  pre.wire .hdr { color: var(--muted); }
+  .j-key { color: var(--j-key); } .j-str { color: var(--j-str); } .j-num { color: var(--j-num); } .j-lit { color: var(--j-lit); }
+  .msg-kind { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+  .state-group { margin: 0 0 10px; }
+  .state-group h4 { margin: 0 0 4px; font-size: 12.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .state-group table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .state-group td { padding: 3px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .state-group td:first-child { color: var(--muted); width: 36%; }
+  .state-group td:last-child { overflow-wrap: anywhere; }
+  .state-group tr.changed td { background: color-mix(in srgb, var(--hot) 22%, transparent); }
+  .state-group tr.absent td:last-child { color: var(--muted); }
+
+  /* Data diagrams */
+  svg.diagram { display: block; width: 100%; height: auto; }
+  .tbl rect.h { fill: var(--accent); }
+  .tbl text.h { fill: var(--surface); font-weight: 700; font-size: 13px; }
+  .tbl rect.body { fill: var(--surface); stroke: var(--border); }
+  .tbl line { stroke: var(--border); }
+  .tbl text { font-size: 11.5px; fill: var(--text); }
+  .tbl text.t { fill: var(--muted); }
+  .tbl text.pk { font-weight: 700; }
+  .rel path { fill: none; stroke: var(--accent); stroke-width: 1.6; }
+  .rel text { font-size: 11px; fill: var(--accent); font-weight: 700; }
+  .sm rect { fill: var(--surface); stroke: var(--border); stroke-width: 1.4; }
+  .sm text { font-size: 12.5px; fill: var(--text); }
+  .sm text.e { font-size: 11px; fill: var(--muted); }
+  .sm text.ttl { font-size: 13px; font-weight: 700; }
+  .sm path { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+  .sm .ok rect { stroke: var(--ok); }
+  .sm .bad rect { stroke: var(--danger); }
+  .ko rect.obj { fill: var(--surface); stroke: var(--border); stroke-width: 1.4; }
+  .ko text { font-size: 12px; fill: var(--text); }
+  .ko text.s { font-size: 10.5px; fill: var(--muted); }
+  .ko rect.zone { fill: none; stroke: var(--border); stroke-dasharray: 5 4; }
+  .ko text.zone { fill: var(--muted); font-size: 12px; }
+  .ko path { fill: none; stroke: var(--muted); stroke-width: 1.4; }
+  .ko path.allow { stroke: var(--ok); stroke-width: 1.8; }
+  .ko path.deny { stroke: var(--danger); stroke-width: 1.8; stroke-dasharray: 5 4; }
+  .ko text.lbl { font-size: 10.5px; fill: var(--muted); }
+  .rt rect.bx { fill: var(--surface); stroke-width: 1.6; }
+  .rt text { font-size: 11px; fill: var(--muted); }
+  .rt text.t { font-size: 12.5px; font-weight: 600; fill: var(--text); }
+  .rt path { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+
+  .chain { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+  .stage { flex: 1 1 250px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; cursor: pointer; transition: border-color .2s, box-shadow .2s, opacity .2s; }
+  .stage h4 { margin: 0 0 2px; font-size: 13.5px; }
+  .stage .where { color: var(--muted); font-size: 12px; margin: 0 0 6px; }
+  .stage pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); border-radius: 6px; padding: 6px 8px; max-height: 280px; overflow: auto; }
+  .stage.on { border-color: var(--hot); box-shadow: 0 0 0 3px color-mix(in srgb, var(--hot) 35%, transparent); }
+  .chain.playing .stage:not(.on) { opacity: .55; }
+
+  .layer { border: 1.5px solid var(--border); border-radius: 12px; padding: 10px 12px 12px; background: var(--surface); }
+  .layer > .ttl { font-weight: 700; font-size: 14px; }
+  .layer > .txt { color: var(--muted); font-size: 13px; margin: 2px 0 8px; }
+  .layer .layer { background: var(--surface-2); }
+  .layer .layer .layer { background: var(--surface); }
+  .layer .layer .layer .layer { background: var(--surface-2); }
+
+  table.ref { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.ref th, table.ref td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.ref th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .03em; }
+  table.ref td code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; overflow-wrap: anywhere; }
+  .tablewrap { overflow-x: auto; }
+  footer { color: var(--muted); font-size: 13px; padding: 24px 0 40px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .progress > div, .row, .stage { transition: none; } }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="grow">
+      <h1>How FF works</h1>
+      <p>From the moment you create a function to the result of each invocation: every component, request, and record, with step-by-step simulations.</p>
+    </div>
+    <button id="themeBtn" type="button" aria-label="Switch the colour theme">Theme: auto</button>
+  </div>
+</header>
+<nav class="toc" aria-label="Sections">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#simulator">Simulator</a>
+    <a href="#data">Data model</a>
+    <a href="#trace">Trace an invocation</a>
+    <a href="#runtime">Inside the runtime</a>
+    <a href="#isolation">Isolation and limits</a>
+    <a href="#reference">Reference</a>
+  </div>
+</nav>
+
+<main>
+<section id="overview">
+  <div class="wrap">
+    <h2>Overview</h2>
+    <p class="lead">You send code to the backend. The backend keeps the record in PostgreSQL and an archive copy in S3, then asks Kubernetes for your tenant's namespace and guardrails, a ConfigMap that holds the code, a Service, and a Deployment. Kubernetes starts a pod from the runtime image; the runtime loads your code once and reports ready. On each invocation the backend forwards your input to the pod, the runtime calls <code>handler(event, context)</code> in a worker, and the result travels back and is recorded with its duration. Idle functions are scaled to zero and start again on the next call. Click a component for details.</p>
+    <div class="grid2">
+      <div class="card pad scrollx"><div id="archBig"></div></div>
+      <div class="card pad arch-info" id="archInfo" aria-live="polite"></div>
+    </div>
+  </div>
+</section>
+
+<section id="simulator">
+  <div class="wrap">
+    <h2>Simulator</h2>
+    <p class="lead">Pick a feature and step through it. Each arrow is a call the code really makes. The panel shows the exact message, and the state of every record and object after the step. Keys: <kbd>←</kbd> <kbd>→</kbd> to step, <kbd>Space</kbd> to play or pause.</p>
+    <div class="chips" id="scenarioChips" role="group" aria-label="Scenarios"></div>
+    <p class="sim-summary" id="simSummary"></p>
+    <div class="grid2 sim">
+      <div class="card" style="overflow:hidden">
+        <div class="seq-wrap" id="seqWrap">
+          <div class="seq-inner" id="seqInner">
+            <div id="seqHead"></div>
+            <div class="seq-body" id="seqBody"></div>
+          </div>
+        </div>
+        <div class="progress"><div id="progressBar"></div></div>
+        <div class="controls">
+          <button type="button" id="btnRestart" aria-label="Back to the start">⏮</button>
+          <button type="button" id="btnPrev" aria-label="Previous step">◀</button>
+          <button type="button" id="btnPlay" class="primary" aria-label="Play">▶ Play</button>
+          <button type="button" id="btnNext" aria-label="Next step">▶</button>
+          <span class="sp"></span>
+          <label class="count" for="speed">Speed</label>
+          <select id="speed" class="btn">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+          </select>
+          <span class="count" id="stepCount">–</span>
+        </div>
+        <div class="legend" aria-hidden="true">
+          <span><i style="border-color:var(--accent)"></i>request</span>
+          <span><i style="border-color:var(--resp);border-top-style:dashed"></i>response</span>
+          <span><i style="border-color:var(--danger);border-top-style:dashed"></i>error</span>
+          <span><i style="border-color:var(--muted)"></i>internal step</span>
+        </div>
+      </div>
+      <div class="card sticky">
+        <div class="pad" style="padding-bottom:10px">
+          <div class="tag" id="stepNo">Ready</div>
+          <h3 class="step-title" id="stepTitle">Press play, or click any step</h3>
+          <p class="step-text" id="stepText"></p>
+          <div class="step-meta" id="stepMeta"></div>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Step details">
+          <button type="button" role="tab" id="tab-msg" aria-selected="true" aria-controls="panel-msg">Message</button>
+          <button type="button" role="tab" id="tab-state" aria-selected="false" aria-controls="panel-state">State</button>
+          <button type="button" role="tab" id="tab-where" aria-selected="false" aria-controls="panel-where">Where</button>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="panel-msg" aria-labelledby="tab-msg"></div>
+        <div class="tabpanel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
+        <div class="tabpanel" role="tabpanel" id="panel-where" aria-labelledby="tab-where" hidden><div id="archMini"></div></div>
+      </div>
+    </div>
+    <div class="sr-only" aria-live="polite" id="announce"></div>
+  </div>
+</section>
+
+<section id="data">
+  <div class="wrap">
+    <h2>Data model</h2>
+    <p class="lead">Three tables hold everything the backend knows. A function's invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). In development the backend creates and updates this schema itself when it starts: TypeORM <code>synchronize</code> is on whenever <code>NODE_ENV</code> is not <code>production</code>.</p>
+    <div class="card pad scrollx"><div id="erDiagram" class="capped"></div></div>
+    <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set. The columns <code>cpu</code>, <code>targetConcurrency</code>, and <code>cpuUsed</code> aren't used yet, so <code>cpuUsage</code> is always 0.</p>
+    <h3>Lifecycles</h3>
+    <div class="card pad scrollx"><div id="stateMachines" class="capped"></div></div>
+    <h3>Kubernetes objects of one tenant</h3>
+    <p class="lead">One namespace per tenant, named <code>ff-t-</code> plus the first 12 hex characters of <code>sha256(tenant ID)</code>: tenant <code>1</code>, the development tenant, gets <code>ff-t-6b86b273ff34</code>. Each function adds a Deployment, a Service, and one ConfigMap per code version. Green arrows are traffic the network policy allows; the red one is blocked.</p>
+    <div class="card pad scrollx"><div id="k8sObjects" class="capped"></div></div>
+    <h3>Where each piece of data lives</h3>
+    <div class="tablewrap card">
+      <table class="ref">
+        <thead><tr><th>Data</th><th>Stored in</th><th>Written by</th><th>Read by</th></tr></thead>
+        <tbody>
+          <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
+          <tr><td>Invocations: input, output, status, duration, memory, error</td><td>PostgreSQL <code>function_invocations</code></td><td>invoke (RUNNING, then the outcome)</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
+          <tr><td>Per-minute metrics: request and error counts, p50/p95/p99, averages, instances</td><td>PostgreSQL <code>function_metrics</code></td><td>the metrics tick, every 60 s</td><td>the dashboard (<code>GET /metrics/:id</code>)</td></tr>
+          <tr><td>An archive copy of the code</td><td>S3 bucket <code>functions</code>, key <code>&lt;id&gt;/code.ts</code> or <code>code.py</code></td><td>create, update</td><td>nothing yet: the cluster gets the code from the ConfigMap</td></tr>
+          <tr><td>The code the pod runs</td><td>ConfigMap <code>fn-&lt;id&gt;-&lt;hash&gt;</code>, immutable, mounted read-only at <code>/var/task</code></td><td>create, update</td><td>the runtime, when it starts</td></tr>
+          <tr><td>Desired and ready instances</td><td>Deployment <code>fn-&lt;id&gt;</code>: <code>spec.replicas</code>, <code>status.readyReplicas</code></td><td>create, update, the autoscaler, the idle sweep, cold starts</td><td>invoke, the waits, the metrics tick</td></tr>
+          <tr><td>The current minute's metrics, and each function's last invocation time</td><td>Backend memory</td><td>invoke</td><td>the metrics tick and the idle sweep (one backend replica assumed)</td></tr>
+          <tr><td>Logs: START, END, REPORT, your output, errors</td><td>Pod stdout (the container log)</td><td>the runtime and your code</td><td><code>kubectl logs</code>, the backend's diagnosis when a function doesn't become ready</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="trace">
+  <div class="wrap">
+    <h2>Trace an invocation</h2>
+    <p class="lead">The same data, changing shape as it travels: what you send, what your handler receives, what it returns, and what you get back. Click a stage, or play the trace.</p>
+    <div style="margin:0 0 12px"><button type="button" id="tracePlay" class="primary">▶ Play the trace</button></div>
+    <div class="chain" id="chain"></div>
+  </div>
+</section>
+
+<section id="runtime">
+  <div class="wrap">
+    <h2>Inside the runtime</h2>
+    <p class="lead">Every function pod runs one of two images, <code>ff-runtime-nodejs:24-v1</code> or <code>ff-runtime-python:3.13-v1</code>, which speak the same protocol. Your code never runs in the main process: Node.js uses a worker thread with V8 heap limits, and Python a separate worker process with a memory budget. The main process therefore keeps answering probes, enforces the timeout, and replaces the worker after a timeout, an out-of-memory error, or a crash, without restarting the container.</p>
+    <div class="grid2">
+      <div class="card pad scrollx"><div id="runtimeDiagram"></div></div>
+      <div class="card pad">
+        <h3 style="margin-top:0">What the runtime answers</h3>
+        <div class="tablewrap">
+          <table class="ref">
+            <thead><tr><th>HTTP</th><th>errorType</th><th>When</th></tr></thead>
+            <tbody id="errorRows"></tbody>
+          </table>
+        </div>
+        <p class="note">Errors from an invocation carry <code>x-ff-function-error: Unhandled</code>. The backend records <code>Sandbox.Timedout</code> as an invocation with status <code>TIMEOUT</code> and every other error as <code>ERROR</code>, then answers the caller with 400 and <code>"&lt;errorType&gt;: &lt;message&gt;"</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="isolation">
+  <div class="wrap">
+    <h2>Isolation and limits</h2>
+    <p class="lead">Each layer narrows what a tenant's code, or a compromised backend, can reach.</p>
+    <div class="grid2">
+      <div class="layer">
+        <div class="ttl">Kubernetes API: RBAC and an admission policy</div>
+        <div class="txt">The backend's ServiceAccount <code>ff-system/ff-controller</code> may manage only the objects functions need: no Secrets, no exec into pods, no changes to RBAC. The admission policy <code>ff-controller-scope</code> confines its writes to namespaces named <code>ff-t-*</code> and labelled <code>app.kubernetes.io/managed-by=ff-controller</code>.</div>
+        <div class="layer">
+          <div class="ttl">Tenant namespace <code>ff-t-…</code></div>
+          <div class="txt">Pod Security <code>restricted</code>. A ResourceQuota (20 pods, 8 CPU, 8 Gi, 60 ConfigMaps, 30 Services), a LimitRange, and the NetworkPolicy <code>ff-default-deny</code>: ingress only from <code>ff-system</code>; egress only to DNS and to public addresses, never to private ranges, cluster addresses, or metadata endpoints.</div>
+          <div class="layer">
+            <div class="ttl">Pod</div>
+            <div class="txt">Runs as uid 10001 with a read-only root filesystem, every capability dropped, no privilege escalation, seccomp <code>RuntimeDefault</code>, and no ServiceAccount token. The memory limit is the function's memory, and the CPU is proportional to it. Only <code>/tmp</code> is writable (512 Mi).</div>
+            <div class="layer">
+              <div class="ttl">Optional gVisor sandbox</div>
+              <div class="txt">After <code>hack/k8s/gvisor-up.sh</code> and with <code>K8S_RUNTIME_CLASS=gvisor</code>, the pod's system calls go to a user-space kernel instead of the node's. It adds 2–5 s to a cold start.</div>
+              <div class="layer">
+                <div class="ttl">Runtime worker</div>
+                <div class="txt">One invocation at a time, a hard timeout, a memory budget, and a fresh worker after any timeout, out-of-memory error, or crash.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card tablewrap">
+        <table class="ref">
+          <thead><tr><th>Limit</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td>Memory</td><td>128–1024 MB through the API; the container limit equals it</td></tr>
+            <tr><td>CPU</td><td><code>max(100m, memory ÷ 1769 MB × 1000m)</code>, Lambda's ratio: 128 MB → 100m, 1024 MB → 579m</td></tr>
+            <tr><td>Timeout</td><td>1–300 s</td></tr>
+            <tr><td>Code</td><td>About 100 KB per API request today (the JSON body limit); 900 KiB fit in a ConfigMap</td></tr>
+            <tr><td>Invocation input</td><td>About 100 KB per API request today; the runtime accepts 6 MB</td></tr>
+            <tr><td>Result</td><td>6 MB</td></tr>
+            <tr><td>Concurrency</td><td>One invocation per pod at a time, 32 waiting, then 429</td></tr>
+            <tr><td>Wait for create or update</td><td>90 s (<code>FF_READY_TIMEOUT_SECONDS</code>)</td></tr>
+            <tr><td>Wait for a cold start</td><td>90 s (<code>K8S_READY_TIMEOUT_SECONDS</code>)</td></tr>
+            <tr><td>Scale to zero</td><td>After 900 s without invocations (<code>FF_SCALE_TO_ZERO_IDLE_SECONDS</code>)</td></tr>
+            <tr><td>Instances</td><td>min 0, max 1 by default; the API can't change them yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="reference">
+  <div class="wrap">
+    <h2>Reference: where it lives in the code</h2>
+    <div class="card tablewrap">
+      <table class="ref">
+        <thead><tr><th>Piece</th><th>Files</th></tr></thead>
+        <tbody>
+          <tr><td>REST API</td><td><code>BE/src/functions/functions.controller.ts</code>, <code>BE/src/metrics/metrics.controller.ts</code></td></tr>
+          <tr><td>Create, update, delete, invoke</td><td><code>BE/src/functions/functions.service.ts</code></td></tr>
+          <tr><td>The tenant of a request</td><td><code>BE/src/auth/decorators/user.decorator.ts</code></td></tr>
+          <tr><td>Kubernetes driver</td><td><code>BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts</code>, <code>kube-client.ts</code>, <code>kubernetes.settings.ts</code></td></tr>
+          <tr><td>Every Kubernetes object</td><td><code>BE/src/orchestrator/kubernetes/manifests.ts</code>, <code>naming.ts</code></td></tr>
+          <tr><td>Metrics, autoscaling, scale to zero</td><td><code>BE/src/metrics/metrics.service.ts</code>, <code>scaling.ts</code></td></tr>
+          <tr><td>S3 archive</td><td><code>BE/src/minio-client/minio-client.service.ts</code></td></tr>
+          <tr><td>Configuration and its defaults</td><td><code>BE/src/config/configuration.ts</code>, <code>BE/.env</code></td></tr>
+          <tr><td>Runtimes</td><td><code>runtimes/nodejs/src/</code>, <code>runtimes/python/ff_runtime/</code></td></tr>
+          <tr><td>Cluster RBAC and admission policy</td><td><code>deploy/k8s/base/</code></td></tr>
+          <tr><td>Dashboard</td><td><code>FE/src/components/</code>, <code>FE/src/services/api.ts</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="lead" style="margin-top:14px">Setup and everyday commands: <a href="getting-started.md">Getting started</a>. Cluster details: <a href="kubernetes-dev-guide.md">Kubernetes dev guide</a>. Runtime contracts: <a href="../runtimes/nodejs/README.md">Node.js</a>, <a href="../runtimes/python/README.md">Python</a>.</p>
+  </div>
+</section>
+</main>
+<footer><div class="wrap">The Kubernetes manifests shown are generated by the backend's own code for the sample function, and the ConfigMap names are the real hashes of <code>examples/hello.ts</code>, <code>hello.py</code>, and <code>slow.py</code>. Durations marked ⏱ were measured on the development cluster (128 MB, 0.1 CPU). IDs, timestamps, and the other numbers are examples.</div></footer>
+
+<script>
+'use strict';
+/* DATA START */
+const FN = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
+const PY = 'a7d4e2c1-6b3f-4d8e-9a1b-2c3d4e5f6a7b';
+const SLOW = '5e2b9c7a-1d4f-4a6e-8b3c-9f0e1d2c3b4a';
+const BAD = 'c1b2a3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+const NS = 'ff-t-6b86b273ff34';
+const REQ = '7b0c2d8e-5f4a-4e1b-9c3d-2a6f8e1b4c7d';
+const INV = 'd2a1f0c4-3b5e-4f6a-8c7d-9e0f1a2b3c4d';
+const HASH_V1 = 'c4d785b3974c4e13e098fb8b8034abd3aaee686501033a3aef4019435aad8c44';
+const HASH_V2 = '9c9e249cb76d185984d6cf076a57c17a0221e5034e5e9e283e504b0060e40bc8';
+const HASH_PY = 'c38dc02399da3a28e683be106277c9888de99cbfae257cf053a8273b8a665c66';
+const HASH_SLOW = '16a2f390332cf9c1dd1e9b57fa8f5a3362e596a035e71b494dcd1b42a2914662';
+const HASH_BAD = '93201b57673588061bb0e87ed85bad5728d55391e96ceb14c8c95d9e4cee3084';
+const CODE_TS = "// A Node.js function in TypeScript. FF calls handler(event, context), as AWS Lambda does.\n// event.body is the \"input\" sent to POST /functions/:id/invoke.\nexport async function handler(event: { body: { name?: string } }, context: { awsRequestId: string }) {\n  const name = event.body.name ?? 'world';\n  console.log(`greeting ${name}`); // shows up in the function pod's logs\n  return { message: `Hello ${name}`, requestId: context.awsRequestId };\n}\n";
+const CODE_TS_V2 = CODE_TS.replace('Hello ', 'Marhba ');
+const CODE_PY = "# A Python function. FF calls handler(event, context), as AWS Lambda does.\n# event[\"body\"] is the \"input\" sent to POST /functions/:id/invoke.\ndef handler(event, context):\n    name = event[\"body\"].get(\"name\", \"world\")\n    if name == \"error\":\n        raise ValueError(\"this name is not allowed\")  # the invocation ends as ERROR\n    print(f\"greeting {name}\")  # shows up in the function pod's logs\n    return {\"message\": f\"Hello {name}\", \"requestId\": context.aws_request_id}\n";
+const CODE_SLOW = "import time\n\n\n# Sleeps for event[\"body\"][\"seconds\"]. Longer than the function's timeout ends as TIMEOUT.\ndef handler(event, context):\n    seconds = event[\"body\"].get(\"seconds\", 1)\n    time.sleep(seconds)\n    return {\"slept\": seconds, \"remainingMs\": context.get_remaining_time_in_millis()}\n";
+const CODE_BAD = "export async function handler() {\n  return {{{;\n}\n";
+const fn = (id) => 'fn-' + id;
+const cm = (id, hash) => fn(id) + '-' + hash.slice(0, 10);
+/** Python's json.dumps() spacing, as the Python runtime writes its logs. */
+function pyJSON(v) {
+  if (Array.isArray(v)) return '[' + v.map(pyJSON).join(', ') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).map((k) => JSON.stringify(k) + ': ' + pyJSON(v[k])).join(', ') + '}';
+  return JSON.stringify(v);
+}
+
+/* The manifests below are what BE/src/orchestrator/kubernetes/manifests.ts produces for the sample function. */
+const MANAGED = { 'app.kubernetes.io/managed-by': 'ff-controller' };
+const FN_LABELS = { 'app.kubernetes.io/managed-by': 'ff-controller', 'app.kubernetes.io/name': 'ff-function', 'ff.dev/function-id': FN, 'ff.dev/runtime': 'nodejs' };
+const M_NAMESPACE = { apiVersion: 'v1', kind: 'Namespace', metadata: { name: NS, labels: { 'app.kubernetes.io/managed-by': 'ff-controller', 'ff.dev/tenant-hash': '6b86b273ff34', 'pod-security.kubernetes.io/enforce': 'restricted', 'pod-security.kubernetes.io/enforce-version': 'latest', 'pod-security.kubernetes.io/warn': 'restricted', 'pod-security.kubernetes.io/audit': 'restricted' }, annotations: { 'ff.dev/tenant-id': '1' } } };
+const M_QUOTA = { apiVersion: 'v1', kind: 'ResourceQuota', metadata: { name: 'ff-tenant-quota', namespace: NS, labels: MANAGED }, spec: { hard: { pods: '20', 'requests.cpu': '8', 'limits.cpu': '8', 'requests.memory': '8Gi', 'limits.memory': '8Gi', configmaps: '60', services: '30' } } };
+const M_LIMITS = { apiVersion: 'v1', kind: 'LimitRange', metadata: { name: 'ff-tenant-limits', namespace: NS, labels: MANAGED }, spec: { limits: [{ type: 'Container', default: { cpu: '100m', memory: '128Mi' }, defaultRequest: { cpu: '100m', memory: '128Mi' }, max: { cpu: '6', memory: '10240Mi' } }] } };
+const M_NETPOL = { apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', metadata: { name: 'ff-default-deny', namespace: NS, labels: MANAGED }, spec: { podSelector: {}, policyTypes: ['Ingress', 'Egress'],
+  ingress: [{ from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } } }] }],
+  egress: [
+    { to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }], ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] },
+    { to: [{ ipBlock: { cidr: '0.0.0.0/0', except: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', '127.0.0.0/8'] } }] }] } };
+const mConfigMap = (hash, code) => ({ apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: cm(FN, hash), namespace: NS, labels: FN_LABELS, annotations: { 'ff.dev/code-sha256': hash } }, immutable: true, data: { 'function.ts': code } });
+const M_SERVICE = { apiVersion: 'v1', kind: 'Service', metadata: { name: fn(FN), namespace: NS, labels: FN_LABELS }, spec: { type: 'ClusterIP', selector: { 'ff.dev/function-id': FN }, ports: [{ name: 'http', port: 8080, targetPort: 'http', protocol: 'TCP' }] } };
+const mDeployment = (hash, replicas) => ({ apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name: fn(FN), namespace: NS, labels: FN_LABELS },
+  spec: { replicas, revisionHistoryLimit: 2, progressDeadlineSeconds: 120, selector: { matchLabels: { 'ff.dev/function-id': FN } }, strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } },
+    template: { metadata: { labels: FN_LABELS, annotations: { 'ff.dev/code-sha256': hash } },
+      spec: { automountServiceAccountToken: false, enableServiceLinks: false, terminationGracePeriodSeconds: 10,
+        securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: 'RuntimeDefault' } },
+        containers: [{ name: 'function', image: 'ff-runtime-nodejs:24-v1', imagePullPolicy: 'IfNotPresent', ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
+          env: [{ name: 'FUNCTION_NAME', value: 'hello' }, { name: 'FUNCTION_VERSION', value: '$LATEST' }, { name: 'FUNCTION_MEMORY_LIMIT', value: '128' }, { name: 'FUNCTION_TIMEOUT', value: '5000' }, { name: 'LAMBDA_TASK_ROOT', value: '/var/task' }, { name: 'FF_HANDLER', value: 'function.handler' }, { name: 'PORT', value: '8080' }, { name: 'TZ', value: 'UTC' }],
+          resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '100m', memory: '128Mi' } },
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } },
+          readinessProbe: { httpGet: { path: '/readyz', port: 'http' }, periodSeconds: 2, failureThreshold: 3 },
+          livenessProbe: { httpGet: { path: '/healthz', port: 'http' }, periodSeconds: 10, failureThreshold: 3 },
+          volumeMounts: [{ name: 'code', mountPath: '/var/task', readOnly: true }, { name: 'tmp', mountPath: '/tmp' }] }],
+        volumes: [{ name: 'code', configMap: { name: cm(FN, hash), defaultMode: 292 } }, { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } }] } } } });
+
+const KUBE_HEADERS = { 'content-type': 'application/apply-patch+yaml', accept: 'application/json', authorization: 'Bearer <token of the ff-controller ServiceAccount>' };
+const APPLY = (path, body) => ({ kind: 'http', first: 'PATCH ' + path + '?fieldManager=ff-controller&force=true HTTP/1.1', headers: KUBE_HEADERS, body });
+const DEPLOY_PATH = '/apis/apps/v1/namespaces/' + NS + '/deployments/' + fn(FN);
+const PROXY_PATH = (id) => '/api/v1/namespaces/' + NS + '/services/' + fn(id) + ':http/proxy/invoke';
+const BY_FUNCTION = (id) => 'labelSelector=ff.dev%2Ffunction-id%3D' + id;
+const INVOKE_REQ = (id, input) => ({ kind: 'http', first: 'POST /functions/' + id + '/invoke HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { input } });
+const SHUTDOWN_LOG = (time, inFlight) => JSON.stringify({ time, level: 'info', msg: 'shutting down; draining invocations', signal: 'SIGTERM', inFlight, queued: 0 });
+const SYNTAX_ERROR = "SyntaxError: function.ts:2:11 Property assignment expected.; function.ts:4:1 '}' expected.";
+const BAD_LOG = [
+  JSON.stringify({ time: '2026-10-16T14:10:03.881Z', level: 'info', msg: 'runtime listening', port: 8080, timeoutMs: 5000, memoryLimitMb: 128, heapLimitMb: 65, handler: 'function.handler', protocol: 1 }),
+  JSON.stringify({ time: '2026-10-16T14:10:09.127Z', level: 'error', msg: 'function initialization failed', errorType: 'Runtime.UserCodeSyntaxError', errorMessage: SYNTAX_ERROR }),
+];
+const NOT_READY = 'Function "broken" did not become ready within 90 s: last log lines: ' + BAD_LOG.join(' | ');
+
+const LANES = {
+  user:   { label: 'You', sub: 'browser, curl', color: '--c-user', map: 'user' },
+  api:    { label: 'Backend', sub: 'NestJS API', color: '--c-api', map: 'api' },
+  db:     { label: 'PostgreSQL', sub: 'records', color: '--c-db', map: 'db' },
+  s3:     { label: 'S3 storage', sub: 'SeaweedFS', color: '--c-s3', map: 's3' },
+  k8s:    { label: 'Kubernetes', sub: 'API server', color: '--c-k8s', map: 'k8sapi' },
+  node:   { label: 'Node', sub: 'kubelet', color: '--c-node', map: 'node' },
+  pod:    { label: 'Runtime', sub: 'pod, main', color: '--c-pod', map: 'pod' },
+  worker: { label: 'Handler', sub: 'your code', color: '--c-worker', map: 'worker' },
+};
+const MAP_IDS = ['user', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'service', 'configmap', 'deployment', 'pod-box', 'pod', 'worker', 'node'];
+
+const K = 'Kubernetes · ' + NS;
+const EMPTY = {
+  'PostgreSQL': { 'functions': null, 'function_invocations': null, 'function_metrics': null },
+  'S3 (bucket functions)': { 'object': null },
+  [K]: { 'Namespace': null, 'ResourceQuota': null, 'LimitRange': null, 'NetworkPolicy': null, 'ConfigMap': null, 'Service': null, 'Deployment': null, 'Pod': null },
+  'Runtime': { 'main process': null, 'worker': null },
+};
+function activeState(id, hash, codeFile, extra) {
+  return Object.assign({
+    'PostgreSQL.functions': 'ACTIVE',
+    'S3 (bucket functions).object': id + '/' + codeFile,
+    [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits',
+    [K + '.NetworkPolicy']: 'ff-default-deny', [K + '.ConfigMap']: cm(id, hash), [K + '.Service']: fn(id) + ' (ClusterIP :8080)',
+    [K + '.Deployment']: 'replicas 1 · ready 1/1', [K + '.Pod']: 'Running · Ready',
+    'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'code loaded · idle',
+  }, extra || {});
+}
+
+const SCENARIOS = [
+  {
+    id: 'create', title: 'Create a function', lanes: ['user', 'api', 'db', 's3', 'k8s', 'node', 'pod', 'worker'],
+    summary: 'POST /functions with examples/hello.ts. The call returns only once a pod is serving: 6–12 s at 128 MB in our measurements, most of it the runtime starting on 0.1 CPU.',
+    initial: {},
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions', title: 'You send the function',
+        text: 'The dashboard form, Swagger UI (/api), or curl sends the function as JSON: a name, the runtime, the code, the memory in MB, and the timeout in seconds.',
+        code: 'FE/src/components/CreateFunction.tsx · BE/src/functions/functions.controller.ts',
+        msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'hello', runtime: 'nodejs', code: CODE_TS, memory: 128, timeout: 5 } } },
+      { from: 'api', to: 'api', kind: 'int', label: 'validate · resolve the tenant', title: 'Validation and the tenant',
+        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. @User() picks the tenant: the authenticated user, or FF_DEV_USER_ID ("1") in development; without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413.',
+        code: 'BE/src/main.ts · BE/src/auth/decorators/user.decorator.ts' },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
+        text: 'The row gets its UUID, the tenant ID, and the defaults: cpu 100, minInstances 0, maxInstances 1, targetConcurrency 100, scaleToZero true.',
+        code: 'BE/src/functions/functions.service.ts create()',
+        msg: { kind: 'sql', text: "INSERT INTO \"functions\" (\"name\", \"userId\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '1', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
+        set: { 'PostgreSQL.functions': 'CREATING' } },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts', title: 'An archive copy of the code',
+        text: 'The code goes to the functions bucket under <id>/code.ts. Nothing reads it back today: the cluster gets the code through a ConfigMap.',
+        code: 'BE/src/minio-client/minio-client.service.ts uploadCode()',
+        msg: { kind: 'http', first: 'PUT /functions/' + FN + '/code.ts HTTP/1.1', headers: { host: 'localhost:9003', 'content-length': '450', authorization: 'AWS4-HMAC-SHA256 Credential=<development key>/…' }, body: CODE_TS },
+        set: { 'S3 (bucket functions).object': FN + '/code.ts (450 bytes)' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply Namespace ' + NS, title: 'The tenant\'s namespace',
+        text: 'Every write is a server-side apply: a PATCH of the whole desired object, with fieldManager ff-controller, so repeating it changes nothing. The admission policy ff-controller-scope lets the backend\'s ServiceAccount write only to namespaces named ff-t-* and labelled as managed by ff-controller.',
+        code: 'BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts ensureTenant() · manifests.ts namespaceManifest()', hl: ['ns'],
+        msg: APPLY('/api/v1/namespaces/' + NS, M_NAMESPACE),
+        set: { [K + '.Namespace']: NS } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply quota · limits · network policy', title: 'The tenant\'s guardrails',
+        text: 'Three more applies: a ResourceQuota that caps the whole tenant, a LimitRange with defaults and maximums per container, and the NetworkPolicy ff-default-deny, which covers every pod in the namespace.',
+        code: 'manifests.ts resourceQuotaManifest(), limitRangeManifest(), networkPolicyManifest()', hl: ['guard'],
+        msg: [APPLY('/api/v1/namespaces/' + NS + '/resourcequotas/ff-tenant-quota', M_QUOTA),
+          APPLY('/api/v1/namespaces/' + NS + '/limitranges/ff-tenant-limits', M_LIMITS),
+          APPLY('/apis/networking.k8s.io/v1/namespaces/' + NS + '/networkpolicies/ff-default-deny', M_NETPOL)],
+        set: { [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits', [K + '.NetworkPolicy']: 'ff-default-deny' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply ConfigMap (the code)', title: 'The code, as an immutable ConfigMap',
+        text: 'Its name ends with the first 10 hex characters of sha256(runtime + newline + code), so each code version is a new ConfigMap. Up to 900 KiB of code fit, but the API\'s 100 KB request limit applies first today.',
+        code: 'manifests.ts codeConfigMapManifest() · naming.ts codeHash()', hl: ['configmap'],
+        msg: APPLY('/api/v1/namespaces/' + NS + '/configmaps/' + cm(FN, HASH_V1), mConfigMap(HASH_V1, CODE_TS)),
+        set: { [K + '.ConfigMap']: cm(FN, HASH_V1) + ' (immutable)' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply Service', title: 'A Service in front of the pods',
+        text: 'A ClusterIP Service on port http (8080) that selects the function\'s pods by the label ff.dev/function-id. Invocations reach the function through it.',
+        code: 'manifests.ts serviceManifest()', hl: ['service'],
+        msg: APPLY('/api/v1/namespaces/' + NS + '/services/' + fn(FN), M_SERVICE),
+        set: { [K + '.Service']: fn(FN) + ' (ClusterIP :8080)' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply Deployment (replicas 1)', title: 'The Deployment',
+        text: 'The backend first reads the Deployment, so that a redeploy keeps the current replica count; on create there is none yet, so it starts at max(1, minInstances) = 1. The manifest sets the runtime image, the FUNCTION_* variables, requests equal to limits (128 Mi and 100m CPU), the probes, the security context, and two volumes: the ConfigMap at /var/task (read-only, mode 0444) and /tmp. A rolling update adds the new pod before it removes the old one. Last, ConfigMaps older than the previous version are deleted; there are none yet.',
+        code: 'kubernetes.orchestrator.ts apply(), collectOldConfigMaps() · manifests.ts deploymentManifest()', hl: ['deployment'],
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 404 Not Found' },
+          APPLY(DEPLOY_PATH, mDeployment(HASH_V1, 1))],
+        set: { [K + '.Deployment']: 'replicas 1 · ready 0/1' } },
+      { from: 'k8s', to: 'node', kind: 'req', label: 'schedule · start the container', title: 'Kubernetes starts a pod',
+        text: 'The Deployment controller creates a ReplicaSet, which creates the pod. The scheduler places it on a node, and kubelet starts the container. The image is already on the node (imported into the development cluster with k3d image import; imagePullPolicy IfNotPresent), and the ConfigMap is mounted at /var/task.',
+        code: 'Kubernetes controllers and kubelet', hl: ['pod-box'],
+        set: { [K + '.Pod']: 'ContainerCreating' } },
+      { from: 'node', to: 'pod', kind: 'req', label: 'the runtime starts', title: 'The runtime starts',
+        text: 'The container runs the runtime\'s main process as uid 10001 on a read-only root filesystem. Its HTTP server listens on :8080: /healthz answers 200 at once, and /readyz answers 503 "starting" until your code is loaded.',
+        code: 'runtimes/nodejs/src/main.ts',
+        msg: { kind: 'log', lines: [JSON.stringify({ time: '2026-10-16T14:00:03.512Z', level: 'info', msg: 'runtime listening', port: 8080, timeoutMs: 5000, memoryLimitMb: 128, heapLimitMb: 65, handler: 'function.handler', protocol: 1 })] },
+        set: { [K + '.Pod']: 'Running · not ready', 'Runtime.main process': 'listening on :8080 · /readyz 503 starting', 'Runtime.worker': 'starting' } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'start the worker · load function.ts', title: 'Your code is loaded, once',
+        text: 'The main process starts the worker: a worker thread with V8 heap limits in Node.js (65 MB of heap at 128 MB), a separate process with a memory budget in Python. The worker reads /var/task/function.ts, transpiles the TypeScript (a syntax error fails here), and imports it. Module-level code runs now, once per worker, not on every invocation.',
+        code: 'runtimes/nodejs/src/main.ts startWorker() · worker.ts loadHandler() · ts-hook.ts',
+        msg: { kind: 'ipc', title: 'new Worker(…) with these resource limits', body: { resourceLimits: { maxOldGenerationSizeMb: 57, maxYoungGenerationSizeMb: 8 } } } },
+      { from: 'worker', to: 'pod', kind: 'res', label: 'ready', title: 'The worker reports ready',
+        text: 'The handler export was found. The main process marks itself ready, and /readyz now answers 200.',
+        code: 'runtimes/nodejs/src/main.ts onMessage()',
+        msg: [{ kind: 'ipc', title: 'message from the worker', body: { type: 'ready' } },
+          { kind: 'log', lines: [JSON.stringify({ time: '2026-10-16T14:00:08.874Z', level: 'info', msg: 'function initialized', handler: 'function.handler' })] }],
+        set: { 'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'code loaded · idle' } },
+      { from: 'node', to: 'pod', kind: 'req', label: 'readiness probe /readyz → 200', title: 'kubelet sees the pod ready',
+        text: 'kubelet probes /readyz every 2 s. On 200 the pod becomes Ready, joins the Service\'s endpoints, and the Deployment reports 1/1 ready. kubelet also probes /healthz every 10 s; three failures in a row there restart the container.',
+        code: 'manifests.ts (readinessProbe, livenessProbe)',
+        msg: [{ kind: 'http', first: 'GET /readyz HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json' }, body: { status: 'ready' } }],
+        set: { [K + '.Pod']: 'Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment, every second', title: 'The backend waits for the rollout',
+        text: 'Since step 9 the backend has polled the Deployment every second. It is done when the controller has seen the latest generation and the updated and available replicas reach the desired count. After FF_READY_TIMEOUT_SECONDS (90 s) it gives up with a diagnosis; see "The function fails to load".',
+        code: 'kubernetes.orchestrator.ts waitUntilReady(), isRolledOut()', t: '⏱ 6–12 s from the request to ready',
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { metadata: { name: fn(FN), generation: 1, '…': '…' }, spec: { replicas: 1, '…': '…' }, status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } } }] },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ACTIVE', title: 'The function is ACTIVE',
+        text: 'Only now, with an instance that can serve, does the status become ACTIVE.',
+        code: 'functions.service.ts create()',
+        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ACTIVE', \"updatedAt\" = CURRENT_TIMESTAMP\nWHERE \"id\" = '" + FN + "';" },
+        set: { 'PostgreSQL.functions': 'ACTIVE' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 Created · the function', title: 'You get the function back',
+        text: 'The response is the stored record. Keep its id: you need it to invoke, update, or delete the function.',
+        code: 'functions.controller.ts create()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'hello', userId: '1', runtime: 'nodejs', code: '// A Node.js function in TypeScript…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, id: FN, cpu: 100, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:00:09.412Z' } } },
+    ],
+  },
+  {
+    id: 'invoke', title: 'Invoke (warm)', lanes: ['user', 'api', 'db', 'k8s', 'pod', 'worker'],
+    summary: 'POST /functions/:id/invoke on a function with a ready pod. Your handler runs in about a millisecond; the rest of the time is the trip through the backend and the API server.',
+    initial: activeState(FN, HASH_V1, 'code.ts'),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'You invoke the function',
+        text: 'The body has one field, input, holding any JSON object. It becomes event.body in your handler.',
+        code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(FN, { name: 'Tunis' }) },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT the function · ACTIVE?', title: 'The function must be ACTIVE',
+        text: 'A function that doesn\'t exist gets 404; one that isn\'t ACTIVE gets 400 "Function is not active".',
+        code: 'functions.service.ts invoke()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- status: ACTIVE" } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'The invocation is recorded as RUNNING',
+        text: 'The record exists before the call, so a timeout or a crash still leaves a trace. The backend starts its clock after this insert.',
+        code: 'functions.service.ts invoke()',
+        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"functionId\", \"input\", \"status\", …)\nVALUES ('" + FN + "', '{\"name\":\"Tunis\"}', 'RUNNING', …)\nRETURNING \"id\";   -- " + INV },
+        set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment · readyReplicas 1', title: 'Is an instance ready?',
+        text: 'The backend asks before every invocation. readyReplicas is 1, so the call goes straight to the pod; with 0 this would be a cold start, as the next scenario shows.',
+        code: 'kubernetes.orchestrator.ts invoke(), readyInstances()',
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { spec: { replicas: 1, '…': '…' }, status: { replicas: 1, readyReplicas: 1, availableReplicas: 1, '…': '…' } } }] },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'POST …/services/fn-…:http/proxy/invoke', title: 'The call goes to the function\'s Service',
+        text: 'In development the backend runs outside the cluster, so it calls through the API server\'s service proxy (K8S_INVOKE_MODE=proxy). Inside a cluster it calls http://fn-<id>.<namespace>.svc:8080/invoke directly. The body is your input object. The backend waits at most the function\'s timeout plus 2 s.',
+        code: 'kubernetes.orchestrator.ts post() · kube-client.ts paths.serviceProxy()', hl: ['service'],
+        msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json', accept: 'application/json', authorization: 'Bearer <token of the ff-controller ServiceAccount>' }, body: { name: 'Tunis' } } },
+      { from: 'k8s', to: 'pod', kind: 'req', label: 'POST /invoke → pod :8080', title: 'The API server forwards it to the pod',
+        text: 'It picks a ready endpoint of the Service and forwards the request to the pod\'s port 8080. On k3s the default-deny NetworkPolicy doesn\'t block this path (checked in task K-06); with other network plugins, K8S_INGRESS_ALLOW_CIDRS can admit the API server.',
+        code: 'Kubernetes API server', hl: ['service', 'pod-box'],
+        msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', '…': '…' }, body: { name: 'Tunis' } } },
+      { from: 'pod', to: 'pod', kind: 'int', label: 'parse · queue · START · timer', title: 'The runtime accepts the invocation',
+        text: 'The body must be valid JSON of at most 6 MB. One invocation runs at a time, up to 32 more wait, and beyond that the answer is 429. The backend sends no x-ff-request-id header, so the runtime generates a UUID as the request ID. It writes the START line and arms the 5 s timer.',
+        code: 'runtimes/nodejs/src/main.ts acceptInvocation(), dispatch()',
+        msg: { kind: 'log', lines: ['START RequestId: ' + REQ + ' Version: $LATEST'] },
+        set: { 'Runtime.worker': 'busy' } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'event · deadline', title: 'The event reaches the worker',
+        text: 'The event wraps your input with the details of the HTTP request; headers holds every request header, lowercased. The deadline lets context.getRemainingTimeInMillis() count down.',
+        code: 'runtimes/nodejs/src/main.ts dispatch() → worker.ts',
+        msg: { kind: 'ipc', title: 'worker.postMessage(…), headers abridged', body: { type: 'invoke', id: 1, requestId: REQ, event: { body: { name: 'Tunis' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }, deadlineMs: 1792159335240 } } },
+      { from: 'worker', to: 'worker', kind: 'int', label: 'handler(event, context)', title: 'Your handler runs',
+        text: 'context uses Lambda\'s names: functionName, functionVersion, memoryLimitInMB (a string), awsRequestId, getRemainingTimeInMillis(). console.log goes to the pod\'s log.',
+        code: 'runtimes/nodejs/src/worker.ts · your function.ts', t: '⏱ 1.09 ms',
+        msg: { kind: 'log', lines: ['greeting Tunis'] } },
+      { from: 'worker', to: 'pod', kind: 'res', label: 'result', title: 'The worker returns the result',
+        text: 'The return value is serialized to JSON. A result over 6 MB becomes the error Function.ResponseSizeTooLarge.',
+        code: 'runtimes/nodejs/src/worker.ts → main.ts onMessage()',
+        msg: { kind: 'ipc', title: 'message from the worker', body: { type: 'result', id: 1, ok: true, body: '{"message":"Hello Tunis","requestId":"' + REQ + '"}' } },
+        set: { 'Runtime.worker': 'code loaded · idle' } },
+      { from: 'pod', to: 'k8s', kind: 'res', label: '200 · x-ff-duration-ms · END · REPORT', title: 'The runtime answers',
+        text: 'The headers carry the request ID, the duration (time spent waiting in the queue excluded), and the memory used. The END and REPORT lines go to the log, in Lambda\'s format.',
+        code: 'runtimes/nodejs/src/main.ts finish(), invocationHeaders()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json', 'x-ff-request-id': REQ, 'x-ff-duration-ms': '1.09', 'x-ff-max-memory-used-mb': '98' }, body: { message: 'Hello Tunis', requestId: REQ },
+          log: ['END RequestId: ' + REQ, 'REPORT RequestId: ' + REQ + '\tDuration: 1.09 ms\tBilled Duration: 2 ms\tMemory Size: 128 MB\tMax Memory Used: 98 MB'] } },
+      { from: 'k8s', to: 'api', kind: 'res', label: '200, relayed', title: 'The answer reaches the backend',
+        text: 'The backend parses the body and reads the duration and memory headers. An error answer raises an error here instead; see "The function throws".',
+        code: 'kubernetes.orchestrator.ts toResult()',
+        msg: { kind: 'ipc', title: 'InvokeResult, returned to FunctionsService', body: { output: { message: 'Hello Tunis', requestId: REQ }, durationMs: 1.09, memoryUsedMb: 98 } } },
+      { from: 'api', to: 'api', kind: 'int', label: 'record a metric (1-minute window)', title: 'A metric is recorded in memory',
+        text: 'The end-to-end time measured by the backend, the memory, and the outcome go into this function\'s current one-minute window, which becomes a metrics row at the next tick; see "Metrics, autoscaling, and history".',
+        code: 'BE/src/metrics/metrics.service.ts recordMetric()' },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → COMPLETED', title: 'The invocation is COMPLETED',
+        text: 'The output, the runtime\'s duration (the basis for metering), and the memory are saved.',
+        code: 'functions.service.ts invoke()',
+        msg: { kind: 'sql', text: "UPDATE \"function_invocations\"\n   SET \"status\" = 'COMPLETED', \"output\" = '{\"message\":\"Hello Tunis\",…}', \"duration\" = 1.09, \"memoryUsed\" = 98\n WHERE \"id\" = '" + INV + "';" },
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · 1.09 ms · 98 MB' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · the invocation', title: 'You get the result',
+        text: 'The response is the invocation record; output holds what your handler returned.',
+        code: 'functions.controller.ts invoke()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { functionId: FN, input: { name: 'Tunis' }, status: 'COMPLETED', output: { message: 'Hello Tunis', requestId: REQ }, memoryUsed: 98, cpuUsed: null, error: null, id: INV, duration: 1.09, createdAt: '2026-10-16T14:02:10.212Z', updatedAt: '2026-10-16T14:02:10.251Z' } } },
+    ],
+  },
+  {
+    id: 'cold', title: 'Cold start from zero', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod', 'worker'],
+    summary: 'The same invocation after the function was scaled to zero. The backend scales it back to one instance, waits for the pod, then invokes. Measured: 7–10 s at 128 MB.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { [K + '.Deployment']: 'replicas 0 · ready 0/0', [K + '.Pod']: null, 'Runtime.main process': null, 'Runtime.worker': null }),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'You invoke a sleeping function',
+        text: 'Nothing tells you it is asleep: the call is the same, it just takes longer.', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(FN, { name: 'Sousse' }) },
+      { from: 'api', to: 'db', kind: 'req', label: 'ACTIVE? · INSERT invocation', title: 'Recorded as RUNNING, as usual',
+        text: 'A function scaled to zero is still ACTIVE: it exists, it just has no pod.', code: 'functions.service.ts invoke()',
+        set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment · readyReplicas 0', title: 'No instance is ready',
+        text: 'There is no ready replica, so the backend logs "Cold start: scaling <id> from zero".', code: 'kubernetes.orchestrator.ts invoke()',
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { spec: { replicas: 0, '…': '…' }, status: { observedGeneration: 1, '…': '…' } } }] },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'PATCH …/scale → 1', title: 'Scale to one',
+        text: 'The scale subresource changes only the replica count; the pod template, and so the code, stays as it was.', code: 'kubernetes.orchestrator.ts scale() · kube-client.ts scaleDeployment()', hl: ['deployment'],
+        msg: { kind: 'http', first: 'PATCH ' + DEPLOY_PATH + '/scale?fieldManager=ff-scaler HTTP/1.1', headers: { 'content-type': 'application/merge-patch+json' }, body: { spec: { replicas: 1 } } },
+        set: { [K + '.Deployment']: 'replicas 1 · ready 0/1' } },
+      { from: 'k8s', to: 'node', kind: 'req', label: 'schedule · start the container', title: 'A pod is created and started',
+        text: 'The same path as on create: ReplicaSet, scheduler, kubelet, and the ConfigMap mounted at /var/task.', code: 'Kubernetes controllers and kubelet', hl: ['pod-box'],
+        set: { [K + '.Pod']: 'ContainerCreating' } },
+      { from: 'node', to: 'pod', kind: 'req', label: 'the runtime starts', title: 'The runtime starts',
+        text: '/healthz answers at once; /readyz answers 503 until the code is loaded.', code: 'runtimes/nodejs/src/main.ts',
+        set: { [K + '.Pod']: 'Running · not ready', 'Runtime.main process': 'listening on :8080 · /readyz 503 starting', 'Runtime.worker': 'starting' } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'load function.ts', title: 'The code is loaded again',
+        text: 'Module-level state from before the scale-down is gone: this is a new worker in a new pod. Loading at 0.1 CPU is most of a cold start; making it faster is task K-13 of the Kubernetes migration plan.', code: 'runtimes/nodejs/src/worker.ts loadHandler()' },
+      { from: 'worker', to: 'pod', kind: 'res', label: 'ready', title: 'Ready', text: '/readyz turns 200.', code: 'runtimes/nodejs/src/main.ts onMessage()',
+        set: { 'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'code loaded · idle' } },
+      { from: 'node', to: 'pod', kind: 'req', label: 'readiness probe → Ready', title: 'The pod is Ready', text: 'It joins the Service\'s endpoints.', code: 'kubelet readiness probe',
+        set: { [K + '.Pod']: 'Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'wait until rolled out (≤ 90 s)', title: 'The backend waits',
+        text: 'It polls the Deployment every second, for at most K8S_READY_TIMEOUT_SECONDS (90 s).', code: 'kubernetes.orchestrator.ts waitUntilReady()' },
+      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke (through the API server)', title: 'Now the usual invocation',
+        text: 'From here on it is the warm path: the API server\'s proxy, the runtime, the worker, your handler.', code: 'kubernetes.orchestrator.ts post()', hl: ['k8sapi', 'service'],
+        msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json' }, body: { name: 'Sousse' } },
+        set: { 'Runtime.worker': 'busy' } },
+      { from: 'pod', to: 'api', kind: 'res', label: '200 · the result', title: 'The result comes back',
+        text: 'Measured on the development cluster: 7–10 s for the whole call, against milliseconds when warm.', code: 'runtimes/nodejs/src/main.ts', t: '⏱ 7–10 s end to end',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json', 'x-ff-request-id': '…', 'x-ff-duration-ms': '1.06', 'x-ff-max-memory-used-mb': '97' }, body: { message: 'Hello Sousse', requestId: '…' } },
+        set: { 'Runtime.worker': 'code loaded · idle' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · COMPLETED', title: 'You get the result',
+        text: 'The invocation\'s duration is the handler\'s 1.06 ms, so the cold start isn\'t billed to it. The metric for this minute records the whole call, cold start included.', code: 'functions.service.ts invoke()',
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · 1.06 ms' } },
+    ],
+  },
+  {
+    id: 'error', title: 'The function throws', lanes: ['user', 'api', 'db', 'pod', 'worker'],
+    summary: 'examples/hello.py (Python) raises ValueError for the name "error". The runtime reports it the way Lambda does, and the invocation ends as ERROR.',
+    initial: activeState(PY, HASH_PY, 'code.py'),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'An input that makes the handler fail', text: 'The Python example refuses the name "error".', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(PY, { name: 'error' }) },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'Recorded as RUNNING', text: 'As for any invocation.', code: 'functions.service.ts invoke()', set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
+      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke (through the API server)', title: 'The usual path to the pod', text: 'The readiness check, the API server\'s service proxy, then the runtime.', code: 'kubernetes.orchestrator.ts post()', hl: ['k8sapi', 'service'],
+        msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', '…': '…' }, body: { name: 'error' } } },
+      { from: 'pod', to: 'worker', kind: 'req', label: '["invoke", id, event, deadline]', title: 'The Python worker gets the event',
+        text: 'In Python the main process and the worker process talk over a socket pair, in JSON messages with a 4-byte length prefix.', code: 'runtimes/python/ff_runtime/protocol.py · main.py Supervisor._run()',
+        msg: { kind: 'ipc', title: 'a message on the socket (a JSON array), headers abridged', body: ['invoke', REQ, { body: { name: 'error' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }, 1792159355230] },
+        set: { 'Runtime.worker': 'busy' } },
+      { from: 'worker', to: 'worker', kind: 'int', label: 'raise ValueError(…)', title: 'The handler raises',
+        text: 'The worker catches the exception and logs it as one JSON line, with the stack trace.', code: 'runtimes/python/ff_runtime/worker.py run_once(), log_error()',
+        msg: { kind: 'log', lines: [pyJSON({ time: '2026-10-16T14:02:30.231456+00:00', level: 'error', msg: 'function error', requestId: REQ, errorType: 'ValueError', errorMessage: 'this name is not allowed', stackTrace: ['  File "/var/task/function.py", line 6, in handler\n    raise ValueError("this name is not allowed")  # the invocation ends as ERROR'] })] } },
+      { from: 'worker', to: 'pod', kind: 'err', label: '["error", "ValueError", message]', title: 'The error goes back to the main process',
+        text: 'The worker stays loaded: an ordinary exception doesn\'t need a new worker.', code: 'runtimes/python/ff_runtime/worker.py serve()',
+        msg: { kind: 'ipc', title: 'a message on the socket', body: ['error', 'ValueError', 'this name is not allowed'] },
+        set: { 'Runtime.worker': 'code loaded · idle' } },
+      { from: 'pod', to: 'api', kind: 'err', label: '500 · x-ff-function-error: Unhandled', title: 'The runtime answers 500',
+        text: 'The body names the error the way Lambda does: errorType is the exception\'s class name.', code: 'runtimes/python/ff_runtime/main.py',
+        msg: { kind: 'http', first: 'HTTP/1.1 500 Internal Server Error', headers: { 'content-type': 'application/json', 'x-ff-request-id': REQ, 'x-ff-duration-ms': '0.41', 'x-ff-max-memory-used-mb': '24', 'x-ff-function-error': 'Unhandled' }, body: { errorType: 'ValueError', errorMessage: 'this name is not allowed' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → ERROR', title: 'The invocation is ERROR',
+        text: 'toResult() turned the answer into a FunctionRuntimeError. The error also counts in this minute\'s metrics.', code: 'kubernetes.orchestrator.ts toResult() · functions.service.ts invoke()',
+        msg: { kind: 'sql', text: "UPDATE \"function_invocations\" SET \"status\" = 'ERROR',\n       \"error\" = 'ValueError: this name is not allowed', …\n WHERE \"id\" = '" + INV + "';" },
+        set: { 'PostgreSQL.function_invocations': 'ERROR · ValueError' } },
+      { from: 'api', to: 'user', kind: 'err', label: '400 · "ValueError: …"', title: 'You get a 400',
+        text: 'The message carries the error type and text. The history keeps the full record.', code: 'functions.service.ts invoke()',
+        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: 'ValueError: this name is not allowed', error: 'Bad Request', statusCode: 400 } } },
+    ],
+  },
+  {
+    id: 'timeout', title: 'The function times out', lanes: ['user', 'api', 'db', 'pod', 'worker'],
+    summary: 'examples/slow.py with a 2 s timeout, asked to sleep for 5 s. The runtime stops it at 2 s and replaces the worker; the pod stays up.',
+    initial: activeState(SLOW, HASH_SLOW, 'code.py'),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'An invocation that runs too long', text: 'The function\'s timeout is 2 s; the input asks for a 5 s sleep.', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(SLOW, { seconds: 5 }) },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'Recorded as RUNNING', text: 'As usual.', code: 'functions.service.ts invoke()', set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
+      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke (waits ≤ 2 s + 2 s)', title: 'The backend waits at most 4 s',
+        text: 'Its own HTTP timeout is the function\'s timeout plus 2 s, so the runtime\'s answer always arrives first.', code: 'kubernetes.orchestrator.ts post()', hl: ['k8sapi', 'service'],
+        msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', '…': '…' }, body: { seconds: 5 } } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'event · 2 s timer', title: 'The handler starts, and the clock runs', text: 'The main process waits for the worker\'s reply for at most FUNCTION_TIMEOUT, 2000 ms.', code: 'runtimes/python/ff_runtime/main.py Supervisor._run()', set: { 'Runtime.worker': 'busy (sleeping)' } },
+      { from: 'pod', to: 'pod', kind: 'int', label: '2.00 s: time is up', title: 'Time is up',
+        text: 'No reply after 2 s. A CPU-bound endless loop is stopped the same way: the main process doesn\'t need the worker\'s cooperation.', code: 'runtimes/python/ff_runtime/main.py Supervisor._run()', t: '⏱ 2 s',
+        msg: { kind: 'log', lines: [pyJSON({ time: '2026-10-16T14:04:02.551208+00:00', level: 'error', msg: 'task timed out; restarting worker', requestId: REQ, timeoutMs: 2000 })] } },
+      { from: 'pod', to: 'worker', kind: 'err', label: 'kill the worker · start a fresh one', title: 'The worker is replaced',
+        text: 'The old worker is killed and a new one starts loading the code; the container keeps running. While it loads, /readyz answers 503 "starting".', code: 'runtimes/python/ff_runtime/main.py stop_worker(), start_worker()',
+        set: { 'Runtime.worker': 'replaced · loading the code', 'Runtime.main process': 'listening on :8080 · /readyz 503 starting' } },
+      { from: 'pod', to: 'api', kind: 'err', label: '504 · Sandbox.Timedout', title: 'The runtime answers 504', text: 'In Lambda\'s words.', code: 'runtimes/python/ff_runtime/main.py',
+        msg: { kind: 'http', first: 'HTTP/1.1 504 Gateway Timeout', headers: { 'content-type': 'application/json', 'x-ff-request-id': REQ, 'x-ff-duration-ms': '2000.62', 'x-ff-max-memory-used-mb': '27', 'x-ff-function-error': 'Unhandled' }, body: { errorType: 'Sandbox.Timedout', errorMessage: 'Task timed out after 2.00 seconds' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → TIMEOUT', title: 'The invocation is TIMEOUT',
+        text: 'Sandbox.Timedout becomes a FunctionTimeoutError, so the status is TIMEOUT rather than ERROR. On errors the duration saved is the backend\'s end-to-end time.', code: 'kubernetes.orchestrator.ts toResult() · functions.service.ts invoke()', t: '⏱ 2010 ms recorded',
+        msg: { kind: 'sql', text: "UPDATE \"function_invocations\" SET \"status\" = 'TIMEOUT', \"duration\" = 2010,\n       \"error\" = 'Sandbox.Timedout: Task timed out after 2.00 seconds', …\n WHERE \"id\" = '" + INV + "';" },
+        set: { 'PostgreSQL.function_invocations': 'TIMEOUT · 2010 ms' } },
+      { from: 'api', to: 'user', kind: 'err', label: '400 · "Sandbox.Timedout: …"', title: 'You get a 400', text: 'The message carries the error type and text.', code: 'functions.service.ts invoke()',
+        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: 'Sandbox.Timedout: Task timed out after 2.00 seconds', error: 'Bad Request', statusCode: 400 } } },
+      { from: 'worker', to: 'pod', kind: 'res', label: 'fresh worker ready', title: 'The pod is ready again',
+        text: 'The new worker has loaded the code: /readyz answers 200 again, and the next invocation runs on it.', code: 'runtimes/python/ff_runtime/worker.py serve()',
+        msg: { kind: 'ipc', title: 'a message on the socket', body: ['ready'] },
+        set: { 'Runtime.worker': 'code loaded · idle', 'Runtime.main process': 'listening on :8080 · /readyz 200' } },
+    ],
+  },
+  {
+    id: 'update', title: 'Update the code', lanes: ['user', 'api', 'db', 's3', 'k8s', 'node', 'pod'],
+    summary: 'PUT /functions/:id with new code: a new ConfigMap and a rolling update. The old pod keeps serving until the new one is ready, so invocations keep working. Measured: about 6 s.',
+    initial: activeState(FN, HASH_V1, 'code.ts'),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'PUT /functions/:id', title: 'You send the new code',
+        text: 'Any subset of the create fields. Here the greeting becomes "Marhba".', code: 'functions.controller.ts update()',
+        msg: { kind: 'http', first: 'PUT /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { code: CODE_TS_V2 } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT · is it yours?', title: 'Only the owner may update',
+        text: 'Update and delete compare the function\'s userId with the caller\'s tenant, and refuse anyone else with 401.', code: 'functions.controller.ts update()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- userId '1' = the caller" } },
+      { from: 'api', to: 'api', kind: 'int', label: 'the code changed → roll out', title: 'Does this need a rollout?',
+        text: 'Only a change to the code, runtime, memory, or timeout rolls out a new version, and only when the value differs from the stored one. Other fields are just saved.', code: 'functions.service.ts update() · ROLLOUT_FIELDS' },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced', text: 'Same key, new content.', code: 'BE/src/minio-client/minio-client.service.ts uploadCode()',
+        set: { 'S3 (bucket functions).object': FN + '/code.ts (451 bytes, new)' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply namespace · guardrails (no change)', title: 'The tenant is ensured again',
+        text: 'Applying the same objects again changes nothing. That is why create and update can share one code path.', code: 'kubernetes.orchestrator.ts update() → apply(), ensureTenant()', hl: ['ns', 'guard'] },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply ConfigMap …-9c9e249cb7', title: 'A new ConfigMap for the new code',
+        text: 'New code, new hash, new name. The old ConfigMap is immutable and stays: the old pod still mounts it.', code: 'manifests.ts codeConfigMapManifest()', hl: ['configmap'],
+        msg: APPLY('/api/v1/namespaces/' + NS + '/configmaps/' + cm(FN, HASH_V2), mConfigMap(HASH_V2, CODE_TS_V2)),
+        set: { [K + '.ConfigMap']: cm(FN, HASH_V2) + ' and the previous …-c4d785b397' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply Deployment (new template)', title: 'The Deployment points at the new ConfigMap',
+        text: 'The pod template changes (the code volume and the ff.dev/code-sha256 annotation), which starts a rollout. The replica count is kept: the backend read it first. Then ConfigMaps older than the previous version are deleted; here there are none.', code: 'kubernetes.orchestrator.ts apply(), collectOldConfigMaps()', hl: ['deployment'],
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { spec: { replicas: 1, '…': '…' }, '…': '…' } }, APPLY(DEPLOY_PATH, mDeployment(HASH_V2, 1))],
+        set: { [K + '.Deployment']: 'replicas 1 · rolling update' } },
+      { from: 'k8s', to: 'node', kind: 'req', label: 'surge: start a new pod', title: 'A new pod starts next to the old one',
+        text: 'maxSurge 1 and maxUnavailable 0: the old pod keeps serving invocations while the new one loads the new code.', code: 'Deployment controller', hl: ['pod-box'],
+        set: { [K + '.Pod']: 'old: Ready · new: starting' } },
+      { from: 'node', to: 'pod', kind: 'req', label: 'new pod Ready', title: 'The new pod is ready', text: 'Its runtime loaded the new code, and /readyz answers 200.', code: 'kubelet readiness probe',
+        set: { [K + '.Pod']: 'old: Ready · new: Ready' } },
+      { from: 'node', to: 'pod', kind: 'int', label: 'old pod: SIGTERM · drain', title: 'The old pod is stopped',
+        text: 'It receives SIGTERM: the runtime stops accepting (new requests get 503), finishes the invocations in flight, and exits. terminationGracePeriodSeconds, the timeout plus 5 s, bounds the wait.', code: 'runtimes/nodejs/src/main.ts shutdown() · manifests.ts',
+        msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-16T14:05:05.903Z', 0)] },
+        set: { [K + '.Pod']: 'new: Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment until rolled out', title: 'The backend waits for the rollout',
+        text: 'For up to 90 s. If the new pod isn\'t ready by then, the update fails with 400 and the record keeps the old code, while S3 and the Deployment already have the new one; the old pod keeps serving, because maxUnavailable is 0.', code: 'kubernetes.orchestrator.ts waitUntilReady()', t: '⏱ about 6 s in all',
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { metadata: { generation: 2, '…': '…' }, status: { observedGeneration: 2, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } } }] },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions (code)', title: 'The change is saved last', text: 'The record changes only once the new version is live. The status isn\'t touched: an update never changes it.', code: 'functions.service.ts update()',
+        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"code\" = '…Marhba…', \"updatedAt\" = CURRENT_TIMESTAMP WHERE \"id\" = '" + FN + "';" },
+        set: { 'PostgreSQL.functions': 'ACTIVE (new code)' } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · the function', title: 'Done', text: 'The next invocation answers "Marhba Tunis".', code: 'functions.controller.ts update()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', userId: '1', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, cpu: 100, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
+    ],
+  },
+  {
+    id: 'delete', title: 'Delete a function', lanes: ['user', 'api', 'db', 's3', 'k8s', 'node', 'pod'],
+    summary: 'DELETE /functions/:id removes the Deployment, the Service, every ConfigMap, the archived code, and the records. The tenant\'s namespace and guardrails stay for its other functions.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows', 'PostgreSQL.function_metrics': '3 rows' }),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'DELETE /functions/:id', title: 'You delete the function', text: 'No body.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'DELETE /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT · is it yours?', title: 'Only the owner may delete', text: 'Anyone else gets 401.', code: 'functions.controller.ts remove()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- userId '1' = the caller" } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Deployment', title: 'The Deployment goes first', text: 'Its ReplicaSet and pods go with it.', code: 'kubernetes.orchestrator.ts remove()', hl: ['deployment'],
+        msg: { kind: 'http', first: 'DELETE ' + DEPLOY_PATH + ' HTTP/1.1' },
+        set: { [K + '.Deployment']: null, [K + '.Pod']: 'Terminating' } },
+      { from: 'node', to: 'pod', kind: 'int', label: 'SIGTERM · drain · exit', title: 'The pod stops cleanly', text: 'kubelet sends SIGTERM; the runtime finishes any invocation in flight, then exits.', code: 'runtimes/nodejs/src/main.ts shutdown()',
+        msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-16T14:20:00.412Z', 0)] },
+        set: { [K + '.Pod']: null, 'Runtime.main process': null, 'Runtime.worker': null } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Service · ConfigMaps by label', title: 'Then the Service and every code version', text: 'The ConfigMaps are deleted in one call, selected by the label ff.dev/function-id.', code: 'kubernetes.orchestrator.ts remove()', hl: ['service', 'configmap'],
+        msg: [{ kind: 'http', first: 'DELETE /api/v1/namespaces/' + NS + '/services/' + fn(FN) + ' HTTP/1.1' }, { kind: 'http', first: 'DELETE /api/v1/namespaces/' + NS + '/configmaps?' + BY_FUNCTION(FN) + ' HTTP/1.1' }],
+        set: { [K + '.Service']: null, [K + '.ConfigMap']: null } },
+      { from: 'api', to: 's3', kind: 'req', label: 'DELETE <id>/code.ts', title: 'The archived code is removed', text: 'The object goes from the functions bucket.', code: 'BE/src/minio-client/minio-client.service.ts deleteCode()',
+        msg: { kind: 'http', first: 'DELETE /functions/' + FN + '/code.ts HTTP/1.1', headers: { host: 'localhost:9003' } },
+        set: { 'S3 (bucket functions).object': null } },
+      { from: 'api', to: 'db', kind: 'req', label: 'DELETE functions (CASCADE)', title: 'The records go, with their history',
+        text: 'The foreign keys of invocations and metrics are ON DELETE CASCADE, so one delete removes all of it.', code: 'functions.service.ts remove()',
+        msg: { kind: 'sql', text: "DELETE FROM \"functions\" WHERE \"id\" = '" + FN + "';\n-- cascades to function_invocations (12 rows) and function_metrics (3 rows)" },
+        set: { 'PostgreSQL.functions': null, 'PostgreSQL.function_invocations': null, 'PostgreSQL.function_metrics': null } },
+      { from: 'api', to: 'user', kind: 'res', label: '200', title: 'Deleted', text: 'The response has no body. The namespace, quota, limits, and network policy remain for the tenant.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-length': '0' } } },
+    ],
+  },
+  {
+    id: 'idle', title: 'Scale to zero when idle', lanes: ['api', 'db', 'k8s', 'node', 'pod'],
+    summary: 'No invocation for 15 minutes: the backend\'s idle sweep scales the function to zero and its pod stops. Nobody calls the backend for this; it runs on a timer.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': 'the last one 15 min ago' }),
+    steps: [
+      { from: 'api', to: 'api', kind: 'int', label: 'timer: every 60 s', title: 'The metrics tick',
+        text: 'Every 60 s MetricsService writes the past minute\'s metrics (none for an idle function), then sweeps for idle functions. It runs inside the API process and assumes a single backend replica.', code: 'BE/src/metrics/metrics.service.ts tick()' },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT ACTIVE · scaleToZero · min 0', title: 'Which functions may sleep?',
+        text: 'ACTIVE functions with scaleToZero true and minInstances 0, which are the defaults of every function today.', code: 'metrics.service.ts sweepIdleFunctions()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\"\n WHERE \"status\" = 'ACTIVE' AND \"scaleToZero\" = true AND \"minInstances\" = 0;" } },
+      { from: 'api', to: 'api', kind: 'int', label: 'idle for 900 s?', title: 'How long has it been idle?',
+        text: 'Its last activity is the latest of three times: its last invocation seen by this process, the process start, and the function\'s updatedAt. Here that was 15 minutes ago, the FF_SCALE_TO_ZERO_IDLE_SECONDS default.', code: 'metrics.service.ts sweepIdleFunctions() · scaling.ts shouldScaleToZero()' },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment · readyReplicas 1', title: 'It is running, so it can be scaled down', text: 'A function that is already at zero is left alone.', code: 'kubernetes.orchestrator.ts readyInstances()',
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { status: { readyReplicas: 1, '…': '…' }, '…': '…' } }] },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'PATCH …/scale → 0', title: 'Scale to zero', text: 'The backend logs "Scaled idle function <id> to zero (no invocations for 900 s)".', code: 'kubernetes.orchestrator.ts scale() · kube-client.ts scaleDeployment()', hl: ['deployment'],
+        msg: { kind: 'http', first: 'PATCH ' + DEPLOY_PATH + '/scale?fieldManager=ff-scaler HTTP/1.1', headers: { 'content-type': 'application/merge-patch+json' }, body: { spec: { replicas: 0 } } },
+        set: { [K + '.Deployment']: 'replicas 0 · scaling down' } },
+      { from: 'k8s', to: 'node', kind: 'req', label: 'delete the pod', title: 'The ReplicaSet removes the pod', text: 'The Deployment controller lowers the ReplicaSet to zero, and the pod is deleted.', code: 'Deployment controller', hl: ['pod-box'], set: { [K + '.Pod']: 'Terminating' } },
+      { from: 'node', to: 'pod', kind: 'int', label: 'SIGTERM · drain · exit', title: 'The runtime stops', text: 'Nothing is in flight, so it exits at once.', code: 'runtimes/nodejs/src/main.ts shutdown()',
+        msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-16T14:18:00.377Z', 0)] },
+        set: { [K + '.Pod']: null, [K + '.Deployment']: 'replicas 0 · ready 0/0', 'Runtime.main process': null, 'Runtime.worker': null } },
+      { from: 'api', to: 'api', kind: 'int', label: 'still ACTIVE', title: 'The function is still ACTIVE',
+        text: 'Its record, Service, and ConfigMap stay. The next invocation cold-starts it; see "Cold start from zero".', code: 'kubernetes.orchestrator.ts invoke()' },
+    ],
+  },
+  {
+    id: 'metrics', title: 'Metrics, autoscaling, and history', lanes: ['user', 'api', 'db', 'k8s'],
+    summary: 'Three invocations within a minute, then the 60 s tick: one metrics row and one autoscaling decision. Then the dashboard reads the history and the metrics.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '3 rows (COMPLETED)' }),
+    steps: [
+      { from: 'api', to: 'api', kind: 'int', label: 'window: 3 requests, 0 errors', title: 'The invocations were recorded in memory',
+        text: 'Each invocation added the backend\'s end-to-end time, the memory, and its outcome to this function\'s window: here 38, 41, and 55 ms.', code: 'metrics.service.ts recordMetric()' },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'tick: GET Deployment · ready 1', title: 'The tick reads the instance count', text: 'activeInstances is the Deployment\'s readyReplicas.', code: 'metrics.service.ts aggregate()',
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { status: { readyReplicas: 1, '…': '…' }, '…': '…' } }] },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT function_metrics', title: 'One row per function per minute',
+        text: 'Counts, percentiles, averages, and instances. The window is swapped out first, so invocations that arrive during the tick count in the next one. A minute without invocations writes no row.', code: 'metrics.service.ts aggregate()',
+        msg: { kind: 'sql', text: "INSERT INTO \"function_metrics\" (\"functionId\", \"timestamp\", \"requestCount\", \"errorCount\",\n  \"responseTimeP50\", \"responseTimeP95\", \"responseTimeP99\", \"cpuUsage\", \"memoryUsage\", \"activeInstances\")\nVALUES ('" + FN + "', '2026-10-16T14:03:00.004Z', 3, 0, 41, 55, 55, 0, 98, 1);" },
+        set: { 'PostgreSQL.function_metrics': '1 row (14:03)' } },
+      { from: 'api', to: 'api', kind: 'int', label: 'decideReplicas → no change', title: 'The autoscaling decision',
+        text: '3 requests on 1 instance is more than MAX_REQUESTS_PER_INSTANCE (2 per minute), so the rule asks for one more. But maxInstances is 1, a default the API can\'t change yet, so the function stays at one instance and nothing is called. The rule moves one instance per minute: up above 2 requests per instance or a p95 over 1 s, down below 1.2.', code: 'BE/src/metrics/scaling.ts decideReplicas()',
+        msg: { kind: 'ipc', title: 'decideReplicas(…) returns null: keep the current count', body: { activeInstances: 1, requestCount: 3, responseTimeP95: 55, minInstances: 0, maxInstances: 1, maxRequestsPerInstance: 2 } } },
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/invocations', title: 'The dashboard reads the history', text: 'Newest first, 10 at a time by default.', code: 'functions.controller.ts getInvocations()',
+        msg: { kind: 'http', first: 'GET /functions/' + FN + '/invocations?limit=10&offset=0 HTTP/1.1', headers: { host: 'localhost:3000' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT … ORDER BY createdAt DESC', title: 'One page of invocations', text: 'With the total count, for paging.', code: 'functions.service.ts getInvocations()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"function_invocations\" WHERE \"functionId\" = '" + FN + "'\n ORDER BY \"createdAt\" DESC LIMIT 10 OFFSET 0;   -- and COUNT(*)" } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · { invocations, total }', title: 'The history', text: 'An object with the page and the total.', code: 'functions.service.ts getInvocations()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { invocations: [{ id: INV, status: 'COMPLETED', duration: 1.09, memoryUsed: 98, output: { message: 'Hello Tunis', requestId: REQ }, '…': '…' }, '… 2 more'], total: 3 } } },
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /metrics/:id?start&end', title: 'The dashboard reads the metrics', text: 'For its charts, over a time range.', code: 'BE/src/metrics/metrics.controller.ts',
+        msg: { kind: 'http', first: 'GET /metrics/' + FN + '?start=2026-10-16T13:00:00Z&end=2026-10-16T15:00:00Z HTTP/1.1', headers: { host: 'localhost:3000' } } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · metrics rows', title: 'The metrics', text: 'One row per minute that had invocations, oldest first.', code: 'metrics.service.ts getMetrics()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: [{ functionId: FN, timestamp: '2026-10-16T14:03:00.004Z', requestCount: 3, errorCount: 0, responseTimeP50: 41, responseTimeP95: 55, responseTimeP99: 55, cpuUsage: 0, memoryUsage: 98, activeInstances: 1, '…': '…' }] } },
+    ],
+  },
+  {
+    id: 'loadfail', title: 'The function fails to load', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod', 'worker'],
+    summary: 'Code with a syntax error. Everything is deployed, but the runtime never reports ready; after 90 s the backend gives up, with the reason it found in the pod\'s log.',
+    initial: {},
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions (broken code)', title: 'You create a function with a syntax error', text: 'Valid JSON and valid fields; only the code itself is broken.', code: 'functions.controller.ts create()',
+        msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'broken', runtime: 'nodejs', code: CODE_BAD, memory: 128, timeout: 5 } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT (CREATING) · S3 copy', title: 'Recorded and archived', text: 'Nothing checks the code at this point.', code: 'functions.service.ts create()', set: { 'PostgreSQL.functions': 'CREATING', 'S3 (bucket functions).object': BAD + '/code.ts' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply tenant · ConfigMap · Service · Deployment', title: 'Everything is deployed', text: 'The same applies as for any function.', code: 'kubernetes.orchestrator.ts apply()', hl: ['ns', 'guard', 'configmap', 'service', 'deployment'],
+        set: { [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits', [K + '.NetworkPolicy']: 'ff-default-deny', [K + '.ConfigMap']: cm(BAD, HASH_BAD), [K + '.Service']: fn(BAD), [K + '.Deployment']: 'replicas 1 · ready 0/1' } },
+      { from: 'k8s', to: 'node', kind: 'req', label: 'schedule · start the container', title: 'The pod starts', text: 'As for any function.', code: 'Kubernetes controllers and kubelet', hl: ['pod-box'],
+        set: { [K + '.Pod']: 'ContainerCreating' } },
+      { from: 'node', to: 'pod', kind: 'req', label: 'the runtime starts', title: 'The runtime starts', text: 'Its HTTP server listens, /healthz answers 200, and /readyz answers 503 "starting".', code: 'runtimes/nodejs/src/main.ts',
+        msg: { kind: 'log', lines: [BAD_LOG[0]] },
+        set: { [K + '.Pod']: 'Running · not ready', 'Runtime.main process': 'listening on :8080 · /readyz 503 starting', 'Runtime.worker': 'starting' } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'load function.ts', title: 'The worker tries to load the code', text: 'TypeScript reports the syntax errors, and the loader refuses to run code that has any.', code: 'runtimes/nodejs/src/ts-hook.ts registerTypeScript()' },
+      { from: 'worker', to: 'pod', kind: 'err', label: 'init error: UserCodeSyntaxError', title: 'Loading fails',
+        text: 'The main process records the failure for good. From now on /readyz answers 503 "failed" while /healthz stays 200, so kubelet doesn\'t restart the container in a loop.', code: 'runtimes/nodejs/src/worker.ts loadHandler() · main.ts fail()',
+        msg: [{ kind: 'ipc', title: 'message from the worker', body: { type: 'init_error', errorType: 'Runtime.UserCodeSyntaxError', errorMessage: SYNTAX_ERROR } }, { kind: 'log', lines: [BAD_LOG[1]] }],
+        set: { 'Runtime.main process': 'listening on :8080 · /readyz 503 failed', 'Runtime.worker': 'failed: UserCodeSyntaxError' } },
+      { from: 'node', to: 'pod', kind: 'err', label: 'readiness probe → 503', title: 'The pod never becomes Ready', text: 'It gets no traffic, so nothing can invoke it.', code: 'kubelet readiness probe',
+        msg: [{ kind: 'http', first: 'GET /readyz HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 503 Service Unavailable', headers: { 'content-type': 'application/json' }, body: { status: 'failed', error: { errorType: 'Runtime.UserCodeSyntaxError', errorMessage: SYNTAX_ERROR } } }],
+        set: { [K + '.Pod']: 'Running · not ready (503)' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: '90 s later: read the pods and the log', title: 'The backend gives up, and finds out why',
+        text: 'After FF_READY_TIMEOUT_SECONDS it lists the function\'s pods for waiting or terminated containers, then reads the newest pod\'s log and keeps its last 5 lines. A missing RuntimeClass or an exhausted quota would show up here too, as "no pods were created".', code: 'kubernetes.orchestrator.ts waitUntilReady(), diagnose()', t: '90 s',
+        msg: [{ kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods?' + BY_FUNCTION(BAD) + ' HTTP/1.1' }, { kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods/' + fn(BAD) + '-…/log?container=function&tailLines=20 HTTP/1.1' }] },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ERROR', title: 'The function is ERROR', text: 'The diagnosis is stored in its error column. Nothing is cleaned up: its objects stay in the cluster, and its archived code in S3, until you delete the function.', code: 'functions.service.ts create()',
+        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ERROR',\n       \"error\" = '" + NOT_READY.replace(/'/g, "''") + "'\n WHERE \"id\" = '" + BAD + "';" },
+        set: { 'PostgreSQL.functions': 'ERROR (with the diagnosis)' } },
+      { from: 'api', to: 'user', kind: 'err', label: '400 · did not become ready', title: 'You get a 400, with the reason', text: 'An update can\'t repair it: it rolls out new code but never changes the status, so the function would stay ERROR. Delete it and create it again with the fixed code.', code: 'functions.service.ts create()',
+        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: NOT_READY, error: 'Bad Request', statusCode: 400 } } },
+    ],
+  },
+];
+
+const ARCH_INFO = {
+  user: ['You', 'The dashboard (React, on :5173), Swagger UI on /api, or curl. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · docs/getting-started.md'],
+  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL, archives code in S3, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep.', 'BE/src/functions · BE/src/metrics · BE/src/orchestrator'],
+  db: ['PostgreSQL', 'Three tables: functions, function_invocations, and function_metrics. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
+  s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds an archive copy of each function\'s code. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
+  k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages.', 'deploy/k8s/base'],
+  ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
+  guard: ['Guardrails', 'A ResourceQuota caps the tenant (20 pods, 8 CPU, 8 Gi, 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from ff-system, and lets pods reach only DNS and public addresses.', 'manifests.ts'],
+  configmap: ['Code ConfigMap', 'fn-<id>-<hash>: immutable, one per code version, mounted read-only at /var/task. The current and the previous version are kept.', 'manifests.ts codeConfigMapManifest()'],
+  service: ['Service', 'fn-<id>: ClusterIP, port http (8080). Invocations reach the ready pods through it.', 'manifests.ts serviceManifest()'],
+  deployment: ['Deployment', 'fn-<id>: the runtime image, environment, resources, probes, security context, and volumes. Its replica count changes with autoscaling, the idle sweep, and cold starts.', 'manifests.ts deploymentManifest()'],
+  'pod-box': ['Pod', 'One per instance of the function: a single container, "function", from the runtime image, with the code mounted read-only and only /tmp writable.', 'manifests.ts deploymentManifest()'],
+  pod: ['Runtime: the main process', 'Serves /healthz, /readyz, and /invoke on :8080. It queues invocations, enforces the timeout, writes the START, END, and REPORT lines, and supervises the worker.', 'runtimes/nodejs/src/main.ts · runtimes/python/ff_runtime/main.py'],
+  worker: ['Worker: your handler', 'Loads your code once and runs handler(event, context) for each invocation. It is replaced after a timeout, an out-of-memory error, or a crash.', 'runtimes/nodejs/src/worker.ts · runtimes/python/ff_runtime/worker.py'],
+  node: ['Node: scheduler, kubelet, containerd', 'Places pods, starts containers from the runtime images, mounts the code, and probes /readyz and /healthz.', 'manifests.ts (probes)'],
+};
+
+const TRACE = [
+  ['1. What you send', 'POST /functions/:id/invoke', { input: { name: 'Tunis' } }],
+  ['2. What the backend forwards', 'kubernetes.orchestrator.ts post()', { name: 'Tunis' }],
+  ['3. What the runtime receives', 'POST /invoke, through the API server\'s proxy', 'POST /invoke HTTP/1.1\ncontent-type: application/json\n…\n\n{"name":"Tunis"}'],
+  ['4. The event your handler gets', 'runtime main → worker (headers abridged)', { body: { name: 'Tunis' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }],
+  ['5. The context', 'worker.ts (Python: worker.py)', 'functionName: "hello"\nfunctionVersion: "$LATEST"\nmemoryLimitInMB: "128"\nawsRequestId: "' + REQ + '"\ngetRemainingTimeInMillis() → 4998\ncallbackWaitsForEmptyEventLoop: true'],
+  ['6. What your handler returns', 'your function.ts', { message: 'Hello Tunis', requestId: REQ }],
+  ['7. What the runtime answers', 'main.ts', 'HTTP/1.1 200 OK\ncontent-type: application/json\nx-ff-request-id: ' + REQ + '\nx-ff-duration-ms: 1.09\nx-ff-max-memory-used-mb: 98\n\n{"message":"Hello Tunis","requestId":"…"}'],
+  ['8. What the backend makes of it', 'kubernetes.orchestrator.ts toResult()', { output: { message: 'Hello Tunis', requestId: '…' }, durationMs: 1.09, memoryUsedMb: 98 }],
+  ['9. What is stored, and what you get', 'function_invocations · the 201 response', { id: INV, status: 'COMPLETED', input: { name: 'Tunis' }, output: { message: 'Hello Tunis', requestId: '…' }, duration: 1.09, memoryUsed: 98, error: null }],
+];
+
+/* [HTTP status, errorType names (or a description), when]. */
+const ERROR_ROWS = [
+  ['200', '–', 'The handler\'s return value, as JSON'],
+  ['500', 'the exception\'s class name, such as ValueError', 'The handler threw; the worker stays'],
+  ['504', ['Sandbox.Timedout'], 'Past the timeout; the worker is replaced'],
+  ['500', ['Runtime.OutOfMemory'], 'Over the memory budget; the worker is replaced'],
+  ['500', ['Runtime.ExitError'], 'The code exited or crashed the worker; it is replaced'],
+  ['500', ['Runtime.UserCodeSyntaxError', 'Runtime.ImportModuleError', 'Runtime.HandlerNotFound', 'Runtime.MalformedHandlerName'], 'The code can\'t load; /readyz stays 503'],
+  ['500', ['Function.ResponseSizeTooLarge'], 'The result is over 6 MB'],
+  ['413', ['RequestEntityTooLargeException'], 'The request body is over 6 MB'],
+  ['400', ['InvalidRequestContentException'], 'The request body isn\'t JSON'],
+  ['429', ['TooManyRequestsException'], '32 invocations already wait behind the running one'],
+  ['503', ['ServiceUnavailableException'], 'The runtime is shutting down after SIGTERM'],
+];
+
+/** Returns a list of inconsistencies in the data above; the page logs them, and docs checks can run it in Node. */
+function validateScenarios() {
+  const problems = [];
+  const knownKey = (key) => {
+    const dot = key.lastIndexOf('.');
+    const group = EMPTY[key.slice(0, dot)];
+    return Boolean(group) && Object.prototype.hasOwnProperty.call(group, key.slice(dot + 1));
+  };
+  const ids = new Set();
+  for (const sc of SCENARIOS) {
+    if (ids.has(sc.id)) problems.push('duplicate scenario id ' + sc.id);
+    ids.add(sc.id);
+    if (!sc.title || !sc.summary || !sc.steps.length) problems.push(sc.id + ': title, summary, and steps are required');
+    for (const lane of sc.lanes) if (!LANES[lane]) problems.push(sc.id + ': unknown lane ' + lane);
+    for (const key of Object.keys(sc.initial || {})) if (!knownKey(key)) problems.push(sc.id + ': unknown state key ' + key);
+    const used = new Set();
+    sc.steps.forEach((st, n) => {
+      const where = sc.id + ' step ' + (n + 1);
+      if (!sc.lanes.includes(st.from) || !sc.lanes.includes(st.to)) problems.push(where + ': a lane is not in the scenario');
+      used.add(st.from);
+      used.add(st.to);
+      if (!['req', 'res', 'int', 'err'].includes(st.kind)) problems.push(where + ': unknown kind ' + st.kind);
+      if (!st.label || !st.title || typeof st.text !== 'string' || !st.code) problems.push(where + ': label, title, text, and code are required');
+      const msgs = Array.isArray(st.msg) ? st.msg : st.msg ? [st.msg] : [];
+      for (const m of msgs) {
+        if (!['http', 'sql', 'log', 'ipc'].includes(m.kind)) problems.push(where + ': unknown message kind ' + m.kind);
+        if (m.kind === 'http' && !m.first) problems.push(where + ': an HTTP message needs a first line');
+      }
+      for (const key of Object.keys(st.set || {})) if (!knownKey(key)) problems.push(where + ': unknown state key ' + key);
+      for (const id of st.hl || []) if (!MAP_IDS.includes(id)) problems.push(where + ': unknown map id ' + id);
+    });
+    for (const lane of sc.lanes) if (!used.has(lane)) problems.push(sc.id + ': lane ' + lane + ' has no arrow');
+  }
+  for (const lane of Object.values(LANES)) if (!MAP_IDS.includes(lane.map)) problems.push('lane map id ' + lane.map + ' is unknown');
+  for (const id of Object.keys(ARCH_INFO)) if (!MAP_IDS.includes(id)) problems.push('ARCH_INFO has an unknown id ' + id);
+  return problems;
+}
+/* DATA END */
+
+/* ---------- helpers ---------- */
+const $ = (sel, el) => (el || document).querySelector(sel);
+const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
+const escText = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escAttr = (s) => escText(s).replace(/"/g, '&quot;');
+let jsonWidth = 56; // characters per line in the message panel, measured in go()
+function inlineJSON(v) {
+  if (Array.isArray(v)) return v.length ? '[' + v.map(inlineJSON).join(', ') + ']' : '[]';
+  if (v && typeof v === 'object') {
+    const keys = Object.keys(v);
+    return keys.length ? '{ ' + keys.map((k) => JSON.stringify(k) + ': ' + inlineJSON(v[k])).join(', ') + ' }' : '{}';
+  }
+  return JSON.stringify(v);
+}
+/** JSON with small objects and arrays kept on one line. */
+function prettyJSON(v, width, indent, used) {
+  indent = indent || '';
+  const flat = inlineJSON(v);
+  if (!v || typeof v !== 'object' || indent.length + (used || 0) + flat.length <= width) return flat;
+  const next = indent + '  ';
+  if (Array.isArray(v)) return '[\n' + v.map((x) => next + prettyJSON(x, width, next, 0)).join(',\n') + '\n' + indent + ']';
+  return '{\n' + Object.keys(v).map((k) => {
+    const key = JSON.stringify(k) + ': ';
+    return next + key + prettyJSON(v[k], width, next, key.length);
+  }).join(',\n') + '\n' + indent + '}';
+}
+const JSON_TOKEN = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g;
+function highlightJSON(text) {
+  return escText(text).replace(JSON_TOKEN, (m, str, colon, lit) => {
+    if (str) return colon ? '<span class="j-key">' + str + '</span>' + colon : '<span class="j-str">' + str + '</span>';
+    if (lit) return '<span class="j-lit">' + m + '</span>';
+    return '<span class="j-num">' + m + '</span>';
+  });
+}
+const showValue = (v, width) => (typeof v === 'string' ? escText(v) : highlightJSON(prettyJSON(v, width || jsonWidth)));
+const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const noAnim = params.has('noanim') || reducedMotion;
+
+/* ---------- theme ---------- */
+(function theme() {
+  const btn = $('#themeBtn');
+  const order = ['auto', 'light', 'dark'];
+  let mode = 'auto';
+  try { mode = localStorage.getItem('ff-theme') || 'auto'; } catch (e) { /* storage unavailable */ }
+  if (order.includes(params.get('theme'))) mode = params.get('theme');
+  if (!order.includes(mode)) mode = 'auto';
+  const apply = () => {
+    if (mode === 'auto') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', mode);
+    btn.textContent = 'Theme: ' + mode;
+  };
+  btn.addEventListener('click', () => {
+    mode = order[(order.indexOf(mode) + 1) % order.length];
+    try { localStorage.setItem('ff-theme', mode); } catch (e) { /* storage unavailable */ }
+    apply();
+  });
+  apply();
+})();
+
+/* ---------- SVG building blocks ---------- */
+const arrowDefs = (id, color) => '<marker id="' + id + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(' + color + ')"/></marker>';
+function svgBox(id, x, y, w, h, label, sub, opts) {
+  opts = opts || {};
+  const ty = opts.top ? y + 24 : (sub ? y + h / 2 - 2 : y + h / 2 + 4.5);
+  const focus = opts.inert ? '' : ' tabindex="0" role="button" aria-label="' + escAttr(label) + '"';
+  return '<g class="arch-box" data-id="' + id + '"' + focus + '>' +
+    '<rect class="b" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="9"/>' +
+    '<text x="' + (x + w / 2) + '" y="' + ty + '" text-anchor="middle" font-weight="600">' + escText(label) + '</text>' +
+    (sub ? '<text class="sub" x="' + (x + w / 2) + '" y="' + (ty + 15) + '" text-anchor="middle">' + escText(sub) + '</text>' : '') + '</g>';
+}
+function svgZone(id, x, y, w, h, label, anchor, opts) {
+  const focus = opts && opts.inert ? '' : ' tabindex="0" role="button" aria-label="' + escAttr(label || id) + '"';
+  const tx = anchor === 'end' ? x + w - 12 : x + 12;
+  return '<g class="arch-zone" data-id="' + id + '"' + focus + '><rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="12"/>' +
+    (label ? '<text x="' + tx + '" y="' + (y + 17) + '" text-anchor="' + (anchor || 'start') + '">' + escText(label) + '</text>' : '') + '</g>';
+}
+const svgGroup = (x, y, w, h, label) => '<g class="arch-group"><rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="14"/><text x="' + (x + 14) + '" y="' + (y + 20) + '">' + escText(label) + '</text></g>';
+const svgComp = (x, y, w, h, label) => '<g class="arch-comp"><rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="7"/><text x="' + (x + w / 2) + '" y="' + (y + h / 2 + 4) + '" text-anchor="middle">' + escText(label) + '</text></g>';
+const svgLink = (d, label, lx, ly, anchor) => '<g class="arch-link"><path d="' + d + '" marker-end="url(#arch-arrow)"/>' + (label ? '<text x="' + lx + '" y="' + ly + '" text-anchor="' + (anchor || 'middle') + '">' + escText(label) + '</text>' : '') + '</g>';
+
+/* ---------- architecture maps ---------- */
+function archBig() {
+  return '<svg class="diagram" viewBox="0 0 1000 556" role="img" aria-label="Architecture: you, the backend with PostgreSQL and S3, and the Kubernetes cluster with the tenant namespace">' +
+    '<defs>' + arrowDefs('arch-arrow', '--muted') + '</defs>' +
+    svgGroup(208, 20, 300, 420, 'Your machine or server') +
+    svgGroup(560, 20, 428, 520, 'Kubernetes cluster (k3s)') +
+    svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-6b86b273ff34 (tenant 1)', 'end') +
+    svgBox('user', 16, 136, 150, 76, 'You', 'dashboard · curl') +
+    svgBox('api', 226, 52, 264, 244, 'Backend API', 'NestJS · :3000', { top: true }) +
+    svgComp(242, 108, 232, 36, 'Functions: controller · service') +
+    svgComp(242, 152, 232, 36, 'Metrics · autoscaler · idle sweep') +
+    svgComp(242, 196, 232, 36, 'Kubernetes driver · KubeClient') +
+    svgComp(242, 240, 232, 36, 'S3 client') +
+    svgBox('db', 226, 344, 124, 72, 'PostgreSQL', 'records') +
+    svgBox('s3', 366, 344, 124, 72, 'S3 storage', 'code archive') +
+    svgBox('k8sapi', 578, 52, 392, 56, 'Kubernetes API server', 'RBAC · admission policy ff-controller-scope') +
+    svgBox('guard', 668, 168, 286, 44, 'Guardrails', 'ResourceQuota · LimitRange · NetworkPolicy') +
+    svgBox('service', 594, 224, 178, 46, 'Service', 'fn-<id> · ClusterIP :8080') +
+    svgBox('configmap', 784, 224, 170, 46, 'ConfigMap', 'fn-<id>-<hash> · code') +
+    svgBox('deployment', 784, 282, 170, 44, 'Deployment', 'fn-<id> · replicas') +
+    svgZone('pod-box', 594, 338, 360, 88, 'Pod · one container, "function"', 'end') +
+    svgBox('pod', 606, 362, 166, 52, 'Runtime main', 'HTTP :8080 · probes') +
+    svgBox('worker', 784, 362, 158, 52, 'Your handler', 'worker') +
+    svgBox('node', 578, 456, 392, 60, 'Node: scheduler · kubelet · containerd', 'starts pods · mounts the code · probes') +
+    svgLink('M166,174 L224,174', 'HTTP', 187, 166) +
+    svgLink('M288,296 L288,342', 'SQL', 296, 324, 'start') +
+    svgLink('M428,296 L428,342', 'S3 API', 436, 324, 'start') +
+    svgLink('M490,80 L576,80', 'HTTPS', 534, 72) +
+    svgLink('M640,108 L640,222', 'service proxy', 648, 128, 'start') +
+    svgLink('M683,270 L683,360', '', 0, 0) +
+    svgLink('M869,270 L869,280', '', 0, 0) +
+    svgLink('M869,326 L869,336', '', 0, 0) +
+    svgLink('M772,388 L782,388', '', 0, 0) +
+    svgLink('M700,456 L700,428', '', 0, 0) +
+    '</svg>';
+}
+function archMini() {
+  const o = { inert: true };
+  return '<svg class="diagram" viewBox="0 0 420 424" role="img" aria-label="Where this step happens">' +
+    svgBox('user', 10, 10, 120, 40, 'You', '', o) +
+    svgBox('api', 140, 10, 270, 40, 'Backend API', '', o) +
+    svgBox('db', 140, 60, 130, 36, 'PostgreSQL', '', o) +
+    svgBox('s3', 280, 60, 130, 36, 'S3 storage', '', o) +
+    svgBox('k8sapi', 10, 112, 400, 38, 'Kubernetes API server', '', o) +
+    svgZone('ns', 10, 162, 400, 202, 'Namespace ff-t-…', 'start', o) +
+    svgBox('guard', 20, 186, 380, 32, 'Guardrails: quota · limits · network policy', '', o) +
+    svgBox('service', 20, 226, 186, 32, 'Service', '', o) +
+    svgBox('configmap', 214, 226, 186, 32, 'ConfigMap (the code)', '', o) +
+    svgBox('deployment', 214, 266, 186, 32, 'Deployment', '', o) +
+    svgZone('pod-box', 20, 306, 380, 50, '', 'start', o) +
+    svgBox('pod', 28, 313, 180, 36, 'Runtime main', '', o) +
+    svgBox('worker', 214, 313, 178, 36, 'Your handler', '', o) +
+    svgBox('node', 10, 376, 400, 38, 'Node: scheduler · kubelet', '', o) +
+    '</svg>';
+}
+function mountArchBig() {
+  const container = $('#archBig');
+  container.innerHTML = archBig();
+  const info = $('#archInfo');
+  const show = (id) => {
+    const d = ARCH_INFO[id];
+    if (!d) return;
+    info.innerHTML = '<h3>' + escText(d[0]) + '</h3><p>' + escText(d[1]) + '</p><p class="where">Code: <code>' + escText(d[2]) + '</code></p>';
+    $$('.arch-box, .arch-zone', container).forEach((b) => b.classList.toggle('sel', b.dataset.id === id));
+  };
+  $$('.arch-box[tabindex], .arch-zone[tabindex]', container).forEach((b) => {
+    b.addEventListener('click', (e) => { e.stopPropagation(); show(b.dataset.id); });
+    b.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(b.dataset.id); } });
+  });
+  show('api');
+}
+function highlightMini(ids) {
+  $$('#archMini .arch-box, #archMini .arch-zone').forEach((b) => b.classList.toggle('hot', ids.includes(b.dataset.id)));
+}
+
+/* ---------- simulator ---------- */
+const SEQ = { left: 36, row: 46, pad: 14, head: 60, minCol: 92, maxCol: 150 };
+const sim = { sc: SCENARIOS[0], L: null, i: -1, playing: false, speed: 1, timer: null, raf: null };
+
+function seqLayout(sc) {
+  const avail = $('#seqWrap').clientWidth || 900;
+  const col = Math.max(SEQ.minCol, Math.min(SEQ.maxCol, Math.floor((avail - SEQ.left - SEQ.pad) / sc.lanes.length)));
+  return { col, width: SEQ.left + col * sc.lanes.length + SEQ.pad };
+}
+const laneX = (sc, lane) => SEQ.left + sim.L.col * sc.lanes.indexOf(lane) + sim.L.col / 2;
+const labelWidth = (s) => s.length * 6.5;
+
+function renderLaneHeads(sc) {
+  const W = sim.L.width;
+  let s = '<svg class="seq-svg" width="' + W + '" height="' + SEQ.head + '" viewBox="0 0 ' + W + ' ' + SEQ.head + '" role="img" aria-label="Participants: ' + escAttr(sc.lanes.map((l) => LANES[l].label).join(', ')) + '">';
+  sc.lanes.forEach((id) => {
+    const lane = LANES[id], x = laneX(sc, id), w = sim.L.col - 10;
+    s += '<g class="lane-head"><rect x="' + (x - w / 2) + '" y="6" width="' + w + '" height="48" rx="9" style="stroke:var(' + lane.color + ')"/>' +
+      '<text x="' + x + '" y="26" text-anchor="middle">' + escText(lane.label) + '</text>' +
+      '<text class="sub" x="' + x + '" y="43" text-anchor="middle">' + escText(lane.sub) + '</text></g>';
+  });
+  return s + '</svg>';
+}
+
+function renderSteps(sc) {
+  const W = sim.L.width, H = SEQ.row * sc.steps.length + 16;
+  let s = '<svg class="seq-svg" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + escAttr(sc.steps.length + ' steps of ' + sc.title) + '">' +
+    '<defs>' + arrowDefs('ah-req', '--accent') + arrowDefs('ah-res', '--resp') + arrowDefs('ah-int', '--muted') + arrowDefs('ah-err', '--danger') + '</defs>';
+  sc.lanes.forEach((id) => { const x = laneX(sc, id); s += '<line class="lifeline" x1="' + x + '" y1="0" x2="' + x + '" y2="' + H + '"/>'; });
+  sc.steps.forEach((st, i) => {
+    const y = SEQ.row * i + SEQ.row / 2 + 8;
+    const x1 = laneX(sc, st.from), x2 = laneX(sc, st.to);
+    const w = labelWidth(st.label);
+    let d, lx, ly, anchor;
+    if (st.from === st.to) {
+      const toLeft = sc.lanes.indexOf(st.from) >= sc.lanes.length / 2;
+      const dir = toLeft ? -1 : 1;
+      d = 'M' + (x1 + dir * 4) + ',' + (y - 9) + ' h' + (dir * 30) + ' v18 h' + (-dir * 25);
+      lx = x1 + dir * 42; ly = y + 4; anchor = toLeft ? 'end' : 'start';
+    } else {
+      const dir = x2 > x1 ? 1 : -1;
+      d = 'M' + (x1 + dir * 4) + ',' + y + ' L' + (x2 - dir * 7) + ',' + y;
+      lx = Math.max(w / 2 + 36, Math.min(W - w / 2 - 4, (x1 + x2) / 2)); ly = y - 7; anchor = 'middle';
+    }
+    s += '<g class="row k-' + st.kind + '" data-i="' + i + '">' +
+      '<rect class="hit" x="0" y="' + (SEQ.row * i + 8) + '" width="' + W + '" height="' + SEQ.row + '"/>' +
+      '<g class="num"><circle cx="18" cy="' + y + '" r="11"/><text x="18" y="' + (y + 4) + '" text-anchor="middle">' + (i + 1) + '</text></g>' +
+      '<path class="msg" id="seq-path-' + i + '" d="' + d + '" marker-end="url(#ah-' + st.kind + ')"/>' +
+      '<text class="lbl" x="' + lx + '" y="' + ly + '" text-anchor="' + anchor + '">' + escText(st.label) + '</text></g>';
+  });
+  return s + '<circle class="packet" id="packet" r="6" cx="-20" cy="-20"/></svg>';
+}
+
+function computeState(sc, upto) {
+  const state = JSON.parse(JSON.stringify(EMPTY));
+  const put = (patch) => Object.entries(patch || {}).forEach(([key, value]) => {
+    const dot = key.lastIndexOf('.');
+    state[key.slice(0, dot)][key.slice(dot + 1)] = value;
+  });
+  put(sc.initial);
+  for (let i = 0; i <= upto; i++) put(sc.steps[i].set);
+  return state;
+}
+
+function renderOneMessage(m) {
+  const head = (t) => '<p class="msg-kind">' + escText(t) + '</p>';
+  if (m.kind === 'sql') return head('SQL, sent by TypeORM (abridged)') + '<pre class="wire">' + escText(m.text) + '</pre>';
+  if (m.kind === 'log') return head('Pod log (stdout)') + '<pre class="wire">' + escText(m.lines.join('\n')) + '</pre>';
+  if (m.kind === 'ipc') return head(m.title || 'In-process message') + '<pre class="wire">' + showValue(m.body) + '</pre>';
+  let s = '<span class="first">' + escText(m.first) + '</span>';
+  Object.entries(m.headers || {}).forEach(([k, v]) => { s += '\n<span class="hdr">' + escText(k === '…' ? '…' : k + ': ' + v) + '</span>'; });
+  if (m.body !== undefined) s += '\n\n' + showValue(m.body);
+  let out = head(/^HTTP\//.test(m.first) ? 'HTTP response' : 'HTTP request') + '<pre class="wire">' + s + '</pre>';
+  if (m.log) out += head('Pod log (stdout)') + '<pre class="wire">' + escText(m.log.join('\n')) + '</pre>';
+  return out;
+}
+function renderMessage(st) {
+  if (!st) return '<p class="note" style="margin:0">Press play to start. Each step shows the request, query, message, or log line it involves.</p>';
+  const list = Array.isArray(st.msg) ? st.msg : st.msg ? [st.msg] : [];
+  if (!list.length) return '<p class="note" style="margin:0">Nothing to show on the wire for this step' + (st.from === st.to ? ': it happens inside ' + escText(LANES[st.from].label) + '.' : '.') + ' The State tab shows what changed.</p>';
+  return list.map(renderOneMessage).join('');
+}
+
+function renderState(sc, i) {
+  const state = computeState(sc, i);
+  const changed = new Set(i >= 0 ? Object.keys(sc.steps[i].set || {}) : []);
+  let out = '<p class="msg-kind">After this step. Highlighted rows just changed; a dash means it doesn\'t exist.</p>';
+  Object.entries(state).forEach(([group, fields]) => {
+    out += '<div class="state-group"><h4>' + escText(group) + '</h4><table><tbody>';
+    Object.entries(fields).forEach(([field, value]) => {
+      const cls = (changed.has(group + '.' + field) ? 'changed ' : '') + (value === null ? 'absent' : '');
+      out += '<tr class="' + cls.trim() + '"><td>' + escText(field) + '</td><td>' + (value === null ? '—' : escText(value)) + '</td></tr>';
+    });
+    out += '</tbody></table></div>';
+  });
+  return out;
+}
+
+function setTab(name) {
+  ['msg', 'state', 'where'].forEach((t) => {
+    $('#tab-' + t).setAttribute('aria-selected', String(t === name));
+    $('#panel-' + t).hidden = t !== name;
+  });
+}
+
+function animatePacket(i) {
+  const packet = $('#packet');
+  const path = document.getElementById('seq-path-' + i);
+  if (sim.raf) cancelAnimationFrame(sim.raf);
+  if (!packet || !path) return;
+  const len = path.getTotalLength();
+  const place = (f) => { const p = path.getPointAtLength(f * len); packet.setAttribute('cx', p.x); packet.setAttribute('cy', p.y); };
+  if (noAnim) { place(1); return; }
+  const dur = 750 / sim.speed;
+  const t0 = performance.now();
+  const frame = (now) => {
+    const t = Math.min(1, (now - t0) / dur);
+    place(t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+    if (t < 1) sim.raf = requestAnimationFrame(frame);
+  };
+  sim.raf = requestAnimationFrame(frame);
+}
+
+function keepVisible(i) {
+  const body = $('#seqBody');
+  const top = SEQ.row * i, bottom = top + SEQ.row + 16;
+  if (top < body.scrollTop || bottom > body.scrollTop + body.clientHeight) {
+    body.scrollTo({ top: Math.max(0, top - body.clientHeight / 3), behavior: noAnim ? 'auto' : 'smooth' });
+  }
+}
+
+function go(i, opts) {
+  opts = opts || {};
+  const sc = sim.sc;
+  sim.i = Math.max(-1, Math.min(sc.steps.length - 1, i));
+  const st = sim.i >= 0 ? sc.steps[sim.i] : null;
+  $$('#seqBody .row').forEach((row) => {
+    const n = Number(row.dataset.i);
+    row.classList.toggle('current', n === sim.i);
+    row.classList.toggle('past', n < sim.i);
+    row.classList.toggle('future', n > sim.i);
+  });
+  $('#stepNo').textContent = st ? 'Step ' + (sim.i + 1) + ' of ' + sc.steps.length : sc.steps.length + ' steps';
+  $('#stepTitle').textContent = st ? st.title : sc.title;
+  $('#stepText').textContent = st ? st.text : 'Press play, or click any step in the diagram.';
+  let meta = '';
+  if (st && st.code) meta += '<code title="Where in the code">' + escText(st.code) + '</code>';
+  if (st && st.t) meta += '<span class="tag">' + escText(st.t) + '</span>';
+  $('#stepMeta').innerHTML = meta;
+  jsonWidth = Math.max(36, Math.floor(($('#panel-msg').parentElement.clientWidth - 56) / 7.6));
+  $('#panel-msg').innerHTML = renderMessage(st);
+  $('#panel-state').innerHTML = renderState(sc, sim.i);
+  $('#stepCount').textContent = (sim.i + 1) + ' / ' + sc.steps.length;
+  $('#progressBar').style.width = ((sim.i + 1) / sc.steps.length * 100) + '%';
+  highlightMini(st ? [LANES[st.from].map, LANES[st.to].map].concat(st.hl || []) : []);
+  $('#announce').textContent = st ? 'Step ' + (sim.i + 1) + ': ' + st.title : '';
+  const packet = $('#packet');
+  if (st) { animatePacket(sim.i); keepVisible(sim.i); }
+  else if (packet) { packet.setAttribute('cx', -20); packet.setAttribute('cy', -20); }
+  if (!opts.quiet) updateHash();
+}
+
+function updateHash() {
+  const h = new URLSearchParams();
+  h.set('sim', sim.sc.id);
+  if (sim.i >= 0) h.set('step', String(sim.i + 1));
+  history.replaceState(null, '', '#' + h.toString());
+}
+
+function setPlaying(on) {
+  sim.playing = on;
+  $('#btnPlay').textContent = on ? '⏸ Pause' : '▶ Play';
+  $('#btnPlay').setAttribute('aria-label', on ? 'Pause' : 'Play');
+  clearTimeout(sim.timer);
+  if (on) tick();
+}
+function tick() {
+  if (!sim.playing) return;
+  if (sim.i >= sim.sc.steps.length - 1) { setPlaying(false); return; }
+  go(sim.i + 1);
+  sim.timer = setTimeout(tick, 2000 / sim.speed);
+}
+
+function renderSequence() {
+  const sc = sim.sc;
+  sim.L = seqLayout(sc);
+  $('#seqInner').style.width = sim.L.width + 'px';
+  $('#seqHead').innerHTML = renderLaneHeads(sc);
+  $('#seqBody').innerHTML = renderSteps(sc);
+  $$('#seqBody .row').forEach((row) => row.addEventListener('click', () => { setPlaying(false); go(Number(row.dataset.i)); }));
+}
+
+function loadScenario(id, step, opts) {
+  const sc = SCENARIOS.find((s) => s.id === id) || SCENARIOS[0];
+  sim.sc = sc;
+  setPlaying(false);
+  $$('#scenarioChips .chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.id === sc.id)));
+  $('#simSummary').textContent = sc.summary;
+  renderSequence();
+  $('#seqBody').scrollTop = 0;
+  go(typeof step === 'number' ? step : -1, opts);
+}
+
+function initSimulator() {
+  const chips = $('#scenarioChips');
+  chips.innerHTML = SCENARIOS.map((s, n) => '<button type="button" class="chip" data-id="' + s.id + '" aria-pressed="false">' + (n + 1) + '. ' + escText(s.title) + '</button>').join('');
+  $$('.chip', chips).forEach((c) => c.addEventListener('click', () => loadScenario(c.dataset.id)));
+  $('#archMini').innerHTML = archMini();
+  $('#btnPlay').addEventListener('click', () => {
+    if (!sim.playing && sim.i >= sim.sc.steps.length - 1) go(-1);
+    setPlaying(!sim.playing);
+  });
+  $('#btnNext').addEventListener('click', () => { setPlaying(false); go(sim.i + 1); });
+  $('#btnPrev').addEventListener('click', () => { setPlaying(false); go(sim.i - 1); });
+  $('#btnRestart').addEventListener('click', () => { setPlaying(false); go(-1); });
+  $('#speed').addEventListener('change', (e) => { sim.speed = Number(e.target.value); });
+  ['msg', 'state', 'where'].forEach((t) => $('#tab-' + t).addEventListener('click', () => setTab(t)));
+  document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.target.closest && e.target.closest('select, input, textarea, [contenteditable]')) return;
+    const box = $('#simulator').getBoundingClientRect();
+    const middle = window.innerHeight / 2;
+    if (box.top > middle || box.bottom < middle) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); setPlaying(false); go(sim.i + 1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); setPlaying(false); go(sim.i - 1); }
+    else if (e.key === ' ' && !(e.target.closest && e.target.closest('button, [role="button"]'))) { e.preventDefault(); $('#btnPlay').click(); }
+  });
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (seqLayout(sim.sc).col === sim.L.col) return;
+      renderSequence();
+      go(sim.i, { quiet: true });
+    }, 150);
+  });
+  const step = params.get('step') ? Number(params.get('step')) - 1 : -1;
+  loadScenario(params.get('sim') || 'create', step, { quiet: true });
+  if (['msg', 'state', 'where'].includes(params.get('tab'))) setTab(params.get('tab'));
+  if (params.get('sim')) $('#simulator').scrollIntoView({ behavior: 'instant', block: 'start' });
+}
+
+/* ---------- data diagrams ---------- */
+function erDiagram() {
+  const tables = [
+    { name: 'function_invocations', x: 16, cols: [['id', 'uuid · PK', 'pk'], ['functionId', 'uuid · FK, cascade'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · TIMEOUT'], ['duration', 'float = 0, ms'], ['memoryUsed', 'float, MB, null'], ['cpuUsed', 'float, null'], ['error', 'varchar, null'], ['createdAt', 'timestamp'], ['updatedAt', 'timestamp']] },
+    { name: 'functions', x: 350, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['userId', 'varchar · the tenant'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['cpu', 'int = 100'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['minInstances', 'int = 0'], ['maxInstances', 'int = 1'], ['targetConcurrency', 'int = 100'], ['scaleToZero', 'boolean = true'], ['createdAt', 'timestamp'], ['updatedAt', 'timestamp']] },
+    { name: 'function_metrics', x: 684, cols: [['id', 'uuid · PK', 'pk'], ['functionId', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['requestCount', 'int'], ['errorCount', 'int'], ['responseTimeP50', 'float, ms'], ['responseTimeP95', 'float, ms'], ['responseTimeP99', 'float, ms'], ['cpuUsage', 'float'], ['memoryUsage', 'float, MB'], ['activeInstances', 'int'], ['createdAt', 'timestamp']] },
+  ];
+  const RH = 21, W = 300, TOP = 10, HEAD = 30;
+  const tallest = Math.max.apply(null, tables.map((t) => t.cols.length));
+  let s = '<svg class="diagram" viewBox="0 0 1000 ' + (TOP + HEAD + RH * tallest + 20) + '" role="img" aria-label="The three tables and their columns">';
+  tables.forEach((t) => {
+    const h = HEAD + RH * t.cols.length + 6;
+    s += '<g class="tbl"><rect class="body" x="' + t.x + '" y="' + TOP + '" width="' + W + '" height="' + h + '" rx="8"/>' +
+      '<rect class="h" x="' + t.x + '" y="' + TOP + '" width="' + W + '" height="' + (HEAD - 2) + '" rx="8"/><rect class="h" x="' + t.x + '" y="' + (TOP + 18) + '" width="' + W + '" height="' + (HEAD - 20) + '"/>' +
+      '<text class="h" x="' + (t.x + 12) + '" y="' + (TOP + 19) + '">' + t.name + '</text>';
+    t.cols.forEach((c, n) => {
+      const y = TOP + HEAD + RH * n + 15;
+      if (n) s += '<line x1="' + (t.x + 8) + '" x2="' + (t.x + W - 8) + '" y1="' + (y - 15) + '" y2="' + (y - 15) + '"/>';
+      s += '<text x="' + (t.x + 12) + '" y="' + y + '"' + (c[2] === 'pk' ? ' class="pk"' : '') + '>' + escText(c[0]) + '</text>' +
+        '<text class="t" x="' + (t.x + W - 10) + '" y="' + y + '" text-anchor="end">' + escText(c[1]) + '</text>';
+    });
+    s += '</g>';
+  });
+  const y0 = TOP + HEAD + 11, y1 = y0 + RH;
+  s += '<g class="rel"><path d="M350,' + y0 + ' C333,' + y0 + ' 333,' + y1 + ' 316,' + y1 + '"/><text x="342" y="' + (y0 - 5) + '" text-anchor="middle">1</text><text x="324" y="' + (y1 + 14) + '" text-anchor="middle">n</text></g>';
+  s += '<g class="rel"><path d="M650,' + y0 + ' C667,' + y0 + ' 667,' + y1 + ' 684,' + y1 + '"/><text x="658" y="' + (y0 - 5) + '" text-anchor="middle">1</text><text x="676" y="' + (y1 + 14) + '" text-anchor="middle">n</text></g>';
+  return s + '</svg>';
+}
+
+function stateMachines() {
+  const node = (x, y, w, label, cls) => '<g class="' + (cls || '') + '"><rect x="' + x + '" y="' + y + '" width="' + w + '" height="36" rx="18"/><text x="' + (x + w / 2) + '" y="' + (y + 23) + '" text-anchor="middle" font-weight="600">' + escText(label) + '</text></g>';
+  const edge = (d, label, lx, ly) => '<path d="' + d + '" marker-end="url(#sm-arrow)"/>' + (label ? '<text class="e" x="' + lx + '" y="' + ly + '" text-anchor="middle">' + escText(label) + '</text>' : '');
+  const note = (x, y, lines) => lines.map((t, n) => '<text class="e" x="' + x + '" y="' + (y + 16 * n) + '">' + escText(t) + '</text>').join('');
+  return '<svg class="diagram sm" viewBox="0 0 1000 300" role="img" aria-label="Lifecycles of a function and of an invocation">' +
+    '<defs>' + arrowDefs('sm-arrow', '--muted') + '</defs>' +
+    '<text class="ttl" x="16" y="22">A function</text>' +
+    node(16, 50, 130, 'CREATING') + node(320, 14, 120, 'ACTIVE', 'ok') + node(320, 90, 120, 'ERROR', 'bad') + node(600, 52, 150, 'deleted') +
+    edge('M146,62 C230,44 250,32 318,32', 'a pod is ready', 228, 34) +
+    edge('M146,76 C230,96 250,108 318,108', 'not ready within 90 s, or the deploy failed', 232, 140) +
+    edge('M440,32 C520,32 540,62 598,66', 'DELETE', 522, 36) +
+    edge('M440,108 C520,108 540,82 598,76', 'DELETE', 522, 112) +
+    note(770, 30, ['ACTIVE includes scaled to zero:', 'replicas live in the Deployment.', 'An update never changes the status:', 'an ERROR function stays ERROR.', 'DELETE removes the row.']) +
+    '<text class="ttl" x="16" y="186">An invocation</text>' +
+    node(16, 214, 130, 'RUNNING') + node(330, 176, 140, 'COMPLETED', 'ok') + node(520, 234, 120, 'ERROR', 'bad') + node(720, 234, 130, 'TIMEOUT', 'bad') +
+    edge('M146,226 C230,206 260,194 328,194', '200 from the runtime', 236, 196) +
+    edge('M146,236 C300,250 420,252 518,252', 'an error: thrown, out of memory, crashed', 330, 238) +
+    edge('M146,242 C380,296 640,290 718,256', 'Sandbox.Timedout', 600, 295) +
+    note(870, 246, ['A row stays RUNNING', 'if the backend stops', 'during the call.']) +
+    '</svg>';
+}
+
+function k8sObjects() {
+  const obj = (x, y, w, h, label, sub) => '<g><rect class="obj" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="8"/><text x="' + (x + 10) + '" y="' + (y + 19) + '" font-weight="600">' + escText(label) + '</text>' + (sub ? '<text class="s" x="' + (x + 10) + '" y="' + (y + 35) + '">' + escText(sub) + '</text>' : '') + '</g>';
+  const arrow = (d, cls, marker) => '<path class="' + (cls || '') + '" d="' + d + '" marker-end="url(#ko-' + (marker || 'n') + ')"/>';
+  const label = (x, y, t, anchor) => '<text class="lbl" x="' + x + '" y="' + y + '" text-anchor="' + (anchor || 'middle') + '">' + escText(t) + '</text>';
+  const lines = (x, y, list, step) => list.map((t, n) => '<text class="s" x="' + x + '" y="' + (y + (step || 14) * n) + '">' + escText(t) + '</text>').join('');
+  return '<svg class="diagram ko" viewBox="0 0 1000 500" role="img" aria-label="Kubernetes objects of one tenant and the network rules">' +
+    '<defs>' + arrowDefs('ko-n', '--muted') + arrowDefs('ko-allow', '--ok') + arrowDefs('ko-deny', '--danger') + '</defs>' +
+    '<rect class="zone" x="190" y="10" width="620" height="390" rx="14"/><text class="zone" x="206" y="30">Namespace ff-t-6b86b273ff34 · managed by ff-controller · Pod Security "restricted"</text>' +
+    obj(206, 44, 186, 44, 'ResourceQuota', 'ff-tenant-quota') + obj(406, 44, 186, 44, 'LimitRange', 'ff-tenant-limits') + obj(606, 44, 190, 44, 'NetworkPolicy', 'ff-default-deny · every pod') +
+    '<text class="zone" x="206" y="118">Per function, labelled ff.dev/function-id and ff.dev/runtime</text>' +
+    obj(206, 130, 220, 44, 'Deployment fn-<id>', 'replicas · rolling updates') +
+    obj(586, 130, 210, 44, 'Service fn-<id>', 'ClusterIP · http 8080') +
+    obj(206, 196, 220, 44, 'ReplicaSet', 'one per pod template') +
+    obj(296, 262, 270, 118, 'Pod fn-<id>-…', 'container "function" · the runtime image') +
+    lines(306, 322, ['/var/task ← the ConfigMap, read-only', '/tmp ← emptyDir, 512 Mi', 'uid 10001 · read-only root · no capabilities'], 18) +
+    obj(606, 262, 190, 44, 'ConfigMap …-c4d785b397', 'the current code · immutable') +
+    obj(606, 316, 190, 44, 'ConfigMap …-<previous>', 'kept while old pods drain') +
+    arrow('M316,174 L316,194') + label(324, 188, 'owns', 'start') +
+    arrow('M316,240 C316,252 330,256 338,260') +
+    arrow('M690,174 C690,220 540,220 522,260') + label(690, 244, 'routes to ready pods') +
+    arrow('M606,284 L568,284') +
+    '<g><rect class="obj" x="16" y="296" width="150" height="56" rx="8"/><text x="26" y="318" font-weight="600">ff-system</text><text class="s" x="26" y="336">the backend, in a cluster</text></g>' +
+    arrow('M166,322 L294,322', 'allow', 'allow') + label(230, 314, 'ingress') +
+    lines(16, 372, ['In development, calls come', 'through the API server\'s', 'proxy, which k3s lets', 'through (task K-06).']) +
+    obj(206, 430, 170, 46, 'kube-dns', 'UDP and TCP 53') +
+    obj(392, 430, 200, 46, 'Public addresses', 'when K8S_EGRESS_INTERNET=true') +
+    obj(608, 430, 198, 46, 'Private ranges', 'nodes · API server · metadata') +
+    arrow('M330,380 C330,405 291,405 291,428', 'allow', 'allow') +
+    arrow('M450,380 C450,405 492,405 492,428', 'allow', 'allow') +
+    arrow('M540,380 C540,405 707,405 707,428', 'deny', 'deny') +
+    '<text class="zone" x="830" y="300">Egress rules</text>' + lines(830, 318, ['green: allowed', 'red: blocked: 10/8, 172.16/12,', '192.168/16, 169.254/16,', '100.64/10, 127/8']) +
+    '</svg>';
+}
+
+function runtimeDiagram() {
+  const box = (x, y, w, h, title, lines, color) => '<g><rect class="bx" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="9" style="stroke:var(' + color + ')"/><text class="t" x="' + (x + 12) + '" y="' + (y + 21) + '">' + escText(title) + '</text>' +
+    lines.map((t, n) => '<text x="' + (x + 12) + '" y="' + (y + 40 + 15 * n) + '">' + escText(t) + '</text>').join('') + '</g>';
+  const arrow = (d, dashed) => '<path d="' + d + '" marker-end="url(#rt-arrow)"' + (dashed ? ' style="stroke-dasharray:5 4"' : '') + '/>';
+  const label = (x, y, t, anchor) => '<text x="' + x + '" y="' + y + '" text-anchor="' + (anchor || 'middle') + '">' + escText(t) + '</text>';
+  return '<svg class="diagram rt" viewBox="0 0 640 430" role="img" aria-label="Inside a function pod: the runtime main process, the worker, and your code">' +
+    '<defs>' + arrowDefs('rt-arrow', '--muted') + '</defs>' +
+    '<rect x="6" y="6" width="628" height="418" rx="14" style="fill:none;stroke:var(--border);stroke-dasharray:5 4"/>' + label(20, 26, 'Container "function", one per pod', 'start') +
+    box(20, 40, 260, 170, 'Main process', ['HTTP server on :8080', 'GET /healthz → 200 while alive', 'GET /readyz → 200 once code is loaded', 'POST /invoke → 1 running, 32 waiting', 'timer per invocation (FUNCTION_TIMEOUT)', 'START / END / REPORT log lines', 'replaces a timed-out or crashed worker', 'SIGTERM: stop accepting, drain, exit'], '--c-pod') +
+    box(370, 40, 250, 130, 'Worker', ['Node.js: worker thread, heap limits', 'Python: child process, memory budget', 'loads /var/task/function.* once', 'runs handler(event, context)', 'one invocation at a time'], '--c-worker') +
+    box(370, 290, 250, 116, 'Your code', ['/var/task: the ConfigMap, read-only', 'returns JSON-serializable data', 'console.log, print → the pod log', 'writable: /tmp only'], '--c-worker') +
+    box(20, 290, 260, 116, 'kubelet, outside the container', ['readiness probe /readyz every 2 s', 'liveness probe /healthz every 10 s', 'SIGTERM on scale-down or rollout'], '--c-node') +
+    arrow('M280,90 L368,90') + label(324, 82, 'event') +
+    arrow('M368,130 L282,130') + label(324, 148, 'result') +
+    arrow('M280,190 C330,190 340,160 368,160', true) +
+    arrow('M495,170 L495,288') + label(503, 234, 'imports, then calls', 'start') +
+    arrow('M150,290 L150,212') + label(158, 255, 'probes · SIGTERM', 'start') +
+    '</svg>';
+}
+
+function initTrace() {
+  const chain = $('#chain');
+  chain.innerHTML = TRACE.map((t, n) => '<div class="stage" data-n="' + n + '" tabindex="0" role="button" aria-label="' + escAttr(t[0]) + '"><h4>' + escText(t[0]) + '</h4><p class="where">' + escText(t[1]) + '</p><pre>' + showValue(t[2], 28) + '</pre></div>').join('');
+  const stages = $$('.stage', chain);
+  const on = (n) => stages.forEach((s, k) => s.classList.toggle('on', k === n));
+  let timer = null;
+  stages.forEach((s, n) => {
+    const pick = () => { clearInterval(timer); chain.classList.remove('playing'); on(n); };
+    s.addEventListener('click', pick);
+    s.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+  });
+  $('#tracePlay').addEventListener('click', () => {
+    clearInterval(timer);
+    let n = 0;
+    chain.classList.add('playing');
+    on(0);
+    timer = setInterval(() => {
+      n += 1;
+      if (n >= stages.length) { clearInterval(timer); chain.classList.remove('playing'); on(-1); return; }
+      on(n);
+      if (!noAnim) stages[n].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, noAnim ? 10 : 1200);
+  });
+}
+
+/* ---------- start ---------- */
+const problems = validateScenarios();
+if (problems.length) console.warn('how-it-works: scenario data problems:\n' + problems.join('\n'));
+mountArchBig();
+$('#erDiagram').innerHTML = erDiagram();
+$('#stateMachines').innerHTML = stateMachines();
+$('#k8sObjects').innerHTML = k8sObjects();
+$('#runtimeDiagram').innerHTML = runtimeDiagram();
+$('#errorRows').innerHTML = ERROR_ROWS.map((r) => '<tr><td>' + r[0] + '</td><td>' + (Array.isArray(r[1]) ? r[1].map((t) => '<code>' + escText(t) + '</code>').join(', ') : escText(r[1])) + '</td><td>' + escText(r[2]) + '</td></tr>').join('');
+initTrace();
+initSimulator();
+</script>
+</body>
+</html>

@@ -8,7 +8,7 @@ curl, Swagger UI, dashboard ──▶ backend API (localhost:3000) ──▶ Pos
                                     └──▶ local Kubernetes (k3d) ──▶ one namespace per tenant ──▶ function pods
 ```
 
-The commands were checked on a Linux machine, against a running stack. `git clone` needs your repository's URL, and the commands that would overwrite `BE/.env` or delete data were not run there. More detail on the cluster, runtimes, and tests is in the [Kubernetes dev guide](kubernetes-dev-guide.md).
+The commands were checked on a Linux machine, against a running stack. `git clone` needs your repository's URL, and the commands that would overwrite `BE/.env` or delete data were not run there. More detail on the cluster, runtimes, and tests is in the [Kubernetes dev guide](kubernetes-dev-guide.md). To see what happens inside FF at each step, open [How FF works](how-it-works.html) in a browser: it simulates every feature, request by request.
 
 ## 1. Before you start
 
