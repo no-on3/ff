@@ -17,9 +17,10 @@ interface MetricsWindow {
 
 /**
  * Aggregates invocation metrics per one-minute window, adjusts replicas from
- * them (decideReplicas), and scales idle functions to zero when the driver
- * supports cold starts. Runs in the API process and assumes a single backend
- * replica; multi-replica deployments need leader election (parent plan R-06).
+ * them (decideReplicas), and scales idle functions to zero; their next
+ * invocation cold-starts them. Runs in the API process and assumes a single
+ * backend replica; multi-replica deployments need leader election (parent
+ * plan R-06).
  */
 @Injectable()
 export class MetricsService implements OnModuleInit, OnModuleDestroy {
