@@ -3,7 +3,7 @@
 #   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003)
 #   + the k3d dev cluster + the backend (built, started on a free port).
 # Scenario: create → invoke → history → update → invoke → delete, with checks
-# on the Kubernetes side. Removes its compose project (including its volumes),
+# on the Kubernetes side, then the same lifecycle for a Python function. Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given.
 #   hack/e2e.sh [--teardown]
@@ -76,8 +76,10 @@ k3d cluster get "$FF_CLUSTER_NAME" >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/cl
 "$FF_REPO_ROOT/hack/k8s/mint-token.sh" >/dev/null
 docker image inspect ff-runtime-nodejs:24-v1 >/dev/null 2>&1 ||
   docker build -q -t ff-runtime-nodejs:24-v1 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
-"$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v1 >/dev/null 2>&1
-echo "  $FF_CLUSTER_NAME ready, runtime image imported"
+docker image inspect ff-runtime-python:3.13-v1 >/dev/null 2>&1 ||
+  docker build -q -t ff-runtime-python:3.13-v1 "$FF_REPO_ROOT/runtimes/python" >/dev/null
+"$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v1 ff-runtime-python:3.13-v1 >/dev/null 2>&1
+echo "  $FF_CLUSTER_NAME ready, runtime images imported"
 
 echo "== backend"
 (cd "$FF_REPO_ROOT/BE" && npm run build >/dev/null)
@@ -92,7 +94,9 @@ echo "== backend"
   exec node dist/main.js
 ) >"$work/backend.log" 2>&1 &
 be_pid=$!
-for _ in $(seq 1 60); do
+# A cold start reads thousands of node_modules files. With a cold page cache on
+# a spinning disk that took 23 s just to load the modules, so allow 3 minutes.
+for _ in $(seq 1 "${FF_E2E_BACKEND_START_SECONDS:-180}"); do
   kill -0 "$be_pid" 2>/dev/null || fail "backend exited during startup"
   [ "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")" = 200 ] && break
   sleep 1
@@ -138,5 +142,20 @@ done
 check "its Deployment is removed from the cluster" true "$gone"
 http GET "/functions/$id" >/dev/null
 check "the function record is gone" 404 "$(status)"
+
+echo "== python function"
+py='def handler(event, context):
+    return {"message": "Hello " + event["body"].get("name", "world"), "memory": context.memory_limit_in_mb}
+'
+created="$(http POST /functions "$(jq -n --arg code "$py" '{name: "e2e-python", runtime: "python", code: $code, memory: 128, timeout: 5}')")"
+check "create returns 201" 201 "$(status)"
+check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
+id="$(jq -r .id <<<"$created")"
+invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"Python"}}')"
+check "invocation is COMPLETED" COMPLETED "$(jq -r .status <<<"$invoked")"
+check "handler output is returned, with the Lambda context" "Hello Python 128" \
+  "$(jq -r '"\(.output.message) \(.output.memory)"' <<<"$invoked")"
+http DELETE "/functions/$id" >/dev/null
+check "delete returns 200" 200 "$(status)"
 
 echo "e2e: $passed checks passed"

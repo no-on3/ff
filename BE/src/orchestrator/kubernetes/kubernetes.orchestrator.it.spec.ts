@@ -1,11 +1,12 @@
 /**
  * L3: the Kubernetes driver against the live dev cluster. Requires the cluster
- * (hack/k8s/cluster-up.sh) and the runtime image (hack/k8s/load-images.sh).
+ * (hack/k8s/cluster-up.sh) and the runtime images (hack/k8s/load-images.sh).
  * Uses the least-privilege ff-controller token, like the backend.
  *   npm run test:it
  */
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
+import { Runtime } from '../../functions/entities/function.entity';
 import { KubeClient, paths } from './kube-client';
 import { KubernetesOrchestrator } from './kubernetes.orchestrator';
 import { LABELS, functionResourceName, tenantNamespace } from './naming';
@@ -18,6 +19,20 @@ const greeter = (version: number) => `
 export async function handler(event: { body: { name?: string } }) {
   return { version: ${version}, message: 'Hello ' + (event.body.name ?? 'world') };
 }`;
+
+const pythonGreeter = `
+import os
+
+
+def handler(event, context):
+    if event["body"].get("fail"):
+        raise ValueError("no thanks")
+    return {
+        "message": "Hello " + event["body"].get("name", "world"),
+        "memoryLimitInMB": context.memory_limit_in_mb,
+        "cwd": os.getcwd(),
+    }
+`;
 
 // Checks from inside a function pod which destinations the tenant NetworkPolicy allows.
 const networkProbe = `
@@ -120,6 +135,24 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
       await expect(orchestrator.waitUntilReady(broken, 25_000)).rejects.toThrow(/did not become ready.*boom at init/s);
     } finally {
       await orchestrator.remove(broken);
+    }
+  });
+
+  it('runs a Python function with the Lambda handler signature and error names', async () => {
+    const py = workload({ id: randomUUID(), userId: tenant, name: 'it-python', runtime: Runtime.PYTHON, code: pythonGreeter, memory: 128, timeout: 5 });
+    try {
+      await orchestrator.deploy(py);
+      await orchestrator.waitUntilReady(py, 90_000);
+
+      const result = await orchestrator.invoke(py, { name: 'Python' });
+      const failure = await orchestrator.invoke(py, { fail: true }).catch((error: unknown) => error);
+
+      expect(result.output).toEqual({ message: 'Hello Python', memoryLimitInMB: '128', cwd: '/var/task' });
+      expect(result.durationMs).toBeGreaterThan(0);
+      expect(result.memoryUsedMb).toBeGreaterThan(0);
+      expect(failure).toMatchObject({ errorType: 'ValueError', message: 'no thanks' });
+    } finally {
+      await orchestrator.remove(py);
     }
   });
 

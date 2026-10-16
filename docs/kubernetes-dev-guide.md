@@ -48,12 +48,13 @@ It is safe to re-run.
 
 ## Runtime images and integration tests
 
-Function pods use the FF runtime images (`ff-runtime-nodejs:24-v1`, …). In development they are built locally and imported into the cluster, so no registry is needed:
+Function pods use the FF runtime images `ff-runtime-nodejs:24-v1` and `ff-runtime-python:3.13-v1` (protocol and handler contracts in [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md)). In development they are built locally and imported into the cluster, so no registry is needed:
 
 ```bash
-runtimes/nodejs/test/container-smoke.sh   # builds ff-runtime-nodejs:24-v1 and checks it hardened
-hack/k8s/load-images.sh                   # imports every local ff-runtime-* image into ff-dev
-hack/k8s/test-it.sh                       # L3: re-imports the images, then runs BE `npm run test:it` (~75 s)
+runtimes/nodejs/test/container-smoke.sh    # builds ff-runtime-nodejs:24-v1 and checks it hardened
+runtimes/python/tests/container-smoke.sh   # builds ff-runtime-python:3.13-v1 and checks it hardened
+hack/k8s/load-images.sh                    # imports every local ff-runtime-* image into ff-dev
+hack/k8s/test-it.sh                        # L3: re-imports the images, then runs BE `npm run test:it` (~85 s)
 ```
 
 `npm run test:it` deploys real functions with the `ff-controller` token into a throw-away `ff-t-*` namespace. It checks:
@@ -62,6 +63,7 @@ hack/k8s/test-it.sh                       # L3: re-imports the images, then runs
 - scale to zero and cold start;
 - the tenant network policy (DNS allowed, the API server blocked);
 - init-failure diagnostics;
+- a Python function (deploy, invoke, and Lambda error names);
 - clean-up.
 
 It deletes everything it creates. The default `npm test` skips these suites.
@@ -87,12 +89,13 @@ hack/e2e.sh                # L4: the whole stack through the REST API (~2 min)
 hack/e2e.sh --teardown     # … and delete the cluster afterwards
 ```
 
-The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ensures the cluster and runtime image are ready, builds the backend, and starts it on a free port. It then runs:
+The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
 1. create (waits for ACTIVE);
 2. invoke;
 3. history (with duration);
 4. update (new code live);
-5. delete (Deployment gone, record gone).
+5. delete (Deployment gone, record gone);
+6. the same create, invoke, and delete for a Python function.
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
 
@@ -123,4 +126,5 @@ See [`deploy/k8s/README.md`](../deploy/k8s/README.md). In short:
 | `kubectl: command not found` after `source` | Source from the repository root: `source hack/k8s/env.sh`. |
 | `Unauthorized` from the backend after a day | The token expired: run `hack/k8s/mint-token.sh`. |
 | System pods stuck in `ContainerCreating` | Images are still being pulled inside the node; `kubectl -n kube-system get events` shows progress. |
+| `hack/e2e.sh`: `FAIL backend answers on …` with an empty backend log | The backend was still loading its modules. On a spinning disk with a cold page cache that alone took 23 s. The script waits up to 180 s; raise it with `FF_E2E_BACKEND_START_SECONDS`. |
 | Function pods in `ImagePullBackOff` for `ff-runtime-*` | kubelet's image GC deleted the imported image; it has no registry to re-pull from. GC runs when the disk passes the high threshold, which this cluster raises from 85% to 95% (`FF_IMAGE_GC_HIGH_THRESHOLD`). Re-import with `hack/k8s/load-images.sh`; `hack/k8s/test-it.sh` does this automatically. |
