@@ -1,50 +1,18 @@
-# React + TypeScript + Vite
+# FF dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The web console for FF: list, create, edit, and invoke functions, and view their metrics. It is a React app built with Vite, and it uses Redux Toolkit, MUI, and Tailwind.
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
-
-- Configure the top-level `parserOptions` property like this:
-
-```js
-export default tseslint.config({
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+```bash
+npm install
+npm run dev        # http://localhost:5173
+npm run build      # type-check, then a production build in dist/
 ```
 
-- Replace `tseslint.configs.recommended` to `tseslint.configs.recommendedTypeChecked` or `tseslint.configs.strictTypeChecked`
-- Optionally add `...tseslint.configs.stylisticTypeChecked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and update the config:
+It calls the backend API at `http://localhost:3000`, which is hard-coded in `src/services/api.ts`. Start the backend first: see [Getting started](../docs/getting-started.md).
 
-```js
-// eslint.config.js
-import react from 'eslint-plugin-react'
-
-export default tseslint.config({
-  // Set the react version
-  settings: { react: { version: '18.3' } },
-  plugins: {
-    // Add the react plugin
-    react,
-  },
-  rules: {
-    // other rules...
-    // Enable its recommended rules
-    ...react.configs.recommended.rules,
-    ...react.configs['jsx-runtime'].rules,
-  },
-})
-```
+Known gaps (parent plan F-10):
+- the invocation history is read as a list, but the API returns `{invocations, total}`, so past invocations don't show;
+- a fresh invocation is added without its duration or memory, which are read from a `metrics` object the API doesn't return;
+- saving the scaling configuration calls `PUT /functions/:id/scaling-config`, which the API does not have;
+- there is no login yet;
+- two UI kits (MUI and Tailwind) are used side by side.

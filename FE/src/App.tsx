@@ -4,7 +4,6 @@ import { store } from './store/store';
 import FunctionList from './components/FunctionList';
 import FunctionDetail from './components/FunctionDetail';
 import CreateFunction from './components/CreateFunction';
-import Metrics from './components/Metrics';
 import './styles/main.scss';
 
 function App() {
@@ -30,12 +29,6 @@ function App() {
                   >
                     Functions
                   </Link>
-                  <Link
-                    to="/metrics"
-                    className="text-gray-600 hover:text-gray-900"
-                  >
-                    Metrics
-                  </Link>
                 </div>
               </div>
             </div>
@@ -47,7 +40,6 @@ function App() {
               <Route path="/functions" element={<FunctionList />} />
               <Route path="/functions/new" element={<CreateFunction />} />
               <Route path="/functions/:id" element={<FunctionDetail />} />
-              <Route path="/metrics" element={<Metrics />} />
             </Routes>
           </main>
         </div>

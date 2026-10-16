@@ -52,6 +52,7 @@ export interface InvocationResponse {
     endTime: string;
     duration: number;
   };
+  error?: string;
 }
 
 export const functionsApi = {
@@ -100,11 +101,6 @@ export const getScalingConfig = async (functionId: string) => {
 export const updateScalingConfig = async (functionId: string, config: any) => {
   const response = await api.put(`/functions/${functionId}/scaling-config`, config);
   return response.data;
-};
-
-export const monitoringApi = {
-  // Get metrics
-  getMetrics: () => api.get<string>('/metrics'),
 };
 
 export default api;
