@@ -432,7 +432,7 @@ The goal is a secure, honest, testable baseline. Each task lists the files it to
 | F-10 | **Console fixes.** `VITE_API_URL`, OIDC login (oidc-client-ts / react-oidc-context with PKCE), invocations response parsing, `PATCH` with only editable fields, scaling UI aligned with the backend (or hidden), the 2 TypeScript errors fixed, and one UI kit (MUI *or* Tailwind, not both). | `FE/src/services/api.ts`, `FE/src/components/*`, `FE/package.json` | `npm run build` passes, login works, and invoking shows the history. |
 | F-11 | **CI and tests.** Pipeline: lint, type-check, unit tests, and e2e tests with docker-compose (PostgreSQL, S3 store, a Nomad dev agent via `nomad agent -dev`). Add an SBOM and a vulnerability scan (Syft, Trivy), plus secret scanning (gitleaks). | new `.github/workflows/*` or Gitea/Woodpecker config, `BE/test/*` | The pipeline is green; at least 60% service-layer coverage on `functions/` and `auth/`. |
 | F-12 | **Repo hygiene.**<br>• Version `scripts/` and fix them, or replace them with IaC.<br>• Remove `cni-plugins.tgz` and `BE/job.json` from the root.<br>• Upgrade the platform images to Node.js 24 LTS.<br>• Add Nomad to docker-compose.<br>• Rewrite the README to state what really exists. | `.gitignore`, `scripts/*`, `BE/Dockerfile*`, `FE/Dockerfile.dev`, `docker-compose.yml`, `README.md`, `docs/*` | A new developer gets a working setup with one documented command. |
-| F-13 | **Nomad client.** One typed client (the handful of endpoints used) with an ACL token (`X-Nomad-Token`), mTLS, namespace, and region. Remove the Pulumi provider, `@chatsight/hostel`, and `BE/script.ts`. | `nomad.service.ts`, `package.json`, `BE/src/types/*` | ACLs enabled on the dev cluster; the API works with a least-privilege token. |
+| F-13 | ~~**Nomad client.**~~ **Superseded and done** by the [Kubernetes migration](kubernetes-migration-plan.md): one typed Kubernetes API client using a least-privilege ServiceAccount token (K-06); RBAC plus an admission policy that confines it to tenant namespaces (K-04); the Pulumi provider, `@chatsight/hostel`, and `BE/script.ts` removed with Nomad (K-09). | `BE/src/orchestrator/kubernetes/*`, `deploy/k8s/base/*` | Done: `hack/k8s/test-rbac.sh` 25/25, and the API works with the least-privilege token (L3, L4). |
 | F-14 | **Decision records.** Write ADR-001 to ADR-009 (§15). Send the written question to IBM about Nomad's licence (§9.5). | `docs/adr/*` | Decisions signed off before Phase 1 starts. |
 | F-15 | **Replace MinIO** (H-12). Use the ADR-002 engine in docker-compose. Switch `BE` and the CLI from the `minio` client to the AWS SDK S3 client, coding only against the S3 API. | `docker-compose.yml:16`, `BE/src/minio-client/*`, `BE/package.json:47`, `cli/` | `docker compose up` works on a fresh machine, and the e2e suite passes on the new engine. |
 
@@ -1246,27 +1246,29 @@ A customer exporting to AWS counts as a success metric, not a loss: it is proof 
 
 ## Appendix A: Findings → fixes → phase
 
-| Finding | Fix (task) | Phase |
-|---|---|---|
-| C-1, C-2, C-3 | F-01 global guard, typed principal, tenant-scoped queries; R-08 IAM | 0 / 1 |
-| C-4 | F-02 artifact delivery via pre-signed URL + checksum; R-02/R-03 | 0 / 1 |
-| C-5 | F-03 real lifecycle; R-01 versions | 0 / 1 |
-| C-6 | F-13 Nomad ACL/mTLS; R-07 isolation | 0 / 1 |
-| C-7 | F-04 baseline migration, sync off, drift check in CI | 0 |
-| H-1, M-3, M-6 | F-06 → R-02/R-03 zips with dependencies, current runtimes | 0 / 1 |
-| H-2 | R-07/R-01 memory hard limit, CPU proportional to memory | 1 |
-| H-3, H-7 | R-05 gateway, R-06 scaling controller (delete in-process autoscaler) | 1 |
-| H-4, H-5 | F-07 invocation records → B-01 metering | 0 / 2 |
-| H-6 | R-03 Python runtime via official client | 1 |
-| H-8, H-9 | F-08 → R-04 agent + official runtime interface client | 0 / 1 |
-| H-10 | R-10 single CLI talking to the API only (pre-signed uploads, device-flow login) | 1 |
-| H-11 | F-10 → B-08 | 0 / 2 |
-| H-12 | F-15 replace MinIO (ADR-002), AWS SDK S3 client | 0 |
-| M-1 | F-09 | 0 |
-| M-2 | F-05 | 0 |
-| M-4 | R-01 Lambda naming and limits | 1 |
-| M-5 | F-13 | 0 |
-| M-7, M-8, M-9, L-1, L-2 | F-11, F-12 | 0 |
+The status column records what the [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12, 2026-10-16) changed. The finding IDs refer to the audit in §2.3, which describes the code as it was before the migration.
+
+| Finding | Fix (task) | Phase | Status (2026-10-16) |
+|---|---|---|---|
+| C-1, C-2, C-3 | F-01 global guard, typed principal, tenant-scoped queries; R-08 IAM | 0 / 1 | Open. Authentication is still not enforced. Development uses one fixed tenant (`FF_DEV_USER_ID`, K-07). |
+| C-4 | F-02 artifact delivery via pre-signed URL + checksum; R-02/R-03 | 0 / 1 | Partly done. Code is delivered as data in an immutable ConfigMap and never evaluated as a template (K-06). Zip delivery (R-02) is open. |
+| C-5 | F-03 real lifecycle; R-01 versions | 0 / 1 | Lifecycle done. Update rolls out, and delete removes the Deployment, Service, ConfigMaps, and database rows (K-06, K-07, `dbe2ce3`). Versions (R-01) are open. |
+| C-6 | ~~F-13 Nomad ACL/mTLS~~ K-04, K-06; R-07 isolation | 0 / 1 | Done. Least-privilege ServiceAccount, admission policy, non-root read-only pods, a default-deny NetworkPolicy per tenant (K-04 to K-06, K-10), and an optional gVisor sandbox (K-11). |
+| C-7 | F-04 baseline migration, sync off, drift check in CI | 0 | Open |
+| H-1, M-3, M-6 | F-06 → R-02/R-03 zips with dependencies, current runtimes | 0 / 1 | Partly done. The runtime images install nothing at start and run Node.js 24 and Python 3.13 (K-05, K-10). Zips with dependencies are open. |
+| H-2 | R-07/R-01 memory hard limit, CPU proportional to memory | 1 | Done. The memory limit is the function's memory, and CPU is proportional to it (K-06). The runtimes keep user code within that limit, so the container survives an out-of-memory error. |
+| H-3, H-7 | R-05 gateway, R-06 scaling controller (delete in-process autoscaler) | 1 | Partly done. Invocations go through the Service, with timeouts and readiness gating. Scaling uses the scale subresource, with scale to zero when idle (K-06, K-07). The gateway (R-05) is open. |
+| H-4, H-5 | F-07 invocation records → B-01 metering | 0 / 2 | Partly done. Duration and peak memory come from the runtime's response headers (K-05, K-07). Metering is open. |
+| H-6 | R-03 Python runtime via official client | 1 | Done, with FF's own Python runtime on the same protocol as Node.js (K-10) |
+| H-8, H-9 | F-08 → R-04 agent + official runtime interface client | 0 / 1 | Done. The environment is never logged, and timeouts stop even CPU-bound loops (K-05, K-10). |
+| H-10 | R-10 single CLI talking to the API only (pre-signed uploads, device-flow login) | 1 | Open |
+| H-11 | F-10 → B-08 | 0 / 2 | Open. The dev CORS origin now matches the console's Vite port (K-12). |
+| H-12 | F-15 replace MinIO (ADR-002), AWS SDK S3 client | 0 | Partly done. SeaweedFS replaces MinIO in docker-compose (K-08). The backend still uses the `minio` npm client against it. |
+| M-1 | F-09 | 0 | Open |
+| M-2 | F-05 | 0 | Open |
+| M-4 | R-01 Lambda naming and limits | 1 | Open |
+| M-5 | F-13 | 0 | Done (K-09) |
+| M-7, M-8, M-9, L-1, L-2 | F-11, F-12 | 0 | Partly done. docker-compose works (K-08), and the README was rewritten (K-12). |
 
 ## Appendix B: AWS Lambda compatibility matrix
 

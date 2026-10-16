@@ -1,118 +1,94 @@
-# Serverless Platform
+# FF: a serverless functions platform
 
-A modern serverless platform that allows users to deploy and manage serverless functions, similar to AWS Lambda.
+FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with AWS Lambda's handler contract, on Kubernetes. It targets markets where international payments and the big clouds are hard to use, such as Tunisia. Customers there get a local platform, and their functions stay portable to AWS Lambda when they move. See the [local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md).
 
-## Project Structure
+## What works today
 
-```
-.
-├── BE/                     # Backend services
-│   ├── src/
-│   │   ├── controllers/    # Request handlers
-│   │   ├── services/       # Business logic
-│   │   ├── models/        # Database models
-│   │   ├── middleware/    # Express middleware
-│   │   ├── utils/         # Utility functions
-│   │   ├── config/       # Configuration files
-│   │   └── routes/       # API routes
-│   └── tests/            # Backend tests
-│
-├── FE/                    # Frontend application
-│   ├── src/
-│   │   ├── components/   # Reusable React components
-│   │   ├── pages/        # Page components
-│   │   ├── services/     # API services
-│   │   ├── hooks/        # Custom React hooks
-│   │   ├── utils/        # Utility functions
-│   │   ├── assets/       # Static assets
-│   │   ├── styles/       # Global styles
-│   │   └── context/      # React context
-│   └── tests/            # Frontend tests
-│
-├── infrastructure/        # Infrastructure as code
-│   ├── nomad/           # Nomad configuration
-│   ├── docker/          # Docker configuration
-└── docs/                # Documentation
-- Pay-as-you-go billing with Stripe
-- Real-time function monitoring
-- Auto-scaling capabilities
-- Custom domain support
-- Function versioning
+- **Functions API** (NestJS, PostgreSQL, S3-compatible storage). You can:
+  - create, update, delete, and invoke functions;
+  - see the invocation history with durations, and collect metrics.
 
-## Prerequisites
+  Functions scale to zero when idle and start again on the next invocation.
+- **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
+  - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy;
+  - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
+  - code is stored in immutable ConfigMaps, up to 900 KiB.
+- **Runtimes** `ff-runtime-nodejs:24-v1` and `ff-runtime-python:3.13-v1` ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
+  - Lambda's `handler(event, context)`, error names, and log lines;
+  - real timeouts;
+  - out-of-memory and crashes are handled per invocation, without restarting the container;
+  - non-root, read-only images that install nothing at start.
+- **Optional gVisor sandbox** for untrusted code: `K8S_RUNTIME_CLASS=gvisor`. See the [dev guide](docs/kubernetes-dev-guide.md#sandboxing-with-gvisor).
+- **Dashboard:** a React + Vite frontend in `FE/`.
 
-- Node.js 18+
-- Docker
-- Nomad
-- PostgreSQL
-- MinIO
-- Auth0 account
-- Stripe account
+**Not implemented yet**, despite what older documents say:
+- **Authentication is not enforced.** Auth0 JWT validation exists, but its guard is disabled, and development uses a fixed tenant (`FF_DEV_USER_ID`).
+- Billing and payments: no Stripe or local gateways yet; see the market plan.
+- Custom domains and function versioning.
+- Multi-file packages with dependencies, which need the zip pipeline (parent plan R-02).
 
-## Getting Started
+Nomad is no longer used. `nomad-vagrant/` is kept only for reference.
 
-1. Clone the repository
-2. Set up environment variables
-3. Install dependencies
-4. Start the development servers
+## Repository layout
 
-### Backend Setup
+| Path | Contents |
+|---|---|
+| `BE/` | Backend: functions API, metrics, scaling, and the orchestrator (`src/orchestrator/kubernetes`) |
+| `FE/` | Dashboard (React, Vite, Tailwind) |
+| `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol v1 |
+| `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy) and `optional/` (gVisor) |
+| `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
+| `infrastructure/` | SeaweedFS (S3) identities, Prometheus, and Grafana configuration for `docker-compose.yml` |
+| `docs/` | Plans, ADRs, and the [Kubernetes dev guide](docs/kubernetes-dev-guide.md) |
+| `cli/`, `cli-rust/`, `lambda-func/`, `scripts/` | Earlier prototypes (packaging CLIs, the old function wrapper, old setup scripts); not used by the current stack |
+| `nomad-vagrant/` | Deprecated Nomad VM |
+
+## Quick start (development)
+
+You need Docker 24+, Node.js 24, Python 3.11+ (for the Python runtime tests), `curl`, and `jq`. Plan for at least 3.5 GB of free memory and 6 GB free on Docker's disk; the [dev guide](docs/kubernetes-dev-guide.md) has the details. The scripts check resources before every heavy step (`hack/check-resources.sh`).
 
 ```bash
-cd BE
-cp .env.example .env  # Configure your environment variables
-npm install
-npm run dev
+docker compose up -d --wait                 # PostgreSQL (127.0.0.1:5432) + SeaweedFS S3 (127.0.0.1:9003)
+hack/k8s/cluster-up.sh                      # k3d cluster (k3s v1.37.1), RBAC, admission policy, credentials
+runtimes/nodejs/test/container-smoke.sh     # builds ff-runtime-nodejs:24-v1 and checks it
+runtimes/python/tests/container-smoke.sh    # builds ff-runtime-python:3.13-v1 and checks it
+hack/k8s/load-images.sh                     # imports the runtime images into the cluster
+cp BE/.env.example BE/.env                  # first time only; the defaults match the steps above
+cd BE && npm install && npm run start:dev   # API on http://localhost:3000, Swagger UI on /api
 ```
 
-### Frontend Setup
+Create a function and invoke it:
 
 ```bash
-cd FE
-cp .env.example .env  # Configure your environment variables
-npm install
-npm run dev
+curl -s localhost:3000/functions -H 'content-type: application/json' -d @- <<'EOF'
+{"name": "hello", "runtime": "nodejs", "memory": 128, "timeout": 5,
+ "code": "export async function handler(event) { return { message: `Hello ${event.body.name ?? 'world'}` }; }"}
+EOF
+curl -s -X POST localhost:3000/functions/<id>/invoke -H 'content-type: application/json' -d '{"input": {"name": "FF"}}'
+# → {"status": "COMPLETED", "output": {"message": "Hello FF"}, "duration": 0.48, …}
 ```
 
-### Infrastructure Setup
+For Python, use `"runtime": "python"` and code such as `"def handler(event, context):\n    return {\"message\": \"Hello \" + event[\"body\"].get(\"name\", \"world\")}\n"`. Creating a function returns once it is running (`"status": "ACTIVE"`). The memory range is 128–1024 MB and the timeout 1–300 s.
 
-Follow the instructions in the infrastructure directory for setting up:
-- Nomad cluster
-- PostgreSQL database
-- MinIO storage
-- Monitoring stack
+To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http://localhost:5173 and calls the API on localhost:3000, which allows that origin (`CORS_ORIGIN`). Its pages were not reviewed during the Kubernetes migration.
 
-## Development
+## Tests
 
-- Backend API runs on `http://localhost:3000`
-- Frontend development server runs on `http://localhost:5173`
-- API documentation available at `http://localhost:3000/api-docs`
+| Level | Command | What it covers |
+|---|---|---|
+| L1 backend | `cd BE && npm test` | Unit tests: orchestrator against a fake API server, manifests, scaling, services |
+| L1 runtimes | `cd runtimes/nodejs && npm test`; `cd runtimes/python && python3 -m unittest discover -s tests` | The runtime protocol on real processes |
+| L2 | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities |
+| L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor) |
+| RBAC | `hack/k8s/test-rbac.sh` | What the backend's ServiceAccount may and may not do |
+| L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes |
 
-## Testing
+## Documentation
 
-```bash
-# Backend tests
-cd BE && npm test
-
-# Frontend tests
-cd FE && npm test
-```
-
-## Deployment
-
-Refer to the deployment guides in the `docs` directory for:
-- Production deployment
-- Scaling considerations
-- Security best practices
-- Monitoring setup
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a new Pull Request
+- [Kubernetes dev guide](docs/kubernetes-dev-guide.md): cluster, images, tests, gVisor, troubleshooting.
+- [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
+- [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.
+- [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why.
 
 ## License
 
