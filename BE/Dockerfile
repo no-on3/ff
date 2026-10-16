@@ -20,9 +20,6 @@ RUN npm ci --only=production
 COPY --from=builder /usr/src/app/dist ./dist
 COPY --from=builder /usr/src/app/node_modules ./node_modules
 
-# Copy templates
-COPY templates ./templates
-
 # Create app user
 RUN addgroup -S app && adduser -S app -G app
 

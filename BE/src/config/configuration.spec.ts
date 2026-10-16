@@ -44,14 +44,14 @@ describe('configuration', () => {
       MINIO_PORT: '9100',
       MINIO_USE_SSL: 'true',
       MINIO_BUCKET_NAME: 'artifacts',
-      ORCHESTRATOR: 'nomad',
+      ORCHESTRATOR: 'kubernetes',
       FF_READY_TIMEOUT_SECONDS: '30',
     };
 
     const config = configuration();
 
     expect(config.port).toBe(4100);
-    expect(config.orchestrator).toEqual({ driver: 'nomad', readyTimeoutSeconds: 30 });
+    expect(config.orchestrator).toEqual({ driver: 'kubernetes', readyTimeoutSeconds: 30 });
     expect(config.database).toMatchObject({ host: 'db.internal', port: 6543, name: 'ff' });
     expect(config.minio).toMatchObject({ port: 9100, useSSL: true, bucketName: 'artifacts' });
   });

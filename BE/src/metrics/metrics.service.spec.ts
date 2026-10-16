@@ -119,7 +119,7 @@ describe('MetricsService', () => {
       expect(orchestrator.scale).not.toHaveBeenCalled();
     });
 
-    it('does nothing when the driver cannot cold-start (Nomad)', async () => {
+    it('does nothing when the driver cannot cold-start from zero', async () => {
       create(false);
       functionRepository.find.mockResolvedValue([fn()]);
 

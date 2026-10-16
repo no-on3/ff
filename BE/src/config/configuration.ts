@@ -55,11 +55,6 @@ export default () => ({
       memory: process.env.K8S_TENANT_QUOTA_MEMORY || '8Gi',
     },
   },
-  nomad: {
-    address: process.env.NOMAD_ADDR || 'http://localhost:4646',
-    host: process.env.NOMAD_HOST || 'http://localhost',
-    token: process.env.NOMAD_TOKEN || '',
-  },
   auth: {
     domain: process.env.AUTH0_DOMAIN || '',
     audience: process.env.AUTH0_AUDIENCE || '',

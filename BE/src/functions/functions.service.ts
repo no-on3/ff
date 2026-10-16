@@ -40,21 +40,9 @@ export class FunctionsService {
 
     const savedFunction = await this.functionsRepository.save(function_);
     try {
-      const basePath = `${savedFunction.id}`;
-      
-      // Upload code to MinIO
-      const codePath = `${basePath}/code.${this.getFileExtension(savedFunction.runtime)}`;
+      // Archive the code in object storage (the cluster gets it via an immutable ConfigMap).
+      const codePath = `${savedFunction.id}/code.${this.getFileExtension(savedFunction.runtime)}`;
       await this.minioClientService.uploadCode(codePath, savedFunction.code);
-
-      // Upload package.json
-      const packageJsonPath = `${basePath}/package.json`;
-      const packageJsonContent = this.generatePackageJson(savedFunction.runtime);
-      await this.minioClientService.uploadCode(packageJsonPath, packageJsonContent);
-
-      // Upload tsconfig.json
-      const tsconfigPath = `${basePath}/tsconfig.json`;
-      const tsconfigContent = this.generateTsConfig();
-      await this.minioClientService.uploadCode(tsconfigPath, tsconfigContent);
 
       await this.orchestrator.deploy(savedFunction);
       // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
@@ -205,60 +193,5 @@ export class FunctionsService {
       default:
         return 'txt';
     }
-  }
-
-  private generatePackageJson(runtime: string): string {
-    return JSON.stringify({
-      "name": "serverless-function",
-      "version": "1.0.0",
-      "description": "Serverless function",
-      "main": "dist/wrapper.js",
-      "scripts": {
-        "build": "npx tsc",
-        "start": "npx ts-node wrapper.ts"
-      },
-      "dependencies": {
-        "express": "^4.18.2",
-        "body-parser": "^1.20.2"
-      },
-      "devDependencies": {
-        "@types/node": "^18.0.0",
-        "@types/express": "^4.17.21",
-        "typescript": "^5.0.0"
-      }
-    }, null, 2);
-  }
-
-  private generateTsConfig(): string {
-    return JSON.stringify({
-      "compilerOptions": {
-        "target": "ES2021",
-        "module": "commonjs",
-        "lib": ["ES2021","dom" ],
-        "declaration": true,
-        "removeComments": true,
-        "emitDecoratorMetadata": true,
-        "experimentalDecorators": true,
-        "allowSyntheticDefaultImports": true,
-        "allowJs": true,
-        "sourceMap": true,
-        "outDir": "./dist",
-        "baseUrl": "./",
-        "incremental": true,
-        "skipLibCheck": true,
-        "strictNullChecks": true,
-        "noImplicitAny": true,
-        "strictBindCallApply": true,
-        "forceConsistentCasingInFileNames": true,
-        "noFallthroughCasesInSwitch": true,
-        "esModuleInterop": true,
-        "typeRoots": [
-          "node_modules/@types"
-        ]
-      },
-      "include": [ "*.ts"]
-    
-    }
-    , null, 2);
   }
 }
