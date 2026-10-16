@@ -127,7 +127,7 @@ Monitoring: prom-client registry (never written to) · Grafana JSON · function_
 - **The handler is already Lambda-shaped:** `export async function handler(event, context)`, with `functionName`, `functionVersion`, `memoryLimitInMB`, and `getRemainingTimeInMillis()` (`BE/templates/nodejs/wrapper.ts`). The "Lambda feel" is there; it now needs to become *exact*.
 - **S3-compatible object storage** is the right abstraction for code artifacts and customer storage.
 - **Nomad bridge networking**, with dynamic ports and a network namespace per allocation, is a usable base for sandboxing.
-- **Written specs** for auto-scaling and CLI authentication (`docs/auto-scaling-feature.md`, `docs/cli-authentication-spec.md`). They are folded into this plan.
+- **Written specs** for auto-scaling and CLI authentication (`docs/auto-scaling-feature.md`, `docs/cli-authentication-spec.md`). They are folded into this plan. Both files were later removed with the other outdated documents; git history has them.
 
 ### 2.3 Findings
 
