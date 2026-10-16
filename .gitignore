@@ -160,3 +160,8 @@ nomad-vagrant/shared
 scripts
 
 # End of https://www.toptal.com/developers/gitignore/api/node,react
+
+# Kubernetes migration (K-00): local tool binaries and cluster credentials
+hack/bin/
+hack/.kube/
+*.kubeconfig
