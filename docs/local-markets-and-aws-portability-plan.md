@@ -1268,7 +1268,7 @@ The status column records what the [Kubernetes migration](kubernetes-migration-p
 | M-2 | F-05 | 0 | Partly done. `BE/.env.example` lists only variables the code reads (82 → 32), and unused configuration sections were removed. The validated schema is open. |
 | M-4 | R-01 Lambda naming and limits | 1 | Open |
 | M-5 | F-13 | 0 | Done (K-09) |
-| M-7, M-8, M-9, L-1, L-2 | F-11, F-12 | 0 | Partly done. docker-compose works (K-08), and the README was rewritten (K-12). |
+| M-7, M-8, M-9, L-1, L-2 | F-11, F-12 | 0 | M-7, L-1, L-2 done: the unversioned scripts and the old wrapper were deleted, the outdated docs were removed and the README rewritten (K-12), and the root clutter is gone. M-8 done: docker-compose starts only PostgreSQL and S3, with development credentials bound to 127.0.0.1. M-9 partly done: unit, container, cluster and end-to-end tests exist, and the debug logs are gone; CI is open. |
 
 ## Appendix B: AWS Lambda compatibility matrix
 
