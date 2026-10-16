@@ -46,6 +46,26 @@ hack/k8s/cluster-down.sh           # delete the cluster and the local credential
 
 It is safe to re-run.
 
+## Runtime images and integration tests
+
+Function pods use the FF runtime images (`ff-runtime-nodejs:24-v1`, …). In development they are built locally and imported into the cluster, so no registry is needed:
+
+```bash
+runtimes/nodejs/test/container-smoke.sh   # builds ff-runtime-nodejs:24-v1 and checks it hardened
+hack/k8s/load-images.sh                   # imports every local ff-runtime-* image into ff-dev
+cd BE && npm run test:it                  # L3: KubernetesOrchestrator against the live cluster (~80 s)
+```
+
+`npm run test:it` deploys real functions with the `ff-controller` token into a throw-away `ff-t-*` namespace. It checks:
+- deploy and invoke;
+- a code rollout;
+- scale to zero and cold start;
+- the tenant network policy (DNS allowed, the API server blocked);
+- init-failure diagnostics;
+- clean-up.
+
+It deletes everything it creates. The default `npm test` skips these suites.
+
 ## Credentials
 
 Everything lives in `hack/.kube/` (git-ignored, mode 0700, files 0600):

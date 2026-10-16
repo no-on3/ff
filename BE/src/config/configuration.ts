@@ -21,6 +21,33 @@ export default () => ({
     // Scheduler driver behind the ORCHESTRATOR token (see OrchestratorModule).
     driver: process.env.ORCHESTRATOR || 'nomad',
   },
+  // Kubernetes driver settings (docs/kubernetes-migration-plan.md §4.5).
+  kubernetes: {
+    // Empty: use the in-cluster API server (KUBERNETES_SERVICE_HOST/PORT).
+    apiUrl: process.env.K8S_API_URL || '',
+    tokenFile: process.env.K8S_TOKEN_FILE || '/var/run/secrets/kubernetes.io/serviceaccount/token',
+    caFile: process.env.K8S_CA_FILE || '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt',
+    // Empty: "direct" inside the cluster, "proxy" (through the API server) outside.
+    invokeMode: process.env.K8S_INVOKE_MODE || '',
+    namespacePrefix: process.env.K8S_NAMESPACE_PREFIX || 'ff-t-',
+    runtimeImages: {
+      nodejs: process.env.K8S_RUNTIME_IMAGE_NODEJS || 'ff-runtime-nodejs:24-v1',
+      python: process.env.K8S_RUNTIME_IMAGE_PYTHON || 'ff-runtime-python:3.13-v1',
+    },
+    imagePullPolicy: process.env.K8S_IMAGE_PULL_POLICY || 'IfNotPresent',
+    runtimeClass: process.env.K8S_RUNTIME_CLASS || '',
+    readyTimeoutSeconds: parseInt(process.env.K8S_READY_TIMEOUT_SECONDS || '90', 10),
+    egressInternet: process.env.K8S_EGRESS_INTERNET !== 'false',
+    ingressAllowCidrs: (process.env.K8S_INGRESS_ALLOW_CIDRS || '')
+      .split(',')
+      .map((cidr) => cidr.trim())
+      .filter(Boolean),
+    tenantQuota: {
+      pods: process.env.K8S_TENANT_QUOTA_PODS || '20',
+      cpu: process.env.K8S_TENANT_QUOTA_CPU || '8',
+      memory: process.env.K8S_TENANT_QUOTA_MEMORY || '8Gi',
+    },
+  },
   nomad: {
     address: process.env.NOMAD_ADDR || 'http://localhost:4646',
     host: process.env.NOMAD_HOST || 'http://localhost',
