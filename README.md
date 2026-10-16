@@ -12,7 +12,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
   - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy;
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
-  - code is stored in immutable ConfigMaps, up to 900 KiB.
+  - code is stored in immutable ConfigMaps, up to 900 KiB. The API currently accepts requests of about 100 KB at most, which is task C-03 of the [CLI plan](docs/cli-plan.md).
 - **Runtimes** `ff-runtime-nodejs:24-v1` and `ff-runtime-python:3.13-v1` ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
   - Lambda's `handler(event, context)`, error names, and log lines;
   - real timeouts;
@@ -92,6 +92,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 - [Kubernetes dev guide](docs/kubernetes-dev-guide.md): cluster, images, tests, gVisor, troubleshooting.
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.
+- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in four phases (proposed).
 - [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why.
 
 ## License
