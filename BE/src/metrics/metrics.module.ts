@@ -4,13 +4,13 @@ import { FunctionMetrics } from './entities/function-metrics.entity';
 import { MetricsService } from './metrics.service';
 import { MetricsController } from './metrics.controller';
 import { Function } from '../functions/entities/function.entity';
-import { NomadModule } from '../nomad/nomad.module';
+import { OrchestratorModule } from '../orchestrator/orchestrator.module';
 import { ConfigModule } from '@nestjs/config';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([FunctionMetrics, Function]),
-    NomadModule,
+    OrchestratorModule,
     ConfigModule,
   ],
   providers: [MetricsService],

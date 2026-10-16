@@ -5,7 +5,6 @@ import { FunctionsModule } from './functions/functions.module';
 import { MonitoringModule } from './monitoring/monitoring.module';
 import { AuthModule } from './auth/auth.module';
 import { MinioClientModule } from './minio-client/minio-client.module';
-import { NomadModule } from './nomad/nomad.module';
 import configuration from './config/configuration';
 
 @Module({
@@ -34,7 +33,6 @@ import configuration from './config/configuration';
     MonitoringModule,
     AuthModule,
     MinioClientModule,
-    NomadModule,
   ],
 })
 export class AppModule {}

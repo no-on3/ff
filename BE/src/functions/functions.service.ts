@@ -1,10 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
-import { NomadService } from '../nomad/nomad.service';
+import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
@@ -18,7 +18,7 @@ export class FunctionsService {
     @InjectRepository(FunctionInvocation)
     private invocationsRepository: Repository<FunctionInvocation>,
     private minioClientService: MinioClientService,
-    private nomadService: NomadService,
+    @Inject(ORCHESTRATOR) private orchestrator: Orchestrator,
     private configService: ConfigService,
     private metricsService: MetricsService,
   ) {}
@@ -48,8 +48,7 @@ export class FunctionsService {
       const tsconfigContent = this.generateTsConfig();
       await this.minioClientService.uploadCode(tsconfigPath, tsconfigContent);
       console.log('here')
-      // Deploy to Nomad
-      await this.nomadService.deployFunction(savedFunction);
+      await this.orchestrator.deploy(savedFunction);
 
       // Update status to ACTIVE
       savedFunction.status = FunctionStatus.ACTIVE;
@@ -86,7 +85,7 @@ export class FunctionsService {
       try {
         const codePath = `${id}/code.${this.getFileExtension(function_.runtime)}`;
         await this.minioClientService.uploadCode(codePath, updateFunctionDto.code);
-        await this.nomadService.updateFunction({ ...function_, ...updateFunctionDto });
+        await this.orchestrator.update({ ...function_, ...updateFunctionDto });
       } catch (error) {
         throw new BadRequestException(error.message);
       }
@@ -100,8 +99,7 @@ export class FunctionsService {
     const function_ = await this.findOne(id);
     
     try {
-      // Remove from Nomad
-      await this.nomadService.removeFunction(function_);
+      await this.orchestrator.remove(function_);
       
       // Remove code from MinIO
       const codePath = `${id}/code.${this.getFileExtension(function_.runtime)}`;
@@ -130,7 +128,7 @@ export class FunctionsService {
 
     try {
       const startTime = Date.now();
-      const result = await this.nomadService.invokeFunction(function_, input);
+      const result = await this.orchestrator.invoke(function_, input || {});
       const duration = Date.now() - startTime;
 
       // Record metrics
@@ -138,13 +136,13 @@ export class FunctionsService {
         id,
         duration,
         result.cpuUsed || 0,
-        result.memoryUsed || 0,
+        result.memoryUsedMb || 0,
         false
       );
 
       // Update invocation with results and metrics
-      invocation.output = result.output || result;
-      invocation.memoryUsed = result.memoryUsed;
+      invocation.output = result.output as Record<string, any>;
+      invocation.memoryUsed = result.memoryUsedMb;
       invocation.cpuUsed = result.cpuUsed;
       invocation.status = InvocationStatus.COMPLETED;
       await this.invocationsRepository.save(invocation);

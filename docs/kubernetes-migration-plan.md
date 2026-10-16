@@ -554,8 +554,8 @@ The rules:
 |---|---|---|---|
 | K-00 Preparation | ✅ Done | `0f1ced0` (baseline snapshot), `992cd63` | Resource guard: exit 0 at defaults, exit 1 on each violated threshold; ignore rules verified |
 | K-01 Plan and ADR | ✅ Done | `e197d16` | `hack/check-docs.py` passes on this plan, ADR 0001, and the parent plan; a negative test catches a bad table row, a broken link, and an unclosed fence |
-| K-02 Test harness | ✅ Done | (this commit) | `tsc --noEmit` exit 0; `npm test`: 1 suite, 3 tests pass, imported through the `@/` alias; `npm run test:it` selects only `*.it.spec.ts` (none yet) |
-| K-03 Orchestrator abstraction | ⏳ Planned | | |
+| K-02 Test harness | ✅ Done | `c26a44b` | `tsc --noEmit` exit 0; `npm test`: 1 suite, 3 tests pass, imported through the `@/` alias; `npm run test:it` selects only `*.it.spec.ts` (none yet) |
+| K-03 Orchestrator abstraction | ✅ Done | `7acb5f7` (build fix found while verifying), (this commit) | `tsc` exit 0; `npm test`: 4 suites, 15 tests; `NomadService` is referenced only by its driver; `nest build` now emits `dist/main.js` (it was `dist/src/main.js`, which broke `start:prod`). Only deliberate behaviour change: the metrics loop skips functions deleted during the window, instead of writing metrics for a missing row |
 | K-04 Dev cluster, RBAC, admission policy | ⏳ Planned | | |
 | K-05 Node.js runtime image | ⏳ Planned | | |
 | K-06 KubernetesOrchestrator | ⏳ Planned | | |

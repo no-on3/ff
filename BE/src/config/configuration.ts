@@ -17,6 +17,10 @@ export default () => ({
     secretKey: process.env.MINIO_SECRET_KEY || 'minioadmin',
     bucketName: process.env.MINIO_BUCKET_NAME || 'functions',
   },
+  orchestrator: {
+    // Scheduler driver behind the ORCHESTRATOR token (see OrchestratorModule).
+    driver: process.env.ORCHESTRATOR || 'nomad',
+  },
   nomad: {
     address: process.env.NOMAD_ADDR || 'http://localhost:4646',
     host: process.env.NOMAD_HOST || 'http://localhost',

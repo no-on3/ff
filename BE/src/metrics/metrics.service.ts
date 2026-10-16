@@ -1,9 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, Repository } from 'typeorm';
 import { Function } from '../functions/entities/function.entity';
-import { NomadService } from '../nomad/nomad.service';
+import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { FunctionMetrics } from './entities/function-metrics.entity';
 
 interface MetricsWindow {
@@ -15,21 +15,27 @@ interface MetricsWindow {
 }
 
 @Injectable()
-export class MetricsService {
+export class MetricsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MetricsService.name);
   private metricsWindows: Map<string, MetricsWindow> = new Map();
   private readonly windowSize = 60 * 1000; // 1 minute window
+  private aggregationTimer?: NodeJS.Timeout;
 
   constructor(
     @InjectRepository(FunctionMetrics)
     private metricsRepository: Repository<FunctionMetrics>,
     @InjectRepository(Function)
     private functionRepository: Repository<Function>,
-    private nomadService: NomadService,
+    @Inject(ORCHESTRATOR) private orchestrator: Orchestrator,
     private configService: ConfigService,
-  ) {
-    // Start metrics aggregation loop
+  ) {}
+
+  onModuleInit() {
     this.startMetricsAggregation();
+  }
+
+  onModuleDestroy() {
+    if (this.aggregationTimer) clearInterval(this.aggregationTimer);
   }
 
   async recordMetric(
@@ -58,14 +64,17 @@ export class MetricsService {
     window.memoryUsage.push(memoryUsage);
   }
 
-  private async startMetricsAggregation() {
-    setInterval(async () => {
+  private startMetricsAggregation() {
+    this.aggregationTimer = setInterval(async () => {
       try {
         const timestamp = new Date();
         const promises: Promise<void>[] = [];
 
         for (const [functionId, window] of this.metricsWindows.entries()) {
           if (window.requestCount === 0) continue;
+
+          const function_ = await this.functionRepository.findOne({ where: { id: functionId } });
+          if (!function_) continue; // deleted since the window opened
 
           // Sort response times for percentile calculations
           window.responseTimes.sort((a, b) => a - b);
@@ -82,14 +91,12 @@ export class MetricsService {
           metrics.cpuUsage = this.average(window.cpuUsage);
           metrics.memoryUsage = this.average(window.memoryUsage);
 
-          // Get active instances count from Nomad
-          const activeInstances = await this.nomadService.getActiveInstanceCount(functionId);
-          metrics.activeInstances = activeInstances;
+          metrics.activeInstances = await this.orchestrator.readyInstances(function_);
 
           promises.push(this.metricsRepository.save(metrics).then());
 
           // Check scaling conditions
-          await this.checkScalingConditions(functionId, metrics);
+          await this.checkScalingConditions(function_, metrics);
         }
 
         // Clear the windows after saving
@@ -102,11 +109,9 @@ export class MetricsService {
     }, this.windowSize);
   }
 
-  private async checkScalingConditions(functionId: string, metrics: FunctionMetrics) {
+  private async checkScalingConditions(function_: Function, metrics: FunctionMetrics) {
+    const functionId = function_.id;
     try {
-      const function_ = await this.functionRepository.findOne({ where: { id: functionId } });
-      if (!function_) return;
-
       const maxRequestsPerInstance = this.configService.get('MAX_REQUESTS_PER_INSTANCE', 2);
       const maxCpuUtilization = this.configService.get('MAX_CPU_UTILIZATION', 80);
       const minCpuUtilization = this.configService.get('MIN_CPU_UTILIZATION', 40);
@@ -123,10 +128,10 @@ export class MetricsService {
         metrics.cpuUsage < minCpuUtilization;
 
       if (shouldScaleUp) {
-        await this.nomadService.scaleFunction(functionId, metrics.activeInstances + 1);
+        await this.orchestrator.scale(function_, metrics.activeInstances + 1);
         this.logger.log(`Scaling up function ${functionId} to ${metrics.activeInstances + 1} instances`);
       } else if (shouldScaleDown) {
-        await this.nomadService.scaleFunction(functionId, metrics.activeInstances - 1);
+        await this.orchestrator.scale(function_, metrics.activeInstances - 1);
         this.logger.log(`Scaling down function ${functionId} to ${metrics.activeInstances - 1} instances`);
       }
     } catch (error) {

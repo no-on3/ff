@@ -25,6 +25,7 @@ describe('configuration', () => {
       logging: true,
     });
     expect(config.minio).toMatchObject({ port: 9003, useSSL: false, bucketName: 'functions' });
+    expect(config.orchestrator.driver).toBe('nomad');
     expect(config.function).toEqual({
       defaultMemory: 128,
       defaultTimeout: 30,
@@ -42,11 +43,13 @@ describe('configuration', () => {
       MINIO_PORT: '9100',
       MINIO_USE_SSL: 'true',
       MINIO_BUCKET_NAME: 'artifacts',
+      ORCHESTRATOR: 'kubernetes',
     };
 
     const config = configuration();
 
     expect(config.port).toBe(4100);
+    expect(config.orchestrator.driver).toBe('kubernetes');
     expect(config.database).toMatchObject({ host: 'db.internal', port: 6543, name: 'ff' });
     expect(config.minio).toMatchObject({ port: 9100, useSSL: true, bucketName: 'artifacts' });
   });
