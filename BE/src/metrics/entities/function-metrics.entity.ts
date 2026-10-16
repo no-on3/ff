@@ -17,7 +17,7 @@ export class FunctionMetrics {
   @Column()
   functionId: string;
 
-  @ManyToOne(() => Function)
+  @ManyToOne(() => Function, { onDelete: 'CASCADE' })
   function: Function;
 
   @Column({ type: 'timestamptz' })

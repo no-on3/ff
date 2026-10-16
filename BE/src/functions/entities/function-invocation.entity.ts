@@ -25,7 +25,9 @@ export class FunctionInvocation {
   @Column()
   functionId: string;
 
-  @ManyToOne(() => Function, func => func.invocations)
+  // Invocation history belongs to the function; deleting the function deletes it
+  // (as the original migration already declared).
+  @ManyToOne(() => Function, func => func.invocations, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'functionId' })
   function: Function;
 
