@@ -41,7 +41,6 @@ Nomad is no longer used; its development VM was removed.
 | `infrastructure/` | SeaweedFS (S3) identities, Prometheus, and Grafana configuration for `docker-compose.yml` |
 | `docs/` | The [getting-started guide](docs/getting-started.md), plans, ADRs, and the [Kubernetes dev guide](docs/kubernetes-dev-guide.md) |
 | `examples/` | Example functions (Node.js and Python) used by the getting-started guide |
-| `cli/`, `cli-rust/`, `lambda-func/`, `scripts/` | Earlier prototypes (packaging CLIs, the old function wrapper, old setup scripts); not used by the current stack |
 
 ## Quick start (development)
 

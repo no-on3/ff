@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Proposed, not started. Open questions for you are in §10. |
-| **Replaces** | The plan in [`cli/README.md`](../cli/README.md), which no longer matches the platform (§1) |
+| **Replaces** | The plan in `cli/README.md`, which no longer matched the platform (§1). It was removed with the prototypes; git history has it, for example at commit `fb9d833`. |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): finding H-10; tasks R-02 (in part) and R-10; ADR-007 (Rust) and ADR-009 (SAM); §6.1 packaging, §7.1 `ff export`, §7.4 `ff doctor` |
 | **Builds on** | The [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12) and the [getting-started guide](getting-started.md) |
 | **Decision records** | ADR 0002 (the CLI) in C-00, ADR 0003 (code delivery) in C-20 |
@@ -24,7 +24,7 @@ The plan has four phases. Each delivers something usable on its own:
 
 ## 1. Why the old plan is replaced
 
-A review of `cli/` (Node.js, 234 lines) and `cli-rust/` (Rust, 383 lines) against the platform as it is now:
+A review of the two prototypes, `cli/` (Node.js, 234 lines) and `cli-rust/` (Rust, 383 lines), against the platform as it is now. Both were then removed as dead code, and they remain in git history (for example at commit `fb9d833`):
 
 | The old plan assumed | What is true now | Consequence |
 |---|---|---|
@@ -35,7 +35,7 @@ A review of `cli/` (Node.js, 234 lines) and `cli-rust/` (Rust, 383 lines) agains
 | Node.js 18, `npm install --production` | Node 18 is end of life; the flag is deprecated (`--omit=dev`). The CLI also ran it in the user's own folder, mutating their `node_modules`. | Rework in any case |
 | No limits | **Measured:** the backend rejects request bodies over about 100 KB with `413 request entity too large`, for function code and for invoke input alike. The runtimes accept 900 KiB of code and 6 MB payloads. | Deploys and payloads over 100 KB fail today (fixed in C-03) |
 
-Both prototypes are small, so starting cleanly costs little. The Rust one keeps its useful parts: the `clap` command structure, the error type, and the project layout.
+Both prototypes are small, so starting cleanly costs little. The new CLI can borrow the Rust prototype's `clap` command structure and error type from git history.
 
 ## 2. Goals and non-goals
 
@@ -64,7 +64,7 @@ Decisions D1–D3, D5 and D7 are recorded in ADR 0002 (task C-00). D4 is decided
   - `walkdir` and `ignore` (`.ffignore` in gitignore syntax);
   - `directories` (config paths), `anyhow` / `thiserror`, and `notify` (watch mode);
   - versions: the latest stable at implementation time, locked in `Cargo.lock`, built with `--locked`.
-- **Dropped from `cli-rust`:** `tokio` (no async runtime is needed for a CLI that does one request at a time), `s3`, and `dotenv`.
+- **Not carried over from the Rust prototype:** `tokio` (no async runtime is needed for a CLI that does one request at a time), `s3`, and `dotenv`.
 - **Static builds:** `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`; macOS and Windows targets in phase 4. The toolchain on the reference machine is Rust 1.91, so edition 2024 is available.
 
 ### D2. Configuration
@@ -173,7 +173,7 @@ developer machine                                   FF platform
         (same hardening as production pods)
 ```
 
-- **Source layout.** `cli-rust/` moves to `cli/`, replacing the Node.js CLI, in C-01:
+- **Source layout.** The CLI lives in `cli/`:
   - `src/main.rs` (clap);
   - `config.rs`;
   - `api/` (client, types, error mapping);
@@ -235,13 +235,11 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 #### C-00: Preparation and ADR 0002
 - **Steps:**
   - Create the branch.
-  - Replace `cli/README.md` with a pointer to this plan; the old content stays in git history.
   - Write `docs/adr/0002-cli.md`, recording D1, D2, D3, D5, and D7 and naming the parent's ADR-007 and ADR-009.
 - **Done when:** `hack/check-docs.py` passes on the new and changed documents.
 
 #### C-01: One CLI
-- **Remove** the Node.js CLI (`cli/src`, `package.json`, the MinIO service) and the S3 code in `cli-rust` (`minio.rs`, the `upload` command).
-- **Move** `cli-rust/` to `cli/`. The binary is `ff`, and the edition becomes 2024. Trim the dependencies (D1).
+- **Create** the Rust project in `cli/`. Both prototypes were already removed as dead code; the Rust one's `clap` structure and error type can be borrowed from git history (`fb9d833`). The binary is `ff`, with edition 2024 and the dependencies of D1.
 - **Skeleton:**
   - the global flags;
   - `ff version` (version and git commit, embedded at build time);

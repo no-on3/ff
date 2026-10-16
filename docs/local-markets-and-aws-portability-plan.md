@@ -1261,7 +1261,7 @@ The status column records what the [Kubernetes migration](kubernetes-migration-p
 | H-4, H-5 | F-07 invocation records → B-01 metering | 0 / 2 | Partly done. Duration and peak memory come from the runtime's response headers (K-05, K-07). Metering is open. |
 | H-6 | R-03 Python runtime via official client | 1 | Done, with FF's own Python runtime on the same protocol as Node.js (K-10) |
 | H-8, H-9 | F-08 → R-04 agent + official runtime interface client | 0 / 1 | Done. The environment is never logged, and timeouts stop even CPU-bound loops (K-05, K-10). |
-| H-10 | R-10 single CLI talking to the API only (pre-signed uploads, device-flow login) | 1 | Open |
+| H-10 | R-10 single CLI talking to the API only (pre-signed uploads, device-flow login) | 1 | Partly done. Both prototypes, which uploaded zips to storage with the root keys, were removed as dead code. The API-only CLI is planned in the [CLI plan](cli-plan.md). |
 | H-11 | F-10 → B-08 | 0 / 2 | Open. The dev CORS origin now matches the console's Vite port (K-12). |
 | H-12 | F-15 replace MinIO (ADR-002), AWS SDK S3 client | 0 | Partly done. SeaweedFS replaces MinIO in docker-compose (K-08). The backend still uses the `minio` npm client against it. |
 | M-1 | F-09 | 0 | Open |
