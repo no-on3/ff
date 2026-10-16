@@ -8,11 +8,11 @@
 | **Builds on** | The [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12) and the [CLI plan](cli-plan.md) (C-05 logs endpoint, C-40 login) |
 | **Decision records** | ADR 0004 (identity and tenancy) in P-00, ADR 0005 (log pipeline) in P-41. ADR 0002 and 0003 are reserved by the CLI plan. |
 
-The function engine works: functions deploy to Kubernetes, scale to zero, run in hardened pods, and report their duration and memory. The business layer around it doesn't exist yet. There are no accounts, nothing stops one caller from using another's functions, the usage data can't be billed from, and logs live only in pods that disappear. This plan builds that layer, in the order the risks demand: first isolation between customers, then metering and prepaid credit, then logs, metrics and alarms, then the launch work.
+The function engine works: functions deploy to Kubernetes, scale to zero, run in hardened pods, and report their duration and memory. The business layer around it doesn't exist yet. There are no accounts, nothing stops one caller from using another's functions, the usage data can't be billed from, and logs live only in pods that disappear. This plan builds that layer, in the order the risks demand: first the engine's defects (§1.6) and isolation between customers, then metering and prepaid credit, then logs, metrics and alarms, then the launch work.
 
 | Phase | You get | Needs |
 |---|---|---|
-| **0. Groundwork** | Migrations that work in production, a validated configuration that refuses the development tenant in production, ADR 0004 | nothing |
+| **0. Groundwork** | Migrations that work in production, a validated configuration that refuses the development tenant in production, ADR 0004, and the defects of §1.6 fixed: function updates and failures, the runtimes, the console, scaling, and cluster permissions | nothing |
 | **1. Accounts and isolation** | Sign-up and login (console, CLI, API keys); every route limited to the caller's account; plans, quotas and rate limits | Keycloak; an SMTP server |
 | **2. Metering** | One usage record per invocation, which deleting or editing a function can't change; usage per month in the API and console; idle capacity measured | phase 1 |
 | **3. Prepaid credit** | AWS Lambda's prices in dinars as a configurable price book; wallet and ledger; top-ups through Konnect and bank transfer; a balance check before each invoke; low-balance e-mails; monthly invoices | phase 2; a Konnect merchant account; the accountant's confirmations (§9) |
@@ -89,6 +89,29 @@ A single 1 ms call at 128 MB therefore holds 0.125 GB × 900 s ≈ 112 GB-s of s
 - **The console** has its API URL hard-coded to `http://localhost:3000` (`FE/src/services/api.ts:4`), and reads a token from `localStorage` that nothing writes.
 - **No CI** (parent F-11).
 - **gVisor is optional** (K-11). The parent plan says to run no untrusted third-party code until sandboxing is on.
+
+### 1.6 Defects in the function engine
+
+Found on 2026-10-16 while checking [How FF works](how-it-works.html) against the code (commit `8f934d5`). Customers would run into each of them, so phase 0 fixes them (P-03 to P-08) before the client-facing work starts. The other problems that review found already have tasks: ownership (P-10), the migrations (P-01), `X-FF-Request-Id` and the durations of failed calls (P-20).
+
+| Finding | Where | Consequence |
+|---|---|---|
+| **An update never changes the status.** A successful rollout saves the record as it was, so a function in `ERROR` stays in `ERROR`. | `BE/src/functions/functions.service.ts:99`, `:122` | A function that failed to load can't be repaired: even with fixed code, every invoke gets 400 "Function is not active". The only way out is to delete it and create it again, under a new ID. |
+| **A failed update is half applied.** The new code goes to S3 and to the Deployment before the wait; when the wait fails, the record keeps the old code. | `functions.service.ts:81-96` | The Deployment is left on the broken version. The old pod keeps serving only until it is replaced: after the next scale to zero, every cold start runs the broken code, while the record shows the old one. |
+| **An update of a function scaled to zero checks nothing.** `isRolledOut` is true at zero replicas, so the wait returns at once. | `BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts:54,114` | Broken code is accepted with 200, and fails at the next invocation after a 90 s wait. The interface promises a wait for "at least one instance" (`orchestrator.types.ts:42`); the code waits for every desired replica. |
+| **A failed create leaves its pod running.** The function becomes `ERROR`, but its Deployment, its pod that can never become ready, and its S3 copy stay, and the idle sweep only scales `ACTIVE` functions. | `functions.service.ts:55-59`, `BE/src/metrics/metrics.service.ts:144` | Each failed create holds its memory and CPU in the tenant's quota until the function is deleted. |
+| **Node.js functions run in `/opt/ff`.** The Node.js runtime never changes directory; the Python runtime and Lambda run in `/var/task`. | `runtimes/nodejs/src/main.ts`, `runtimes/python/ff_runtime/worker.py:210` | A Node.js function that reads a file next to its code works on Lambda but not on FF. |
+| **"Max Memory Used" means two things:** in Node.js, the memory in use when the call ends; in Python, the peak, as on Lambda. | `runtimes/nodejs/src/main.ts:99`, `runtimes/python/ff_runtime/main.py:67` | Node.js under-reports what a call needed, in `REPORT` lines and in the history. |
+| **The runtimes log errors differently.** Node.js doesn't log a handler's exception, while Python writes a `function error` line with the stack trace. Python doesn't log an out-of-memory replacement, while Node.js does. | `runtimes/nodejs/src/worker.ts:90`, `runtimes/python/ff_runtime/worker.py:150`, `main.py:201` | Customer logs (phase 4) would show nothing for a failed Node.js call. |
+| **A worker that fails to reload leaves the pod unready for good.** `/readyz` stays 503 and `/healthz` stays 200, so kubelet never restarts the container. | `runtimes/nodejs/src/main.ts:125-160`, `runtimes/python/ff_runtime/main.py:84-135` | After a timeout or a crash, a reload that fails (an init timeout at 0.1 CPU, for example) takes the instance out of service until its pod is deleted. |
+| **A Node.js result that JSON can't hold** (a function, a `Symbol`) leaves the response body undefined, and the main process then measures it. This is read from the code; no test covers it. Python answers `Runtime.MarshalError`. | `runtimes/nodejs/src/worker.ts:87`, `main.ts:184` | The main process can crash, failing the calls waiting behind it. |
+| **Callback-style handlers fail.** The context sets `callbackWaitsForEmptyEventLoop`, but no callback is passed. | `runtimes/nodejs/src/worker.ts:83` | A Lambda handler written as `(event, context, callback)` fails with `TypeError`. |
+| **Four console calls are broken.** The invocation history expects an array (the API returns `{ invocations, total }`). The invoke result reads `response.data.metrics.*`, which doesn't exist. An edit sends the whole function, which the API rejects with 400. The scaling form calls `PUT /functions/:id/scaling-config`, which doesn't exist. | `FE/src/components/FunctionDetail.tsx:33,68-72,88`, `FE/src/services/api.ts:81,102` | The history stays empty, an invoke shows no duration or memory, and editing or scaling a function fails. |
+| **Autoscaling never adds a pod.** `maxInstances` defaults to 1, and no API field changes it. The rule counts requests per minute (more than 2 per instance scales up), and its p95 includes cold starts. | `BE/src/functions/dto/`, `BE/src/metrics/scaling.ts:34-36`, `metrics.service.ts:133` | Each function runs on one pod, one call at a time. In a burst, calls wait in the pod's queue, and the backend gives up on those that wait longer than the function's timeout plus 2 s while the pod is still working through the queue. |
+| **Unused columns.** `functions.cpu` and `targetConcurrency` are never read, `function_invocations.cpuUsed` is always NULL, and `function_metrics.cpuUsage` is always 0. | the entities, `functions.service.ts:140-146` | Fields in the API and the console that mean nothing. |
+| **The invoke mode changes how a timeout is recorded.** When the backend gives up waiting, proxy mode (development) records `ERROR`, and direct mode (production) `TIMEOUT`. | `kubernetes.orchestrator.ts:209-218` | Development doesn't show what production records. |
+| **The OpenAPI document says invoke answers 200.** It answers 201, which `hack/e2e.sh` checks. | `BE/src/functions/functions.controller.ts:81` | Generated clients, and the L5 suite that reads the document, expect the wrong status. |
+| **The controller's permissions reach further than the admission policy.** `services/proxy` is granted cluster-wide, although the role says it is for development only, and the policy doesn't check proxy calls. Every read (pods, pod logs, ConfigMaps) is cluster-wide. The policy hard-codes `ff-t-`, while `K8S_NAMESPACE_PREFIX` can be changed. | `deploy/k8s/base/20-clusterrole.yaml:28-31`, `30-clusterrolebinding.yaml`, `40-admission-policy.yaml:45`, `BE/src/config/configuration.ts:39` | A stolen backend token can call any Service in the cluster and read every ConfigMap and pod log. Another prefix makes every deploy fail. |
 
 ## 2. Goals and non-goals
 
@@ -460,6 +483,63 @@ The same as the Kubernetes migration and the CLI plan:
 - **`FF_DEV_USER_ID`** is replaced by `FF_AUTH_MODE=dev` and `FF_DEV_ACCOUNT_ID` (D2).
 - **Tests:** L1 for each refusal.
 
+#### P-03: Function lifecycle fixes
+- **An update repairs a failed function.** A successful rollout sets `status = ACTIVE` and clears `error`. An update of a function in `ERROR` always rolls out, even when no rollout field changed, so the same code can be retried after a passing failure (a full quota, a missing image).
+- **A failed update is rolled back:**
+  - the code goes to S3 only after the rollout succeeds;
+  - when the wait fails, the backend re-applies the previous version and waits for it, so the Deployment matches the record again (its ConfigMap still exists, because `collectOldConfigMaps` keeps one previous version);
+  - the answer is 400 with the diagnosis, as today. If the rollback fails too, the function becomes `ERROR`, with both messages.
+- **An update checks new code even at zero.** When the code changes, `apply()` rolls out with at least one replica, and the wait checks that pod; the idle sweep scales it back to zero after the idle window. The `waitUntilReady` comment (`orchestrator.types.ts:42`) is corrected: the wait covers every desired replica.
+- **A failed create releases its pod.** The Deployment is scaled to zero. The objects and the diagnosis stay, so an update can repair the function, or a delete removes everything.
+- **Tests:**
+  - L1 (`functions.service.spec.ts`, with the fake orchestrator): an update of an `ERROR` function ends `ACTIVE`; a failed update re-applies the previous version and uploads nothing; a failed create scales to zero; an update at zero rolls out with one replica;
+  - L3 (`K8S_IT=1`): a broken create ends `ERROR` with no pod, and an update with fixed code makes it `ACTIVE` and invocable; a broken update of a working function answers 400, and after a scale to zero the next cold start still runs the old code; an update at zero starts a pod and checks it.
+- **Docs:** `how-it-works.html` (the update and failed-load scenarios, the lifecycle diagram), and the getting-started guide's troubleshooting.
+
+#### P-04: Runtime fixes: Lambda parity and robustness
+- **Working directory:** the Node.js runtime changes to `LAMBDA_TASK_ROOT` (`/var/task`) when it starts, in the main thread, because worker threads can't call `process.chdir()`. The worker script is already loaded by an absolute path (`main.ts:129`).
+- **Max memory used:** Node.js reports the process's peak resident memory (`process.resourceUsage().maxRSS`, in KiB) instead of the current one, so both runtimes report the peak, as Lambda does.
+- **Error logs:** the Node.js worker writes the same `function error` JSON line as Python, with `requestId`, `errorType`, `errorMessage` and `stackTrace`. Python logs an out-of-memory replacement, as Node.js does. Phase 4's request-ID parsing relies on both.
+- **Failed reloads:** when a worker fails to load after the first successful start, the main process exits with a non-zero code, so kubelet restarts the container. A failure of the very first load stays reported on `/readyz`, as today.
+- **Results that JSON can't hold:** the Node.js worker answers `Runtime.MarshalError` ("Unable to marshal response: …"), as Python does, when `JSON.stringify` throws or returns nothing. The main process checks the body before measuring it.
+- **Callback-style handlers:** do what Lambda's Node.js 24 runtime does: accept `(event, context, callback)` handlers, or reject them at load with a clear error. Without callbacks, the context stops offering `callbackWaitsForEmptyEventLoop`.
+- **Tests:** a case for each item in `runtimes/nodejs/test/runtime.test.mjs` and `runtimes/python/tests/test_runtime.py`; both container smoke tests; L3 for a function that reads a file next to its code.
+- **Images:** new tags (`24-v2`, `3.13-v2`), with the defaults in `configuration.ts` and `BE/.env.example` and every script that names the old tags (`grep -rn -- -v1`). Running functions keep the old image until their next update.
+- **Docs:** both runtime READMEs. The Python README's examples show the spaced JSON (`{"status": "ok"}`) that the runtime really writes.
+
+#### P-05: Console fixes
+- **Moved here from P-14,** so the console works before its new pages are built (parent H-11):
+  - the invocation history reads `{ invocations, total }` (`FE/src/components/FunctionDetail.tsx:33`, `FE/src/services/api.ts:81`);
+  - the invoke result shows the invocation's `duration`, `memoryUsed`, `createdAt` and `updatedAt`, instead of `response.data.metrics.*` (`FunctionDetail.tsx:68-72`);
+  - an edit sends only the changed fields that the API accepts (`FunctionDetail.tsx:88`);
+  - the scaling form is read-only until P-06 decides what customers may change, because `PUT /functions/:id/scaling-config` doesn't exist (`api.ts:102`);
+  - the debug `console.log` goes (`FunctionDetail.tsx:31`).
+- **Tests:** L0 (`npm run build`); a manual check of create, invoke, history and edit against the development stack, recorded in the progress log.
+
+#### P-06: Concurrency and autoscaling
+- **Decide the beta's scaling model,** and record it in §3:
+  - which settings customers may change (`minInstances`, `maxInstances`), within the plan's limits (P-15);
+  - the default `maxInstances`, which is 1 today, so autoscaling never adds a pod;
+  - the signal that adds a pod: requests per instance and minute, as today (`MAX_REQUESTS_PER_INSTANCE`, 2), or concurrency, meaning calls running or waiting per instance. Only the runtime knows its queue; it would report it, for example in a response header.
+- **Build it:** validated DTO fields; `decideReplicas` with the chosen signal; a p95 rule on the runtime's duration, without cold starts; a `scaling-config` route that writes as well as reads. P-05's form then becomes editable.
+- **Calls waiting in a pod's queue:** the backend's timeout (the function's timeout plus 2 s) also counts the time a call waits behind others. Either the backend waits longer when the pod reports a queue, or the pod answers 429 before queueing, recorded as `throttled` (P-15).
+- **Unused columns:** a migration drops `functions.cpu`, `function_invocations.cpuUsed` and `function_metrics.cpuUsage`, and `targetConcurrency` unless the chosen model uses it.
+- **Tests:** L1 for `decideReplicas` with the new inputs; L3: a burst of slow calls to one function scales it to two pods, and no call fails while the second pod starts.
+- **Docs:** `how-it-works.html` (the metrics scenario and the limits), and the getting-started guide's limits.
+
+#### P-07: Cluster permissions
+- **`services/proxy`** moves from `deploy/k8s/base` to a development-only overlay that `hack/k8s/cluster-up.sh` applies. Production invokes in direct mode (P-60) and doesn't need it.
+- **The namespace prefix:** the configuration schema (P-02) refuses a `K8S_NAMESPACE_PREFIX` other than `ff-t-`, because the admission policy checks that prefix (`40-admission-policy.yaml:45`).
+- **Cluster-wide reads:** decide, and record the decision in `deploy/k8s/README.md`. Either accept them for the beta and say what they expose, or bind the read permissions per tenant namespace, which needs a separate provisioner because the backend must not manage RBAC. The `pods/log` permission goes once P-43 serves logs from the log store. P-64 reviews the decision.
+- **Tests:** `hack/k8s/test-rbac.sh`: with the production manifests, the controller can't proxy to a Service, in a tenant namespace or anywhere else; with the development overlay, it can.
+- **Docs:** `deploy/k8s/README.md`, the Kubernetes dev guide.
+
+#### P-08: API and documentation fixes
+- **The OpenAPI document** says invoke answers 201, as it does (`functions.controller.ts:81`).
+- **One timeout, one status:** when the backend gives up waiting in proxy mode, the error becomes a `FunctionTimeoutError`, as in direct mode. P-20 then maps it to the usage status.
+- **The migration plan's KubeClient names** match the code: `scaleDeployment`, `list`, and `podLog(ns, pod, container, tailLines)` (`docs/kubernetes-migration-plan.md:400-401`).
+- **Tests:** L1 for the timeout mapping; `hack/e2e.sh` unchanged.
+
 ### Phase 1: accounts and isolation
 
 #### P-10: Principal and account-scoped services
@@ -510,7 +590,7 @@ The same as the Kubernetes migration and the CLI plan:
   - "waiting for approval";
   - account settings;
   - API keys.
-- **Fix the console bugs that block these flows** (parent H-11): the invocation history's response shape, update sending only editable fields, and the scaling form calling a route that doesn't exist.
+- **The console's broken calls** (parent H-11) are fixed first, in P-05.
 - **Tests:** L0 (`npm run build`); a manual check of the full flow, recorded in the progress log.
 
 #### P-15: Plans, quotas and rate limits
@@ -854,6 +934,7 @@ Each task ships with the phase it serves:
 | Personal data in logs and history | In-country storage, retention per plan, deletion on account closure, the data-processing agreement (P-45, P-65) |
 | Tunisian invoicing rules are uncertain | The accountant confirms D9 in P-00; VAT is charged at payment, so it is never declared late; tax rules are dated data (parent §8.6); El Fatoora is planned on its own (P-37) |
 | gVisor makes slow cold starts slower (12–15 s) | K-13's CPU burst decision; `minInstances` billed as warm time (D8) |
+| A burst of calls to one function queues on its only pod, and calls fail while it works through the queue | P-06 decides the scaling model before the beta; P-15's rate limits and the `throttled` status |
 
 ## 9. Decisions of 2026-10-16
 
@@ -883,7 +964,7 @@ Each task ships with the phase it serves:
 
 | Phase | Working days | Notes |
 |---|---|---|
-| 0 | 3–5 | The schema baseline is most of it |
+| 0 | 12–18 | The schema baseline, the lifecycle fixes (P-03) and the scaling model (P-06) are most of it |
 | 1 | 15–20 | Keycloak, the rename to accounts, and the console pages are the largest parts |
 | 2 | 6–8 | |
 | 3 | 20–28 | Plus 10–15 for El Fatoora (P-37), with external lead times |
@@ -891,9 +972,9 @@ Each task ships with the phase it serves:
 | 5 | 8–10 | |
 | 6 | 10–15 | Plus the external legal work |
 | Admin dashboard | 18–24 | Spread over phases 1, 3, 4 and 5; P-70 is the largest part |
-| **Total** | **88–122** | Milestone A (free pilot) is about 40–55 of these |
+| **Total** | **97–135** | Milestone A (free pilot) is about 49–68 of these |
 
-This is smaller than the parent plan's Phase 2 (about 24 person-weeks): one payment provider, bank transfers recorded by hand, a console in French and English only, and no SMS.
+Without the fixes of P-03 to P-08, this is smaller than the parent plan's Phase 2 (about 24 person-weeks): one payment provider, bank transfers recorded by hand, a console in French and English only, and no SMS.
 
 ## 11. Progress log
 
@@ -902,6 +983,12 @@ This is smaller than the parent plan's Phase 2 (about 24 person-weeks): one paym
 | P-00 Preparation and ADR 0004 | ⏳ Planned | | |
 | P-01 Schema baseline | ⏳ Planned | | |
 | P-02 Validated configuration | ⏳ Planned | | |
+| P-03 Function lifecycle fixes | ⏳ Planned | | |
+| P-04 Runtime fixes | ⏳ Planned | | |
+| P-05 Console fixes | ⏳ Planned | | |
+| P-06 Concurrency and autoscaling | ⏳ Planned | | |
+| P-07 Cluster permissions | ⏳ Planned | | |
+| P-08 API and documentation fixes | ⏳ Planned | | |
 | P-10 Principal and account-scoped services | ⏳ Planned | | |
 | P-11 Keycloak and the global guard | ⏳ Planned | | |
 | P-12 Accounts, users and sign-up | ⏳ Planned | | |
