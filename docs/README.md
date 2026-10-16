@@ -7,6 +7,7 @@
 | [Kubernetes dev guide](kubernetes-dev-guide.md) | The local cluster, runtime images, tests, the gVisor sandbox, troubleshooting |
 | [Kubernetes migration plan](kubernetes-migration-plan.md) | How FF moved from Nomad to Kubernetes, task by task (K-00 to K-13) |
 | [CLI plan](cli-plan.md) | The `ff` command-line tool, in four phases (proposed) |
+| [Client-readiness plan](client-readiness-plan.md) | Accounts and isolation, metering, prepaid credit at AWS prices in dinars, customer logs, metrics and alarms, the admin dashboard, and the pilot launch (proposed) |
 | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md) | The product and portability roadmap |
 | [ADR 0001](adr/0001-orchestrator-kubernetes.md) | Why Kubernetes is FF's orchestrator |
 
