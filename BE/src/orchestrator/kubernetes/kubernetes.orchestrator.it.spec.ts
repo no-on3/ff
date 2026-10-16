@@ -43,6 +43,13 @@ def handler(event, context):
     return "ok"
 `;
 
+const nodeHog = `
+const hoard: string[][] = [];
+export async function handler(event: { body: { hog?: boolean } }) {
+  while (event.body.hog) hoard.push(new Array(100_000).fill('x'.repeat(8)));
+  return 'ok';
+}`;
+
 interface PodStatus {
   status?: { containerStatuses?: Array<{ restartCount: number }> };
 }
@@ -182,6 +189,24 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
       const pods = await client.list<PodStatus>(paths.core(ns, 'pods'), `${LABELS.functionId}=${hog.id}`);
 
       expect(failure).toMatchObject({ errorType: 'Runtime.OutOfMemory', message: 'Runtime exceeded its memory limit' });
+      expect(after.output).toBe('ok');
+      expect(pods.map((pod) => pod.status?.containerStatuses?.[0]?.restartCount)).toEqual([0]);
+    } finally {
+      await orchestrator.remove(hog);
+    }
+  });
+
+  it('turns a Node.js heap hog into Runtime.OutOfMemory without restarting the container', async () => {
+    const hog = workload({ id: randomUUID(), userId: tenant, name: 'it-node-hog', code: nodeHog, memory: 128, timeout: 10 });
+    try {
+      await orchestrator.deploy(hog);
+      await orchestrator.waitUntilReady(hog, 90_000);
+
+      const failure = await orchestrator.invoke(hog, { hog: true }).catch((error: unknown) => error);
+      const after = await orchestrator.invoke(hog, {});
+      const pods = await client.list<PodStatus>(paths.core(ns, 'pods'), `${LABELS.functionId}=${hog.id}`);
+
+      expect(failure).toMatchObject({ errorType: 'Runtime.OutOfMemory' });
       expect(after.output).toBe('ok');
       expect(pods.map((pod) => pod.status?.containerStatuses?.[0]?.restartCount)).toEqual([0]);
     } finally {

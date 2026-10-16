@@ -230,6 +230,22 @@ describe('timeouts and crashes recycle the worker', () => {
     await rt.stop();
   });
 
+  it('budgets the function memory minus what the runtime uses', async () => {
+    const rt = await startRuntime('allocate', { FUNCTION_MEMORY_LIMIT: '256', FUNCTION_TIMEOUT: '10000' });
+    await readyz(rt, 200);
+
+    const fits = await invoke(rt, { mb: 100 });
+    const tooBig = await invoke(rt, { mb: 230 }); // 256 MB minus the runtime's ~45 MB, a worker's 12 MB and a 16 MB margin is less
+    await readyz(rt, 200);
+    const after = await invoke(rt, { mb: 50 });
+
+    assert.deepEqual([fits.status, fits.json], [200, 100]);
+    assert.equal(tooBig.status, 500);
+    assert.equal(tooBig.json.errorType, 'Runtime.OutOfMemory');
+    assert.deepEqual([after.status, after.json], [200, 50]);
+    await rt.stop();
+  });
+
   it('reports process.exit() in user code as Runtime.ExitError and recovers', async () => {
     const rt = await startRuntime('exit');
     await readyz(rt, 200);

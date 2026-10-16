@@ -11,6 +11,7 @@
  * Environment variables are never logged.
  */
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -25,6 +26,42 @@ const initTimeoutMs = Number(env.FF_INIT_TIMEOUT_MS ?? Math.max(10_000, timeoutM
 const maxQueue = Number(env.FF_MAX_QUEUE ?? 32);
 /** AWS Lambda's synchronous request and response limit. */
 const MAX_PAYLOAD_BYTES = 6 * 1024 * 1024;
+const MB = 1024 * 1024;
+/** This thread's steady-state memory in the image. At start-up the container reads less. */
+const MAIN_THREAD_MB = 35;
+/** What a worker needs besides its heap: the isolate, Node's environment, and TypeScript for `.ts` code. */
+const WORKER_BASELINE_MB = 12;
+/** Room for this thread's share of an invocation (6 MB requests and replies, held more than once) and for Buffers, which V8's heap limits do not cover. */
+const MARGIN_MB = 16;
+const MIN_HEAP_MB = 32;
+
+/** The container's memory limit and use (cgroup v2), where this process runs in one. */
+function containerMemoryMb(): { limitMb?: number; inUseMb?: number } {
+  try {
+    const max = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+    const inUseMb = Number(fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8')) / MB;
+    return { limitMb: max === 'max' ? undefined : Number(max) / MB, inUseMb };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * V8 heap limits for every worker. On Kubernetes the container limit equals the function's
+ * memory, and reaching it gets the whole container killed (repeatedly: CrashLoopBackOff),
+ * whereas a full heap only ends the worker, reported as Runtime.OutOfMemory. So the heap gets
+ * the function's memory (or the container limit, if lower) minus what this thread uses, a
+ * worker's baseline, and a margin. Measured once at start: after an out-of-memory, the old
+ * worker's heap is still being freed when its replacement starts.
+ */
+const heapLimits = ((): { maxOldGenerationSizeMb: number; maxYoungGenerationSizeMb: number } => {
+  const { limitMb, inUseMb } = containerMemoryMb();
+  const totalMb = limitMb === undefined ? memoryLimitMb : Math.min(memoryLimitMb, limitMb);
+  const usedMb = Math.max(inUseMb ?? 0, MAIN_THREAD_MB);
+  const heapMb = Math.max(MIN_HEAP_MB, Math.floor(totalMb - usedMb - WORKER_BASELINE_MB - MARGIN_MB));
+  const youngMb = Math.max(2, Math.min(16, Math.floor(heapMb / 8)));
+  return { maxOldGenerationSizeMb: heapMb - youngMb, maxYoungGenerationSizeMb: youngMb };
+})();
 
 const workerConfig: WorkerConfig = {
   taskRoot: env.LAMBDA_TASK_ROOT ?? '/var/task',
@@ -89,10 +126,7 @@ function startWorker(): void {
   const gen = ++generation;
   state = 'starting';
   initError = undefined;
-  const w = new Worker(path.join(__dirname, 'worker.js'), {
-    workerData: workerConfig,
-    resourceLimits: { maxOldGenerationSizeMb: Math.max(16, Math.floor(memoryLimitMb * 0.8)) },
-  });
+  const w = new Worker(path.join(__dirname, 'worker.js'), { workerData: workerConfig, resourceLimits: heapLimits });
   worker = w;
   w.on('message', (message: WorkerMessage) => gen === generation && onMessage(message));
   w.on('error', (err: NodeJS.ErrnoException) => {
@@ -311,5 +345,14 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 startWorker();
 server.listen(port, () => {
-  log({ level: 'info', msg: 'runtime listening', port, timeoutMs, memoryLimitMb, handler: workerConfig.handler, protocol: 1 });
+  log({
+    level: 'info',
+    msg: 'runtime listening',
+    port,
+    timeoutMs,
+    memoryLimitMb,
+    heapLimitMb: heapLimits.maxOldGenerationSizeMb + heapLimits.maxYoungGenerationSizeMb,
+    handler: workerConfig.handler,
+    protocol: 1,
+  });
 });

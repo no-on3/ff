@@ -37,7 +37,7 @@ User code never runs on the main thread. A CPU-bound infinite loop, a memory blo
 |---|---|---|
 | 500 | The thrown error's name (e.g. `TypeError`) | The handler threw or rejected |
 | 504 | `Sandbox.Timedout` | `Task timed out after X.XX seconds`; the worker is recycled |
-| 500 | `Runtime.OutOfMemory` | Worker heap limit (80% of `FUNCTION_MEMORY_LIMIT`) exceeded; recycled |
+| 500 | `Runtime.OutOfMemory` | The worker's heap limit was exceeded (see [Memory](#memory)); recycled |
 | 500 | `Runtime.ExitError` | User code exited or crashed the worker; recycled |
 | 500 | `Function.ResponseSizeTooLarge` | Return value above 6 MB |
 | 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
@@ -65,11 +65,19 @@ export async function handler(event, context) { … }
 | `LAMBDA_TASK_ROOT` | `/var/task` | Where the user code lives |
 | `FF_HANDLER` | `function.handler` | `<file>.<export>`; subdirectories allowed (`src/app.handler`) |
 | `FUNCTION_TIMEOUT` | `30000` | Invocation timeout in **ms** |
-| `FUNCTION_MEMORY_LIMIT` | `128` | MB; sets the worker heap limit and `context.memoryLimitInMB` |
+| `FUNCTION_MEMORY_LIMIT` | `128` | MB; sizes the worker heap limit and sets `context.memoryLimitInMB` |
 | `FUNCTION_NAME`, `FUNCTION_VERSION` | `unknown`, `$LATEST` | Reported in `context` and the logs |
 | `FF_INIT_TIMEOUT_MS` | `max(10000, FUNCTION_TIMEOUT)` | Limit for loading user code |
 | `FF_MAX_QUEUE` | `32` | Invocations allowed to wait behind the running one |
 | `PORT` | `8080` | HTTP port |
+
+## Memory
+
+On Kubernetes the container's memory limit equals the function's memory, as on Lambda. A container that reaches it is killed by the kernel, and repeated kills put the pod into CrashLoopBackOff. A full V8 heap only ends the worker. So the worker's heap limit is the function's memory (or the container limit, if lower), minus 35 MB for the main thread (or more, if the container already uses more at start), 12 MB for a worker's baseline, and 16 MB of margin. A 128 MB function gets about 65 MB of heap; the startup log line shows it (`heapLimitMb`). The first version allowed 80% of the function's memory, and on the cluster the container was OOM-killed first.
+
+Verified on k3d through the API server proxy, with a 128 MB function: a heap-hoarding handler got `Runtime.OutOfMemory` 5 times out of 5, the next invocation always succeeded, and the container restarted 0 times.
+
+Not covered: V8 checks its limit when it collects garbage, so a single huge allocation can get past it, and `Buffer`s live outside the heap. Either can still reach the container limit and restart the container.
 
 ## Logs
 
