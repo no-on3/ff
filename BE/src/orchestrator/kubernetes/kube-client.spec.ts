@@ -15,6 +15,7 @@ interface Captured {
 /** A local fake API server: records requests, answers with the handler's reply. */
 async function fakeApiServer(reply: (req: Captured) => { status: number; body?: unknown; delayMs?: number }) {
   const captured: Captured[] = [];
+  const pendingReplies = new Set<NodeJS.Timeout>();
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
@@ -22,10 +23,12 @@ async function fakeApiServer(reply: (req: Captured) => { status: number; body?: 
       const request = { method: req.method ?? '', url: req.url ?? '', headers: req.headers, body };
       captured.push(request);
       const { status, body: out, delayMs } = reply(request);
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        pendingReplies.delete(timer);
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end(out === undefined ? '' : JSON.stringify(out));
       }, delayMs ?? 0);
+      pendingReplies.add(timer);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -33,7 +36,12 @@ async function fakeApiServer(reply: (req: Captured) => { status: number; body?: 
   return {
     url: `http://127.0.0.1:${port}`,
     captured,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    // Delayed replies the client gave up on must not outlive the test.
+    close: () => {
+      pendingReplies.forEach(clearTimeout);
+      server.closeAllConnections();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    },
   };
 }
 
