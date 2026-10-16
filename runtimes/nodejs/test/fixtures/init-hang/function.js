@@ -1,0 +1,3 @@
+for (;;) {
+  // never finishes loading
+}
