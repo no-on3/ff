@@ -34,6 +34,19 @@ def handler(event, context):
     }
 `;
 
+// Hoards memory until the runtime stops it.
+const pythonHog = `
+def handler(event, context):
+    hoard = []
+    while event["body"].get("hog"):
+        hoard.append(bytearray(4 * 1024 * 1024))
+    return "ok"
+`;
+
+interface PodStatus {
+  status?: { containerStatuses?: Array<{ restartCount: number }> };
+}
+
 // Checks from inside a function pod which destinations the tenant NetworkPolicy allows.
 const networkProbe = `
 import * as dns from 'node:dns/promises';
@@ -153,6 +166,26 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
       expect(failure).toMatchObject({ errorType: 'ValueError', message: 'no thanks' });
     } finally {
       await orchestrator.remove(py);
+    }
+  });
+
+  it('turns a Python memory hog into Runtime.OutOfMemory without restarting the container', async () => {
+    // The container limit equals the function memory, as on Lambda. Reaching it would get
+    // the whole container killed, so the runtime must stop the worker first.
+    const hog = workload({ id: randomUUID(), userId: tenant, name: 'it-python-hog', runtime: Runtime.PYTHON, code: pythonHog, memory: 128, timeout: 10 });
+    try {
+      await orchestrator.deploy(hog);
+      await orchestrator.waitUntilReady(hog, 90_000);
+
+      const failure = await orchestrator.invoke(hog, { hog: true }).catch((error: unknown) => error);
+      const after = await orchestrator.invoke(hog, {});
+      const pods = await client.list<PodStatus>(paths.core(ns, 'pods'), `${LABELS.functionId}=${hog.id}`);
+
+      expect(failure).toMatchObject({ errorType: 'Runtime.OutOfMemory', message: 'Runtime exceeded its memory limit' });
+      expect(after.output).toBe('ok');
+      expect(pods.map((pod) => pod.status?.containerStatuses?.[0]?.restartCount)).toEqual([0]);
+    } finally {
+      await orchestrator.remove(hog);
     }
   });
 

@@ -15,9 +15,11 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
+sys.path.insert(0, str(ROOT))  # for the in-process tests
 
 
 def free_port():
@@ -269,6 +271,25 @@ class Recycling(RuntimeTest):
         self.assertFunctionError(res, 504, "Sandbox.Timedout")
         self.assertEqual((after.status, after.json), (200, "ok"))
 
+    def test_a_replacement_worker_outlives_the_connection_that_replaced_it(self):
+        # Replacement workers are started from request threads. A worker tied to
+        # that thread (PR_SET_PDEATHSIG fires when the parent *thread* exits)
+        # died when the connection closed, and the next invocation failed.
+        rt = self.start("busy-loop", FUNCTION_TIMEOUT="500")
+        rt.ready()
+        connection = HTTPConnection("127.0.0.1", rt.port, timeout=30)
+        connection.request("POST", "/invoke", b'{"spin": true}', {"content-type": "application/json"})
+        timed_out = connection.getresponse()
+        timed_out.read()
+        rt.ready()  # the replacement has loaded the function
+        connection.close()  # so the request thread that started it exits
+        time.sleep(0.5)
+
+        after = rt.invoke({"spin": False})
+
+        self.assertEqual(timed_out.status, 504)
+        self.assertEqual((after.status, after.json), (200, "ok"))
+
     def test_reports_running_out_of_memory_as_runtime_out_of_memory_and_recovers(self):
         rt = self.start("oom", FUNCTION_MEMORY_LIMIT="64", FUNCTION_TIMEOUT="10000")
         rt.ready()
@@ -278,6 +299,28 @@ class Recycling(RuntimeTest):
 
         self.assertFunctionError(res, 500, "Runtime.OutOfMemory")
         self.assertEqual(ready.status, 200)
+
+    def test_budgets_the_function_memory_minus_what_the_runtime_uses(self):
+        rt = self.start("allocate", FUNCTION_MEMORY_LIMIT="256", FUNCTION_TIMEOUT="10000")
+        rt.ready()
+
+        fits = rt.invoke({"mb": 120})
+        too_big = rt.invoke({"mb": 230})  # 256 MB minus the runtime's ~35 MB and its 32 MB margin is less
+        rt.ready()
+        after = rt.invoke({"mb": 50})
+
+        self.assertEqual((fits.status, fits.json), (200, 120))
+        self.assertFunctionError(too_big, 500, "Runtime.OutOfMemory")
+        self.assertEqual((after.status, after.json), (200, 50))
+
+    def test_runs_ten_threads_in_a_128_mb_function(self):
+        rt = self.start("threads")
+        rt.ready()
+
+        res = rt.invoke({})
+
+        self.assertEqual(res.status, 200, res.text)
+        self.assertEqual(res.json, {"threads": 10, "stackSize": 2 * 1024 * 1024})
 
     def test_reports_sys_exit_as_runtime_exit_error_and_recovers(self):
         rt = self.start("exit")
@@ -381,6 +424,38 @@ class Lifecycle(RuntimeTest):
         self.assertEqual(res.status, 200)
         self.assertEqual(code, 0)
         self.assertIn("shutting down; draining invocations", rt.logs())
+
+
+class AcceptLoop(unittest.TestCase):
+    """The HTTP server itself, in this process."""
+
+    def test_a_connection_thread_that_fails_to_start_does_not_stop_the_server(self):
+        # Short of memory, a new thread can fail before it reports that it is
+        # running. threading.Thread.start() then waits forever, which once
+        # stopped the accept loop for good (seen under gVisor).
+        from ff_runtime import main
+
+        server = main.listen(0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: threading.Thread(target=server.shutdown, daemon=True).start())
+
+        with mock.patch.object(threading.Thread, "_bootstrap_inner", side_effect=MemoryError):
+            first = self.healthz(server.server_address[1])
+        second = self.healthz(server.server_address[1])
+
+        self.assertEqual((first, second), (200, 200))
+
+    @staticmethod
+    def healthz(port):
+        connection = HTTPConnection("127.0.0.1", port, timeout=3)
+        try:
+            connection.request("GET", "/healthz")
+            return connection.getresponse().status
+        except OSError as error:
+            return repr(error)
+        finally:
+            connection.close()
 
 
 class Secrets(RuntimeTest):

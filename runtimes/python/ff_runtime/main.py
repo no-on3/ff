@@ -11,6 +11,7 @@ A timeout, out-of-memory, or crash kills the worker and starts a fresh one, so
 even CPU-bound infinite loops are stopped and probes keep answering.
 Environment variables are never logged.
 """
+import _thread
 import json
 import math
 import os
@@ -22,12 +23,32 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 from ff_runtime import protocol
 from ff_runtime.protocol import FUNCTION_VERSION, HANDLER, INIT_TIMEOUT_MS, MAX_PAYLOAD_BYTES, MAX_QUEUE, MEMORY_MB, TIMEOUT_MS, log
+
+
+def start_thread(target, *args):
+    """Runs target(*args) on a new daemon thread; RuntimeError if none can be started.
+
+    threading.Thread.start() waits, with no timeout, for the new thread to report
+    that it is running. A thread that fails before that (MemoryError when the
+    container is short of memory) blocks the caller forever: in the accept loop,
+    that stops all requests. The low-level call returns once the thread exists.
+    """
+    _thread.start_new_thread(target, args)
+
+
+def fatal(reason):
+    """The runtime itself cannot go on: exit, so that Kubernetes restarts the container."""
+    try:
+        log(level="error", msg="runtime failure; exiting so the container restarts", reason=reason)
+    finally:
+        os._exit(1)
 
 
 def crash_error(code):
@@ -61,17 +82,23 @@ class Supervisor:
         self.start_worker()
 
     def start_worker(self):
-        ours, theirs = socket.socketpair()
-        process = subprocess.Popen(
-            [sys.executable, "-P", "-m", "ff_runtime.worker", str(theirs.fileno()), str(os.getpid())],
-            pass_fds=[theirs.fileno()],
-            stdin=subprocess.DEVNULL,
-        )
+        try:
+            ours, theirs = socket.socketpair()
+            process = subprocess.Popen(
+                [sys.executable, "-P", "-m", "ff_runtime.worker", str(theirs.fileno()), str(os.getpid())],
+                pass_fds=[theirs.fileno()],
+                stdin=subprocess.DEVNULL,
+            )
+        except (OSError, MemoryError) as error:
+            fatal(f"cannot start the worker process: {error!r}")
         theirs.close()
         with self.lock:
             self.state, self.init_error = "starting", None
             self.process, self.sock = process, ours
-        threading.Thread(target=self._await_init, args=(process, ours), daemon=True).start()
+        try:
+            start_thread(self._await_init, process, ours)
+        except (RuntimeError, MemoryError) as error:
+            fatal(f"cannot start a thread: {error!r}")
 
     @staticmethod
     def stop_worker(process, sock, grace_s=0.0):
@@ -158,6 +185,8 @@ class Supervisor:
             message = protocol.recv(sock) if protocol.wait_readable(sock, TIMEOUT_MS / 1000) else ["timeout"]
         except (EOFError, OSError):
             message = ["exited"]
+        except MemoryError:  # mid-reply, so the stream is out of step: start a fresh worker
+            message = ["error", "Runtime.OutOfMemory", "Runtime exceeded its memory limit"]
         duration_ms = (time.perf_counter() - started) * 1000
         memory_mb = memory_used_mb(process)
         headers = {
@@ -334,8 +363,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
-    daemon_threads = True
     request_queue_size = 128
+
+    def process_request(self, request, client_address):
+        try:
+            start_thread(self.process_request_thread, request, client_address)
+        except (RuntimeError, MemoryError):  # only this connection is lost
+            self.shutdown_request(request)
+
+    def handle_error(self, request, client_address):
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionError, TimeoutError)):
+            return  # the client went away: not worth a traceback in the function's logs
+        log(level="error", msg="request failed", error=repr(error), stackTrace=traceback.format_exc().splitlines())
 
     def server_bind(self):
         socketserver.TCPServer.server_bind(self)  # without HTTPServer's reverse DNS lookup
@@ -369,7 +409,10 @@ def main():
         SHUTTING_DOWN.set()
         log(level="info", msg="shutting down; draining invocations", signal=signal.Signals(signum).name,
             inFlight=SUPERVISOR.pending)
-        threading.Thread(target=server.shutdown, daemon=True).start()  # stop accepting connections
+        try:
+            start_thread(server.shutdown)  # stop accepting connections
+        except (RuntimeError, MemoryError):
+            os._exit(0)
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)

@@ -24,6 +24,8 @@ main process (main.py)                        worker process (worker.py)
 
 User code never runs in the main process. A Python thread cannot be stopped from outside, so the worker is a separate process: `python -P -m ff_runtime.worker`, connected to the main process by a socket pair that carries length-prefixed JSON messages (`protocol.py`). A CPU-bound infinite loop, a memory blow-up, or `sys.exit()` only ends the worker. The main process answers probes, reports a Lambda-style error, and starts a new worker. Starting a worker takes about 80 ms plus the import time of the user's module.
 
+Each connection gets its own thread, started with the low-level `_thread` call. `threading.Thread.start()` waits, with no timeout, for the new thread to report that it is running, so a thread that dies first under memory pressure would freeze the accept loop. That was seen under gVisor. If the runtime cannot start the worker or a thread it needs, it exits, and Kubernetes restarts the container.
+
 `multiprocessing` is not used: its spawn mode starts an extra resource-tracker process in every container and re-imports the main module in the child. A plain subprocess avoids both and exposes the worker's exit status directly.
 
 ## HTTP protocol
@@ -76,10 +78,13 @@ def handler(event, context):
 
 ## Memory
 
-Two limits apply:
+On Kubernetes the container's memory limit equals the function's memory, as on Lambda. A container that reaches it is killed by the kernel, all processes together (`memory.oom.group = 1`, verified on k3s v1.37.1), and repeated kills put the pod into CrashLoopBackOff. So the runtime stops the worker first:
 
-1. **The runtime's own limit.** After user code is loaded, the worker sets `RLIMIT_DATA` to its current data size plus `FUNCTION_MEMORY_LIMIT`. Allocations beyond it raise `MemoryError`. The runtime turns that into `Runtime.OutOfMemory` and replaces the worker, and the container keeps running. The limit counts reserved address space, so it is measured from the loaded state: imports that reserve large buffers still load. Verified with numpy 2.5.4 in a 128 MB function (container limit 256 MB): 2000×2000 matrix products run, with a peak of 135 MB for both processes. A 3000×3000 product gets `Runtime.OutOfMemory`, and the next invocation succeeds on a fresh worker.
-2. **The container's memory limit**, set by the Kubernetes manifest. It is the hard limit, and it catches memory the first one misses, for example memory allocated by C extensions. The worker sets its `oom_score_adj` to 1000, so the kernel's OOM killer picks it before the main process. On Kubernetes with cgroup v2, however, the kubelet makes the kernel kill all of a container's processes together (`memory.oom.group = 1`, verified on k3s v1.37.1). In that case the container restarts, and the invocation fails at the proxy.
+- **Budget.** Once user code is loaded, the worker may use the function's memory (or the container limit, if lower), minus what the container already uses, minus 32 MB for the main process. The main process can hold a 6 MB request and reply more than once. The worker enforces this with `RLIMIT_DATA` = its current data size + the budget. Allocations beyond it raise `MemoryError`. The runtime reports `Runtime.OutOfMemory`, replaces the worker in about 0.1 to 1 s, and the container keeps running. Data the imports already reserved, such as numpy's buffers, is not charged twice.
+- **Thread stacks.** `RLIMIT_DATA` also counts thread stacks, so Python threads get 2 MB stacks instead of 8 MB. Ten threads, the size of boto3's transfer pool, then take 20 MB of the budget rather than 80 MB.
+- **Verified** on k3d through the API server proxy, with a 128 MB function: a hoarding handler got `Runtime.OutOfMemory` 5 times out of 5, the next invocation always succeeded, and the container restarted 0 times. With numpy 2.5.4 in a 128 MB container, 1000×1000 matrix products run and 2000×2000 gets `Runtime.OutOfMemory`; 2000×2000 runs in 256 MB.
+- **What the budget misses** (memory that C extensions allocate in other ways, or a fork) still reaches the container limit. The worker's `oom_score_adj` of 1000 makes it the kernel's first choice of victim, but Kubernetes' group kill takes the whole container anyway.
+- **Under gVisor** (K-11), `RLIMIT_DATA` is not enforced (verified), so the budget does not apply. A function that outgrows its memory meets the sandbox's limit instead.
 
 ## Environment
 

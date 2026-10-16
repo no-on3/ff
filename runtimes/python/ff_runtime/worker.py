@@ -4,19 +4,29 @@ main.py starts it as `python -P -m ff_runtime.worker <socket fd> <main pid>`.
 It imports the handler once, then runs one invocation at a time. If it hangs,
 runs out of memory, or exits, main.py kills it and starts a fresh one.
 """
+import _thread
 import decimal
 import importlib
 import json
 import os
 import resource
-import signal
 import socket
 import sys
+import threading
 import time
 import traceback
 
 from ff_runtime import protocol
 from ff_runtime.protocol import FUNCTION_NAME, FUNCTION_VERSION, HANDLER, MAX_PAYLOAD_BYTES, MEMORY_MB, TASK_ROOT
+
+# What the main process may need on top of the worker: an invocation's request
+# and reply (up to 6 MB each) are held more than once while being passed on.
+MAIN_PROCESS_MARGIN_MB = 32
+MIN_BUDGET_MB = 16
+# Stacks count toward the memory limit, so Python threads get 2 MB instead of
+# the platform's 8 MB. Ten threads (boto3's transfer pool) then cost 20 MB of
+# the budget, not 80 MB.
+THREAD_STACK_BYTES = 2 * 1024 * 1024
 
 
 class InitError(Exception):
@@ -45,16 +55,21 @@ class Context:
         return max(0, int(self._deadline_ms - time.time() * 1000))
 
 
-def die_with_parent(parent_pid):
-    """Linux: get SIGKILL when main.py exits, so a busy handler is never orphaned."""
-    try:
-        import ctypes
+def exit_with_parent(parent_pid):
+    """Exit once main.py is gone, so a busy handler is never left running.
 
-        ctypes.CDLL(None).prctl(1, int(signal.SIGKILL))  # PR_SET_PDEATHSIG
-    except (OSError, AttributeError):
-        return
-    if os.getppid() != parent_pid:  # main.py exited before prctl took effect
+    In a container main.py is PID 1, and its exit ends every process. This
+    covers running elsewhere. PR_SET_PDEATHSIG does not fit: it fires when the
+    parent *thread* exits, and replacement workers are started from request
+    threads, so a worker would be killed as soon as its connection closed.
+    """
+
+    def watch():
+        while os.getppid() == parent_pid:
+            time.sleep(1)
         os._exit(1)
+
+    _thread.start_new_thread(watch, ())
 
 
 def prefer_for_oom_kill():
@@ -66,19 +81,39 @@ def prefer_for_oom_kill():
         pass
 
 
+def container_memory_kb():
+    """(limit, in use) of this container's memory cgroup; None where unknown or unlimited."""
+    try:
+        with open("/sys/fs/cgroup/memory.max") as limit, open("/sys/fs/cgroup/memory.current") as current:
+            text = limit.read().strip()
+            return (None if text == "max" else int(text) // 1024), int(current.read()) // 1024
+    except (OSError, ValueError):
+        return None, None
+
+
 def limit_memory():
     """Make allocations beyond the function's memory raise MemoryError.
 
+    The runtime reports that as Runtime.OutOfMemory and replaces the worker.
+    Reaching the container's limit instead gets the whole container killed by
+    the kernel, and repeated kills put the pod into CrashLoopBackOff.
+
+    The budget is the function's memory (or the container limit, if lower),
+    minus what the container already uses and room for the main process.
     RLIMIT_DATA counts reserved as well as used private memory, so the limit is
-    what the loaded code already holds (imports such as numpy reserve large
-    buffers) plus the function's memory. The container's memory limit remains
-    the hard limit.
+    the worker's current data size plus that budget: what imports have already
+    reserved (numpy's buffers, for example) is not charged again.
     """
     data_kb = protocol.proc_status_kb("VmData")
     if data_kb is None:
         return
+    limit_kb, in_use_kb = container_memory_kb()
+    if in_use_kb is None:  # not in a container: count the runtime's two processes
+        in_use_kb = (protocol.proc_status_kb("VmRSS") or 0) + (protocol.proc_status_kb("VmRSS", os.getppid()) or 0)
+    total_kb = MEMORY_MB * 1024 if limit_kb is None else min(MEMORY_MB * 1024, limit_kb)
+    budget_kb = max(MIN_BUDGET_MB * 1024, total_kb - in_use_kb - MAIN_PROCESS_MARGIN_MB * 1024)
     _, hard = resource.getrlimit(resource.RLIMIT_DATA)
-    limit = (data_kb + MEMORY_MB * 1024) * 1024
+    limit = (data_kb + budget_kb) * 1024
     if hard != resource.RLIM_INFINITY:
         limit = min(limit, hard)
     try:
@@ -167,9 +202,10 @@ def serve(sock, handler):
 
 def main():
     sock = socket.socket(fileno=int(sys.argv[1]))
-    die_with_parent(int(sys.argv[2]))
+    exit_with_parent(int(sys.argv[2]))
     sys.argv = sys.argv[:1]
     prefer_for_oom_kill()
+    threading.stack_size(THREAD_STACK_BYTES)
     try:
         os.chdir(TASK_ROOT)  # as on AWS Lambda, relative paths resolve against the task root
     except OSError:
