@@ -154,9 +154,6 @@ psd
 thumb
 sketch
 lambda-func
-nomad-vagrant/.vagrant
-nomad-vagrant/pulumi
-nomad-vagrant/shared
 scripts
 
 # End of https://www.toptal.com/developers/gitignore/api/node,react

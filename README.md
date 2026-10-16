@@ -27,7 +27,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - Custom domains and function versioning.
 - Multi-file packages with dependencies, which need the zip pipeline (parent plan R-02).
 
-Nomad is no longer used. `nomad-vagrant/` is kept only for reference.
+Nomad is no longer used; its development VM was removed.
 
 ## Repository layout
 
@@ -42,7 +42,6 @@ Nomad is no longer used. `nomad-vagrant/` is kept only for reference.
 | `docs/` | The [getting-started guide](docs/getting-started.md), plans, ADRs, and the [Kubernetes dev guide](docs/kubernetes-dev-guide.md) |
 | `examples/` | Example functions (Node.js and Python) used by the getting-started guide |
 | `cli/`, `cli-rust/`, `lambda-func/`, `scripts/` | Earlier prototypes (packaging CLIs, the old function wrapper, old setup scripts); not used by the current stack |
-| `nomad-vagrant/` | Deprecated Nomad VM |
 
 ## Quick start (development)
 
