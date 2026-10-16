@@ -2,7 +2,7 @@ import { UnauthorizedException } from '@nestjs/common';
 import { resolveUserId } from './user.decorator';
 
 describe('resolveUserId', () => {
-  it('uses the authenticated user (JwtStrategy stores the token subject)', () => {
+  it('uses the authenticated user (an authentication guard stores the token subject)', () => {
     expect(resolveUserId('auth0|abc', 'dev')).toBe('auth0|abc');
   });
 

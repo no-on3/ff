@@ -598,3 +598,13 @@ The rules:
 | K-13 Cold-start performance | 💡 Proposed | | Measurements and options in K-13; needs a product decision on CPU burst |
 
 **After the plan:** [Getting started](getting-started.md) and `examples/` were added: a developer's setup from a fresh clone, plus the everyday commands. Its commands were run against the dev stack. Doing so found one more bug, fixed in `b054a2c`: the Node.js runtime ran TypeScript with syntax errors as code the transpiler had "recovered", so a broken function deployed as ACTIVE and returned `{}`.
+
+**Dead code removed** (commits `874d86f` to `c996fcf`, before new work starts on this version):
+- the Nomad VM folder;
+- both CLI prototypes;
+- nine documents about the old platform;
+- the broken compose `full` profile and the unused Dockerfiles;
+- in the backend: the Prometheus module, whose metrics were never recorded; the Auth0 strategy, which was never switched on; the Nomad-era `supportsScaleToZero` switch; 54 unused packages; and 50 settings nothing read;
+- the dashboard's Metrics page, which showed that empty endpoint.
+
+The dashboard builds again. Rows above that mention these items describe the state at the time.
