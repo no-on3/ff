@@ -31,6 +31,7 @@ They are built into the bundle, so a production build needs its own values. The 
 - **What it shows:** no account yet, the onboarding form; a pending account, the "waiting for approval" page, with "Check again"; a rejected one, why; a suspended or closed one, its functions with a banner saying what still works. Account settings and API keys are under "Account" and "API keys".
 - **The plan's limits** (P-15): `GET /me` gives each account's plan. The create, edit and scaling forms take their maximums from it, and the account page lists every limit (`src/lib/plans.ts`).
 - **Members** (`src/components/Members.tsx`, P-16): owners invite people by e-mail with a role, change roles, remove members and cancel invitations. The pages show each role only what it may do (`can()` in `src/lib/session.ts`): a viewer gets no button to create, change or invoke functions.
+- **Invocation statuses** (`src/services/api.ts`, P-20): the history shows each of the API's, which `src/contract.test.ts` checks against the backend's list: `THROTTLED` (no instance was free in time) in amber and `LOST` (the backend stopped during the call, so the answer is unknown) in grey, neither billed, with the reason under the call.
 - **API keys** (`src/components/ApiKeys.tsx`): owners create a key with a name, scopes and an expiry, see it once, and revoke it. The list shows each key by its prefix, `ffk_<id>_…`.
 
 `dependencies` lists exactly what ships in the bundle, so `npm audit --omit=dev` audits what users get; the build and test tools are `devDependencies`.

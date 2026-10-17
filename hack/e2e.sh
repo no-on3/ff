@@ -8,7 +8,10 @@
 # code archive, read through SeaweedFS's filer), then the same lifecycle
 # for a Python function. Then plans (P-15): an account on a small plan, its
 # limits, its namespace's quota and its rate limits, which don't touch other
-# accounts. Removes its compose project (including its volumes),
+# accounts. Then usage records (P-20): one per invocation, with the runtime
+# given the invocation's ID, and a call lost when the backend is killed during
+# it, which the restarted backend marks LOST without billing it.
+# Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
 # gVisor (hack/k8s/gvisor-up.sh installs it).
@@ -167,5 +170,82 @@ for _ in 1 2 3; do as_small POST "/functions/$small_id/invoke" '{"input":{}}' >/
 check "invocations have their own rate: two a second, then 429" " 201 201 429" "$codes"
 http PUT "/functions/$small_id/scaling-config" '{"maxInstances": 1}' >/dev/null
 check "another account, from the same address, isn't slowed: its own count, and its function isn't found" 404 "$(status)"
+
+echo "== usage records (P-20)"
+# q <sql>: one value, or a row with its columns separated by spaces.
+q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F ' ' -c "$1"; }
+meter='export async function handler(event: { body: { sleepMs?: number; fail?: boolean } }, context: { awsRequestId: string }) {
+  if (event.body.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.body.sleepMs));
+  if (event.body.fail) throw new Error("failed on purpose");
+  return { requestId: context.awsRequestId };
+}'
+created="$(http POST /functions "$(jq -n --arg code "$meter" '{name: "e2e-meter", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')")"
+check "create returns 201" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
+meter_id="$(jq -r .id <<<"$created")"
+
+# A cold start first: no instance left, as after the idle window. Before any call, so the backend's
+# autoscaler, which steps up a function that had calls in the last minute, leaves it at zero.
+kubectl -n "$tenant_ns" scale deployment "fn-$meter_id" --replicas=0 >/dev/null
+for _ in $(seq 1 90); do
+  [ -z "$(kubectl -n "$tenant_ns" get pods -l "ff.dev/function-id=$meter_id" -o name 2>/dev/null)" ] && break
+  sleep 1
+done
+check "scaled to zero: no instance left" "" "$(kubectl -n "$tenant_ns" get pods -l "ff.dev/function-id=$meter_id" -o name 2>/dev/null)"
+cold="$(http POST "/functions/$meter_id/invoke" '{"input":{}}' | jq -r .id)"
+check "a call that started an instance: its cold start is recorded, and not billed" "success t t" \
+  "$(q "SELECT status, init_ms > 0, billed_ms < init_ms FROM usage_records WHERE request_id = '$cold'")"
+
+invoked="$(http POST "/functions/$meter_id/invoke" '{"input":{}}')"
+inv="$(jq -r .id <<<"$invoked")"
+check "the runtime got the invocation's ID as its request ID" "201 $inv" "$(status) $(jq -r .output.requestId <<<"$invoked")"
+check "the runtime's log names the call by that ID" true \
+  "$(kubectl -n "$tenant_ns" logs "deployment/fn-$meter_id" 2>/dev/null | grep -q "START RequestId: $inv" && echo true || echo false)"
+check "its usage record: a success, the function's memory, billed its duration rounded up" "success 128 t" \
+  "$(q "SELECT status, memory_mb, billed_ms = ceil(duration_ms) FROM usage_records WHERE request_id = '$inv'")"
+check "and the history's start and end, to the millisecond, and its duration" "t t t" \
+  "$(q "SELECT u.started_at = date_trunc('milliseconds', i.created_at), u.ended_at = date_trunc('milliseconds', i.updated_at),
+               u.duration_ms = round(i.duration::numeric, 3)
+          FROM usage_records u JOIN function_invocations i ON i.id = u.request_id WHERE u.request_id = '$inv'")"
+
+http POST "/functions/$meter_id/invoke" '{"input":{"fail":true}}' >/dev/null
+check "a function's error answers 400" 400 "$(status)"
+check "its record: an error, billed its duration rounded up; the history has the runtime's memory measure too" "error t t" \
+  "$(q "SELECT u.status, u.billed_ms = ceil(u.duration_ms), i.memory_used > 0
+          FROM usage_records u JOIN function_invocations i ON i.id = u.request_id WHERE i.function_id = '$meter_id' AND i.status = 'ERROR'")"
+http POST "/functions/$meter_id/invoke" '{"input":{"sleepMs":5000}}' >/dev/null
+check "a timeout answers 400" 400 "$(status)"
+check "its record: a timeout, billed the function's timeout" "timeout 3000" \
+  "$(q "SELECT u.status, u.billed_ms FROM usage_records u JOIN function_invocations i ON i.id = u.request_id
+          WHERE i.function_id = '$meter_id' AND i.status = 'TIMEOUT'")"
+
+# A call lost: the backend is killed while it waits for the answer.
+be_pid="${e2e_pids[${#e2e_pids[@]}-1]}"
+(http POST "/functions/$meter_id/invoke" '{"input":{"sleepMs":2500}}' >/dev/null 2>&1 || true) &
+call_pid=$!
+lost=""
+for _ in $(seq 1 50); do
+  lost="$(q "SELECT id FROM function_invocations WHERE function_id = '$meter_id' AND status = 'RUNNING'")"
+  [ -n "$lost" ] && break
+  sleep 0.2
+done
+check "a slow call is running" true "$([ -n "$lost" ] && echo true || echo false)"
+kill -9 "$be_pid"
+wait "$be_pid" 2>/dev/null || true # reaped quietly: bash would report "Killed"
+wait "$call_pid" 2>/dev/null || true
+# Restarted at once, as a supervisor would. Its reaper marks the call LOST once the longest a call can
+# take has passed (2 × 3 s + a 1 s cold-start limit + 30 s), at the next run of the minute.
+e2e_start_backend "$work/backend-restarted.log" "$api" "${be_env[@]}" K8S_READY_TIMEOUT_SECONDS=1
+state=""
+for _ in $(seq 1 120); do
+  state="$(q "SELECT status FROM function_invocations WHERE id = '$lost'")"
+  [ "$state" = LOST ] && break
+  sleep 1
+done
+check "the restarted backend marks the call LOST" LOST "$state"
+check "its record bills nothing" "lost 0 0.000" "$(q "SELECT status, billed_ms, duration_ms FROM usage_records WHERE request_id = '$lost'")"
+check "the history says why" "Lost: the backend restarted during the call, so its answer is unknown. It isn't billed." \
+  "$(http GET "/functions/$meter_id/invocations" | jq -r --arg id "$lost" '.invocations[] | select(.id == $id) | .error')"
+check "one record per invocation, none without one" "5 5" \
+  "$(q "SELECT (SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'), (SELECT count(*) FROM usage_records WHERE function_id = '$meter_id')")"
 
 echo "e2e: $passed checks passed"

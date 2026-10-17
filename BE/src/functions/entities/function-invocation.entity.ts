@@ -18,6 +18,8 @@ export enum InvocationStatus {
   COMPLETED = 'COMPLETED',
   /** No instance could take the call in time: the runtime answered 429 (P-15). Not billed (D7). */
   THROTTLED = 'THROTTLED',
+  /** The backend restarted during the call: its answer was lost, and it isn't billed (P-20, D6). */
+  LOST = 'LOST',
 }
 
 @Entity('function_invocations')

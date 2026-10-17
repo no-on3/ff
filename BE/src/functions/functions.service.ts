@@ -5,11 +5,14 @@ import { Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { describeError } from '../common/describe-error';
-import { CodeTooLargeError, FunctionThrottledError, FunctionTimeoutError } from '../orchestrator/orchestrator.errors';
+import { CodeTooLargeError, FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, initMsOf } from '../orchestrator/orchestrator.errors';
 import { ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService, tenantLimits } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
+import { UsageStatus } from '../usage/usage-record.entity';
+import { failureStatus, usageRecord } from '../usage/usage';
+import { UsageService } from '../usage/usage.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
@@ -86,6 +89,7 @@ export class FunctionsService {
     private metricsService: MetricsService,
     private plans: PlansService,
     private audit: AuditService,
+    private usage: UsageService,
   ) {}
 
   private readyTimeoutMs(): number {
@@ -322,26 +326,32 @@ export class FunctionsService {
     this.metricsService.invocationStarted(function_);
     const startTime = Date.now();
     try {
-      const result = await this.orchestrator.invoke(function_, input || {});
+      // The invocation's ID is the request's: the runtime logs it, and the usage record is keyed by it (D6).
+      const result = await this.orchestrator.invoke(function_, input || {}, invocation.id);
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
       this.metricsService.recordMetric(id, duration, result.memoryUsedMb || 0, false);
 
       // Update invocation with results and metrics. Duration is the execution
-      // time reported by the runtime (the basis for metering), else end-to-end.
+      // time reported by the runtime (the basis for metering), else end-to-end
+      // without the cold start, which isn't billed (D7).
       invocation.output = result.output;
-      invocation.duration = result.durationMs ?? duration;
+      invocation.duration = result.durationMs ?? Math.max(0, duration - (result.initMs ?? 0));
       invocation.memoryUsed = result.memoryUsedMb;
       invocation.status = InvocationStatus.COMPLETED;
-      await this.invocationsRepository.save(invocation);
+      // Should this fail, the catch below ends the call as a platform failure, unbilled: its outcome couldn't be kept.
+      await this.finish(function_, invocation, UsageStatus.SUCCESS, result.initMs);
 
       return invocation;
     } catch (error) {
       const duration = Date.now() - startTime;
       this.metricsService.recordMetric(id, duration, 0, true);
 
-      invocation.duration = duration;
+      // The runtime measures a call that failed too; without its measure, end-to-end without the cold start.
+      const measured = error instanceof FunctionRuntimeError ? error : undefined;
+      invocation.duration = measured?.durationMs ?? Math.max(0, duration - (initMsOf(error) ?? 0));
+      invocation.memoryUsed = measured?.memoryUsedMb;
       invocation.status =
         error instanceof FunctionTimeoutError
           ? InvocationStatus.TIMEOUT
@@ -350,11 +360,40 @@ export class FunctionsService {
             : InvocationStatus.ERROR;
       // The history is the account's to read: a platform failure is generic there too (D4).
       invocation.error = callersFailure(error) ?? platformFailure(this.logger, 'The invocation', error);
-      await this.invocationsRepository.save(invocation);
+      await this.finish(function_, invocation, failureStatus(error), initMsOf(error));
       throw failureResponse(error, invocation.error);
     } finally {
       this.metricsService.invocationFinished(function_);
     }
+  }
+
+  /**
+   * The invocation's final state and its usage record, in one transaction:
+   * neither is written without the other (D6). The row is locked first, as
+   * the reaper locks it: a call it already marked LOST (the backend was
+   * stopped past the call's deadline) stays LOST, with the record it got.
+   */
+  private finish(function_: Function, invocation: FunctionInvocation, status: UsageStatus, initMs: number | undefined): Promise<void> {
+    return this.invocationsRepository.manager.transaction(async (manager) => {
+      const current = await manager.findOne(FunctionInvocation, { where: { id: invocation.id }, lock: { mode: 'pessimistic_write' } });
+      if (current && current.status !== InvocationStatus.RUNNING) {
+        this.logger.warn(`Invocation ${invocation.id} ended after it was marked ${current.status}, which stands`);
+        return;
+      }
+      // Deleting the function during the call took its history along; the call ran all the same, and is billed.
+      const endedAt = current ? (await manager.save(FunctionInvocation, invocation)).updatedAt : new Date();
+      await this.usage.record(
+        usageRecord(function_, {
+          requestId: invocation.id,
+          startedAt: invocation.createdAt,
+          endedAt,
+          status,
+          durationMs: invocation.duration ?? 0,
+          initMs,
+        }),
+        manager,
+      );
+    });
   }
 
   /** What GET /functions/:id/scaling-config answers. */

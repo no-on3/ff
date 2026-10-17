@@ -10,7 +10,7 @@ import {
   formatMemory,
   parseInvokeInput,
 } from '../lib/functions';
-import { Function, FunctionInvocation, functionsApi } from '../services/api';
+import { Function, FunctionInvocation, InvocationStatus, functionsApi } from '../services/api';
 import { can } from '../lib/session';
 import { useSession } from '../session/session';
 import { updateFunction } from '../store/functionSlice';
@@ -21,13 +21,22 @@ import { ScalingConfiguration } from './ScalingConfiguration';
 /** How many invocations the history shows, newest first. */
 const HISTORY_PAGE = 20;
 
-const STATUS_STYLES: Record<string, string> = {
-  ACTIVE: 'bg-green-100 text-green-800',
-  COMPLETED: 'bg-green-100 text-green-800',
-  CREATING: 'bg-blue-100 text-blue-800',
-  RUNNING: 'bg-blue-100 text-blue-800',
+const GREEN = 'bg-green-100 text-green-800';
+const BLUE = 'bg-blue-100 text-blue-800';
+const RED = 'bg-red-100 text-red-800';
+/** A function's status: ready, starting, or anything else, which is a failure. */
+const FUNCTION_STYLES: Record<string, string> = { ACTIVE: GREEN, CREATING: BLUE };
+const statusStyle = (status: string) => FUNCTION_STYLES[status] ?? RED;
+/** Every invocation status has its own: a new one fails the type check until it gets one. */
+const INVOCATION_STYLES: Record<InvocationStatus, string> = {
+  SUCCESS: GREEN,
+  COMPLETED: GREEN,
+  RUNNING: BLUE,
+  ERROR: RED,
+  TIMEOUT: RED,
+  THROTTLED: 'bg-amber-100 text-amber-800', // not billed: try again
+  LOST: 'bg-gray-200 text-gray-800', // not billed: its answer is unknown
 };
-const statusStyle = (status: string) => STATUS_STYLES[status] ?? 'bg-red-100 text-red-800';
 
 const FunctionDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -256,7 +265,7 @@ const FunctionDetail: React.FC = () => {
                 <div key={invocation.id} className="card">
                   <div className="flex justify-between items-start mb-4">
                     <span className="text-sm text-gray-500">{new Date(invocation.createdAt).toLocaleString()}</span>
-                    <span className={`px-2 py-1 rounded-full text-sm ${statusStyle(invocation.status)}`}>
+                    <span className={`px-2 py-1 rounded-full text-sm ${INVOCATION_STYLES[invocation.status] ?? RED}`}>
                       {invocation.status}
                     </span>
                   </div>

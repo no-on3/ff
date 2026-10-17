@@ -16,6 +16,7 @@ import { FunctionInvocation, InvocationStatus } from './entities/function-invoca
 import { FunctionStatus, Function, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 import { recordingAudit } from '../audit/test-fixtures';
+import { recordingUsage } from '../usage/test-fixtures';
 import { onePlan } from '../plans/test-fixtures';
 import { FUNCTION_DEFAULTS, MemoryRepository, eventually } from './test-fixtures';
 
@@ -48,6 +49,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
   const functions = new MemoryRepository<Function>(FUNCTION_DEFAULTS);
   const invocations = new MemoryRepository<FunctionInvocation>();
   const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
+  const usage = recordingUsage();
   const config = {
     get: (key: string, fallback?: unknown) => (key === 'orchestrator.readyTimeoutSeconds' ? READY_TIMEOUT_SECONDS : fallback),
   };
@@ -60,6 +62,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() } as never,
     onePlan(),
     recordingAudit().audit,
+    usage.usage,
   );
   const spec = (name: string, code: string) => ({ name, runtime: Runtime.NODEJS, code, memory: 128, timeout: 3 });
 
@@ -140,6 +143,10 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     expect(failure).toBeInstanceOf(BadRequestException);
     expect(await invocations.find({ where: { functionId: fn.id } })).toEqual([
       expect.objectContaining({ status: InvocationStatus.TIMEOUT, error: 'Sandbox.Timedout: No response within 8000 ms' }),
+    ]);
+    // Without an answer there is no measure from the runtime: billed as a timeout, the function's 3 s (P-20, D7).
+    expect(usage.records.filter((record) => record.functionId === fn.id)).toEqual([
+      expect.objectContaining({ status: 'timeout', billedMs: 3_000, memoryMb: 128, initMs: null }),
     ]);
   });
 });

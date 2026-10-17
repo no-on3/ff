@@ -35,6 +35,13 @@ async function migrateDownTo(dataSource: DataSource, name: string): Promise<void
 const BASELINE = migrationNames[0];
 const SCALING_MODEL = migrationNames.find((name) => name.startsWith('ScalingModel')) as string;
 const API_KEYS = migrationNames.find((name) => name.startsWith('ApiKeys')) as string;
+const AUDIT_LOG = migrationNames.find((name) => name.startsWith('AuditLog')) as string;
+/** The usage partition of the month `ahead` months from now, by the UTC calendar (P-20). */
+function usagePartition(ahead = 0): string {
+  const now = new Date();
+  const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + ahead, 1));
+  return `usage_records_${month.toISOString().slice(0, 7).replace('-', '_')}`;
+}
 
 interface ColumnRow {
   table_name: string;
@@ -167,6 +174,34 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the usage-records migration adds LOST and the table with this month's and next month's partitions, and reverts with a LOST invocation present (P-20)", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const partitions = () =>
+        dataSource.query(`SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'usage_records'::regclass ORDER BY 1`);
+      expect(await partitions()).toEqual([{ relname: usagePartition(0) }, { relname: usagePartition(1) }]);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('f', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      const lost = () => dataSource.query(`INSERT INTO function_invocations (function_id, input, status) VALUES ($1, '{}', 'LOST')`, [id]);
+      await lost();
+
+      await migrateDownTo(dataSource, AUDIT_LOG);
+
+      expect(await dataSource.query(`SELECT status FROM function_invocations`)).toEqual([{ status: 'ERROR' }]);
+      expect(await dataSource.query(`SELECT to_regclass('usage_records') AS t, to_regclass('${usagePartition(0)}') AS p`)).toEqual([{ t: null, p: null }]);
+      expect(await dataSource.query(`SELECT proname FROM pg_proc WHERE proname LIKE 'ff\\_%' ORDER BY 1`)).toEqual([{ proname: 'ff_refuse_change' }]);
+      await expect(lost()).rejects.toThrow(/invalid input value for enum/);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+      expect(await partitions()).toEqual([{ relname: usagePartition(0) }, { relname: usagePartition(1) }]);
+      await lost();
+    });
+  });
+
   describe('after the migrations', () => {
     let db: ScratchDatabase;
 
@@ -195,8 +230,9 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
+      const monthly = /^usage_records_\d{4}_\d{2}$/; // usage_records' partitions, one per month (P-20)
 
-      expect(tables).toEqual([
+      expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
         'api_keys',
         'audit_log',
@@ -207,8 +243,10 @@ run('database schema (L2, real PostgreSQL)', () => {
         'memberships',
         'migrations',
         'plans',
+        'usage_records',
         'users',
       ]);
+      expect(tables.filter((table) => monthly.test(table))).toEqual([usagePartition(0), usagePartition(1)]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
       for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
@@ -259,7 +297,7 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(raw).toEqual({ account_id: ACCOUNT, min_instances: 0, scale_to_zero: true });
     });
 
-    it('still deletes a function with its invocations and metrics (P-20 moves usage out of their reach)', async () => {
+    it('deletes a function with its invocations and metrics, and keeps its usage records (P-20)', async () => {
       const functions = db.dataSource.getRepository(Function);
       const fn = await functions.save(
         functions.create({ name: 'doomed', accountId: ACCOUNT, runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 }),
@@ -280,14 +318,21 @@ run('database schema (L2, real PostgreSQL)', () => {
         maxConcurrency: 1,
       });
 
+      await db.dataSource.query(
+        `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb,
+           duration_ms, billed_ms, status) VALUES (gen_random_uuid(), now(), now(), $1, $2, 'doomed', 'nodejs', 128, 2, 2, 'error')`,
+        [ACCOUNT, fn.id],
+      );
+
       await functions.delete(fn.id);
 
-      const [{ invocations, metrics }] = await db.dataSource.query(
+      const [counts] = await db.dataSource.query(
         `SELECT (SELECT count(*)::int FROM function_invocations WHERE function_id = $1) AS invocations,
-                (SELECT count(*)::int FROM function_metrics WHERE function_id = $1) AS metrics`,
+                (SELECT count(*)::int FROM function_metrics WHERE function_id = $1) AS metrics,
+                (SELECT count(*)::int FROM usage_records WHERE function_id = $1) AS usage`,
         [fn.id],
       );
-      expect({ invocations, metrics }).toEqual({ invocations: 0, metrics: 0 });
+      expect(counts).toEqual({ invocations: 0, metrics: 0, usage: 1 });
     });
 
     it('running the migrations again changes nothing', async () => {
@@ -303,6 +348,7 @@ run('database schema (L2, real PostgreSQL)', () => {
           WHERE n.nspname = 'public' AND t.typtype = 'e'`,
       );
       expect(enums).toEqual([]);
+      expect(await db.dataSource.query(`SELECT proname FROM pg_proc WHERE proname LIKE 'ff\\_%'`)).toEqual([]);
       expect(await pendingMigrations(db.dataSource)).toEqual(migrationNames);
 
       await db.dataSource.runMigrations({ transaction: 'each' });

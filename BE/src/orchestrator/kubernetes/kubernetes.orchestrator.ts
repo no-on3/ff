@@ -6,7 +6,9 @@ import {
   FunctionThrottledError,
   FunctionTimeoutError,
   OrchestratorError,
+  withInitMs,
 } from '../orchestrator.errors';
+import { REQUEST_ID_HEADER } from '../../common/request-context';
 import { FunctionWorkload, InvokeResult, Orchestrator, TenantLimits } from '../orchestrator.types';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
@@ -250,36 +252,49 @@ export class KubernetesOrchestrator implements Orchestrator {
     return (await this.instances(fn)).desired;
   }
 
-  async invoke(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<InvokeResult> {
-    const { desired, ready } = await this.instances(fn);
-    if (ready === 0) {
-      // Only raise from zero: an instance may already be starting, perhaps asked for by the
-      // scaler for a burst of calls, and setting 1 here would take the others away again.
-      if (desired === 0) {
-        this.logger.log(`Cold start: scaling ${fn.id} from zero`);
-        await this.scale(fn, 1);
+  async invoke(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<InvokeResult> {
+    let initMs: number | undefined;
+    try {
+      const { desired, ready } = await this.instances(fn);
+      if (ready === 0) {
+        // A cold start: how long it takes is recorded, even when it fails (D7 doesn't bill it).
+        const waitStarted = Date.now();
+        try {
+          // Only raise from zero: an instance may already be starting, perhaps asked for by the
+          // scaler for a burst of calls, and setting 1 here would take the others away again.
+          if (desired === 0) {
+            this.logger.log(`Cold start: scaling ${fn.id} from zero`);
+            await this.scale(fn, 1);
+          }
+          await this.waitForAnInstance(fn, this.settings.readyTimeoutSeconds * 1000);
+        } finally {
+          initMs = Date.now() - waitStarted;
+        }
       }
-      await this.waitForAnInstance(fn, this.settings.readyTimeoutSeconds * 1000);
+      return { ...this.toResult(await this.post(fn, payload, requestId)), ...(initMs !== undefined ? { initMs } : {}) };
+    } catch (error) {
+      throw withInitMs(error, initMs);
     }
-    return this.toResult(await this.post(fn, payload));
   }
 
-  private async post(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<KubeResponse> {
+  private async post(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<KubeResponse> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const body = JSON.stringify(payload);
+    // The runtime logs the call under this ID, and answers with it (D6).
+    const headers: Record<string, string> = requestId ? { [REQUEST_ID_HEADER]: requestId } : {};
     // A call may wait for a free instance (the runtime then answers 429), then runs up to its timeout.
     const timeoutMs = maxQueueWaitMs(fn) + fn.timeout * 1000 + 2000;
     if (this.settings.invokeMode === 'proxy') {
       try {
-        return await this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs });
+        return await this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs, headers });
       } catch (error) {
         // Giving up waiting is the same timeout in both modes, so development records what production does.
         if (error instanceof KubeRequestTimeoutError) throw noResponseWithin(timeoutMs);
         throw error;
       }
     }
-    return postJson(`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`, body, timeoutMs);
+    return postJson(`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`, body, timeoutMs, headers);
   }
 
   private toResult(res: KubeResponse): InvokeResult {
@@ -290,17 +305,15 @@ export class KubernetesOrchestrator implements Orchestrator {
         return undefined;
       }
     })();
+    // The runtime measures every call it ran, failed ones too: what D7 bills for errors and timeouts (P-20).
+    const measured = { durationMs: measure(res.headers['x-ff-duration-ms']), memoryUsedMb: measure(res.headers['x-ff-max-memory-used-mb']) };
     if (res.status === 200 && parsed !== undefined) {
-      return {
-        output: parsed,
-        durationMs: Number(res.headers['x-ff-duration-ms']) || undefined,
-        memoryUsedMb: Number(res.headers['x-ff-max-memory-used-mb']) || undefined,
-      };
+      return { output: parsed, ...measured };
     }
     const failure = runtimeError(parsed);
     if (failure) {
-      if (failure.errorType === 'Sandbox.Timedout') throw new FunctionTimeoutError(failure.errorMessage);
-      if (res.headers['x-ff-function-error']) throw new FunctionRuntimeError(failure.errorType, failure.errorMessage);
+      if (failure.errorType === 'Sandbox.Timedout') throw new FunctionTimeoutError(failure.errorMessage, measured);
+      if (res.headers['x-ff-function-error']) throw new FunctionRuntimeError(failure.errorType, failure.errorMessage, measured);
       // The runtime's queue: full, or no instance was free within one timeout.
       if (res.status === 429 && failure.errorType === 'TooManyRequestsException') throw new FunctionThrottledError(failure.errorMessage);
     }
@@ -339,12 +352,20 @@ function noResponseWithin(timeoutMs: number): FunctionTimeoutError {
   return new FunctionTimeoutError(`No response within ${timeoutMs} ms`);
 }
 
+/** A number the runtime measured, from its answer's header: 0 is a measure; a missing or garbled header is none. */
+function measure(header: string | string[] | undefined): number | undefined {
+  const text = Array.isArray(header) ? header[0] : header;
+  if (text === undefined || text.trim() === '') return undefined;
+  const value = Number(text);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 /** Direct (in-cluster) call to a function Service. */
-function postJson(url: string, body: string, timeoutMs: number): Promise<KubeResponse> {
+function postJson(url: string, body: string, timeoutMs: number, headers: Record<string, string> = {}): Promise<KubeResponse> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       url,
-      { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+      { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers } },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));

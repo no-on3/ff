@@ -12,23 +12,48 @@ export class OrchestratorError extends Error {
   }
 }
 
+/** What the runtime measured of a call that failed, from its answer's headers (P-20). */
+export interface Measured {
+  durationMs?: number;
+  memoryUsedMb?: number;
+}
+
 /** The function ran and failed (it threw, ran out of memory, crashed, or could not load). */
 export class FunctionRuntimeError extends Error {
+  readonly durationMs?: number;
+  readonly memoryUsedMb?: number;
+
   constructor(
     readonly errorType: string,
     message: string,
+    measured: Measured = {},
   ) {
     super(message);
     this.name = 'FunctionRuntimeError';
+    this.durationMs = measured.durationMs;
+    this.memoryUsedMb = measured.memoryUsedMb;
   }
 }
 
 /** The function exceeded its configured timeout. */
 export class FunctionTimeoutError extends FunctionRuntimeError {
-  constructor(message: string) {
-    super('Sandbox.Timedout', message);
+  constructor(message: string, measured: Measured = {}) {
+    super('Sandbox.Timedout', message, measured);
     this.name = 'FunctionTimeoutError';
   }
+}
+
+const coldStarts = new WeakMap<object, number>();
+
+/** Marks what a call threw with how long its cold start took, if it had one (P-20). */
+export function withInitMs<T>(error: T, initMs: number | undefined): T {
+  if (initMs !== undefined && typeof error === 'object' && error !== null) coldStarts.set(error, initMs);
+  return error;
+}
+
+/** How long the cold start before a failed call took, if it had one. */
+export function initMsOf(error: unknown): number | undefined {
+  return typeof error === 'object' && error !== null ? coldStarts.get(error) : undefined;
 }
 
 /** The function's code failed to load: the error its runtime reported at start-up. */

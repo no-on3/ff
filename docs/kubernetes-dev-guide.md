@@ -100,7 +100,7 @@ cd BE && npm run migration:run && npm run start:dev
 ## End-to-end test
 
 ```bash
-hack/e2e.sh                # L4: the whole stack through the REST API (~2 min)
+hack/e2e.sh                # L4: the whole stack through the REST API (~3 min)
 hack/e2e.sh --teardown     # … and delete the cluster afterwards
 hack/e2e-tenancy.sh        # L5: every route as another account and anonymously (~1 min)
 ```
@@ -111,7 +111,9 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 3. history (with duration);
 4. update (new code live);
 5. delete (Deployment gone, record gone);
-6. the same create, invoke, and delete for a Python function.
+6. the same create, invoke, and delete for a Python function;
+7. plans and rate limits (P-15): an account on a small plan, its limits, its namespace's quota, and its rates;
+8. usage records (P-20): one per invocation, with the invocation's ID as the runtime's request ID, for a success, an error, a timeout and a cold start; then the backend is killed during a call, restarted, and marks the call `LOST`, unbilled, within about a minute.
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
 

@@ -16,6 +16,7 @@ import { settings } from '../orchestrator/kubernetes/test-fixtures';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 import { recordingAudit } from '../audit/test-fixtures';
+import { recordingUsage } from '../usage/test-fixtures';
 import { onePlan } from '../plans/test-fixtures';
 import { FUNCTION_DEFAULTS, MemoryRepository, eventually } from './test-fixtures';
 
@@ -57,6 +58,7 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
     metrics,
     onePlan(),
     recordingAudit().audit,
+    recordingUsage().usage,
   );
 
   afterAll(async () => {

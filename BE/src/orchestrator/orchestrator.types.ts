@@ -35,6 +35,8 @@ export interface InvokeResult {
   output: unknown;
   durationMs?: number;
   memoryUsedMb?: number;
+  /** How long the call waited for an instance to start from zero: a cold start (P-20). */
+  initMs?: number;
 }
 
 export interface Orchestrator {
@@ -59,7 +61,12 @@ export interface Orchestrator {
    * current version and can serve. Reject with diagnostics on timeout.
    */
   waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void>;
-  invoke(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<InvokeResult>;
+  /**
+   * Calls the function. `requestId` goes to the runtime (X-FF-Request-Id), so the
+   * invocation, its usage record and its log lines share one ID (D6). An error
+   * after a cold start carries its duration: initMsOf().
+   */
+  invoke(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<InvokeResult>;
   scale(fn: FunctionWorkload, replicas: number): Promise<void>;
   /** Instances that can serve now. */
   readyInstances(fn: FunctionWorkload): Promise<number>;

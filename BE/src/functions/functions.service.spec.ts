@@ -16,6 +16,8 @@ import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
+import { UsageService } from '../usage/usage.service';
+import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
@@ -45,6 +47,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn() };
   const TENANT = { quota: BETA_LIMITS.quota };
   const audit = { record: jest.fn() };
+  const usage = { record: jest.fn() };
+  /** The transaction that ends an invocation: it locks the row, saves the final state, then writes the usage record (D6). */
+  const ending = { findOne: jest.fn(), save: jest.fn() };
 
   const activeFunction = (): Function =>
     ({
@@ -81,7 +86,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     transaction.countBy.mockImplementation(async () => existingFunctions);
     transaction.save.mockImplementation(async (_target, entity) => functionsRepo.save(entity));
     Object.assign(functionsRepo, { manager: { transaction: jest.fn(async (work) => work(transaction)) } });
-    invocationsRepo.create.mockImplementation((dto) => ({ ...dto, createdAt: new Date() }));
+    invocationsRepo.create.mockImplementation((dto) => ({ ...dto, id: 'inv-1', createdAt: new Date('2026-10-17T10:00:00Z') }));
+    ending.findOne.mockImplementation(async () => ({ status: InvocationStatus.RUNNING }));
+    ending.save.mockImplementation(async (_target, entity) => invocationsRepo.save({ ...entity, updatedAt: new Date('2026-10-17T10:00:02Z') }));
+    Object.assign(invocationsRepo, { manager: { transaction: jest.fn(async (work) => work(ending)) } });
     invocationsRepo.save.mockImplementation(async (entity) => entity);
     orchestrator = {
       deploy: jest.fn(),
@@ -107,6 +115,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { provide: MetricsService, useValue: metrics },
         { provide: PlansService, useValue: plans },
         { provide: AuditService, useValue: audit },
+        { provide: UsageService, useValue: usage },
       ],
     }).compile();
     service = moduleRef.get(FunctionsService);
@@ -353,7 +362,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1', { a: 1 });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 });
+      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, 'inv-1');
       expect(invocation).toMatchObject({
         status: InvocationStatus.COMPLETED,
         output: { hello: 'world' },
@@ -392,7 +401,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1');
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {});
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, 'inv-1');
       expect(invocation.duration).toBeGreaterThanOrEqual(0);
     });
 
@@ -628,6 +637,129 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { quota: { pods: 7, cpu: '2', memory: '3Gi' } },
         { quota: { pods: 7, cpu: '2', memory: '3Gi' } },
       ]);
+    });
+  });
+
+  describe('usage records (P-20, D6, D7)', () => {
+    const record = () => usage.record.mock.calls[0][0];
+
+    it("sends the invocation's ID to the runtime, and writes its usage record in the transaction that ends it", async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), memory: 256 });
+      orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 1.09, memoryUsedMb: 50 });
+
+      await service.invoke('user-1', 'fn-1', { name: 'x' });
+
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, 'inv-1');
+      expect(usage.record).toHaveBeenCalledWith(
+        {
+          requestId: 'inv-1',
+          startedAt: new Date('2026-10-17T10:00:00Z'),
+          endedAt: new Date('2026-10-17T10:00:02Z'),
+          accountId: 'user-1',
+          functionId: 'fn-1',
+          functionName: 'hello',
+          runtime: 'nodejs',
+          memoryMb: 256,
+          durationMs: '1.090',
+          billedMs: 2,
+          initMs: null,
+          status: 'success',
+        },
+        ending,
+      );
+      expect(ending.save.mock.invocationCallOrder[0]).toBeLessThan(usage.record.mock.invocationCallOrder[0]);
+    });
+
+    it("records a function's error with the runtime's duration and memory, which its answer's headers carried", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockRejectedValue(new FunctionRuntimeError('Error', 'boom', { durationMs: 12.3, memoryUsedMb: 61 }));
+
+      await service.invoke('user-1', 'fn-1', {}).catch(() => undefined);
+
+      expect(invocationsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ status: InvocationStatus.ERROR, duration: 12.3, memoryUsed: 61 }));
+      expect(record()).toMatchObject({ status: 'error', durationMs: '12.300', billedMs: 13 });
+    });
+
+    it.each([
+      ['a timeout bills the function\'s timeout', new FunctionTimeoutError('Task timed out after 5.00 seconds', { durationMs: 5003 }), 'timeout', 5000],
+      ['a throttled call bills nothing', new FunctionThrottledError('Rate exceeded'), 'throttled', 0],
+      ['a platform failure bills nothing', new OrchestratorError('pod unreachable'), 'platform_error', 0],
+      ['a cold start that failed to load bills nothing', new FunctionLoadError('Runtime.ImportModuleError', 'nope'), 'platform_error', 0],
+    ])('%s', async (_case, error, status, billed) => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockRejectedValue(error);
+
+      await service.invoke('user-1', 'fn-1', {}).catch(() => undefined);
+
+      expect(record()).toMatchObject({ status, billedMs: billed });
+    });
+
+    it('records the cold start, apart from the billed duration (D7)', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 3.2, initMs: 7400 });
+
+      await service.invoke('user-1', 'fn-1', {});
+
+      expect(record()).toMatchObject({ initMs: 7400, billedMs: 4 });
+    });
+
+    it('records the cold start before a failed call, and bills nothing for it', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockRejectedValue(withInitMs(new OrchestratorError('no instance became ready'), 90000));
+
+      await service.invoke('user-1', 'fn-1', {}).catch(() => undefined);
+
+      expect(record()).toMatchObject({ status: 'platform_error', initMs: 90000, billedMs: 0 });
+    });
+
+    it("times a call itself when the runtime didn't, leaving the cold start out (D7)", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      // 7 s from sending the call to its answer, of which 5 s waited for an instance to start.
+      jest.spyOn(Date, 'now').mockReturnValueOnce(1_000).mockReturnValueOnce(8_000).mockReturnValueOnce(20_000).mockReturnValueOnce(27_000);
+      orchestrator.invoke.mockResolvedValueOnce({ output: 1, initMs: 5_000 });
+      orchestrator.invoke.mockRejectedValueOnce(withInitMs(new OrchestratorError('connection reset'), 5_000));
+
+      const invocation = await service.invoke('user-1', 'fn-1', {});
+      await service.invoke('user-1', 'fn-1', {}).catch(() => undefined);
+
+      expect(invocation.duration).toBe(2_000);
+      expect(usage.record.mock.calls.map(([written]) => [written.status, written.durationMs, written.billedMs, written.initMs])).toEqual([
+        ['success', '2000.000', 2_000, 5_000],
+        ['platform_error', '2000.000', 0, 5_000],
+      ]);
+    });
+
+    it('locks the invocation before ending it, as the reaper does', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 1 });
+
+      await service.invoke('user-1', 'fn-1', {});
+
+      expect(ending.findOne).toHaveBeenCalledWith(FunctionInvocation, { where: { id: 'inv-1' }, lock: { mode: 'pessimistic_write' } });
+      expect(ending.findOne.mock.invocationCallOrder[0]).toBeLessThan(ending.save.mock.invocationCallOrder[0]);
+    });
+
+    it('leaves a call the reaper already marked LOST as it is: its record says so, and the caller still gets the answer', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 'late', durationMs: 1 });
+      ending.findOne.mockResolvedValue({ status: InvocationStatus.LOST });
+
+      const invocation = await service.invoke('user-1', 'fn-1', {});
+
+      expect(invocation.output).toBe('late');
+      expect(ending.save).not.toHaveBeenCalled();
+      expect(usage.record).not.toHaveBeenCalled();
+    });
+
+    it('bills a call whose function was deleted while it ran: the history went with the function, the record stays', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 30.5 });
+      ending.findOne.mockResolvedValue(null);
+
+      await service.invoke('user-1', 'fn-1', {});
+
+      expect(ending.save).not.toHaveBeenCalled();
+      expect(record()).toMatchObject({ requestId: 'inv-1', status: 'success', billedMs: 31, endedAt: expect.any(Date) });
     });
   });
 

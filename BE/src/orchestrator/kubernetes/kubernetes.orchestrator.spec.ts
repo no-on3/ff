@@ -1,3 +1,5 @@
+import * as http from 'node:http';
+import { AddressInfo } from 'node:net';
 import {
   CodeTooLargeError,
   FunctionLoadError,
@@ -5,10 +7,11 @@ import {
   FunctionThrottledError,
   FunctionTimeoutError,
   OrchestratorError,
+  initMsOf,
 } from '../orchestrator.errors';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
-import { MAX_CODE_BYTES, TENANT_QUOTA_NAME } from './manifests';
+import { MAX_CODE_BYTES, RUNTIME_PORT, TENANT_QUOTA_NAME } from './manifests';
 import { functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
 
@@ -347,6 +350,121 @@ describe('KubernetesOrchestrator', () => {
       api.responses.push({ status: 500, headers: { 'x-ff-function-error': 'Unhandled' }, body: '{"errorType":"Runtime.OutOfMemory","errorMessage":"heap"}' });
 
       await expect(orchestrator.invoke(fn, {})).rejects.toMatchObject({ errorType: 'Runtime.OutOfMemory', message: 'heap' });
+    });
+
+    describe('what usage records need (P-20)', () => {
+      /** Starting instances that become ready after `ms`: a cold start of about that long. */
+      const readyAfter = (ms: number) => {
+        api.objects.set(deploymentPath, { ...rolledOut(2), status: { readyReplicas: 0 } });
+        setTimeout(() => api.objects.set(deploymentPath, rolledOut(2)), ms);
+      };
+
+      it("sends the invocation's ID to the runtime as X-FF-Request-Id, and nothing without one (D6)", async () => {
+        api.objects.set(deploymentPath, rolledOut(1));
+
+        await orchestrator.invoke(fn, {}, 'inv-1');
+        await orchestrator.invoke(fn, {});
+
+        expect(api.requests.map((request) => request.options?.headers)).toEqual([{ 'x-ff-request-id': 'inv-1' }, {}]);
+      });
+
+      it("sends it on a direct call to the function's Service too, and reads a measure of 0 ms as one", async () => {
+        // A local server stands in for the Service; the request still names the Service's address.
+        const seen: Array<{ url?: string; headers: http.IncomingHttpHeaders; body: string }> = [];
+        const server = http.createServer((req, res) => {
+          let body = '';
+          req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+          req.on('end', () => {
+            seen.push({ url: req.url, headers: req.headers, body });
+            res.writeHead(200, { 'content-type': 'application/json', 'x-ff-duration-ms': '0.00', 'x-ff-max-memory-used-mb': '48' });
+            res.end('"ok"');
+          });
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const { port } = server.address() as AddressInfo;
+        const send = http.request;
+        const urls: string[] = [];
+        const spy = jest.spyOn(http, 'request').mockImplementation((url: string, options: http.RequestOptions, callback: () => void) => {
+          urls.push(url);
+          return send(`http://127.0.0.1:${port}${new URL(url).pathname}`, options, callback);
+        });
+        try {
+          const direct = new KubernetesOrchestrator(settings({ invokeMode: 'direct' }), api, 5);
+          api.objects.set(deploymentPath, rolledOut(1));
+
+          const result = await direct.invoke(fn, { a: 1 }, 'inv-2');
+
+          expect(urls).toEqual([`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`]);
+          expect(seen).toEqual([
+            { url: '/invoke', headers: expect.objectContaining({ 'x-ff-request-id': 'inv-2', 'content-type': 'application/json' }), body: '{"a":1}' },
+          ]);
+          // 0.00 ms is what the runtime measured: billed as such, not replaced by the backend's own, longer measure.
+          expect(result).toEqual({ output: 'ok', durationMs: 0, memoryUsedMb: 48 });
+        } finally {
+          spy.mockRestore();
+          await new Promise((resolve) => server.close(resolve));
+        }
+      });
+
+      it('keeps what the runtime measured of a call that failed: its duration and memory', async () => {
+        api.objects.set(deploymentPath, rolledOut(1));
+        const measured = { 'x-ff-function-error': 'Unhandled', 'x-ff-duration-ms': '41.25', 'x-ff-max-memory-used-mb': '77' };
+        api.responses.push(
+          { status: 500, headers: measured, body: '{"errorType":"TypeError","errorMessage":"bad input"}' },
+          {
+            status: 504,
+            headers: { ...measured, 'x-ff-duration-ms': '5003.10' },
+            body: '{"errorType":"Sandbox.Timedout","errorMessage":"Task timed out after 5.00 seconds"}',
+          },
+          { status: 500, headers: { 'x-ff-function-error': 'Unhandled', 'x-ff-duration-ms': 'soon' }, body: '{"errorType":"Error","errorMessage":"x"}' },
+        );
+
+        const failures: unknown[] = [];
+        for (let i = 0; i < 3; i++) failures.push(await orchestrator.invoke(fn, {}).catch((error: unknown) => error));
+
+        expect(failures[0]).toBeInstanceOf(FunctionRuntimeError);
+        expect(failures[0]).toMatchObject({ errorType: 'TypeError', durationMs: 41.25, memoryUsedMb: 77 });
+        expect(failures[1]).toBeInstanceOf(FunctionTimeoutError);
+        expect(failures[1]).toMatchObject({ durationMs: 5003.1, memoryUsedMb: 77 });
+        // A garbled or missing header is no measure: the backend then times the call itself.
+        expect(failures[2]).toMatchObject({ durationMs: undefined, memoryUsedMb: undefined });
+      });
+
+      it('reports how long a cold start took, and no cold start for a warm call', async () => {
+        readyAfter(40);
+
+        const cold = await orchestrator.invoke(fn, {});
+        const warm = await orchestrator.invoke(fn, {});
+
+        expect(cold.initMs).toBeGreaterThanOrEqual(35);
+        expect(cold.initMs).toBeLessThan(5_000);
+        expect(warm).not.toHaveProperty('initMs');
+      });
+
+      it('marks a failure after a cold start with how long the cold start took, and one without a cold start with nothing', async () => {
+        readyAfter(40);
+        const boom = { status: 500, headers: { 'x-ff-function-error': 'Unhandled' }, body: '{"errorType":"Error","errorMessage":"boom"}' };
+        api.responses.push(boom, boom);
+
+        const afterColdStart = await orchestrator.invoke(fn, {}).catch((error: unknown) => error);
+        const warm = await orchestrator.invoke(fn, {}).catch((error: unknown) => error);
+
+        expect(afterColdStart).toBeInstanceOf(FunctionRuntimeError);
+        expect(initMsOf(afterColdStart)).toBeGreaterThanOrEqual(35);
+        expect(warm).toBeInstanceOf(FunctionRuntimeError);
+        expect(initMsOf(warm)).toBeUndefined();
+      });
+
+      it('marks a cold start that never became ready with how long it waited, and never calls the function', async () => {
+        const impatient = new KubernetesOrchestrator(settings({ readyTimeoutSeconds: 0.05 }), api, 5);
+        api.objects.set(deploymentPath, { ...rolledOut(2), status: { readyReplicas: 0 } }); // stays so
+
+        const error = await impatient.invoke(fn, {}).catch((failure: unknown) => failure);
+
+        expect(error).toBeInstanceOf(OrchestratorError);
+        expect(initMsOf(error)).toBeGreaterThanOrEqual(50);
+        expect(api.requests).toEqual([]);
+      });
     });
   });
 

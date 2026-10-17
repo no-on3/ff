@@ -81,7 +81,14 @@ export type NewFunction = Pick<Function, 'name' | 'runtime' | 'code' | 'memory' 
 /** What PUT /functions/:id accepts: any subset of these. */
 export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'>>;
 
-export type InvocationStatus = 'RUNNING' | 'COMPLETED' | 'ERROR' | 'TIMEOUT';
+/**
+ * Every status an invocation can have: the API's, which contract.test.ts checks.
+ * THROTTLED: no instance could take the call in time (P-15). LOST: the backend
+ * stopped during the call, so its answer is unknown (P-20). Neither is billed.
+ * SUCCESS has been in the database's list from the start, but nothing writes it.
+ */
+export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'COMPLETED', 'THROTTLED', 'LOST'] as const;
+export type InvocationStatus = (typeof INVOCATION_STATUSES)[number];
 
 /** An invocation, as the API returns it: from POST /functions/:id/invoke, and in the history. */
 export interface FunctionInvocation {

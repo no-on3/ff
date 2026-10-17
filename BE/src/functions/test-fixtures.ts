@@ -45,13 +45,17 @@ export class MemoryRepository<T extends { id?: string }> {
       .map((row) => ({ ...row }));
   }
 
-  /** Enough of TypeORM's EntityManager for FunctionsService's create transaction: one process, so no locks. */
+  /**
+   * Enough of TypeORM's EntityManager for FunctionsService's transactions, the
+   * create and the end of an invocation (P-20): one process, so locks are ignored.
+   */
   get manager() {
     return {
       transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> =>
         work({
           query: async () => [],
           countBy: async (_target: unknown, where: Partial<T>) => (await this.find({ where })).length,
+          findOne: async (_target: unknown, options: { where: Partial<T> }) => this.findOne(options),
           save: async (_target: unknown, entity: T) => this.save(entity),
         }),
     };

@@ -118,7 +118,7 @@ hack/k8s/gvisor-up.sh                                       # about 80 s the fir
 sed -i 's/^K8S_RUNTIME_CLASS=.*/K8S_RUNTIME_CLASS=gvisor/' BE/.env
 ```
 
-**Check the whole setup** with the end-to-end test. It uses its own compose project, ports, and backend, so it can run next to your dev stack. It takes about 2 minutes and needs 3.5 GB of free memory.
+**Check the whole setup** with the end-to-end test. It uses its own compose project, ports, and backend, so it can run next to your dev stack. It takes about 3 minutes and needs 3.5 GB of free memory.
 
 ```bash
 hack/e2e.sh
@@ -141,13 +141,15 @@ ID=$(jq -n --rawfile code examples/hello.ts \
 echo "$ID"
 ```
 
-**Invoke it.** `input` becomes `event.body` in the handler, and `duration` is the execution time in milliseconds:
+**Invoke it.** `input` becomes `event.body` in the handler, and `duration` is the execution time in milliseconds, as the runtime measured it:
 
 ```bash
 curl -s -X POST "$FF/functions/$ID/invoke" -H 'content-type: application/json' \
-  -d '{"input": {"name": "Tunis"}}' | jq '{status, output, duration}'
-# {"status": "COMPLETED", "output": {"message": "Hello Tunis", "requestId": "…"}, "duration": 1.09}
+  -d '{"input": {"name": "Tunis"}}' | jq '{id, status, output, duration}'
+# {"id": "6f1c…", "status": "COMPLETED", "output": {"message": "Hello Tunis", "requestId": "6f1c…"}, "duration": 1.09}
 ```
+
+The invocation's `id` is also the call's request ID: the handler gets it as `context.awsRequestId`, the function's log names the call by it (`START RequestId: 6f1c…`), and so does its usage record (section 5).
 
 **A Python function**, the same way:
 
@@ -326,6 +328,25 @@ curl -s "$FF/audit-log?limit=20" -H "$AUTH" | jq -c '.entries[] | {at, actorLabe
 curl -s "$FF/audit-log?limit=20&before=<next>" -H "$AUTH"   # the next page, older; "next" is null on the last one
 ```
 
+**Usage records.** Every invocation leaves one row in `usage_records` when it ends, written in the same transaction as its final state in the history (D6 of the client-readiness plan). The row copies what the price will depend on: the account, the function's ID, name, runtime and memory at the time of the call, the runtime's duration, the billed duration, the cold start (`init_ms`), and the outcome. Its `request_id` is the invocation's ID. Rows are never changed or deleted, not even when the function changes or is deleted: the database refuses it. What is billed follows D7:
+
+| Outcome (`status`) | Billed duration (`billed_ms`) |
+|---|---|
+| `success`, `error` (it threw, crashed or ran out of memory) | the runtime's duration, rounded up to the millisecond |
+| `timeout` | the function's timeout |
+| `throttled` (no instance free in time), `platform_error` (the cold start failed, the pod was unreachable), `lost` | nothing |
+
+The cold start, when the call had to start an instance, is recorded in `init_ms` and never billed. Until the usage page (P-22), read the records in SQL:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d serverless_platform \
+  -c "SELECT started_at, function_name, status, memory_mb, duration_ms, billed_ms, init_ms FROM usage_records ORDER BY started_at DESC LIMIT 10"
+```
+
+The table has a partition per month, by the UTC calendar (`usage_records_2026_10`, …). The backend creates this month's and the next two at startup and then daily, so a month is never missing.
+
+**Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known.
+
 **The console with a login.** With the backend in OIDC mode as above, copy `FE/.env.example` to `FE/.env.local`, set `VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff` in it, and restart `npm run dev`. The console then opens on a login page:
 1. "Sign up" opens Keycloak's registration form. The verification e-mail arrives in Mailpit (http://localhost:58025); its link asks for a password, then brings you back to the console, logged in.
 2. The console asks you to create your account, which then waits for approval. Approve it as above, and "Check again" shows the functions.
@@ -395,7 +416,7 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
-hack/e2e.sh                                              # the whole stack through the API, about 2 min
+hack/e2e.sh                                              # the whole stack through the API, about 3 min
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 1 min
 ```
 
@@ -440,6 +461,8 @@ docker compose down -v
 | Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. |
 | `create` takes 90 s, then fails | The function cannot load: the answer starts with `The function failed to load:` and the runtime's reason. Fix the code and send it with `PUT /functions/<id>`: see "If a function cannot load" in section 3. If the answer is 500 instead, the platform failed: see the row below about request IDs. |
 | An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first. The previous version still serves, and the record is unchanged. |
+| An invocation stays `RUNNING`, then becomes `LOST` | The backend stopped during the call, so its answer is unknown; it isn't billed. Invoke again. See "Lost calls" in section 5. |
+| The backend logs `Could not create usage partitions` | The migrations haven't run (`cd BE && npm run migration:run`), or the database refused: the message says why. An invocation in a month without a partition fails with `no partition of relation "usage_records" found for row`. |
 | An invoke answers 429 with `TooManyRequestsException: Rate exceeded: no instance was free within …` | More calls arrived together than the function's instances could take within one timeout. Raise `maxInstances` (`PUT /functions/<id>/scaling-config`), or make the calls shorter. |
 | `jq: parse error` after `echo "$response" \| jq` in zsh | zsh's `echo` expands `\n` inside JSON strings. Pipe `curl` straight into `jq`, or use `printf '%s' "$response"`. |
 

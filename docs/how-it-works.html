@@ -383,7 +383,7 @@
 <section id="data">
   <div class="wrap">
     <h2>Data model</h2>
-    <p class="lead">Seven tables hold everything the backend knows: functions with their invocations and metrics, and since P-12 accounts, with their plans, users and memberships. A function belongs to an account, and its invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). A user belongs to accounts through memberships, each with a role. The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>account_id</code> is <code>accountId</code>).</p>
+    <p class="lead">These tables hold everything the backend knows: functions with their invocations and metrics; accounts, with their plans, users, memberships, invitations and API keys (P-12 to P-16); and two tables written once and never changed, which a trigger guards: the audit log (P-17) and the usage records (P-20). A function belongs to an account, and its invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). Its usage records have no foreign key, so they outlive it, and <code>usage_records</code> has a partition per month. A user belongs to accounts through memberships, each with a role. The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>account_id</code> is <code>accountId</code>).</p>
     <div class="card pad scrollx"><div id="erDiagram" class="capped"></div></div>
     <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set.</p>
     <h3>Lifecycles</h3>
@@ -397,7 +397,8 @@
         <thead><tr><th>Data</th><th>Stored in</th><th>Written by</th><th>Read by</th></tr></thead>
         <tbody>
           <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
-          <tr><td>Invocations: input, output, status, duration, memory, error</td><td>PostgreSQL <code>function_invocations</code></td><td>invoke (RUNNING, then the outcome)</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
+          <tr><td>Invocations: input, output, status, duration, memory, error</td><td>PostgreSQL <code>function_invocations</code></td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST)</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
+          <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td>nothing yet: the usage page (P-22), then billing (P-32)</td></tr>
           <tr><td>Per-minute metrics: request and error counts, p50/p95/p99, averages, instances</td><td>PostgreSQL <code>function_metrics</code></td><td>the metrics tick, every 60 s</td><td>the console (<code>GET /metrics/:id</code>)</td></tr>
           <tr><td>An archive copy of the code</td><td>S3 bucket <code>functions</code>, key <code>&lt;id&gt;/code.ts</code> or <code>code.py</code></td><td>create, update</td><td>nothing yet: the cluster gets the code from the ConfigMap</td></tr>
           <tr><td>The code the pod runs</td><td>ConfigMap <code>fn-&lt;id&gt;-&lt;hash&gt;</code>, immutable, mounted read-only at <code>/var/task</code></td><td>create, update</td><td>the runtime, when it starts</td></tr>
@@ -433,7 +434,7 @@
             <tbody id="errorRows"></tbody>
           </table>
         </div>
-        <p class="note">Errors from an invocation carry <code>x-ff-function-error: Unhandled</code>. The backend records <code>Sandbox.Timedout</code> as an invocation with status <code>TIMEOUT</code> and every other error as <code>ERROR</code>, then answers the caller with 400 and <code>"&lt;errorType&gt;: &lt;message&gt;"</code>; a full queue answers 429 with <code>TooManyRequestsException</code>. A platform failure, such as an unreachable pod, answers 500 with a generic message and the request ID, and the history records it the same way; the details go only to the server log (D4 of the client-readiness plan). A call that gets no answer within the backend's own wait (see the limits below) is <code>TIMEOUT</code> too, with <code>No response within … ms</code>, in both invoke modes.</p>
+        <p class="note">Errors from an invocation carry <code>x-ff-function-error: Unhandled</code>. The backend records <code>Sandbox.Timedout</code> as an invocation with status <code>TIMEOUT</code> and every other error as <code>ERROR</code>, then answers the caller with 400 and <code>"&lt;errorType&gt;: &lt;message&gt;"</code>; a full queue answers 429 with <code>TooManyRequestsException</code>. A platform failure, such as an unreachable pod, answers 500 with a generic message and the request ID, and the history records it the same way; the details go only to the server log (D4 of the client-readiness plan). A call that gets no answer within the backend's own wait (see the limits below) is <code>TIMEOUT</code> too, with <code>No response within … ms</code>, in both invoke modes. The duration and memory the runtime measured are kept for failed calls too, and every outcome gets its usage record: errors are billed their duration and timeouts the function's timeout, while a full queue and platform failures aren't billed (D7).</p>
       </div>
     </div>
   </div>
@@ -480,6 +481,7 @@
             <tr><td>Backend wait for an answer</td><td>One timeout of waiting for a free instance, plus the timeout, plus 2 s; then the invocation is <code>TIMEOUT</code></td></tr>
             <tr><td>Wait for create or update</td><td>90 s (<code>FF_READY_TIMEOUT_SECONDS</code>)</td></tr>
             <tr><td>Wait for a cold start</td><td>90 s (<code>K8S_READY_TIMEOUT_SECONDS</code>)</td></tr>
+            <tr><td>A call is lost</td><td>When it is still <code>RUNNING</code> after one timeout of waiting, the timeout, the cold-start limit and 30 s: the backend stopped during it. It becomes <code>LOST</code>, unbilled, within the next minute</td></tr>
             <tr><td>Scale to zero</td><td>After the plan's idle window without invocations (<code>idleSeconds</code>, 900 s on beta)</td></tr>
             <tr><td>Instances</td><td>min 0, max 3 by default; <code>PUT /functions/:id/scaling-config</code> sets them, both up to the plan's <code>instancesPerFunction</code> (10 on beta)</td></tr>
           </tbody>
@@ -507,6 +509,7 @@
           <tr><td>Kubernetes driver</td><td><code>BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts</code>, <code>kube-client.ts</code>, <code>kubernetes.settings.ts</code></td></tr>
           <tr><td>Every Kubernetes object</td><td><code>BE/src/orchestrator/kubernetes/manifests.ts</code>, <code>naming.ts</code></td></tr>
           <tr><td>Metrics, autoscaling, scale to zero</td><td><code>BE/src/metrics/metrics.service.ts</code>, <code>scaling.ts</code></td></tr>
+          <tr><td>Usage records: what is billed, lost calls, monthly partitions</td><td><code>BE/src/usage/usage.ts</code>, <code>usage.service.ts</code>, and the migration <code>…-UsageRecords.ts</code></td></tr>
           <tr><td>S3 archive</td><td><code>BE/src/minio-client/minio-client.service.ts</code></td></tr>
           <tr><td>Configuration and its defaults</td><td><code>BE/src/config/configuration.ts</code>, <code>BE/.env</code></td></tr>
           <tr><td>Runtimes</td><td><code>runtimes/nodejs/src/</code>, <code>runtimes/python/ff_runtime/</code></td></tr>
@@ -530,8 +533,9 @@ const PY = 'a7d4e2c1-6b3f-4d8e-9a1b-2c3d4e5f6a7b';
 const SLOW = '5e2b9c7a-1d4f-4a6e-8b3c-9f0e1d2c3b4a';
 const BAD = 'c1b2a3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 const NS = 'ff-t-27d6fbbe5c7d';
-const REQ = '7b0c2d8e-5f4a-4e1b-9c3d-2a6f8e1b4c7d';
 const INV = 'd2a1f0c4-3b5e-4f6a-8c7d-9e0f1a2b3c4d';
+// The call's request ID in the runtime is the invocation's ID: the backend sends it as x-ff-request-id (P-20, D6).
+const REQ = INV;
 const HASH_V1 = 'c4d785b3974c4e13e098fb8b8034abd3aaee686501033a3aef4019435aad8c44';
 const HASH_V2 = '9c9e249cb76d185984d6cf076a57c17a0221e5034e5e9e283e504b0060e40bc8';
 const HASH_PY = 'c38dc02399da3a28e683be106277c9888de99cbfae257cf053a8273b8a665c66';
@@ -608,7 +612,7 @@ const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'ser
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
-  'PostgreSQL': { 'functions': null, 'function_invocations': null, 'function_metrics': null },
+  'PostgreSQL': { 'functions': null, 'function_invocations': null, 'function_metrics': null, 'usage_records': null },
   'S3 (bucket functions)': { 'object': null },
   [K]: { 'Namespace': null, 'ResourceQuota': null, 'LimitRange': null, 'NetworkPolicy': null, 'ConfigMap': null, 'Service': null, 'Deployment': null, 'Pod': null },
   'Runtime': { 'main process': null, 'worker': null },
@@ -736,15 +740,15 @@ const SCENARIOS = [
         code: 'kubernetes.orchestrator.ts invoke(), readyInstances()',
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { spec: { replicas: 1, '…': '…' }, status: { replicas: 1, readyReplicas: 1, availableReplicas: 1, '…': '…' } } }] },
       { from: 'api', to: 'k8s', kind: 'req', label: 'POST …/services/fn-…:http/proxy/invoke', title: 'The call goes to the function\'s Service',
-        text: 'In development the backend runs outside the cluster, so it calls through the API server\'s service proxy (K8S_INVOKE_MODE=proxy). Inside a cluster it calls http://fn-<id>.<namespace>.svc:8080/invoke directly. The body is your input object. The backend waits at most the function\'s timeout plus 2 s.',
+        text: 'In development the backend runs outside the cluster, so it calls through the API server\'s service proxy (K8S_INVOKE_MODE=proxy). Inside a cluster it calls http://fn-<id>.<namespace>.svc:8080/invoke directly. The body is your input object, and x-ff-request-id carries the invocation\'s ID, so the runtime\'s log, the history and the usage record name the call the same way. The backend waits at most one timeout for a free instance, the timeout itself, and 2 s more.',
         code: 'kubernetes.orchestrator.ts post() · kube-client.ts paths.serviceProxy()', hl: ['service'],
-        msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json', accept: 'application/json', authorization: 'Bearer <token of the ff-controller ServiceAccount>' }, body: { name: 'Tunis' } } },
+        msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json', accept: 'application/json', authorization: 'Bearer <token of the ff-controller ServiceAccount>', 'x-ff-request-id': INV }, body: { name: 'Tunis' } } },
       { from: 'k8s', to: 'pod', kind: 'req', label: 'POST /invoke → pod :8080', title: 'The API server forwards it to the pod',
         text: 'It picks a ready endpoint of the Service and forwards the request to the pod\'s port 8080. On k3s the default-deny NetworkPolicy doesn\'t block this path (checked in task K-06); with other network plugins, K8S_INGRESS_ALLOW_CIDRS can admit the API server.',
         code: 'Kubernetes API server', hl: ['service', 'pod-box'],
-        msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', '…': '…' }, body: { name: 'Tunis' } } },
+        msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', 'x-ff-request-id': INV, '…': '…' }, body: { name: 'Tunis' } } },
       { from: 'pod', to: 'pod', kind: 'int', label: 'parse · queue · START · timer', title: 'The runtime accepts the invocation',
-        text: 'The body must be valid JSON of at most 6 MB. One invocation runs at a time; up to 32 more wait, each at most one timeout for its turn, and beyond either limit the answer is 429. The backend sends no x-ff-request-id header, so the runtime generates a UUID as the request ID. It writes the START line and arms the 5 s timer.',
+        text: 'The body must be valid JSON of at most 6 MB. One invocation runs at a time; up to 32 more wait, each at most one timeout for its turn, and beyond either limit the answer is 429. The request ID is the x-ff-request-id header, the invocation\'s ID; a call without one would get a new UUID. It writes the START line and arms the 5 s timer.',
         code: 'runtimes/nodejs/src/main.ts acceptInvocation(), dispatch()',
         msg: { kind: 'log', lines: ['START RequestId: ' + REQ + ' Version: $LATEST'] },
         set: { 'Runtime.worker': 'busy' } },
@@ -773,11 +777,11 @@ const SCENARIOS = [
       { from: 'api', to: 'api', kind: 'int', label: 'record a metric (1-minute window)', title: 'A metric is recorded in memory',
         text: 'The end-to-end time measured by the backend, the memory, and the outcome go into this function\'s current one-minute window, which becomes a metrics row at the next tick; see "Metrics, autoscaling, and history".',
         code: 'BE/src/metrics/metrics.service.ts recordMetric()' },
-      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → COMPLETED', title: 'The invocation is COMPLETED',
-        text: 'The output, the runtime\'s duration (the basis for metering), and the memory are saved.',
-        code: 'functions.service.ts invoke()',
-        msg: { kind: 'sql', text: "UPDATE \"function_invocations\"\n   SET \"status\" = 'COMPLETED', \"output\" = '{\"message\":\"Hello Tunis\",…}', \"duration\" = 1.09, \"memory_used\" = 98\n WHERE \"id\" = '" + INV + "';" },
-        set: { 'PostgreSQL.function_invocations': 'COMPLETED · 1.09 ms · 98 MB' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation · INSERT usage record', title: 'The invocation is COMPLETED, and metered',
+        text: 'One transaction saves the output, the runtime\'s duration and the memory, and writes the call\'s usage record (D6): what the price depends on, as the function is now, and the billed duration, the runtime\'s rounded up to the millisecond (D7). It locks the invocation first, as the lost-call reaper does. The record is never changed or deleted: the table refuses it.',
+        code: 'functions.service.ts finish() · usage/usage.ts usageRecord()',
+        msg: { kind: 'sql', text: "BEGIN;\nSELECT … FROM \"function_invocations\" WHERE \"id\" = '" + INV + "' FOR UPDATE;   -- still RUNNING\nUPDATE \"function_invocations\"\n   SET \"status\" = 'COMPLETED', \"output\" = '{\"message\":\"Hello Tunis\",…}', \"duration\" = 1.09, \"memory_used\" = 98\n WHERE \"id\" = '" + INV + "';\nINSERT INTO \"usage_records\" (\"request_id\", \"started_at\", \"account_id\", \"function_id\", \"function_name\", \"runtime\",\n       \"memory_mb\", \"duration_ms\", \"billed_ms\", \"init_ms\", \"status\", \"ended_at\")\nVALUES ('" + INV + "', '2026-10-16 14:02:10.212+00', '000000000001', '" + FN + "', 'hello', 'nodejs',\n       128, 1.090, 2, NULL, 'success', '2026-10-16 14:02:10.251+00')\nON CONFLICT DO NOTHING;   -- written once\nCOMMIT;" },
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · 1.09 ms · 98 MB', 'PostgreSQL.usage_records': 'success · 128 MB · billed 2 ms' } },
       { from: 'api', to: 'user', kind: 'res', label: '201 · the invocation', title: 'You get the result',
         text: 'The response is the invocation record; output holds what your handler returned.',
         code: 'functions.controller.ts invoke()',
@@ -823,9 +827,13 @@ const SCENARIOS = [
         text: 'Measured on the development cluster: 7–10 s for the whole call, against milliseconds when warm.', code: 'runtimes/nodejs/src/main.ts', t: '⏱ 7–10 s end to end',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json', 'x-ff-request-id': '…', 'x-ff-duration-ms': '1.06', 'x-ff-max-memory-used-mb': '97' }, body: { message: 'Hello Sousse', requestId: '…' } },
         set: { 'Runtime.worker': 'code loaded · idle' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation · INSERT usage record', title: 'Completed, with the cold start apart',
+        text: 'The invocation\'s duration is the handler\'s 1.06 ms. The usage record keeps the cold start in init_ms, the 7,412 ms the backend waited for an instance, and bills 2 ms: D7 doesn\'t bill cold starts.',
+        code: 'kubernetes.orchestrator.ts invoke() · functions.service.ts finish()',
+        msg: { kind: 'sql', text: "UPDATE \"function_invocations\" SET \"status\" = 'COMPLETED', \"duration\" = 1.06, … WHERE \"id\" = '" + INV + "';\nINSERT INTO \"usage_records\" (…, \"duration_ms\", \"billed_ms\", \"init_ms\", \"status\", …)\nVALUES (…, 1.060, 2, 7412, 'success', …) ON CONFLICT DO NOTHING;" },
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · 1.06 ms', 'PostgreSQL.usage_records': 'success · init 7,412 ms · billed 2 ms' } },
       { from: 'api', to: 'user', kind: 'res', label: '201 · COMPLETED', title: 'You get the result',
-        text: 'The invocation\'s duration is the handler\'s 1.06 ms, so the cold start isn\'t billed to it. The metric for this minute records the whole call, cold start included.', code: 'functions.service.ts invoke()',
-        set: { 'PostgreSQL.function_invocations': 'COMPLETED · 1.06 ms' } },
+        text: 'The same answer as a warm call. The metric for this minute records the whole call, cold start included.', code: 'functions.controller.ts invoke()' },
     ],
   },
   {
@@ -851,10 +859,10 @@ const SCENARIOS = [
       { from: 'pod', to: 'api', kind: 'err', label: '500 · x-ff-function-error: Unhandled', title: 'The runtime answers 500',
         text: 'The body names the error the way Lambda does: errorType is the exception\'s class name.', code: 'runtimes/python/ff_runtime/main.py',
         msg: { kind: 'http', first: 'HTTP/1.1 500 Internal Server Error', headers: { 'content-type': 'application/json', 'x-ff-request-id': REQ, 'x-ff-duration-ms': '0.41', 'x-ff-max-memory-used-mb': '24', 'x-ff-function-error': 'Unhandled' }, body: { errorType: 'ValueError', errorMessage: 'this name is not allowed' } } },
-      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → ERROR', title: 'The invocation is ERROR',
-        text: 'toResult() turned the answer into a FunctionRuntimeError. The error also counts in this minute\'s metrics.', code: 'kubernetes.orchestrator.ts toResult() · functions.service.ts invoke()',
-        msg: { kind: 'sql', text: "UPDATE \"function_invocations\" SET \"status\" = 'ERROR',\n       \"error\" = 'ValueError: this name is not allowed', …\n WHERE \"id\" = '" + INV + "';" },
-        set: { 'PostgreSQL.function_invocations': 'ERROR · ValueError' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → ERROR · INSERT usage record', title: 'The invocation is ERROR, and metered',
+        text: 'toResult() turned the answer into a FunctionRuntimeError, which carries the duration and memory from the runtime\'s headers. In the same transaction, the usage record: an error is billed as a success is, its duration rounded up, as on Lambda (D7). The error also counts in this minute\'s metrics.', code: 'kubernetes.orchestrator.ts toResult() · functions.service.ts invoke(), finish()',
+        msg: { kind: 'sql', text: "UPDATE \"function_invocations\" SET \"status\" = 'ERROR', \"duration\" = 0.41, \"memory_used\" = 24,\n       \"error\" = 'ValueError: this name is not allowed', …\n WHERE \"id\" = '" + INV + "';\nINSERT INTO \"usage_records\" (…, \"duration_ms\", \"billed_ms\", \"status\", …)\nVALUES (…, 0.410, 1, 'error', …) ON CONFLICT DO NOTHING;" },
+        set: { 'PostgreSQL.function_invocations': 'ERROR · ValueError · 0.41 ms', 'PostgreSQL.usage_records': 'error · billed 1 ms' } },
       { from: 'api', to: 'user', kind: 'err', label: '400 · "ValueError: …"', title: 'You get a 400',
         text: 'The message carries the error type and text. The history keeps the full record.', code: 'functions.service.ts invoke()',
         msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: 'ValueError: this name is not allowed', error: 'Bad Request', statusCode: 400, requestId: '…' } } },
@@ -879,16 +887,49 @@ const SCENARIOS = [
         set: { 'Runtime.worker': 'replaced · loading the code', 'Runtime.main process': 'listening on :8080 · /readyz 503 starting' } },
       { from: 'pod', to: 'api', kind: 'err', label: '504 · Sandbox.Timedout', title: 'The runtime answers 504', text: 'In Lambda\'s words.', code: 'runtimes/python/ff_runtime/main.py',
         msg: { kind: 'http', first: 'HTTP/1.1 504 Gateway Timeout', headers: { 'content-type': 'application/json', 'x-ff-request-id': REQ, 'x-ff-duration-ms': '2000.62', 'x-ff-max-memory-used-mb': '27', 'x-ff-function-error': 'Unhandled' }, body: { errorType: 'Sandbox.Timedout', errorMessage: 'Task timed out after 2.00 seconds' } } },
-      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → TIMEOUT', title: 'The invocation is TIMEOUT',
-        text: 'Sandbox.Timedout becomes a FunctionTimeoutError, so the status is TIMEOUT rather than ERROR. On errors the duration saved is the backend\'s end-to-end time.', code: 'kubernetes.orchestrator.ts toResult() · functions.service.ts invoke()', t: '⏱ 2010 ms recorded',
-        msg: { kind: 'sql', text: "UPDATE \"function_invocations\" SET \"status\" = 'TIMEOUT', \"duration\" = 2010,\n       \"error\" = 'Sandbox.Timedout: Task timed out after 2.00 seconds', …\n WHERE \"id\" = '" + INV + "';" },
-        set: { 'PostgreSQL.function_invocations': 'TIMEOUT · 2010 ms' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → TIMEOUT · INSERT usage record', title: 'The invocation is TIMEOUT, and metered',
+        text: 'Sandbox.Timedout becomes a FunctionTimeoutError, with the runtime\'s duration and memory, so the status is TIMEOUT rather than ERROR. The usage record bills the function\'s timeout, 2 s, whatever the call measured (D7).', code: 'kubernetes.orchestrator.ts toResult() · functions.service.ts invoke(), finish()', t: '⏱ 2000.62 ms recorded, 2,000 ms billed',
+        msg: { kind: 'sql', text: "UPDATE \"function_invocations\" SET \"status\" = 'TIMEOUT', \"duration\" = 2000.62, \"memory_used\" = 27,\n       \"error\" = 'Sandbox.Timedout: Task timed out after 2.00 seconds', …\n WHERE \"id\" = '" + INV + "';\nINSERT INTO \"usage_records\" (…, \"duration_ms\", \"billed_ms\", \"status\", …)\nVALUES (…, 2000.620, 2000, 'timeout', …) ON CONFLICT DO NOTHING;" },
+        set: { 'PostgreSQL.function_invocations': 'TIMEOUT · 2000.62 ms', 'PostgreSQL.usage_records': 'timeout · billed 2,000 ms' } },
       { from: 'api', to: 'user', kind: 'err', label: '400 · "Sandbox.Timedout: …"', title: 'You get a 400', text: 'The message carries the error type and text.', code: 'functions.service.ts invoke()',
         msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: 'Sandbox.Timedout: Task timed out after 2.00 seconds', error: 'Bad Request', statusCode: 400, requestId: '…' } } },
       { from: 'worker', to: 'pod', kind: 'res', label: 'fresh worker ready', title: 'The pod is ready again',
         text: 'The new worker has loaded the code: /readyz answers 200 again, and the next invocation runs on it.', code: 'runtimes/python/ff_runtime/worker.py serve()',
         msg: { kind: 'ipc', title: 'a message on the socket', body: ['ready'] },
         set: { 'Runtime.worker': 'code loaded · idle', 'Runtime.main process': 'listening on :8080 · /readyz 200' } },
+    ],
+  },
+  {
+    id: 'lost', title: 'The backend stops during a call', lanes: ['user', 'api', 'db', 'pod'],
+    summary: 'The backend is killed while a call runs: a crash, an out-of-memory kill, a node drained. Nobody gets the answer, and the invocation stays RUNNING until the restarted backend marks it LOST, unbilled (P-20, D6).',
+    initial: activeState(FN, HASH_V1, 'code.ts'),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'A call, as usual', text: 'Nothing about it is special.', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(FN, { name: 'Bizerte' }) },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'Recorded as RUNNING', text: 'As usual, the record exists before the call.', code: 'functions.service.ts invoke()', set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
+      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke · x-ff-request-id', title: 'The call reaches the pod', text: 'Through the API server\'s proxy, as usual, named by the invocation\'s ID.', code: 'kubernetes.orchestrator.ts post()', hl: ['k8sapi', 'service'],
+        msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', 'x-ff-request-id': INV, '…': '…' }, body: { name: 'Bizerte' } },
+        set: { 'Runtime.worker': 'busy' } },
+      { from: 'api', to: 'api', kind: 'err', label: 'the backend is killed', title: 'The backend stops',
+        text: 'The process goes, and its connections with it. Nothing is left to record how the call ends: its invocation stays RUNNING, and it has no usage record.', code: 'the backend process (node dist/main.js)' },
+      { from: 'pod', to: 'api', kind: 'err', label: '200, to nobody', title: 'The answer goes nowhere',
+        text: 'The runtime finishes the call, but the connection is gone. Its log still has the call, under the invocation\'s ID.', code: 'runtimes/nodejs/src/main.ts send()',
+        msg: { kind: 'log', lines: ['START RequestId: ' + INV + ' Version: $LATEST', 'END RequestId: ' + INV, 'REPORT RequestId: ' + INV + '\tDuration: 1.12 ms\tBilled Duration: 2 ms\tMemory Size: 128 MB\tMax Memory Used: 97 MB'] },
+        set: { 'Runtime.worker': 'code loaded · idle' } },
+      { from: 'api', to: 'user', kind: 'err', label: 'the connection drops', title: 'You get no answer',
+        text: 'curl says "Empty reply from server". Whether the call ran, you can\'t tell: invoke again if that is safe.', code: 'the backend process' },
+      { from: 'api', to: 'db', kind: 'req', label: 'restarted · SELECT RUNNING past the deadline', title: 'The restarted backend looks for lost calls',
+        text: 'At startup and every minute, it looks for invocations still RUNNING past the longest a call can take: one timeout of waiting for a free instance, the timeout, the cold-start limit (K8S_READY_TIMEOUT_SECONDS, 90 s), and 30 s more. For this 5 s function: 130 s after the call started. A function changed since the call started gets the platform\'s longest timeout, 900 s, as its timeout then is no longer known. The times are the database\'s, as the invocations\' are.',
+        code: 'usage/usage.service.ts reapLost()', t: '⏱ 130 s after the call started, at the next minute',
+        msg: { kind: 'sql', text: "SELECT i.\"id\", i.\"created_at\", f.\"account_id\", f.\"name\", f.\"runtime\", f.\"memory\", f.\"timeout\"\n  FROM \"function_invocations\" i JOIN \"functions\" f ON f.\"id\" = i.\"function_id\"\n WHERE i.\"status\" = 'RUNNING'\n   AND i.\"created_at\" < now() - make_interval(secs => 2 * f.\"timeout\" + 90 + 30);   -- 2 × 5 + 90 + 30 = 130 s" } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE → LOST · INSERT usage record', title: 'LOST, and not billed',
+        text: 'In one transaction, and only while it is still RUNNING: a call that ended meanwhile keeps its outcome. Its usage record bills nothing (D7). Should the call end after this, because the backend was only frozen, it waits for this transaction and stays LOST.',
+        code: 'usage/usage.service.ts reapLost()',
+        msg: { kind: 'sql', text: "BEGIN;\nUPDATE \"function_invocations\" SET \"status\" = 'LOST', \"updated_at\" = CURRENT_TIMESTAMP,\n       \"error\" = 'Lost: the backend restarted during the call, so its answer is unknown. It isn''t billed.'\n WHERE \"id\" = '" + INV + "' AND \"status\" = 'RUNNING'\nRETURNING \"updated_at\";\nINSERT INTO \"usage_records\" (…, \"duration_ms\", \"billed_ms\", \"init_ms\", \"status\", …)\nVALUES (…, 0.000, 0, NULL, 'lost', …) ON CONFLICT DO NOTHING;\nCOMMIT;" },
+        set: { 'PostgreSQL.function_invocations': 'LOST', 'PostgreSQL.usage_records': 'lost · billed 0 ms' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/invocations', title: 'You look at the history', text: 'The newest invocation first.', code: 'functions.controller.ts getInvocations()',
+        msg: { kind: 'http', first: 'GET /functions/' + FN + '/invocations?limit=1 HTTP/1.1', headers: { host: 'localhost:3000' } } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · LOST', title: 'It says what happened', text: 'The console shows LOST in grey, with the reason.', code: 'functions.service.ts getInvocations()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { invocations: [{ id: INV, functionId: FN, input: { name: 'Bizerte' }, output: null, status: 'LOST', duration: 0, memoryUsed: null, error: 'Lost: the backend restarted during the call, so its answer is unknown. It isn\'t billed.', createdAt: '2026-10-16T14:06:00.120Z', updatedAt: '2026-10-16T14:08:30.004Z' }], total: 1 } } },
     ],
   },
   {
@@ -937,8 +978,8 @@ const SCENARIOS = [
   },
   {
     id: 'delete', title: 'Delete a function', lanes: ['user', 'api', 'db', 's3', 'k8s', 'node', 'pod'],
-    summary: 'DELETE /functions/:id removes the Deployment, the Service, every ConfigMap, the archived code, and the records. The tenant\'s namespace and guardrails stay for its other functions.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows', 'PostgreSQL.function_metrics': '3 rows' }),
+    summary: 'DELETE /functions/:id removes the Deployment, the Service, every ConfigMap, the archived code, and the records, except its usage records, which billing keeps. The tenant\'s namespace and guardrails stay for its other functions.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows', 'PostgreSQL.function_metrics': '3 rows', 'PostgreSQL.usage_records': '12 rows' }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'DELETE /functions/:id', title: 'You delete the function', text: 'No body.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'DELETE /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT · in your account?', title: 'Only your account\'s function is found', text: 'Another account\'s function answers 404, as one that doesn\'t exist.', code: 'functions.service.ts remove() → findOne()',
@@ -956,8 +997,8 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'DELETE /functions/' + FN + '/code.ts?x-id=DeleteObject HTTP/1.1', headers: { host: 'localhost:9003', authorization: 'AWS4-HMAC-SHA256 Credential=<development key>/…' } },
         set: { 'S3 (bucket functions).object': null } },
       { from: 'api', to: 'db', kind: 'req', label: 'DELETE functions (CASCADE)', title: 'The records go, with their history',
-        text: 'The foreign keys of invocations and metrics are ON DELETE CASCADE, so one delete removes all of it.', code: 'functions.service.ts remove()',
-        msg: { kind: 'sql', text: "DELETE FROM \"functions\" WHERE \"id\" = '" + FN + "';\n-- cascades to function_invocations (12 rows) and function_metrics (3 rows)" },
+        text: 'The foreign keys of invocations and metrics are ON DELETE CASCADE, so one delete removes all of it. The usage records stay: they have no foreign key, and copy what billing needs (D6).', code: 'functions.service.ts remove()',
+        msg: { kind: 'sql', text: "DELETE FROM \"functions\" WHERE \"id\" = '" + FN + "';\n-- cascades to function_invocations (12 rows) and function_metrics (3 rows);\n-- usage_records keeps its 12 rows" },
         set: { 'PostgreSQL.functions': null, 'PostgreSQL.function_invocations': null, 'PostgreSQL.function_metrics': null } },
       { from: 'api', to: 'user', kind: 'res', label: '200', title: 'Deleted', text: 'The response has no body. The namespace, quota, limits, and network policy remain for the tenant.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-length': '0' } } },
     ],
@@ -1104,8 +1145,8 @@ const SCENARIOS = [
 const ARCH_INFO = {
   user: ['You', 'The console (React, on :5199), Swagger UI on /api, or curl. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · docs/getting-started.md'],
   idp: ['Keycloak', 'Logs users in and signs them up, for the realm ff (development: localhost:8180). The console gets its tokens from it with the authorization code flow and PKCE; the backend checks each access token against the realm\'s public keys, which it fetches once and caches.', 'deploy/keycloak/ff-realm.json · FE/src/auth/oidc.ts · BE/src/auth/token-verifier.ts'],
-  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL, archives code in S3, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep.', 'BE/src/functions · BE/src/metrics · BE/src/orchestrator'],
-  db: ['PostgreSQL', 'Three tables: functions, function_invocations, and function_metrics. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
+  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL, archives code in S3, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute, and creates the usage partitions ahead of time.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator'],
+  db: ['PostgreSQL', 'The records: accounts, their plans, users and memberships, invitations and API keys; functions, with their invocations and metrics; and two tables written once and never changed, the audit log and the usage records, which have a partition per month. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
   s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds an archive copy of each function\'s code. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
   k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
   ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
@@ -1122,7 +1163,7 @@ const ARCH_INFO = {
 const TRACE = [
   ['1. What you send', 'POST /functions/:id/invoke', { input: { name: 'Tunis' } }],
   ['2. What the backend forwards', 'kubernetes.orchestrator.ts post()', { name: 'Tunis' }],
-  ['3. What the runtime receives', 'POST /invoke, through the API server\'s proxy', 'POST /invoke HTTP/1.1\ncontent-type: application/json\n…\n\n{"name":"Tunis"}'],
+  ['3. What the runtime receives', 'POST /invoke, through the API server\'s proxy', 'POST /invoke HTTP/1.1\ncontent-type: application/json\nx-ff-request-id: ' + INV + '\n…\n\n{"name":"Tunis"}'],
   ['4. The event your handler gets', 'runtime main → worker (headers abridged)', { body: { name: 'Tunis' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }],
   ['5. The context', 'worker.ts (Python: worker.py)', 'functionName: "hello"\nfunctionVersion: "$LATEST"\nmemoryLimitInMB: "128"\nawsRequestId: "' + REQ + '"\ngetRemainingTimeInMillis() → 4998'],
   ['6. What your handler returns', 'your function.ts', { message: 'Hello Tunis', requestId: REQ }],
@@ -1590,7 +1631,7 @@ function initSimulator() {
 
 /* ---------- data diagrams ---------- */
 function erDiagram() {
-  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16), and the audit log (P-17).
+  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16), and the audit log (P-17); row 3: usage records (P-20) and API keys (P-13).
   const tables = [
     { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · …'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
     { name: 'functions', x: 350, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['account_id', 'char(12) · FK, indexed'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
@@ -1600,17 +1641,19 @@ function erDiagram() {
     { name: 'memberships', x: 684, row: 1, cols: [['account_id', 'char(12) · PK, FK, cascade', 'pk'], ['user_id', 'uuid · PK, FK, cascade', 'pk'], ['role', 'owner · developer · viewer'], ['created_at', 'timestamptz']] },
     { name: 'audit_log', x: 16, row: 2, cols: [['id', 'bigserial · PK', 'pk'], ['account_id', 'char(12), null, no FK'], ['actor', 'user:… · key:… · dev · system'], ['actor_label', 'e-mail, or key name'], ['action', 'function.create, member.role, …'], ['resource', 'function:<id>, user:<id>, …'], ['ip', 'text, null'], ['request_id', 'text, null'], ['details', 'jsonb, null'], ['at', 'timestamptz · append-only']] },
     { name: 'invitations', x: 350, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['account_id', 'char(12) · FK, cascade'], ['email', 'text, lowercase, indexed'], ['role', 'owner · developer · viewer'], ['invited_by', 'uuid · FK → users'], ['created_at', 'timestamptz'], ['expires_at', 'timestamptz, 7 days'], ['accepted_at', 'timestamptz, null'], ['accepted_by', 'uuid · FK → users, null']] },
+    { name: 'usage_records', x: 16, row: 3, cols: [['request_id', 'uuid · PK: the invocation', 'pk'], ['started_at', 'timestamptz · PK, by month', 'pk'], ['account_id', 'char(12), no FK'], ['function_id', 'uuid, no FK'], ['function_name', 'text, as invoked'], ['runtime', 'text, as invoked'], ['memory_mb', 'int, as invoked'], ['duration_ms', 'numeric(12,3)'], ['billed_ms', 'int (D7)'], ['init_ms', 'int, null: cold start'], ['status', 'success · error · lost · …'], ['ended_at', 'timestamptz · append-only']] },
+    { name: 'api_keys', x: 350, row: 3, cols: [['id', 'text · PK, the key\'s ID', 'pk'], ['account_id', 'char(12) · FK, cascade'], ['created_by', 'uuid · FK → users'], ['name', 'text'], ['secret_sha256', 'bytea'], ['scopes', 'text[]'], ['expires_at', 'timestamptz, null'], ['last_used_at', 'timestamptz, null'], ['revoked_at', 'timestamptz, null'], ['created_at', 'timestamptz']] },
     { name: 'users', x: 684, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['oidc_sub', "text · unique, Keycloak's ID"], ['email', 'text'], ['name', 'text, null'], ['locale', "text = 'fr-TN'"], ['created_at', 'timestamptz']] },
   ];
   const RH = 21, W = 300, TOP = 10, HEAD = 30, GAP = 34;
   const height = (t) => HEAD + RH * t.cols.length + 6;
   // Each row starts below the tallest table of the row above.
   const rowTop = [TOP];
-  for (let r = 1; r <= 2; r++) rowTop[r] = rowTop[r - 1] + Math.max.apply(null, tables.filter((t) => t.row === r - 1).map(height)) + GAP;
+  for (let r = 1; r <= 3; r++) rowTop[r] = rowTop[r - 1] + Math.max.apply(null, tables.filter((t) => t.row === r - 1).map(height)) + GAP;
   const top = (t) => rowTop[t.row];
   const byName = (name) => tables.find((t) => t.name === name);
   const colY = (name, col) => { const t = byName(name); return top(t) + HEAD + RH * t.cols.findIndex((c) => c[0] === col) + 11; };
-  const bottom = rowTop[2] + Math.max.apply(null, tables.filter((t) => t.row === 2).map(height));
+  const bottom = rowTop[3] + Math.max.apply(null, tables.filter((t) => t.row === 3).map(height));
   let s = '<svg class="diagram" viewBox="0 0 1000 ' + (bottom + 16) + '" role="img" aria-label="The tables and their columns">';
   tables.forEach((t) => {
     const y0 = top(t);
@@ -1653,7 +1696,7 @@ function stateMachines() {
   const node = (x, y, w, label, cls) => '<g class="' + (cls || '') + '"><rect x="' + x + '" y="' + y + '" width="' + w + '" height="36" rx="18"/><text x="' + (x + w / 2) + '" y="' + (y + 23) + '" text-anchor="middle" font-weight="600">' + escText(label) + '</text></g>';
   const edge = (d, label, lx, ly) => '<path d="' + d + '" marker-end="url(#sm-arrow)"/>' + (label ? '<text class="e" x="' + lx + '" y="' + ly + '" text-anchor="middle">' + escText(label) + '</text>' : '');
   const note = (x, y, lines) => lines.map((t, n) => '<text class="e" x="' + x + '" y="' + (y + 16 * n) + '">' + escText(t) + '</text>').join('');
-  return '<svg class="diagram sm" viewBox="0 0 1000 340" role="img" aria-label="Lifecycles of a function and of an invocation">' +
+  return '<svg class="diagram sm" viewBox="0 0 1000 370" role="img" aria-label="Lifecycles of a function and of an invocation">' +
     '<defs>' + arrowDefs('sm-arrow', '--muted') + '</defs>' +
     '<text class="ttl" x="16" y="22">A function</text>' +
     node(16, 50, 130, 'CREATING') + node(320, 14, 120, 'ACTIVE', 'ok') + node(320, 90, 120, 'ERROR', 'bad') + node(600, 52, 150, 'deleted') +
@@ -1670,8 +1713,9 @@ function stateMachines() {
     edge('M146,236 C300,250 420,252 518,252', 'an error: thrown, out of memory, crashed', 330, 238) +
     edge('M146,242 C380,296 640,290 718,256', 'Sandbox.Timedout', 600, 295) +
     node(16, 292, 130, 'THROTTLED', 'bad') +
-    edge('M81,250 L81,290', '429: no instance was free in time (P-15)', 238, 276) +
-    note(870, 246, ['A row stays RUNNING', 'if the backend stops', 'during the call.']) +
+    edge('M81,250 L81,290') + note(16, 348, ['429: no instance was free in time (P-15)']) +
+    node(330, 292, 110, 'LOST') +
+    edge('M146,248 C220,262 260,306 328,310') + note(452, 324, ['the backend stopped during the call: marked', 'once the call is past its deadline, unbilled (P-20)']) +
     '</svg>';
 }
 

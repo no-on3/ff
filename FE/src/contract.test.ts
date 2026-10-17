@@ -3,11 +3,12 @@ import corsSource from '../../BE/src/config/configuration.ts?raw';
 import backendEnvExample from '../../BE/.env.example?raw';
 import scopesSource from '../../BE/src/api-keys/api-key-format.ts?raw';
 import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
+import invocationSource from '../../BE/src/functions/entities/function-invocation.entity.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
-import { SCOPES } from './services/api';
+import { INVOCATION_STATUSES, SCOPES } from './services/api';
 
 // What the console shares with the API and the development realm, read from
 // their files: a console on another port than the realm and the API allow
@@ -70,6 +71,16 @@ describe('API key scopes', () => {
     const backendScopes = /export const SCOPES = \[([^\]]*)\] as const/.exec(scopesSource)?.[1].match(/'[^']+'/g)?.map((s) => s.slice(1, -1));
 
     expect(backendScopes).toEqual([...SCOPES]);
+  });
+});
+
+describe("an invocation's status", () => {
+  it("is one of the API's, so the history has a style for each one it may show (P-20 added LOST)", () => {
+    const enumBody = invocationSource.slice(invocationSource.indexOf('export enum InvocationStatus'));
+    const backendStatuses = [...enumBody.slice(0, enumBody.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1]);
+
+    expect(backendStatuses).toContain('LOST');
+    expect(backendStatuses).toEqual([...INVOCATION_STATUSES]);
   });
 });
 
