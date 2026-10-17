@@ -82,8 +82,10 @@ docker compose up -d --wait               # PostgreSQL (127.0.0.1:5432) + Seawee
 hack/k8s/cluster-up.sh                    # prints the K8S_* settings
 hack/k8s/load-images.sh
 cp BE/.env.example BE/.env                # first time only; the defaults match the steps above
-cd BE && npm run start:dev
+cd BE && npm run migration:run && npm run start:dev
 ```
+
+- **The database schema comes from migrations.** `npm run migration:run` applies the pending ones, and the backend refuses to start while any is pending. A database created before 2026-10-17 must be reset once; see [Getting started](getting-started.md), step 7.
 
 - **Nothing runs without a tenant.** Without authentication, the backend needs `FF_DEV_USER_ID` set, as `.env.example` does. Otherwise every request returns 401. `FF_DEV_USER_ID=1` keeps functions created by the old hard-coded user visible. This is a development-only stand-in until real authentication (parent plan F-01) is switched on.
 - **What `docker compose up` starts.** Only PostgreSQL and S3. The backend and the dashboard run on the host (`npm run start:dev`, `npm run dev`).

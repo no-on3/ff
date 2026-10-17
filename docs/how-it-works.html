@@ -380,7 +380,7 @@
 <section id="data">
   <div class="wrap">
     <h2>Data model</h2>
-    <p class="lead">Three tables hold everything the backend knows. A function's invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). In development the backend creates and updates this schema itself when it starts: TypeORM <code>synchronize</code> is on whenever <code>NODE_ENV</code> is not <code>production</code>.</p>
+    <p class="lead">Three tables hold everything the backend knows. A function's invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>user_id</code> is <code>userId</code>).</p>
     <div class="card pad scrollx"><div id="erDiagram" class="capped"></div></div>
     <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set. The columns <code>cpu</code>, <code>targetConcurrency</code>, and <code>cpuUsed</code> aren't used yet, so <code>cpuUsage</code> is always 0.</p>
     <h3>Lifecycles</h3>
@@ -626,7 +626,7 @@ const SCENARIOS = [
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
         text: 'The row gets its UUID, the tenant ID, and the defaults: cpu 100, minInstances 0, maxInstances 1, targetConcurrency 100, scaleToZero true.',
         code: 'BE/src/functions/functions.service.ts create()',
-        msg: { kind: 'sql', text: "INSERT INTO \"functions\" (\"name\", \"userId\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '1', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
+        msg: { kind: 'sql', text: "INSERT INTO \"functions\" (\"name\", \"user_id\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '1', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
         set: { 'PostgreSQL.functions': 'CREATING' } },
       { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts', title: 'An archive copy of the code',
         text: 'The code goes to the functions bucket under <id>/code.ts. Nothing reads it back today: the cluster gets the code through a ConfigMap.',
@@ -692,7 +692,7 @@ const SCENARIOS = [
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ACTIVE', title: 'The function is ACTIVE',
         text: 'Only now, with an instance that can serve, does the status become ACTIVE.',
         code: 'functions.service.ts create()',
-        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ACTIVE', \"updatedAt\" = CURRENT_TIMESTAMP\nWHERE \"id\" = '" + FN + "';" },
+        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ACTIVE', \"updated_at\" = CURRENT_TIMESTAMP\nWHERE \"id\" = '" + FN + "';" },
         set: { 'PostgreSQL.functions': 'ACTIVE' } },
       { from: 'api', to: 'user', kind: 'res', label: '201 Created · the function', title: 'You get the function back',
         text: 'The response is the stored record. Keep its id: you need it to invoke, update, or delete the function.',
@@ -715,7 +715,7 @@ const SCENARIOS = [
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'The invocation is recorded as RUNNING',
         text: 'The record exists before the call, so a timeout or a crash still leaves a trace. The backend starts its clock after this insert.',
         code: 'functions.service.ts invoke()',
-        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"functionId\", \"input\", \"status\", …)\nVALUES ('" + FN + "', '{\"name\":\"Tunis\"}', 'RUNNING', …)\nRETURNING \"id\";   -- " + INV },
+        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"function_id\", \"input\", \"status\", …)\nVALUES ('" + FN + "', '{\"name\":\"Tunis\"}', 'RUNNING', …)\nRETURNING \"id\";   -- " + INV },
         set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment · readyReplicas 1', title: 'Is an instance ready?',
         text: 'The backend asks before every invocation. readyReplicas is 1, so the call goes straight to the pod; with 0 this would be a cold start, as the next scenario shows.',
@@ -762,7 +762,7 @@ const SCENARIOS = [
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation → COMPLETED', title: 'The invocation is COMPLETED',
         text: 'The output, the runtime\'s duration (the basis for metering), and the memory are saved.',
         code: 'functions.service.ts invoke()',
-        msg: { kind: 'sql', text: "UPDATE \"function_invocations\"\n   SET \"status\" = 'COMPLETED', \"output\" = '{\"message\":\"Hello Tunis\",…}', \"duration\" = 1.09, \"memoryUsed\" = 98\n WHERE \"id\" = '" + INV + "';" },
+        msg: { kind: 'sql', text: "UPDATE \"function_invocations\"\n   SET \"status\" = 'COMPLETED', \"output\" = '{\"message\":\"Hello Tunis\",…}', \"duration\" = 1.09, \"memory_used\" = 98\n WHERE \"id\" = '" + INV + "';" },
         set: { 'PostgreSQL.function_invocations': 'COMPLETED · 1.09 ms · 98 MB' } },
       { from: 'api', to: 'user', kind: 'res', label: '201 · the invocation', title: 'You get the result',
         text: 'The response is the invocation record; output holds what your handler returned.',
@@ -887,7 +887,7 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'PUT /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { code: CODE_TS_V2 } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT · is it yours?', title: 'Only the owner may update',
         text: 'Update and delete compare the function\'s userId with the caller\'s tenant, and refuse anyone else with 401.', code: 'functions.controller.ts update()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- userId '1' = the caller" } },
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '1' = the caller" } },
       { from: 'api', to: 'api', kind: 'int', label: 'the code changed → roll out', title: 'Does this need a rollout?',
         text: 'Only a change to the code, runtime, memory, or timeout rolls out a new version, and only when the value differs from the stored one. Other fields are just saved.', code: 'functions.service.ts update() · ROLLOUT_FIELDS' },
       { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced', text: 'Same key, new content.', code: 'BE/src/minio-client/minio-client.service.ts uploadCode()',
@@ -915,7 +915,7 @@ const SCENARIOS = [
         text: 'For up to 90 s. If the new pod isn\'t ready by then, the update fails with 400 and the record keeps the old code, while S3 and the Deployment already have the new one; the old pod keeps serving, because maxUnavailable is 0.', code: 'kubernetes.orchestrator.ts waitUntilReady()', t: '⏱ about 6 s in all',
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { metadata: { generation: 2, '…': '…' }, status: { observedGeneration: 2, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } } }] },
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions (code)', title: 'The change is saved last', text: 'The record changes only once the new version is live. The status isn\'t touched: an update never changes it.', code: 'functions.service.ts update()',
-        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"code\" = '…Marhba…', \"updatedAt\" = CURRENT_TIMESTAMP WHERE \"id\" = '" + FN + "';" },
+        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"code\" = '…Marhba…', \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = '" + FN + "';" },
         set: { 'PostgreSQL.functions': 'ACTIVE (new code)' } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · the function', title: 'Done', text: 'The next invocation answers "Marhba Tunis".', code: 'functions.controller.ts update()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', userId: '1', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, cpu: 100, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
@@ -928,7 +928,7 @@ const SCENARIOS = [
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'DELETE /functions/:id', title: 'You delete the function', text: 'No body.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'DELETE /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT · is it yours?', title: 'Only the owner may delete', text: 'Anyone else gets 401.', code: 'functions.controller.ts remove()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- userId '1' = the caller" } },
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '1' = the caller" } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Deployment', title: 'The Deployment goes first', text: 'Its ReplicaSet and pods go with it.', code: 'kubernetes.orchestrator.ts remove()', hl: ['deployment'],
         msg: { kind: 'http', first: 'DELETE ' + DEPLOY_PATH + ' HTTP/1.1' },
         set: { [K + '.Deployment']: null, [K + '.Pod']: 'Terminating' } },
@@ -955,9 +955,9 @@ const SCENARIOS = [
     steps: [
       { from: 'api', to: 'api', kind: 'int', label: 'timer: every 60 s', title: 'The metrics tick',
         text: 'Every 60 s MetricsService writes the past minute\'s metrics (none for an idle function), then sweeps for idle functions. It runs inside the API process and assumes a single backend replica.', code: 'BE/src/metrics/metrics.service.ts tick()' },
-      { from: 'api', to: 'db', kind: 'req', label: 'SELECT ACTIVE · scaleToZero · min 0', title: 'Which functions may sleep?',
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT ACTIVE · scale_to_zero · min 0', title: 'Which functions may sleep?',
         text: 'ACTIVE functions with scaleToZero true and minInstances 0, which are the defaults of every function today.', code: 'metrics.service.ts sweepIdleFunctions()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\"\n WHERE \"status\" = 'ACTIVE' AND \"scaleToZero\" = true AND \"minInstances\" = 0;" } },
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\"\n WHERE \"status\" = 'ACTIVE' AND \"scale_to_zero\" = true AND \"min_instances\" = 0;" } },
       { from: 'api', to: 'api', kind: 'int', label: 'idle for 900 s?', title: 'How long has it been idle?',
         text: 'Its last activity is the latest of three times: its last invocation seen by this process, the process start, and the function\'s updatedAt. Here that was 15 minutes ago, the FF_SCALE_TO_ZERO_IDLE_SECONDS default.', code: 'metrics.service.ts sweepIdleFunctions() · scaling.ts shouldScaleToZero()' },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment · readyReplicas 1', title: 'It is running, so it can be scaled down', text: 'A function that is already at zero is left alone.', code: 'kubernetes.orchestrator.ts readyInstances()',
@@ -984,15 +984,15 @@ const SCENARIOS = [
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { status: { readyReplicas: 1, '…': '…' }, '…': '…' } }] },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT function_metrics', title: 'One row per function per minute',
         text: 'Counts, percentiles, averages, and instances. The window is swapped out first, so invocations that arrive during the tick count in the next one. A minute without invocations writes no row.', code: 'metrics.service.ts aggregate()',
-        msg: { kind: 'sql', text: "INSERT INTO \"function_metrics\" (\"functionId\", \"timestamp\", \"requestCount\", \"errorCount\",\n  \"responseTimeP50\", \"responseTimeP95\", \"responseTimeP99\", \"cpuUsage\", \"memoryUsage\", \"activeInstances\")\nVALUES ('" + FN + "', '2026-10-16T14:03:00.004Z', 3, 0, 41, 55, 55, 0, 98, 1);" },
+        msg: { kind: 'sql', text: "INSERT INTO \"function_metrics\" (\"function_id\", \"timestamp\", \"request_count\", \"error_count\",\n  \"response_time_p50\", \"response_time_p95\", \"response_time_p99\", \"cpu_usage\", \"memory_usage\", \"active_instances\")\nVALUES ('" + FN + "', '2026-10-16T14:03:00.004Z', 3, 0, 41, 55, 55, 0, 98, 1);" },
         set: { 'PostgreSQL.function_metrics': '1 row (14:03)' } },
       { from: 'api', to: 'api', kind: 'int', label: 'decideReplicas → no change', title: 'The autoscaling decision',
         text: '3 requests on 1 instance is more than MAX_REQUESTS_PER_INSTANCE (2 per minute), so the rule asks for one more. But maxInstances is 1, a default the API can\'t change yet, so the function stays at one instance and nothing is called. The rule moves one instance per minute: up above 2 requests per instance or a p95 over 1 s, down below 1.2.', code: 'BE/src/metrics/scaling.ts decideReplicas()',
         msg: { kind: 'ipc', title: 'decideReplicas(…) returns null: keep the current count', body: { activeInstances: 1, requestCount: 3, responseTimeP95: 55, minInstances: 0, maxInstances: 1, maxRequestsPerInstance: 2 } } },
       { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/invocations', title: 'The dashboard reads the history', text: 'Newest first, 10 at a time by default.', code: 'functions.controller.ts getInvocations()',
         msg: { kind: 'http', first: 'GET /functions/' + FN + '/invocations?limit=10&offset=0 HTTP/1.1', headers: { host: 'localhost:3000' } } },
-      { from: 'api', to: 'db', kind: 'req', label: 'SELECT … ORDER BY createdAt DESC', title: 'One page of invocations', text: 'With the total count, for paging.', code: 'functions.service.ts getInvocations()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"function_invocations\" WHERE \"functionId\" = '" + FN + "'\n ORDER BY \"createdAt\" DESC LIMIT 10 OFFSET 0;   -- and COUNT(*)" } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT … ORDER BY created_at DESC', title: 'One page of invocations', text: 'With the total count, for paging.', code: 'functions.service.ts getInvocations()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"function_invocations\" WHERE \"function_id\" = '" + FN + "'\n ORDER BY \"created_at\" DESC LIMIT 10 OFFSET 0;   -- and COUNT(*)" } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · { invocations, total }', title: 'The history', text: 'An object with the page and the total.', code: 'functions.service.ts getInvocations()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { invocations: [{ id: INV, status: 'COMPLETED', duration: 1.09, memoryUsed: 98, output: { message: 'Hello Tunis', requestId: REQ }, '…': '…' }, '… 2 more'], total: 3 } } },
       { from: 'user', to: 'api', kind: 'req', label: 'GET /metrics/:id?start&end', title: 'The dashboard reads the metrics', text: 'For its charts, over a time range.', code: 'BE/src/metrics/metrics.controller.ts',
@@ -1520,9 +1520,9 @@ function initSimulator() {
 /* ---------- data diagrams ---------- */
 function erDiagram() {
   const tables = [
-    { name: 'function_invocations', x: 16, cols: [['id', 'uuid · PK', 'pk'], ['functionId', 'uuid · FK, cascade'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · TIMEOUT'], ['duration', 'float = 0, ms'], ['memoryUsed', 'float, MB, null'], ['cpuUsed', 'float, null'], ['error', 'varchar, null'], ['createdAt', 'timestamp'], ['updatedAt', 'timestamp']] },
-    { name: 'functions', x: 350, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['userId', 'varchar · the tenant'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['cpu', 'int = 100'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['minInstances', 'int = 0'], ['maxInstances', 'int = 1'], ['targetConcurrency', 'int = 100'], ['scaleToZero', 'boolean = true'], ['createdAt', 'timestamp'], ['updatedAt', 'timestamp']] },
-    { name: 'function_metrics', x: 684, cols: [['id', 'uuid · PK', 'pk'], ['functionId', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['requestCount', 'int'], ['errorCount', 'int'], ['responseTimeP50', 'float, ms'], ['responseTimeP95', 'float, ms'], ['responseTimeP99', 'float, ms'], ['cpuUsage', 'float'], ['memoryUsage', 'float, MB'], ['activeInstances', 'int'], ['createdAt', 'timestamp']] },
+    { name: 'function_invocations', x: 16, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · TIMEOUT'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['cpu_used', 'float, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'functions', x: 350, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['user_id', 'varchar · the tenant'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['cpu', 'int = 100'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 1'], ['target_concurrency', 'int = 100'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'function_metrics', x: 684, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['request_count', 'int'], ['error_count', 'int'], ['response_time_p50', 'float, ms'], ['response_time_p95', 'float, ms'], ['response_time_p99', 'float, ms'], ['cpu_usage', 'float'], ['memory_usage', 'float, MB'], ['active_instances', 'int'], ['created_at', 'timestamptz']] },
   ];
   const RH = 21, W = 300, TOP = 10, HEAD = 30;
   const tallest = Math.max.apply(null, tables.map((t) => t.cols.length));

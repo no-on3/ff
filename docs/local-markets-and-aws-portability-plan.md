@@ -1246,15 +1246,15 @@ A customer exporting to AWS counts as a success metric, not a loss: it is proof 
 
 ## Appendix A: Findings → fixes → phase
 
-The status column records what the [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12, 2026-10-16) changed. The finding IDs refer to the audit in §2.3, which describes the code as it was before the migration.
+The status column records what the [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12, 2026-10-16) and the [client-readiness plan](client-readiness-plan.md) (P-xx tasks, from 2026-10-17) changed. The finding IDs refer to the audit in §2.3, which describes the code as it was before the migration.
 
-| Finding | Fix (task) | Phase | Status (2026-10-16) |
+| Finding | Fix (task) | Phase | Status |
 |---|---|---|---|
 | C-1, C-2, C-3 | F-01 global guard, typed principal, tenant-scoped queries; R-08 IAM | 0 / 1 | Open. Authentication is still not enforced. Development uses one fixed tenant (`FF_DEV_USER_ID`, K-07). |
 | C-4 | F-02 artifact delivery via pre-signed URL + checksum; R-02/R-03 | 0 / 1 | Partly done. Code is delivered as data in an immutable ConfigMap and never evaluated as a template (K-06). Zip delivery (R-02) is open. |
 | C-5 | F-03 real lifecycle; R-01 versions | 0 / 1 | Lifecycle done. Update rolls out, and delete removes the Deployment, Service, ConfigMaps, and database rows (K-06, K-07, `dbe2ce3`). Versions (R-01) are open. |
 | C-6 | ~~F-13 Nomad ACL/mTLS~~ K-04, K-06; R-07 isolation | 0 / 1 | Done. Least-privilege ServiceAccount, admission policy, non-root read-only pods, a default-deny NetworkPolicy per tenant (K-04 to K-06, K-10), and an optional gVisor sandbox (K-11). |
-| C-7 | F-04 baseline migration, sync off, drift check in CI | 0 | Open |
+| C-7 | F-04 baseline migration, sync off, drift check in CI | 0 | Done except CI (P-01, 2026-10-17). One baseline generated from the entities, with snake_case columns and `gen_random_uuid()`; sync off everywhere; migrations as a deploy step (`npm run migration:run:prod`); the backend refuses to start while one is pending; `npm run migration:check` fails on drift. CI runs it from P-63. |
 | H-1, M-3, M-6 | F-06 → R-02/R-03 zips with dependencies, current runtimes | 0 / 1 | Partly done. The runtime images install nothing at start and run Node.js 24 and Python 3.13 (K-05, K-10). Zips with dependencies are open. |
 | H-2 | R-07/R-01 memory hard limit, CPU proportional to memory | 1 | Done. The memory limit is the function's memory, and CPU is proportional to it (K-06). The runtimes keep user code within that limit, so the container survives an out-of-memory error. |
 | H-3, H-7 | R-05 gateway, R-06 scaling controller (delete in-process autoscaler) | 1 | Partly done. Invocations go through the Service, with timeouts and readiness gating. Scaling uses the scale subresource, with scale to zero when idle (K-06, K-07). The gateway (R-05) is open. |

@@ -269,9 +269,9 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
   - invoke input limited to 6 MB once serialized, answered with 413 and `RequestEntityTooLargeException`, Lambda's name.
 - **Names:**
   - Lambda's naming rule on create and update;
-  - a unique index on `(userId, name)`, with `409 Conflict` for duplicates;
+  - a unique index on `(account_id, name)`, with `409 Conflict` for duplicates (the tenant column is `user_id` until the client-readiness plan's P-12 renames it);
   - `GET /functions?name=<name>`;
-  - a TypeORM migration for production. In development the schema is synchronized; databases that already hold duplicate names need them renamed first, which the migration reports.
+  - a TypeORM migration. Every environment builds its schema from migrations since the client-readiness plan's P-01. Databases that already hold duplicate names need them renamed first, which the migration reports.
 - **Tests:**
   - L1: DTO validation, and the conflict on create and on rename.
   - The e2e script gains checks that 150 KB of code is accepted, 1 MB is refused with the clear message, and a 1 MB input is accepted.

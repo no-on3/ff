@@ -80,17 +80,27 @@ runtimes/python/tests/container-smoke.sh
 hack/k8s/load-images.sh
 ```
 
-**7. Configure and start the backend.**
+**7. Configure the backend, create the database schema, and start the backend.**
 
 ```bash
 cp BE/.env.example BE/.env
-cd BE && npm install && npm run start:dev
+cd BE && npm install
+npm run migration:run
+npm run start:dev
 ```
 
 - The defaults in `.env.example` match the steps above.
 - If you already have a `BE/.env` from before the Kubernetes migration (it contains `NOMAD_*` keys), replace it. It lacks the `K8S_*` settings and `FF_DEV_USER_ID`, and without the latter every request returns 401.
-- In development the backend creates the database schema itself when it starts.
+- **The schema comes from migrations,** in development as in production. `npm run migration:run` applies the ones your database hasn't had yet. Run it again whenever you pull changes that add a migration (`BE/src/migrations/`). The backend refuses to start while a migration is pending, and says so.
 - Leave this terminal running, and run the remaining commands from a second terminal at the repository root. Check that the backend answers: `curl -s localhost:3000/functions` prints `[]`, and the Swagger UI is at http://localhost:3000/api.
+
+**A database created before 2026-10-17 must be reset once.** Until then, the backend created its tables itself, with other column names, and `npm run migration:run` stops with `relation "functions" already exists`. Resetting deletes your development functions and their history. Their Deployments in the cluster go with the dev tenant's namespace:
+
+```bash
+docker compose exec postgres psql -U postgres -c 'DROP DATABASE serverless_platform WITH (FORCE)' -c 'CREATE DATABASE serverless_platform'
+source hack/k8s/env.sh && kubectl delete namespace "ff-t-$(printf %s 1 | sha256sum | cut -c1-12)" --ignore-not-found
+(cd BE && npm run migration:run)
+```
 
 **8. The dashboard (optional)**, in its own terminal:
 
@@ -242,8 +252,20 @@ source hack/k8s/env.sh && k3d cluster stop "$FF_CLUSTER_NAME"
 # start again
 docker compose up -d --wait
 hack/k8s/cluster-up.sh                                   # restarts the existing cluster and renews its token
-cd BE && npm run start:dev
+cd BE && npm run migration:run && npm run start:dev      # migration:run does nothing when none is pending
 ```
+
+**Change the database schema.** Change the entity, then let TypeORM write the migration, read it, and register it:
+
+```bash
+cd BE
+npm run migration:generate -- src/migrations/AddFunctionDescription   # compares the entities with your database
+# review the new file, then add its class to src/migrations/index.ts
+npm run migration:run                                    # apply it to your database
+npm run migration:check                                  # migrations and entities agree: exit 0
+```
+
+`migration:check` builds a scratch database, runs every migration there, and fails if the entities still need anything. A migration that isn't in `src/migrations/index.ts` never runs, so the check catches it too. `npm run migration:revert` undoes the last migration, and `npm run migration:show` lists them.
 
 **Renew the cluster token.** The backend's token is valid for 24 hours. When calls to Kubernetes start failing with `Unauthorized`, run `hack/k8s/mint-token.sh`. `cluster-up.sh` does this as well.
 
@@ -258,6 +280,8 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 
 ```bash
 (cd BE && npm test)                                      # backend unit tests, seconds
+(cd BE && npm run test:db)                               # migrations against real PostgreSQL (compose), seconds
+(cd BE && npm run migration:check)                       # the migrations build exactly the entities' schema
 (cd runtimes/nodejs && npm test)                         # Node.js runtime protocol
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 3 min
@@ -282,6 +306,9 @@ docker compose down -v
 | Port 3000 already in use | Set `PORT` in `BE/.env`. The dashboard has the API address hard-coded in `FE/src/services/api.ts`, so change it there as well. |
 | Port 5173 already in use | Vite moves to the next free port and prints it. Set `CORS_ORIGIN` in `BE/.env` to that address, or the browser blocks the dashboard's API calls. |
 | Every API call returns 401 | `FF_DEV_USER_ID` is missing from `BE/.env`, which is usually an old `.env`. See step 7. |
+| `The backend did not start: The database schema is out of date: … pending` | `cd BE && npm run migration:run`, then start it again. |
+| `migration:run` fails with `relation "functions" already exists` | The database was created before migrations were used. Reset it once, as shown after step 7. |
+| `npm run test:db` fails with `ECONNREFUSED` | PostgreSQL isn't running: `docker compose up -d --wait postgres`. The tests read `DB_*` from `BE/.env`. |
 | Kubernetes calls fail with `Unauthorized` | The token expired: `hack/k8s/mint-token.sh`. |
 | Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. |
 | `create` takes 90 s, then fails | The function cannot load. The error message contains the runtime's reason. See "If a function cannot load" in section 3. |

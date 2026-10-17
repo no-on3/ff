@@ -78,9 +78,9 @@ export class Function {
   @OneToMany(() => FunctionInvocation, invocation => invocation.function)
   invocations: FunctionInvocation[];
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt: Date;
 }

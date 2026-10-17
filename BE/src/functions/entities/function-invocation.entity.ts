@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
@@ -18,6 +19,8 @@ export enum InvocationStatus {
 }
 
 @Entity('function_invocations')
+// The history lists a function's invocations newest first; deleting a function finds them too.
+@Index(['functionId', 'createdAt'])
 export class FunctionInvocation {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -28,7 +31,7 @@ export class FunctionInvocation {
   // Invocation history belongs to the function; deleting the function deletes it
   // (as the original migration already declared).
   @ManyToOne(() => Function, func => func.invocations, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'functionId' })
+  @JoinColumn({ name: 'function_id' })
   function: Function;
 
   @Column({ type: 'jsonb', nullable: true })
@@ -54,9 +57,9 @@ export class FunctionInvocation {
   @Column({ nullable: true })
   error?: string;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt: Date;
 }

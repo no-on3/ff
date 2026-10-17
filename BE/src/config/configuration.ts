@@ -6,7 +6,7 @@ export default () => ({
     username: process.env.DB_USERNAME || 'postgres',
     password: process.env.DB_PASSWORD || 'postgres',
     name: process.env.DB_NAME || 'postgres',
-    synchronize: process.env.NODE_ENV !== 'production',
+    // The schema comes only from migrations, in every environment (src/database).
     logging: process.env.NODE_ENV !== 'production',
   },
   minio: {

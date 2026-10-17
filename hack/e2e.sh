@@ -2,8 +2,10 @@
 # L4 end-to-end test of the whole stack, driven through the public REST API:
 #   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003)
 #   + the k3d dev cluster + the backend (built, started on a free port).
-# Scenario: create → invoke → history → update → invoke → delete, with checks
-# on the Kubernetes side, then the same lifecycle for a Python function. Removes its compose project (including its volumes),
+# The backend first refuses the new database, then the migrations run from the
+# build, as a deploy step would. Scenario: create → invoke → history → update →
+# invoke → delete, with checks on the Kubernetes side, then the same lifecycle
+# for a Python function. Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
 # gVisor (hack/k8s/gvisor-up.sh installs it).
@@ -84,17 +86,27 @@ echo "  $FF_CLUSTER_NAME ready, runtime images imported"
 
 echo "== backend"
 (cd "$FF_REPO_ROOT/BE" && npm run build >/dev/null)
-(
-  cd "$FF_REPO_ROOT/BE"
-  export NODE_ENV=development PORT="$be_port" \
-    DB_HOST=127.0.0.1 DB_PORT="$FF_PG_PORT" DB_USERNAME=postgres DB_PASSWORD=postgres DB_NAME=serverless_platform \
-    MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$FF_S3_PORT" MINIO_USE_SSL=false MINIO_BUCKET_NAME=functions \
-    MINIO_ACCESS_KEY=ffdevaccesskey MINIO_SECRET_KEY=ffdevsecretkey-local-only \
-    ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy \
-    K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" FF_DEV_USER_ID="$tenant" \
-    K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
-  exec node dist/main.js
-) >"$work/backend.log" 2>&1 &
+# Every setting explicit, so that BE/.env (read when a variable is missing) can't change the test.
+be_env=(
+  NODE_ENV=development PORT="$be_port"
+  DB_HOST=127.0.0.1 DB_PORT="$FF_PG_PORT" DB_USERNAME=postgres DB_PASSWORD=postgres DB_NAME=serverless_platform
+  MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$FF_S3_PORT" MINIO_USE_SSL=false MINIO_BUCKET_NAME=functions
+  MINIO_ACCESS_KEY=ffdevaccesskey MINIO_SECRET_KEY=ffdevsecretkey-local-only
+  ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy
+  K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" FF_DEV_USER_ID="$tenant"
+  K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
+)
+# The database is new: the backend must refuse it until the migrations have run.
+refused=0
+(cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" node dist/main.js) >"$work/backend-refused.log" 2>&1 || refused=$?
+check "the backend refuses a database with pending migrations" "1 pending" \
+  "$refused $(grep -o 'pending' "$work/backend-refused.log" | head -1)"
+(cd "$FF_REPO_ROOT/BE" && env "${be_env[@]}" npm run migration:run:prod) >"$work/migrations.log" 2>&1 ||
+  fail "the migrations failed (see $work/migrations.log)"
+# The backend's own startup check, below, then proves that none is left pending.
+check "the migrations run from the build" true \
+  "$(grep -q 'executed successfully' "$work/migrations.log" && echo true || echo false)"
+(cd "$FF_REPO_ROOT/BE" && exec env "${be_env[@]}" node dist/main.js) >"$work/backend.log" 2>&1 &
 be_pid=$!
 # A cold start reads thousands of node_modules files. With a cold page cache on
 # a spinning disk that took 23 s just to load the modules, so allow 3 minutes.

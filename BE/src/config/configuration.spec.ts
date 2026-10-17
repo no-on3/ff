@@ -17,11 +17,12 @@ describe('configuration', () => {
     const config = configuration();
 
     expect(config.port).toBe(3000);
-    expect(config.database).toMatchObject({
+    expect(config.database).toEqual({
       host: 'localhost',
       port: 5432,
+      username: 'postgres',
+      password: 'postgres',
       name: 'postgres',
-      synchronize: true,
       logging: true,
     });
     expect(config.minio).toMatchObject({ port: 9003, useSSL: false, bucketName: 'functions' });
@@ -50,12 +51,15 @@ describe('configuration', () => {
     expect(config.minio).toMatchObject({ port: 9100, useSSL: true, bucketName: 'artifacts' });
   });
 
-  it('turns schema synchronization and query logging off in production', () => {
+  it('turns query logging off in production', () => {
     process.env = { NODE_ENV: 'production' };
 
-    const config = configuration();
+    expect(configuration().database.logging).toBe(false);
+  });
 
-    expect(config.database.synchronize).toBe(false);
-    expect(config.database.logging).toBe(false);
+  it('has no schema synchronization switch: the schema comes only from migrations', () => {
+    process.env = { NODE_ENV: 'development' };
+
+    expect(configuration().database).not.toHaveProperty('synchronize');
   });
 });

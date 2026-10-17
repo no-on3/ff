@@ -61,7 +61,7 @@ It isn't reliable enough to bill from:
 | The row is saved as `RUNNING` before the call and updated after. | `BE/src/functions/functions.service.ts:129` | If the backend crashes or restarts during a call, the row stays `RUNNING` forever. |
 | On errors and timeouts the stored duration is the end-to-end time, including any cold start. Both runtimes return `X-FF-Duration-Ms` on errors too, but the orchestrator drops it. | `functions.service.ts:162`, `BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts:237` | Failed calls are mismeasured. |
 | A runtime's `429 TooManyRequestsException` (more than `FF_MAX_QUEUE`, 32, calls waiting) becomes a generic error. | `kubernetes.orchestrator.ts:239` | Throttled calls are recorded, reported and would be charged as function errors. |
-| `synchronize` is on outside production, and the migrations don't match the entities (parent C-7, still open). | `configuration.ts:9`, `BE/src/migrations/*` | A production database breaks today, and every table this plan adds needs migrations that really run. |
+| `synchronize` is on outside production, and the migrations don't match the entities (parent C-7). **Fixed in P-01.** | `configuration.ts:9`, `BE/src/migrations/*` | A production database breaks today, and every table this plan adds needs migrations that really run. |
 | There are no plans, prices, balances, payments or invoices. | | |
 
 ### 1.3 What a call really costs
@@ -453,7 +453,7 @@ The same as the Kubernetes migration and the CLI plan:
 |---|---|---|
 | L0 | Type-check and build, backend and console | `tsc --noEmit`, `nest build`, `npm run build` in `FE/` |
 | L1 | Unit tests | Jest |
-| L2 | Against real PostgreSQL: migrations, triggers, ledger invariants, concurrent writes | Jest with the compose database |
+| L2 | Against real PostgreSQL: migrations, triggers, ledger invariants, concurrent writes | `npm run test:db` in `BE/`: Jest, each case in its own scratch database on the compose server |
 | L3 | Cluster integration | the `K8S_IT=1` Jest suite on k3d |
 | L4 | End to end through the public API, with Keycloak in docker-compose | `hack/e2e.sh` |
 | L5 | **Cross-account suite:** for every route in the OpenAPI document, account B gets 404 (or 403 for a missing role) on account A's resources, and anonymous calls get 401 | `hack/e2e-tenancy.sh`, in CI from P-63 |
@@ -473,6 +473,11 @@ The same as the Kubernetes migration and the CLI plan:
 - **Drift check:** `npm run migration:check` fails when `migration:generate` would produce anything.
 - **Tests:** L2: a fresh database, then the migrations, then L1 and L4 with sync off.
 - **Docs:** the getting-started guide (development databases are reset once).
+- **As built** (2026-10-17):
+  - `BE/src/database/` holds one options builder, shared by the backend and the TypeORM CLI, with explicit lists of entities and migrations. A file glob over `dist/` would also match the compiled `.d.ts` files.
+  - `SnakeNamingStrategy` is FF's own (about 40 lines, tested), not a dependency. `uuidExtension: 'pgcrypto'` gives `gen_random_uuid()`, and `installExtensions: false` keeps TypeORM from creating extensions, which managed servers may forbid.
+  - Two changes that are free while no production data exists: every timestamp is `timestamptz`, and `function_invocations` has an index on `(function_id, created_at)` for the history and for cascade deletes.
+  - Commands in `BE/`: `migration:run`, `migration:run:prod` (from the build, for P-60's Job), `migration:revert`, `migration:show`, `migration:generate`, `migration:check`, and `test:db`. The drift check and the L2 tests work in scratch databases and never touch the configured one.
 
 #### P-02: Validated configuration (parent F-05)
 - **One schema** for every variable (Zod), checked at boot, failing with a message that names the variable.
@@ -991,8 +996,8 @@ Without the fixes of P-03 to P-08, this is smaller than the parent plan's Phase 
 
 | Task | Status | Commit | Evidence |
 |---|---|---|---|
-| P-00 Preparation and ADR 0004 | ✅ Done | (this commit) | • Branch `feat/client-ready` created from `master` at `5434ad9`. Baseline before any change: `tsc --noEmit` exit 0, `npm test` **12 suites / 122 tests**.<br>• [ADR 0004](adr/0004-identity-and-tenancy.md) records D1 to D5 and D12. It adds three precisions that the later tasks need: how a request chooses its account (`X-FF-Account`, now in D4), the exact API-key format, and that a key's limit to its creator's role is checked on every request (now in D3).<br>• D1 lists the `rejected` status, as §4 already did.<br>• The external actions are listed in §9, waiting for you.<br>• `hack/check-docs.py` passes on the ADR, this plan, and the docs index. |
-| P-01 Schema baseline | ⏳ Planned | | |
+| P-00 Preparation and ADR 0004 | ✅ Done | `9326077` | • Branch `feat/client-ready` created from `master` at `5434ad9`. Baseline before any change: `tsc --noEmit` exit 0, `npm test` **12 suites / 122 tests**.<br>• [ADR 0004](adr/0004-identity-and-tenancy.md) records D1 to D5 and D12. It adds three precisions that the later tasks need: how a request chooses its account (`X-FF-Account`, now in D4), the exact API-key format, and that a key's limit to its creator's role is checked on every request (now in D3).<br>• D1 lists the `rejected` status, as §4 already did.<br>• The external actions are listed in §9, waiting for you.<br>• `hack/check-docs.py` passes on the ADR, this plan, and the docs index. |
+| P-01 Schema baseline | ✅ Done | (this commit) | • L0: `tsc --noEmit` exit 0; `nest build` has no tests in `dist/`.<br>• L1 `npm test`: **15 suites / 153 tests** (was 122). New: the naming strategy; the options (no sync in any `NODE_ENV`, `gen_random_uuid()`, the explicit lists); the entity mapping built offline (snake_case, camelCase properties kept, one `function_id` column per table, `timestamptz` everywhere); `describeError`. Undoing each change by hand makes its test fail.<br>• L2 `npm run test:db`: **7/7** on PostgreSQL 15.19. A fresh database is refused; after the migrations there is no drift; `information_schema` shows snake_case, `gen_random_uuid()` and `timestamptz`; repositories round-trip with the API's names; deletes still cascade; a second run does nothing; the baseline reverts completely and applies again.<br>• `migration:check`: exit 0; exit 1 for an entity changed without a migration, and for a migration missing from `index.ts`; exit 2, naming the cause, when the server is unreachable.<br>• Manual: the build refuses a fresh database (exit 1, naming the pending migration); `migration:run:prod` applies the baseline; the backend then answers `GET /functions` with 200.<br>• L4 `hack/e2e.sh`: **21/21** in 67 s, with two new checks (the refusal, and the migrations from the build). No leftovers.<br>• Found while verifying: `pg` reports a refused connection as an `AggregateError` with an empty message, so failures printed nothing. `describeError` now names the cause in `main.ts` and in the check.<br>• Docs: getting-started (migration step, one-time reset, schema changes, tests, troubleshooting), README, the Kubernetes dev guide, `how-it-works.html` (SQL and diagram in snake_case), CLI plan C-03, parent Appendix A (C-7). |
 | P-02 Validated configuration | ⏳ Planned | | |
 | P-03 Function lifecycle fixes | ⏳ Planned | | |
 | P-04 Runtime fixes | ⏳ Planned | | |

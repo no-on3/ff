@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import configuration from './config/configuration';
+import { DatabaseSettings, dataSourceOptions } from './database/database.options';
 import { FunctionsModule } from './functions/functions.module';
 import { MinioClientModule } from './minio-client/minio-client.module';
-import configuration from './config/configuration';
 
 @Module({
   imports: [
@@ -13,19 +14,9 @@ import configuration from './config/configuration';
     }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: (configService: ConfigService) => ({
-        type: 'postgres',
-        host: configService.get('database.host'),
-        port: configService.get('database.port'),
-        username: configService.get('database.username'),
-        password: configService.get('database.password'),
-        database: configService.get('database.name'),
-        entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        migrations: [__dirname + '/migrations/*{.ts,.js}'],
-        synchronize: configService.get('database.synchronize'),
-        logging: configService.get('database.logging'),
-      }),
       inject: [ConfigService],
+      useFactory: (configService: ConfigService) =>
+        dataSourceOptions(configService.getOrThrow<DatabaseSettings>('database')),
     }),
     FunctionsModule,
     MinioClientModule,
