@@ -1590,7 +1590,7 @@ function initSimulator() {
 
 /* ---------- data diagrams ---------- */
 function erDiagram() {
-  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16).
+  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16), and the audit log (P-17).
   const tables = [
     { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · …'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
     { name: 'functions', x: 350, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['account_id', 'char(12) · FK, indexed'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
@@ -1598,6 +1598,7 @@ function erDiagram() {
     { name: 'plans', x: 16, row: 1, cols: [['id', 'text · PK, "beta"', 'pk'], ['name', 'text'], ['limits', 'jsonb (P-15)']] },
     { name: 'accounts', x: 350, row: 1, cols: [['id', 'char(12) · PK, random digits', 'pk'], ['name', 'text'], ['status', 'pending · active · …'], ['plan_id', 'text · FK'], ['country', "char(2) = 'TN'"], ['tax_id', 'text, null'], ['internet_egress', 'bool = false'], ['use_case', 'text, null'], ['created_at', 'timestamptz']] },
     { name: 'memberships', x: 684, row: 1, cols: [['account_id', 'char(12) · PK, FK, cascade', 'pk'], ['user_id', 'uuid · PK, FK, cascade', 'pk'], ['role', 'owner · developer · viewer'], ['created_at', 'timestamptz']] },
+    { name: 'audit_log', x: 16, row: 2, cols: [['id', 'bigserial · PK', 'pk'], ['account_id', 'char(12), null, no FK'], ['actor', 'user:… · key:… · dev · system'], ['actor_label', 'e-mail, or key name'], ['action', 'function.create, member.role, …'], ['resource', 'function:<id>, user:<id>, …'], ['ip', 'text, null'], ['request_id', 'text, null'], ['details', 'jsonb, null'], ['at', 'timestamptz · append-only']] },
     { name: 'invitations', x: 350, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['account_id', 'char(12) · FK, cascade'], ['email', 'text, lowercase, indexed'], ['role', 'owner · developer · viewer'], ['invited_by', 'uuid · FK → users'], ['created_at', 'timestamptz'], ['expires_at', 'timestamptz, 7 days'], ['accepted_at', 'timestamptz, null'], ['accepted_by', 'uuid · FK → users, null']] },
     { name: 'users', x: 684, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['oidc_sub', "text · unique, Keycloak's ID"], ['email', 'text'], ['name', 'text, null'], ['locale', "text = 'fr-TN'"], ['created_at', 'timestamptz']] },
   ];

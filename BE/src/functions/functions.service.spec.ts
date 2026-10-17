@@ -15,6 +15,7 @@ import {
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
+import { AuditService } from '../audit/audit.service';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
@@ -43,6 +44,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const plans = { forAccount: jest.fn() };
   const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn() };
   const TENANT = { quota: BETA_LIMITS.quota };
+  const audit = { record: jest.fn() };
 
   const activeFunction = (): Function =>
     ({
@@ -104,6 +106,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { provide: ConfigService, useValue: { get: jest.fn((_key: string, fallback?: unknown) => fallback) } },
         { provide: MetricsService, useValue: metrics },
         { provide: PlansService, useValue: plans },
+        { provide: AuditService, useValue: audit },
       ],
     }).compile();
     service = moduleRef.get(FunctionsService);
@@ -625,6 +628,81 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { quota: { pods: 7, cpu: '2', memory: '3Gi' } },
         { quota: { pods: 7, cpu: '2', memory: '3Gi' } },
       ]);
+    });
+  });
+
+  describe('the audit log (P-17)', () => {
+    const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
+    const recorded = () => audit.record.mock.calls.map(([event]) => event);
+
+    it('records a new function in the transaction that saves it, so a deploy that fails later still says who created it', async () => {
+      orchestrator.waitUntilReady.mockRejectedValue(new FunctionLoadError('Runtime.ImportModuleError', 'nope'));
+
+      await service.create('user-1', dto).catch(() => undefined);
+
+      expect(audit.record).toHaveBeenCalledTimes(1);
+      expect(audit.record).toHaveBeenCalledWith(
+        {
+          accountId: 'user-1',
+          action: 'function.create',
+          resource: 'function:fn-1',
+          details: { name: 'hello', runtime: 'nodejs', memory: 128, timeout: 5 },
+        },
+        transaction,
+      );
+    });
+
+    it('records the fields an update changed, with their new values but never the code', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      await service.update('user-1', 'fn-1', { code: 'v2', memory: 256, timeout: 5 });
+
+      expect(recorded()).toEqual([
+        { accountId: 'user-1', action: 'function.update', resource: 'function:fn-1', details: { changed: ['code', 'memory'], memory: 256, outcome: 'live' } },
+      ]);
+    });
+
+    it('records a rename, which needs no rollout, and nothing for an update that changes nothing', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      await service.update('user-1', 'fn-1', { name: 'renamed' });
+      await service.update('user-1', 'fn-1', { timeout: 5 });
+
+      expect(recorded()).toEqual([
+        { accountId: 'user-1', action: 'function.update', resource: 'function:fn-1', details: { changed: ['name'], name: 'renamed', outcome: 'saved' } },
+      ]);
+    });
+
+    it('records a failed attempt that was kept, and nothing for one that was rolled back: nothing changed', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Error', 'boom'));
+      await service.update('user-1', 'fn-1', { code: 'broken' }).catch(() => undefined);
+      expect(recorded()).toEqual([]);
+
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR });
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Error', 'boom'));
+      await service.update('user-1', 'fn-1', { code: 'still broken' }).catch(() => undefined);
+      expect(recorded()).toEqual([expect.objectContaining({ action: 'function.update', details: { changed: ['code'], outcome: 'failed, kept: ERROR' } })]);
+    });
+
+    it('records a deletion and a scaling change', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      await service.updateScalingConfig('user-1', 'fn-1', { maxInstances: 5 });
+      await service.remove('user-1', 'fn-1');
+
+      expect(recorded()).toEqual([
+        { accountId: 'user-1', action: 'function.scaling', resource: 'function:fn-1', details: { minInstances: 0, maxInstances: 5 } },
+        { accountId: 'user-1', action: 'function.delete', resource: 'function:fn-1', details: { name: 'hello' } },
+      ]);
+    });
+
+    it('records nothing for a delete that failed', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.remove.mockRejectedValue(new Error('api down'));
+
+      await service.remove('user-1', 'fn-1').catch(() => undefined);
+
+      expect(recorded()).toEqual([]);
     });
   });
 

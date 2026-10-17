@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { MinioClientModule } from '../minio-client/minio-client.module';
 import { OrchestratorModule } from '../orchestrator/orchestrator.module';
 import { PlansModule } from '../plans/plans.module';
+import { AuditModule } from '../audit/audit.module';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
 import { FunctionsController } from './functions.controller';
@@ -16,6 +17,7 @@ import { FunctionsService } from './functions.service';
     OrchestratorModule,
     MetricsModule,
     PlansModule,
+    AuditModule,
   ],
   controllers: [FunctionsController],
   providers: [FunctionsService],

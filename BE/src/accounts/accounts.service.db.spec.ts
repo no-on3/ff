@@ -9,6 +9,8 @@ import 'dotenv/config';
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { databaseConfiguration } from '../config/configuration';
+import { AuditEntry } from '../audit/audit-entry.entity';
+import { AuditService } from '../audit/audit.service';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { Mail, MailService } from '../mail/mail.service';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
@@ -36,8 +38,9 @@ run('accounts, users and memberships (L2, P-12)', () => {
     const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
     const config = { getOrThrow: () => ({ operatorEmail, adminUrl: 'https://admin.ff.example' }) } as unknown as ConfigService;
     const ds = db.dataSource;
-    const plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), {} as Orchestrator);
-    service = new AccountsService(ds.getRepository(Account), ds.getRepository(User), ds.getRepository(Membership), ds, mail, config, plans);
+    const audit = new AuditService(ds.getRepository(AuditEntry));
+    const plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), {} as Orchestrator, audit);
+    service = new AccountsService(ds.getRepository(Account), ds.getRepository(User), ds.getRepository(Membership), ds, mail, config, plans, audit);
   });
 
   afterAll(async () => {

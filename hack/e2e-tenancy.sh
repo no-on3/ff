@@ -21,6 +21,7 @@
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
+#   - The audit log (P-17): each account reads its own, which names who did what.
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
 # compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
@@ -239,6 +240,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: needs a logged-in user" "$needs_user_for_keys" "$(status) $(message)"
       ;;
+    "GET /audit-log")
+      log_b="$(as_b GET /audit-log)"
+      check "$route: B reads its own log, which never names A's function" "200 0" \
+        "$(status) $(jq --arg id "function:$id" '[.entries[] | select(.resource == $id)] | length' <<<"$log_b")"
+      ;;
     *" /members"*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: needs a logged-in user" "$needs_user_for_members" "$(status) $(message)"
@@ -375,6 +381,12 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 "$method" "/members/$user_1_id" "$(body_for "$method" "$template")" >/dev/null
       check "$route: user 1 is not a member of account 2" "404 Member $user_1_id not found" "$(status) $(message)"
       ;;
+    "GET /audit-log")
+      log_2="$(as_user_2 GET /audit-log)"
+      check "$route: account 2's log names nothing of account 1's" "200 0" \
+        "$(status) $(jq --arg f "function:$fn_1" --arg k "api_key:$key_1_id" --arg i "invitation:$invitation_1" \
+          '[.entries[] | select(.resource == $f or .resource == $k or .resource == $i)] | length' <<<"$log_2")"
+      ;;
     "DELETE /members/invitations/{id}")
       as_user_2 DELETE "/members/invitations/$invitation_1" >/dev/null
       check "$route: account 2 can't cancel account 1's invitation" "404 Invitation $invitation_1 not found" "$(status) $(message)"
@@ -402,7 +414,7 @@ with_token "$key_1" POST "/functions/$fn_1/invoke" '{"input":{"name":"key"}}' >/
 check "and invokes them" 201 "$(status)"
 with_token "$key_1" PUT "/functions/$fn_1" '{"name": "renamed"}' >/dev/null
 check "but can't change one without functions:write" "403 This API key lacks the scope functions:write" "$(status) $(message)"
-for path in /me /api-keys /members; do
+for path in /me /api-keys /members /audit-log; do
   with_token "$key_1" GET "$path" >/dev/null
   check "a key can't call GET $path, which takes a user's token" \
     "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
@@ -446,6 +458,18 @@ as_user_1 DELETE "/members/$user_2_id" >/dev/null
 check "the owner removes user 2" 200 "$(status)"
 as_member GET /functions >/dev/null
 check "who can't reach account 1 any more" "404 Account $account_1 not found" "$(status) $(message)"
+
+echo "== the audit log (P-17)"
+log_1="$(as_user_1 GET '/audit-log?limit=100')"
+check "account 1's log has each change, oldest to newest" \
+  "account.create function.create api_key.create member.invite api_key.revoke member.invite member.join member.role member.remove" \
+  "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
+check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
+  "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
+check "with the address and the request's ID" true \
+  "$(jq '[.entries[] | (.ip != null and (.requestId | test("^[0-9a-f-]{36}$")))] | all' <<<"$log_1")"
+as_user_1 GET '/audit-log?limit=0' >/dev/null
+check "a page of nothing is refused" "400 limit must not be less than 1" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 
 with_token "${token_1%?????}AAAAA" GET /functions >/dev/null
 check "a tampered token: 401" "401 The token is invalid" "$(status) $(message)"

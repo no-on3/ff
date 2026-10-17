@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, IsNull, MoreThan, Repository } from 'typeorm';
+import { AuditService } from '../audit/audit.service';
 import { Role } from '../auth/principal';
 import { MailService } from '../mail/mail.service';
 import { InvitationView, InviteMemberDto, MemberView, MembersView } from './dto/member.dto';
@@ -45,6 +46,7 @@ export class MembersService {
     private readonly dataSource: DataSource,
     private readonly mail: MailService,
     private readonly config: ConfigService,
+    private readonly audit: AuditService,
   ) {}
 
   /** GET /members. */
@@ -82,6 +84,12 @@ export class MembersService {
       [accountId, email, dto.role, inviter.id, expiresAt],
     );
     const invitation = await this.invitations.findOneByOrFail({ id: saved.id });
+    await this.audit.record({
+      accountId,
+      action: 'member.invite',
+      resource: `invitation:${invitation.id}`,
+      details: { email, role: dto.role, renewed: reopened },
+    });
     await this.sendInvitation(invitation, inviter);
     return invitationView(invitation, now);
   }
@@ -105,8 +113,15 @@ export class MembersService {
 
   /** DELETE /members/invitations/:id: an invitation nobody has accepted yet. */
   async cancelInvitation(accountId: string, id: string): Promise<void> {
-    const { affected } = await this.invitations.delete({ id, accountId, acceptedAt: IsNull() });
-    if (!affected) throw new NotFoundException(`Invitation ${id} not found`);
+    const invitation = await this.invitations.findOneBy({ id, accountId, acceptedAt: IsNull() });
+    const { affected } = invitation ? await this.invitations.delete({ id, accountId, acceptedAt: IsNull() }) : { affected: 0 };
+    if (!invitation || !affected) throw new NotFoundException(`Invitation ${id} not found`);
+    await this.audit.record({
+      accountId,
+      action: 'member.invitation_cancel',
+      resource: `invitation:${id}`,
+      details: { email: invitation.email, role: invitation.role },
+    });
   }
 
   /** PATCH /members/:userId. */
@@ -115,6 +130,11 @@ export class MembersService {
       const membership = await this.memberOf(manager, accountId, userId);
       if (membership.role === 'owner' && role !== 'owner') await this.keepAnOwner(manager, accountId);
       await manager.update(Membership, { accountId, userId }, { role });
+      const email = (membership.user as User).email;
+      await this.audit.record(
+        { accountId, action: 'member.role', resource: `user:${userId}`, details: { email, from: membership.role, to: role } },
+        manager,
+      );
       return memberView({ ...membership, role });
     });
   }
@@ -125,6 +145,10 @@ export class MembersService {
       const membership = await this.memberOf(manager, accountId, userId);
       if (membership.role === 'owner') await this.keepAnOwner(manager, accountId);
       await manager.delete(Membership, { accountId, userId });
+      await this.audit.record(
+        { accountId, action: 'member.remove', resource: `user:${userId}`, details: { email: (membership.user as User).email, role: membership.role } },
+        manager,
+      );
     });
   }
 
@@ -134,7 +158,7 @@ export class MembersService {
    * with a token: Keycloak verified the address. A membership the user already
    * has stays as it is.
    */
-  async acceptInvitations(user: User, now = new Date()): Promise<void> {
+  async acceptInvitations(user: User, now = new Date(), request: { ip?: string; requestId?: string } = {}): Promise<void> {
     if (!user.email) return;
     const open = await this.invitations.find({ where: { email: user.email.toLowerCase(), acceptedAt: IsNull(), expiresAt: MoreThan(now) } });
     for (const invitation of open) {
@@ -146,7 +170,21 @@ export class MembersService {
           .values({ accountId: invitation.accountId, userId: user.id, role: invitation.role })
           .orIgnore()
           .execute();
-        await manager.update(Invitation, { id: invitation.id, acceptedAt: IsNull() }, { acceptedAt: now, acceptedBy: user.id });
+        const { affected } = await manager.update(Invitation, { id: invitation.id, acceptedAt: IsNull() }, { acceptedAt: now, acceptedBy: user.id });
+        if (!affected) return; // another request of the same user took it
+        // In the guard, before the request context exists: the joining user is the actor.
+        await this.audit.record(
+          {
+            accountId: invitation.accountId,
+            action: 'member.join',
+            resource: `user:${user.id}`,
+            details: { email: user.email, role: invitation.role, invitation: invitation.id, invitedBy: invitation.invitedBy },
+            actor: { id: `user:${user.id}`, label: user.email },
+            ip: request.ip,
+            requestId: request.requestId,
+          },
+          manager,
+        );
       });
       this.logger.log(`User ${user.id} joined account ${invitation.accountId} as ${invitation.role}, invited by ${invitation.invitedBy}`);
     }

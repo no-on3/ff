@@ -15,6 +15,7 @@ import { settings } from '../orchestrator/kubernetes/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { FunctionStatus, Function, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
+import { recordingAudit } from '../audit/test-fixtures';
 import { onePlan } from '../plans/test-fixtures';
 import { FUNCTION_DEFAULTS, MemoryRepository, eventually } from './test-fixtures';
 
@@ -58,6 +59,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     config as never,
     { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() } as never,
     onePlan(),
+    recordingAudit().audit,
   );
   const spec = (name: string, code: string) => ({ name, runtime: Runtime.NODEJS, code, memory: 128, timeout: 3 });
 

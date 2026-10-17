@@ -9,6 +9,7 @@ import { CodeTooLargeError, FunctionThrottledError, FunctionTimeoutError } from 
 import { ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService, tenantLimits } from '../plans/plans.service';
+import { AuditService } from '../audit/audit.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
@@ -65,7 +66,8 @@ function refuseOverPlan(plan: PlanView, change: Sized, current?: Sized): void {
  *
  * Every method acts for one account (P-10, D4): it takes the account ID, every
  * query includes it, and another account's function is not found. The account's
- * plan limits what it may create and change (P-15, D5). Failures
+ * plan limits what it may create and change (P-15, D5), and the audit log
+ * records each change (P-17). Failures
  * show the function's own errors as they are, and platform failures as a
  * generic message with the request ID (failures.ts).
  */
@@ -83,6 +85,7 @@ export class FunctionsService {
     private configService: ConfigService,
     private metricsService: MetricsService,
     private plans: PlansService,
+    private audit: AuditService,
   ) {}
 
   private readyTimeoutMs(): number {
@@ -135,7 +138,29 @@ export class FunctionsService {
         const allowed = plan.limits.functions === 1 ? '1 function' : `${plan.limits.functions} functions`;
         throw new BadRequestException(`The ${plan.name} plan allows ${allowed} per account: delete one first`);
       }
-      return manager.save(Function, function_);
+      const saved = await manager.save(Function, function_);
+      // Recorded with the row: a function whose deploy fails later still says who created it.
+      await this.audit.record(
+        {
+          accountId: saved.accountId,
+          action: 'function.create',
+          resource: `function:${saved.id}`,
+          details: { name: saved.name, runtime: saved.runtime, memory: saved.memory, timeout: saved.timeout },
+        },
+        manager,
+      );
+      return saved;
+    });
+  }
+
+  /** The fields an update changes, for the audit log: their names, and the new values but the code's. */
+  private recordUpdate(function_: Function, changed: string[], outcome: string): Promise<void> {
+    const values = Object.fromEntries(changed.filter((field) => field !== 'code').map((field) => [field, function_[field as keyof Function]]));
+    return this.audit.record({
+      accountId: function_.accountId,
+      action: 'function.update',
+      resource: `function:${function_.id}`,
+      details: { changed, ...values, outcome },
     });
   }
 
@@ -161,6 +186,9 @@ export class FunctionsService {
     refuseOverPlan(plan, updateFunctionDto, function_);
     const tenant = tenantLimits(plan.limits);
     const updated = { ...function_, ...updateFunctionDto };
+    const changed = (Object.keys(updateFunctionDto) as Array<keyof UpdateFunctionDto>).filter(
+      (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
+    );
     const changesVersion = ROLLOUT_FIELDS.some(
       (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
     );
@@ -170,7 +198,9 @@ export class FunctionsService {
 
     if (!changesVersion && !repairing) {
       Object.assign(function_, updateFunctionDto);
-      return this.functionsRepository.save(function_);
+      const saved = await this.functionsRepository.save(function_);
+      if (changed.length) await this.recordUpdate(saved, changed, 'saved');
+      return saved;
     }
 
     try {
@@ -179,13 +209,14 @@ export class FunctionsService {
       await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
     } catch (error) {
       if (error instanceof CodeTooLargeError) throw new BadRequestException(error.message); // nothing was applied
-      if (repairing) return this.keepFailedAttempt(function_, updateFunctionDto, error);
-      return this.rollBack(function_, error, tenant);
+      if (repairing) return this.keepFailedAttempt(function_, updateFunctionDto, changed, error);
+      return this.rollBack(function_, error, tenant, changed);
     }
 
     const previousCodePath = this.codePath(function_);
     Object.assign(function_, updateFunctionDto, { status: FunctionStatus.ACTIVE, error: null });
     const saved = await this.functionsRepository.save(function_);
+    await this.recordUpdate(saved, changed, 'live');
     await this.archiveCode(saved, previousCodePath);
     return saved;
   }
@@ -195,7 +226,7 @@ export class FunctionsService {
    * the Deployment matches the record, and answer with the diagnosis. If that
    * fails too, the function is ERROR, with both messages.
    */
-  private async rollBack(previous: Function, error: unknown, tenant: TenantLimits): Promise<never> {
+  private async rollBack(previous: Function, error: unknown, tenant: TenantLimits, changed: string[]): Promise<never> {
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
@@ -205,6 +236,7 @@ export class FunctionsService {
       previous.status = FunctionStatus.ERROR;
       previous.error = `The update failed: ${clause(failure)}. ${platformFailure(this.logger, 'Rolling back to the previous version', rollbackError)}`;
       await this.functionsRepository.save(previous);
+      await this.recordUpdate(previous, changed, 'failed, and so did the rollback: ERROR');
       await this.releaseInstances(previous);
       throw new InternalServerErrorException(previous.error);
     }
@@ -216,11 +248,12 @@ export class FunctionsService {
    * to go back to. Keep the attempt and its diagnosis, so the record shows the
    * code that failed and why, and release its instance, as a failed create does.
    */
-  private async keepFailedAttempt(function_: Function, changes: UpdateFunctionDto, error: unknown): Promise<never> {
+  private async keepFailedAttempt(function_: Function, changes: UpdateFunctionDto, changed: string[], error: unknown): Promise<never> {
     const previousCodePath = this.codePath(function_);
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     Object.assign(function_, changes, { status: FunctionStatus.ERROR, error: failure });
     const saved = await this.functionsRepository.save(function_);
+    await this.recordUpdate(saved, changed, 'failed, kept: ERROR');
     await this.releaseInstances(saved);
     await this.archiveCode(saved, previousCodePath);
     throw failureResponse(error, failure);
@@ -268,6 +301,7 @@ export class FunctionsService {
     } catch (error) {
       throw new InternalServerErrorException(platformFailure(this.logger, 'Deleting the function', error));
     }
+    await this.audit.record({ accountId, action: 'function.delete', resource: `function:${id}`, details: { name: function_.name } });
   }
 
   async invoke(accountId: string, id: string, input?: Record<string, unknown>): Promise<FunctionInvocation> {
@@ -347,6 +381,7 @@ export class FunctionsService {
     }
     Object.assign(function_, { minInstances, maxInstances });
     const saved = await this.functionsRepository.save(function_);
+    await this.audit.record({ accountId, action: 'function.scaling', resource: `function:${id}`, details: { minInstances, maxInstances } });
     if (saved.status === FunctionStatus.ACTIVE) await this.applyInstanceLimits(saved);
     return this.scalingConfig(saved);
   }

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomInt } from 'node:crypto';
 import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { AuditService } from '../audit/audit.service';
 import { ACCOUNT_ID, Principal } from '../auth/principal';
 import { Identity } from '../auth/token-verifier';
 import { MailService } from '../mail/mail.service';
@@ -39,6 +40,7 @@ export class AccountsService {
     private readonly mail: MailService,
     private readonly config: ConfigService,
     private readonly plans: PlansService,
+    private readonly audit: AuditService,
   ) {}
 
   /** The user of a valid token: found by its subject, or created on the first call. */
@@ -149,6 +151,10 @@ export class AccountsService {
       });
       await manager.save(created);
       await manager.save(manager.create(Membership, { accountId: created.id, userId: user.id, role: 'owner' }));
+      await this.audit.record(
+        { accountId: created.id, action: 'account.create', resource: `account:${created.id}`, details: { name: created.name, planId: created.planId } },
+        manager,
+      );
       return created;
     });
     await this.tellOperators(user, account);
@@ -165,9 +171,14 @@ export class AccountsService {
   async update(user: User, id: string, dto: UpdateAccountDto): Promise<AccountView> {
     const { account, role } = await this.membership(user, id);
     if (role !== 'owner') throw new ForbiddenException(`The ${role} role can't change the account`);
+    const changes: Record<string, { from: string | null; to: string | null }> = {};
+    if (dto.name !== undefined && dto.name !== account.name) changes.name = { from: account.name, to: dto.name };
+    if (dto.taxId !== undefined && dto.taxId !== account.taxId) changes.taxId = { from: account.taxId, to: dto.taxId };
     if (dto.name !== undefined) account.name = dto.name;
     if (dto.taxId !== undefined) account.taxId = dto.taxId;
-    return view(await this.accounts.save(account), role);
+    const saved = await this.accounts.save(account);
+    if (Object.keys(changes).length) await this.audit.record({ accountId: id, action: 'account.update', resource: `account:${id}`, details: changes });
+    return view(saved, role);
   }
 
   private async membership(user: User, id: string): Promise<{ account: Account; role: Membership['role'] }> {

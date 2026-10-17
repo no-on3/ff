@@ -10,6 +10,8 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { Plan } from '../accounts/entities/plan.entity';
 import { databaseConfiguration } from '../config/configuration';
+import { AuditEntry } from '../audit/audit-entry.entity';
+import { AuditService } from '../audit/audit.service';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function, Runtime } from '../functions/entities/function.entity';
@@ -23,6 +25,7 @@ const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 run('plans (L2, P-15)', () => {
   let db: ScratchDatabase;
   let plans: PlansService;
+  let audit: AuditService;
   const applied: Array<{ accountId: string; tenant: TenantLimits }> = [];
   const orchestrator = {
     applyTenantLimits: async (accountId: string, tenant: TenantLimits) => void applied.push({ accountId, tenant }),
@@ -44,7 +47,8 @@ run('plans (L2, P-15)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    plans = new PlansService(db.dataSource.getRepository(Plan), db.dataSource.getRepository(Account), orchestrator);
+    audit = new AuditService(db.dataSource.getRepository(AuditEntry));
+    plans = new PlansService(db.dataSource.getRepository(Plan), db.dataSource.getRepository(Account), orchestrator, audit);
   });
 
   afterAll(async () => {
@@ -120,6 +124,7 @@ run('plans (L2, P-15)', () => {
       { get: (_key: string, fallback?: unknown) => fallback } as never,
       {} as never,
       plans,
+      audit,
     );
     const create = (name: string) => functions.create(id, { name, runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 });
     await create('first');

@@ -199,6 +199,7 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(tables).toEqual([
         'accounts',
         'api_keys',
+        'audit_log',
         'function_invocations',
         'function_metrics',
         'functions',

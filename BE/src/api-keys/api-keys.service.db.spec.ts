@@ -9,6 +9,8 @@ import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { User } from '../accounts/entities/user.entity';
 import { databaseConfiguration } from '../config/configuration';
+import { AuditEntry } from '../audit/audit-entry.entity';
+import { AuditService } from '../audit/audit.service';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { API_KEY } from './api-key-format';
 import { ApiKeysService, MAX_KEYS_PER_ACCOUNT } from './api-keys.service';
@@ -19,6 +21,7 @@ const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 run('API keys (L2, P-13)', () => {
   let db: ScratchDatabase;
   let service: ApiKeysService;
+  let audit: AuditService;
   let owner: User;
   let n = 0;
 
@@ -35,7 +38,8 @@ run('API keys (L2, P-13)', () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
     owner = await db.dataSource.getRepository(User).save({ oidcSub: 'kc-owner', email: 'owner@example.tn' });
-    service = new ApiKeysService(db.dataSource.getRepository(ApiKey), db.dataSource.getRepository(Membership));
+    audit = new AuditService(db.dataSource.getRepository(AuditEntry));
+    service = new ApiKeysService(db.dataSource.getRepository(ApiKey), db.dataSource.getRepository(Membership), audit);
   });
 
   afterAll(async () => {
@@ -66,6 +70,7 @@ run('API keys (L2, P-13)', () => {
       accountStatus: 'active',
       planId: 'beta',
       keyId: id,
+      keyName: 'deploys',
       userId: owner.id,
       role: 'owner',
       scopes: ['functions:write'],

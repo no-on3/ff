@@ -5,6 +5,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountsModule } from './accounts/accounts.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
+import { AuditModule } from './audit/audit.module';
 import { AuthGuard } from './auth/auth.guard';
 import { TokenVerifier } from './auth/token-verifier';
 import { ApiExceptionFilter } from './common/api-exception.filter';
@@ -38,6 +39,7 @@ import { RateLimitGuard, rateLimitOptions } from './plans/rate-limits';
     }),
     AccountsModule,
     ApiKeysModule,
+    AuditModule,
     FunctionsModule,
     MinioClientModule,
     PlansModule,

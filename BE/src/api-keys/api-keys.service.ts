@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, MoreThan, Repository } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { Membership } from '../accounts/entities/membership.entity';
+import { AuditService } from '../audit/audit.service';
 import { Principal } from '../auth/principal';
 import { describeError } from '../common/describe-error';
 import { hashSecret, newApiKey, parseApiKey, secretMatches } from './api-key-format';
@@ -27,6 +28,7 @@ export class ApiKeysService {
   constructor(
     @InjectRepository(ApiKey) private readonly keys: Repository<ApiKey>,
     @InjectRepository(Membership) private readonly memberships: Repository<Membership>,
+    private readonly audit: AuditService,
   ) {}
 
   /** The account's keys, newest first. */
@@ -51,6 +53,12 @@ export class ApiKeysService {
     const saved = await this.keys.save(
       this.keys.create({ id, accountId, createdBy: userId, name: dto.name, secretSha256: hashSecret(secret), scopes: dto.scopes, expiresAt }),
     );
+    await this.audit.record({
+      accountId,
+      action: 'api_key.create',
+      resource: `api_key:${id}`,
+      details: { name: dto.name, scopes: dto.scopes, expiresAt: expiresAt?.toISOString() ?? null },
+    });
     return { ...view(saved), key };
   }
 
@@ -58,8 +66,11 @@ export class ApiKeysService {
   async revoke(accountId: string, id: string, now = new Date()): Promise<ApiKeyView> {
     const key = await this.keys.findOne({ where: { id, accountId } });
     if (!key) throw new NotFoundException(`API key ${id} not found`);
-    key.revokedAt ??= now;
-    return view(await this.keys.save(key));
+    if (key.revokedAt) return view(key); // the first revocation stands
+    key.revokedAt = now;
+    const saved = await this.keys.save(key);
+    await this.audit.record({ accountId, action: 'api_key.revoke', resource: `api_key:${id}`, details: { name: key.name } });
+    return view(saved);
   }
 
   /**
@@ -87,6 +98,7 @@ export class ApiKeysService {
       accountStatus: (key.account as Account).status,
       planId: (key.account as Account).planId,
       keyId: key.id,
+      keyName: key.name,
       userId: key.createdBy,
       role: membership.role,
       scopes: key.scopes,

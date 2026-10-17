@@ -24,6 +24,8 @@ export interface Principal {
   userId?: string;
   /** The API key acting, when one is used (D3). */
   keyId?: string;
+  /** Its name, for the audit log (P-17). */
+  keyName?: string;
   role: Role;
   /** What an API key may do. A user's token may do all that its role allows. */
   scopes?: string[];

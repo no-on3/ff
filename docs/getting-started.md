@@ -319,6 +319,13 @@ curl -s -X DELETE $FF/members/invitations/<invitation ID> -H "$AUTH" # cancel on
 
 Inviting an address again renews its invitation, with the new role.
 
+**The audit log.** Owners read who changed what in their account, when, from which address, and in which request: account changes, functions created, changed and deleted, scaling, API keys, invitations, joins, role changes and removals. Entries are never changed or deleted: the database refuses it.
+
+```bash
+curl -s "$FF/audit-log?limit=20" -H "$AUTH" | jq -c '.entries[] | {at, actorLabel, action, resource}'
+curl -s "$FF/audit-log?limit=20&before=<next>" -H "$AUTH"   # the next page, older; "next" is null on the last one
+```
+
 **The console with a login.** With the backend in OIDC mode as above, copy `FE/.env.example` to `FE/.env.local`, set `VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff` in it, and restart `npm run dev`. The console then opens on a login page:
 1. "Sign up" opens Keycloak's registration form. The verification e-mail arrives in Mailpit (http://localhost:58025); its link asks for a password, then brings you back to the console, logged in.
 2. The console asks you to create your account, which then waits for approval. Approve it as above, and "Check again" shows the functions.

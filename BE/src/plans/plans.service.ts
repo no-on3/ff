@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { Plan } from '../accounts/entities/plan.entity';
+import { AuditService } from '../audit/audit.service';
 import { ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PlanLimits, PlanView, parsePlanLimits } from './plan-limits';
 
@@ -25,6 +26,7 @@ export class PlansService {
     @InjectRepository(Plan) private readonly plans: Repository<Plan>,
     @InjectRepository(Account) private readonly accounts: Repository<Account>,
     @Inject(ORCHESTRATOR) private readonly orchestrator: Orchestrator,
+    private readonly audit: AuditService,
   ) {}
 
   /** A plan, with its limits checked. A plan that doesn't exist, or whose limits are wrong, is a platform failure. */
@@ -61,8 +63,10 @@ export class PlansService {
   async assign(accountId: string, planId: string): Promise<PlanView> {
     if (!(await this.plans.exists({ where: { id: planId } }))) throw new NotFoundException(`Plan ${planId} not found`);
     const plan = await this.get(planId, { fresh: true });
-    const { affected } = await this.accounts.update({ id: accountId }, { planId });
-    if (!affected) throw new NotFoundException(`Account ${accountId} not found`);
+    const account = await this.accounts.findOne({ where: { id: accountId }, select: { id: true, planId: true } });
+    if (!account) throw new NotFoundException(`Account ${accountId} not found`);
+    await this.accounts.update({ id: accountId }, { planId });
+    await this.audit.record({ accountId, action: 'account.plan', resource: `account:${accountId}`, details: { from: account.planId, to: planId } });
     await this.orchestrator.applyTenantLimits(accountId, tenantLimits(plan.limits));
     return plan;
   }

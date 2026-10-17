@@ -7,6 +7,8 @@ import 'dotenv/config';
 import { ConfigService } from '@nestjs/config';
 import { ApiKeysService } from '../api-keys/api-keys.service';
 import { ApiKey } from '../api-keys/entities/api-key.entity';
+import { AuditEntry } from '../audit/audit-entry.entity';
+import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { Mail, MailService } from '../mail/mail.service';
@@ -21,6 +23,7 @@ const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 run('members and invitations (L2, P-16)', () => {
   let db: ScratchDatabase;
   let members: MembersService;
+  let audit: AuditService;
   const sent: Mail[] = [];
   let n = 0;
   const NOW = new Date('2026-10-17T10:00:00Z');
@@ -45,7 +48,8 @@ run('members and invitations (L2, P-16)', () => {
     const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
     const config = { getOrThrow: () => ({ consoleUrl: 'https://console.ff.example' }) } as unknown as ConfigService;
     const ds = db.dataSource;
-    members = new MembersService(ds.getRepository(Membership), ds.getRepository(Invitation), ds.getRepository(Account), ds, mail, config);
+    audit = new AuditService(ds.getRepository(AuditEntry));
+    members = new MembersService(ds.getRepository(Membership), ds.getRepository(Invitation), ds.getRepository(Account), ds, mail, config, audit);
   });
 
   afterAll(async () => {
@@ -210,12 +214,40 @@ run('members and invitations (L2, P-16)', () => {
     const id = await account(owner);
     const developer = await user();
     await db.dataSource.getRepository(Membership).save({ accountId: id, userId: developer.id, role: 'owner' });
-    const keys = new ApiKeysService(db.dataSource.getRepository(ApiKey), db.dataSource.getRepository(Membership));
+    const keys = new ApiKeysService(db.dataSource.getRepository(ApiKey), db.dataSource.getRepository(Membership), audit);
     const { key } = await keys.create(id, developer.id, { name: 'ci', scopes: ['functions:read'] });
 
     await members.remove(id, developer.id);
 
     expect(await refusal(keys.authenticate(key))).toBe("UnauthorizedException: The API key's creator is no longer a member of its account");
+  });
+
+  it("records invitations, joins, role changes and removals in the account's audit log (P-17)", async () => {
+    const owner = await user('auditor@example.tn');
+    const id = await account(owner);
+    const invitation = await members.invite(id, owner, { email: 'joiner@example.tn', role: 'viewer' }, NOW);
+    const joiner = await user('joiner@example.tn');
+    await members.acceptInvitations(joiner, NOW, { ip: '10.0.0.7', requestId: 'r-join' });
+    await members.changeRole(id, joiner.id, 'developer');
+    await members.remove(id, joiner.id);
+    const cancelled = await members.invite(id, owner, { email: 'never@example.tn', role: 'viewer' }, NOW);
+    await members.cancelInvitation(id, cancelled.id);
+
+    const entries = (await audit.list(id, { limit: 50 })).entries.reverse();
+    expect(entries.map(({ action, actor, resource, details }) => ({ action, actor, resource, details }))).toEqual([
+      { action: 'member.invite', actor: 'system', resource: `invitation:${invitation.id}`, details: { email: 'joiner@example.tn', role: 'viewer', renewed: false } },
+      {
+        action: 'member.join',
+        actor: `user:${joiner.id}`,
+        resource: `user:${joiner.id}`,
+        details: { email: 'joiner@example.tn', role: 'viewer', invitation: invitation.id, invitedBy: owner.id },
+      },
+      { action: 'member.role', actor: 'system', resource: `user:${joiner.id}`, details: { email: 'joiner@example.tn', from: 'viewer', to: 'developer' } },
+      { action: 'member.remove', actor: 'system', resource: `user:${joiner.id}`, details: { email: 'joiner@example.tn', role: 'developer' } },
+      { action: 'member.invite', actor: 'system', resource: `invitation:${cancelled.id}`, details: { email: 'never@example.tn', role: 'viewer', renewed: false } },
+      { action: 'member.invitation_cancel', actor: 'system', resource: `invitation:${cancelled.id}`, details: { email: 'never@example.tn', role: 'viewer' } },
+    ]);
+    expect(entries[1]).toMatchObject({ actorLabel: 'joiner@example.tn', ip: '10.0.0.7', requestId: 'r-join' });
   });
 
   it('answers 404 for a member of another account', async () => {

@@ -14,11 +14,12 @@ import { ApiKeysService } from '../api-keys/api-keys.service';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { User } from '../accounts/entities/user.entity';
 import { ACCOUNT_HEADER, ACCOUNT_ID, DEV_ACCOUNT_HEADER, RequestWithPrincipal, resolvePrincipal, Role } from './principal';
+import { requestIdOf } from '../common/request-context';
 import { IS_PUBLIC } from './public.decorator';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from './route-rules';
 import { InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
 
-type GuardedRequest = RequestWithPrincipal & { user?: User };
+type GuardedRequest = RequestWithPrincipal & { user?: User; ip?: string; requestId?: string };
 
 /** The token of an `Authorization: Bearer <token>` header. */
 export function bearerToken(header: string | string[] | undefined): string {
@@ -114,7 +115,8 @@ export class AuthGuard implements CanActivate {
       throw error; // the realm's keys couldn't be read: a platform failure
     }
     request.user = await this.accounts.userFor(request.identity);
-    await this.members.acceptInvitations(request.user); // the accounts that invited the user's address (P-16)
+    // The accounts that invited the user's address (P-16), recorded before the request context exists (P-17).
+    await this.members.acceptInvitations(request.user, new Date(), { ip: request.ip, requestId: requestIdOf(request) });
     const choice = await this.accounts.choose(request.user, request.headers[ACCOUNT_HEADER]);
     if ('principal' in choice) request.principal = choice.principal;
     else request.principalProblem = choice.problem;

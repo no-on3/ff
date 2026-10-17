@@ -4,6 +4,7 @@ import { AccountsAndUsers1792212624716 } from './1792212624716-AccountsAndUsers'
 import { ApiKeys1792214380231 } from './1792214380231-ApiKeys';
 import { PlanLimits1792218389612 } from './1792218389612-PlanLimits';
 import { Invitations1792220311930 } from './1792220311930-Invitations';
+import { AuditLog1792221758532 } from './1792221758532-AuditLog';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -17,4 +18,5 @@ export const MIGRATIONS: Array<new () => object> = [
   ApiKeys1792214380231,
   PlanLimits1792218389612,
   Invitations1792220311930,
+  AuditLog1792221758532,
 ];
