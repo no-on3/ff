@@ -10,6 +10,7 @@ import { apiDocument } from './api-document';
 import { Principal } from './auth/principal';
 import { FunctionsController } from './functions/functions.controller';
 import { FunctionsService } from './functions/functions.service';
+import { HealthController } from './health/health.controller';
 import { MetricsController } from './metrics/metrics.controller';
 import { MetricsService } from './metrics/metrics.service';
 
@@ -30,7 +31,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [FunctionsController, MetricsController],
+      controllers: [FunctionsController, MetricsController, HealthController],
       providers: [
         // The caller owns the function, so the ownership checks pass.
         { provide: FunctionsService, useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, userId: ACCOUNT }) }) },
@@ -67,7 +68,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /health']));
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
   });
 

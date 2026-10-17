@@ -493,7 +493,9 @@
         <tbody>
           <tr><td>REST API</td><td><code>BE/src/functions/functions.controller.ts</code>, <code>BE/src/metrics/metrics.controller.ts</code></td></tr>
           <tr><td>Create, update, delete, invoke</td><td><code>BE/src/functions/functions.service.ts</code></td></tr>
+          <tr><td>Token checks, the global guard</td><td><code>BE/src/auth/auth.guard.ts</code>, <code>token-verifier.ts</code></td></tr>
           <tr><td>The caller of a request, and its account</td><td><code>BE/src/auth/principal.ts</code></td></tr>
+          <tr><td>The development realm (Keycloak)</td><td><code>deploy/keycloak/ff-realm.json</code></td></tr>
           <tr><td>Request IDs, and error answers</td><td><code>BE/src/common/request-context.ts</code>, <code>api-exception.filter.ts</code></td></tr>
           <tr><td>Which errors the caller sees</td><td><code>BE/src/functions/failures.ts</code></td></tr>
           <tr><td>Kubernetes driver</td><td><code>BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts</code>, <code>kube-client.ts</code>, <code>kubernetes.settings.ts</code></td></tr>
@@ -625,8 +627,8 @@ const SCENARIOS = [
         code: 'FE/src/components/CreateFunction.tsx · BE/src/functions/functions.controller.ts',
         msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'hello', runtime: 'nodejs', code: CODE_TS, memory: 128, timeout: 5 } } },
       { from: 'api', to: 'api', kind: 'int', label: 'validate · resolve the tenant', title: 'Validation and the tenant',
-        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. @Principal() names the caller and its account: the principal that the guard sets (from P-11), or in development (FF_AUTH_MODE=dev) the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names. Without one, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID.',
-        code: 'BE/src/main.ts · BE/src/auth/principal.ts · BE/src/common/request-context.ts' },
+        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. In OIDC mode, the global guard first checks the access token: its signature against the Keycloak realm\'s published keys, an asymmetric algorithm, the issuer, the ff-api audience, the expiry, and a verified e-mail address (401 or 403 otherwise). @Principal() then names the caller\'s account; until accounts exist (P-12), a logged-in user has none and gets 403. In development (FF_AUTH_MODE=dev), the caller is the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names. Without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID.',
+        code: 'BE/src/main.ts · BE/src/auth/auth.guard.ts · token-verifier.ts · principal.ts · BE/src/common/request-context.ts' },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
         text: 'The row gets its UUID, the tenant ID, and the defaults: minInstances 0, maxInstances 3, scaleToZero true.',
         code: 'BE/src/functions/functions.service.ts create()',

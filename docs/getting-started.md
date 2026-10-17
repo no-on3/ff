@@ -264,6 +264,24 @@ hack/k8s/cluster-up.sh                                   # restarts the existing
 cd BE && npm run migration:run && npm run start:dev      # migration:run does nothing when none is pending
 ```
 
+**Log in with Keycloak.** Development mode needs no login. To try real tokens, start Keycloak with the development realm `ff` (`deploy/keycloak/ff-realm.json`) and Mailpit, which catches its e-mails. Keycloak takes about 30 s and 600 MB:
+
+```bash
+docker compose --profile auth up -d --wait   # Keycloak on http://localhost:8180 (admin console: admin / admin), Mailpit on http://localhost:58025
+```
+
+Make a user, either by registering at http://localhost:8180/realms/ff/account (the verification e-mail arrives in Mailpit), or through the admin API. Then get a token through the `ff-e2e` client, which exists only in this development realm:
+
+```bash
+KC=http://localhost:8180
+ADMIN=$(curl -s -X POST $KC/realms/master/protocol/openid-connect/token -d grant_type=password -d client_id=admin-cli -d username=admin -d password=admin | jq -r .access_token)
+curl -s -X POST $KC/admin/realms/ff/users -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"username":"amira@ff.test","email":"amira@ff.test","emailVerified":true,"enabled":true,"firstName":"Amira","lastName":"Test","credentials":[{"type":"password","value":"change-me-1","temporary":false}]}'
+TOKEN=$(curl -s -X POST $KC/realms/ff/protocol/openid-connect/token -d grant_type=password -d client_id=ff-e2e -d username=amira@ff.test -d password=change-me-1 | jq -r .access_token)
+```
+
+Start the backend in OIDC mode, as `BE/.env.example` shows: `FF_AUTH_MODE=oidc`, `FF_OIDC_ISSUER=http://localhost:8180/realms/ff`, `FF_OIDC_AUDIENCE=ff-api`. Every call then needs `-H "Authorization: Bearer $TOKEN"`, except `GET /health`. Without a token, the answer is 401. With one, a user has no account until P-12 of the client-readiness plan creates accounts, so the answer is 403 `This user has no account yet`. `docker compose --profile auth down -v` resets Keycloak.
+
 **Change the database schema.** Change the entity, then let TypeORM write the migration, read it, and register it:
 
 ```bash
@@ -318,7 +336,9 @@ docker compose down -v
 | Port 3000 already in use | Set `PORT` in `BE/.env`. The dashboard has the API address hard-coded in `FE/src/services/api.ts`, so change it there as well. |
 | Port 5173 already in use | Vite moves to the next free port and prints it. Set `CORS_ORIGIN` in `BE/.env` to that address, or the browser blocks the dashboard's API calls. |
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. |
-| Every API call returns 401 | `FF_AUTH_MODE` isn't `dev`. The default, `oidc`, needs Keycloak, which doesn't exist yet (client-readiness plan P-11). Use the values from `BE/.env.example`. |
+| Every API call returns 401 | `FF_AUTH_MODE` isn't `dev`, and the call has no valid token. Use the development values from `BE/.env.example`, or send a token: see "Log in with Keycloak" in section 5. |
+| 401 `The token was issued by another issuer` | `FF_OIDC_ISSUER` must be exactly the token's `iss`, `http://localhost:8180/realms/ff` for the local Keycloak, including `localhost`. |
+| 403 `This user has no account yet` | Expected until accounts exist (client-readiness plan P-12): the token is valid, but there is no account to act for. Use development mode in the meantime. |
 | A function you can see in the dashboard answers 404 to `curl` | The two act as different accounts: `curl` sent `X-FF-Dev-Account`, or the backend runs with another `FF_DEV_ACCOUNT_ID` than when the function was created. |
 | An answer is 500 with `… failed because of an internal error (request <id>)` | A failure of the platform, not of your function. The backend's log has the details: search it for the request ID, which every answer also carries in `x-ff-request-id`. |
 | `The backend did not start: The database schema is out of date: … pending` | `cd BE && npm run migration:run`, then start it again. |

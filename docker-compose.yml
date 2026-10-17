@@ -1,8 +1,10 @@
 # Local development dependencies.
-#   docker compose up -d --wait               → PostgreSQL + S3 storage (what the backend needs)
+#   docker compose up -d --wait                  → PostgreSQL + S3 storage (what the backend needs)
+#   docker compose --profile auth up -d --wait   → also Keycloak (login, realm "ff") and Mailpit (its e-mails)
 # The backend and the dashboard run on the host (see docs/getting-started.md).
 # Functions run on the Kubernetes dev cluster (hack/k8s/cluster-up.sh), not here.
-# Host ports bind to 127.0.0.1 only and can be moved: FF_PG_PORT, FF_S3_PORT.
+# Host ports bind to 127.0.0.1 only and can be moved: FF_PG_PORT, FF_S3_PORT,
+# FF_KEYCLOAK_PORT, FF_MAIL_SMTP_PORT, FF_MAIL_UI_PORT.
 
 services:
   postgres:
@@ -40,6 +42,51 @@ services:
       timeout: 3s
       retries: 30
 
+  # Keycloak, the identity provider (D2), with the development realm "ff"
+  # (deploy/keycloak/ff-realm.json, imported on first start). Development
+  # only: start-dev, an embedded database, and the admin admin/admin.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.5
+    profiles: [auth]
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # One issuer for tokens, whichever address the browser or curl used.
+      KC_HOSTNAME: http://localhost:${FF_KEYCLOAK_PORT:-8180}
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${FF_KEYCLOAK_PORT:-8180}:8080"
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ./deploy/keycloak/ff-realm.json:/opt/keycloak/data/import/ff-realm.json:ro
+    mem_limit: 1g
+    healthcheck:
+      # The image has no curl or wget: ask the management port through bash.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"UP"' <&3
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+  # Catches every e-mail Keycloak (and later the backend) sends: http://localhost:58025.
+  mailpit:
+    image: axllent/mailpit:v1.31.4
+    profiles: [auth]
+    ports:
+      - "127.0.0.1:${FF_MAIL_SMTP_PORT:-51025}:1025"
+      - "127.0.0.1:${FF_MAIL_UI_PORT:-58025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   postgres_data:
   s3_data:
+  keycloak_data:

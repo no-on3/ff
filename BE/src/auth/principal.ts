@@ -1,4 +1,5 @@
-import { BadRequestException, createParamDecorator, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, createParamDecorator, ExecutionContext, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import { Identity } from './token-verifier';
 
 /** An account ID: 12 random digits, the AWS-shaped format of ADR 0004. */
 export const ACCOUNT_ID = /^\d{12}$/;
@@ -22,17 +23,21 @@ export interface Principal {
 
 interface RequestWithPrincipal {
   principal?: Principal;
+  /** The user of a valid token, set by the global guard (P-11). */
+  identity?: Identity;
   headers: Record<string, string | string[] | undefined>;
 }
 
 /**
- * The caller. The global guard (P-11) sets request.principal from a token or
- * an API key. In development mode, without one, the caller is the owner of
+ * The caller. The global guard (P-11) checks the token and records its user.
+ * Until accounts exist (P-12), such a user has none to act for, and gets 403.
+ * In development mode, without a token, the caller is the owner of
  * FF_DEV_ACCOUNT_ID, or of the account that X-FF-Dev-Account names. Anyone
  * else gets 401.
  */
 export function resolvePrincipal(request: RequestWithPrincipal, devAccountId: string | undefined): Principal {
   if (request.principal) return request.principal;
+  if (request.identity) throw new ForbiddenException('This user has no account yet');
   if (!devAccountId) throw new UnauthorizedException('Authentication required');
   const named = request.headers[DEV_ACCOUNT_HEADER];
   if (named === undefined) return { accountId: devAccountId, userId: 'dev', role: 'owner' };

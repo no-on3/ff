@@ -31,8 +31,10 @@ export class ApiExceptionFilter implements ExceptionFilter {
     response.setHeader(REQUEST_ID_HEADER, requestId);
 
     if (exception instanceof HttpException) {
-      const status = exception.getStatus();
+      const status: HttpStatus = exception.getStatus();
       const body = exception.getResponse();
+      // RFC 6750: say how to authenticate.
+      if (status === HttpStatus.UNAUTHORIZED) response.setHeader('WWW-Authenticate', 'Bearer realm="ff"');
       response.status(status).json({ ...(typeof body === 'string' ? { statusCode: status, message: body } : body), requestId });
       return;
     }

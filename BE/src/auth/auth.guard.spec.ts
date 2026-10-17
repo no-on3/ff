@@ -1,0 +1,268 @@
+/**
+ * L1: the global guard and the token checks (client-readiness plan, P-11, D2),
+ * through a real HTTP server, with tokens signed locally and the keys served
+ * by a fake OpenID issuer.
+ */
+import { Controller, Get, INestApplication, Logger, Req } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { Test } from '@nestjs/testing';
+import { exportJWK, generateKeyPair, JWK, JWTPayload, SignJWT } from 'jose';
+import * as http from 'node:http';
+import { AddressInfo } from 'node:net';
+import { ApiExceptionFilter } from '../common/api-exception.filter';
+import { AuthGuard } from './auth.guard';
+import { Principal } from './principal';
+import { Public } from './public.decorator';
+import { Identity, InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
+
+const AUDIENCE = 'ff-api';
+
+@Controller()
+class ProbeController {
+  @Public()
+  @Get('open')
+  open() {
+    return { open: true };
+  }
+
+  /** What the guard recorded. */
+  @Get('identity')
+  identity(@Req() request: { identity?: Identity }) {
+    return request.identity ?? null;
+  }
+
+  @Get('functions')
+  functions(@Principal() principal: Principal) {
+    return principal;
+  }
+}
+
+type Key = Awaited<ReturnType<typeof generateKeyPair>> & { kid: string };
+
+async function newKey(kid: string, alg = 'RS256'): Promise<Key> {
+  return { ...(await generateKeyPair(alg, { extractable: true })), kid };
+}
+
+/** A fake OpenID issuer: its configuration and its keys, which a test can change. */
+async function fakeIssuer() {
+  const state = { keys: [] as JWK[], jwksFetches: 0, up: true };
+  const server = http.createServer((req, res) => {
+    if (!state.up) return void res.destroy();
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/realms/ff/.well-known/openid-configuration') {
+      res.end(JSON.stringify({ issuer: `${base}/realms/ff`, jwks_uri: `${base}/realms/ff/certs` }));
+    } else if (req.url === '/realms/ff/certs') {
+      state.jwksFetches++;
+      res.end(JSON.stringify({ keys: state.keys }));
+    } else {
+      res.statusCode = 404;
+      res.end('{}');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return { issuer: `${base}/realms/ff`, state, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+}
+
+const publish = async (key: Key): Promise<JWK> => ({ ...(await exportJWK(key.publicKey)), kid: key.kid, alg: 'RS256', use: 'sig' });
+
+describe('the global guard and token checks (L1, P-11)', () => {
+  let issuer: Awaited<ReturnType<typeof fakeIssuer>>;
+  let key: Key;
+  let app: INestApplication;
+  let baseUrl: string;
+  let mode: 'oidc' | 'dev' = 'oidc';
+
+  /** A token as Keycloak would issue it, with `claims` changed. */
+  async function token(claims: JWTPayload = {}, signer: Key = key, header: Record<string, unknown> = {}): Promise<string> {
+    return new SignJWT({ sub: 'kc-user-1', email: 'amira@example.tn', email_verified: true, ...claims })
+      .setProtectedHeader({ alg: 'RS256', kid: signer.kid, ...header })
+      .setIssuer((claims.iss as string) ?? issuer.issuer)
+      .setAudience((claims.aud as string) ?? AUDIENCE)
+      .setIssuedAt()
+      .setExpirationTime((claims.exp as number) ?? '5m')
+      .sign(signer.privateKey);
+  }
+
+  const get = (path: string, authorization?: string) =>
+    fetch(`${baseUrl}${path}`, { headers: authorization ? { authorization } : {} });
+
+  /** The probe routes behind the backend's guard and filter, trusting `issuerUrl`. */
+  async function startApp(issuerUrl: () => string): Promise<INestApplication> {
+    const config = {
+      get: (path: string) => (path === 'auth.mode' ? mode : undefined),
+      getOrThrow: () => ({ issuer: issuerUrl(), audience: AUDIENCE }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [ProbeController],
+      providers: [
+        TokenVerifier,
+        { provide: ConfigService, useValue: config },
+        { provide: APP_GUARD, useClass: AuthGuard },
+        { provide: APP_FILTER, useClass: ApiExceptionFilter },
+      ],
+    }).compile();
+    const started = moduleRef.createNestApplication({ logger: false });
+    await started.listen(0, '127.0.0.1');
+    return started;
+  }
+
+  beforeAll(async () => {
+    issuer = await fakeIssuer();
+    key = await newKey('key-1');
+    issuer.state.keys = [await publish(key)];
+    app = await startApp(() => issuer.issuer);
+    baseUrl = await app.getUrl();
+  });
+
+  beforeEach(() => {
+    mode = 'oidc';
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  afterAll(async () => {
+    await app.close();
+    await issuer.close();
+  });
+
+  it("records a valid token's user on the request", async () => {
+    const res = await get('/identity', `Bearer ${await token()}`);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ userId: 'kc-user-1', email: 'amira@example.tn' });
+  });
+
+  it('gives that user no account yet: account routes answer 403 until P-12', async () => {
+    const res = await get('/functions', `Bearer ${await token()}`);
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ message: 'This user has no account yet' });
+  });
+
+  it.each([
+    ['no Authorization header', undefined, 'Authentication required'],
+    ['another scheme', 'Basic YWRtaW46YWRtaW4=', 'Authentication required: send "Authorization: Bearer <token>"'],
+    ['a bearer without a token', 'Bearer ', 'Authentication required: send "Authorization: Bearer <token>"'],
+    ['an API key, before P-13', `Bearer ffk_0123456789ab_${'a'.repeat(43)}`, 'API keys are not accepted yet'],
+  ])('answers 401 to %s, saying how to authenticate', async (_label, authorization, message) => {
+    const res = await get('/identity', authorization);
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toBe('Bearer realm="ff"');
+    expect(await res.json()).toMatchObject({ message });
+  });
+
+  it.each<[string, () => Promise<string>, string]>([
+    ['an expired token', () => token({ exp: Math.floor(Date.now() / 1000) - 60 }), 'The token has expired'],
+    ['a token from another issuer', () => token({ iss: 'https://evil.example/realms/ff' }), 'The token was issued by another issuer'],
+    ['a token for another audience', () => token({ aud: 'account' }), 'The token is not meant for this API'],
+    ['a token not valid yet', () => token({ nbf: Math.floor(Date.now() / 1000) + 120 }), 'The token is not valid yet'],
+    ['a token without a subject', () => token({ sub: undefined }), 'The token has no valid subject'],
+    ['a token whose subject is not a string', () => token({ sub: { id: 'kc-user-1' } as unknown as string }), 'The token has no valid subject'],
+    ['a token signed with a key that is not the realm\'s', async () => token({}, await newKey('key-1')), 'The token is invalid'],
+    ['a token naming a key the realm never had', async () => token({}, await newKey('stolen-key')), 'The token is invalid'],
+    ['an unsigned token (alg "none")', async () => {
+      const [, payload] = (await token()).split('.');
+      return `${Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')}.${payload}.`;
+    }, 'The token is invalid'],
+    ['an HMAC token, signed with the public key as the secret', async () => {
+      const secret = new TextEncoder().encode(JSON.stringify(await publish(key)));
+      return new SignJWT({ sub: 'kc-user-1', email_verified: true })
+        .setProtectedHeader({ alg: 'HS256', kid: key.kid })
+        .setIssuer(issuer.issuer)
+        .setAudience(AUDIENCE)
+        .setExpirationTime('5m')
+        .sign(secret);
+    }, 'The token is invalid'],
+    ['a token with a broken signature', async () => `${(await token()).slice(0, -4)}AAAA`, 'The token is invalid'],
+  ])('answers 401 to %s', async (_label, make, message) => {
+    const res = await get('/identity', `Bearer ${await make()}`);
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ message });
+  });
+
+  it('accepts a token that expired within the 30 s of clock skew', async () => {
+    const res = await get('/identity', `Bearer ${await token({ exp: Math.floor(Date.now() / 1000) - 10 })}`);
+
+    expect(res.status).toBe(200);
+  });
+
+  it('answers 403 to a valid token whose user has not verified their e-mail', async () => {
+    for (const verified of [false, undefined]) {
+      const res = await get('/identity', `Bearer ${await token({ email_verified: verified })}`);
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ message: 'Verify your e-mail address first' });
+    }
+  });
+
+  it('caches the keys, and reads them again for a key it lacks once the cooldown has passed, so a rotation goes through', async () => {
+    const verifier = new TokenVerifier({ getOrThrow: () => ({ issuer: issuer.issuer, audience: AUDIENCE }) } as never);
+    verifier.keyRefetchCooldownMs = 1_000; // 30 s in production
+    // Keys and tokens made first: generating an RSA key can take longer than the cooldown.
+    const rotated = await newKey('key-2');
+    const [current, fromRotated, forged] = [await token(), await token({}, rotated), await token({}, await newKey('forged'))];
+    const fetches = () => issuer.state.jwksFetches;
+    const start = fetches();
+
+    await verifier.verify(current);
+    await verifier.verify(current);
+    expect(fetches()).toBe(start + 1); // cached
+
+    issuer.state.keys = [await publish(key), await publish(rotated)];
+    // Within the cooldown, a key the backend lacks is refused without reading the keys again.
+    await expect(verifier.verify(fromRotated)).rejects.toBeInstanceOf(InvalidTokenError);
+    expect(fetches()).toBe(start + 1);
+
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await expect(verifier.verify(fromRotated)).resolves.toMatchObject({ userId: 'kc-user-1' });
+    expect(fetches()).toBe(start + 2);
+
+    // A forged key ID right after can't make it read them again.
+    await expect(verifier.verify(forged)).rejects.toBeInstanceOf(InvalidTokenError);
+    expect(fetches()).toBe(start + 2);
+  });
+
+  it('lets anyone call a @Public() route', async () => {
+    const res = await get('/open');
+
+    expect(res.status).toBe(200);
+  });
+
+  it('reads no token in development mode: @Principal() acts as the development account', async () => {
+    mode = 'dev';
+    process.env.FF_AUTH_MODE = 'dev';
+    process.env.FF_DEV_ACCOUNT_ID = '000000000001';
+    try {
+      const res = await get('/functions');
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ accountId: '000000000001', role: 'owner' });
+    } finally {
+      delete process.env.FF_AUTH_MODE;
+      delete process.env.FF_DEV_ACCOUNT_ID;
+    }
+  });
+
+  it("answers a platform failure, not 401, when the realm's keys can't be read", async () => {
+    const unreachable = () => 'http://127.0.0.1:1/realms/ff';
+    const verifier = new TokenVerifier({ getOrThrow: () => ({ issuer: unreachable(), audience: AUDIENCE }) } as never);
+    const failure = await verifier.verify(await token()).catch((error: unknown) => error);
+    const isolated = await startApp(unreachable);
+    try {
+      const res = await fetch(`${await isolated.getUrl()}/identity`, { headers: { authorization: `Bearer ${await token()}` } });
+
+      // Not the token's fault: neither 401 nor 403, but D4's generic answer.
+      expect(failure).not.toBeInstanceOf(InvalidTokenError);
+      expect(failure).not.toBeInstanceOf(UnverifiedEmailError);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ message: expect.stringMatching(/^Internal error\. Request ID: /) });
+    } finally {
+      await isolated.close();
+    }
+  });
+});

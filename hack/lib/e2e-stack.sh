@@ -5,13 +5,15 @@
 #
 # Source it after hack/k8s/env.sh, with E2E_PROJECT (the compose project) and
 # E2E_NAME (the name in messages and of the work directory) set, and with
-# FF_PG_PORT and FF_S3_PORT exported. Then call e2e_dependencies, e2e_cluster,
+# FF_PG_PORT and FF_S3_PORT exported (and FF_KEYCLOAK_PORT, FF_MAIL_SMTP_PORT and
+# FF_MAIL_UI_PORT when it starts Keycloak). Then call e2e_dependencies, e2e_cluster,
 # e2e_build, e2e_migrate and e2e_start_backend. On exit, it stops the backends
 # it started, deletes the namespaces listed in e2e_namespaces, and removes the
 # compose project with its volumes; the cluster too if e2e_teardown is true.
 
 work="$FF_REPO_ROOT/hack/.$E2E_NAME"
-compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml")
+# With the "auth" profile, so that cleaning up also removes Keycloak and Mailpit when they ran.
+compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth)
 e2e_pids=()
 e2e_namespaces=()
 e2e_teardown=false
@@ -81,12 +83,13 @@ free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1
 random_account() { node -e "console.log(String(require('crypto').randomInt(1e12)).padStart(12, '0'))"; }
 tenant_namespace() { printf 'ff-t-%s' "$(printf %s "$1" | sha256sum | cut -c1-12)"; }
 
+# e2e_dependencies [service...]: PostgreSQL and S3, and the services named (keycloak, mailpit).
 e2e_dependencies() {
   echo "== resources"
   MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3500}" "$FF_REPO_ROOT/hack/check-resources.sh"
   echo "== dependencies (compose project $E2E_PROJECT)"
-  "${compose[@]}" up -d --wait postgres s3 >/dev/null 2>&1 || fail "compose dependencies did not become healthy"
-  echo "  postgres on 127.0.0.1:$FF_PG_PORT, s3 on 127.0.0.1:$FF_S3_PORT"
+  "${compose[@]}" up -d --wait postgres s3 "$@" >/dev/null 2>&1 || fail "compose dependencies did not become healthy"
+  echo "  postgres on 127.0.0.1:$FF_PG_PORT, s3 on 127.0.0.1:$FF_S3_PORT${1:+, and $*}"
 }
 
 e2e_cluster() {
