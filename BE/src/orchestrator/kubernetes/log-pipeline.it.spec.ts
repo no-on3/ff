@@ -248,6 +248,41 @@ run('the log pipeline on the dev cluster (L3)', () => {
     expect((await orchestrator.logs(printerA, { ...window(), q: '"} OR {namespace=~".*"} OR "' })).lines).toEqual([]);
   });
 
+  it("tails a function's lines as they come, narrowed to a call, about 5 s late (P-43)", async () => {
+    const abort = new AbortController();
+    const call = `it-log-tail-${randomUUID()}`;
+    const nonce = word('tail');
+    const lines = orchestrator.tailLogs(printerA, { requestId: call }, abort.signal);
+    const seen: FunctionLogLine[] = [];
+    const reading = (async () => {
+      try {
+        for await (const line of lines) {
+          seen.push(line);
+          if (line.message.startsWith(`REPORT RequestId: ${call}`)) return;
+        }
+      } catch {
+        // the abort below, if the REPORT never came
+      }
+    })();
+
+    await orchestrator.invoke(printerA, { nonce: word('other'), lines: 1 }, `it-log-tail-other-${randomUUID()}`);
+    await orchestrator.invoke(printerA, { nonce, lines: 2 }, call);
+    const called = Date.now();
+    await Promise.race([reading, new Promise((resolve) => setTimeout(resolve, 30_000))]);
+    const delayMs = Date.now() - called;
+    abort.abort();
+
+    expect(seen.map((l) => l.message)).toEqual([
+      `START RequestId: ${call} Version: $LATEST`,
+      `${nonce} 1`,
+      `${nonce} 2`,
+      `END RequestId: ${call}`,
+      expect.stringMatching(new RegExp(`^REPORT RequestId: ${call}\t`)),
+    ]);
+    expect(seen.every((l) => l.requestId === call && l.instance?.startsWith(`fn-${printerA.id}-`))).toBe(true);
+    expect(delayMs).toBeLessThan(15_000);
+  });
+
   it("limits a namespace printing in a loop to its budget a second, counts every line it drops, and keeps another namespace's", async () => {
     const nonce = word('flood');
     const floodCall = `it-log-flood-${randomUUID()}`;

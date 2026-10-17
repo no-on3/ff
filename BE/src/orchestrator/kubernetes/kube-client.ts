@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import type { Readable } from 'node:stream';
 
 export const FIELD_MANAGER = 'ff-controller';
 
@@ -67,6 +68,8 @@ export interface KubeApi {
   deleteCollection(path: string, labelSelector: string): Promise<void>;
   scaleDeployment(namespace: string, name: string, replicas: number): Promise<void>;
   list<T>(path: string, labelSelector: string): Promise<T[]>;
+  /** A GET whose answer is read as it comes, for as long as it lasts: no timeout, but `signal` ends it. */
+  stream(path: string, signal: AbortSignal): Promise<{ status: number; body: Readable }>;
 }
 
 export const paths = {
@@ -153,6 +156,30 @@ export class KubeClient implements KubeApi {
       req.setTimeout(timeoutMs, () => req.destroy(new KubeRequestTimeoutError(timeoutMs, method, path)));
       req.on('error', reject);
       if (options.body !== undefined) req.write(options.body);
+      req.end();
+    });
+  }
+
+  stream(path: string, signal: AbortSignal): Promise<{ status: number; body: Readable }> {
+    const transport = this.url.protocol === 'https:' ? https : http;
+    const headers: Record<string, string> = {};
+    const token = this.token();
+    if (token) headers.authorization = `Bearer ${token}`;
+    return new Promise((resolve, reject) => {
+      const req = transport.request(
+        {
+          protocol: this.url.protocol,
+          hostname: this.url.hostname,
+          port: this.url.port,
+          method: 'GET',
+          path: this.url.pathname.replace(/\/$/, '') + path,
+          headers,
+          agent: this.agent,
+          signal,
+        },
+        (res) => resolve({ status: res.statusCode ?? 0, body: res }),
+      );
+      req.on('error', reject);
       req.end();
     });
   }

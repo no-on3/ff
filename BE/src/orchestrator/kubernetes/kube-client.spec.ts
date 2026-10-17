@@ -162,6 +162,38 @@ describe('KubeClient', () => {
     expect(error).not.toBeInstanceOf(KubeRequestTimeoutError);
   });
 
+  it('streams an answer as it comes, with its token and no timeout, until the signal aborts it (P-43)', async () => {
+    let closed!: () => void;
+    const requestClosed = new Promise<void>((resolve) => (closed = resolve));
+    const seen: http.IncomingHttpHeaders[] = [];
+    const server = http.createServer((req, res) => {
+      seen.push(req.headers);
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+      res.write('a\n');
+      setTimeout(() => res.write('b\n'), 50); // later, on the same answer, which stays open
+      req.on('close', closed);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    servers.push({ close: () => (server.closeAllConnections(), new Promise<void>((resolve) => server.close(() => resolve()))) });
+    const client = new KubeClient({ server: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, tokenFile, requestTimeoutMs: 20 });
+    const abort = new AbortController();
+
+    const { status, body } = await client.stream('/api/v1/namespaces/n/services/s:1/proxy/tail', abort.signal);
+    body.setEncoding('utf8');
+    body.on('error', () => undefined); // the abort's
+    // Both chunks, the second 50 ms in: past requestTimeoutMs, which a stream doesn't have.
+    const text = await new Promise<string>((resolve) => {
+      let got = '';
+      body.on('data', (chunk: string) => (got += chunk) === 'a\nb\n' && resolve(got));
+    });
+    const bodyClosed = new Promise((resolve) => body.on('close', resolve));
+    abort.abort();
+    await Promise.all([requestClosed, bodyClosed]);
+
+    expect([status, text]).toEqual([200, 'a\nb\n']);
+    expect(seen[0].authorization).toBe('Bearer token-one');
+  });
+
   it('rejects unsupported URL schemes', () => {
     expect(() => new KubeClient({ server: 'ftp://example' })).toThrow('Unsupported Kubernetes API URL');
   });

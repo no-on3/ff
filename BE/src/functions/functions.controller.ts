@@ -1,16 +1,18 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, Res } from '@nestjs/common';
+import { ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
+import type { ServerResponse } from 'node:http';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { Invocation } from '../plans/rate-limits';
 import { CreateFunctionDto } from './dto/create-function.dto';
-import { FunctionLogsQuery, FunctionLogsView } from './dto/function-logs.dto';
+import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
+import { sendEvents } from './event-stream';
 import { FunctionsService } from './functions.service';
 
 /**
@@ -113,6 +115,30 @@ export class FunctionsController {
   @ApiResponse({ status: 503, description: 'The log store is unavailable: try again shortly' })
   logs(@Param('id', ParseUUIDPipe) id: string, @Query() query: FunctionLogsQuery, @Principal() principal: Principal): Promise<FunctionLogsView> {
     return this.functionsService.logs(principal.accountId, id, query);
+  }
+
+  @Get(':id/logs/stream')
+  @RequireScope('logs:read')
+  @ApiOperation({
+    summary: "The function's live tail: its lines as Server-Sent Events, as the log store gets them (P-43)",
+    description:
+      'Every member, and an API key with logs:read. Each line comes as a message event whose data is the line, as in a page, about 5 s after it ' +
+      'was written: the store waits for lines that reach it late. q and requestId narrow it. A ping event comes every 15 s; an end event after ' +
+      "30 minutes, when the stream closes and the client opens another; an unavailable event if the log store can't start the tail or fails. " +
+      "404 for another account's function comes as JSON, before the stream.",
+  })
+  @ApiProduces('text/event-stream')
+  @ApiResponse({ status: 200, description: 'The event stream' })
+  async logsStream(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: FunctionLogsStreamQuery,
+    @Principal() principal: Principal,
+    @Res() res: ServerResponse,
+  ): Promise<void> {
+    const tail = new AbortController();
+    // Every check first: another account's function is a JSON 404, before anything of the stream is sent.
+    const events = await this.functionsService.liveLogs(principal.accountId, id, query, tail.signal);
+    await sendEvents(res, events, () => tail.abort());
   }
 
   @Get(':id/scaling-config')

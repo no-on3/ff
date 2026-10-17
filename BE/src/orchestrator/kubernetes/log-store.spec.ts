@@ -5,10 +5,11 @@
  */
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
+import { Readable } from 'node:stream';
 import { InvalidLogCursorError, LogStoreUnavailableError } from '../orchestrator.errors';
 import type { LogsQuery } from '../orchestrator.types';
 import { KubeApi, KubeResponse, RequestOptions } from './kube-client';
-import { LogStore, StoredLine, decodeCursor, encodeCursor, nineDecimals, pageQuery, quoted, toPage } from './log-store';
+import { LogStore, StoredLine, decodeCursor, encodeCursor, nineDecimals, pageQuery, quoted, tailQuery, toPage } from './log-store';
 
 const query = (extra: Partial<LogsQuery> = {}): LogsQuery => ({
   start: new Date('2026-10-17T10:00:00Z'),
@@ -74,6 +75,18 @@ describe('pageQuery', () => {
 
   it('refuses a cursor that no page gave', () => {
     expect(() => pageQuery('ff-t-abc', 'f-1', query({ cursor: 'bm90IGEgY3Vyc29y' }))).toThrow(InvalidLogCursorError);
+  });
+});
+
+describe('tailQuery', () => {
+  it("asks for the function's lines in its account's namespace as they come, with no pipe the store refuses in a tail", () => {
+    expect(tailQuery('ff-t-abc', 'f-1', {})).toBe(`${STREAM}${FIELDS}`);
+  });
+
+  it('narrows to a call and to a phrase, each a quoted value', () => {
+    expect(tailQuery('ff-t-abc', 'f-1', { requestId: 'r-1', q: 'x" | sort by (_time)' })).toBe(
+      `${STREAM} request_id:="r-1" _msg:"x\\" | sort by (_time)"${FIELDS}`,
+    );
   });
 });
 
@@ -197,6 +210,85 @@ describe('LogStore', () => {
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+
+  describe('tail', () => {
+    /** The API server, for a stream: the answer given, and the paths asked for. */
+    const streamingApi = (answer: () => Promise<{ status: number; body: Readable }>) => {
+      const paths: string[] = [];
+      const api = { stream: (path: string) => (paths.push(path), answer()) } as unknown as KubeApi;
+      return { api, paths };
+    };
+    const bytes = (...chunks: string[]) => Readable.from(chunks.map((chunk) => Buffer.from(chunk)), { objectMode: false });
+    const rows = async (lines: AsyncIterable<StoredLine>) => {
+      const got: StoredLine[] = [];
+      for await (const row of lines) got.push(row);
+      return got;
+    };
+
+    it("reads the store's live tail through the API server's proxy, rows split across chunks included", async () => {
+      const { api, paths } = streamingApi(async () => ({
+        status: 200,
+        body: bytes('{"_time":"2026-10-17T10:00:00Z","_msg":"one"}\n{"_time":"2026-10-17T10:0', '0:01Z","_msg":"two"}\n\n'),
+      }));
+
+      const got = await rows(new LogStore('proxy', api).tail('{namespace="ff-t-abc"}', new AbortController().signal));
+
+      expect(got.map((r) => r._msg)).toEqual(['one', 'two']);
+      const [route, search] = paths[0].split('?');
+      expect(route).toBe('/api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/select/logsql/tail');
+      expect(new URLSearchParams(search).get('query')).toBe('{namespace="ff-t-abc"}');
+    });
+
+    it("returns before the store answers: through the API server's proxy, the answer begins with its first row", () => {
+      const { api } = streamingApi(() => new Promise(() => undefined)); // an answer that never comes
+
+      const lines = new LogStore('proxy', api).tail('*', new AbortController().signal);
+
+      expect(typeof lines[Symbol.asyncIterator]).toBe('function'); // the rows themselves, not a promise of them
+    });
+
+    it("fails the reading for a tail the store refuses, with the start of its answer, and for one it can't be asked for", async () => {
+      const refused = streamingApi(async () => ({ status: 400, body: bytes('the query cannot be used in live tailing') }));
+      const unreachable = streamingApi(() => Promise.reject(new Error('connect ECONNREFUSED')));
+
+      const errors = await Promise.all(
+        [refused, unreachable].map(({ api }) => rows(new LogStore('proxy', api).tail('*', new AbortController().signal)).catch((err: unknown) => err)),
+      );
+
+      expect(errors.map((e) => [e instanceof LogStoreUnavailableError, (e as Error).message])).toEqual([
+        [true, 'The log store answered 400: the query cannot be used in live tailing'],
+        [true, 'The log store did not answer: connect ECONNREFUSED'],
+      ]);
+    });
+
+    it('reads the Service itself from inside the cluster, until the signal aborts the tail', async () => {
+      let requestClosed!: () => void;
+      const closed = new Promise<void>((resolve) => (requestClosed = resolve));
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+        res.write('{"_time":"2026-10-17T10:00:00Z","_msg":"live"}\n'); // then the answer stays open, as a tail's does
+        req.on('close', requestClosed);
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      try {
+        const abort = new AbortController();
+        const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        const iterator = new LogStore('direct', {} as KubeApi, url).tail('*', abort.signal)[Symbol.asyncIterator]();
+
+        const first = await iterator.next();
+        abort.abort();
+        const after = await iterator.next().catch((err: unknown) => err);
+        await closed;
+
+        expect(first.value?._msg).toBe('live');
+        // The rows end with the aborted answer's error, which the live tail ignores once stopped; the store saw the request close.
+        expect(after).toMatchObject({ code: 'ECONNRESET', message: 'aborted' });
+      } finally {
+        server.closeAllConnections();
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
   });
 
   it.each([

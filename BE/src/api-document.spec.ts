@@ -40,6 +40,7 @@ import { InvoicesService } from './billing/invoices/invoices.service';
 import { AdminInvoicesController } from './admin/admin-invoices.controller';
 import { AdminPaymentsController } from './admin/admin-payments.controller';
 import { UsageService } from './usage/usage.service';
+import { of } from 'rxjs';
 
 const ACCOUNT = '000000000001';
 const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
@@ -78,7 +79,11 @@ describe('the OpenAPI document (L1, P-08)', () => {
       ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
-        { provide: FunctionsService, useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }) }) },
+        {
+          provide: FunctionsService,
+          // The live tail answers with an event stream, which ends here at once (P-43).
+          useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }), liveLogs: async () => of({ data: {} }) }),
+        },
         { provide: MetricsService, useValue: succeeding(MetricsService) },
         { provide: AccountsService, useValue: succeeding(AccountsService) },
         { provide: ApiKeysService, useValue: succeeding(ApiKeysService) },

@@ -1,5 +1,6 @@
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
+import { Readable } from 'node:stream';
 import {
   CodeTooLargeError,
   FunctionLoadError,
@@ -13,7 +14,7 @@ import {
 } from '../orchestrator.errors';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
-import { StoredLine, decodeCursor, pageQuery } from './log-store';
+import { StoredLine, decodeCursor, pageQuery, tailQuery } from './log-store';
 import { MAX_CODE_BYTES, RUNTIME_PORT, TENANT_QUOTA_NAME } from './manifests';
 import { functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
@@ -76,6 +77,13 @@ class FakeKubeApi implements KubeApi {
   async list<T>(path: string, selector: string): Promise<T[]> {
     this.listed.push({ path, selector });
     return (this.lists.get(path) as T[]) ?? [];
+  }
+  /** The store's live tail (P-43): what it sends, and the paths asked for. */
+  tailText = '';
+  streamed: string[] = [];
+  async stream(path: string): Promise<{ status: number; body: Readable }> {
+    this.streamed.push(path);
+    return { status: 200, body: Readable.from([Buffer.from(this.tailText)], { objectMode: false }) };
   }
   async request(method: string, path: string, options?: RequestOptions): Promise<KubeResponse> {
     if (path.startsWith(STORE_QUERY)) {
@@ -534,6 +542,18 @@ describe('KubernetesOrchestrator', () => {
       api.storeRows = [];
 
       expect(await orchestrator.logs(fn, window)).toEqual({ lines: [], next: null });
+    });
+
+    it("tails the function's lines in its account's namespace, as lines (P-43)", async () => {
+      api.tailText = '{"_time":"2026-10-17T10:00:01Z","_msg":"live","pod":"fn-a","stream":"stderr","request_id":"req-1"}\n';
+
+      const lines: unknown[] = [];
+      for await (const line of orchestrator.tailLogs(fn, { requestId: 'req-1' }, new AbortController().signal)) lines.push(line);
+
+      const [route, search] = api.streamed[0].split('?');
+      expect(route).toBe('/api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/select/logsql/tail');
+      expect(new URLSearchParams(search).get('query')).toBe(tailQuery(ns, fn.id, { requestId: 'req-1' }));
+      expect(lines).toEqual([{ time: '2026-10-17T10:00:01.000000000Z', instance: 'fn-a', requestId: 'req-1', stream: 'stderr', message: 'live' }]);
     });
 
     it('rejects with the store unavailable when it fails, and with the cursor when no page gave it', async () => {

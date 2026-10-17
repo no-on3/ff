@@ -247,6 +247,12 @@ Without cluster access, `GET /functions/:id/logs` gives the same lines, from the
 
 Every member of the account reads them, and so does an API key with `logs:read`; another account's function answers 404. When the store can't be reached, the answer is 503: try again in a minute. The [Kubernetes dev guide](kubernetes-dev-guide.md#the-log-pipeline) shows how to query the store directly.
 
+**The live tail,** `GET /functions/:id/logs/stream`, keeps the connection open and sends each new line as a Server-Sent Event, about 5 s after it was written: the store waits that long for lines that reach it late. `q` and `requestId` narrow it, as for a page. A `ping` event comes every 15 s; an `end` event after 30 minutes, when the stream closes and you open another; an `unavailable` event if the store can't start the tail or fails. A 404 comes as JSON, before any event. A browser's `EventSource` can't send the `Authorization` header, so read it with `fetch`, or with curl:
+
+```bash
+curl -sN "$FF/functions/$ID/logs/stream" | grep --line-buffered '^data: {' | sed -u 's/^data: //' | jq -r '"\(.time) \(.message)"'
+```
+
 ```bash
 curl -s "$FF/functions/$ID/logs?limit=20" | jq -r '.lines[] | "\(.time) \(.requestId // "-") \(.message)"'
 curl -s "$FF/functions/$ID/logs?requestId=$REQUEST" | jq -r '.lines[].message'          # one call's lines

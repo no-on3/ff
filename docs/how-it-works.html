@@ -1346,6 +1346,46 @@ const SCENARIOS = [
     ],
   },
   {
+    id: 'tail', title: 'Follow a function\'s logs live', lanes: ['user', 'api', 'db', 'k8s', 'store'],
+    summary: 'GET /functions/:id/logs/stream keeps the connection open and sends the function\'s lines as Server-Sent Events, as the log store gets them (P-43): the store\'s own live tail, through the backend, for 30 minutes at most.',
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/logs/stream', title: 'You open the live tail',
+        text: 'Server-Sent Events: the answer stays open. q and requestId narrow it, as they do a page. Every member of the account may open it, and an API key with logs:read.',
+        code: 'functions/functions.controller.ts logsStream() · functions/dto/function-logs.dto.ts FunctionLogsStreamQuery',
+        msg: { kind: 'http', first: 'GET /functions/' + FN + '/logs/stream HTTP/1.1', headers: { host: 'localhost:3000', accept: 'text/event-stream', authorization: 'Bearer eyJhbGciOiJSUzI1NiIs… (ff-console)', 'x-ff-account': '000000000001' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT the function · the account\'s?', title: 'The account\'s own function',
+        text: 'Another account\'s function answers 404, as JSON, before any event, as on every function route (D4).',
+        code: 'functions/functions.service.ts liveLogs() findOne()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"account_id\" = '000000000001';" } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'GET …/victoria-logs:9428/proxy/select/logsql/tail', title: 'The store\'s live tail, through the API server',
+        text: 'In development the backend opens the store\'s tail through the API server\'s Service proxy, as it queries pages; its request stays open, with no timeout. Through the proxy, the store\'s answer begins only with its first row, so the backend\'s own stream doesn\'t wait for it: it starts at once. A store that can\'t start the tail ends it with an unavailable event.',
+        code: 'orchestrator/kubernetes/log-store.ts LogStore.tail() · kube-client.ts stream()',
+        msg: { kind: 'http', first: 'GET /api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/select/logsql/tail?query=%7Bnamespace%3D%22' + NS + '%22… HTTP/1.1', headers: { authorization: 'Bearer … (the backend\'s ServiceAccount)' } },
+        hl: ['k8sapi'] },
+      { from: 'k8s', to: 'store', kind: 'req', label: 'the tail, in LogsQL', title: 'The same lines, as they come',
+        text: 'The filters of a page, without its sort, which a tail can\'t have. The store holds each line back 5 s, by its own time, for the lines the collector brings late: a line comes through about 5 to 7 s after it was written.',
+        code: 'orchestrator/kubernetes/log-store.ts tailQuery()',
+        msg: { kind: 'logsql', text: '{namespace="' + NS + '", function_id="' + FN + '"}\n  | fields _time, _msg, pod, stream, request_id' } },
+      { from: 'store', to: 'k8s', kind: 'res', label: 'a JSON line as each comes', title: 'Rows, one by one',
+        text: 'The answer never ends by itself: each new row is a JSON line.',
+        code: 'VictoriaLogs /select/logsql/tail',
+        msg: { kind: 'ipc', title: 'JSON lines, from VictoriaLogs, as they come', body: [{ _time: '2026-10-17T10:00:01.0154Z', _msg: 'greeting Tunis', pod: 'fn-' + FN + '-7d9f8b6c5-x2x9q', stream: 'stdout', request_id: REQ }, '…'] } },
+      { from: 'k8s', to: 'api', kind: 'res', label: 'relayed, as it comes', title: 'Through the API server',
+        text: 'The API server passes each part on as it arrives.',
+        code: 'orchestrator/kubernetes/log-store.ts jsonLines()' },
+      { from: 'api', to: 'user', kind: 'res', label: 'event stream · ping · end', title: 'Each line an event',
+        text: 'Each line is an event whose data is the line, as in a page. A ping comes every 15 s, so that proxies keep the quiet connection open; an end event after 30 minutes, when the stream closes and the client opens another; an unavailable event if the store fails, its cause only in the server log (D4).',
+        code: 'functions/live-tail.ts liveTail() · functions/event-stream.ts sendEvents()',
+        msg: { kind: 'sse', text: 'HTTP/1.1 200 OK\ncontent-type: text/event-stream\ncache-control: no-cache\nx-accel-buffering: no\n\nid: 1\ndata: {"time":"2026-10-17T10:00:01.015400000Z","instance":"fn-' + FN + '-7d9f8b6c5-x2x9q","requestId":"' + REQ + '","stream":"stdout","message":"greeting Tunis"}\n\nevent: ping\nid: 2\ndata: \n\n…\n\nevent: end\nid: 120\ndata: {"message":"The live tail lasts 30 minutes: open it again to go on."}' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'close', title: 'You close it',
+        text: 'Closing the tab, or the reader, ends the connection.',
+        code: 'functions/event-stream.ts sendEvents()' },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'abort', title: 'The store\'s tail stops too',
+        text: 'The connection\'s end aborts the backend\'s own request, so the store stops tailing at once: nothing goes on reading for a client that left. A client that leaves more than 8 MiB unread is let go the same way, so that it can\'t fill the backend\'s memory.',
+        code: 'orchestrator/kubernetes/log-store.ts LogStore.tail()' },
+    ],
+  },
+  {
     id: 'loadfail', title: 'The function fails to load', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod', 'worker'],
     summary: 'Code with a syntax error. Everything is deployed, but the runtime never reports ready; after 90 s the backend gives up, with the reason it found in the pod\'s log, and releases the pod. An update with fixed code repairs the function.',
     initial: {},
@@ -1537,7 +1577,7 @@ function validateScenarios() {
       if (!st.label || !st.title || typeof st.text !== 'string' || !st.code) problems.push(where + ': label, title, text, and code are required');
       const msgs = Array.isArray(st.msg) ? st.msg : st.msg ? [st.msg] : [];
       for (const m of msgs) {
-        if (!['http', 'sql', 'log', 'ipc', 'logsql'].includes(m.kind)) problems.push(where + ': unknown message kind ' + m.kind);
+        if (!['http', 'sql', 'log', 'ipc', 'logsql', 'sse'].includes(m.kind)) problems.push(where + ': unknown message kind ' + m.kind);
         if (m.kind === 'http' && !m.first) problems.push(where + ': an HTTP message needs a first line');
       }
       for (const key of Object.keys(st.set || {})) if (!knownKey(key)) problems.push(where + ': unknown state key ' + key);
@@ -1785,6 +1825,7 @@ function renderOneMessage(m) {
   if (m.kind === 'log') return head('Pod log (stdout)') + '<pre class="wire">' + escText(m.lines.join('\n')) + '</pre>';
   if (m.kind === 'ipc') return head(m.title || 'In-process message') + '<pre class="wire">' + showValue(m.body) + '</pre>';
   if (m.kind === 'logsql') return head('LogsQL, run by the log store') + '<pre class="wire">' + escText(m.text) + '</pre>';
+  if (m.kind === 'sse') return head('Server-Sent Events, as they go out') + '<pre class="wire">' + escText(m.text) + '</pre>';
   let s = '<span class="first">' + escText(m.first) + '</span>';
   Object.entries(m.headers || {}).forEach(([k, v]) => { s += '\n<span class="hdr">' + escText(k === '…' ? '…' : k + ': ' + v) + '</span>'; });
   if (m.body !== undefined) s += '\n\n' + showValue(m.body);

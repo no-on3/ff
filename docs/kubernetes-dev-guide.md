@@ -212,6 +212,7 @@ curl -s http://127.0.0.1:9428/select/logsql/query --data-urlencode 'query={names
 The L3 suite (`log-pipeline.it.spec.ts`, run where the pipeline is installed) deploys functions in two throw-away accounts and checks:
 - a Node.js call's lines (stdout and stderr) and a Python call's, with their namespace, function, pod, stream and request ID, all queryable within 5 s;
 - pages read as the logs API reads them: a call's lines, a phrase, pages of 3 back with the cursor giving the same lines once each, and a phrase written as LogsQL finding nothing;
+- the live tail, opened before two calls and narrowed to one: that call's five lines, in order, within 15 s;
 - a call printing 30,000 lines: at most 2,000 of them stored per second, every other one counted in a notice, so that stored and counted add up to the call's 30,003 lines; and another account calling meanwhile keeps all its lines;
 - a 120,000-byte line of euro signs, cut to 5,461 of them;
 - the store refusing a function pod and an unlabelled pod in `ff-system`, and accepting one labelled as the backend;

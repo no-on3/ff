@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, PickType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, IsString, IsUUID, Length, Matches, Max, Min } from 'class-validator';
 
@@ -116,3 +116,6 @@ export class FunctionLogsView {
   @ApiProperty({ nullable: true, type: String, description: "The cursor for the older lines: pass it as cursor, with the same parameters; null when there are none" })
   next: string | null;
 }
+
+/** GET /functions/:id/logs/stream (P-43): the live tail, narrowed as a page may be. */
+export class FunctionLogsStreamQuery extends PickType(FunctionLogsQuery, ['q', 'requestId'] as const) {}

@@ -303,7 +303,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
   - lines are prefixed with the pod name when there are several pods;
   - it is scoped to the caller's account: another account's function answers 404 (D4 of the client-readiness plan).
 - **Built by the client-readiness plan's P-40 (2026-10-17):** the backend part, as `GET /functions/:id/logs?tail=&sinceSeconds=`, scoped to the account, in the shape the log store's API keeps (P-43): `{ lines: [{ time, instance, requestId, stream, message }], next }`, oldest first, the instance in place of a pod-name prefix. The CLI part is still to do.
-- **Since P-43** the route reads the log store, so lines outlive their instance. `tail` and `sinceSeconds` work as before; `limit`, `start`, `end`, `q`, `requestId` and `cursor` are new, and `next` leads to older lines. A line's `instance` is null on the store's notice of dropped lines, whose `stream` is `ff`.
+- **Since P-43** the route reads the log store, so lines outlive their instance. `tail` and `sinceSeconds` work as before; `limit`, `start`, `end`, `q`, `requestId` and `cursor` are new, and `next` leads to older lines. A line's `instance` is null on the store's notice of dropped lines, whose `stream` is `ff`. `GET /functions/:id/logs/stream` is the live tail, as Server-Sent Events: `--follow` can read it instead of polling.
 - **CLI:** `ff logs <name> [--tail N] [--follow]`. `--follow` polls every 2 s with `sinceSeconds` and drops lines it has already printed, using their timestamps. Streaming can come later.
 - **Tests:** L1 backend against the fake Kubernetes API (several pods, no pods, a pod with no log yet); L2 CLI; L3 for a `print` in a function showing up in `ff logs`.
 

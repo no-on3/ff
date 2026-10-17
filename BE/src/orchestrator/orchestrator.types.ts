@@ -37,16 +37,20 @@ export interface FunctionLogLine {
   message: string;
 }
 
-/** Which lines to read (P-43): the newest `limit` of the window, or of what comes before `cursor`. */
-export interface LogsQuery {
-  /** The window: from `start`, included, to `end`, excluded. */
-  start: Date;
-  end: Date;
-  limit: number;
+/** Which of a function's lines (P-43): all, or only a call's, or only those with a phrase. */
+export interface LogsFilter {
   /** Only lines with this phrase. */
   q?: string;
   /** Only the lines of this call. */
   requestId?: string;
+}
+
+/** Which lines to read (P-43): the newest `limit` of the window, or of what comes before `cursor`. */
+export interface LogsQuery extends LogsFilter {
+  /** The window: from `start`, included, to `end`, excluded. */
+  start: Date;
+  end: Date;
+  limit: number;
   /** Where the page before ended: its `next`. */
   cursor?: string;
 }
@@ -116,4 +120,10 @@ export interface Orchestrator {
    * the store can't answer, and InvalidLogCursorError for a cursor no page gave.
    */
   logs(fn: FunctionWorkload, query: LogsQuery): Promise<FunctionLogsPage>;
+  /**
+   * The function's lines as the log store gets them (P-43), until `signal`
+   * aborts. Reading them starts the tail; it throws LogStoreUnavailableError
+   * when the store can't start it, or fails later.
+   */
+  tailLogs(fn: FunctionWorkload, filter: LogsFilter, signal: AbortSignal): AsyncIterable<FunctionLogLine>;
 }

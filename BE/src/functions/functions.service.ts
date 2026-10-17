@@ -1,6 +1,16 @@
-import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  MessageEvent,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Observable } from 'rxjs';
 import { Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
@@ -23,13 +33,14 @@ import { failureStatus, usageRecord } from '../usage/usage';
 import { UsageService } from '../usage/usage.service';
 import { CreditService } from '../billing/credit.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
-import { FunctionLogsQuery, FunctionLogsView } from './dto/function-logs.dto';
+import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
 import { callersFailure, failureResponse, platformFailure } from './failures';
+import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
 
 /** Fields whose change requires rolling out a new version of the function. */
@@ -490,6 +501,18 @@ export class FunctionsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * The function's live tail, as Server-Sent Events (P-43), until the client
+   * goes, which aborts `signal`, or 30 minutes pass. Another account's function
+   * answers 404, before any event. The stream starts at once: a store that can't
+   * start the tail, or fails later, ends it with an `unavailable` event.
+   */
+  async liveLogs(accountId: string, id: string, request: FunctionLogsStreamQuery, signal: AbortSignal): Promise<Observable<MessageEvent>> {
+    const function_ = await this.findOne(accountId, id);
+    const lines = this.orchestrator.tailLogs(function_, { q: request.q, requestId: request.requestId }, signal);
+    return liveTail(lines, (error) => this.logger.error(`The live tail of function ${id} stopped: ${describeError(error)}`));
   }
 
   /** Where object storage keeps the copy of a function's code. */

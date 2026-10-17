@@ -5,15 +5,17 @@
  * so none can change what a query does (D10).
  */
 import * as http from 'node:http';
+import type { Readable } from 'node:stream';
 import { describeError } from '../../common/describe-error';
 import { InvalidLogCursorError, LogStoreUnavailableError } from '../orchestrator.errors';
-import type { FunctionLogLine, FunctionLogsPage, LogsQuery } from '../orchestrator.types';
+import type { FunctionLogLine, FunctionLogsPage, LogsFilter, LogsQuery } from '../orchestrator.types';
 import { KubeApi, paths } from './kube-client';
 import type { InvokeMode } from './kubernetes.settings';
 
 /** Where the store is (deploy/k8s/logging): its Service. The admission policy names it too, for the development proxy. */
 export const LOG_STORE = { namespace: 'ff-system', service: 'victoria-logs', port: 9428 } as const;
 const QUERY_PATH = '/select/logsql/query';
+const TAIL_PATH = '/select/logsql/tail';
 const QUERY_TIMEOUT_MS = 15_000;
 /** The most a direct answer may hold: a page is 1,001 lines of at most 16 KiB and their fields. */
 const MAX_ANSWER_BYTES = 32 * 1024 * 1024;
@@ -57,6 +59,16 @@ export function decodeCursor(text: string): Cursor {
   throw new InvalidLogCursorError();
 }
 
+/** The function's lines, in its account's namespace, narrowed to a call and a phrase when asked. */
+function filters(namespace: string, functionId: string, filter: LogsFilter): string[] {
+  const parts = [`{namespace=${quoted(namespace)}, function_id=${quoted(functionId)}}`];
+  if (filter.requestId !== undefined) parts.push(`request_id:=${quoted(filter.requestId)}`);
+  if (filter.q !== undefined) parts.push(`_msg:${quoted(filter.q)}`);
+  return parts;
+}
+
+const FIELDS = ' | fields _time, _msg, pod, stream, request_id';
+
 /**
  * A page's query: the function's lines in the window, or in its part before
  * the cursor, the newest first, and one more than the page, which says whether
@@ -65,17 +77,15 @@ export function decodeCursor(text: string): Cursor {
  */
 export function pageQuery(namespace: string, functionId: string, query: LogsQuery): string {
   const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
-  const filters = [
-    `{namespace=${quoted(namespace)}, function_id=${quoted(functionId)}}`,
-    cursor ? `_time:[${query.start.toISOString()}, ${cursor.before}]` : `_time:[${query.start.toISOString()}, ${query.end.toISOString()})`,
-  ];
-  if (query.requestId !== undefined) filters.push(`request_id:=${quoted(query.requestId)}`);
-  if (query.q !== undefined) filters.push(`_msg:${quoted(query.q)}`);
+  const [stream, ...narrowing] = filters(namespace, functionId, query);
+  const window = cursor ? `_time:[${query.start.toISOString()}, ${cursor.before}]` : `_time:[${query.start.toISOString()}, ${query.end.toISOString()})`;
   const offset = cursor && cursor.skip > 0 ? ` offset ${cursor.skip}` : '';
-  return (
-    `${filters.join(' ')} | sort by (_time desc, pod desc, _msg desc)${offset} limit ${query.limit + 1}` +
-    ' | fields _time, _msg, pod, stream, request_id'
-  );
+  return `${[stream, window, ...narrowing].join(' ')} | sort by (_time desc, pod desc, _msg desc)${offset} limit ${query.limit + 1}${FIELDS}`;
+}
+
+/** A live tail's query: the same lines as they come. The store refuses pipes such as sort in a tail. */
+export function tailQuery(namespace: string, functionId: string, filter: LogsFilter): string {
+  return `${filters(namespace, functionId, filter).join(' ')}${FIELDS}`;
 }
 
 /** A page from the newest-first rows: `limit` of them, oldest first, and the cursor to the older ones. */
@@ -91,7 +101,7 @@ export function toPage(rows: StoredLine[], limit: number, cursor?: string): Func
   return { lines: page.reverse().map(toLine), next };
 }
 
-function toLine(row: StoredLine): FunctionLogLine {
+export function toLine(row: StoredLine): FunctionLogLine {
   return {
     time: nineDecimals(row._time),
     instance: row.pod ?? null,
@@ -143,6 +153,70 @@ export class LogStore {
       throw new LogStoreUnavailableError(`The log store's answer is not JSON lines: ${describeError(error)}`);
     }
   }
+
+  /**
+   * A live tail: the rows of `logsql` as the store gets them, for as long as
+   * `signal` lets it run. The store holds each line back 5 s, by its own time,
+   * for those that reach it late. The request goes out on the first read, and
+   * nothing waits for the store's answer before that: through the API server's
+   * proxy, the answer's headers come only with its first row. A store that
+   * can't start the tail makes the reading fail, with LogStoreUnavailableError.
+   */
+  tail(logsql: string, signal: AbortSignal): AsyncIterable<StoredLine> {
+    const path = `${TAIL_PATH}?${new URLSearchParams({ query: logsql }).toString()}`;
+    const open = async (): Promise<Readable> => {
+      let answer: { status: number; body: Readable };
+      try {
+        answer =
+          this.mode === 'proxy'
+            ? await this.api.stream(paths.serviceProxy(LOG_STORE.namespace, LOG_STORE.service, String(LOG_STORE.port), path), signal)
+            : await streamGet(`${this.directUrl}${path}`, signal);
+      } catch (error) {
+        throw new LogStoreUnavailableError(`The log store did not answer: ${describeError(error)}`);
+      }
+      if (answer.status !== 200) {
+        const body = await firstBytes(answer.body, 300);
+        throw new LogStoreUnavailableError(`The log store answered ${answer.status}: ${body}`);
+      }
+      return answer.body;
+    };
+    return (async function* () {
+      yield* jsonLines(await open());
+    })();
+  }
+}
+
+/** Rows from a stream of JSON lines, however its chunks split them. */
+async function* jsonLines(body: Readable): AsyncGenerator<StoredLine> {
+  let buffer = '';
+  body.setEncoding('utf8');
+  for await (const chunk of body as AsyncIterable<string>) {
+    buffer += chunk;
+    for (let at = buffer.indexOf('\n'); at >= 0; at = buffer.indexOf('\n')) {
+      const line = buffer.slice(0, at);
+      buffer = buffer.slice(at + 1);
+      if (line.trim()) yield JSON.parse(line) as StoredLine;
+    }
+  }
+}
+
+/** The start of a stream's text, for an error message; the rest is dropped. */
+async function firstBytes(body: Readable, max: number): Promise<string> {
+  let text = '';
+  body.setEncoding('utf8');
+  for await (const chunk of body as AsyncIterable<string>) {
+    text += chunk;
+    if (text.length >= max) break;
+  }
+  body.destroy();
+  return text.slice(0, max);
+}
+
+function streamGet(url: string, signal: AbortSignal): Promise<{ status: number; body: Readable }> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, { signal }, (res) => resolve({ status: res.statusCode ?? 0, body: res }));
+    req.on('error', reject);
+  });
 }
 
 function getText(url: string, timeoutMs: number): Promise<{ status: number; body: string }> {

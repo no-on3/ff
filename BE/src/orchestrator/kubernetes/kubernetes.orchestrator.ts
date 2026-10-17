@@ -9,10 +9,10 @@ import {
   withInitMs,
 } from '../orchestrator.errors';
 import { REQUEST_ID_HEADER } from '../../common/request-context';
-import { FunctionLogsPage, FunctionWorkload, InvokeResult, LogsQuery, Orchestrator, TenantLimits } from '../orchestrator.types';
+import { FunctionLogLine, FunctionLogsPage, FunctionWorkload, InvokeResult, LogsFilter, LogsQuery, Orchestrator, TenantLimits } from '../orchestrator.types';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
-import { LogStore, pageQuery, quoted, toPage } from './log-store';
+import { LogStore, pageQuery, quoted, tailQuery, toLine, toPage } from './log-store';
 import {
   K8sObject,
   RUNTIME_PORT,
@@ -238,6 +238,14 @@ export class KubernetesOrchestrator implements Orchestrator {
   async logs(fn: FunctionWorkload, query: LogsQuery): Promise<FunctionLogsPage> {
     const rows = await this.logStore.query(pageQuery(this.namespaceOf(fn), fn.id, query));
     return toPage(rows, query.limit, query.cursor);
+  }
+
+  /** The function's lines as the log store gets them, in its account's namespace, until `signal` aborts (P-43). */
+  tailLogs(fn: FunctionWorkload, filter: LogsFilter, signal: AbortSignal): AsyncIterable<FunctionLogLine> {
+    const rows = this.logStore.tail(tailQuery(this.namespaceOf(fn), fn.id, filter), signal);
+    return (async function* () {
+      for await (const row of rows) yield toLine(row);
+    })();
   }
 
   /**

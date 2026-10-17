@@ -1,4 +1,4 @@
-import { BadRequestException, HttpStatus, InternalServerErrorException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -26,6 +26,8 @@ import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
+import { TAIL_ENDED, TAIL_UNAVAILABLE } from './live-tail';
+import { Observable } from 'rxjs';
 
 /** What the caller sees of a platform failure (D4): no details, and the request ID. */
 const internal = (action: string) => new RegExp(`^${action} failed because of an internal error \\(request [0-9a-f-]{36}\\)\\.$`);
@@ -109,6 +111,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       readyInstancesByFunction: jest.fn(),
       applyTenantLimits: jest.fn(),
       logs: jest.fn(),
+      tailLogs: jest.fn(),
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -878,6 +881,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       orchestrator.invoke.mockResolvedValue({ output: 'hi' });
       orchestrator.desiredInstances.mockResolvedValue(1);
       orchestrator.logs.mockResolvedValue({ lines: [], next: null });
+      orchestrator.tailLogs.mockReturnValue((async function* () {})());
     });
 
     const calls: Array<[string, (accountId: string, id?: string) => Promise<unknown>]> = [
@@ -888,6 +892,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       ['getInvocations', (accountId, id = ID) => service.getInvocations(accountId, id, { limit: 10, offset: 0 })],
       ['updateScalingConfig', (accountId, id = ID) => service.updateScalingConfig(accountId, id, { maxInstances: 2 })],
       ['logs', (accountId, id = ID) => service.logs(accountId, id, { tail: 200 })],
+      ['liveLogs', (accountId, id = ID) => service.liveLogs(accountId, id, {}, new AbortController().signal)],
     ];
 
     it.each(calls)("%s answers another account exactly as for a function that doesn't exist, and does nothing", async (_name, call) => {
@@ -961,6 +966,36 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         orchestrator.logs.mockRejectedValue(new Error('boom'));
 
         await expect(service.logs('user-1', ID, {})).rejects.toThrow('boom');
+      });
+
+      const line = page.lines[0];
+      const events = (stream: Observable<MessageEvent>) =>
+        new Promise<MessageEvent[]>((resolve) => {
+          const got: MessageEvent[] = [];
+          stream.subscribe({ next: (event) => got.push(event), complete: () => resolve(got) });
+        });
+
+      it("tails the account's function with the filter and the request's signal, as events", async () => {
+        orchestrator.tailLogs.mockReturnValue((async function* () { yield line; })());
+        const signal = new AbortController().signal;
+
+        const stream = await service.liveLogs('user-1', ID, { q: 'time out', requestId: 'r-1' }, signal);
+
+        expect(orchestrator.tailLogs).toHaveBeenCalledWith(owned(), { q: 'time out', requestId: 'r-1' }, signal);
+        expect(await events(stream)).toEqual([{ data: line }, { type: 'end', data: { message: TAIL_ENDED } }]);
+      });
+
+      it.each([
+        ["can't start the tail", new LogStoreUnavailableError('The log store answered 503: no endpoints')],
+        ['fails on the way', new Error('socket hang up')],
+      ])("ends the stream with 'unavailable' when the store %s, the cause in the server log alone (D4)", async (_, cause) => {
+        const failing: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(cause) }) };
+        orchestrator.tailLogs.mockReturnValue(failing);
+
+        const got = await events(await service.liveLogs('user-1', ID, {}, new AbortController().signal));
+
+        expect(got).toEqual([{ type: 'unavailable', data: { message: TAIL_UNAVAILABLE } }]);
+        expect(logged).toHaveBeenCalledWith(`The live tail of function ${ID} stopped: ${cause.message}`);
       });
     });
 

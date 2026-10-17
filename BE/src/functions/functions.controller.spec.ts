@@ -2,17 +2,19 @@
  * L1: who may call each function route (client-readiness plan, P-12, D4), as
  * the routes declare it for the global guard: writers (owners and developers)
  * change and invoke functions, viewers only read, and an account deploys and
- * invokes only once it is approved. The logs route through HTTP (P-40).
+ * invokes only once it is approved. The logs routes through HTTP (P-40, P-43).
  */
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, NotFoundException, ValidationPipe } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { Principal } from '../auth/principal';
+import { RequestIdInterceptor } from '../common/request-context';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { INVOCATION } from '../plans/rate-limits';
 import { FunctionsController } from './functions.controller';
 import { FunctionsService } from './functions.service';
+import { of } from 'rxjs';
 
 const reflector = new Reflector();
 const rules = (handler: keyof FunctionsController) => {
@@ -45,8 +47,8 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
     },
   );
 
-  it('logs: every member reads them, viewers included, and a key with logs:read (P-40)', () => {
-    expect(rules('logs')).toEqual({ roles: 'anyone', activeAccount: false, scope: 'logs:read' });
+  it.each<keyof FunctionsController>(['logs', 'logsStream'])('%s: every member reads them, viewers included, and a key with logs:read (P-40, P-43)', (handler) => {
+    expect(rules(handler)).toEqual({ roles: 'anyone', activeAccount: false, scope: 'logs:read' });
   });
 
   it("counts only invoke against the plan's invocation rate; every other change counts against its rate of changes (P-15)", () => {
@@ -63,7 +65,10 @@ describe('GET /functions/:id/logs (L1, P-40, P-43)', () => {
   const ACCOUNT = '000000000001';
   const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
   const LOGS = { lines: [{ time: '2026-10-17T10:00:00.000000000Z', instance: 'fn-a', requestId: null, stream: 'stdout', message: 'hi' }], next: 'older' };
-  const functions = { logs: jest.fn(async () => LOGS) };
+  const functions = {
+    logs: jest.fn(async () => LOGS),
+    liveLogs: jest.fn(async (..._args: unknown[]) => of({ data: LOGS.lines[0] }, { type: 'ping', data: '' }, { type: 'end', data: { message: 'over' } })),
+  };
   let app: INestApplication;
   let baseUrl: string;
   const get = (query: string) => fetch(`${baseUrl}/functions/${ID}/logs${query}`);
@@ -76,6 +81,8 @@ describe('GET /functions/:id/logs (L1, P-40, P-43)', () => {
       next();
     });
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true })); // as main.ts
+    // As app.module.ts: an interceptor changes how Nest runs a handler, and so how a failure reaches the caller.
+    app.useGlobalInterceptors(new RequestIdInterceptor());
     await app.listen(0, '127.0.0.1');
     baseUrl = await app.getUrl();
   });
@@ -135,5 +142,46 @@ describe('GET /functions/:id/logs (L1, P-40, P-43)', () => {
   it('refuses an ID that is not one', async () => {
     expect((await fetch(`${baseUrl}/functions/fn-1/logs`)).status).toBe(400);
     expect(functions.logs).not.toHaveBeenCalled();
+  });
+
+  describe('GET /functions/:id/logs/stream (P-43)', () => {
+    it("streams the service's events as Server-Sent Events, with the filter and the request's signal", async () => {
+      const res = await get(`/stream?q=time%20out&requestId=0b7c6f2e-5d1a-4c3b-9e8f-7a6b5c4d3e2f`);
+
+      expect([res.status, res.headers.get('content-type'), res.headers.get('x-accel-buffering')]).toEqual([200, 'text/event-stream', 'no']);
+      // Numbered events, the stream ending with them.
+      expect(await res.text()).toBe(
+        `id: 1\ndata: ${JSON.stringify(LOGS.lines[0])}\n\nevent: ping\nid: 2\ndata: \n\nevent: end\nid: 3\ndata: {"message":"over"}\n\n`,
+      );
+      const [account, id, query, signal] = functions.liveLogs.mock.calls[0];
+      expect([account, id, query]).toEqual([ACCOUNT, ID, { q: 'time out', requestId: '0b7c6f2e-5d1a-4c3b-9e8f-7a6b5c4d3e2f' }]);
+      expect(signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it("answers another account's function with a JSON 404, before any event", async () => {
+      // After a database query's time: the check is done by then, and nothing was sent yet.
+      functions.liveLogs.mockImplementationOnce(
+        () => new Promise((_, reject) => setTimeout(() => reject(new NotFoundException(`Function with ID ${ID} not found`)), 20)),
+      );
+
+      const res = await get('/stream');
+
+      expect([res.status, res.headers.get('content-type')?.split(';')[0], (await res.json()).message]).toEqual([
+        404,
+        'application/json',
+        `Function with ID ${ID} not found`,
+      ]);
+    });
+
+    it.each([
+      ['?requestId=req-1', 'requestId must be a UUID'],
+      ['?q=%20', 'q must have a character other than a space'],
+      ['?limit=5', 'property limit should not exist'],
+    ])('refuses %s', async (query, message) => {
+      const res = await get(`/stream${query}`);
+
+      expect([res.status, (await res.json()).message]).toEqual([400, expect.arrayContaining([message])]);
+      expect(functions.liveLogs).not.toHaveBeenCalled();
+    });
   });
 });

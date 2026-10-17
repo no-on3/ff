@@ -817,6 +817,21 @@ as_user_1 GET "/functions/$fn_1/logs?start=2026-10-17T11:00:00Z&end=2026-10-17T1
 check "a start after the end is refused" "400 start must be before end" "$(status) $(message)"
 as_user_1 GET "/functions/$fn_1/logs?cursor=bm9wZQ" >/dev/null
 check "a cursor no page gave is refused" "400 Invalid cursor: pass the next value of the page before" "$(status) $(message)"
+# The live tail, open before a call: the call's lines come through it, about 5 s after they were written.
+stream_file="$work/stream.txt"
+curl -sN --max-time 60 -H "Authorization: Bearer $token_1" -D "$work/stream-headers" "$api_oidc/functions/$fn_1/logs/stream" >"$stream_file" 2>/dev/null &
+stream_pid=$!
+sleep 1
+streamed_id="$(as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"live"}}' | jq -r .id)"
+for _ in $(seq 1 60); do
+  grep -q "\"requestId\":\"$streamed_id\".*REPORT RequestId" "$stream_file" 2>/dev/null && break
+  sleep 0.5
+done
+# curl ends with the signal's status, which set -e must not take for a failure.
+kill "$stream_pid" 2>/dev/null || true
+wait "$stream_pid" 2>/dev/null || true
+check "the live tail streams a call's START, END and REPORT as events, as they come (P-43)" "text/event-stream START,END,REPORT" \
+  "$(grep -i '^content-type:' "$work/stream-headers" | tr -d '\r' | awk '{ print $2 }') $(grep '^data: {' "$stream_file" | sed 's/^data: //' | jq -r --arg id "$streamed_id" 'select(.requestId == $id) | .message | capture("^(?<kind>START|END|REPORT) ").kind' | paste -sd, -)"
 key_logs="$(as_user_1 POST /api-keys '{"name": "l5 logs", "scopes": ["logs:read"]}' | jq -r .key)"
 by_key="$(with_token "$key_logs" GET "/functions/$fn_1/logs?tail=5")"
 check "a key with logs:read reads them" "200 5" "$(status) $(jq '.lines | length' <<<"$by_key")"
