@@ -27,7 +27,7 @@ import {
   resourceQuotaManifest,
   serviceManifest,
 } from './manifests';
-import { LABELS, accountNamespace, codeConfigMapName, codeHash, functionResourceName } from './naming';
+import { LABELS, MANAGED_BY, accountNamespace, codeConfigMapName, codeHash, functionResourceName } from './naming';
 
 interface Deployment extends K8sObject {
   metadata: K8sObject['metadata'] & { generation?: number };
@@ -250,6 +250,20 @@ export class KubernetesOrchestrator implements Orchestrator {
 
   async desiredInstances(fn: FunctionWorkload): Promise<number> {
     return (await this.instances(fn)).desired;
+  }
+
+  async readyInstancesByFunction(): Promise<Map<string, number>> {
+    // One list of FF's Deployments in every namespace: a read the backend's ClusterRole allows (deploy/k8s/README.md).
+    const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);
+    const ready = new Map<string, number>();
+    for (const deployment of deployments) {
+      const functionId = deployment.metadata.labels?.[LABELS.functionId];
+      const instances = deployment.status?.readyReplicas ?? 0;
+      // Only FF's tenant namespaces: a label is easy to copy.
+      if (!functionId || instances <= 0 || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
+      ready.set(functionId, instances);
+    }
+    return ready;
   }
 
   async invoke(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<InvokeResult> {

@@ -63,6 +63,7 @@ check "deletecollection configmaps" yes "$(can deletecollection configmaps -n ff
 check "create networkpolicies" yes "$(can create networkpolicies.networking.k8s.io -n ff-t-x)"
 check "create services/proxy (dev overlay: the invoke path outside the cluster)" yes "$(can create services --subresource=proxy -n ff-t-x)"
 check "get pods/log (diagnostics)" yes "$(can get pods --subresource=log -n ff-t-x)"
+check "list deployments in every namespace at once (capacity samples)" yes "$(can list deployments.apps --all-namespaces)"
 check "create namespaces" yes "$(can create namespaces)"
 
 echo "RBAC denials:"

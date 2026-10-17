@@ -347,6 +347,16 @@ The table has a partition per month, by the UTC calendar (`usage_records_2026_10
 
 **Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known.
 
+**Capacity samples.** Five seconds into every minute, the backend lists FF's Deployments in one Kubernetes call and writes a row to `capacity_samples` for each function with a ready instance: how many, its memory and its `minInstances` (D6 and D8 of the client-readiness plan). A warm instance holds its memory whether or not it runs a call, and these samples show how much. Like usage records, samples are never changed or deleted, and the table has a partition per month. The capacity report weighs, per account and day, the GB-s held for ready instances against the GB-s the usage records bill:
+
+```bash
+cd BE && npm run capacity:report -- --days 7      # the last 7 days by the UTC calendar, today included
+# Day (UTC)   Account       Reserved GB-s  Provisioned GB-s  Billed GB-s  Requests  Reserved ÷ billed
+# 2026-10-17  000000000001         45.000             0.000        0.004         3            11,250×
+```
+
+One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bills 0.000125 GB-s: that gap is D8's, and the report is how you watch it until the admin dashboard does (P-75). "Provisioned" is what `minInstances` would bill at the provisioned price. The report reads the database that `BE/.env` names, and changes nothing.
+
 **The console with a login.** With the backend in OIDC mode as above, copy `FE/.env.example` to `FE/.env.local`, set `VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff` in it, and restart `npm run dev`. The console then opens on a login page:
 1. "Sign up" opens Keycloak's registration form. The verification e-mail arrives in Mailpit (http://localhost:58025); its link asks for a password, then brings you back to the console, logged in.
 2. The console asks you to create your account, which then waits for approval. Approve it as above, and "Check again" shows the functions.
@@ -462,7 +472,8 @@ docker compose down -v
 | `create` takes 90 s, then fails | The function cannot load: the answer starts with `The function failed to load:` and the runtime's reason. Fix the code and send it with `PUT /functions/<id>`: see "If a function cannot load" in section 3. If the answer is 500 instead, the platform failed: see the row below about request IDs. |
 | An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first. The previous version still serves, and the record is unchanged. |
 | An invocation stays `RUNNING`, then becomes `LOST` | The backend stopped during the call, so its answer is unknown; it isn't billed. Invoke again. See "Lost calls" in section 5. |
-| The backend logs `Could not create usage partitions` | The migrations haven't run (`cd BE && npm run migration:run`), or the database refused: the message says why. An invocation in a month without a partition fails with `no partition of relation "usage_records" found for row`. |
+| The backend logs `Could not create the monthly partitions` | The migrations haven't run (`cd BE && npm run migration:run`), or the database refused: the message says why. An invocation in a month without a partition fails with `no partition of relation "usage_records" found for row`. |
+| The backend logs `Could not sample capacity` | The Kubernetes API didn't answer the list of Deployments, or the database refused the samples: the message says why. That minute has no sample; the next minute is sampled as usual. |
 | An invoke answers 429 with `TooManyRequestsException: Rate exceeded: no instance was free within …` | More calls arrived together than the function's instances could take within one timeout. Raise `maxInstances` (`PUT /functions/<id>/scaling-config`), or make the calls shorter. |
 | `jq: parse error` after `echo "$response" \| jq` in zsh | zsh's `echo` expands `\n` inside JSON strings. Pipe `curl` straight into `jq`, or use `printf '%s' "$response"`. |
 

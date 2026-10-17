@@ -36,12 +36,22 @@ const BASELINE = migrationNames[0];
 const SCALING_MODEL = migrationNames.find((name) => name.startsWith('ScalingModel')) as string;
 const API_KEYS = migrationNames.find((name) => name.startsWith('ApiKeys')) as string;
 const AUDIT_LOG = migrationNames.find((name) => name.startsWith('AuditLog')) as string;
-/** The usage partition of the month `ahead` months from now, by the UTC calendar (P-20). */
-function usagePartition(ahead = 0): string {
+const USAGE_RECORDS = migrationNames.find((name) => name.startsWith('UsageRecords')) as string;
+/** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
+function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
   const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + ahead, 1));
-  return `usage_records_${month.toISOString().slice(0, 7).replace('-', '_')}`;
+  return `${table}_${month.toISOString().slice(0, 7).replace('-', '_')}`;
 }
+const usagePartition = (ahead = 0) => monthPartition('usage_records', ahead);
+/** The partitions of a partitioned table, by name. */
+const partitionsOf = (dataSource: DataSource, table: string) =>
+  dataSource.query(`SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = $1::regclass ORDER BY 1`, [table]);
+/** FF's own SQL functions. */
+const ffFunctions = async (dataSource: DataSource) =>
+  (await dataSource.query<Array<{ proname: string }>>(`SELECT proname FROM pg_proc WHERE proname LIKE 'ff\\_%' ORDER BY 1`)).map(
+    (row) => row.proname,
+  );
 
 interface ColumnRow {
   table_name: string;
@@ -177,8 +187,7 @@ run('database schema (L2, real PostgreSQL)', () => {
   it("the usage-records migration adds LOST and the table with this month's and next month's partitions, and reverts with a LOST invocation present (P-20)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      const partitions = () =>
-        dataSource.query(`SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'usage_records'::regclass ORDER BY 1`);
+      const partitions = () => partitionsOf(dataSource, 'usage_records');
       expect(await partitions()).toEqual([{ relname: usagePartition(0) }, { relname: usagePartition(1) }]);
       await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
       const [{ id }] = await dataSource.query(
@@ -192,13 +201,39 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       expect(await dataSource.query(`SELECT status FROM function_invocations`)).toEqual([{ status: 'ERROR' }]);
       expect(await dataSource.query(`SELECT to_regclass('usage_records') AS t, to_regclass('${usagePartition(0)}') AS p`)).toEqual([{ t: null, p: null }]);
-      expect(await dataSource.query(`SELECT proname FROM pg_proc WHERE proname LIKE 'ff\\_%' ORDER BY 1`)).toEqual([{ proname: 'ff_refuse_change' }]);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_refuse_change']);
       await expect(lost()).rejects.toThrow(/invalid input value for enum/);
 
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
       expect(await partitions()).toEqual([{ relname: usagePartition(0) }, { relname: usagePartition(1) }]);
       await lost();
+    });
+  });
+
+  it("the capacity-samples migration replaces P-20's partition function, and reverts with samples present (P-21)", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_month_partition', 'ff_refuse_change']);
+      expect(await partitionsOf(dataSource, 'capacity_samples')).toEqual([
+        { relname: monthPartition('capacity_samples', 0) },
+        { relname: monthPartition('capacity_samples', 1) },
+      ]);
+      await dataSource.query(
+        `INSERT INTO capacity_samples VALUES (gen_random_uuid(), date_trunc('minute', now()), $1, 1, 0, 128)`,
+        [ACCOUNT],
+      );
+
+      await migrateDownTo(dataSource, USAGE_RECORDS);
+
+      expect(await dataSource.query(`SELECT to_regclass('capacity_samples') AS t`)).toEqual([{ t: null }]);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_usage_partition', 'ff_refuse_change']);
+      expect(await dataSource.query(`SELECT ff_ensure_usage_partition('2031-01-01') AS p`)).toEqual([{ p: 'usage_records_2031_01' }]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'usage_records_2031_01'::regclass`)).toEqual([{ n: 2 }]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_month_partition', 'ff_refuse_change']);
     });
   });
 
@@ -230,12 +265,13 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^usage_records_\d{4}_\d{2}$/; // usage_records' partitions, one per month (P-20)
+      const monthly = /^(usage_records|capacity_samples)_\d{4}_\d{2}$/; // their partitions, one per month (P-20, P-21)
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
         'api_keys',
         'audit_log',
+        'capacity_samples',
         'function_invocations',
         'function_metrics',
         'functions',
@@ -246,7 +282,12 @@ run('database schema (L2, real PostgreSQL)', () => {
         'usage_records',
         'users',
       ]);
-      expect(tables.filter((table) => monthly.test(table))).toEqual([usagePartition(0), usagePartition(1)]);
+      expect(tables.filter((table) => monthly.test(table))).toEqual([
+        monthPartition('capacity_samples', 0),
+        monthPartition('capacity_samples', 1),
+        usagePartition(0),
+        usagePartition(1),
+      ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
       for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
@@ -348,7 +389,7 @@ run('database schema (L2, real PostgreSQL)', () => {
           WHERE n.nspname = 'public' AND t.typtype = 'e'`,
       );
       expect(enums).toEqual([]);
-      expect(await db.dataSource.query(`SELECT proname FROM pg_proc WHERE proname LIKE 'ff\\_%'`)).toEqual([]);
+      expect(await ffFunctions(db.dataSource)).toEqual([]);
       expect(await pendingMigrations(db.dataSource)).toEqual(migrationNames);
 
       await db.dataSource.runMigrations({ transaction: 'each' });

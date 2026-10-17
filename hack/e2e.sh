@@ -10,7 +10,8 @@
 # limits, its namespace's quota and its rate limits, which don't touch other
 # accounts. Then usage records (P-20): one per invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
-# it, which the restarted backend marks LOST without billing it.
+# it, which the restarted backend marks LOST without billing it. Then capacity
+# samples (P-21): the warm function sampled each minute, and the capacity report.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -247,5 +248,13 @@ check "the history says why" "Lost: the backend restarted during the call, so it
   "$(http GET "/functions/$meter_id/invocations" | jq -r --arg id "$lost" '.invocations[] | select(.id == $id) | .error')"
 check "one record per invocation, none without one" "5 5" \
   "$(q "SELECT (SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'), (SELECT count(*) FROM usage_records WHERE function_id = '$meter_id')")"
+
+echo "== capacity samples (P-21)"
+# The backends sampled every minute since the meter function was created: it has had a ready instance since its cold start.
+check "a sample a minute of the warm function: its instances, memory, account and minInstances" "t 1 128 $tenant 0" \
+  "$(q "SELECT count(*) > 0, min(instances), max(memory_mb), max(account_id), max(min_instances) FROM capacity_samples WHERE function_id = '$meter_id'")"
+report="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s capacity:report -- --days 1 2>&1)"
+check "the capacity report shows the account's day: capacity reserved, and capacity billed" true \
+  "$(awk -v account="$tenant" '$2 == account && $3 != "0.000" && $5 != "0.000" { found = 1 } END { print found ? "true" : "false" }' <<<"$report")"
 
 echo "e2e: $passed checks passed"

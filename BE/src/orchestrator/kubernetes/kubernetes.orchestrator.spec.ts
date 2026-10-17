@@ -29,6 +29,7 @@ class FakeKubeApi implements KubeApi {
   applied: Array<{ path: string; manifest: any }> = [];
   deleted: string[] = [];
   deletedCollections: Array<{ path: string; selector: string }> = [];
+  listed: Array<{ path: string; selector: string }> = [];
   scaled: number[] = [];
   requests: Array<{ method: string; path: string; options?: RequestOptions }> = [];
   /** What request() answers next; an Error is thrown, as the client would. */
@@ -57,7 +58,8 @@ class FakeKubeApi implements KubeApi {
     // Pretend the rollout completes immediately.
     this.objects.set(`/apis/apps/v1/namespaces/${namespace}/deployments/${name}`, rolledOut(replicas));
   }
-  async list<T>(path: string): Promise<T[]> {
+  async list<T>(path: string, selector: string): Promise<T[]> {
+    this.listed.push({ path, selector });
     return (this.lists.get(path) as T[]) ?? [];
   }
   async podLog(): Promise<string> {
@@ -465,6 +467,38 @@ describe('KubernetesOrchestrator', () => {
         expect(initMsOf(error)).toBeGreaterThanOrEqual(50);
         expect(api.requests).toEqual([]);
       });
+    });
+  });
+
+  describe('readyInstancesByFunction: capacity samples (P-21)', () => {
+    const deployment = (namespace: string, labels: Record<string, string>, readyReplicas?: number) => ({
+      metadata: { name: 'fn-x', namespace, labels },
+      status: readyReplicas === undefined ? {} : { readyReplicas },
+    });
+    const ff = (functionId: string) => ({ 'app.kubernetes.io/managed-by': 'ff-controller', 'ff.dev/function-id': functionId });
+
+    it("lists FF's Deployments in every namespace in one call, and counts each function's ready instances", async () => {
+      api.lists.set('/apis/apps/v1/deployments', [
+        deployment('ff-t-aaaaaaaaaaaa', ff('f-two'), 2),
+        deployment('ff-t-bbbbbbbbbbbb', ff('f-one'), 1),
+        deployment('ff-t-aaaaaaaaaaaa', ff('f-starting'), 0), // its pod isn't ready yet
+        deployment('ff-t-aaaaaaaaaaaa', ff('f-zero')), // scaled to zero: no ready count at all
+      ]);
+
+      const ready = await orchestrator.readyInstancesByFunction();
+
+      expect(api.listed).toEqual([{ path: '/apis/apps/v1/deployments', selector: 'app.kubernetes.io/managed-by=ff-controller' }]);
+      expect(Object.fromEntries(ready)).toEqual({ 'f-two': 2, 'f-one': 1 });
+    });
+
+    it("leaves out a Deployment outside FF's tenant namespaces, or without a function ID, whatever its labels say", async () => {
+      api.lists.set('/apis/apps/v1/deployments', [
+        deployment('default', ff('f-copied'), 3),
+        deployment('ff-t-aaaaaaaaaaaa', { 'app.kubernetes.io/managed-by': 'ff-controller' }, 1),
+        deployment('ff-t-aaaaaaaaaaaa', ff('f-real'), 1),
+      ]);
+
+      expect(Object.fromEntries(await orchestrator.readyInstancesByFunction())).toEqual({ 'f-real': 1 });
     });
   });
 

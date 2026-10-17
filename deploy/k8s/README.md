@@ -30,7 +30,7 @@
 | `namespaces` | get, list, watch, create, patch, update, delete | One namespace per tenant (`ff-t-<hash>`) |
 | `configmaps` | … + `deletecollection` | Immutable code ConfigMaps; clean-up by label |
 | `services`, `resourcequotas`, `limitranges` | get, list, watch, create, patch, update, delete | Per-function Service; per-tenant guardrails |
-| `apps/deployments` (+ `deployments/scale`: get, patch, update) | get, list, watch, create, patch, update, delete | One Deployment per function; scaling, including to zero |
+| `apps/deployments` (+ `deployments/scale`: get, patch, update) | get, list, watch, create, patch, update, delete | One Deployment per function; scaling, including to zero; once a minute, one list across the tenant namespaces for the capacity samples (client-readiness plan, P-21) |
 | `networking.k8s.io/networkpolicies` | get, list, watch, create, patch, update, delete | Default-deny policy per tenant |
 | `pods` (+ `pods/log`: get) | get, list, watch | Readiness checks and failure diagnostics. `pods/log` goes once logs come from the log store (client-readiness plan, P-43) |
 | `services/proxy` | get, create | **Development only,** in `dev/`: invoking functions through the API server |

@@ -12,8 +12,8 @@ describe('UsageService (P-20)', () => {
 
   beforeEach(() => {
     jest.useRealTimers();
-    query = jest.fn(async (sql: string, [month]: [string]) =>
-      sql.includes('ff_ensure_usage_partition') ? [{ partition: `usage_records_${month.slice(0, 7).replace('-', '_')}` }] : [],
+    query = jest.fn(async (sql: string, [table, month]: [string, string]) =>
+      sql.includes('ff_ensure_month_partition') ? [{ partition: `${table}_${month.slice(0, 7).replace('-', '_')}` }] : [],
     );
     const dataSource = { query, transaction: jest.fn() } as unknown as DataSource;
     const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
@@ -29,46 +29,49 @@ describe('UsageService (P-20)', () => {
 
   // Both are January by the UTC calendar: the first is still December west of UTC, the second already February east of it.
   it.each(['2026-12-31T23:30:00-05:00', '2027-01-31T23:30:00Z'])(
-    'creates the partitions of this month and the next two, by the UTC calendar, wherever the backend runs (%s)',
+    'creates the partitions of this month and the next two, by the UTC calendar, wherever the backend runs, for usage and capacity (%s)',
     async (now) => {
       await expect(service.ensurePartitions(new Date(now))).resolves.toEqual([
         'usage_records_2027_01',
         'usage_records_2027_02',
         'usage_records_2027_03',
+        'capacity_samples_2027_01',
+        'capacity_samples_2027_02',
+        'capacity_samples_2027_03',
       ]);
-      expect(query.mock.calls.map(([, [month]]) => month)).toEqual(['2027-01-01', '2027-02-01', '2027-03-01']);
+      expect(query.mock.calls.map(([, [, month]]) => month)).toEqual(['2027-01-01', '2027-02-01', '2027-03-01', '2027-01-01', '2027-02-01', '2027-03-01']);
     },
   );
 
   it('has the partitions before it starts taking calls, and reaps lost calls in the background', async () => {
     let reaping = false;
-    query.mockImplementation(async (sql: string, [month]: [string]) => {
-      if (sql.includes('ff_ensure_usage_partition')) return [{ partition: month }];
+    query.mockImplementation(async (sql: string, [table]: [string]) => {
+      if (sql.includes('ff_ensure_month_partition')) return [{ partition: table }];
       reaping = true;
       return new Promise(() => undefined); // a reaper that takes its time doesn't hold up the start
     });
 
     await service.onModuleInit();
 
-    expect(query.mock.calls.slice(0, 3).every(([sql]) => String(sql).includes('ff_ensure_usage_partition'))).toBe(true);
+    expect(query.mock.calls.slice(0, 6).every(([sql]) => String(sql).includes('ff_ensure_month_partition'))).toBe(true);
     expect(reaping).toBe(true);
   });
 
   it("starts even when the partitions can't be created, and says so", async () => {
-    query.mockRejectedValue(new Error('function ff_ensure_usage_partition(date) does not exist'));
+    query.mockRejectedValue(new Error('function ff_ensure_month_partition(text, date) does not exist'));
 
     await expect(service.onModuleInit()).resolves.toBeUndefined();
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(logged).toHaveBeenCalledWith('Could not create usage partitions: function ff_ensure_usage_partition(date) does not exist');
-    expect(logged).toHaveBeenCalledWith('Could not reap lost invocations: function ff_ensure_usage_partition(date) does not exist');
+    expect(logged).toHaveBeenCalledWith('Could not create the monthly partitions: function ff_ensure_month_partition(text, date) does not exist');
+    expect(logged).toHaveBeenCalledWith('Could not reap lost invocations: function ff_ensure_month_partition(text, date) does not exist');
   });
 
   it('reaps every minute and creates partitions every day, until the module stops', async () => {
     jest.useFakeTimers({ now: new Date('2026-10-17T10:00:00Z') });
     await service.onModuleInit();
     const reaps = () => query.mock.calls.filter(([sql]) => String(sql).includes('RUNNING')).length;
-    const partitionRuns = () => query.mock.calls.filter(([sql]) => String(sql).includes('ff_ensure_usage_partition')).length / 3;
+    const partitionRuns = () => query.mock.calls.filter(([sql]) => String(sql).includes('ff_ensure_month_partition')).length / 6;
     expect([reaps(), partitionRuns()]).toEqual([1, 1]); // at startup
 
     await jest.advanceTimersByTimeAsync(3 * 60_000);

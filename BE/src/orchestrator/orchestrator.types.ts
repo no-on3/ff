@@ -72,4 +72,9 @@ export interface Orchestrator {
   readyInstances(fn: FunctionWorkload): Promise<number>;
   /** Instances asked for, ready or starting (0 when the function has none). */
   desiredInstances(fn: FunctionWorkload): Promise<number>;
+  /**
+   * Every function with at least one ready instance, by function ID, with how
+   * many: FF's capacity at this moment, from one call (P-21).
+   */
+  readyInstancesByFunction(): Promise<Map<string, number>>;
 }

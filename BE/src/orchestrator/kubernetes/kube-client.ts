@@ -74,6 +74,8 @@ export const paths = {
   namespace: (name: string) => `/api/v1/namespaces/${name}`,
   core: (ns: string, plural: string, name?: string) => `/api/v1/namespaces/${ns}/${plural}${name ? `/${name}` : ''}`,
   apps: (ns: string, plural: string, name?: string) => `/apis/apps/v1/namespaces/${ns}/${plural}${name ? `/${name}` : ''}`,
+  /** Every namespace's objects of one kind, for a single list call. */
+  allApps: (plural: string) => `/apis/apps/v1/${plural}`,
   networking: (ns: string, plural: string, name?: string) =>
     `/apis/networking.k8s.io/v1/namespaces/${ns}/${plural}${name ? `/${name}` : ''}`,
   serviceProxy: (ns: string, service: string, port: string, path: string) =>

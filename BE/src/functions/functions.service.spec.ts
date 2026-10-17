@@ -100,6 +100,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       scale: jest.fn(),
       readyInstances: jest.fn(),
       desiredInstances: jest.fn(),
+      readyInstancesByFunction: jest.fn(),
       applyTenantLimits: jest.fn(),
     };
 

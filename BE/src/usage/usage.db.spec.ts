@@ -359,14 +359,17 @@ run('usage records (L2, P-20)', () => {
     // A session 14 hours ahead of UTC creates March; the backend's job creates the months around it.
     await db.dataSource.transaction(async (manager) => {
       await manager.query(`SET LOCAL TIME ZONE 'Pacific/Kiritimati'`);
-      await manager.query(`SELECT ff_ensure_usage_partition('2031-03-01')`);
+      await manager.query(`SELECT ff_ensure_month_partition('usage_records', '2031-03-01')`);
     });
     await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toEqual([
       'usage_records_2031_02',
       'usage_records_2031_03',
       'usage_records_2031_04',
+      'capacity_samples_2031_02',
+      'capacity_samples_2031_03',
+      'capacity_samples_2031_04',
     ]);
-    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(3); // again: nothing to do
+    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(6); // again: nothing to do
 
     const fn = await newFunction();
     const at = async (startedAt: string, requestId: string) => {

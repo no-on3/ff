@@ -159,6 +159,20 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     expect((await orchestrator.invoke(fn, {})).output).toEqual({ version: 2, message: 'Hello world' });
   });
 
+  it("counts the function's ready instances in one cluster-wide list, at 1, 2 and 0 replicas (P-21)", async () => {
+    const counted = async () => (await orchestrator.readyInstancesByFunction()).get(fn.id);
+    expect(await counted()).toBe(1);
+
+    await orchestrator.scale(fn, 2);
+    await eventually(async () => (await counted()) === 2, 90_000);
+
+    await orchestrator.scale(fn, 0);
+    await eventually(async () => (await counted()) === undefined, 90_000); // no ready instance: left out
+
+    await orchestrator.scale(fn, 1); // as the next test expects
+    await eventually(async () => (await counted()) === 1, 90_000);
+  });
+
   it('scales to zero and cold-starts on the next invocation', async () => {
     await orchestrator.scale(fn, 0);
     await eventually(async () => (await orchestrator.readyInstances(fn)) === 0, 60_000);

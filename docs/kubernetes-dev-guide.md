@@ -39,7 +39,7 @@ kubectl get pods -A
 
 ```bash
 hack/k8s/cluster-up.sh             # create (or start) the cluster, apply deploy/k8s/dev, mint credentials
-hack/k8s/test-rbac.sh              # verify RBAC, the production manifests and the admission policy (31 checks)
+hack/k8s/test-rbac.sh              # verify RBAC, the production manifests and the admission policy (32 checks)
 hack/k8s/cluster-down.sh           # delete the cluster and the local credentials
 ```
 
@@ -114,6 +114,7 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 6. the same create, invoke, and delete for a Python function;
 7. plans and rate limits (P-15): an account on a small plan, its limits, its namespace's quota, and its rates;
 8. usage records (P-20): one per invocation, with the invocation's ID as the runtime's request ID, for a success, an error, a timeout and a cold start; then the backend is killed during a call, restarted, and marks the call `LOST`, unbilled, within about a minute.
+9. capacity samples (P-21): the warm function sampled each minute, and `npm run capacity:report` showing the account's day.
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
 
