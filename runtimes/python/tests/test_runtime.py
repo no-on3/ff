@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -78,6 +79,18 @@ class Runtime:
 
     def logs(self):
         return "".join(self._logs)
+
+    def log_lines(self, msg):
+        """The runtime's one-line JSON logs whose msg is `msg`."""
+        lines = [json.loads(line) for line in self.logs().splitlines() if line.startswith("{")]
+        return [line for line in lines if line.get("msg") == msg]
+
+    def exit_code(self, wait_s):
+        """The exit code once the process exits, or None if it still runs after wait_s seconds."""
+        try:
+            return self.process.wait(wait_s)
+        except subprocess.TimeoutExpired:
+            return None
 
     def stop(self):
         if self.process.poll() is None:
@@ -294,11 +307,16 @@ class Recycling(RuntimeTest):
         rt = self.start("oom", FUNCTION_MEMORY_LIMIT="64", FUNCTION_TIMEOUT="10000")
         rt.ready()
 
-        res = rt.invoke({})
+        res = rt.invoke({}, {"x-ff-request-id": "req-oom"})
         ready = rt.ready()
 
         self.assertFunctionError(res, 500, "Runtime.OutOfMemory")
         self.assertEqual(ready.status, 200)
+        # The replacement is logged, as the Node.js runtime does.
+        self.assertEqual(
+            [(line["errorType"], line["requestId"]) for line in rt.log_lines("function worker crashed; restarting")],
+            [("Runtime.OutOfMemory", "req-oom")],
+        )
 
     def test_budgets_the_function_memory_minus_what_the_runtime_uses(self):
         rt = self.start("allocate", FUNCTION_MEMORY_LIMIT="256", FUNCTION_TIMEOUT="10000")
@@ -352,12 +370,31 @@ class InitFailures(RuntimeTest):
                 try:
                     failed = rt.failed()
                     res = rt.invoke({})
+                    # A first load that fails is the code's fault: the runtime stays up and reports it.
+                    still_running = rt.exit_code(0.3) is None
                 finally:
                     rt.stop()
+                self.assertTrue(still_running)
                 self.assertEqual(failed.status, 503)
                 self.assertEqual(failed.json["error"]["errorType"], error_type)
                 self.assertRegex(failed.json["error"]["errorMessage"], message)
                 self.assertFunctionError(res, 500, error_type, message)
+
+    def test_exits_so_the_container_restarts_when_a_replacement_cannot_load_code_that_loaded_before(self):
+        marker_dir = tempfile.TemporaryDirectory(prefix="ff-rt-")
+        self.addCleanup(marker_dir.cleanup)
+        rt = self.start("reload-fails", FF_TEST_MARKER=os.path.join(marker_dir.name, "loaded"))
+        rt.ready()
+
+        crashed = rt.invoke({"crash": True})
+        code = rt.exit_code(5)
+
+        self.assertFunctionError(crashed, 500, "Runtime.ExitError", r"exit status 3")
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [line["errorMessage"] for line in rt.log_lines("function reload failed; exiting so the container restarts")],
+            ["Unable to import module 'function': reload fails"],
+        )
 
     def test_fails_initialization_that_never_finishes_with_sandbox_timedout(self):
         rt = self.start("init-hang", FF_INIT_TIMEOUT_MS="500")

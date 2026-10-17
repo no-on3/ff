@@ -419,7 +419,7 @@
 <section id="runtime">
   <div class="wrap">
     <h2>Inside the runtime</h2>
-    <p class="lead">Every function pod runs one of two images, <code>ff-runtime-nodejs:24-v1</code> or <code>ff-runtime-python:3.13-v1</code>, which speak the same protocol. Your code never runs in the main process: Node.js uses a worker thread with V8 heap limits, and Python a separate worker process with a memory budget. The main process therefore keeps answering probes, enforces the timeout, and replaces the worker after a timeout, an out-of-memory error, or a crash, without restarting the container.</p>
+    <p class="lead">Every function pod runs one of two images, <code>ff-runtime-nodejs:24-v2</code> or <code>ff-runtime-python:3.13-v2</code>, which speak the same protocol (version 2). Your code never runs in the main process: Node.js uses a worker thread with V8 heap limits, and Python a separate worker process with a memory budget. The main process therefore keeps answering probes, enforces the timeout, and replaces the worker after a timeout, an out-of-memory error, or a crash, without restarting the container. If that replacement can't load code that loaded before, the environment is broken, so the runtime exits and Kubernetes restarts the container. Your code runs in <code>/var/task</code>, as on Lambda.</p>
     <div class="grid2">
       <div class="card pad scrollx"><div id="runtimeDiagram"></div></div>
       <div class="card pad">
@@ -557,7 +557,7 @@ const mDeployment = (hash, replicas) => ({ apiVersion: 'apps/v1', kind: 'Deploym
     template: { metadata: { labels: FN_LABELS, annotations: { 'ff.dev/code-sha256': hash } },
       spec: { automountServiceAccountToken: false, enableServiceLinks: false, terminationGracePeriodSeconds: 10,
         securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: 'RuntimeDefault' } },
-        containers: [{ name: 'function', image: 'ff-runtime-nodejs:24-v1', imagePullPolicy: 'IfNotPresent', ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
+        containers: [{ name: 'function', image: 'ff-runtime-nodejs:24-v2', imagePullPolicy: 'IfNotPresent', ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
           env: [{ name: 'FUNCTION_NAME', value: 'hello' }, { name: 'FUNCTION_VERSION', value: '$LATEST' }, { name: 'FUNCTION_MEMORY_LIMIT', value: '128' }, { name: 'FUNCTION_TIMEOUT', value: '5000' }, { name: 'LAMBDA_TASK_ROOT', value: '/var/task' }, { name: 'FF_HANDLER', value: 'function.handler' }, { name: 'PORT', value: '8080' }, { name: 'TZ', value: 'UTC' }],
           resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '100m', memory: '128Mi' } },
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } },
@@ -575,7 +575,7 @@ const INVOKE_REQ = (id, input) => ({ kind: 'http', first: 'POST /functions/' + i
 const SHUTDOWN_LOG = (time, inFlight) => JSON.stringify({ time, level: 'info', msg: 'shutting down; draining invocations', signal: 'SIGTERM', inFlight, queued: 0 });
 const SYNTAX_ERROR = "SyntaxError: function.ts:2:11 Property assignment expected.; function.ts:4:1 '}' expected.";
 const BAD_LOG = [
-  JSON.stringify({ time: '2026-10-16T14:10:03.881Z', level: 'info', msg: 'runtime listening', port: 8080, timeoutMs: 5000, memoryLimitMb: 128, heapLimitMb: 65, handler: 'function.handler', protocol: 1 }),
+  JSON.stringify({ time: '2026-10-16T14:10:03.881Z', level: 'info', msg: 'runtime listening', port: 8080, timeoutMs: 5000, memoryLimitMb: 128, heapLimitMb: 65, handler: 'function.handler', protocol: 2 }),
   JSON.stringify({ time: '2026-10-16T14:10:09.127Z', level: 'error', msg: 'function initialization failed', errorType: 'Runtime.UserCodeSyntaxError', errorMessage: SYNTAX_ERROR }),
 ];
 const NOT_READY = 'Function "broken" did not become ready within 90 s: last log lines: ' + BAD_LOG.join(' | ');
@@ -668,7 +668,7 @@ const SCENARIOS = [
       { from: 'node', to: 'pod', kind: 'req', label: 'the runtime starts', title: 'The runtime starts',
         text: 'The container runs the runtime\'s main process as uid 10001 on a read-only root filesystem. Its HTTP server listens on :8080: /healthz answers 200 at once, and /readyz answers 503 "starting" until your code is loaded.',
         code: 'runtimes/nodejs/src/main.ts',
-        msg: { kind: 'log', lines: [JSON.stringify({ time: '2026-10-16T14:00:03.512Z', level: 'info', msg: 'runtime listening', port: 8080, timeoutMs: 5000, memoryLimitMb: 128, heapLimitMb: 65, handler: 'function.handler', protocol: 1 })] },
+        msg: { kind: 'log', lines: [JSON.stringify({ time: '2026-10-16T14:00:03.512Z', level: 'info', msg: 'runtime listening', port: 8080, timeoutMs: 5000, memoryLimitMb: 128, heapLimitMb: 65, handler: 'function.handler', protocol: 2 })] },
         set: { [K + '.Pod']: 'Running · not ready', 'Runtime.main process': 'listening on :8080 · /readyz 503 starting', 'Runtime.worker': 'starting' } },
       { from: 'pod', to: 'worker', kind: 'req', label: 'start the worker · load function.ts', title: 'Your code is loaded, once',
         text: 'The main process starts the worker: a worker thread with V8 heap limits in Node.js (65 MB of heap at 128 MB), a separate process with a memory budget in Python. The worker reads /var/task/function.ts, transpiles the TypeScript (a syntax error fails here), and imports it. Module-level code runs now, once per worker, not on every invocation.',
@@ -1018,7 +1018,7 @@ const SCENARIOS = [
         set: { [K + '.Pod']: 'Running · not ready', 'Runtime.main process': 'listening on :8080 · /readyz 503 starting', 'Runtime.worker': 'starting' } },
       { from: 'pod', to: 'worker', kind: 'req', label: 'load function.ts', title: 'The worker tries to load the code', text: 'TypeScript reports the syntax errors, and the loader refuses to run code that has any.', code: 'runtimes/nodejs/src/ts-hook.ts registerTypeScript()' },
       { from: 'worker', to: 'pod', kind: 'err', label: 'init error: UserCodeSyntaxError', title: 'Loading fails',
-        text: 'The main process records the failure for good. From now on /readyz answers 503 "failed" while /healthz stays 200, so kubelet doesn\'t restart the container in a loop.', code: 'runtimes/nodejs/src/worker.ts loadHandler() · main.ts fail()',
+        text: 'The main process records the failure for good. From now on /readyz answers 503 "failed" while /healthz stays 200, so kubelet doesn\'t restart the container in a loop. That is for a first load: if the code had loaded before, the environment is broken, and the runtime exits so that the container restarts.', code: 'runtimes/nodejs/src/worker.ts loadHandler() · main.ts fail()',
         msg: [{ kind: 'ipc', title: 'message from the worker', body: { type: 'init_error', errorType: 'Runtime.UserCodeSyntaxError', errorMessage: SYNTAX_ERROR } }, { kind: 'log', lines: [BAD_LOG[1]] }],
         set: { 'Runtime.main process': 'listening on :8080 · /readyz 503 failed', 'Runtime.worker': 'failed: UserCodeSyntaxError' } },
       { from: 'node', to: 'pod', kind: 'err', label: 'readiness probe → 503', title: 'The pod never becomes Ready', text: 'It gets no traffic, so nothing can invoke it.', code: 'kubelet readiness probe',
@@ -1061,7 +1061,7 @@ const TRACE = [
   ['2. What the backend forwards', 'kubernetes.orchestrator.ts post()', { name: 'Tunis' }],
   ['3. What the runtime receives', 'POST /invoke, through the API server\'s proxy', 'POST /invoke HTTP/1.1\ncontent-type: application/json\n…\n\n{"name":"Tunis"}'],
   ['4. The event your handler gets', 'runtime main → worker (headers abridged)', { body: { name: 'Tunis' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }],
-  ['5. The context', 'worker.ts (Python: worker.py)', 'functionName: "hello"\nfunctionVersion: "$LATEST"\nmemoryLimitInMB: "128"\nawsRequestId: "' + REQ + '"\ngetRemainingTimeInMillis() → 4998\ncallbackWaitsForEmptyEventLoop: true'],
+  ['5. The context', 'worker.ts (Python: worker.py)', 'functionName: "hello"\nfunctionVersion: "$LATEST"\nmemoryLimitInMB: "128"\nawsRequestId: "' + REQ + '"\ngetRemainingTimeInMillis() → 4998'],
   ['6. What your handler returns', 'your function.ts', { message: 'Hello Tunis', requestId: REQ }],
   ['7. What the runtime answers', 'main.ts', 'HTTP/1.1 200 OK\ncontent-type: application/json\nx-ff-request-id: ' + REQ + '\nx-ff-duration-ms: 1.09\nx-ff-max-memory-used-mb: 98\n\n{"message":"Hello Tunis","requestId":"…"}'],
   ['8. What the backend makes of it', 'kubernetes.orchestrator.ts toResult()', { output: { message: 'Hello Tunis', requestId: '…' }, durationMs: 1.09, memoryUsedMb: 98 }],
@@ -1075,7 +1075,8 @@ const ERROR_ROWS = [
   ['504', ['Sandbox.Timedout'], 'Past the timeout; the worker is replaced'],
   ['500', ['Runtime.OutOfMemory'], 'Over the memory budget; the worker is replaced'],
   ['500', ['Runtime.ExitError'], 'The code exited or crashed the worker; it is replaced'],
-  ['500', ['Runtime.UserCodeSyntaxError', 'Runtime.ImportModuleError', 'Runtime.HandlerNotFound', 'Runtime.MalformedHandlerName'], 'The code can\'t load; /readyz stays 503'],
+  ['500', ['Runtime.UserCodeSyntaxError', 'Runtime.ImportModuleError', 'Runtime.HandlerNotFound', 'Runtime.MalformedHandlerName', 'Runtime.CallbackHandlerDeprecated'], 'The code can\'t load; /readyz stays 503'],
+  ['500', ['Runtime.MarshalError'], 'The result has no JSON form: a set, NaN, a function, a BigInt, a cycle'],
   ['500', ['Function.ResponseSizeTooLarge'], 'The result is over 6 MB'],
   ['413', ['RequestEntityTooLargeException'], 'The request body is over 6 MB'],
   ['400', ['InvalidRequestContentException'], 'The request body isn\'t JSON'],

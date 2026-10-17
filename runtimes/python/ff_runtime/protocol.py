@@ -1,5 +1,5 @@
 """Shared by main.py and worker.py: settings, limits, logging, and the messages
-between the two processes. Runtime protocol v1.
+between the two processes. Runtime protocol v2.
 
 Messages are JSON arrays sent over a socket pair, each prefixed by its length
 as a 4-byte big-endian integer:

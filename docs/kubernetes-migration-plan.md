@@ -144,7 +144,7 @@ and calls functions directly at http://fn-<id>.<ns>.svc:8080 (K8S_INVOKE_MODE=di
 | `K8S_CA_FILE` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | API server CA |
 | `K8S_INVOKE_MODE` | `direct` in-cluster, `proxy` outside | How function pods are reached |
 | `K8S_NAMESPACE_PREFIX` | `ff-t-` | Tenant namespace prefix (must match the admission policy) |
-| `K8S_RUNTIME_IMAGE_NODEJS` / `_PYTHON` | `ff-runtime-nodejs:24-v1` / `ff-runtime-python:3.13-v1` | Runtime images |
+| `K8S_RUNTIME_IMAGE_NODEJS` / `_PYTHON` | `ff-runtime-nodejs:24-v1` / `ff-runtime-python:3.13-v1` | Runtime images. `24-v2` and `3.13-v2` since 2026-10-17 ([client-readiness plan](client-readiness-plan.md), P-04) |
 | `K8S_IMAGE_PULL_POLICY` | `IfNotPresent` | |
 | `K8S_RUNTIME_CLASS` | *(empty)* | For example `gvisor` |
 | `FF_READY_TIMEOUT_SECONDS` | `90` | How long create and update wait for the new version to become ready |

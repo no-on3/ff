@@ -13,10 +13,10 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
   - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy;
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
   - code is stored in immutable ConfigMaps, up to 900 KiB. The API currently accepts requests of about 100 KB at most, which is task C-03 of the [CLI plan](docs/cli-plan.md).
-- **Runtimes** `ff-runtime-nodejs:24-v1` and `ff-runtime-python:3.13-v1` ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
-  - Lambda's `handler(event, context)`, error names, and log lines;
+- **Runtimes** `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2`, runtime protocol 2 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
+  - Lambda's `handler(event, context)`, error names, and log lines, with the code's directory as the working directory and the peak memory as `Max Memory Used`;
   - real timeouts;
-  - out-of-memory and crashes are handled per invocation, without restarting the container;
+  - out-of-memory and crashes are handled per invocation, without restarting the container; a replacement that can't load the code again restarts it;
   - non-root, read-only images that install nothing at start.
 - **Optional gVisor sandbox** for untrusted code: `K8S_RUNTIME_CLASS=gvisor`. See the [dev guide](docs/kubernetes-dev-guide.md#sandboxing-with-gvisor).
 - **Dashboard:** a React + Vite frontend in `FE/`.
@@ -51,8 +51,8 @@ You need Docker 24+, Node.js 24, Python 3.11+ (for the Python runtime tests), `c
 ```bash
 docker compose up -d --wait                 # PostgreSQL (127.0.0.1:5432) + SeaweedFS S3 (127.0.0.1:9003)
 hack/k8s/cluster-up.sh                      # k3d cluster (k3s v1.37.1), RBAC, admission policy, credentials
-runtimes/nodejs/test/container-smoke.sh     # builds ff-runtime-nodejs:24-v1 and checks it
-runtimes/python/tests/container-smoke.sh    # builds ff-runtime-python:3.13-v1 and checks it
+runtimes/nodejs/test/container-smoke.sh     # builds ff-runtime-nodejs:24-v2 and checks it
+runtimes/python/tests/container-smoke.sh    # builds ff-runtime-python:3.13-v2 and checks it
 hack/k8s/load-images.sh                     # imports the runtime images into the cluster
 cp BE/.env.example BE/.env                  # first time only; the defaults match the steps above
 cd BE && npm install && npm run migration:run   # the database schema comes from migrations

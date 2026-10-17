@@ -21,5 +21,7 @@ export async function handler(event: Event, context: Context) {
     memoryLimitInMB: context.memoryLimitInMB,
     requestId: context.awsRequestId,
     remainingMs: context.getRemainingTimeInMillis(),
+    // Removed with callback handlers, as in Lambda's Node.js 24 runtime.
+    hasCallbackWaitsForEmptyEventLoop: 'callbackWaitsForEmptyEventLoop' in context,
   };
 }

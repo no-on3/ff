@@ -6,7 +6,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-image="${IMAGE:-ff-runtime-python:3.13-v1}"
+image="${IMAGE:-ff-runtime-python:3.13-v2}"
 prefix="ff-runtime-smoke-$$"
 
 "$repo/hack/check-resources.sh"
@@ -50,6 +50,7 @@ check "root filesystem is read-only" denied \
 check "/tmp is writable" ok "$(docker exec "$prefix-hello" sh -c 'touch /tmp/probe && echo ok')"
 check "user output reaches the container log" 1 "$(docker logs "$prefix-hello" 2>&1 | grep -c 'hello from user code' || true)"
 check "no install at start (no pip activity in logs)" 0 "$(docker logs "$prefix-hello" 2>&1 | grep -ci 'pip' || true)"
+check "speaks runtime protocol 2" 1 "$(docker logs "$prefix-hello" 2>&1 | grep -c '"protocol": 2' || true)"
 
 # Inside the container's 256 MB limit, a function that hoards memory gets
 # Runtime.OutOfMemory from the runtime's own limit, and the container survives.

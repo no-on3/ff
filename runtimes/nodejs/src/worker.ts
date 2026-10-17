@@ -1,7 +1,8 @@
 /**
  * Worker thread that hosts user code. Loaded once per environment; receives
  * one invocation at a time from main.ts. If it hangs, runs out of memory, or
- * exits, main.ts terminates it and starts a fresh one.
+ * exits, main.ts terminates it and starts a fresh one. It runs in the task
+ * root: main.ts changes directory before starting it, since worker threads can't.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -27,6 +28,9 @@ class InitError extends Error {
 function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
+
+// Stack traces point at the lines of the user's TypeScript, not at its transpiled output.
+process.setSourceMapsEnabled(true);
 
 function loadHandler(): Handler {
   const separator = config.handler.lastIndexOf('.');
@@ -59,7 +63,33 @@ function loadHandler(): Handler {
   if (typeof handler !== 'function') {
     throw new InitError('Runtime.HandlerNotFound', `${file}.${exportName} is undefined or not exported`);
   }
+  // As on AWS Lambda's Node.js 24 runtime, which refuses them with this error type.
+  // AWS doesn't document whether an async handler with a third parameter is spared:
+  // FF refuses any handler that declares one, at load, so the deploy fails with this message.
+  if (handler.length >= 3) {
+    throw new InitError(
+      'Runtime.CallbackHandlerDeprecated',
+      `${file}.${exportName} declares a third parameter, a callback. Callback-based handlers are not ` +
+        'supported from Node.js 24 on, as on AWS Lambda: use an async handler that returns its ' +
+        'result or throws, async (event, context) => result.',
+    );
+  }
   return handler as Handler;
+}
+
+/** The frames of an error's stack that are user code: neither the runtime's own nor Node's internals. */
+function userFrames(error: Error): string[] {
+  return (error.stack ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('at ') && !line.includes(__dirname) && !line.includes('node:internal'));
+}
+
+/** The JSON text of a handler's result. Throws for what JSON can't hold: a function, a symbol, a BigInt, a cycle. */
+function marshal(value: unknown): string {
+  const body = JSON.stringify(value === undefined ? null : value);
+  if (typeof body !== 'string') throw new TypeError(`a ${typeof value} has no JSON representation`);
+  return body;
 }
 
 let handler: Handler | undefined;
@@ -80,14 +110,24 @@ port.on('message', async (message: InvokeMessage) => {
     memoryLimitInMB: String(config.memoryLimitMb),
     awsRequestId: message.requestId,
     getRemainingTimeInMillis: () => Math.max(0, message.deadlineMs - Date.now()),
-    callbackWaitsForEmptyEventLoop: true,
+    // No callbackWaitsForEmptyEventLoop: it went with callback handlers, as on Lambda's Node.js 24.
   };
+  let value: unknown;
   try {
-    const value = await handler(message.event, context);
-    send({ type: 'result', id: message.id, ok: true, body: JSON.stringify(value === undefined ? null : value) });
+    value = await handler(message.event, context);
   } catch (err) {
     const error = toError(err);
     const failure: FunctionError = { errorType: error.name || 'Error', errorMessage: error.message };
-    send({ type: 'result', id: message.id, ok: false, ...failure });
+    send({ type: 'result', id: message.id, ok: false, ...failure, stackTrace: userFrames(error) });
+    return;
   }
+  let body: string;
+  try {
+    body = marshal(value);
+  } catch (err) {
+    const errorMessage = `Unable to marshal response: ${toError(err).message}`;
+    send({ type: 'result', id: message.id, ok: false, errorType: 'Runtime.MarshalError', errorMessage });
+    return;
+  }
+  send({ type: 'result', id: message.id, ok: true, body });
 });

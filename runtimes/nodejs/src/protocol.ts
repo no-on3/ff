@@ -1,6 +1,6 @@
 /**
  * Messages between the HTTP main thread (main.ts) and the worker thread that
- * hosts user code (worker.ts). Runtime protocol v1.
+ * hosts user code (worker.ts). Runtime protocol v2.
  */
 
 /** The event passed to handlers. Unchanged from the original FF wrapper. */
@@ -40,4 +40,8 @@ export type WorkerMessage =
   | ({ type: 'init_error' } & FunctionError)
   /** `body` is the JSON text of the handler's return value. */
   | { type: 'result'; id: number; ok: true; body: string }
-  | ({ type: 'result'; id: number; ok: false } & FunctionError);
+  /**
+   * `stackTrace` is set when the handler threw (its frames in user code, possibly
+   * none), and absent for the runtime's own errors, such as Runtime.MarshalError.
+   */
+  | ({ type: 'result'; id: number; ok: false; stackTrace?: string[] } & FunctionError);

@@ -58,7 +58,7 @@ describe('configuration', () => {
         caFile: '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt',
         invokeMode: '',
         namespacePrefix: 'ff-t-',
-        runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v1', python: 'ff-runtime-python:3.13-v1' },
+        runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v2', python: 'ff-runtime-python:3.13-v2' },
         imagePullPolicy: 'IfNotPresent',
         runtimeClass: '',
         readyTimeoutSeconds: 90,

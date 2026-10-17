@@ -308,7 +308,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 #### C-06: Local runs (`ff local invoke`, `ff local start`)
 - **Docker:** checks `docker version` and says clearly when Docker is missing.
 - **Image:**
-  - from `FF_RUNTIME_IMAGE_NODEJS` / `_PYTHON`, else `ff-runtime-nodejs:24-v1` and `ff-runtime-python:3.13-v1`;
+  - from `FF_RUNTIME_IMAGE_NODEJS` / `_PYTHON`, else `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2`;
   - built locally in this repository; published images come in C-42.
 - **The container gets production's hardening and settings** (§5):
   - memory from `--memory`, default 128 MB;

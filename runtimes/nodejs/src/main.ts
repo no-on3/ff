@@ -1,5 +1,5 @@
 /**
- * FF Node.js runtime, protocol v1. The main thread serves HTTP and supervises
+ * FF Node.js runtime, protocol v2. The main thread serves HTTP and supervises
  * one worker thread that runs user code (worker.ts):
  *
  *   GET  /healthz   liveness: the main thread is responsive
@@ -8,7 +8,8 @@
  *
  * A timeout, out-of-memory, or crash terminates the worker and starts a fresh
  * one, so even CPU-bound infinite loops are stopped and probes keep answering.
- * Environment variables are never logged.
+ * If that fresh worker can't load code that loaded before, the process exits,
+ * so that Kubernetes restarts the container. Environment variables are never logged.
  */
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -71,6 +72,14 @@ const workerConfig: WorkerConfig = {
   memoryLimitMb,
 };
 
+// As on AWS Lambda, the function runs in its task root, so relative paths find the
+// files next to its code. Worker threads can't change directory, and share this one.
+try {
+  process.chdir(workerConfig.taskRoot);
+} catch {
+  // A missing task root is reported when the worker loads the code.
+}
+
 interface Invocation {
   id: number;
   requestId: string;
@@ -85,6 +94,8 @@ let worker: Worker | undefined;
 /** Incremented whenever a worker is replaced; events from older workers are ignored. */
 let generation = 0;
 let state: 'starting' | 'ready' | 'failed' = 'starting';
+/** The code has loaded at least once: a later load failure is a broken environment, not broken code. */
+let everReady = false;
 let initError: FunctionError | undefined;
 let initTimer: NodeJS.Timeout | undefined;
 let current: Invocation | undefined;
@@ -96,8 +107,9 @@ function log(fields: Record<string, unknown>): void {
   console.log(JSON.stringify({ time: new Date().toISOString(), ...fields }));
 }
 
+/** The runtime's peak resident memory since it started, all threads together, as Lambda's "Max Memory Used". */
 function maxMemoryUsedMb(): number {
-  return Math.round(process.memoryUsage().rss / (1024 * 1024));
+  return Math.max(1, Math.round(process.resourceUsage().maxRSS / 1024)); // maxRSS is in KiB
 }
 
 function send(res: http.ServerResponse, status: number, body: string, headers: Record<string, string> = {}): void {
@@ -153,7 +165,12 @@ function replaceWorker(): void {
   if (!shuttingDown) startWorker();
 }
 
-/** User code cannot be loaded: report it on /readyz and to every caller. */
+/**
+ * User code cannot be loaded: report it on /readyz and to every caller. If it
+ * loaded before, the code is fine and this environment is not (a reload that
+ * timed out at 0.1 CPU, for example). /readyz would stay 503 while /healthz
+ * stays 200, so kubelet would never restart the container: exit instead.
+ */
 function fail(error: FunctionError): void {
   clearTimeout(initTimer);
   state = 'failed';
@@ -166,21 +183,41 @@ function fail(error: FunctionError): void {
     if (inv.timer) clearTimeout(inv.timer);
     respondError(inv, 500, error);
   }
+  if (everReady) {
+    log({ level: 'error', msg: 'function reload failed; exiting so the container restarts', ...error });
+    server.close();
+    setTimeout(() => process.exit(1), 200); // let the answers above reach their callers
+  }
 }
 
 function onMessage(message: WorkerMessage): void {
   if (message.type === 'ready') {
     clearTimeout(initTimer);
     state = 'ready';
+    everReady = true;
     log({ level: 'info', msg: 'function initialized', handler: workerConfig.handler });
     dispatch();
   } else if (message.type === 'init_error') {
     fail({ errorType: message.errorType, errorMessage: message.errorMessage });
   } else if (current && current.id === message.id) {
     const inv = current;
+    if (!message.ok && message.stackTrace) {
+      // The handler threw: the same line as the Python runtime writes, before END.
+      log({
+        level: 'error',
+        msg: 'function error',
+        requestId: inv.requestId,
+        errorType: message.errorType,
+        errorMessage: message.errorMessage,
+        stackTrace: message.stackTrace,
+      });
+    }
     finish(inv);
     if (!message.ok) {
       respondError(inv, 500, { errorType: message.errorType, errorMessage: message.errorMessage });
+    } else if (typeof message.body !== 'string') {
+      // The worker never sends anything else; this keeps a bad message from crashing this thread.
+      respondError(inv, 500, { errorType: 'Runtime.MarshalError', errorMessage: 'Unable to marshal response' });
     } else if (Buffer.byteLength(message.body) > MAX_PAYLOAD_BYTES) {
       respondError(inv, 500, {
         errorType: 'Function.ResponseSizeTooLarge',
@@ -353,6 +390,6 @@ server.listen(port, () => {
     memoryLimitMb,
     heapLimitMb: heapLimits.maxOldGenerationSizeMb + heapLimits.maxYoungGenerationSizeMb,
     handler: workerConfig.handler,
-    protocol: 1,
+    protocol: 2,
   });
 });

@@ -78,11 +78,11 @@ echo "  postgres on 127.0.0.1:$FF_PG_PORT, s3 on 127.0.0.1:$FF_S3_PORT"
 echo "== cluster"
 k3d cluster get "$FF_CLUSTER_NAME" >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/cluster-up.sh" >/dev/null
 "$FF_REPO_ROOT/hack/k8s/mint-token.sh" >/dev/null
-docker image inspect ff-runtime-nodejs:24-v1 >/dev/null 2>&1 ||
-  docker build -q -t ff-runtime-nodejs:24-v1 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
-docker image inspect ff-runtime-python:3.13-v1 >/dev/null 2>&1 ||
-  docker build -q -t ff-runtime-python:3.13-v1 "$FF_REPO_ROOT/runtimes/python" >/dev/null
-"$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v1 ff-runtime-python:3.13-v1 >/dev/null 2>&1
+docker image inspect ff-runtime-nodejs:24-v2 >/dev/null 2>&1 ||
+  docker build -q -t ff-runtime-nodejs:24-v2 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
+docker image inspect ff-runtime-python:3.13-v2 >/dev/null 2>&1 ||
+  docker build -q -t ff-runtime-python:3.13-v2 "$FF_REPO_ROOT/runtimes/python" >/dev/null
+"$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v2 ff-runtime-python:3.13-v2 >/dev/null 2>&1
 echo "  $FF_CLUSTER_NAME ready, runtime images imported"
 
 echo "== backend"

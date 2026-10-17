@@ -1,4 +1,4 @@
-"""FF Python runtime, protocol v1 (the same contract as runtimes/nodejs).
+"""FF Python runtime, protocol v2 (the same contract as runtimes/nodejs).
 
 The main process serves HTTP and supervises one worker process that runs user
 code (worker.py):
@@ -8,8 +8,9 @@ code (worker.py):
   POST /invoke    run the handler once; invocations are serialized, as on Lambda
 
 A timeout, out-of-memory, or crash kills the worker and starts a fresh one, so
-even CPU-bound infinite loops are stopped and probes keep answering.
-Environment variables are never logged.
+even CPU-bound infinite loops are stopped and probes keep answering. If that
+fresh worker can't load code that loaded before, the process exits, so that
+Kubernetes restarts the container. Environment variables are never logged.
 """
 import _thread
 import json
@@ -76,6 +77,8 @@ class Supervisor:
         self.exec_lock = threading.Lock()  # held while an invocation runs
         self.state = "starting"  # starting | ready | failed
         self.init_error = None
+        # The code has loaded at least once: a later load failure is a broken environment, not broken code.
+        self.ever_ready = False
         self.pending = 0  # admitted invocations whose response is not written yet
         self.process = None
         self.sock = None
@@ -123,6 +126,7 @@ class Supervisor:
         if message[0] == "ready":
             with self.lock:
                 self.state = "ready"
+                self.ever_ready = True
                 self.lock.notify_all()
             log(level="info", msg="function initialized", handler=HANDLER)
             return
@@ -133,6 +137,28 @@ class Supervisor:
             self._fail("Sandbox.Timedout", f"Init phase timed out after {INIT_TIMEOUT_MS / 1000:.2f} seconds")
         else:  # exited while loading user code
             self._fail(*crash_error(code))
+        with self.lock:
+            reload_failed = self.ever_ready
+        if reload_failed:
+            self._exit_after_failed_reload()
+
+    def _exit_after_failed_reload(self):
+        """The code loaded before, so this environment is broken (a reload that timed
+        out at 0.1 CPU, for example). /readyz would stay 503 while /healthz stays 200,
+        and kubelet would never restart the container: exit instead, once the
+        invocations waiting for this worker have had their answer."""
+        with self.lock:
+            error = dict(self.init_error)
+        log(level="error", msg="function reload failed; exiting so the container restarts", **error)
+
+        def exit_soon():
+            time.sleep(0.2)
+            os._exit(1)
+
+        try:
+            start_thread(exit_soon)
+        except (RuntimeError, MemoryError):
+            os._exit(1)
 
     def _fail(self, error_type, message):
         """User code cannot be loaded: report it on /readyz and to every caller."""
@@ -199,6 +225,9 @@ class Supervisor:
         if message[0] == "error":
             status, error_type, error_message = 500, message[1], message[2]
             replace = error_type == "Runtime.OutOfMemory"  # the worker exits after reporting it
+            if replace:  # the same line as the Node.js runtime writes
+                log(level="error", msg="function worker crashed; restarting", errorType=error_type,
+                    errorMessage=error_message, requestId=request_id)
         elif message[0] == "timeout":
             status, error_type = 504, "Sandbox.Timedout"
             error_message = f"Task timed out after {TIMEOUT_MS / 1000:.2f} seconds"
@@ -237,7 +266,7 @@ def reject_constant(name):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ff-runtime-python/1"
+    server_version = "ff-runtime-python/2"
     protocol_version = "HTTP/1.1"
     timeout = 60  # seconds a connection may sit idle or stall mid-request
 
@@ -417,7 +446,7 @@ def main():
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     log(level="info", msg="runtime listening", port=protocol.PORT, timeoutMs=TIMEOUT_MS, memoryLimitMb=MEMORY_MB,
-        handler=HANDLER, protocol=1)
+        handler=HANDLER, protocol=2)
     server.serve_forever()
     SUPERVISOR.drain(TIMEOUT_MS / 1000 + 1)
     with SUPERVISOR.lock:

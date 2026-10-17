@@ -121,7 +121,7 @@ describe('Kubernetes manifests', () => {
     });
 
     it('picks the image for the runtime and rejects unconfigured runtimes', () => {
-      expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v1');
+      expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v2');
       expect(() => build({ runtime: 'cobol' })).toThrow('No runtime image configured for runtime "cobol"');
     });
   });

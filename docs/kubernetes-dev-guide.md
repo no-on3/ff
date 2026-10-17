@@ -53,11 +53,11 @@ It is safe to re-run.
 
 ## Runtime images and integration tests
 
-Function pods use the FF runtime images `ff-runtime-nodejs:24-v1` and `ff-runtime-python:3.13-v1` (protocol and handler contracts in [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md)). In development they are built locally and imported into the cluster, so no registry is needed:
+Function pods use the FF runtime images `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2` (protocol and handler contracts in [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md)). In development they are built locally and imported into the cluster, so no registry is needed:
 
 ```bash
-runtimes/nodejs/test/container-smoke.sh    # builds ff-runtime-nodejs:24-v1 and checks it hardened
-runtimes/python/tests/container-smoke.sh   # builds ff-runtime-python:3.13-v1 and checks it hardened
+runtimes/nodejs/test/container-smoke.sh    # builds ff-runtime-nodejs:24-v2 and checks it hardened
+runtimes/python/tests/container-smoke.sh   # builds ff-runtime-python:3.13-v2 and checks it hardened
 hack/k8s/load-images.sh                    # imports every local ff-runtime-* image into ff-dev
 hack/k8s/test-it.sh                        # L3: re-imports the images, then runs BE `npm run test:it` (~5 min)
 hack/k8s/test-it.sh functions.lifecycle    # only the suites whose path matches
@@ -70,6 +70,7 @@ hack/k8s/test-it.sh functions.lifecycle    # only the suites whose path matches
 - the tenant network policy (DNS allowed, the API server blocked);
 - init-failure diagnostics, and a missing RuntimeClass explained;
 - a Python function (deploy, invoke, and Lambda error names);
+- a Node.js function in `/var/task` that reads a file next to its code through a relative path;
 - a Python and a Node.js memory hog: each gets `Runtime.OutOfMemory`, the next invocation works, and the container is never restarted;
 - functions of both runtimes inside gVisor, with the network policy still enforced (only where the `gvisor` RuntimeClass exists; see [Sandboxing with gVisor](#sandboxing-with-gvisor));
 - the function lifecycle, through `FunctionsService` (`functions.lifecycle.it.spec.ts`): a broken create is released and then repaired by an update; a broken update of a working function is rolled back, so the next cold start runs the old code; an update of a function scaled to zero is checked on a real pod;

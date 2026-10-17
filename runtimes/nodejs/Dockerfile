@@ -1,5 +1,5 @@
-# FF function runtime for Node.js (runtime protocol v1).
-# Build:  docker build -t ff-runtime-nodejs:24-v1 runtimes/nodejs
+# FF function runtime for Node.js (runtime protocol v2).
+# Build:  docker build -t ff-runtime-nodejs:24-v2 runtimes/nodejs
 # The final image holds only the compiled runtime and TypeScript (used to
 # transpile user .ts files). Nothing is installed when a function starts.
 FROM node:24-alpine AS build
@@ -12,7 +12,7 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:24-alpine
 LABEL org.opencontainers.image.title="ff-runtime-nodejs" \
-      org.opencontainers.image.description="FF function runtime for Node.js, protocol v1"
+      org.opencontainers.image.description="FF function runtime for Node.js, protocol v2"
 WORKDIR /opt/ff
 COPY --from=build /opt/ff/package.json ./
 COPY --from=build /opt/ff/node_modules ./node_modules

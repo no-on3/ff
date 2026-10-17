@@ -53,6 +53,13 @@ export async function handler(event: { body: { hog?: boolean } }) {
   return 'ok';
 }`;
 
+// Reads a file next to its code through a relative path: Lambda runs functions in their task root.
+const readsItsOwnCode = `
+import * as fs from 'node:fs';
+export async function handler() {
+  return { cwd: process.cwd(), readsItself: fs.readFileSync('function.ts', 'utf8').includes('readsItself') };
+}`;
+
 // gVisor reports its own kernel version ("4.19.0-gvisor"), not the node's.
 const kernelProbe: Record<Runtime, string> = {
   [Runtime.NODEJS]: `import * as os from 'node:os';
@@ -206,8 +213,22 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     }
   });
 
+  it('runs a Node.js function in /var/task, where a relative path finds the files next to its code', async () => {
+    const reader = workload({ id: randomUUID(), userId: tenant, name: 'it-cwd', code: readsItsOwnCode, memory: 128, timeout: 5 });
+    try {
+      await orchestrator.deploy(reader);
+      await orchestrator.waitUntilReady(reader, 90_000);
+
+      expect((await orchestrator.invoke(reader, {})).output).toEqual({ cwd: '/var/task', readsItself: true });
+    } finally {
+      await orchestrator.remove(reader);
+    }
+  });
+
   it('turns a Node.js heap hog into Runtime.OutOfMemory without restarting the container', async () => {
-    const hog = workload({ id: randomUUID(), userId: tenant, name: 'it-node-hog', code: nodeHog, memory: 128, timeout: 10 });
+    // 30 s, not 10: at 0.1 CPU, V8's last collections near the heap limit once took
+    // longer than 10 s, and the invocation timed out first (P-04).
+    const hog = workload({ id: randomUUID(), userId: tenant, name: 'it-node-hog', code: nodeHog, memory: 128, timeout: 30 });
     try {
       await orchestrator.deploy(hog);
       await orchestrator.waitUntilReady(hog, 90_000);
