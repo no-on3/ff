@@ -82,8 +82,11 @@ export const paths = {
 
 function toApiError(res: KubeResponse): KubeApiError {
   try {
-    const status = JSON.parse(res.body);
-    if (status?.kind === 'Status') return new KubeApiError(res.status, status.reason ?? '', status.message ?? res.body);
+    const status = JSON.parse(res.body) as { kind?: unknown; reason?: unknown; message?: unknown } | null;
+    if (status?.kind === 'Status') {
+      const text = (value: unknown, fallback: string) => (typeof value === 'string' ? value : fallback);
+      return new KubeApiError(res.status, text(status.reason, ''), text(status.message, res.body));
+    }
   } catch {
     // not JSON
   }

@@ -257,7 +257,7 @@ export class KubernetesOrchestrator implements Orchestrator {
   private toResult(res: KubeResponse): InvokeResult {
     const parsed = (() => {
       try {
-        return res.body ? JSON.parse(res.body) : null;
+        return res.body ? (JSON.parse(res.body) as unknown) : null;
       } catch {
         return undefined;
       }
@@ -269,12 +269,21 @@ export class KubernetesOrchestrator implements Orchestrator {
         memoryUsedMb: Number(res.headers['x-ff-max-memory-used-mb']) || undefined,
       };
     }
-    if (parsed && typeof parsed.errorType === 'string') {
-      if (parsed.errorType === 'Sandbox.Timedout') throw new FunctionTimeoutError(parsed.errorMessage);
-      if (res.headers['x-ff-function-error']) throw new FunctionRuntimeError(parsed.errorType, parsed.errorMessage);
+    const failure = runtimeError(parsed);
+    if (failure) {
+      if (failure.errorType === 'Sandbox.Timedout') throw new FunctionTimeoutError(failure.errorMessage);
+      if (res.headers['x-ff-function-error']) throw new FunctionRuntimeError(failure.errorType, failure.errorMessage);
     }
     throw new OrchestratorError(`Invocation failed with HTTP ${res.status}: ${res.body.slice(0, 300)}`);
   }
+}
+
+/** The runtime's error answer, { errorType, errorMessage }, when the body is one. */
+function runtimeError(body: unknown): { errorType: string; errorMessage: string } | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const { errorType, errorMessage } = body as { errorType?: unknown; errorMessage?: unknown };
+  if (typeof errorType !== 'string') return undefined;
+  return { errorType, errorMessage: typeof errorMessage === 'string' ? errorMessage : '' };
 }
 
 /** The backend gave up waiting for the function's answer. */

@@ -8,6 +8,12 @@ describe('resolveTenantId', () => {
 
   it('accepts a JWT payload object with a subject', () => {
     expect(resolveTenantId({ sub: 'user-7' }, undefined)).toBe('user-7');
+    expect(resolveTenantId({ sub: 42 }, undefined)).toBe('42');
+  });
+
+  it('never makes a tenant of a subject that is not a string or a number (it would be "[object Object]")', () => {
+    expect(() => resolveTenantId({ sub: { id: 'user-7' } }, undefined)).toThrow(UnauthorizedException);
+    expect(() => resolveTenantId({ sub: '' }, undefined)).toThrow(UnauthorizedException);
   });
 
   it('falls back to the development account when nobody is authenticated', () => {

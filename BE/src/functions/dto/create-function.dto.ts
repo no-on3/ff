@@ -29,5 +29,5 @@ export class CreateFunctionDto {
 
   @ApiPropertyOptional({ description: 'Additional metadata', type: 'object', additionalProperties: true })
   @IsOptional()
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }

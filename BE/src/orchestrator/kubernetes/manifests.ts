@@ -51,7 +51,7 @@ export function cpuMillicores(memoryMb: number): number {
   return Math.max(100, Math.round((memoryMb / 1769) * 1000));
 }
 
-export function codeFileName(runtime: Runtime | string): string {
+export function codeFileName(runtime: Runtime): string {
   return runtime === Runtime.PYTHON ? 'function.py' : 'function.ts';
 }
 

@@ -288,13 +288,14 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 **Run the tests.** Use the fast ones while you work and the cluster ones before you commit:
 
 ```bash
+(cd BE && npm run lint)                                  # the backend's linter, with type information, seconds
 (cd BE && npm test)                                      # backend unit tests, seconds
 (cd BE && npm run test:db)                               # migrations against real PostgreSQL (compose), seconds
 (cd BE && npm run migration:check)                       # the migrations build exactly the entities' schema
 (cd FE && npm test)                                      # dashboard unit tests, seconds
 (cd runtimes/nodejs && npm test)                         # Node.js runtime protocol
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
-hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 3 min
+hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
 hack/e2e.sh                                              # the whole stack through the API, about 2 min
 ```

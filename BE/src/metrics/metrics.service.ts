@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, Repository } from 'typeorm';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
+import { describeError } from '../common/describe-error';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { ConcurrencyTracker } from './concurrency';
 import { FunctionMetrics } from './entities/function-metrics.entity';
@@ -87,11 +88,11 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Scaled function ${function_.id} from ${desired} to ${target} instances: ${inFlight} calls in flight`);
     } catch (error) {
       this.burstTargets.delete(function_.id); // the next call tries again
-      this.logger.error(`Error scaling function ${function_.id} for ${inFlight} calls in flight:`, error);
+      this.logger.error(`Error scaling function ${function_.id} for ${inFlight} calls in flight: ${describeError(error)}`);
     }
   }
 
-  async recordMetric(functionId: string, responseTime: number, memoryUsage: number, isError: boolean) {
+  recordMetric(functionId: string, responseTime: number, memoryUsage: number, isError: boolean): void {
     let window = this.metricsWindows.get(functionId);
     if (!window) {
       window = { requestCount: 0, errorCount: 0, responseTimes: [], memoryUsage: [] };
@@ -110,12 +111,12 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.aggregate();
     } catch (error) {
-      this.logger.error('Error in metrics aggregation:', error);
+      this.logger.error(`Error in metrics aggregation: ${describeError(error)}`);
     }
     try {
       await this.sweepIdleFunctions();
     } catch (error) {
-      this.logger.error('Error in idle sweep:', error);
+      this.logger.error(`Error in idle sweep: ${describeError(error)}`);
     }
   }
 
@@ -155,7 +156,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
 
         await this.applyScalingDecision(function_, peakConcurrency);
       } catch (error) {
-        this.logger.error(`Error aggregating metrics for function ${functionId}:`, error);
+        this.logger.error(`Error aggregating metrics for function ${functionId}: ${describeError(error)}`);
       }
     }
   }
@@ -212,7 +213,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
         this.scaledUp.delete(function_.id);
         this.logger.log(`Scaled idle function ${function_.id} to zero (no invocations for ${idleSeconds} s)`);
       } catch (error) {
-        this.logger.error(`Error scaling idle function ${function_.id} to zero:`, error);
+        this.logger.error(`Error scaling idle function ${function_.id} to zero: ${describeError(error)}`);
       }
     }
   }

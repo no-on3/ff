@@ -55,7 +55,7 @@ export class Function {
   status: FunctionStatus;
 
   @Column({ type: 'jsonb', nullable: true })
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
 
   /** Why the function is in ERROR: the last failed deploy or update. Cleared once a rollout succeeds. */
   @Column({ type: 'varchar', nullable: true })

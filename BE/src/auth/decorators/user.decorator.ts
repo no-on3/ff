@@ -8,8 +8,9 @@ import { createParamDecorator, ExecutionContext, UnauthorizedException } from '@
  */
 export function resolveTenantId(user: unknown, devAccountId: string | undefined): string {
   if (typeof user === 'string' && user) return user;
-  if (user && typeof user === 'object' && 'sub' in user && (user as { sub: unknown }).sub) {
-    return String((user as { sub: unknown }).sub);
+  if (user && typeof user === 'object' && 'sub' in user) {
+    // A subject is a string (or a number); anything else would become "[object Object]".
+    if ((typeof user.sub === 'string' && user.sub) || typeof user.sub === 'number') return String(user.sub);
   }
   if (devAccountId) return devAccountId;
   throw new UnauthorizedException('Authentication required');
@@ -24,6 +25,6 @@ export function devAccountId(env: NodeJS.ProcessEnv = process.env): string | und
 }
 
 export const User = createParamDecorator((_data: unknown, ctx: ExecutionContext) => {
-  const request = ctx.switchToHttp().getRequest();
+  const request = ctx.switchToHttp().getRequest<{ user?: unknown }>();
   return resolveTenantId(request.user, devAccountId());
 });

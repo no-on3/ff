@@ -132,7 +132,7 @@ describe('MetricsService', () => {
       await settle();
       service.invocationFinished(f);
       service.invocationFinished(f);
-      for (let i = 0; i < 4; i++) await service.recordMetric('fn-1', 100, 30, i === 0);
+      for (let i = 0; i < 4; i++) service.recordMetric('fn-1', 100, 30, i === 0);
 
       await service.aggregate();
 
@@ -178,7 +178,7 @@ describe('MetricsService', () => {
 
     it('skips functions deleted since the window opened', async () => {
       functionRepository.findOne.mockResolvedValue(null);
-      await service.recordMetric('gone', 100, 30, false);
+      service.recordMetric('gone', 100, 30, false);
 
       await service.aggregate();
 
@@ -188,7 +188,7 @@ describe('MetricsService', () => {
 
     it('starts a fresh window, so a second aggregate has nothing to report', async () => {
       functionRepository.findOne.mockResolvedValue(fn());
-      await service.recordMetric('fn-1', 100, 30, false);
+      service.recordMetric('fn-1', 100, 30, false);
 
       await service.aggregate();
       await service.aggregate();
@@ -216,7 +216,7 @@ describe('MetricsService', () => {
 
     it('leaves recently invoked functions alone, without calling the scheduler', async () => {
       functionRepository.find.mockResolvedValue([fn()]);
-      await service.recordMetric('fn-1', 100, 30, false);
+      service.recordMetric('fn-1', 100, 30, false);
 
       await service.sweepIdleFunctions(Date.now() + 60_000);
 

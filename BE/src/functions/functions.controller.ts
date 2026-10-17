@@ -47,7 +47,7 @@ export class FunctionsController {
   @Get(':id')
   @ApiOperation({ summary: 'Get a function by ID' })
   @ApiResponse({ status: 200, description: 'Function details', type: Function })
-  async findOne(@Param('id') id: string, @User() userId: string): Promise<Function> {
+  async findOne(@Param('id') id: string, @User() _userId: string): Promise<Function> {
     return this.functionsService.findOne(id);
   }
 
@@ -83,7 +83,7 @@ export class FunctionsController {
   async invoke(
     @Param('id') id: string,
     @Body() invokeFunctionDto: InvokeFunctionDto,
-    @User() userId: string,
+    @User() _userId: string,
   ): Promise<FunctionInvocation> {
     return this.functionsService.invoke(id, invokeFunctionDto.input);
   }
@@ -95,7 +95,7 @@ export class FunctionsController {
     @Param('id') id: string,
     @Query('limit') limit = 10,
     @Query('offset') offset = 0,
-    @User() userId: string,
+    @User() _userId: string,
   ): Promise<{ invocations: FunctionInvocation[]; total: number }> {
     await this.functionsService.findOne(id); // 404 for an unknown function
     return this.functionsService.getInvocations(id, limit, offset);
@@ -104,7 +104,7 @@ export class FunctionsController {
   @Get(':id/scaling-config')
   @ApiOperation({ summary: 'Get function scaling configuration' })
   @ApiResponse({ status: 200, description: 'Scaling configuration details', type: ScalingConfig })
-  async getScalingConfig(@Param('id') id: string, @User() userId: string): Promise<ScalingConfig> {
+  async getScalingConfig(@Param('id') id: string, @User() _userId: string): Promise<ScalingConfig> {
     return this.functionsService.scalingConfig(await this.functionsService.findOne(id));
   }
 

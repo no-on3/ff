@@ -78,6 +78,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 
 | Level | Command | What it covers |
 |---|---|---|
+| L0 backend | `cd BE && npx tsc --noEmit && npm run lint` | Types, and ESLint with type information: promises nobody awaits, unchecked `any` values |
 | L1 backend | `cd BE && npm test` | Unit tests: orchestrator against a fake API server, manifests, scaling, services |
 | L1 runtimes | `cd runtimes/nodejs && npm test`; `cd runtimes/python && python3 -m unittest discover -s tests` | The runtime protocol on real processes |
 | L1 dashboard | `cd FE && npm test` | What the dashboard sends and shows: the fields of an edit, invoke input, API error messages, units (Vitest) |

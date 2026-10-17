@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
+import { describeError } from '../common/describe-error';
 import { CodeTooLargeError, FunctionRuntimeError, FunctionTimeoutError } from '../orchestrator/orchestrator.errors';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { CreateFunctionDto } from './dto/create-function.dto';
@@ -68,11 +69,11 @@ export class FunctionsService {
       return savedFunction;
     } catch (error) {
       savedFunction.status = FunctionStatus.ERROR;
-      savedFunction.error = error.message;
+      savedFunction.error = describeError(error);
       await this.functionsRepository.save(savedFunction);
       // Its objects and the diagnosis stay, so an update can repair it, and a delete removes everything.
       if (!(error instanceof CodeTooLargeError)) await this.releaseInstances(savedFunction);
-      throw new BadRequestException(error.message);
+      throw new BadRequestException(savedFunction.error);
     }
   }
 
@@ -93,7 +94,7 @@ export class FunctionsService {
 
   async update(id: string, updateFunctionDto: UpdateFunctionDto): Promise<Function> {
     const function_ = await this.findOne(id);
-    const updated = { ...function_, ...updateFunctionDto } as Function;
+    const updated = { ...function_, ...updateFunctionDto };
     const changesVersion = ROLLOUT_FIELDS.some(
       (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
     );
@@ -128,21 +129,22 @@ export class FunctionsService {
    * the Deployment matches the record, and answer with the diagnosis. If that
    * fails too, the function is ERROR, with both messages.
    */
-  private async rollBack(previous: Function, failure: Error): Promise<never> {
-    this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${failure.message}`);
+  private async rollBack(previous: Function, error: unknown): Promise<never> {
+    const failure = describeError(error);
+    this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${failure}`);
     try {
       await this.orchestrator.update(previous);
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {
       previous.status = FunctionStatus.ERROR;
       previous.error =
-        `The update failed: ${clause(failure.message)}. ` +
-        `Rolling back to the previous version failed too: ${(rollbackError as Error).message}`;
+        `The update failed: ${clause(failure)}. ` +
+        `Rolling back to the previous version failed too: ${describeError(rollbackError)}`;
       await this.functionsRepository.save(previous);
       await this.releaseInstances(previous);
       throw new BadRequestException(previous.error);
     }
-    throw new BadRequestException(`${clause(failure.message)}. The update was rolled back: the previous version is still live.`);
+    throw new BadRequestException(`${clause(failure)}. The update was rolled back: the previous version is still live.`);
   }
 
   /**
@@ -150,13 +152,14 @@ export class FunctionsService {
    * to go back to. Keep the attempt and its diagnosis, so the record shows the
    * code that failed and why, and release its instance, as a failed create does.
    */
-  private async keepFailedAttempt(function_: Function, changes: UpdateFunctionDto, failure: Error): Promise<never> {
+  private async keepFailedAttempt(function_: Function, changes: UpdateFunctionDto, error: unknown): Promise<never> {
     const previousCodePath = this.codePath(function_);
-    Object.assign(function_, changes, { status: FunctionStatus.ERROR, error: failure.message });
+    const failure = describeError(error);
+    Object.assign(function_, changes, { status: FunctionStatus.ERROR, error: failure });
     const saved = await this.functionsRepository.save(function_);
     await this.releaseInstances(saved);
     await this.archiveCode(saved, previousCodePath);
-    throw new BadRequestException(failure.message);
+    throw new BadRequestException(failure);
   }
 
   /**
@@ -167,7 +170,7 @@ export class FunctionsService {
     try {
       await this.orchestrator.scale(function_, 0);
     } catch (error) {
-      this.logger.warn(`Could not scale failed function ${function_.id} to zero: ${(error as Error).message}`);
+      this.logger.warn(`Could not scale failed function ${function_.id} to zero: ${describeError(error)}`);
     }
   }
 
@@ -183,7 +186,7 @@ export class FunctionsService {
       // A runtime change moves the copy (code.ts ↔ code.py).
       if (previousCodePath !== codePath) await this.minioClientService.deleteCode(previousCodePath);
     } catch (error) {
-      this.logger.error(`Could not archive the code of function ${function_.id}: ${(error as Error).message}`);
+      this.logger.error(`Could not archive the code of function ${function_.id}: ${describeError(error)}`);
     }
   }
 
@@ -199,11 +202,11 @@ export class FunctionsService {
       // Delete from database
       await this.functionsRepository.remove(function_);
     } catch (error) {
-      throw new BadRequestException(error.message);
+      throw new BadRequestException(describeError(error));
     }
   }
 
-  async invoke(id: string, input?: Record<string, any>): Promise<FunctionInvocation> {
+  async invoke(id: string, input?: Record<string, unknown>): Promise<FunctionInvocation> {
     const function_ = await this.findOne(id);
     if (function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
@@ -225,11 +228,11 @@ export class FunctionsService {
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
-      await this.metricsService.recordMetric(id, duration, result.memoryUsedMb || 0, false);
+      this.metricsService.recordMetric(id, duration, result.memoryUsedMb || 0, false);
 
       // Update invocation with results and metrics. Duration is the execution
       // time reported by the runtime (the basis for metering), else end-to-end.
-      invocation.output = result.output as Record<string, any>;
+      invocation.output = result.output;
       invocation.duration = result.durationMs ?? duration;
       invocation.memoryUsed = result.memoryUsedMb;
       invocation.status = InvocationStatus.COMPLETED;
@@ -238,11 +241,11 @@ export class FunctionsService {
       return invocation;
     } catch (error) {
       const duration = Date.now() - startTime;
-      await this.metricsService.recordMetric(id, duration, 0, true);
+      this.metricsService.recordMetric(id, duration, 0, true);
 
       invocation.duration = duration;
       invocation.status = error instanceof FunctionTimeoutError ? InvocationStatus.TIMEOUT : InvocationStatus.ERROR;
-      invocation.error = error instanceof FunctionRuntimeError ? `${error.errorType}: ${error.message}` : error.message;
+      invocation.error = error instanceof FunctionRuntimeError ? `${error.errorType}: ${error.message}` : describeError(error);
       await this.invocationsRepository.save(invocation);
       throw new BadRequestException(invocation.error);
     } finally {

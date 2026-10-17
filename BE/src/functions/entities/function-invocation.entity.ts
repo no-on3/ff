@@ -35,10 +35,11 @@ export class FunctionInvocation {
   function: Function;
 
   @Column({ type: 'jsonb', nullable: true })
-  input: Record<string, any>;
+  input: Record<string, unknown>;
 
+  /** Whatever the handler returned: any JSON value. */
   @Column({ type: 'jsonb', nullable: true })
-  output: Record<string, any>;
+  output: unknown;
 
   @Column({
     type: 'enum',

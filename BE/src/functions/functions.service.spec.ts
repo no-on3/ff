@@ -136,7 +136,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
   describe('update', () => {
     const notReady = () => new OrchestratorError('Function "hello" did not become ready within 90 s: boom at init');
-    const errored = (): Function => ({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'old diagnosis' }) as Function;
+    const errored = (): Function => ({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'old diagnosis' });
 
     it('rolls out code changes, waits until they are live, then saves them and archives the code', async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
@@ -369,6 +369,18 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       );
     });
 
+    it('says why a call failed even when the error has no message of its own (P-09)', async () => {
+      // A refused connection to every address of a host name: an AggregateError with an empty message.
+      const refused = (address: string) => Object.assign(new Error(`connect ECONNREFUSED ${address}`), { code: 'ECONNREFUSED' });
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockRejectedValue(new AggregateError([refused('::1:6550'), refused('127.0.0.1:6550')], ''));
+
+      await expect(service.invoke('fn-1', {})).rejects.toThrow('connect ECONNREFUSED ::1:6550; connect ECONNREFUSED 127.0.0.1:6550');
+      expect(invocationsRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: InvocationStatus.ERROR, error: 'connect ECONNREFUSED ::1:6550; connect ECONNREFUSED 127.0.0.1:6550' }),
+      );
+    });
+
     it('rejects functions that are not ACTIVE without calling the orchestrator', async () => {
       functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.CREATING });
 
@@ -380,7 +392,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   describe('scaling configuration', () => {
     it('reports the limits, and that a function scales to zero exactly when minInstances is 0', () => {
       expect(service.scalingConfig(activeFunction())).toEqual({ minInstances: 0, maxInstances: 3, scaleToZero: true });
-      expect(service.scalingConfig({ ...activeFunction(), minInstances: 1 } as Function).scaleToZero).toBe(false);
+      expect(service.scalingConfig({ ...activeFunction(), minInstances: 1 }).scaleToZero).toBe(false);
     });
 
     it('saves new limits and brings the running instances within them at once', async () => {
