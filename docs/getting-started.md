@@ -280,7 +280,7 @@ curl -s -X POST $KC/admin/realms/ff/users -H "authorization: Bearer $ADMIN" -H '
 TOKEN=$(curl -s -X POST $KC/realms/ff/protocol/openid-connect/token -d grant_type=password -d client_id=ff-e2e -d username=amira@ff.test -d password=change-me-1 | jq -r .access_token)
 ```
 
-Start the backend in OIDC mode, as `BE/.env.example` shows: `FF_AUTH_MODE=oidc`, `FF_OIDC_ISSUER=http://localhost:8180/realms/ff`, `FF_OIDC_AUDIENCE=ff-api`. Every call then needs `-H "Authorization: Bearer $TOKEN"`, except `GET /health`. Without a token, the answer is 401. With one, a user has no account until P-12 of the client-readiness plan creates accounts, so the answer is 403 `This user has no account yet`. `docker compose --profile auth down -v` resets Keycloak.
+Start the backend in OIDC mode, as `BE/.env.example` shows: `FF_AUTH_MODE=oidc`, `FF_OIDC_ISSUER=http://localhost:8180/realms/ff`, `FF_OIDC_AUDIENCE=ff-api`. Every call then needs `-H "Authorization: Bearer $TOKEN"`, except `GET /healthz`. Without a token, the answer is 401. With one, a user has no account until P-12 of the client-readiness plan creates accounts, so the answer is 403 `This user has no account yet`. `docker compose --profile auth down -v` resets Keycloak.
 
 **Change the database schema.** Change the entity, then let TypeORM write the migration, read it, and register it:
 

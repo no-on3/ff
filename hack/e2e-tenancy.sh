@@ -40,7 +40,7 @@ anonymous() { http_at "$api_oidc" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $acco
 # with_token <token> <method> <path> [body]: through the guard.
 with_token() { http_at "$api_oidc" "$2" "$3" "${4:-}" -H "Authorization: Bearer $1"; }
 # Routes anyone may call (@Public()).
-public_routes=("GET /health")
+public_routes=("GET /healthz")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
 
 # The local Keycloak (realm "ff", deploy/keycloak/ff-realm.json), through its admin API.
