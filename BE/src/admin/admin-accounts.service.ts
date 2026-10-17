@@ -16,6 +16,7 @@ import { Mail, MailService } from '../mail/mail.service';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
 import { UsageService } from '../usage/usage.service';
+import { AdminCreditsService } from './admin-credits.service';
 import { STATUS_CHANGES, StatusChange, statusChangeProblem, stopsFunctions } from './account-status-changes';
 import {
   ACCOUNTS_CURSOR,
@@ -95,6 +96,7 @@ export class AdminAccountsService {
     private readonly ledger: LedgerService,
     private readonly mail: MailService,
     private readonly config: ConfigService,
+    private readonly credits: AdminCreditsService,
   ) {}
 
   /** GET /admin/accounts: newest first, a page at a time, each with its owners. */
@@ -156,6 +158,7 @@ export class AdminAccountsService {
       })),
       usage: { month, totals },
       balances: (await this.ledger.balances(id)).map(({ currency, exponent, balanceMinor }) => ({ currency, balance: formatMinor(balanceMinor, exponent) })),
+      credit: await this.credits.view(id),
       statusHistory: (await this.audit.statusHistory(id)).map(statusEvent),
     };
   }

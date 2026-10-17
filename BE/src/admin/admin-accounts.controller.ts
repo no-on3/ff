@@ -4,6 +4,8 @@ import { AuditPageView, AuditQuery } from '../audit/audit.dto';
 import { StatusChange } from './account-status-changes';
 import { AccountIdParam, AdminAccountPageView, AdminAccountView, AdminAccountsQuery, AdminEgressDto, AdminPlanDto } from './admin-accounts.dto';
 import { AdminAccountsService } from './admin-accounts.service';
+import { AdminGrantDto, AdminGrantResultView } from './admin-credits.dto';
+import { AdminCreditsService } from './admin-credits.service';
 import { AdminChange } from './admin.dto';
 import { AdminRoutes } from './operator';
 
@@ -18,7 +20,10 @@ const OWNERS_SEE = "The account's owners get an e-mail, and see the reason in th
 @AdminRoutes()
 @Controller('admin/accounts')
 export class AdminAccountsController {
-  constructor(private readonly accounts: AdminAccountsService) {}
+  constructor(
+    private readonly accounts: AdminAccountsService,
+    private readonly credits: AdminCreditsService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'Accounts, newest first, searched and filtered; status=pending is the approvals queue (operators only)' })
@@ -93,6 +98,20 @@ export class AdminAccountsController {
   @ApiResponse({ status: 200, type: AdminAccountView })
   egress(@Param() { id }: AccountIdParam, @Body() body: AdminEgressDto): Promise<AdminAccountView> {
     return this.accounts.setEgress(id, body.internetEgress, body.reason);
+  }
+
+  @Post(':id/credits')
+  @ApiOperation({
+    summary: 'Grant promotional credit, or a correction either way, with a reason (operators only)',
+    description:
+      "Posted against FF's promotional credit, with the audit entry, in one transaction. Above the large-credit threshold, either way, the amount is typed again " +
+      '(confirmAmount). A correction takes the credit left at most, unless allowDebt. The client makes idempotencyKey once per grant: a retry with it ' +
+      `grants once, and says replayed. ${OWNERS_SEE}`,
+  })
+  @ApiResponse({ status: 201, type: AdminGrantResultView })
+  async grant(@Param() { id }: AccountIdParam, @Body() body: AdminGrantDto): Promise<AdminGrantResultView> {
+    const grant = await this.credits.grant(id, body);
+    return { grant, account: await this.accounts.detail(id) };
   }
 
   private change(id: string, change: StatusChange, body: AdminChange): Promise<AdminAccountView> {

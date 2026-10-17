@@ -126,9 +126,15 @@ export class LedgerService {
   }
 
   /** A credit grant (P-74): the wallet moves by the amount, and FF's promotional credit, what the credit costs FF, by the opposite. */
-  async grantCredit(grant: CreditGrant, options: PostOptions = {}): Promise<Posted> {
+  grantCredit(grant: CreditGrant, options: PostOptions = {}): Promise<Posted> {
+    return this.dataSource.transaction((manager) => this.grantCreditIn(manager, grant, options));
+  }
+
+  /** The same, in the caller's database transaction: a grant written with its audit entry (P-74). */
+  async grantCreditIn(manager: EntityManager, grant: CreditGrant, options: PostOptions = {}): Promise<Posted> {
     if (grant.kind === LedgerTransactionKind.PROMO && grant.amountMinor <= 0n) throw new Error('A promotion adds credit: its amount is above 0');
-    return this.post(
+    return this.postIn(
+      manager,
       {
         kind: grant.kind,
         idempotencyKey: grant.idempotencyKey,

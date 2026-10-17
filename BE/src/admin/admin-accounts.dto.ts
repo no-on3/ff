@@ -3,6 +3,7 @@ import { Type } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import type { Role } from '../auth/principal';
+import { CreditStateView } from '../billing/billing.dto';
 import { UsageAmountsView } from '../usage/usage.dto';
 import { AdminChange } from './admin.dto';
 
@@ -135,6 +136,20 @@ export class AdminBalanceView {
   @ApiProperty({ example: '50.000', description: "Credit left, with the currency's decimals; below zero, a debt" }) balance: string;
 }
 
+/** The account's credit (P-33, P-74): the balance in the prices' currency, read as it is now, whether invokes go on, and this month's charges. */
+export class AdminCreditView {
+  @ApiProperty({ example: 'TND' }) currency: string;
+  @ApiProperty({ example: '50.000', description: "Credit left, with the currency's decimals; below zero, usage the credit didn't cover" }) balance: string;
+  @ApiProperty({ type: CreditStateView, description: 'Whether invokes go on (P-33)' }) state: CreditStateView;
+  @ApiProperty({ description: 'D9: usage is rated each hour, not debited' }) shadowMode: boolean;
+  @ApiProperty({ example: '2026-10', description: 'This month, by the UTC calendar' }) month: string;
+  @ApiProperty({ example: '1.234', description: "This month's hourly charges debited from the wallet" }) debited: string;
+  @ApiProperty({ example: '0.000', description: "This month's hourly charges rated in shadow mode, not debited" }) ratedOnly: string;
+  @ApiProperty({ nullable: true, type: String, example: '2026-10-17T10:00:00.000Z', description: 'The end of the last hour rated: later usage is not charged yet' })
+  ratedUntil: Date | null;
+  @ApiProperty({ example: '100.000', description: 'A grant above this, either way, needs its amount typed again (D12)' }) largeCreditThreshold: string;
+}
+
 /** GET /admin/accounts/:id, and the answer to every change: the account page. */
 export class AdminAccountView {
   @ApiProperty({ type: AdminAccountSummaryView }) account: AdminAccountSummaryView;
@@ -143,5 +158,6 @@ export class AdminAccountView {
   @ApiProperty({ type: AdminAccountUsageView }) usage: AdminAccountUsageView;
   @ApiProperty({ type: [AdminBalanceView], description: "Each wallet's balance (P-31); none before the account's first credit or debit" })
   balances: AdminBalanceView[];
+  @ApiProperty({ type: AdminCreditView }) credit: AdminCreditView;
   @ApiProperty({ type: [AdminStatusEventView], description: 'Oldest first' }) statusHistory: AdminStatusEventView[];
 }

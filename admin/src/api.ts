@@ -3,6 +3,7 @@ import type { ApiAuth } from './auth/oidc';
 import { DEFAULT_API_URL, config } from './config';
 import type { AccountSummary, AccountView, StatusChange } from './lib/accounts';
 import type { OperatorAction } from './lib/audit';
+import type { Grant, GrantRequest } from './lib/credits';
 import type { AdminInvoice, DraftsPage, IssueResult } from './lib/invoices';
 import type { AdminPayment } from './lib/payments';
 import { REASON_HEADER } from './lib/reason';
@@ -89,6 +90,8 @@ export const accountsApi = {
   change: (id: string, change: StatusChange, reason: string) => api.post<AccountView>(`${accountPath(id)}/${change}`, { reason }),
   plan: (id: string, planId: string, reason: string) => api.put<AccountView>(`${accountPath(id)}/plan`, { planId, reason }),
   egress: (id: string, internetEgress: boolean, reason: string) => api.put<AccountView>(`${accountPath(id)}/egress`, { internetEgress, reason }),
+  /** Credit FF gives (P-74): the grant, and the account page after it. */
+  grant: (id: string, request: GrantRequest) => api.post<{ grant: Grant; account: AccountView }>(`${accountPath(id)}/credits`, request),
 };
 
 export const plansApi = {

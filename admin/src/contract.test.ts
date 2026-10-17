@@ -14,11 +14,16 @@ import paymentEntitySource from '../../BE/src/billing/payments/payment.entity.ts
 import paymentsServiceSource from '../../BE/src/billing/payments/payments.service.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import invoiceEntitySource from '../../BE/src/billing/invoices/invoice.entity.ts?raw';
+import adminAccountsDtoSource from '../../BE/src/admin/admin-accounts.dto.ts?raw';
+import adminCreditsDtoSource from '../../BE/src/admin/admin-credits.dto.ts?raw';
+import creditGrantsSource from '../../BE/src/admin/credit-grants.ts?raw';
+import ledgerTransactionSource from '../../BE/src/billing/ledger/ledger-transaction.entity.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
 import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
 import { OPERATOR_ACTIONS } from './lib/audit';
+import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
 import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
 import { LIMIT_FIELDS } from './lib/plans';
@@ -192,6 +197,41 @@ describe('invoices (P-36)', () => {
     const kinds = [...body.slice(0, body.indexOf('\n}')).matchAll(/= '(\w+)'/g)].map((match) => match[1]);
 
     expect(INVOICE_KINDS.map((kind) => kind.value)).toEqual(kinds);
+  });
+});
+
+describe('credit grants and the account page\'s credit (P-74)', () => {
+  /** The fields of a backend class: after @ApiProperty on its line, or on a line of their own after it. */
+  const fieldsOf = (source: string, start: string) => {
+    const body = source.slice(source.indexOf(start));
+    return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(?:@ApiProperty(?:Optional)?\(.*\) )?(\w+)\??: /gm)].map((match) => match[1]);
+  };
+  /** The fields of a DTO whose decorators sit on their own lines. */
+  const dtoFieldsOf = (source: string, start: string) => {
+    const body = source.slice(source.indexOf(start));
+    return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1]);
+  };
+
+  it("have the API's credit fields on the account page", () => {
+    expect(fieldsOf(adminAccountsDtoSource, 'export class AdminCreditView {')).toEqual([...ADMIN_CREDIT_FIELDS]);
+    expect(adminAccountsDtoSource).toContain('@ApiProperty({ type: AdminCreditView }) credit: AdminCreditView;');
+  });
+
+  it("have the API's grant fields, and send the fields the API takes", () => {
+    expect(fieldsOf(adminCreditsDtoSource, 'export class AdminGrantView {')).toEqual([...GRANT_FIELDS]);
+    expect(dtoFieldsOf(adminCreditsDtoSource, 'export class AdminGrantDto extends AdminChange {')).toEqual([...GRANT_REQUEST_FIELDS]);
+  });
+
+  it("have the API's kinds, each the ledger's, and their audit actions among the operator's", () => {
+    const enumBody = ledgerTransactionSource.slice(ledgerTransactionSource.indexOf('export enum LedgerTransactionKind'));
+    const kinds = new Map([...enumBody.slice(0, enumBody.indexOf('}')).matchAll(/(\w+) = '(\w+)'/g)].map(([, name, value]) => [name, value]));
+    const listed = /export const GRANT_KINDS: GrantKind\[\] = \[([^\]]+)\];/.exec(creditGrantsSource)?.[1] ?? '';
+    const backend = listed.split(',').map((name) => kinds.get(name.trim().replace('LedgerTransactionKind.', '')));
+    const actions = /export const GRANT_ACTIONS = \{ promo: '([\w.]+)', adjustment: '([\w.]+)' \} as const;/.exec(creditGrantsSource)?.slice(1);
+
+    expect(GRANT_KINDS.map((kind) => kind.value)).toEqual(backend);
+    expect(actions).toEqual(['credit.promo', 'credit.adjustment']);
+    expect(OPERATOR_ACTIONS.map((action) => action.value)).toEqual(expect.arrayContaining(actions ?? ['none']));
   });
 });
 

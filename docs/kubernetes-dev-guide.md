@@ -102,7 +102,7 @@ cd BE && npm run migration:run && npm run start:dev
 ```bash
 hack/e2e.sh                # L4: the whole stack through the REST API (~3 min)
 hack/e2e.sh --teardown     # … and delete the cluster afterwards
-hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, then the operator's routes, bank transfers and invoices (~2 min)
+hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, then the operator's routes, bank transfers, invoices and credit grants (~2 min)
 ```
 
 The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:

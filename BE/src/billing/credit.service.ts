@@ -49,17 +49,21 @@ export class CreditService implements OnModuleInit, OnModuleDestroy {
     if (view.decision.state === 'stopped') throw new InsufficientCreditException(view.standing, view.policy, view.decision);
   }
 
-  /** Where the account stands, under the rule as it is now. */
-  async view(accountId: string, now = new Date()): Promise<CreditView> {
+  /**
+   * Where the account stands, under the rule as it is now. `fresh` reads the
+   * balance whatever is cached: a page that has just written to the wallet
+   * shows the write, whether or not the ledger's word has come yet (P-74).
+   */
+  async view(accountId: string, now = new Date(), { fresh = false }: { fresh?: boolean } = {}): Promise<CreditView> {
     const { currency, exponent } = await billingCurrency(this.dataSource.manager, now);
     const policy = creditPolicy(await this.settings.get(), exponent);
-    const standing = await this.standing(accountId, currency, exponent, policy.bufferMinor, now.getTime());
+    const standing = await this.standing(accountId, currency, exponent, policy.bufferMinor, now.getTime(), fresh);
     return { standing, policy, decision: creditDecision(standing, policy, now) };
   }
 
   /** The wallet's balance, and since when it is below the buffer: cached until its wallet changes, a minute at most. */
-  private async standing(accountId: string, currency: string, exponent: number, bufferMinor: bigint, now: number): Promise<CreditStanding> {
-    const cached = this.cache.get(accountId);
+  private async standing(accountId: string, currency: string, exponent: number, bufferMinor: bigint, now: number, fresh = false): Promise<CreditStanding> {
+    const cached = fresh ? undefined : this.cache.get(accountId);
     if (cached && cached.expires > now && cached.bufferMinor === bufferMinor && cached.standing.currency === currency) return cached.standing;
     const [row] = await this.dataSource.query<Array<{ balance: string; below_since: Date | null }>>(
       `WITH running AS (

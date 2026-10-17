@@ -3,7 +3,8 @@
  * real PostgreSQL server, in a scratch database that is dropped after: the
  * list and its pages, search and filters; the account page; each status
  * change with its audit entry, its e-mails and what it does to the functions;
- * two operators at once; the plan and internet egress; the balance (P-31).
+ * two operators at once; the plan and internet egress; the balance (P-31)
+ * and the credit (P-74; its own cases are in admin-credits.db.spec.ts).
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -19,6 +20,8 @@ import type { Role } from '../auth/principal';
 import { LedgerAccountType } from '../billing/ledger/ledger-account.entity';
 import { LedgerTransactionKind } from '../billing/ledger/ledger-transaction.entity';
 import { LedgerService } from '../billing/ledger/ledger.service';
+import { CreditService } from '../billing/credit.service';
+import { LedgerEvents } from '../billing/ledger/ledger-events';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
@@ -30,6 +33,9 @@ import { PlansService } from '../plans/plans.service';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
 import { AdminAccountsService } from './admin-accounts.service';
+import { AdminCreditsService } from './admin-credits.service';
+import { PlatformSetting } from './platform-setting.entity';
+import { PlatformSettingsService } from './platform-settings.service';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const OPERATOR = { id: 'operator:kc-op-1', label: 'operator@ff.test' };
@@ -109,6 +115,8 @@ run('accounts, for operators (L2, P-71)', () => {
     const usage = new UsageService(ds.getRepository(UsageRecord), ds, config);
     const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
     ledger = new LedgerService(ds);
+    const settings = new PlatformSettingsService(ds.getRepository(PlatformSetting), audit);
+    const credits = new AdminCreditsService(ds, ledger, new CreditService(ds, settings, new LedgerEvents(ds)), settings, audit, mail, config);
     service = new AdminAccountsService(
       ds.getRepository(Account),
       ds.getRepository(Membership),
@@ -121,6 +129,7 @@ run('accounts, for operators (L2, P-71)', () => {
       ledger,
       mail,
       config,
+      credits,
     );
   });
 
@@ -211,6 +220,17 @@ run('accounts, for operators (L2, P-71)', () => {
       ['active', 'operator@ff.test', 'Use case checked'],
     ]);
     expect(page.balances).toEqual([]);
+    expect(page.credit).toEqual({
+      currency: 'TND',
+      balance: '0.000',
+      state: { state: 'ok', buffer: '1.000', belowBufferSince: null, invokesStopAt: null },
+      shadowMode: true,
+      month: new Date().toISOString().slice(0, 7),
+      debited: '0.000',
+      ratedOnly: '0.000',
+      ratedUntil: null,
+      largeCreditThreshold: '100.000',
+    });
   });
 
   it("gives the account's balance with its currency's decimals: none before its first entry, a debt below zero, another account's apart (P-31)", async () => {
@@ -232,6 +252,7 @@ run('accounts, for operators (L2, P-71)', () => {
       ],
     });
     expect((await service.detail(id)).balances).toEqual([{ currency: 'TND', balance: '-0.250' }]);
+    expect((await service.detail(id)).credit.balance).toBe('-0.250');
     expect((await service.detail(other)).balances).toEqual([{ currency: 'TND', balance: '1.000' }]);
   });
 

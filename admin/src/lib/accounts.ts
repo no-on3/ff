@@ -1,3 +1,5 @@
+import type { AccountCredit } from './credits';
+
 /**
  * Accounts, as the admin routes give them (P-71). The statuses and the status
  * changes mirror the backend's (AccountStatus, and STATUS_CHANGES in
@@ -108,6 +110,8 @@ export interface AccountView {
   usage: { month: string; totals: UsageTotals };
   /** Each wallet's balance (P-31), with its currency's decimals; none before the account's first credit or debit. */
   balances: Array<{ currency: string; balance: string }>;
+  /** The balance in the prices' currency, read as it is now, whether invokes go on, and this month's charges (P-74). */
+  credit: AccountCredit;
   statusHistory: Array<{ at: string; action: string; status: AccountStatus; by: string; reason: string | null }>;
 }
 

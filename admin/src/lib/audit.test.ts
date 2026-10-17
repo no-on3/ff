@@ -124,6 +124,15 @@ describe('describeAction', () => {
     );
   });
 
+  it('names a grant by what it moved the balance by, the balance it left, and a debt allowed (P-74)', () => {
+    const promo = { reason: 'r', kind: 'promo', currency: 'TND', amount: '25.000', balance: '37.500' };
+
+    expect(describeAction(entry({ action: 'credit.promo', resource: 'ledger_transaction:1', details: promo }))).toBe('+25.000 TND, leaving 37.500 TND');
+    expect(describeAction(entry({ action: 'credit.adjustment', details: { ...promo, kind: 'adjustment', amount: '-3.000', balance: '-2.000', allowDebt: true } }))).toBe(
+      '-3.000 TND, leaving -2.000 TND, a debt allowed',
+    );
+  });
+
   it('else names what the action was on', () => {
     expect(describeAction(entry({ action: 'account.suspend', resource: 'account:000000000001' }))).toBe('account:000000000001');
   });
@@ -134,6 +143,7 @@ describe('labels and names', () => {
     expect([actionLabel('settings.update'), actionLabel('account.reopen')]).toEqual(['Settings changed', 'account.reopen']);
     expect([actionLabel('payment.record'), actionLabel('payment.withholding')]).toEqual(['Bank transfer recorded', 'Withholding certificate added']);
     expect([actionLabel('invoice.issue'), actionLabel('invoice.credit_note')]).toEqual(['Invoice issued', 'Credit note issued']);
+    expect([actionLabel('credit.promo'), actionLabel('credit.adjustment')]).toEqual(['Promotional credit granted', 'Credit corrected']);
   });
 
   it("names the CSV as the API's Content-Disposition does", () => {

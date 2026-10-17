@@ -27,7 +27,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Console:** a React + Vite web app in `FE/`: login and sign-up, the new account's onboarding and approval, account settings, members, API keys, the function pages, which show each role only what it may do, and the month's usage.
 
 **Not implemented yet**, despite what older documents say:
-- Paying: usage is rated and charged hourly (debited once you turn shadow mode off), credit comes by bank transfer, and each month's credit is invoiced as a PDF, but there are no credit grants or refunds yet, no card payments, and no El Fatoora e-invoicing (skipped for now). See phase 3 of the client-readiness plan.
+- Paying: usage is rated and charged hourly (debited once you turn shadow mode off), credit comes by bank transfer and from FF's grants, and each month's credit is invoiced as a PDF, but there are no refunds yet, no card payments, and no El Fatoora e-invoicing (skipped for now). See phase 3 of the client-readiness plan.
 - Custom domains and function versioning.
 - Multi-file packages with dependencies, which need the zip pipeline (parent plan R-02).
 

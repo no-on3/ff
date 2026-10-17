@@ -20,6 +20,8 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'payment.withholding', label: 'Withholding certificate added' },
   { value: 'invoice.issue', label: 'Invoice issued' },
   { value: 'invoice.credit_note', label: 'Credit note issued' },
+  { value: 'credit.promo', label: 'Promotional credit granted' },
+  { value: 'credit.adjustment', label: 'Credit corrected' },
   { value: 'plan.create', label: 'Plan created' },
   { value: 'plan.update', label: 'Plan changed' },
   { value: 'price_book.create', label: 'Price book created' },
@@ -121,6 +123,13 @@ function describeInvoice(details: Record<string, unknown>): string {
   return `${shown(details.number)} for ${shown(details.month)}: ${money('total')}, with ${money('stampDuty')} of stamp duty`;
 }
 
+/** A grant (P-74): what it moved the balance by, and the balance it left. */
+function describeCredit(details: Record<string, unknown>): string {
+  const money = (name: string) => `${shown(details[name])} ${shown(details.currency)}`;
+  const sign = String(details.amount).startsWith('-') ? '' : '+';
+  return `${sign}${money('amount')}, leaving ${money('balance')}${details.allowDebt === true ? ', a debt allowed' : ''}`;
+}
+
 /** What an action did, to read: each change's from → to, else what it was on. */
 export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource'>): string {
   const changes = entry.details?.changes as Record<string, { from: unknown; to: unknown }> | undefined;
@@ -135,6 +144,8 @@ export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource
   if (typeof entry.details?.reference === 'string') return describePayment(entry.details);
   // An invoice or credit note, by its number (P-36).
   if (typeof entry.details?.number === 'string') return describeInvoice(entry.details);
+  // A grant, by what it moved (P-74).
+  if (typeof entry.details?.kind === 'string' && typeof entry.details.amount === 'string' && typeof entry.details.balance === 'string') return describeCredit(entry.details);
   return entry.resource ?? '';
 }
 

@@ -124,7 +124,7 @@ mail_to() {
   [ -z "$id" ] || curl -sS "$mailpit/api/v1/message/$id" | jq -r '.Subject + "\n" + .Text' | tr -d '\r'
 }
 # grant <account> <millimes> <key>: promotional credit, written as one balanced ledger transaction
-# (P-31; P-74 will grant it from the admin dashboard).
+# (P-31), before the operator logs in; the operator's own grants have their section (P-74).
 grant() {
   "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -v ON_ERROR_STOP=1 -qc "
     INSERT INTO ledger_accounts (account_id, type, currency) VALUES ('$1', 'wallet', 'TND') ON CONFLICT DO NOTHING;
@@ -244,6 +244,7 @@ body_for() {
     "PUT /admin/settings") echo '{"settings": {"gracePeriodHours": 1}, "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/plan") echo '{"planId": "beta", "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/egress") echo '{"internetEgress": true, "reason": "l5 tries"}' ;;
+    "POST /admin/accounts/{id}/credits") echo '{"kind": "promo", "amount": "1", "reason": "l5 tries", "idempotencyKey": "00000000-0000-4000-8000-000000000000"}' ;;
     "POST /admin/accounts/"*) echo '{"reason": "l5 tries"}' ;;
     "POST /admin/plans") echo '{"id": "l5-tries", "name": "L5 tries", "limits": {}, "reason": "l5 tries"}' ;;
     "PUT /admin/plans/{id}") echo '{"limits": {}, "reason": "l5 tries"}' ;;
@@ -894,12 +895,50 @@ check "the owner downloads the month's usage statement" "200 application/pdf %PD
 check "the operator downloads the invoice too" "200 application/pdf" "$(fetch_pdf "$api_oidc" "/admin/invoices/$invoice_1/pdf" -H "Authorization: Bearer $operator_token")"
 documents_1="$(with_token "$operator_token" GET "/admin/invoices?accountId=$account_1")"
 check "and lists both documents of account 1" "200 AV-$year-000001,FAC-$year-000001" "$(status) $(jq -r '[.invoices[].number] | join(",")' <<<"$documents_1")"
+echo "== credit grants (P-74)"
+new_key() { cat /proc/sys/kernel/random/uuid; }
+grant_body() { jq -cn --arg kind "$1" --arg amount "$2" --arg reason "$3" --arg key "$4" '{kind: $kind, amount: $amount, reason: $reason, idempotencyKey: $key}'; }
+balance_before_grant="$(as_user_1 GET /billing/balance | jq -r .balance)"
+balance_after_grant="$(plus_millimes "$balance_before_grant" 15000)"
+promo_key="$(new_key)"
+granted="$(with_token "$operator_token" POST "/admin/accounts/$account_1/credits" "$(grant_body promo 15 'l5: welcome credit' "$promo_key")")"
+check "the operator grants account 1 15.000 TND of promotional credit, and gets the grant and the account page after it" \
+  "201 promo 15.000 false $balance_after_grant $balance_after_grant ok" \
+  "$(status) $(jq -r '"\(.grant.kind) \(.grant.amount) \(.grant.replayed) \(.grant.balance) \(.account.credit.balance) \(.account.credit.state.state)"' <<<"$granted")"
+# The console's balance comes from the invoke check's cache, which the ledger's NOTIFY clears (P-33).
+for _ in $(seq 1 20); do [ "$(as_user_1 GET /billing/balance | jq -r .balance)" = "$balance_after_grant" ] && break; sleep 0.25; done
+check "the owner's balance has it" "$balance_after_grant" "$(as_user_1 GET /billing/balance | jq -r .balance)"
+replayed="$(with_token "$operator_token" POST "/admin/accounts/$account_1/credits" "$(grant_body promo 15 'l5: welcome credit' "$promo_key")")"
+check "sent again with its key, it grants once: the first grant, replayed" "201 true $(jq -r .grant.id <<<"$granted") $balance_after_grant" \
+  "$(status) $(jq -r '"\(.grant.replayed) \(.grant.id)"' <<<"$replayed") $(as_user_1 GET /billing/balance | jq -r .balance)"
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^FF added credit' && break; sleep 0.5; done
+check "the owner gets an e-mail, with the reason and the balance" "FF added credit to your account: L5 one true true" \
+  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep -q '^Why: l5: welcome credit$' && echo true || echo false) $(mail_to "$user_1" | grep -q "^The balance is now $balance_after_grant TND.$" && echo true || echo false)"
+with_token "$operator_token" POST "/admin/accounts/$account_1/credits" "$(grant_body promo 150 'l5 tries' "$(new_key)")" >/dev/null
+check "above the large-credit threshold, the amount is typed again" \
+  "400 150.000 TND is above the large-credit threshold, 100.000 TND: type the amount again as confirmAmount to grant it (D12)" "$(status) $(message)"
+with_token "$operator_token" POST "/admin/accounts/$account_1/credits" "$(grant_body adjustment -1000 'l5 tries' "$(new_key)" | jq -c '.confirmAmount = "-1000"')" >/dev/null
+check "a correction takes the credit left at most" \
+  "409 Account $account_1 has $balance_after_grant TND: taking 1000.000 TND would leave it below 0.000 TND. Nothing was written" "$(status) $(message)"
+corrected="$(with_token "$operator_token" POST "/admin/accounts/$account_1/credits" "$(grant_body adjustment -1.5 'l5: hours billed twice' "$(new_key)")")"
+check "a correction takes 1.500 TND away" "201 adjustment -1.500 $(plus_millimes "$balance_after_grant" -1500)" \
+  "$(status) $(jq -r '"\(.grant.kind) \(.grant.amount) \(.grant.balance)"' <<<"$corrected")"
+with_token "$operator_token" POST "/admin/accounts/$account_1/credits" "$(grant_body promo 1 'l5 tries' "$(new_key)")" -H 'X-FF-Account: 000000000999' >/dev/null
+check "an operator's grant needs no account header, and ignores one" 201 "$(status)"
+with_token "$operator_token" POST "/admin/accounts/000000000999/credits" "$(grant_body promo 1 'l5 tries' "$(new_key)")" >/dev/null
+check "an account that doesn't exist is named" "404 Account 000000000999 not found" "$(status) $(message)"
+page_credit="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
+check "the account page has the credit: balance, state, this month's charges only rated in shadow mode, the threshold" \
+  "200 $(plus_millimes "$balance_after_grant" -500) ok true $(date -u +%Y-%m) 0.000 100.000" \
+  "$(status) $(jq -r '.credit | "\(.balance) \(.state.state) \(.shadowMode) \(.month) \(.debited) \(.largeCreditThreshold)"' <<<"$page_credit")"
 log_invoices="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's audit log has both, as FF's" "invoice.issue:FF invoice.credit_note:FF" \
   "$(jq -r '[.entries[] | select(.action | startswith("invoice.")) | "\(.action):\(.actorLabel)"] | reverse | join(" ")' <<<"$log_invoices")"
+check "and the grants, as FF's, with their reasons (P-74)" "credit.promo:FF:l5: welcome credit|credit.adjustment:FF:l5: hours billed twice|credit.promo:FF:l5 tries" \
+  "$(jq -r '[.entries[] | select(.action | startswith("credit.")) | "\(.action):\(.actorLabel):\(.details.reason)"] | reverse | join("|")' <<<"$log_invoices")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress payment.record payment.withholding payment.record invoice.issue invoice.credit_note" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -907,7 +946,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 16 account.approve,account.egress,account.plan,account.reactivate,account.suspend,invoice.credit_note,invoice.issue,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
+  "200 19 account.approve,account.egress,account.plan,account.reactivate,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

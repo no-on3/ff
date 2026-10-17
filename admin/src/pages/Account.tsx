@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { AccountAuditEntry, accountsApi, invoicesApi, paymentsApi, plansApi } from '../api';
 import DataTable, { Column } from '../components/DataTable';
+import GrantDialog from '../components/GrantDialog';
 import ReasonDialog from '../components/ReasonDialog';
 import { EmptyState, ErrorState, Loading } from '../components/States';
 import StatusBadge from '../components/StatusBadge';
 import { AccountView, PlanOption, STATUS_CHANGES, StatusChange, changedNotice, changesFor, isAccountId, ownersSee } from '../lib/accounts';
 import { actionLabel, describeAction } from '../lib/audit';
+import { GrantRequest, chargesLabel, creditStateLabel, grantNotice } from '../lib/credits';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
 import { balanceNote, formatMoney } from '../lib/money';
 import { AdminInvoice, invoiceLabel } from '../lib/invoices';
@@ -138,8 +140,9 @@ const AccountInvoices: React.FC<{ accountId: string }> = ({ accountId }) => {
 
 /**
  * One account (P-71): what sign-up collected, its people, functions, this
- * month's usage, its balance and payments, and its history, and the
- * operator's changes, each with a reason that goes to the account's audit log.
+ * month's usage, its credit (P-74), payments and invoices, and its history,
+ * and the operator's changes, each with a reason that goes to the account's
+ * audit log: a grant of credit among them.
  */
 const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
   const { id } = useParams();
@@ -149,6 +152,7 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
   const [failure, setFailure] = useState<string | null>(null);
   const [refused, setRefused] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
+  const [granting, setGranting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [auditPaging, setAuditPaging] = useState(firstPage());
   const [audit, setAudit] = useState<{ rows: AccountAuditEntry[]; next: string | null } | null>(null);
@@ -243,7 +247,21 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
       confirmLabel: pending.on ? 'Turn on' : 'Turn off',
     };
   })();
+  const grant = async (request: GrantRequest) => {
+    try {
+      const { data } = await accountsApi.grant(account.id, request);
+      setView(data.account);
+      setNotice(grantNotice(data.grant));
+      setGranting(false);
+      setAuditPaging(firstPage());
+      setChanges((n) => n + 1);
+    } catch (error) {
+      throw new Error(apiErrorMessage(error));
+    }
+  };
   const { totals } = view.usage;
+  const { credit } = view;
+  const otherWallets = view.balances.filter(({ currency }) => currency !== credit.currency);
 
   return (
     <div className="space-y-8">
@@ -367,19 +385,31 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-lg font-semibold">Balance</h2>
-        {view.balances.length === 0 ? (
-          <EmptyState>No credit or debit yet.</EmptyState>
-        ) : (
-          <dl className="card grid gap-3 sm:grid-cols-3">
-            {view.balances.map(({ currency, balance }) => (
-              <div key={currency}>
-                <dt className="text-sm text-gray-600">{balanceNote(balance)}</dt>
-                <dd className="m-0 text-lg font-semibold">{formatMoney(balance, currency)}</dd>
-              </div>
-            ))}
-          </dl>
-        )}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">Credit</h2>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              setNotice(null);
+              setGranting(true);
+            }}
+          >
+            Grant credit
+          </button>
+        </div>
+        <dl className="card space-y-3">
+          <Fact label={balanceNote(credit.balance)}>
+            <span className="text-lg font-semibold">{formatMoney(credit.balance, credit.currency)}</span>
+          </Fact>
+          <Fact label="Invokes">{creditStateLabel(credit)}</Fact>
+          <Fact label={`Charged in ${credit.month} (UTC)`}>{chargesLabel(credit)}</Fact>
+          {otherWallets.map(({ currency, balance }) => (
+            <Fact key={currency} label={`${balanceNote(balance)}, in ${currency}`}>
+              {formatMoney(balance, currency)}
+            </Fact>
+          ))}
+        </dl>
       </section>
 
       <section className="space-y-3">
@@ -420,6 +450,16 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
         />
       </section>
 
+      {granting && (
+        <GrantDialog
+          accountName={account.name}
+          currency={credit.currency}
+          balance={credit.balance}
+          threshold={credit.largeCreditThreshold}
+          onGrant={grant}
+          onCancel={() => setGranting(false)}
+        />
+      )}
       {pending && dialog && (
         <ReasonDialog title={dialog.title} confirmLabel={dialog.confirmLabel} onConfirm={confirm} onCancel={() => setPending(null)}>
           {dialog.body}

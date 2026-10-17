@@ -39,7 +39,9 @@ export type AuditAction =
   | 'payment.record'
   | 'payment.withholding'
   | 'invoice.issue'
-  | 'invoice.credit_note';
+  | 'invoice.credit_note'
+  | 'credit.promo'
+  | 'credit.adjustment';
 
 export interface AuditEvent {
   /** null for an action on no account. */
