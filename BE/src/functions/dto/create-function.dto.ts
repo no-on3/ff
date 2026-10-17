@@ -27,7 +27,7 @@ export class CreateFunctionDto {
   @Max(300)
   timeout: number;
 
-  @ApiPropertyOptional({ description: 'Additional metadata', type: 'object' })
+  @ApiPropertyOptional({ description: 'Additional metadata', type: 'object', additionalProperties: true })
   @IsOptional()
   metadata?: Record<string, any>;
 }

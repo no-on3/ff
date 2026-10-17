@@ -4,7 +4,7 @@
  * document says breaks them (client-readiness plan, P-08).
  */
 import { INestApplication } from '@nestjs/common';
-import { OpenAPIObject } from '@nestjs/swagger';
+import { OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
 import { Test } from '@nestjs/testing';
 import { apiDocument } from './api-document';
 import { FunctionsController } from './functions/functions.controller';
@@ -43,6 +43,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       next();
     });
     document = apiDocument(app);
+    SwaggerModule.setup('api', app, document); // as main.ts serves it
     await app.listen(0, '127.0.0.1');
     baseUrl = await app.getUrl();
   });
@@ -67,6 +68,16 @@ describe('the OpenAPI document (L1, P-08)', () => {
 
     expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke']));
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
+  });
+
+  it('serves the document at /api-json, and its viewer at /api', async () => {
+    const json = await fetch(`${baseUrl}/api-json`);
+    const viewer = await fetch(`${baseUrl}/api`);
+
+    expect(json.status).toBe(200);
+    expect(Object.keys((await json.json()).paths)).toEqual(Object.keys(document.paths));
+    expect(viewer.status).toBe(200);
+    expect(await viewer.text()).toContain('swagger-ui');
   });
 
   it('documents invoke as 201 Created, which hack/e2e.sh checks too', () => {
