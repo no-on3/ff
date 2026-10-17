@@ -23,7 +23,8 @@ export FF_S3_PORT="${FF_E2E_S3_PORT:-59003}"
 be_port="${FF_E2E_BE_PORT:-$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")}"
 api="http://127.0.0.1:$be_port"
 work="$FF_REPO_ROOT/hack/.e2e"
-tenant="e2e-$(date +%s)-$$"
+# A random account per run, so runs never share a namespace (12 digits, ADR 0004).
+tenant="$(node -e "console.log(String(require('crypto').randomInt(1e12)).padStart(12, '0'))")"
 tenant_ns="ff-t-$(printf %s "$tenant" | sha256sum | cut -c1-12)"
 compose=(docker compose -p "$project" -f "$FF_REPO_ROOT/docker-compose.yml")
 be_pid=""
@@ -93,9 +94,15 @@ be_env=(
   MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$FF_S3_PORT" MINIO_USE_SSL=false MINIO_BUCKET_NAME=functions
   MINIO_ACCESS_KEY=ffdevaccesskey MINIO_SECRET_KEY=ffdevsecretkey-local-only
   ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy
-  K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" FF_DEV_USER_ID="$tenant"
+  K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
   K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
 )
+# Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
+refused=0
+(cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
+  >"$work/backend-production.log" 2>&1 || refused=$?
+check "the backend refuses development settings in production" "1 FF_AUTH_MODE=dev is for development only" \
+  "$refused $(grep -o 'FF_AUTH_MODE=dev is for development only' "$work/backend-production.log" | head -1)"
 # The database is new: the backend must refuse it until the migrations have run.
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" node dist/main.js) >"$work/backend-refused.log" 2>&1 || refused=$?

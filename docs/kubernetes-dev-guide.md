@@ -87,7 +87,8 @@ cd BE && npm run migration:run && npm run start:dev
 
 - **The database schema comes from migrations.** `npm run migration:run` applies the pending ones, and the backend refuses to start while any is pending. A database created before 2026-10-17 must be reset once; see [Getting started](getting-started.md), step 7.
 
-- **Nothing runs without a tenant.** Without authentication, the backend needs `FF_DEV_USER_ID` set, as `.env.example` does. Otherwise every request returns 401. `FF_DEV_USER_ID=1` keeps functions created by the old hard-coded user visible. This is a development-only stand-in until real authentication (parent plan F-01) is switched on.
+- **Every variable is checked at boot.** A missing or bad value stops the backend with a message that names the variable (`BE/src/config/configuration.ts`).
+- **Nothing runs without a tenant.** Until Keycloak login exists (client-readiness plan P-11), development uses `FF_AUTH_MODE=dev`, which acts as the account `FF_DEV_ACCOUNT_ID`, as `.env.example` does. Production refuses this mode. `FF_DEV_USER_ID`, used before 2026-10-17, is no longer read, and the backend says so.
 - **What `docker compose up` starts.** Only PostgreSQL and S3. The backend and the dashboard run on the host (`npm run start:dev`, `npm run dev`).
 - **S3 storage.** SeaweedFS replaces the MinIO community image, which is no longer published. Its dev credentials are in `infrastructure/seaweedfs/s3.json` (local use only).
 

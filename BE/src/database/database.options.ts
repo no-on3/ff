@@ -1,16 +1,15 @@
 import { DataSourceOptions } from 'typeorm';
+import { DatabaseSettings } from '../config/configuration';
 import { MIGRATIONS } from '../migrations';
 import { ENTITIES } from './entities';
 import { SnakeNamingStrategy } from './naming.strategy';
 
-/** The `database` block of the configuration (src/config/configuration.ts). */
-export interface DatabaseSettings {
-  host: string;
-  port: number;
-  username: string;
-  password: string;
-  name: string;
-  logging: boolean;
+export { DatabaseSettings };
+
+/** TLS to the database, always verified: against DB_SSL_CA when given, else the system's CAs. */
+export function sslOptions(settings: DatabaseSettings): false | { rejectUnauthorized: true; ca?: string } {
+  if (!settings.ssl) return false;
+  return { rejectUnauthorized: true, ...(settings.ssl.ca ? { ca: settings.ssl.ca } : {}) };
 }
 
 /**
@@ -26,6 +25,7 @@ export function dataSourceOptions(settings: DatabaseSettings): DataSourceOptions
     username: settings.username,
     password: settings.password,
     database: settings.name,
+    ssl: sslOptions(settings),
     entities: ENTITIES,
     migrations: MIGRATIONS,
     namingStrategy: new SnakeNamingStrategy(),

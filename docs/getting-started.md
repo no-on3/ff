@@ -89,12 +89,13 @@ npm run migration:run
 npm run start:dev
 ```
 
-- The defaults in `.env.example` match the steps above.
-- If you already have a `BE/.env` from before the Kubernetes migration (it contains `NOMAD_*` keys), replace it. It lacks the `K8S_*` settings and `FF_DEV_USER_ID`, and without the latter every request returns 401.
+- The defaults in `.env.example` match the steps above. In development the backend acts as one account, `FF_DEV_ACCOUNT_ID` (`FF_AUTH_MODE=dev`), until Keycloak login exists.
+- **Every variable is checked when the backend starts.** A missing or bad value stops it with a message that names the variable and what it expects. `NODE_ENV=production` also refuses the development settings: the dev account, and the default database and storage credentials.
+- A `BE/.env` from before 2026-10-17 sets `FF_DEV_USER_ID`, which is no longer read: copy `BE/.env.example` again. The backend says so if you forget.
 - **The schema comes from migrations,** in development as in production. `npm run migration:run` applies the ones your database hasn't had yet. Run it again whenever you pull changes that add a migration (`BE/src/migrations/`). The backend refuses to start while a migration is pending, and says so.
 - Leave this terminal running, and run the remaining commands from a second terminal at the repository root. Check that the backend answers: `curl -s localhost:3000/functions` prints `[]`, and the Swagger UI is at http://localhost:3000/api.
 
-**A database created before 2026-10-17 must be reset once.** Until then, the backend created its tables itself, with other column names, and `npm run migration:run` stops with `relation "functions" already exists`. Resetting deletes your development functions and their history. Their Deployments in the cluster go with the dev tenant's namespace:
+**A database created before 2026-10-17 must be reset once.** Until then, the backend created its tables itself, with other column names, and `npm run migration:run` stops with `relation "functions" already exists`. Resetting deletes your development functions and their history. Their Deployments in the cluster go with the old dev tenant's namespace (tenant `1`):
 
 ```bash
 docker compose exec postgres psql -U postgres -c 'DROP DATABASE serverless_platform WITH (FORCE)' -c 'CREATE DATABASE serverless_platform'
@@ -207,7 +208,7 @@ The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runt
 
 ```bash
 source hack/k8s/env.sh                                   # kubectl from hack/bin, the dev cluster's kubeconfig
-NS=ff-t-$(printf %s 1 | sha256sum | cut -c1-12)          # the namespace of the dev tenant (FF_DEV_USER_ID=1)
+NS=ff-t-$(printf %s 000000000001 | sha256sum | cut -c1-12)   # the dev account's namespace (FF_DEV_ACCOUNT_ID)
 kubectl -n "$NS" get deployments,pods,services,configmaps
 ```
 
@@ -305,7 +306,8 @@ docker compose down -v
 | Port 6550 already in use | `export FF_API_PORT=6551` before `hack/k8s/cluster-up.sh`, then set `K8S_API_URL=https://127.0.0.1:6551` in `BE/.env`. |
 | Port 3000 already in use | Set `PORT` in `BE/.env`. The dashboard has the API address hard-coded in `FE/src/services/api.ts`, so change it there as well. |
 | Port 5173 already in use | Vite moves to the next free port and prints it. Set `CORS_ORIGIN` in `BE/.env` to that address, or the browser blocks the dashboard's API calls. |
-| Every API call returns 401 | `FF_DEV_USER_ID` is missing from `BE/.env`, which is usually an old `.env`. See step 7. |
+| `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. |
+| Every API call returns 401 | `FF_AUTH_MODE` isn't `dev`. The default, `oidc`, needs Keycloak, which doesn't exist yet (client-readiness plan P-11). Use the values from `BE/.env.example`. |
 | `The backend did not start: The database schema is out of date: … pending` | `cd BE && npm run migration:run`, then start it again. |
 | `migration:run` fails with `relation "functions" already exists` | The database was created before migrations were used. Reset it once, as shown after step 7. |
 | `npm run test:db` fails with `ECONNREFUSED` | PostgreSQL isn't running: `docker compose up -d --wait postgres`. The tests read `DB_*` from `BE/.env`. |

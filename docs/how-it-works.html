@@ -386,7 +386,7 @@
     <h3>Lifecycles</h3>
     <div class="card pad scrollx"><div id="stateMachines" class="capped"></div></div>
     <h3>Kubernetes objects of one tenant</h3>
-    <p class="lead">One namespace per tenant, named <code>ff-t-</code> plus the first 12 hex characters of <code>sha256(tenant ID)</code>: tenant <code>1</code>, the development tenant, gets <code>ff-t-6b86b273ff34</code>. Each function adds a Deployment, a Service, and one ConfigMap per code version. Green arrows are traffic the network policy allows; the red one is blocked.</p>
+    <p class="lead">One namespace per tenant, named <code>ff-t-</code> plus the first 12 hex characters of <code>sha256(tenant ID)</code>: account <code>000000000001</code>, the development tenant (<code>FF_DEV_ACCOUNT_ID</code>), gets <code>ff-t-27d6fbbe5c7d</code>. Each function adds a Deployment, a Service, and one ConfigMap per code version. Green arrows are traffic the network policy allows; the red one is blocked.</p>
     <div class="card pad scrollx"><div id="k8sObjects" class="capped"></div></div>
     <h3>Where each piece of data lives</h3>
     <div class="tablewrap card">
@@ -517,7 +517,7 @@ const FN = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
 const PY = 'a7d4e2c1-6b3f-4d8e-9a1b-2c3d4e5f6a7b';
 const SLOW = '5e2b9c7a-1d4f-4a6e-8b3c-9f0e1d2c3b4a';
 const BAD = 'c1b2a3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
-const NS = 'ff-t-6b86b273ff34';
+const NS = 'ff-t-27d6fbbe5c7d';
 const REQ = '7b0c2d8e-5f4a-4e1b-9c3d-2a6f8e1b4c7d';
 const INV = 'd2a1f0c4-3b5e-4f6a-8c7d-9e0f1a2b3c4d';
 const HASH_V1 = 'c4d785b3974c4e13e098fb8b8034abd3aaee686501033a3aef4019435aad8c44';
@@ -542,7 +542,7 @@ function pyJSON(v) {
 /* The manifests below are what BE/src/orchestrator/kubernetes/manifests.ts produces for the sample function. */
 const MANAGED = { 'app.kubernetes.io/managed-by': 'ff-controller' };
 const FN_LABELS = { 'app.kubernetes.io/managed-by': 'ff-controller', 'app.kubernetes.io/name': 'ff-function', 'ff.dev/function-id': FN, 'ff.dev/runtime': 'nodejs' };
-const M_NAMESPACE = { apiVersion: 'v1', kind: 'Namespace', metadata: { name: NS, labels: { 'app.kubernetes.io/managed-by': 'ff-controller', 'ff.dev/tenant-hash': '6b86b273ff34', 'pod-security.kubernetes.io/enforce': 'restricted', 'pod-security.kubernetes.io/enforce-version': 'latest', 'pod-security.kubernetes.io/warn': 'restricted', 'pod-security.kubernetes.io/audit': 'restricted' }, annotations: { 'ff.dev/tenant-id': '1' } } };
+const M_NAMESPACE = { apiVersion: 'v1', kind: 'Namespace', metadata: { name: NS, labels: { 'app.kubernetes.io/managed-by': 'ff-controller', 'ff.dev/tenant-hash': '27d6fbbe5c7d', 'pod-security.kubernetes.io/enforce': 'restricted', 'pod-security.kubernetes.io/enforce-version': 'latest', 'pod-security.kubernetes.io/warn': 'restricted', 'pod-security.kubernetes.io/audit': 'restricted' }, annotations: { 'ff.dev/tenant-id': '000000000001' } } };
 const M_QUOTA = { apiVersion: 'v1', kind: 'ResourceQuota', metadata: { name: 'ff-tenant-quota', namespace: NS, labels: MANAGED }, spec: { hard: { pods: '20', 'requests.cpu': '8', 'limits.cpu': '8', 'requests.memory': '8Gi', 'limits.memory': '8Gi', configmaps: '60', services: '30' } } };
 const M_LIMITS = { apiVersion: 'v1', kind: 'LimitRange', metadata: { name: 'ff-tenant-limits', namespace: NS, labels: MANAGED }, spec: { limits: [{ type: 'Container', default: { cpu: '100m', memory: '128Mi' }, defaultRequest: { cpu: '100m', memory: '128Mi' }, max: { cpu: '6', memory: '10240Mi' } }] } };
 const M_NETPOL = { apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', metadata: { name: 'ff-default-deny', namespace: NS, labels: MANAGED }, spec: { podSelector: {}, policyTypes: ['Ingress', 'Egress'],
@@ -621,12 +621,12 @@ const SCENARIOS = [
         code: 'FE/src/components/CreateFunction.tsx · BE/src/functions/functions.controller.ts',
         msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'hello', runtime: 'nodejs', code: CODE_TS, memory: 128, timeout: 5 } } },
       { from: 'api', to: 'api', kind: 'int', label: 'validate · resolve the tenant', title: 'Validation and the tenant',
-        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. @User() picks the tenant: the authenticated user, or FF_DEV_USER_ID ("1") in development; without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413.',
+        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. @User() picks the tenant: the authenticated user, or FF_DEV_ACCOUNT_ID ("000000000001") when FF_AUTH_MODE=dev in development; without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413.',
         code: 'BE/src/main.ts · BE/src/auth/decorators/user.decorator.ts' },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
         text: 'The row gets its UUID, the tenant ID, and the defaults: cpu 100, minInstances 0, maxInstances 1, targetConcurrency 100, scaleToZero true.',
         code: 'BE/src/functions/functions.service.ts create()',
-        msg: { kind: 'sql', text: "INSERT INTO \"functions\" (\"name\", \"user_id\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '1', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
+        msg: { kind: 'sql', text: "INSERT INTO \"functions\" (\"name\", \"user_id\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '000000000001', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
         set: { 'PostgreSQL.functions': 'CREATING' } },
       { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts', title: 'An archive copy of the code',
         text: 'The code goes to the functions bucket under <id>/code.ts. Nothing reads it back today: the cluster gets the code through a ConfigMap.',
@@ -697,7 +697,7 @@ const SCENARIOS = [
       { from: 'api', to: 'user', kind: 'res', label: '201 Created · the function', title: 'You get the function back',
         text: 'The response is the stored record. Keep its id: you need it to invoke, update, or delete the function.',
         code: 'functions.controller.ts create()',
-        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'hello', userId: '1', runtime: 'nodejs', code: '// A Node.js function in TypeScript…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, id: FN, cpu: 100, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:00:09.412Z' } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, id: FN, cpu: 100, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:00:09.412Z' } } },
     ],
   },
   {
@@ -887,7 +887,7 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'PUT /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { code: CODE_TS_V2 } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT · is it yours?', title: 'Only the owner may update',
         text: 'Update and delete compare the function\'s userId with the caller\'s tenant, and refuse anyone else with 401.', code: 'functions.controller.ts update()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '1' = the caller" } },
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '000000000001' = the caller" } },
       { from: 'api', to: 'api', kind: 'int', label: 'the code changed → roll out', title: 'Does this need a rollout?',
         text: 'Only a change to the code, runtime, memory, or timeout rolls out a new version, and only when the value differs from the stored one. Other fields are just saved.', code: 'functions.service.ts update() · ROLLOUT_FIELDS' },
       { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced', text: 'Same key, new content.', code: 'BE/src/minio-client/minio-client.service.ts uploadCode()',
@@ -918,7 +918,7 @@ const SCENARIOS = [
         msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"code\" = '…Marhba…', \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = '" + FN + "';" },
         set: { 'PostgreSQL.functions': 'ACTIVE (new code)' } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · the function', title: 'Done', text: 'The next invocation answers "Marhba Tunis".', code: 'functions.controller.ts update()',
-        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', userId: '1', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, cpu: 100, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, cpu: 100, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
     ],
   },
   {
@@ -928,7 +928,7 @@ const SCENARIOS = [
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'DELETE /functions/:id', title: 'You delete the function', text: 'No body.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'DELETE /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT · is it yours?', title: 'Only the owner may delete', text: 'Anyone else gets 401.', code: 'functions.controller.ts remove()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '1' = the caller" } },
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '000000000001' = the caller" } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Deployment', title: 'The Deployment goes first', text: 'Its ReplicaSet and pods go with it.', code: 'kubernetes.orchestrator.ts remove()', hl: ['deployment'],
         msg: { kind: 'http', first: 'DELETE ' + DEPLOY_PATH + ' HTTP/1.1' },
         set: { [K + '.Deployment']: null, [K + '.Pod']: 'Terminating' } },
@@ -1206,7 +1206,7 @@ function archBig() {
     '<defs>' + arrowDefs('arch-arrow', '--muted') + '</defs>' +
     svgGroup(208, 20, 300, 420, 'Your machine or server') +
     svgGroup(560, 20, 428, 520, 'Kubernetes cluster (k3s)') +
-    svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-6b86b273ff34 (tenant 1)', 'end') +
+    svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-27d6fbbe5c7d (dev account)', 'end') +
     svgBox('user', 16, 136, 150, 76, 'You', 'dashboard · curl') +
     svgBox('api', 226, 52, 264, 244, 'Backend API', 'NestJS · :3000', { top: true }) +
     svgComp(242, 108, 232, 36, 'Functions: controller · service') +
@@ -1575,7 +1575,7 @@ function k8sObjects() {
   const lines = (x, y, list, step) => list.map((t, n) => '<text class="s" x="' + x + '" y="' + (y + (step || 14) * n) + '">' + escText(t) + '</text>').join('');
   return '<svg class="diagram ko" viewBox="0 0 1000 500" role="img" aria-label="Kubernetes objects of one tenant and the network rules">' +
     '<defs>' + arrowDefs('ko-n', '--muted') + arrowDefs('ko-allow', '--ok') + arrowDefs('ko-deny', '--danger') + '</defs>' +
-    '<rect class="zone" x="190" y="10" width="620" height="390" rx="14"/><text class="zone" x="206" y="30">Namespace ff-t-6b86b273ff34 · managed by ff-controller · Pod Security "restricted"</text>' +
+    '<rect class="zone" x="190" y="10" width="620" height="390" rx="14"/><text class="zone" x="206" y="30">Namespace ff-t-27d6fbbe5c7d · managed by ff-controller · Pod Security "restricted"</text>' +
     obj(206, 44, 186, 44, 'ResourceQuota', 'ff-tenant-quota') + obj(406, 44, 186, 44, 'LimitRange', 'ff-tenant-limits') + obj(606, 44, 190, 44, 'NetworkPolicy', 'ff-default-deny · every pod') +
     '<text class="zone" x="206" y="118">Per function, labelled ff.dev/function-id and ff.dev/runtime</text>' +
     obj(206, 130, 220, 44, 'Deployment fn-<id>', 'replicas · rolling updates') +

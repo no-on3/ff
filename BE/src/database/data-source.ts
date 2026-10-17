@@ -9,7 +9,8 @@
  */
 import 'dotenv/config';
 import { DataSource } from 'typeorm';
-import configuration from '../config/configuration';
+import { databaseConfiguration } from '../config/configuration';
 import { dataSourceOptions } from './database.options';
 
-export default new DataSource(dataSourceOptions(configuration().database));
+// Only DB_* and NODE_ENV are read and checked: a migration job needs nothing else.
+export default new DataSource(dataSourceOptions(databaseConfiguration()));

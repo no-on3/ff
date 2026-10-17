@@ -1,65 +1,302 @@
 // Imported through the "@/" alias on purpose: this spec also proves the
 // Jest moduleNameMapper matches the tsconfig "paths" mapping.
-import configuration from '@/config/configuration';
+import configuration, { ConfigurationError, Env, VARIABLES, databaseConfiguration } from '@/config/configuration';
+import { parse as parseEnvFile } from 'dotenv';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+/** The smallest valid development environment: everything else has a default. */
+const dev: Env = { FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' };
+
+/** The smallest valid production environment. */
+const production: Env = {
+  NODE_ENV: 'production',
+  FF_OIDC_ISSUER: 'https://login.ff.example/realms/ff',
+  FF_OIDC_AUDIENCE: 'ff-api',
+  DB_PASSWORD: 'a-long-database-secret',
+  MINIO_ACCESS_KEY: 'prod-access-key',
+  MINIO_SECRET_KEY: 'prod-secret-key',
+  CORS_ORIGIN: 'https://console.ff.example',
+};
+
+/** The problems a configuration is refused for; fails the test if it is accepted. */
+function problems(env: Env, load: (env: Env) => unknown = configuration): string[] {
+  try {
+    load(env);
+  } catch (error) {
+    expect(error).toBeInstanceOf(ConfigurationError);
+    return (error as ConfigurationError).problems;
+  }
+  throw new Error('the configuration was accepted');
+}
 
 describe('configuration', () => {
-  const originalEnv = process.env;
+  it('runs a development backend on defaults, given only the development account', () => {
+    const config = configuration(dev);
 
-  beforeEach(() => {
-    process.env = {};
-  });
-
-  afterAll(() => {
-    process.env = originalEnv;
-  });
-
-  it('falls back to development defaults when no variables are set', () => {
-    const config = configuration();
-
-    expect(config.port).toBe(3000);
-    expect(config.database).toEqual({
-      host: 'localhost',
-      port: 5432,
-      username: 'postgres',
-      password: 'postgres',
-      name: 'postgres',
-      logging: true,
+    expect(config).toMatchObject({
+      nodeEnv: 'development',
+      port: 3000,
+      cors: { origins: ['http://localhost:5173'] },
+      auth: { mode: 'dev', devAccountId: '000000000001', oidc: undefined },
+      database: {
+        host: 'localhost',
+        port: 5432,
+        username: 'postgres',
+        password: 'postgres',
+        name: 'postgres',
+        logging: true,
+        ssl: false,
+      },
+      minio: { endPoint: 'localhost', port: 9003, useSSL: false, bucketName: 'functions' },
+      orchestrator: { driver: 'kubernetes', readyTimeoutSeconds: 90 },
+      scaling: { scaleToZeroIdleSeconds: 900, maxRequestsPerInstance: 2 },
+      kubernetes: {
+        apiUrl: '',
+        tokenFile: '/var/run/secrets/kubernetes.io/serviceaccount/token',
+        caFile: '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt',
+        invokeMode: '',
+        namespacePrefix: 'ff-t-',
+        runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v1', python: 'ff-runtime-python:3.13-v1' },
+        imagePullPolicy: 'IfNotPresent',
+        runtimeClass: '',
+        readyTimeoutSeconds: 90,
+        egressInternet: true,
+        ingressAllowCidrs: [],
+        tenantQuota: { pods: '20', cpu: '8', memory: '8Gi' },
+      },
     });
-    expect(config.minio).toMatchObject({ port: 9003, useSSL: false, bucketName: 'functions' });
-    expect(config.orchestrator).toEqual({ driver: 'kubernetes', readyTimeoutSeconds: 90 });
-    expect(config.scaling).toEqual({ scaleToZeroIdleSeconds: 900, maxRequestsPerInstance: 2 });
   });
 
-  it('applies environment overrides and parses numbers and booleans', () => {
-    process.env = {
-      PORT: '4100',
+  it('parses numbers, booleans and lists, trims values, and treats a blank value as unset', () => {
+    const config = configuration({
+      ...dev,
+      PORT: ' 4100 ',
       DB_HOST: 'db.internal',
       DB_PORT: '6543',
       DB_NAME: 'ff',
       MINIO_PORT: '9100',
       MINIO_USE_SSL: 'true',
       MINIO_BUCKET_NAME: 'artifacts',
-      ORCHESTRATOR: 'kubernetes',
       FF_READY_TIMEOUT_SECONDS: '30',
-    };
-
-    const config = configuration();
+      CORS_ORIGIN: 'http://localhost:5173, http://localhost:5174/',
+      K8S_EGRESS_INTERNET: 'false',
+      K8S_INGRESS_ALLOW_CIDRS: '10.42.0.0/16, fd00::/8',
+      K8S_INVOKE_MODE: 'direct',
+      K8S_RUNTIME_CLASS: '',
+      K8S_TENANT_QUOTA_CPU: '500m',
+      FF_SCALE_TO_ZERO_IDLE_SECONDS: '',
+    });
 
     expect(config.port).toBe(4100);
-    expect(config.orchestrator).toEqual({ driver: 'kubernetes', readyTimeoutSeconds: 30 });
     expect(config.database).toMatchObject({ host: 'db.internal', port: 6543, name: 'ff' });
     expect(config.minio).toMatchObject({ port: 9100, useSSL: true, bucketName: 'artifacts' });
+    expect(config.orchestrator.readyTimeoutSeconds).toBe(30);
+    expect(config.cors.origins).toEqual(['http://localhost:5173', 'http://localhost:5174/']);
+    expect(config.kubernetes).toMatchObject({
+      egressInternet: false,
+      ingressAllowCidrs: ['10.42.0.0/16', 'fd00::/8'],
+      invokeMode: 'direct',
+      runtimeClass: '',
+      tenantQuota: { cpu: '500m' },
+    });
+    expect(config.scaling.scaleToZeroIdleSeconds).toBe(900);
   });
 
-  it('turns query logging off in production', () => {
-    process.env = { NODE_ENV: 'production' };
+  it('accepts a complete production configuration: oidc, no query logging, the given origins', () => {
+    const config = configuration(production);
 
-    expect(configuration().database.logging).toBe(false);
+    expect(config.auth).toEqual({
+      mode: 'oidc',
+      devAccountId: undefined,
+      oidc: { issuer: 'https://login.ff.example/realms/ff', audience: 'ff-api' },
+    });
+    expect(config.database.logging).toBe(false);
+    expect(config.cors.origins).toEqual(['https://console.ff.example']);
+  });
+
+  describe('BE/.env.example, which the getting-started guide copies', () => {
+    const example = parseEnvFile(fs.readFileSync(path.join(__dirname, '../../.env.example')));
+
+    it('is a valid development configuration as it is', () => {
+      expect(configuration(example).auth).toMatchObject({ mode: 'dev', devAccountId: '000000000001' });
+    });
+
+    it('documents every variable, and only variables the backend reads', () => {
+      expect(Object.keys(example).filter((name) => !VARIABLES.includes(name))).toEqual([]);
+      expect(VARIABLES.filter((name) => !(name in example))).toEqual([]);
+    });
   });
 
   it('has no schema synchronization switch: the schema comes only from migrations', () => {
-    process.env = { NODE_ENV: 'development' };
+    expect(configuration(dev).database).not.toHaveProperty('synchronize');
+  });
 
-    expect(configuration().database).not.toHaveProperty('synchronize');
+  describe('production refuses development settings', () => {
+    it.each<[string, Env, string]>([
+      ['the dev authentication mode', { FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' }, 'FF_AUTH_MODE=dev is for development only'],
+      ['the default database password', { DB_PASSWORD: undefined }, 'DB_PASSWORD must be set, and not to the development default'],
+      ['the default database password, set explicitly', { DB_PASSWORD: 'postgres' }, 'DB_PASSWORD must be set'],
+      ['the default storage access key', { MINIO_ACCESS_KEY: undefined }, 'MINIO_ACCESS_KEY must be set, and not to a development default'],
+      ['the dev storage access key', { MINIO_ACCESS_KEY: 'ffdevaccesskey' }, 'MINIO_ACCESS_KEY must be set'],
+      ['the default storage secret key', { MINIO_SECRET_KEY: 'minioadmin' }, 'MINIO_SECRET_KEY must be set'],
+      ['the dev storage secret key', { MINIO_SECRET_KEY: 'ffdevsecretkey-local-only' }, 'MINIO_SECRET_KEY must be set'],
+      ['a missing Keycloak issuer', { FF_OIDC_ISSUER: undefined }, 'FF_OIDC_ISSUER is required when FF_AUTH_MODE is oidc'],
+      ['a missing Keycloak audience', { FF_OIDC_AUDIENCE: '' }, 'FF_OIDC_AUDIENCE is required when FF_AUTH_MODE is oidc'],
+      ['an issuer without TLS', { FF_OIDC_ISSUER: 'http://login.ff.example/realms/ff' }, 'FF_OIDC_ISSUER must be an https:// URL'],
+      ['a missing console origin for CORS', { CORS_ORIGIN: undefined }, "CORS_ORIGIN must be set to the console's origin"],
+    ])('%s', (_label, change, expected) => {
+      const found = problems({ ...production, ...change });
+
+      expect(found).toEqual([expect.stringContaining(expected)]);
+    });
+
+    it('never repeats a refused credential in the message', () => {
+      const message = (() => {
+        try {
+          configuration({ ...production, MINIO_SECRET_KEY: 'ffdevsecretkey-local-only', DB_PASSWORD: 'postgres' });
+        } catch (error) {
+          return (error as Error).message;
+        }
+        return '';
+      })();
+
+      expect(message).toContain('MINIO_SECRET_KEY');
+      expect(message).not.toContain('ffdevsecretkey-local-only');
+      expect(message).not.toMatch(/"postgres"|: postgres/);
+    });
+  });
+
+  describe('authentication, in every environment', () => {
+    it('defaults to oidc, so a bare environment must name its issuer and audience', () => {
+      expect(problems({})).toEqual([
+        expect.stringContaining('FF_OIDC_ISSUER is required when FF_AUTH_MODE is oidc, the default (for development without Keycloak, set FF_AUTH_MODE=dev)'),
+        expect.stringContaining('FF_OIDC_AUDIENCE is required'),
+      ]);
+    });
+
+    it('needs a 12-digit development account in dev mode', () => {
+      expect(problems({ FF_AUTH_MODE: 'dev' })).toEqual(['FF_DEV_ACCOUNT_ID is required when FF_AUTH_MODE=dev']);
+      expect(problems({ FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '1' })).toEqual([
+        'FF_DEV_ACCOUNT_ID must be an account ID: 12 digits; got "1"',
+      ]);
+    });
+
+    it('explains that FF_DEV_USER_ID was replaced', () => {
+      expect(problems({ ...dev, FF_DEV_USER_ID: '1' })).toEqual([
+        expect.stringContaining('FF_DEV_USER_ID is no longer read: set FF_AUTH_MODE=dev and FF_DEV_ACCOUNT_ID'),
+      ]);
+    });
+
+    it('accepts oidc outside production with a plain http issuer (a local Keycloak)', () => {
+      const config = configuration({ FF_OIDC_ISSUER: 'http://localhost:8180/realms/ff', FF_OIDC_AUDIENCE: 'ff-api' });
+
+      expect(config.auth.oidc).toEqual({ issuer: 'http://localhost:8180/realms/ff', audience: 'ff-api' });
+    });
+  });
+
+  describe('a bad value is refused, naming the variable and what it expects', () => {
+    it.each<[string, string, string]>([
+      ['DB_PORT', 'abc', 'DB_PORT must be a whole number from 1 to 65535; got "abc"'],
+      ['PORT', '0', 'PORT must be a whole number from 1 to 65535; got "0"'],
+      ['FF_READY_TIMEOUT_SECONDS', '-5', 'FF_READY_TIMEOUT_SECONDS must be a whole number from 1 to 3600; got "-5"'],
+      ['MINIO_USE_SSL', 'yes', 'MINIO_USE_SSL must be true or false; got "yes"'],
+      ['NODE_ENV', 'staging', 'NODE_ENV must be one of development, production, test; got "staging"'],
+      ['ORCHESTRATOR', 'nomad', 'ORCHESTRATOR must be one of kubernetes; got "nomad"'],
+      ['K8S_IMAGE_PULL_POLICY', 'Sometimes', 'K8S_IMAGE_PULL_POLICY must be one of IfNotPresent, Always, Never; got "Sometimes"'],
+      ['K8S_INVOKE_MODE', 'tunnel', 'K8S_INVOKE_MODE must be one of direct, proxy; got "tunnel"'],
+      ['K8S_TENANT_QUOTA_CPU', '8 cores', 'K8S_TENANT_QUOTA_CPU must be a Kubernetes quantity such as 8, 500m or 8Gi; got "8 cores"'],
+      ['K8S_TENANT_QUOTA_PODS', '0', 'K8S_TENANT_QUOTA_PODS must be a whole number above 0; got "0"'],
+      ['K8S_RUNTIME_CLASS', 'G_Visor', 'K8S_RUNTIME_CLASS must be a Kubernetes object name'],
+      ['K8S_NAMESPACE_PREFIX', 'FF_', 'K8S_NAMESPACE_PREFIX must be lowercase letters, digits and "-"'],
+      ['K8S_API_URL', '127.0.0.1:6550', 'K8S_API_URL must be an http:// or https:// URL; got "127.0.0.1:6550"'],
+      ['FF_OIDC_ISSUER', 'login.ff.example', 'FF_OIDC_ISSUER must be an http:// or https:// URL'],
+      ['MINIO_BUCKET_NAME', 'Functions_Bucket', 'MINIO_BUCKET_NAME must be an S3 bucket name'],
+      ['CORS_ORIGIN', 'https://console.ff.example/app', 'CORS_ORIGIN must be a comma-separated list of origins'],
+      ['K8S_INGRESS_ALLOW_CIDRS', '10.0.0.0/8,10.0.0.0/33', 'K8S_INGRESS_ALLOW_CIDRS must be a comma-separated list of CIDR blocks such as 10.42.0.0/16; got "10.0.0.0/33"'],
+    ])('%s=%s', (name, value, expected) => {
+      expect(problems({ ...dev, [name]: value })).toEqual([expect.stringContaining(expected)]);
+    });
+
+    it('lists every bad variable at once', () => {
+      const found = problems({ ...dev, DB_PORT: 'x', MINIO_USE_SSL: 'maybe', K8S_TENANT_QUOTA_MEMORY: 'lots' });
+
+      expect(found.map((problem) => problem.split(' ')[0])).toEqual(['DB_PORT', 'MINIO_USE_SSL', 'K8S_TENANT_QUOTA_MEMORY']);
+    });
+
+    it('says how many problems there are, one per line', () => {
+      expect(() => configuration({ ...dev, DB_PORT: 'x', PORT: 'y' })).toThrow(
+        /^Invalid configuration \(2 problems\):\n {2}- DB_PORT .*\n {2}- PORT /,
+      );
+    });
+  });
+
+  describe('database TLS', () => {
+    let dir: string;
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-config-'));
+      fs.writeFileSync(path.join(dir, 'ca.pem'), '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n');
+      fs.writeFileSync(path.join(dir, 'not-a-cert.txt'), 'hello');
+    });
+
+    afterAll(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('is off by default, and verifies against the system CAs when DB_SSL is on', () => {
+      expect(configuration(dev).database.ssl).toBe(false);
+      expect(configuration({ ...dev, DB_SSL: 'true' }).database.ssl).toEqual({ ca: undefined });
+    });
+
+    it('loads the CA certificate named by DB_SSL_CA', () => {
+      const ssl = configuration({ ...dev, DB_SSL: 'true', DB_SSL_CA: path.join(dir, 'ca.pem') }).database.ssl;
+
+      expect(ssl).toEqual({ ca: expect.stringContaining('-----BEGIN CERTIFICATE-----') });
+    });
+
+    it.each<[string, Env, string]>([
+      ['a CA without TLS', { DB_SSL_CA: '/etc/ssl/db-ca.pem' }, 'DB_SSL_CA is set, but DB_SSL is not true'],
+      ['a CA file that does not exist', { DB_SSL: 'true', DB_SSL_CA: '/nonexistent/ca.pem' }, 'DB_SSL_CA cannot be read: /nonexistent/ca.pem (ENOENT)'],
+      ['a CA file that holds no certificate', { DB_SSL: 'true', DB_SSL_CA: 'not-a-cert.txt' }, 'DB_SSL_CA must be a PEM file with at least one certificate'],
+    ])('refuses %s', (_label, change, expected) => {
+      const env = { ...dev, ...change };
+      if (env.DB_SSL_CA === 'not-a-cert.txt') env.DB_SSL_CA = path.join(dir, 'not-a-cert.txt');
+
+      expect(problems(env)).toEqual([expect.stringContaining(expected)]);
+    });
+  });
+});
+
+describe('databaseConfiguration (the TypeORM CLI and the drift check)', () => {
+  it('reads only DB_* and NODE_ENV: a migration job needs no other setting', () => {
+    const settings = databaseConfiguration({
+      NODE_ENV: 'production',
+      DB_HOST: 'db.internal',
+      DB_PASSWORD: 'a-long-database-secret',
+      // Invalid or missing for the backend, irrelevant here:
+      K8S_TENANT_QUOTA_CPU: 'lots',
+      FF_DEV_USER_ID: '1',
+    });
+
+    expect(settings).toEqual({
+      host: 'db.internal',
+      port: 5432,
+      username: 'postgres',
+      password: 'a-long-database-secret',
+      name: 'postgres',
+      logging: false,
+      ssl: false,
+    });
+  });
+
+  it('still refuses bad database values and the default password in production', () => {
+    expect(problems({ DB_PORT: 'abc' }, databaseConfiguration)).toEqual([
+      'DB_PORT must be a whole number from 1 to 65535; got "abc"',
+    ]);
+    expect(problems({ NODE_ENV: 'production' }, databaseConfiguration)).toEqual([
+      'DB_PASSWORD must be set, and not to the development default, when NODE_ENV=production',
+    ]);
   });
 });

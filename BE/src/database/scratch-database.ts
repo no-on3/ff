@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { DataSource } from 'typeorm';
-import { DatabaseSettings, dataSourceOptions } from './database.options';
+import { DatabaseSettings, dataSourceOptions, sslOptions } from './database.options';
 
 /** A new, empty database on the configured server, with a data source already connected to it. */
 export interface ScratchDatabase {
@@ -21,6 +21,7 @@ function adminDataSource(settings: DatabaseSettings): DataSource {
     username: settings.username,
     password: settings.password,
     database: 'postgres',
+    ssl: sslOptions(settings),
   });
 }
 

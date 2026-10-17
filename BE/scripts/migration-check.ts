@@ -9,12 +9,12 @@
  */
 import 'dotenv/config';
 import { describeError } from '../src/common/describe-error';
-import configuration from '../src/config/configuration';
+import { databaseConfiguration } from '../src/config/configuration';
 import { withScratchDatabase } from '../src/database/scratch-database';
 import { schemaDrift } from '../src/database/schema-check';
 
 async function main(): Promise<number> {
-  return withScratchDatabase(configuration().database, 'ff_check', async (dataSource) => {
+  return withScratchDatabase(databaseConfiguration(), 'ff_check', async (dataSource) => {
     const ran = await dataSource.runMigrations({ transaction: 'each' });
     const drift = await schemaDrift(dataSource);
     if (drift.length === 0) {

@@ -1265,7 +1265,7 @@ The status column records what the [Kubernetes migration](kubernetes-migration-p
 | H-11 | F-10 → B-08 | 0 / 2 | Open. The dev CORS origin now matches the console's Vite port (K-12). |
 | H-12 | F-15 replace MinIO (ADR-002), AWS SDK S3 client | 0 | Partly done. SeaweedFS replaces MinIO in docker-compose (K-08). The backend still uses the `minio` npm client against it. |
 | M-1 | F-09 | 0 | Open |
-| M-2 | F-05 | 0 | Partly done. `BE/.env.example` lists only variables the code reads (82 → 32), and unused configuration sections were removed. The validated schema is open. |
+| M-2 | F-05 | 0 | Done (P-02, 2026-10-17). One Zod schema for every variable, checked at boot, with messages that name each variable. Production refuses the dev authentication mode, the default database and storage credentials, and a missing Keycloak issuer, audience or console origin. `BE/.env.example` documents exactly the variables the code reads, which a test enforces. |
 | M-4 | R-01 Lambda naming and limits | 1 | Open |
 | M-5 | F-13 | 0 | Done (K-09) |
 | M-7, M-8, M-9, L-1, L-2 | F-11, F-12 | 0 | M-7, L-1, L-2 done: the unversioned scripts and the old wrapper were deleted, the outdated docs were removed and the README rewritten (K-12), and the root clutter is gone. M-8 done: docker-compose starts only PostgreSQL and S3, with development credentials bound to 127.0.0.1. M-9 partly done: unit, container, cluster and end-to-end tests exist, and the debug logs are gone; CI is open. |

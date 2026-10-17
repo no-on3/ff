@@ -6,7 +6,7 @@ import { OrchestratorModule } from './orchestrator.module';
 import { ORCHESTRATOR } from './orchestrator.types';
 
 function compileWithDriver(driver: string) {
-  const defaults = configuration();
+  const defaults = configuration({ FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' });
   return Test.createTestingModule({
     imports: [
       ConfigModule.forRoot({

@@ -6,7 +6,7 @@
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
-import configuration from '../config/configuration';
+import { databaseConfiguration } from '../config/configuration';
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
@@ -26,7 +26,7 @@ interface ColumnRow {
 }
 
 run('database schema (L2, real PostgreSQL)', () => {
-  const settings = configuration().database;
+  const settings = databaseConfiguration();
 
   it('a fresh database has every migration pending, and the startup check refuses it', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {

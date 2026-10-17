@@ -1,11 +1,11 @@
 import { DataSource } from 'typeorm';
 import { PostgresDriver } from 'typeorm/driver/postgres/PostgresDriver';
-import configuration from '../config/configuration';
+import { databaseConfiguration } from '../config/configuration';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { MIGRATIONS } from '../migrations';
-import { dataSourceOptions } from './database.options';
+import { dataSourceOptions, sslOptions } from './database.options';
 import { ENTITIES } from './entities';
 
 /** Builds the entity mapping without connecting, so it can be checked offline. */
@@ -18,21 +18,25 @@ class OfflineDataSource extends DataSource {
 const SNAKE = /^[a-z][a-z0-9_]*$/;
 
 describe('dataSourceOptions', () => {
-  const originalEnv = process.env;
-  const settings = { host: 'db', port: 5432, username: 'ff', password: 'secret', name: 'ff', logging: false };
-
-  afterEach(() => {
-    process.env = originalEnv;
-  });
+  const settings = { host: 'db', port: 5432, username: 'ff', password: 'secret', name: 'ff', logging: false, ssl: false as const };
 
   it.each(['development', 'production', undefined])(
     'never synchronizes the schema or runs migrations by itself (NODE_ENV=%s)',
     (nodeEnv) => {
-      process.env = nodeEnv ? { NODE_ENV: nodeEnv } : {};
+      const env = nodeEnv ? { NODE_ENV: nodeEnv, DB_PASSWORD: 'not-the-default' } : {};
 
-      expect(dataSourceOptions(configuration().database)).toMatchObject({ synchronize: false, migrationsRun: false });
+      expect(dataSourceOptions(databaseConfiguration(env))).toMatchObject({ synchronize: false, migrationsRun: false });
     },
   );
+
+  it('connects without TLS unless DB_SSL is on, and then always verifies the server', () => {
+    const pem = '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n';
+
+    expect(dataSourceOptions(settings)).toMatchObject({ ssl: false });
+    expect(sslOptions({ ...settings, ssl: {} })).toEqual({ rejectUnauthorized: true });
+    expect(sslOptions({ ...settings, ssl: { ca: pem } })).toEqual({ rejectUnauthorized: true, ca: pem });
+    expect(dataSourceOptions({ ...settings, ssl: { ca: pem } })).toMatchObject({ ssl: { rejectUnauthorized: true, ca: pem } });
+  });
 
   it('connects with the configured settings', () => {
     expect(dataSourceOptions(settings)).toMatchObject({

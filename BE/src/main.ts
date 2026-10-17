@@ -24,7 +24,7 @@ async function bootstrap() {
   // Global middleware
   app.use(helmet());
   app.enableCors({
-    origin: configService.get<string>('CORS_ORIGIN'),
+    origin: configService.getOrThrow<string[]>('cors.origins'),
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
     credentials: true,
@@ -52,7 +52,7 @@ async function bootstrap() {
 
   // Start the server
   
-  const port = configService.get<number>('PORT', 3000);
+  const port = configService.getOrThrow<number>('port');
   await app.listen(port);
   console.log(`Application is running on: ${await app.getUrl()}`);
 }

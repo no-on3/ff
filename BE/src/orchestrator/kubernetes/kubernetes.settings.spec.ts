@@ -2,14 +2,10 @@ import { ConfigService } from '@nestjs/config';
 import configuration from '../../config/configuration';
 import { resolveKubernetesSettings } from './kubernetes.settings';
 
+/** The settings the backend would resolve from these variables (with development authentication). */
 function settingsFor(env: Record<string, string>) {
-  const original = process.env;
-  process.env = { ...env };
-  try {
-    return resolveKubernetesSettings(new ConfigService(configuration()), process.env);
-  } finally {
-    process.env = original;
-  }
+  const config = configuration({ FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001', ...env });
+  return resolveKubernetesSettings(new ConfigService(config), env);
 }
 
 describe('resolveKubernetesSettings', () => {
@@ -51,9 +47,17 @@ describe('resolveKubernetesSettings', () => {
 
   it.each([
     [{}, 'K8S_API_URL is not set'],
-    [{ K8S_API_URL: 'https://x', K8S_INVOKE_MODE: 'teleport' }, 'K8S_INVOKE_MODE must be'],
-    [{ K8S_API_URL: 'https://x', K8S_NAMESPACE_PREFIX: 'Bad_Prefix' }, 'Invalid K8S_NAMESPACE_PREFIX'],
+    [{ K8S_API_URL: 'https://x', K8S_INVOKE_MODE: 'teleport' }, 'K8S_INVOKE_MODE must be one of direct, proxy'],
+    [{ K8S_API_URL: 'https://x', K8S_NAMESPACE_PREFIX: 'Bad_Prefix' }, 'K8S_NAMESPACE_PREFIX must be lowercase letters'],
   ])('rejects invalid configuration %p', (env, message) => {
     expect(() => settingsFor(env)).toThrow(message);
+  });
+
+  it('checks the invoke mode and prefix itself too, for settings that bypass the schema', () => {
+    const resolve = (kubernetes: object) =>
+      resolveKubernetesSettings(new ConfigService({ kubernetes: { apiUrl: 'https://x', namespacePrefix: 'ff-t-', ...kubernetes } }), {});
+
+    expect(() => resolve({ invokeMode: 'teleport' })).toThrow('K8S_INVOKE_MODE must be "direct" or "proxy"');
+    expect(() => resolve({ namespacePrefix: 'Bad_Prefix' })).toThrow('Invalid K8S_NAMESPACE_PREFIX');
   });
 });

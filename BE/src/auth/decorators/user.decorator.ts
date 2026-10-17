@@ -1,23 +1,29 @@
 import { createParamDecorator, ExecutionContext, UnauthorizedException } from '@nestjs/common';
 
 /**
- * The caller's tenant ID: the authenticated user's `sub` on request.user (set
- * by an authentication guard, once parent plan F-01 adds one), or
- * FF_DEV_USER_ID when no authentication is in place.
- *
- * FF_DEV_USER_ID is a development-only stand-in until real authentication is
- * switched on (parent plan F-01). Without either, the request is rejected.
+ * The caller's tenant ID, until P-10 replaces this decorator with @Principal():
+ * the authenticated user's `sub` on request.user (set by the authentication
+ * guard that P-11 adds), or, in development mode, the development account.
+ * Without either, the request is rejected.
  */
-export function resolveUserId(user: unknown, devUserId: string | undefined): string {
+export function resolveTenantId(user: unknown, devAccountId: string | undefined): string {
   if (typeof user === 'string' && user) return user;
   if (user && typeof user === 'object' && 'sub' in user && (user as { sub: unknown }).sub) {
     return String((user as { sub: unknown }).sub);
   }
-  if (devUserId) return devUserId;
+  if (devAccountId) return devAccountId;
   throw new UnauthorizedException('Authentication required');
 }
 
-export const User = createParamDecorator((data: unknown, ctx: ExecutionContext) => {
+/**
+ * FF_DEV_ACCOUNT_ID when FF_AUTH_MODE=dev, else nothing. Both are checked at
+ * boot (src/config/configuration.ts), and production refuses the dev mode.
+ */
+export function devAccountId(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env.FF_AUTH_MODE?.trim() === 'dev' ? env.FF_DEV_ACCOUNT_ID?.trim() || undefined : undefined;
+}
+
+export const User = createParamDecorator((_data: unknown, ctx: ExecutionContext) => {
   const request = ctx.switchToHttp().getRequest();
-  return resolveUserId(request.user, process.env.FF_DEV_USER_ID);
+  return resolveTenantId(request.user, devAccountId());
 });

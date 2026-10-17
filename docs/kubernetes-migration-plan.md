@@ -153,7 +153,7 @@ and calls functions directly at http://fn-<id>.<ns>.svc:8080 (K8S_INVOKE_MODE=di
 | `K8S_INGRESS_ALLOW_CIDRS` | *(empty)* | Extra ingress sources (comma-separated) |
 | `K8S_TENANT_QUOTA_PODS` / `_CPU` / `_MEMORY` | `20` / `8` / `8Gi` | Tenant ResourceQuota |
 | `FF_SCALE_TO_ZERO_IDLE_SECONDS` | `900` | Idle time before an eligible function is scaled to zero |
-| `FF_DEV_USER_ID` | *(empty)* | **Development only.** Tenant used when no authenticated user exists (K-07). |
+| `FF_DEV_USER_ID` | *(empty)* | **Development only.** Tenant used when no authenticated user exists (K-07). Replaced on 2026-10-17 by `FF_AUTH_MODE=dev` and `FF_DEV_ACCOUNT_ID` ([client-readiness plan](client-readiness-plan.md), P-02). |
 
 ### 4.6 Pinned versions
 

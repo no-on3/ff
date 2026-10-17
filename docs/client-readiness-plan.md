@@ -12,7 +12,7 @@ The function engine works: functions deploy to Kubernetes, scale to zero, run in
 
 | Phase | You get | Needs |
 |---|---|---|
-| **0. Groundwork** | Migrations that work in production, a validated configuration that refuses the development tenant in production, ADR 0004, and the defects of §1.6 fixed: function updates and failures, the runtimes, the console, scaling, and cluster permissions | nothing |
+| **0. Groundwork** | Migrations that work in production, a validated configuration that refuses the development tenant in production, ADR 0004, the defects of §1.6 fixed (function updates and failures, the runtimes, the console, scaling, and cluster permissions), and the dependencies' known vulnerabilities (§1.7) | nothing |
 | **1. Accounts and isolation** | Sign-up and login (console, CLI, API keys); every route limited to the caller's account; plans, quotas and rate limits | Keycloak; an SMTP server |
 | **2. Metering** | One usage record per invocation, which deleting or editing a function can't change; usage per month in the API and console; idle capacity measured | phase 1 |
 | **3. Prepaid credit** | AWS Lambda's prices in dinars as a configurable price book; wallet and ledger; top-ups through Konnect and bank transfer; a balance check before each invoke; low-balance e-mails; monthly invoices | phase 2; a Konnect merchant account; the accountant's confirmations (§9) |
@@ -36,7 +36,7 @@ Checked against the code on 2026-10-16 (commit `c87df16`).
 | Finding | Where | Consequence |
 |---|---|---|
 | **No accounts or users.** The database has three tables: `functions`, `function_invocations` and `function_metrics`. No guard is registered anywhere. The console routes only the function pages. | `BE/src/app.module.ts`, `FE/src/App.tsx` | Nobody can sign up or log in. |
-| **The tenant is whatever `@User()` returns:** `request.user.sub`, which nothing sets, else `FF_DEV_USER_ID` (`1` in `BE/.env.example`). | `BE/src/auth/decorators/user.decorator.ts:22` | If the variable is set in production, every anonymous caller is that tenant. If it isn't, every request gets 401. |
+| **The tenant is whatever `@User()` returns:** `request.user.sub`, which nothing sets, else `FF_DEV_USER_ID` (`1` in `BE/.env.example`). **Partly fixed in P-02:** the development tenant is now `FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, which production refuses; P-10 replaces `@User()`. | `BE/src/auth/decorators/user.decorator.ts:22` | If the variable is set in production, every anonymous caller is that tenant. If it isn't, every request gets 401. |
 | **Ownership is checked only on update and delete,** and a mismatch answers 401 instead of 404. Get (which returns the code), invoke, invocation history (inputs and outputs) and scaling configuration check nothing. The metrics route doesn't even ask for a tenant. | `BE/src/functions/functions.controller.ts:49,63,74,82,93,106`, `BE/src/metrics/metrics.controller.ts` | As soon as there are two tenants, anyone who knows a function ID can read its code and its callers' data, and run it on the owner's bill (parent C-3). |
 | `?limit=` on the invocation history has no maximum. | `functions.controller.ts:95` | One request can dump a function's whole history. |
 | No rate limits. The tenant quota (20 pods, 8 CPU, 8 GiB) is the same for every tenant. | `BE/src/config/configuration.ts:52` | No plans. One tenant can use the cluster up to that quota. |
@@ -112,6 +112,17 @@ Found on 2026-10-16 while checking [How FF works](how-it-works.html) against the
 | **The invoke mode changes how a timeout is recorded.** When the backend gives up waiting, proxy mode (development) records `ERROR`, and direct mode (production) `TIMEOUT`. | `kubernetes.orchestrator.ts:209-218` | Development doesn't show what production records. |
 | **The OpenAPI document says invoke answers 200.** It answers 201, which `hack/e2e.sh` checks. | `BE/src/functions/functions.controller.ts:81` | Generated clients, and the L5 suite that reads the document, expect the wrong status. |
 | **The controller's permissions reach further than the admission policy.** `services/proxy` is granted cluster-wide, although the role says it is for development only, and the policy doesn't check proxy calls. Every read (pods, pod logs, ConfigMaps) is cluster-wide. The policy hard-codes `ff-t-`, while `K8S_NAMESPACE_PREFIX` can be changed. | `deploy/k8s/base/20-clusterrole.yaml:28-31`, `30-clusterrolebinding.yaml`, `40-admission-policy.yaml:45`, `BE/src/config/configuration.ts:39` | A stolen backend token can call any Service in the cluster and read every ConfigMap and pod log. Another prefix makes every deploy fail. |
+
+### 1.7 Dependencies
+
+Found on 2026-10-17 while adding Zod for P-02. P-09 upgrades them.
+
+| Finding | Where | Consequence |
+|---|---|---|
+| `npm audit --omit=dev` reports **26 known vulnerabilities** in the backend's production dependencies: 3 critical, 11 high, 11 moderate, 1 low. | `BE/package-lock.json` | Each is an exposure as soon as a customer can reach the API. The main ones follow. |
+| **TypeORM 0.3.20:** SQL injection through crafted values passed to `save` or `update`, fixed in 0.3.26; a non-breaking update. | `typeorm` | FF calls `save` with request data. |
+| **Express 4 under NestJS 10:** `proxy-addr` (IP spoofing, critical), `path-to-regexp` (ReDoS), `body-parser` and `multer` (denial of service). The audit's fix is NestJS 12, two major versions up, with Express 5. | `@nestjs/platform-express`, `express` | Crafted requests can stall the backend, and spoofed client addresses would defeat P-15's limits by IP. |
+| **minio 7:** `fast-xml-parser` (critical: entity expansion and an encoding bypass). The fix is minio 8. | `minio` | The object store's XML answers are parsed with it. |
 
 ## 2. Goals and non-goals
 
@@ -488,6 +499,13 @@ The same as the Kubernetes migration and the CLI plan:
 - **Database TLS:** `DB_SSL` and `DB_SSL_CA` (D13).
 - **`FF_DEV_USER_ID`** is replaced by `FF_AUTH_MODE=dev` and `FF_DEV_ACCOUNT_ID` (D2).
 - **Tests:** L1 for each refusal.
+- **As built** (2026-10-17):
+  - `BE/src/config/configuration.ts` holds the schema (Zod 4.6.5) for all 39 variables. `databaseConfiguration()` reads only `DB_*` and `NODE_ENV`, for the TypeORM CLI, the drift check and the L2 tests, so a migration job needs no other setting.
+  - **`FF_AUTH_MODE` defaults to `oidc`,** so the dev mode must be asked for. A deployment that forgets `NODE_ENV=production` still doesn't run open. Until P-11, `oidc` answers 401 to every request.
+  - The dev account is `000000000001` (namespace `ff-t-27d6fbbe5c7d`). A leftover `FF_DEV_USER_ID` is refused with an explanation.
+  - Production also refuses an `http://` issuer and a missing `CORS_ORIGIN` (P-60's "CORS limited to the console's origin"). `CORS_ORIGIN` is a checked list of origins.
+  - `DB_SSL` always verifies the server, against `DB_SSL_CA` or the system's CAs. There is no switch to skip verification.
+  - Messages name the variable and what it expects, and never repeat a credential.
 
 #### P-03: Function lifecycle fixes
 - **An update repairs a failed function.** A successful rollout sets `status = ACTIVE` and clears `error`. An update of a function in `ERROR` always rolls out, even when no rollout field changed, so the same code can be retried after a passing failure (a full quota, a missing image).
@@ -545,6 +563,17 @@ The same as the Kubernetes migration and the CLI plan:
 - **One timeout, one status:** when the backend gives up waiting in proxy mode, the error becomes a `FunctionTimeoutError`, as in direct mode. P-20 then maps it to the usage status.
 - **The migration plan's KubeClient names** match the code: `scaleDeployment`, `list`, and `podLog(ns, pod, container, tailLines)` (`docs/kubernetes-migration-plan.md:400-401`).
 - **Tests:** L1 for the timeout mapping; `hack/e2e.sh` unchanged.
+
+#### P-09: Dependency upgrades
+- **Why:** the known vulnerabilities of §1.7, found on 2026-10-17.
+- **Do:**
+  - the non-breaking fixes first (`npm audit fix`): TypeORM 0.3.26 or newer, `@nestjs/common` 10.4.16 or newer, `proxy-addr`, `sha.js`;
+  - NestJS 10 to 12, all `@nestjs/*` packages together, with Express 5;
+  - minio 7 to 8. If the client stays affected, replace it with the AWS SDK's S3 client: FF only uploads and deletes objects;
+  - the same audit for the console (`FE/`) and the Node.js runtime (`runtimes/nodejs`).
+- **Done when:** `npm audit --omit=dev` reports no critical or high finding in any of the three, or each remaining one is accepted in writing with a reason.
+- **Order:** before phase 1, because P-11 adds `jose` and P-15 adds `@nestjs/throttler`, which must match the NestJS version.
+- **Tests:** L0 to L4 green, unchanged; the audit's output in the progress log.
 
 ### Phase 1: accounts and isolation
 
@@ -980,7 +1009,7 @@ When one of these moves, its status changes here.
 
 | Phase | Working days | Notes |
 |---|---|---|
-| 0 | 12–18 | The schema baseline, the lifecycle fixes (P-03) and the scaling model (P-06) are most of it |
+| 0 | 14–22 | The schema baseline, the lifecycle fixes (P-03), the scaling model (P-06) and the NestJS upgrade (P-09) are most of it |
 | 1 | 15–20 | Keycloak, the rename to accounts, and the console pages are the largest parts |
 | 2 | 6–8 | |
 | 3 | 20–28 | Plus 10–15 for El Fatoora (P-37), with external lead times |
@@ -988,7 +1017,7 @@ When one of these moves, its status changes here.
 | 5 | 8–10 | |
 | 6 | 10–15 | Plus the external legal work |
 | Admin dashboard | 18–24 | Spread over phases 1, 3, 4 and 5; P-70 is the largest part |
-| **Total** | **97–135** | Milestone A (free pilot) is about 49–68 of these |
+| **Total** | **99–139** | Milestone A (free pilot) is about 51–72 of these |
 
 Without the fixes of P-03 to P-08, this is smaller than the parent plan's Phase 2 (about 24 person-weeks): one payment provider, bank transfers recorded by hand, a console in French and English only, and no SMS.
 
@@ -997,14 +1026,15 @@ Without the fixes of P-03 to P-08, this is smaller than the parent plan's Phase 
 | Task | Status | Commit | Evidence |
 |---|---|---|---|
 | P-00 Preparation and ADR 0004 | ✅ Done | `9326077` | • Branch `feat/client-ready` created from `master` at `5434ad9`. Baseline before any change: `tsc --noEmit` exit 0, `npm test` **12 suites / 122 tests**.<br>• [ADR 0004](adr/0004-identity-and-tenancy.md) records D1 to D5 and D12. It adds three precisions that the later tasks need: how a request chooses its account (`X-FF-Account`, now in D4), the exact API-key format, and that a key's limit to its creator's role is checked on every request (now in D3).<br>• D1 lists the `rejected` status, as §4 already did.<br>• The external actions are listed in §9, waiting for you.<br>• `hack/check-docs.py` passes on the ADR, this plan, and the docs index. |
-| P-01 Schema baseline | ✅ Done | (this commit) | • L0: `tsc --noEmit` exit 0; `nest build` has no tests in `dist/`.<br>• L1 `npm test`: **15 suites / 153 tests** (was 122). New: the naming strategy; the options (no sync in any `NODE_ENV`, `gen_random_uuid()`, the explicit lists); the entity mapping built offline (snake_case, camelCase properties kept, one `function_id` column per table, `timestamptz` everywhere); `describeError`. Undoing each change by hand makes its test fail.<br>• L2 `npm run test:db`: **7/7** on PostgreSQL 15.19. A fresh database is refused; after the migrations there is no drift; `information_schema` shows snake_case, `gen_random_uuid()` and `timestamptz`; repositories round-trip with the API's names; deletes still cascade; a second run does nothing; the baseline reverts completely and applies again.<br>• `migration:check`: exit 0; exit 1 for an entity changed without a migration, and for a migration missing from `index.ts`; exit 2, naming the cause, when the server is unreachable.<br>• Manual: the build refuses a fresh database (exit 1, naming the pending migration); `migration:run:prod` applies the baseline; the backend then answers `GET /functions` with 200.<br>• L4 `hack/e2e.sh`: **21/21** in 67 s, with two new checks (the refusal, and the migrations from the build). No leftovers.<br>• Found while verifying: `pg` reports a refused connection as an `AggregateError` with an empty message, so failures printed nothing. `describeError` now names the cause in `main.ts` and in the check.<br>• Docs: getting-started (migration step, one-time reset, schema changes, tests, troubleshooting), README, the Kubernetes dev guide, `how-it-works.html` (SQL and diagram in snake_case), CLI plan C-03, parent Appendix A (C-7). |
-| P-02 Validated configuration | ⏳ Planned | | |
+| P-01 Schema baseline | ✅ Done | `e3493b3` | • L0: `tsc --noEmit` exit 0; `nest build` has no tests in `dist/`.<br>• L1 `npm test`: **15 suites / 153 tests** (was 122). New: the naming strategy; the options (no sync in any `NODE_ENV`, `gen_random_uuid()`, the explicit lists); the entity mapping built offline (snake_case, camelCase properties kept, one `function_id` column per table, `timestamptz` everywhere); `describeError`. Undoing each change by hand makes its test fail.<br>• L2 `npm run test:db`: **7/7** on PostgreSQL 15.19. A fresh database is refused; after the migrations there is no drift; `information_schema` shows snake_case, `gen_random_uuid()` and `timestamptz`; repositories round-trip with the API's names; deletes still cascade; a second run does nothing; the baseline reverts completely and applies again.<br>• `migration:check`: exit 0; exit 1 for an entity changed without a migration, and for a migration missing from `index.ts`; exit 2, naming the cause, when the server is unreachable.<br>• Manual: the build refuses a fresh database (exit 1, naming the pending migration); `migration:run:prod` applies the baseline; the backend then answers `GET /functions` with 200.<br>• L4 `hack/e2e.sh`: **21/21** in 67 s, with two new checks (the refusal, and the migrations from the build). No leftovers.<br>• Found while verifying: `pg` reports a refused connection as an `AggregateError` with an empty message, so failures printed nothing. `describeError` now names the cause in `main.ts` and in the check.<br>• Docs: getting-started (migration step, one-time reset, schema changes, tests, troubleshooting), README, the Kubernetes dev guide, `how-it-works.html` (SQL and diagram in snake_case), CLI plan C-03, parent Appendix A (C-7). |
+| P-02 Validated configuration | ✅ Done | (this commit) | • L0: `tsc --noEmit` exit 0; `nest build`.<br>• L1 `npm test`: **15 suites / 204 tests** (was 153). The configuration suite has 48: each production refusal, a format error per kind of variable that names it, every problem listed at once, credentials never repeated, the CA file loaded or refused, `BE/.env.example` valid and documenting exactly the 39 variables, and the database-only parse. Disabling two rules by hand fails the intended tests.<br>• L2 `npm run test:db` **7/7** and `migration:check` OK, both now reading only the database variables.<br>• Manual, with the build: an old `.env` (`FF_DEV_USER_ID=1`) exits 1 with three lines that say what to change; production with the development defaults exits 1 naming four variables; the new dev `.env` starts, answers `GET /functions` with 200, and CORS answers only the console's origin.<br>• L4 `hack/e2e.sh`: **22/22**, with a new check that production refuses development settings at boot. Each run uses a random 12-digit account.<br>• Zod 4.6.5 added (MIT, no dependencies): the newest release that was more than two weeks old.<br>• Found while adding it: 26 known vulnerabilities in the production dependencies, now §1.7 and the new task P-09.<br>• Your `BE/.env` was identical to the old example, so it was replaced by the new one.<br>• Docs: `BE/.env.example`, getting-started, README, the dev guide, `how-it-works.html` (the dev account), the migration plan's §4.5, parent Appendix A (M-2). |
 | P-03 Function lifecycle fixes | ⏳ Planned | | |
 | P-04 Runtime fixes | ⏳ Planned | | |
 | P-05 Console fixes | ⏳ Planned | | |
 | P-06 Concurrency and autoscaling | ⏳ Planned | | |
 | P-07 Cluster permissions | ⏳ Planned | | |
 | P-08 API and documentation fixes | ⏳ Planned | | |
+| P-09 Dependency upgrades | ⏳ Planned | | |
 | P-10 Principal and account-scoped services | ⏳ Planned | | |
 | P-11 Keycloak and the global guard | ⏳ Planned | | |
 | P-12 Accounts, users and sign-up | ⏳ Planned | | |
