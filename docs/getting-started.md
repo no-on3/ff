@@ -422,6 +422,21 @@ Each pro-forma names FF and its bank from `FF_SELLER_NAME`, `FF_SELLER_TAX_ID`, 
 
 When the transfer shows on FF's bank statement, you record it on the admin dashboard's Payments page (below). The wallet gets the credit at once, less any share the buyer withheld at source, and invokes go on again at once (P-33). The withheld share is credited when you add the buyer's withholding certificate. The owners get an e-mail each time.
 
+**Invoices and usage statements** (P-36, D9). Each month an account buys credit in gets an invoice, issued early the next month by FF's operator (below). It lists a line per transfer received up to the month's end and not invoiced before: the credit before tax and its VAT, at the rate of the day the pro-forma was asked for. It adds the stamp duty, 1 TND, which is taken from the account's credit when the invoice is issued. The invoice is a French PDF, numbered `FAC-<year>-000001` without gaps in each fiscal year, with the month's usage statement attached: each function's requests, GB-seconds and cost, the free tier, the total, and what was debited. Usage itself isn't invoiced again, since its credit was. Every month has a usage statement, with or without an invoice. An issued invoice never changes: a correction is a credit note (*facture d'avoir*), `AV-<year>-000001`. The console's Billing page lists the invoices and credit notes, and downloads them and any month's statement. Every member does, and an API key with `usage:read`:
+
+```bash
+curl -s $FF/billing/invoices | jq -c '.invoices[] | {number, kind, month, issuedOn, total, corrects}'
+curl -s $FF/billing/invoices/$INVOICE/pdf -o invoice.pdf                # as it was issued
+curl -s $FF/billing/statements/2026-10/pdf -o releve-2026-10.pdf        # any month that has begun, as rated so far
+```
+
+Invoices are dated in Tunisia, an hour ahead of UTC, and the fiscal year is that day's year; usage months stay UTC, as everywhere. **Tax rates are dated data** (parent §8.6): the table `tax_rates` holds the VAT rate (19% since 2018) and the stamp duty (1.000 TND since 2023), each from the day it applies. A new rate is a new row from its first day; rows are never changed. Until the admin dashboard edits them, add one in SQL:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d serverless_platform -c "
+  INSERT INTO tax_rates (kind, valid_from, percent, source) VALUES ('vat', '2027-01-01', 20, 'Finance Law 2027')"
+```
+
 **Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known.
 
 **Capacity samples.** Five seconds into every minute, the backend lists FF's Deployments in one Kubernetes call and writes a row to `capacity_samples` for each function with a ready instance: how many, its memory and its `minInstances` (D6 and D8 of the client-readiness plan). A warm instance holds its memory whether or not it runs a call, and these samples show how much. Like usage records, samples are never changed or deleted, and the table has a partition per month. The capacity report weighs, per account and day, the GB-s held for ready instances against the GB-s the usage records bill:
@@ -441,7 +456,7 @@ One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bil
 
 The console keeps its tokens in the tab's session storage, and renews the 5-minute access token with the refresh token before it expires. "Log out" ends the Keycloak session too. When that session ends another way (30 minutes without a renewal, as after the laptop slept, or a logout in another tab), the next call gets 401, and the console asks you to log in again.
 
-**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for approvals and accounts, payments, the operator audit log and the platform's settings, and billing as it lands. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
+**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for approvals and accounts, payments, invoices, the operator audit log and the platform's settings, and billing as it lands. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
 
 ```bash
 cd admin && cp .env.example .env.local && npm install && npm run dev
@@ -476,6 +491,19 @@ curl -s -X POST $FF/admin/bank-transfers -H "Authorization: Bearer $OP" -H 'cont
 curl -s -X PUT $FF/admin/payments/$PAYMENT/withholding-certificate -H "Authorization: Bearer $OP" -H 'content-type: application/pdf' \
   -H "X-FF-Reason: $(jq -rn '"Certificate from the tax platform" | @uri')" --data-binary @certificate.pdf
 curl -s $FF/admin/payments/$PAYMENT/withholding-certificate -H "Authorization: Bearer $OP" -o certificate.pdf
+```
+
+**Invoices** (P-36): the dashboard's Invoices page shows a month's drafts, last month's by default: each account with payments received up to the month's end and not invoiced yet, with its lines, VAT, stamp duty and total. A draft is worked out from the payments each time, so a transfer recorded late joins it. Once the month is over in Tunisia, "Issue all" or "Issue" issues them, with a reason. Each invoice is numbered, its stamp duty taken from the account's credit (a ledger transaction, `stamp:<invoice>`: wallet −1.000, stamp duty +1.000), and its PDF written to the S3 bucket under `invoices/<number>.pdf`. Its owners get an e-mail. One that fails, such as for an account name the PDF's fonts can't write, is named, and the others go on; its number goes back, so the numbers keep no gap. A transfer recorded after its month's invoice was issued goes on the next month's. Below the drafts, every issued invoice and credit note, filtered by account, kind and month, with its PDF. "Credit note" corrects an invoice: lines before tax, at the invoice's VAT rate, never giving back more than it charged. A credit note moves no money; a refund is P-74's. The audit log keeps each document (`invoice.issue`, `invoice.credit_note`), as does the account's own log, as FF's.
+
+From the 1st, you get an e-mail when last month's invoices are ready to issue, and another if some still aren't after `invoiceReminderDay` (the 3rd), each once per month, whichever backend sends it. They go to `FF_OPERATOR_EMAIL`, and link to the Invoices page.
+
+```bash
+curl -s "$FF/admin/invoices/drafts?month=2026-10" -H "Authorization: Bearer $OP" | jq -c '.drafts[] | {accountId, total}'
+curl -s -X POST $FF/admin/invoices/issue -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"month": "2026-10", "reason": "October reviewed"}' | jq -c '{issued: [.issued[].number], failed}'   # or "accountIds": [...]
+curl -s -X POST $FF/admin/invoices/$INVOICE/credit-notes -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"lines": [{"description": "Remboursement du crédit non consommé", "amount": "20"}], "reason": "Unused credit refunded"}'
+curl -s "$FF/admin/invoices?accountId=$ACCOUNT" -H "Authorization: Bearer $OP" | jq -c '.invoices[] | {number, kind, total}'
 ```
 
 **The operator audit log** (P-76): the dashboard's "Audit log" page lists what operators did, newest first: when (in UTC), who, the action, the account, what changed, and why. `GET /admin/audit-log` gives the same, 50 entries a page (`limit`, at most 100; pass `next` as `before` for the next page, older), filtered by part of the operator's e-mail in any case (`operator`), the account (`accountId`), the action (`action`) and a time range (`from` included, `to` excluded, ISO 8601). With `Accept: text/csv` it gives the newest 10,000 entries that match, and the header `X-FF-Truncated: true` when more matched: narrow the filters for the rest. Only operators' actions are in it; customers' are in each account's own log, above.
@@ -620,6 +648,9 @@ docker compose down -v
 | The backend won't start: `FF_SELLER_NAME must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)` | In production, set `FF_SELLER_NAME`, `FF_SELLER_TAX_ID`, `FF_SELLER_ADDRESS`, `FF_BANK_NAME` and `FF_BANK_IBAN`: each pro-forma prints them. The development defaults say they are not real, so production refuses them. |
 | 400 `received … and withheld … make …, not the pro-forma's …` when recording a transfer | What arrived and what was withheld at source must add up to the pro-forma's total. A partial payment or an over-payment isn't recorded: sort it out with the buyer first. |
 | 409 `The transfer for FF-… was recorded on …` | The transfer was already recorded: each pro-forma takes one. The Payments page shows it, with what it credited. |
+| 409 `2026-11 isn't over in Tunisia: its invoices are issued from the 1st of the next month` | A month's invoices are issued once it is over, in Tunisia's time. The drafts show meanwhile. |
+| An invoice isn't issued: `"…" has a character the PDF's fonts can't write` | The PDF's standard fonts write French and other Latin text, not Arabic script: an account named in Arabic can't be invoiced until a font that writes it is added (see the plan, P-36). Its number goes back, and the other invoices are issued. Meanwhile its owners can give the account its name in Latin letters on the console's Account page, as the company's French name; then issue it again. |
+| `No stamp duty applies on …: add one to tax_rates` (or VAT) | No rate in `tax_rates` covers that day: add the rate in force from its first day, as above. |
 | The backend logs `Not listening to the ledger: …. Again in 5 s` | Its connection for the ledger's NOTIFY broke, and it opens another. Meanwhile, a cached balance can be a minute old at most. If it repeats, check the database. |
 | `ledger_entries is append-only: UPDATE refused` (or `DELETE`, `TRUNCATE`; the same for `ledger_transactions` and `ledger_accounts`) | The ledger is never changed. Post a correcting transaction instead: the movement the other way. |
 | 409 `The ledger key … was posted before, with other entries` | A movement reused another's idempotency key: the first stands, and nothing was written. A retry must post the same entries. |

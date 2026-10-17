@@ -18,6 +18,8 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'account.egress', label: 'Internet egress changed' },
   { value: 'payment.record', label: 'Bank transfer recorded' },
   { value: 'payment.withholding', label: 'Withholding certificate added' },
+  { value: 'invoice.issue', label: 'Invoice issued' },
+  { value: 'invoice.credit_note', label: 'Credit note issued' },
   { value: 'plan.create', label: 'Plan created' },
   { value: 'plan.update', label: 'Plan changed' },
   { value: 'price_book.create', label: 'Price book created' },
@@ -112,6 +114,13 @@ function describePayment(details: Record<string, unknown>): string {
   return shown(details.reference);
 }
 
+/** An invoice by its number: its month, total and stamp duty; a credit note, the invoice it corrects. */
+function describeInvoice(details: Record<string, unknown>): string {
+  const money = (name: string) => `${shown(details[name])} ${shown(details.currency)}`;
+  if (details.corrects !== undefined) return `${shown(details.number)} for ${shown(details.corrects)}: ${money('total')}`;
+  return `${shown(details.number)} for ${shown(details.month)}: ${money('total')}, with ${money('stampDuty')} of stamp duty`;
+}
+
 /** What an action did, to read: each change's from → to, else what it was on. */
 export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource'>): string {
   const changes = entry.details?.changes as Record<string, { from: unknown; to: unknown }> | undefined;
@@ -124,6 +133,8 @@ export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource
   if (typeof entry.details?.validFrom === 'string') return `Book from ${whenUtc(entry.details.validFrom)}`;
   // A pro-forma, a transfer or a certificate, by its reference (P-35).
   if (typeof entry.details?.reference === 'string') return describePayment(entry.details);
+  // An invoice or credit note, by its number (P-36).
+  if (typeof entry.details?.number === 'string') return describeInvoice(entry.details);
   return entry.resource ?? '';
 }
 

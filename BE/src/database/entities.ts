@@ -21,9 +21,14 @@ import { UsageCharge } from '../billing/usage-charge.entity';
 import { UsageHourly } from '../billing/usage-hourly.entity';
 import { LowBalanceNotice } from '../billing/low-balance-notice.entity';
 import { Payment } from '../billing/payments/payment.entity';
+import { TaxRate } from '../billing/tax-rate.entity';
+import { Invoice } from '../billing/invoices/invoice.entity';
+import { InvoiceLine } from '../billing/invoices/invoice-line.entity';
+import { InvoiceCounter } from '../billing/invoices/invoice-counter.entity';
+import { InvoiceNotice } from '../billing/invoices/invoice-notice.entity';
 
 /**
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionInvocation, FunctionMetrics, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionInvocation, FunctionMetrics, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice];

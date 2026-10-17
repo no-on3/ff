@@ -11,6 +11,7 @@ import { config } from './config';
 import Account from './pages/Account';
 import Accounts from './pages/Accounts';
 import AuditLog from './pages/AuditLog';
+import Invoices from './pages/Invoices';
 import Payments from './pages/Payments';
 import Plans from './pages/Plans';
 import Prices from './pages/Prices';
@@ -40,6 +41,13 @@ function PaymentsRoute({ email }: { email: string | undefined }) {
   const [params] = useSearchParams();
   const initial = Object.fromEntries(['reference', 'status', 'accountId'].map((name) => [name, params.get(name) ?? '']));
   return <Payments key={params.toString()} email={email} initial={initial} />;
+}
+
+/** The invoices, for the month or account the address names, as the operator's e-mails and the account page link to them (P-36). */
+function InvoicesRoute({ email }: { email: string | undefined }) {
+  const [params] = useSearchParams();
+  const initial = Object.fromEntries(['month', 'accountId', 'kind'].map((name) => [name, params.get(name) ?? '']));
+  return <Invoices key={params.toString()} email={email} initial={initial} />;
 }
 
 /** The login page until the operator is logged in, then the dashboard, which opens on the approvals queue (P-71). */
@@ -73,6 +81,7 @@ function LoginGate() {
           <Route path="/accounts" element={<AccountsRoute email={email} />} />
           <Route path="/accounts/:id" element={<Account email={email} />} />
           <Route path="/payments" element={<PaymentsRoute email={email} />} />
+          <Route path="/invoices" element={<InvoicesRoute email={email} />} />
           <Route path="/prices" element={<Prices email={email} />} />
           <Route path="/plans" element={<Plans email={email} />} />
           <Route path="/settings" element={<Settings email={email} />} />

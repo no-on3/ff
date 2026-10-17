@@ -1,4 +1,4 @@
-import type { Balance, ProForma } from '../services/api';
+import type { Balance, Invoice, ProForma } from '../services/api';
 import { formatMoney } from './usage';
 
 /** The header's balance: "12.500 TND", "-0.250 TND". */
@@ -81,8 +81,6 @@ export function parsePercents(text: string): { percents: number[] } | { problem:
   return { percents };
 }
 
-/** D9's VAT on prepaid credit, as the API adds it to a pro-forma; contract.test.ts checks it against BE's pro-forma.ts. */
-export const VAT_PERCENT = 19;
 /** The credit a pro-forma may ask for, in whole units of the currency: the API's limits, checked by contract.test.ts. */
 export const CREDIT_LIMITS = { min: 10, max: 1_000_000 };
 /** The parent plan's prepaid packs (§8.7), in whole units of the currency. */
@@ -100,11 +98,12 @@ function minorText(minor: bigint, decimals: number): string {
 
 /**
  * What a pro-forma for this credit comes to (P-35), before the owner asks for
- * it: the credit with every decimal, the VAT on top rounded once to the minor
- * unit, half up as the API rounds, and the total to transfer. Or what is wrong
- * with the amount typed; the API checks it again.
+ * it: the credit with every decimal, the VAT on top at the API's rate of the
+ * day (P-36), rounded once to the minor unit, half up as the API rounds, and
+ * the total to transfer. Or what is wrong with the amount typed; the API
+ * checks it again.
  */
-export function proFormaQuote(text: string, decimals: number, vatPercent = VAT_PERCENT): { credit: string; vat: string; total: string } | { problem: string } {
+export function proFormaQuote(text: string, decimals: number, vatPercent: number): { credit: string; vat: string; total: string } | { problem: string } {
   const match = /^(\d{1,9})(?:\.(\d+))?$/.exec(text.trim());
   if (!match) return { problem: 'The credit is an amount, such as 50 or 50.500' };
   const [, whole, fraction = ''] = match;
@@ -150,4 +149,16 @@ export function frenchDate(iso: string): string {
   const date = new Date(iso);
   const day = date.getUTCDate();
   return `${day === 1 ? '1er' : day} ${MONTHS[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+}
+
+/** What an issued document is, for the Billing page's list. */
+export const invoiceKindLabel = (invoice: Pick<Invoice, 'kind' | 'corrects'>): string =>
+  invoice.kind === 'invoice' ? 'Invoice' : `Credit note for ${invoice.corrects ?? 'an invoice'}`;
+
+/** "October 2026", from a month, YYYY-MM. */
+export const monthName = (month: string): string => new Date(`${month}-01T00:00:00Z`).toLocaleString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+/** The months a usage statement can be asked for: this one, by the UTC calendar, and the eleven before it, newest first. */
+export function statementMonths(now: Date, count = 12): string[] {
+  return Array.from({ length: count }, (_, back) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1)).toISOString().slice(0, 7));
 }

@@ -22,6 +22,7 @@ describe('the pro-forma routes (L1, P-35)', () => {
   const payments = {
     requestProForma: jest.fn(async () => ({ id: PAYMENT })),
     proFormas: jest.fn(async () => [{ id: PAYMENT }]),
+    vatPercentNow: jest.fn(async () => 19),
     proForma: jest.fn(async () => ({ id: PAYMENT })),
   };
 
@@ -65,8 +66,8 @@ describe('the pro-forma routes (L1, P-35)', () => {
     expect(payments.requestProForma).toHaveBeenCalledTimes(1);
   });
 
-  it("read the caller's account's, and refuse an ID that is not one", async () => {
-    expect(await (await fetch(`${baseUrl}/billing/pro-formas`)).json()).toEqual({ proFormas: [{ id: PAYMENT }] });
+  it("read the caller's account's, with the VAT rate a new one gets, and refuse an ID that is not one", async () => {
+    expect(await (await fetch(`${baseUrl}/billing/pro-formas`)).json()).toEqual({ proFormas: [{ id: PAYMENT }], vatPercent: 19 });
     expect((await fetch(`${baseUrl}/billing/pro-formas/${PAYMENT}`)).status).toBe(200);
     expect([payments.proFormas.mock.calls, payments.proForma.mock.calls]).toEqual([[[ACCOUNT]], [[ACCOUNT, PAYMENT]]]);
     expect((await fetch(`${baseUrl}/billing/pro-formas/FF-7KQ2-9MXA`)).status).toBe(400);

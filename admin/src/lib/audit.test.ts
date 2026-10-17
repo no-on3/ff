@@ -115,6 +115,15 @@ describe('describeAction', () => {
     );
   });
 
+  it("names an invoice by its number, month, total and stamp duty, and a credit note by the invoice it corrects (P-36)", () => {
+    expect(
+      describeAction(entry({ action: 'invoice.issue', details: { reason: 'r', number: 'FAC-2026-000001', month: '2026-10', currency: 'TND', total: '1250.500', stampDuty: '1.000' } })),
+    ).toBe('FAC-2026-000001 for 2026-10: 1250.500 TND, with 1.000 TND of stamp duty');
+    expect(describeAction(entry({ action: 'invoice.credit_note', details: { reason: 'r', number: 'AV-2026-000001', corrects: 'FAC-2026-000001', currency: 'TND', total: '23.800' } }))).toBe(
+      'AV-2026-000001 for FAC-2026-000001: 23.800 TND',
+    );
+  });
+
   it('else names what the action was on', () => {
     expect(describeAction(entry({ action: 'account.suspend', resource: 'account:000000000001' }))).toBe('account:000000000001');
   });
@@ -124,6 +133,7 @@ describe('labels and names', () => {
   it('names a known action, and shows an unknown one as the API does', () => {
     expect([actionLabel('settings.update'), actionLabel('account.reopen')]).toEqual(['Settings changed', 'account.reopen']);
     expect([actionLabel('payment.record'), actionLabel('payment.withholding')]).toEqual(['Bank transfer recorded', 'Withholding certificate added']);
+    expect([actionLabel('invoice.issue'), actionLabel('invoice.credit_note')]).toEqual(['Invoice issued', 'Credit note issued']);
   });
 
   it("names the CSV as the API's Content-Disposition does", () => {

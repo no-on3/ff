@@ -3,6 +3,7 @@ import type { ApiAuth } from './auth/oidc';
 import { DEFAULT_API_URL, config } from './config';
 import type { AccountSummary, AccountView, StatusChange } from './lib/accounts';
 import type { OperatorAction } from './lib/audit';
+import type { AdminInvoice, DraftsPage, IssueResult } from './lib/invoices';
 import type { AdminPayment } from './lib/payments';
 import { REASON_HEADER } from './lib/reason';
 import type { Plan, PlanLimits } from './lib/plans';
@@ -127,6 +128,18 @@ export const paymentsApi = {
       headers: { 'Content-Type': file.type, [REASON_HEADER]: encodeURIComponent(reason) },
     }),
   certificate: (id: string) => api.get<Blob>(`/admin/payments/${encodeURIComponent(id)}/withholding-certificate`, { responseType: 'blob' }),
+};
+
+/** The invoice routes (P-36): a month's drafts, issuing them with a reason, the issued documents, their PDFs, and credit notes. */
+export const invoicesApi = {
+  drafts: (month: string) => api.get<DraftsPage>('/admin/invoices/drafts', { params: { month } }),
+  /** Every draft of the month, or the accounts named, one after the other. */
+  issue: (month: string, accountIds: string[] | undefined, reason: string) => api.post<IssueResult>('/admin/invoices/issue', { month, ...(accountIds ? { accountIds } : {}), reason }),
+  page: (params: Record<string, string>) => api.get<{ invoices: AdminInvoice[]; next: string | null }>('/admin/invoices', { params }),
+  pdf: (id: string) => api.get<Blob>(`/admin/invoices/${encodeURIComponent(id)}/pdf`, { responseType: 'blob' }),
+  /** Lines before tax, each at the invoice's VAT rate. */
+  creditNote: (id: string, lines: Array<{ description: string; amount: string }>, reason: string) =>
+    api.post<AdminInvoice>(`/admin/invoices/${encodeURIComponent(id)}/credit-notes`, { lines, reason }),
 };
 
 export const settingsApi = {

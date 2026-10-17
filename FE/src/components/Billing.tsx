@@ -1,21 +1,24 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   CREDIT_PACKS,
-  VAT_PERCENT,
   balanceLabel,
   decimalsOf,
+  invoiceKindLabel,
   invokesLabel,
+  monthName,
   parsePercents,
   percentsText,
   proFormaQuote,
   proFormaState,
+  statementMonths,
   transactionLabel,
   trialNote,
 } from '../lib/billing';
+import { saveFile } from '../lib/download';
 import { apiErrorMessage } from '../lib/functions';
 import { formatMoney } from '../lib/usage';
-import { Alerts, BillingTransaction, ProForma, billingApi } from '../services/api';
+import { Alerts, BillingTransaction, Invoice, ProForma, billingApi } from '../services/api';
 import { useSession } from '../session/session';
 import { useBalance } from '../session/balance';
 
@@ -119,6 +122,7 @@ const OTHER = 'other';
 const AddingCredit: React.FC<{ owner: boolean; currency: string | null; decimals: number | null }> = ({ owner, currency, decimals }) => {
   const navigate = useNavigate();
   const [proFormas, setProFormas] = useState<ProForma[] | null>(null);
+  const [vatPercent, setVatPercent] = useState<number | null>(null);
   const [choice, setChoice] = useState(CREDIT_PACKS[1]);
   const [other, setOther] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
@@ -127,15 +131,18 @@ const AddingCredit: React.FC<{ owner: boolean; currency: string | null; decimals
   useEffect(() => {
     billingApi
       .getProFormas()
-      .then(({ data }) => setProFormas(data.proFormas))
+      .then(({ data }) => {
+        setProFormas(data.proFormas);
+        setVatPercent(data.vatPercent);
+      })
       .catch((failure) => setProblem(apiErrorMessage(failure)));
   }, []);
 
-  const quote = decimals === null ? null : proFormaQuote(choice === OTHER ? other : choice, decimals);
+  const quote = decimals === null || vatPercent === null ? null : proFormaQuote(choice === OTHER ? other : choice, decimals, vatPercent);
   const ask = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!quote || 'problem' in quote) {
-      setProblem(quote ? quote.problem : 'The balance did not load: try again in a moment');
+      setProblem(quote ? quote.problem : 'The balance or the VAT rate did not load: try again in a moment');
       return;
     }
     setAsking(true);
@@ -152,8 +159,8 @@ const AddingCredit: React.FC<{ owner: boolean; currency: string | null; decimals
   return (
     <div className="space-y-4">
       <p className="card">
-        Credit comes by bank transfer. {owner ? 'Ask' : 'An owner of the account asks'} for a pro-forma: it gives the total to transfer, with {VAT_PERCENT}% VAT on top of the credit, FF's bank
-        account, and a reference to write in the transfer's label. FF adds the credit when the transfer arrives; a share withheld at source is added when FF receives the withholding certificate.
+        Credit comes by bank transfer. {owner ? 'Ask' : 'An owner of the account asks'} for a pro-forma: it gives the total to transfer, with VAT on top of the credit
+        {vatPercent === null ? '' : ` (${vatPercent}%)`}, FF's bank account, and a reference to write in the transfer's label. FF adds the credit when the transfer arrives; a share withheld at source is added when FF receives the withholding certificate.
       </p>
       {owner && currency && (
         <form onSubmit={(event) => void ask(event)} className="card space-y-4" aria-label="Ask for a pro-forma">
@@ -174,7 +181,7 @@ const AddingCredit: React.FC<{ owner: boolean; currency: string | null; decimals
           )}
           {quote && 'credit' in quote && (
             <p aria-label="Quote" className="tabular-nums">
-              {formatMoney(quote.credit, currency)} of credit + {formatMoney(quote.vat, currency)} VAT ({VAT_PERCENT}%) = <strong>{formatMoney(quote.total, currency)}</strong> to transfer
+              {formatMoney(quote.credit, currency)} of credit + {formatMoney(quote.vat, currency)} VAT ({vatPercent}%) = <strong>{formatMoney(quote.total, currency)}</strong> to transfer
             </p>
           )}
           <button type="submit" className="btn btn-primary" disabled={asking}>
@@ -226,8 +233,97 @@ const AddingCredit: React.FC<{ owner: boolean; currency: string | null; decimals
 };
 
 /**
- * The account's money (P-32, P-33, P-35): its balance, whether invokes go on,
- * this month's charges, adding credit, when the owners hear of a low balance,
+ * Invoices and usage statements (P-36, D9): each month the account bought
+ * credit in gets an invoice, in French, once FF issues it early the next
+ * month, with the month's usage statement attached; a correction is a credit
+ * note. Every month has a usage statement. Every member downloads them.
+ */
+const Invoices: React.FC = () => {
+  const [invoices, setInvoices] = useState<Invoice[] | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const months = useMemo(() => statementMonths(new Date()), []);
+  const [month, setMonth] = useState(months[1]);
+
+  useEffect(() => {
+    billingApi
+      .getInvoices()
+      .then(({ data }) => setInvoices(data.invoices))
+      .catch((failure) => setProblem(apiErrorMessage(failure)));
+  }, []);
+
+  const download = async (load: () => Promise<{ data: Blob }>, name: string) => {
+    setProblem(null);
+    try {
+      saveFile(name, (await load()).data);
+    } catch (failure) {
+      setProblem(apiErrorMessage(failure));
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="card">
+        Each month you buy credit in gets an invoice, in French, issued early the next month: a line per transfer, the VAT, and the stamp duty, which is taken from your credit.
+        The month's usage statement is attached to it. Every month has a usage statement, with or without an invoice.
+      </p>
+      {invoices && invoices.length > 0 && (
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full text-left text-sm" aria-label="Invoices">
+            <thead className="bg-gray-50 text-gray-600">
+              <tr>
+                <th className="px-4 py-2 font-medium">Number</th>
+                <th className="px-4 py-2 font-medium">What</th>
+                <th className="px-4 py-2 font-medium">Issued on</th>
+                <th className="px-4 py-2 text-right font-medium">Total</th>
+                <th className="px-4 py-2 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {invoices.map((invoice) => (
+                <tr key={invoice.id} className="border-t border-gray-200">
+                  <td className="px-4 py-2 whitespace-nowrap font-mono">{invoice.number}</td>
+                  <td className="px-4 py-2">{invoice.month ? `${invoiceKindLabel(invoice)}, ${monthName(invoice.month)}` : invoiceKindLabel(invoice)}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">{invoice.issuedOn}</td>
+                  <td className="px-4 py-2 text-right tabular-nums whitespace-nowrap">{formatMoney(invoice.total, invoice.currency)}</td>
+                  <td className="px-4 py-2 text-right">
+                    <button type="button" className="btn btn-secondary" onClick={() => void download(() => billingApi.getInvoicePdf(invoice.id), `${invoice.number}.pdf`)}>
+                      PDF
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {invoices && invoices.length === 0 && <p className="text-gray-600">No invoice yet.</p>}
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-sm">
+          <span className="block text-gray-700 mb-1">Usage statement</span>
+          <select aria-label="Statement month" value={month} onChange={(event) => setMonth(event.target.value)} className="rounded-md border border-gray-300 px-3 py-2">
+            {months.map((option) => (
+              <option key={option} value={option}>
+                {monthName(option)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="button" className="btn btn-secondary" onClick={() => void download(() => billingApi.getStatementPdf(month), `releve-${month}.pdf`)}>
+          Download the statement
+        </button>
+      </div>
+      {problem && (
+        <p role="alert" className="text-red-700">
+          {problem}
+        </p>
+      )}
+    </div>
+  );
+};
+
+/**
+ * The account's money (P-32, P-33, P-35, P-36): its balance, whether invokes go on,
+ * this month's charges, adding credit, invoices and statements, when the owners hear of a low balance,
  * and what moved the balance. Every member reads it.
  */
 const Billing: React.FC = () => {
@@ -272,6 +368,11 @@ const Billing: React.FC = () => {
       <section className="space-y-2">
         <h2 className="text-lg font-semibold">Adding credit</h2>
         <AddingCredit owner={account.role === 'owner'} currency={balance?.currency ?? null} decimals={balance ? decimalsOf(balance.balance) : null} />
+      </section>
+
+      <section className="space-y-2">
+        <h2 className="text-lg font-semibold">Invoices and usage statements</h2>
+        <Invoices />
       </section>
 
       <section className="space-y-2">

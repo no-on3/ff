@@ -60,6 +60,7 @@ export class ProFormaView {
 
 export class ProFormasPage {
   @ApiProperty({ type: [ProFormaView], description: 'Newest first, the last 100' }) proFormas: ProFormaView[];
+  @ApiProperty({ example: 19, description: "The VAT rate a pro-forma asked for now gets, in percent: today's, in Tunisia" }) vatPercent: number;
 }
 
 /** A payment, as operators see it (P-35, P-74): who asked, who recorded, the certificate. */

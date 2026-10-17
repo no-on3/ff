@@ -8,15 +8,18 @@ import usageDtoSource from '../../BE/src/usage/usage.dto.ts?raw';
 import billingDtoSource from '../../BE/src/billing/billing.dto.ts?raw';
 import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw';
 import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
+import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
-import { CREDIT_LIMITS, VAT_PERCENT } from './lib/billing';
+import { CREDIT_LIMITS } from './lib/billing';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import {
   BALANCE_FIELDS,
   CREDIT_STATE_FIELDS,
   INVOCATION_STATUSES,
+  INVOICE_FIELDS,
+  PRO_FORMAS_PAGE_FIELDS,
   PRO_FORMA_FIELDS,
   PRO_FORMA_PARTY_FIELDS,
   SCOPES,
@@ -157,10 +160,16 @@ describe('a pro-forma (P-35)', () => {
     expect(dtoFields(paymentsDtoSource, 'export class BankView {')).toEqual([...PRO_FORMA_PARTY_FIELDS.bank]);
   });
 
-  it("quotes the API's VAT and takes the API's credit limits, so the quote is the pro-forma's", () => {
-    expect(/export const VAT_PERCENT = (\d+);/.exec(proFormaSource)?.[1]).toBe(String(VAT_PERCENT));
+  it("quotes at the VAT rate the API gives with the list (P-36), and takes the API's credit limits, so the quote is the pro-forma's", () => {
+    expect(dtoFields(paymentsDtoSource, 'export class ProFormasPage {')).toEqual([...PRO_FORMAS_PAGE_FIELDS]);
     const limits = /export const CREDIT_LIMITS = \{ min: ([\d_]+)n, max: ([\d_]+)n \};/.exec(proFormaSource);
     expect(limits?.slice(1).map((limit) => Number(limit.replace(/_/g, '')))).toEqual([CREDIT_LIMITS.min, CREDIT_LIMITS.max]);
+  });
+});
+
+describe('an invoice (P-36)', () => {
+  it("has the API's fields, so the Billing page lists each one there is", () => {
+    expect(dtoFields(invoicesDtoSource, 'export class InvoiceView {')).toEqual([...INVOICE_FIELDS]);
   });
 });
 

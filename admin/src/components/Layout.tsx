@@ -24,6 +24,9 @@ const Layout: React.FC<{ email: string | undefined; onLogOut: () => void; childr
             <NavLink to="/payments" className={linkClass}>
               Payments
             </NavLink>
+            <NavLink to="/invoices" className={linkClass}>
+              Invoices
+            </NavLink>
             <NavLink to="/prices" className={linkClass}>
               Prices
             </NavLink>

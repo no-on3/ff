@@ -3,13 +3,10 @@ import type { Mail } from '../../mail/mail.service';
 import { Decimal } from '../decimal';
 import { formatMinor } from '../money';
 
-/** D9: VAT on top of prepaid credit (parent §8.6). P-36 makes tax rates dated data. */
-export const VAT_PERCENT = 19;
-
 /** The credit a pro-forma may ask for, in whole units of the currency: from a small top-up to a large B2B one. */
 export const CREDIT_LIMITS = { min: 10n, max: 1_000_000n };
 
-/** VAT on a credit, in minor units, rounded once, half away from zero: 19% of 50.000 TND is 9.500. */
+/** VAT on an amount, in minor units, rounded once, half away from zero: 19% of 50.000 TND is 9.500. The rate is the day's, from tax_rates (P-36). */
 export const vatOf = (creditMinor: bigint, percent: number): bigint => Decimal.ratio(creditMinor * BigInt(percent), 100n).unitsAt(0);
 
 /** Letters and digits that read and type without doubt: no I, L, O, U, 0 or 1. */

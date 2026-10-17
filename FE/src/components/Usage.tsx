@@ -4,6 +4,7 @@ import { apiErrorMessage } from '../lib/functions';
 import { estimateLines, formatBilledDuration, formatGbSeconds, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from '../lib/usage';
 import { MonthlyUsage, usageApi } from '../services/api';
 import { useSession } from '../session/session';
+import { saveFile } from '../lib/download';
 
 const Figure: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div className="card">
@@ -11,16 +12,6 @@ const Figure: React.FC<{ label: string; value: string }> = ({ label, value }) =>
     <div className="text-2xl font-semibold mt-1">{value}</div>
   </div>
 );
-
-/** Saves text as a file, from the browser. */
-function download(name: string, text: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = name;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1_000);
-}
 
 /** The account's usage, this month or last, per function (P-22), with its estimated cost (P-30): every member reads it. */
 const Usage: React.FC = () => {
@@ -51,7 +42,7 @@ const Usage: React.FC = () => {
     setDownloading(true);
     setError(null);
     try {
-      download(usageCsvName(account.id, month), (await usageApi.getMonthCsv(month)).data);
+      saveFile(usageCsvName(account.id, month), new Blob([(await usageApi.getMonthCsv(month)).data], { type: 'text/csv' }));
     } catch (failure) {
       setError(apiErrorMessage(failure));
     } finally {

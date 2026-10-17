@@ -260,6 +260,37 @@ export interface Alerts {
  */
 export const PRO_FORMA_FIELDS = ['id', 'reference', 'status', 'currency', 'credit', 'vatPercent', 'vat', 'total', 'createdAt', 'buyer', 'seller', 'bank', 'transfer'] as const;
 export const TRANSFER_FIELDS = ['received', 'withheld', 'receivedOn', 'recordedAt', 'credited', 'withheldCreditedAt'] as const;
+/** GET /billing/pro-formas: the account's pro-formas, and the VAT rate one asked for now gets (P-36: rates are dated data). */
+export const PRO_FORMAS_PAGE_FIELDS = ['proFormas', 'vatPercent'] as const;
+export interface ProFormasPage {
+  proFormas: ProForma[];
+  /** In percent: today's, in Tunisia. */
+  vatPercent: number;
+}
+
+/** An issued invoice or credit note (P-36). contract.test.ts checks these names against the API's. */
+export const INVOICE_FIELDS = ['id', 'kind', 'number', 'month', 'issuedOn', 'currency', 'subtotal', 'vat', 'stampDuty', 'total', 'corrects', 'reason'] as const;
+export interface Invoice {
+  id: string;
+  /** invoice: a month's credit bought; credit_note: an invoice corrected. */
+  kind: 'invoice' | 'credit_note';
+  /** FAC-2026-000001, AV-2026-000001. */
+  number: string;
+  /** An invoice's month, YYYY-MM. */
+  month: string | null;
+  /** YYYY-MM-DD, in Tunisia. */
+  issuedOn: string;
+  currency: string;
+  subtotal: string;
+  vat: string;
+  /** Taken from the credit when the invoice was issued. */
+  stampDuty: string;
+  total: string;
+  /** A credit note's invoice, by its number. */
+  corrects: string | null;
+  reason: string | null;
+}
+
 /** Who sells, who buys, and where to pay, as each pro-forma carries them. */
 export const PRO_FORMA_PARTY_FIELDS = { buyer: ['name', 'taxId'], seller: ['name', 'taxId', 'address'], bank: ['name', 'iban', 'bic'] } as const;
 export interface Transfer {
@@ -305,9 +336,15 @@ export const billingApi = {
   setAlerts: (lowBalancePercents: number[] | null) => api.put<Alerts>('/billing/alerts', { lowBalancePercents }),
   /** An owner asks for a pro-forma: the credit before tax, such as "50.000". */
   requestProForma: (credit: string) => api.post<ProForma>('/billing/pro-formas', { credit }),
-  /** The account's last 100, newest first. */
-  getProFormas: () => api.get<{ proFormas: ProForma[] }>('/billing/pro-formas'),
+  /** The account's last 100, newest first, with the VAT rate a new one gets. */
+  getProFormas: () => api.get<ProFormasPage>('/billing/pro-formas'),
   getProForma: (id: string) => api.get<ProForma>(`/billing/pro-formas/${encodeURIComponent(id)}`),
+  /** The account's issued invoices and credit notes, newest first (P-36). */
+  getInvoices: () => api.get<{ invoices: Invoice[] }>('/billing/invoices'),
+  /** An invoice or credit note's PDF, as it was issued. */
+  getInvoicePdf: (id: string) => api.get<Blob>(`/billing/invoices/${encodeURIComponent(id)}/pdf`, { responseType: 'blob' }),
+  /** A month's usage statement, YYYY-MM, as rated so far. */
+  getStatementPdf: (month: string) => api.get<Blob>(`/billing/statements/${encodeURIComponent(month)}/pdf`, { responseType: 'blob' }),
 };
 
 // Metrics API endpoints

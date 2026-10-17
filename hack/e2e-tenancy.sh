@@ -27,6 +27,9 @@
 #     records the transfer net of a share withheld at source, then uploads the
 #     withholding certificate as a raw body with its reason in X-FF-Reason. Each
 #     credit reaches the balance, the ledger and the owner's mailbox.
+#   - Invoices (P-36): the operator issues last month's invoice, its stamp duty
+#     taken from the credit, then a credit note; the owner reads both and the
+#     month's usage statement, as PDFs, and other accounts never do.
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
 # compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
@@ -133,6 +136,14 @@ grant() {
        WHERE t.idempotency_key = '$3' AND a.currency = 'TND'
          AND (a.account_id = '$1' OR (a.account_id IS NULL AND a.type = 'promotional_credit'));" >/dev/null
 }
+# fetch_pdf <base URL> <path> [curl option...]: GETs a document into $work/file.pdf, its headers into $work/headers, printing its status and content type.
+fetch_pdf() {
+  local base=$1 path=$2
+  shift 2
+  curl -sS -D "$work/headers" -o "$work/file.pdf" -w '%{http_code} %{content_type}' "$@" "$base$path"
+}
+# The file name of the last fetch_pdf's download.
+fetched_name() { sed -n 's/^content-disposition: .*filename="\([^"]*\)".*/\1/ip' "$work/headers" | tr -d '\r'; }
 # upload <path> <file> [reason]: the operator PUTs a PDF as the body, as the admin dashboard does, its reason URI-encoded in X-FF-Reason (P-35).
 upload() {
   local args=(-sS -o "$work/body" -w '%{http_code}' -X PUT -H "Authorization: Bearer $operator_token" -H 'content-type: application/pdf' --data-binary "@$2")
@@ -206,6 +217,7 @@ path_for() {
   esac
   path="${path//\{functionId\}/$3}"
   path="${path//\{userId\}/$missing}"
+  path="${path//\{month\}/$(date -u +%Y-%m)}"
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
     case $name in
@@ -334,6 +346,18 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /billing/pro-formas/{id}")
       as_b GET "/billing/pro-formas/$pf_a" >/dev/null
       check "$route: B gets 404 for A's pro-forma (P-35)" "404 Pro-forma $pf_a not found" "$(status) $(message)"
+      ;;
+    "GET /billing/invoices")
+      invoices_b="$(as_b GET /billing/invoices)"
+      check "$route: B lists its own invoices: none (P-36)" "200 0" "$(status) $(jq '.invoices | length' <<<"$invoices_b")"
+      ;;
+    "GET /billing/invoices/{id}/pdf")
+      as_b GET "/billing/invoices/$missing/pdf" >/dev/null
+      check "$route: an invoice that isn't B's: 404 (P-36)" "404 Invoice $missing not found" "$(status) $(message)"
+      ;;
+    "GET /billing/statements/{month}/pdf")
+      check "$route: B gets its own usage statement, a PDF (P-36)" "200 application/pdf %PDF-" \
+        "$(fetch_pdf "$api" "$(path_for "$template" "$method" "$id" "$account_a")" -H "X-FF-Dev-Account: $account_b") $(head -c 5 "$work/file.pdf")"
       ;;
     *" /members"*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
@@ -529,6 +553,18 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 GET "/billing/pro-formas/$pf_1" >/dev/null
       check "$route: account 1's pro-forma is not found for account 2 (P-35)" "404 Pro-forma $pf_1 not found" "$(status) $(message)"
       ;;
+    "GET /billing/invoices")
+      invoices_2="$(as_user_2 GET /billing/invoices)"
+      check "$route: account 2 lists its own invoices: none (P-36)" "200 0" "$(status) $(jq '.invoices | length' <<<"$invoices_2")"
+      ;;
+    "GET /billing/invoices/{id}/pdf")
+      as_user_2 GET "/billing/invoices/$missing/pdf" >/dev/null
+      check "$route: an invoice that isn't account 2's: 404 (P-36)" "404 Invoice $missing not found" "$(status) $(message)"
+      ;;
+    "GET /billing/statements/{month}/pdf")
+      check "$route: account 2 gets its own usage statement, a PDF (P-36)" "200 application/pdf %PDF-" \
+        "$(fetch_pdf "$api_oidc" "$(path_for "$template" "$method" "$fn_1" "$account_1")" -H "Authorization: Bearer $token_2" -H "X-FF-Account: $account_2") $(head -c 5 "$work/file.pdf")"
+      ;;
     *" /admin/"*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: a customer's token is not the admin dashboard's" "$not_admin_client" "$(status) $(message)"
@@ -577,6 +613,11 @@ pro_formas_key="$(with_token "$key_usage" GET /billing/pro-formas)"
 check "and its own account's pro-formas, none of account 1's (P-35)" "200 $pf_2" "$(status) $(jq -r '[.proFormas[].id] | join(" ")' <<<"$pro_formas_key")"
 with_token "$key_usage" POST /billing/pro-formas '{"credit": "20"}' >/dev/null
 check "but can't ask for one: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
+invoices_key="$(with_token "$key_usage" GET /billing/invoices)"
+check "and lists its own account's invoices (P-36)" "200 0" "$(status) $(jq '.invoices | length' <<<"$invoices_key")"
+check "and downloads its usage statements" "200 application/pdf" "$(fetch_pdf "$api_oidc" "/billing/statements/$(date -u +%Y-%m)/pdf" -H "Authorization: Bearer $key_usage")"
+with_token "$key_1" GET /billing/invoices >/dev/null
+check "a key without usage:read can't list invoices" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 with_token "$key_1" GET /billing/pro-formas >/dev/null
 check "a key without usage:read can't list them" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
@@ -622,6 +663,8 @@ as_member POST "/functions/$fn_1/invoke" '{"input":{}}' >/dev/null
 check "but can't invoke them" "403 The viewer role can't do this" "$(status) $(message)"
 as_member PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "nor set the low-balance e-mails (P-33)" "403 The viewer role can't do this" "$(status) $(message)"
+as_member GET /billing/invoices >/dev/null
+check "a viewer reads account 1's invoices (P-36)" 200 "$(status)"
 listed_pro_formas="$(as_member GET /billing/pro-formas | jq -r '[.proFormas[].id] | join(" ")')"
 check "but reads account 1's pro-formas (P-35)" "200 $pf_1" "$(status) $listed_pro_formas"
 as_member POST /billing/pro-formas '{"credit": "20"}' >/dev/null
@@ -807,9 +850,56 @@ log_payments="$(as_user_1 GET '/audit-log?limit=100')"
 check "and, in the account's audit log, who asked for it and FF's two credits, without the operator's address" \
   "billing.pro_forma:$user_1:true payment.record:FF:null payment.withholding:FF:null" \
   "$(jq -r '[.entries[] | select(.action == "billing.pro_forma" or (.action | startswith("payment."))) | "\(.action):\(.actorLabel):\(if .actor == "operator" then .ip else (.ip != null) end)"] | reverse | join(" ")' <<<"$log_payments")"
+echo "== invoices (P-36)"
+last_month="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)"
+last_day="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%F)"
+late="$(as_user_1 POST /billing/pro-formas '{"credit": "20"}')"
+with_token "$operator_token" POST /admin/bank-transfers \
+  "$(jq -cn --arg reference "$(jq -r .reference <<<"$late")" --arg on "$last_day" '{reference: $reference, received: "23.800", withheld: "0", receivedOn: $on, reason: "l5: the statement of last month"}')" >/dev/null
+check "a transfer received on the last day of last month is recorded" 201 "$(status)"
+drafts="$(with_token "$operator_token" GET /admin/invoices/drafts)"
+check "last month's drafts: account 1's, its one payment, 19% VAT and the 1.000 TND stamp duty on top" "200 $last_month true $account_1 1 20.000 3.800 1.000 24.800" \
+  "$(status) $(jq -r '"\(.month) \(.issuable) " + ([.drafts[] | "\(.accountId) \(.lines | length) \(.subtotal) \(.vat) \(.stampDuty) \(.total)"] | join(","))' <<<"$drafts")"
+balance_before_invoice="$(as_user_1 GET /billing/balance | jq -r .balance)"
+issued="$(with_token "$operator_token" POST /admin/invoices/issue "$(jq -cn --arg month "$last_month" '{month: $month, reason: "l5: drafts reviewed"}')")"
+year="$(TZ=Africa/Tunis date +%Y)"
+check "the operator issues them: one invoice, numbered first of the fiscal year, none failed" "200 FAC-$year-000001 0" \
+  "$(status) $(jq -r '"\([.issued[].number] | join(",")) \(.failed | length)"' <<<"$issued")"
+invoice_1="$(jq -r '.issued[0].id' <<<"$issued")"
+check "the stamp duty is taken from account 1's credit: $balance_before_invoice - 1.000 TND" \
+  "$(plus_millimes "$balance_before_invoice" -1000)" "$(as_user_1 GET /billing/balance | jq -r .balance)"
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^Your invoice' && break; sleep 0.5; done
+check "account 1's owner gets an e-mail, with the invoice's number" "Your invoice FAC-$year-000001: L5 one" "$(mail_to "$user_1" | head -1)"
+listed_invoices="$(as_user_1 GET /billing/invoices)"
+check "and lists it: its month, issue date in Tunisia and total" "200 FAC-$year-000001 invoice $last_month $(TZ=Africa/Tunis date +%F) 24.800" \
+  "$(status) $(jq -r '.invoices[0] | "\(.number) \(.kind) \(.month) \(.issuedOn) \(.total)"' <<<"$listed_invoices")"
+check "and downloads its PDF, named by its number" "200 application/pdf %PDF- FAC-$year-000001.pdf true" \
+  "$(fetch_pdf "$api_oidc" "/billing/invoices/$invoice_1/pdf" -H "Authorization: Bearer $token_1") $(head -c 5 "$work/file.pdf") $(fetched_name) $(grep -aq "Facture FAC-$year-000001" "$work/file.pdf" && echo true || echo false)"
+with_token "$token_2" GET "/billing/invoices/$invoice_1/pdf" '' -H "X-FF-Account: $account_2" >/dev/null
+check "which account 2 never gets" "404 Invoice $invoice_1 not found" "$(status) $(message)"
+again="$(with_token "$operator_token" POST /admin/invoices/issue "$(jq -cn --arg month "$last_month" --arg account "$account_1" '{month: $month, accountIds: [$account], reason: "l5 tries"}')")"
+check "issuing it again names it, and issues nothing" "200 0 L5 one's invoice for $last_month was issued: FAC-$year-000001" \
+  "$(status) $(jq -r '"\(.issued | length) \(.failed[0].problem)"' <<<"$again")"
+note="$(with_token "$operator_token" POST "/admin/invoices/$invoice_1/credit-notes" '{"lines": [{"description": "Remboursement partiel", "amount": "5"}], "reason": "l5: part refunded"}')"
+check "a credit note corrects it: its own numbers, 5.000 TND and 19% VAT, no stamp duty" "201 AV-$year-000001 FAC-$year-000001 5.950 0.000" \
+  "$(status) $(jq -r '"\(.number) \(.corrects) \(.total) \(.stampDuty)"' <<<"$note")"
+with_token "$operator_token" POST "/admin/invoices/$invoice_1/credit-notes" '{"lines": [{"description": "Trop", "amount": "15.001"}], "reason": "l5 tries"}' >/dev/null
+check "and all its credit notes give back no more than it charged" \
+  "400 FAC-$year-000001's credit notes would give back 20.001 TND before tax and 3.800 TND of VAT: it charged 20.000 TND and 3.800 TND" "$(status) $(message)"
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^A credit note' && break; sleep 0.5; done
+check "and its owner is told" "A credit note for your invoice FAC-$year-000001: L5 one" "$(mail_to "$user_1" | head -1)"
+check "the owner's list has both, newest first" "AV-$year-000001 FAC-$year-000001" "$(as_user_1 GET /billing/invoices | jq -r '[.invoices[].number] | join(" ")')"
+check "the owner downloads the month's usage statement" "200 application/pdf %PDF- releve-$(date -u +%Y-%m).pdf" \
+  "$(fetch_pdf "$api_oidc" "/billing/statements/$(date -u +%Y-%m)/pdf" -H "Authorization: Bearer $token_1") $(head -c 5 "$work/file.pdf") $(fetched_name)"
+check "the operator downloads the invoice too" "200 application/pdf" "$(fetch_pdf "$api_oidc" "/admin/invoices/$invoice_1/pdf" -H "Authorization: Bearer $operator_token")"
+documents_1="$(with_token "$operator_token" GET "/admin/invoices?accountId=$account_1")"
+check "and lists both documents of account 1" "200 AV-$year-000001,FAC-$year-000001" "$(status) $(jq -r '[.invoices[].number] | join(",")' <<<"$documents_1")"
+log_invoices="$(as_user_1 GET '/audit-log?limit=100')"
+check "account 1's audit log has both, as FF's" "invoice.issue:FF invoice.credit_note:FF" \
+  "$(jq -r '[.entries[] | select(.action | startswith("invoice.")) | "\(.action):\(.actorLabel)"] | reverse | join(" ")' <<<"$log_invoices")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress payment.record payment.withholding" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress payment.record payment.withholding payment.record invoice.issue invoice.credit_note" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -817,7 +907,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 13 account.approve,account.egress,account.plan,account.reactivate,account.suspend,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
+  "200 16 account.approve,account.egress,account.plan,account.reactivate,account.suspend,invoice.credit_note,invoice.issue,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

@@ -32,7 +32,7 @@ export class ProFormasController {
   @ApiOperation({ summary: "The account's pro-formas, newest first, each with its transfer once FF recorded it" })
   @ApiResponse({ status: 200, type: ProFormasPage })
   async list(@Principal() principal: Principal): Promise<ProFormasPage> {
-    return { proFormas: await this.payments.proFormas(principal.accountId) };
+    return { proFormas: await this.payments.proFormas(principal.accountId), vatPercent: await this.payments.vatPercentNow() };
   }
 
   @Get(':id')

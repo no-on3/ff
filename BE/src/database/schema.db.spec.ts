@@ -43,6 +43,7 @@ const PRICE_BOOKS = migrationNames.find((name) => name.startsWith('PriceBooks'))
 const LEDGER = migrationNames.find((name) => name.startsWith('Ledger')) as string;
 const RATING = migrationNames.find((name) => name.startsWith('Rating')) as string;
 const CREDIT_CONTROLS = migrationNames.find((name) => name.startsWith('CreditControls')) as string;
+const BANK_TRANSFERS = migrationNames.find((name) => name.startsWith('BankTransfers')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -244,6 +245,37 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it('the invoices migration loads the tax rates, and refuses to revert while an invoice exists, as issued invoices are legal records (P-36)', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await dataSource.query(`SELECT kind, valid_from::text AS "from", percent, amount_minor::int AS amount, currency FROM tax_rates ORDER BY kind`)).toEqual([
+        { kind: 'stamp_duty', from: '2023-01-01', percent: null, amount: 1000, currency: 'TND' },
+        { kind: 'vat', from: '2018-01-01', percent: 19, amount: null, currency: null },
+      ]);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO invoices (id, account_id, kind, number, fiscal_year, sequence, month, issued_on, issued_by, currency, subtotal_minor, vat_minor, stamp_duty_minor, total_minor, buyer_name, pdf_key)
+         VALUES (gen_random_uuid(), $1, 'invoice', 'FAC-2026-000001', 2026, 1, '2026-10', '2026-11-02', 'operator:kc-op-1', 'TND', 50000, 9500, 0, 59500, 'A', 'invoices/FAC-2026-000001.pdf')`,
+        [ACCOUNT],
+      );
+
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow('1 invoice(s) or credit note(s) were issued: they are legal records, and reverting would drop them');
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM invoices`)).toEqual([{ n: 1 }]); // nothing undone
+
+      await withScratchDatabase(settings, 'ff_test', async (fresh) => {
+        await fresh.runMigrations({ transaction: 'each' });
+        await fresh.query(`INSERT INTO invoice_counters (series, fiscal_year, last_number) VALUES ('FAC', 2026, 0)`);
+        await fresh.query(`INSERT INTO invoice_notices (month, kind, waiting) VALUES ('2026-10', 'ready', 0)`);
+
+        await migrateDownTo(fresh, BANK_TRANSFERS);
+
+        expect(await fresh.query(`SELECT to_regclass('invoices') AS i, to_regclass('invoice_counters') AS c, to_regclass('tax_rates') AS t`)).toEqual([{ i: null, c: null, t: null }]);
+        await fresh.runMigrations({ transaction: 'each' });
+        expect(await schemaDrift(fresh)).toEqual([]);
+      });
+    });
+  });
+
   it('the bank-transfers migration reverts with a pro-forma present, unless a withholding receivable exists, which the ledger keeps (P-35)', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -254,6 +286,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         [ACCOUNT],
       );
       await dataSource.query(`INSERT INTO ledger_accounts (type, currency) VALUES ('withholding_receivable', 'TND')`);
+      await migrateDownTo(dataSource, BANK_TRANSFERS);
 
       await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(/violated by some row/);
       expect(await dataSource.query(`SELECT count(*)::int AS n FROM payments`)).toEqual([{ n: 1 }]); // nothing undone
@@ -382,6 +415,10 @@ run('database schema (L2, real PostgreSQL)', () => {
         'function_metrics',
         'functions',
         'invitations',
+        'invoice_counters',
+        'invoice_lines',
+        'invoice_notices',
+        'invoices',
         'ledger_accounts',
         'ledger_entries',
         'ledger_transactions',
@@ -393,6 +430,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'platform_settings',
         'price_books',
         'rating_runs',
+        'tax_rates',
         'usage_charges',
         'usage_hourly',
         'usage_records',

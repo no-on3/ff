@@ -6,12 +6,15 @@ import {
   creditBanner,
   decimalsOf,
   frenchDate,
+  invoiceKindLabel,
+  monthName,
   frenchMoney,
   invokesLabel,
   parsePercents,
   percentsText,
   proFormaQuote,
   proFormaState,
+  statementMonths,
   transactionLabel,
   trialNote,
 } from './billing';
@@ -119,7 +122,7 @@ const PAID = { received: '58.608', withheld: '0.892', receivedOn: '2026-10-20', 
 
 describe('asking for a pro-forma (P-35)', () => {
   it("quotes a pack as the API will write it: the credit, D9's 19% VAT on top, and the total to transfer", () => {
-    expect(CREDIT_PACKS.map((pack) => proFormaQuote(pack, 3))).toEqual([
+    expect(CREDIT_PACKS.map((pack) => proFormaQuote(pack, 3, 19))).toEqual([
       { credit: '20.000', vat: '3.800', total: '23.800' },
       { credit: '50.000', vat: '9.500', total: '59.500' },
       { credit: '100.000', vat: '19.000', total: '119.000' },
@@ -128,20 +131,25 @@ describe('asking for a pro-forma (P-35)', () => {
   });
 
   it('rounds the VAT once to the millime, half up, as the API does (pro-forma.spec.ts has the same amounts)', () => {
-    expect(proFormaQuote('50.001', 3)).toEqual({ credit: '50.001', vat: '9.500', total: '59.501' }); // 9500.19
-    expect(proFormaQuote('50.003', 3)).toEqual({ credit: '50.003', vat: '9.501', total: '59.504' }); // 9500.57
-    expect(proFormaQuote('10.050', 3)).toEqual({ credit: '10.050', vat: '1.910', total: '11.960' }); // 1909.5
-    expect(proFormaQuote(' 12.5 ', 3)).toEqual({ credit: '12.500', vat: '2.375', total: '14.875' });
-    expect(proFormaQuote('50', 0)).toEqual({ credit: '50', vat: '10', total: '60' }); // 9.5, in a currency without decimals
+    expect(proFormaQuote('50.001', 3, 19)).toEqual({ credit: '50.001', vat: '9.500', total: '59.501' }); // 9500.19
+    expect(proFormaQuote('50.003', 3, 19)).toEqual({ credit: '50.003', vat: '9.501', total: '59.504' }); // 9500.57
+    expect(proFormaQuote('10.050', 3, 19)).toEqual({ credit: '10.050', vat: '1.910', total: '11.960' }); // 1909.5
+    expect(proFormaQuote(' 12.5 ', 3, 19)).toEqual({ credit: '12.500', vat: '2.375', total: '14.875' });
+    expect(proFormaQuote('50', 0, 19)).toEqual({ credit: '50', vat: '10', total: '60' }); // 9.5, in a currency without decimals
   });
 
   it("refuses what the API would, from 10 to 1,000,000 of credit, with the currency's decimals at most", () => {
-    expect(proFormaQuote('10', 3)).toEqual({ credit: '10.000', vat: '1.900', total: '11.900' });
-    expect(proFormaQuote('1000000', 3)).toEqual({ credit: '1000000.000', vat: '190000.000', total: '1190000.000' });
-    for (const amount of ['9.999', '1000000.001', '0']) expect(proFormaQuote(amount, 3)).toEqual({ problem: 'The credit is from 10 to 1,000,000' });
-    for (const amount of ['fifty', '-50', '50,000', '50.', '', '1e3']) expect(proFormaQuote(amount, 3)).toEqual({ problem: 'The credit is an amount, such as 50 or 50.500' });
-    expect(proFormaQuote('50.0001', 3)).toEqual({ problem: 'The credit has at most 3 decimals' });
-    expect(proFormaQuote('50.5', 0)).toEqual({ problem: 'The credit is a whole amount' });
+    expect(proFormaQuote('10', 3, 19)).toEqual({ credit: '10.000', vat: '1.900', total: '11.900' });
+    expect(proFormaQuote('1000000', 3, 19)).toEqual({ credit: '1000000.000', vat: '190000.000', total: '1190000.000' });
+    for (const amount of ['9.999', '1000000.001', '0']) expect(proFormaQuote(amount, 3, 19)).toEqual({ problem: 'The credit is from 10 to 1,000,000' });
+    for (const amount of ['fifty', '-50', '50,000', '50.', '', '1e3']) expect(proFormaQuote(amount, 3, 19)).toEqual({ problem: 'The credit is an amount, such as 50 or 50.500' });
+    expect(proFormaQuote('50.0001', 3, 19)).toEqual({ problem: 'The credit has at most 3 decimals' });
+    expect(proFormaQuote('50.5', 0, 19)).toEqual({ problem: 'The credit is a whole amount' });
+  });
+
+  it("quotes at the rate of the day the API gives, as tax rates are dated data (P-36)", () => {
+    expect(proFormaQuote('50', 3, 20)).toEqual({ credit: '50.000', vat: '10.000', total: '60.000' });
+    expect(proFormaQuote('50.005', 3, 7)).toEqual({ credit: '50.005', vat: '3.500', total: '53.505' }); // 3500.35
   });
 
   it("reads the currency's decimals from an amount the API wrote", () => {
@@ -184,5 +192,21 @@ describe('the printed pro-forma, in French (P-35)', () => {
     expect(frenchDate('2026-08-01T00:00:00.000Z')).toBe('1er août 2026');
     expect(frenchDate('2026-12-31T23:59:59.000Z')).toBe('31 décembre 2026');
     expect(frenchDate('2026-02-01')).toBe('1er février 2026');
+  });
+});
+
+describe('invoices and usage statements (P-36)', () => {
+  it('names an invoice by its month, and a credit note by the invoice it corrects', () => {
+    expect(invoiceKindLabel({ kind: 'invoice', corrects: null })).toBe('Invoice');
+    expect(invoiceKindLabel({ kind: 'credit_note', corrects: 'FAC-2026-000001' })).toBe('Credit note for FAC-2026-000001');
+    expect([monthName('2026-10'), monthName('2027-01')]).toEqual(['October 2026', 'January 2027']);
+  });
+
+  it('offers the statements of this month, by the UTC calendar, and the eleven before, newest first', () => {
+    const months = statementMonths(new Date('2026-10-31T23:30:00Z'));
+
+    expect(months).toHaveLength(12);
+    expect([months[0], months[1], months[months.length - 1]]).toEqual(['2026-10', '2026-09', '2025-11']);
+    expect(statementMonths(new Date('2027-01-01T00:00:00Z'), 3)).toEqual(['2027-01', '2026-12', '2026-11']);
   });
 });

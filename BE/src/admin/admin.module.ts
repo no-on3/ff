@@ -15,6 +15,7 @@ import { UsageModule } from '../usage/usage.module';
 import { AdminAccountsController } from './admin-accounts.controller';
 import { AdminAccountsService } from './admin-accounts.service';
 import { AdminAuditController } from './admin-audit.controller';
+import { AdminInvoicesController } from './admin-invoices.controller';
 import { AdminPaymentsController, certificateBody } from './admin-payments.controller';
 import { AdminPlansController } from './admin-plans.controller';
 import { AdminPricesController } from './admin-prices.controller';
@@ -34,7 +35,7 @@ import { PlatformSettingsModule } from './platform-settings.module';
     PlansModule,
     UsageModule,
   ],
-  controllers: [AdminSettingsController, AdminAuditController, AdminAccountsController, AdminPlansController, AdminPricesController, AdminPaymentsController],
+  controllers: [AdminSettingsController, AdminAuditController, AdminAccountsController, AdminPlansController, AdminPricesController, AdminPaymentsController, AdminInvoicesController],
   providers: [AdminAccountsService, AdminPricesService],
 })
 export class AdminModule implements NestModule {

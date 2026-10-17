@@ -15,7 +15,9 @@ import { LedgerService } from '../ledger/ledger.service';
 import { formatMinor, parseMinor } from '../money';
 import { Payment, PaymentMethod, PaymentStatus } from './payment.entity';
 import { AdminPaymentView, AdminPaymentsPage, BankView, PAYMENTS_CURSOR, ProFormaView, SellerView } from './payments.dto';
-import { CREDIT_LIMITS, TransferFacts, VAT_PERCENT, newReference, normalizedReference, transferMail, transferProblem, vatOf, withholdingMail } from './pro-forma';
+import { vatPercentOn } from '../tax-rates';
+import { tunisDay } from '../tunisia';
+import { CREDIT_LIMITS, TransferFacts, newReference, normalizedReference, transferMail, transferProblem, vatOf, withholdingMail } from './pro-forma';
 
 /** The types a withholding certificate may have: the tax platform's PDF, or a scan. */
 export const CERTIFICATE_TYPES = ['application/pdf', 'image/png', 'image/jpeg'];
@@ -70,7 +72,9 @@ export class PaymentsService {
     }
     const account = await this.dataSource.getRepository(Account).findOneBy({ id: accountId });
     if (!account) throw new NotFoundException(`Account ${accountId} not found`);
-    const vatMinor = vatOf(creditMinor, VAT_PERCENT);
+    // The VAT rate in force today, in Tunisia (P-36: tax rates are dated data).
+    const vatPercent = await vatPercentOn(this.dataSource.manager, tunisDay(now));
+    const vatMinor = vatOf(creditMinor, vatPercent);
 
     for (let attempt = 1; ; attempt++) {
       try {
@@ -82,7 +86,7 @@ export class PaymentsService {
             status: PaymentStatus.PENDING,
             currency,
             creditMinor,
-            vatPercent: VAT_PERCENT,
+            vatPercent,
             vatMinor,
             totalMinor: creditMinor + vatMinor,
             buyerName: account.name,
@@ -107,6 +111,11 @@ export class PaymentsService {
         throw error;
       }
     }
+  }
+
+  /** The VAT rate a pro-forma asked for now gets, as the console quotes it. */
+  vatPercentNow(now = new Date()): Promise<number> {
+    return vatPercentOn(this.dataSource.manager, tunisDay(now));
   }
 
   /** GET /billing/pro-formas: the account's, newest first. */

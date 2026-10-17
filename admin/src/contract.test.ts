@@ -12,11 +12,14 @@ import priceBooksMigration from '../../BE/src/migrations/1792235773406-PriceBook
 import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw';
 import paymentEntitySource from '../../BE/src/billing/payments/payment.entity.ts?raw';
 import paymentsServiceSource from '../../BE/src/billing/payments/payments.service.ts?raw';
+import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
+import invoiceEntitySource from '../../BE/src/billing/invoices/invoice.entity.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
 import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
 import { OPERATOR_ACTIONS } from './lib/audit';
+import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
 import { LIMIT_FIELDS } from './lib/plans';
 import { SKUS, multiplyDecimals } from './lib/prices';
@@ -173,6 +176,22 @@ describe('payments (P-35)', () => {
     expect(paymentsServiceSource).toContain(`export const CERTIFICATE_TYPES = [${CERTIFICATE_TYPES.map((type) => `'${type}'`).join(', ')}];`);
     expect(paymentsServiceSource).toContain(`export const CERTIFICATE_LIMIT = '${CERTIFICATE_MAX_MB}mb';`);
     expect(constant('REASON_HEADER')).toBe(REASON_HEADER.toLowerCase());
+  });
+});
+
+describe('invoices (P-36)', () => {
+  it("have the API's operator fields, after the customer's", () => {
+    const body = invoicesDtoSource.slice(invoicesDtoSource.indexOf('export class AdminInvoiceView extends InvoiceView {'));
+    const fields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): /gm)].map((match) => match[1]);
+
+    expect(fields).toEqual([...ADMIN_INVOICE_FIELDS]);
+  });
+
+  it("have the API's kinds", () => {
+    const body = invoiceEntitySource.slice(invoiceEntitySource.indexOf('export enum InvoiceKind'));
+    const kinds = [...body.slice(0, body.indexOf('\n}')).matchAll(/= '(\w+)'/g)].map((match) => match[1]);
+
+    expect(INVOICE_KINDS.map((kind) => kind.value)).toEqual(kinds);
   });
 });
 

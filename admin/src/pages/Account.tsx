@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { AccountAuditEntry, accountsApi, paymentsApi, plansApi } from '../api';
+import { AccountAuditEntry, accountsApi, invoicesApi, paymentsApi, plansApi } from '../api';
 import DataTable, { Column } from '../components/DataTable';
 import ReasonDialog from '../components/ReasonDialog';
 import { EmptyState, ErrorState, Loading } from '../components/States';
@@ -9,6 +9,7 @@ import { AccountView, PlanOption, STATUS_CHANGES, StatusChange, changedNotice, c
 import { actionLabel, describeAction } from '../lib/audit';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
 import { balanceNote, formatMoney } from '../lib/money';
+import { AdminInvoice, invoiceLabel } from '../lib/invoices';
 import { AdminPayment, paymentState } from '../lib/payments';
 import { currentCursor, firstPage, nextPage, pageNumber, previousPage } from '../lib/table';
 import { whenUtc } from '../lib/time';
@@ -93,6 +94,43 @@ const AccountPayments: React.FC<{ accountId: string }> = ({ accountId }) => {
       />
       <Link to={`/payments?accountId=${accountId}`} className="text-sm text-blue-700 hover:underline">
         {payments.more ? 'All its payments' : 'On the Payments page'}, to record a transfer or add a certificate →
+      </Link>
+    </>
+  );
+};
+
+/** The account's last invoices and credit notes (P-36), with a link to the Invoices page, where they are issued and corrected. */
+const AccountInvoices: React.FC<{ accountId: string }> = ({ accountId }) => {
+  const [invoices, setInvoices] = useState<{ rows: AdminInvoice[]; more: boolean } | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoicesApi.page({ accountId, limit: '5' }).then(
+      ({ data }) => setInvoices({ rows: data.invoices, more: data.next !== null }),
+      (error) => setFailure(apiErrorMessage(error)),
+    );
+  }, [accountId]);
+
+  if (failure) return <ErrorState message={failure} />;
+  if (!invoices) return <Loading />;
+  if (invoices.rows.length === 0) return <EmptyState>No invoice issued yet.</EmptyState>;
+  return (
+    <>
+      <Table
+        head={['Number', 'What', 'Issued on', 'Total']}
+        rows={invoices.rows.map((invoice) => [
+          <span key="number" className="whitespace-nowrap font-mono">
+            {invoice.number}
+          </span>,
+          invoiceLabel(invoice),
+          invoice.issuedOn,
+          <span key="total" className="whitespace-nowrap">
+            {formatMoney(invoice.total, invoice.currency)}
+          </span>,
+        ])}
+      />
+      <Link to={`/invoices?accountId=${accountId}`} className="text-sm text-blue-700 hover:underline">
+        {invoices.more ? 'All its invoices' : 'On the Invoices page'}, to download them or issue a credit note →
       </Link>
     </>
   );
@@ -347,6 +385,11 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Payments</h2>
         <AccountPayments key={changes} accountId={account.id} />
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Invoices</h2>
+        <AccountInvoices key={changes} accountId={account.id} />
       </section>
 
       <section className="space-y-3">

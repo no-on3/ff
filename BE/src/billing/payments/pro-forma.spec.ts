@@ -4,13 +4,12 @@
  * against a pro-forma must add up to, and the owners' e-mails. The ledger
  * entries run against PostgreSQL in payments.db.spec.ts.
  */
-import { CREDIT_LIMITS, REFERENCE, VAT_PERCENT, newReference, normalizedReference, transferMail, transferProblem, vatOf, withholdingMail } from './pro-forma';
+import { CREDIT_LIMITS, REFERENCE, newReference, normalizedReference, transferMail, transferProblem, vatOf, withholdingMail } from './pro-forma';
 
 const AMOUNTS = { creditMinor: 50000n, vatMinor: 9500n, totalMinor: 59500n };
 
 describe('pro-formas and bank transfers (L1, P-35)', () => {
-  it("puts D9's 19% VAT on top of the credit, rounded once to the millime", () => {
-    expect(VAT_PERCENT).toBe(19);
+  it("puts D9's VAT on top of the credit, rounded once to the millime", () => {
     expect(vatOf(50000n, 19)).toBe(9500n); // 50.000 TND of credit costs 59.500
     expect(vatOf(50001n, 19)).toBe(9500n); // 9500.19
     expect(vatOf(50003n, 19)).toBe(9501n); // 9500.57
