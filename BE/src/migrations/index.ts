@@ -14,6 +14,7 @@ import { Rating1792241835410 } from './1792241835410-Rating';
 import { CreditControls1792244277487 } from './1792244277487-CreditControls';
 import { BankTransfers1792246542708 } from './1792246542708-BankTransfers';
 import { Invoices1792251640141 } from './1792251640141-Invoices';
+import { CancelledProFormas1792259449848 } from './1792259449848-CancelledProFormas';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -37,4 +38,5 @@ export const MIGRATIONS: Array<new () => object> = [
   CreditControls1792244277487,
   BankTransfers1792246542708,
   Invoices1792251640141,
+  CancelledProFormas1792259449848,
 ];

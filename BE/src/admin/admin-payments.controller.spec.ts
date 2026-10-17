@@ -1,5 +1,5 @@
 /**
- * L1: the admin payment routes (client-readiness plan, P-35) through HTTP,
+ * L1: the admin payment routes (client-readiness plan, P-35; cancelling, P-74) through HTTP,
  * with the validation main.ts sets up and the certificate's body parser the
  * admin module applies: what each passes on, and what each refuses. The
  * service runs against PostgreSQL in payments.db.spec.ts; who may call them
@@ -24,6 +24,7 @@ describe('the admin payment routes (L1, P-35)', () => {
     recordTransfer: jest.fn(async () => ({ id: PAYMENT })),
     attachCertificate: jest.fn(async (..._args: unknown[]) => ({ id: PAYMENT })),
     certificate: jest.fn(async () => ({ body: PDF, contentType: 'application/pdf', reference: 'FF-7KQ2-9MXA' })),
+    cancelPayment: jest.fn(async () => ({ id: PAYMENT, status: 'cancelled' })),
   };
   const json = (method: string, path: string, body?: object) =>
     fetch(`${baseUrl}${path}`, { method, headers: { 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
@@ -59,9 +60,23 @@ describe('the admin payment routes (L1, P-35)', () => {
     expect((await json('GET', '/admin/payments?reference=ff7kq29mxa')).status).toBe(200);
     expect(payments.forOperators).toHaveBeenLastCalledWith({ status: undefined, accountId: undefined, reference: 'ff7kq29mxa' }, { limit: 50, before: undefined });
 
-    expect(await refusal(await json('GET', '/admin/payments?status=lost'))).toEqual([400, ['status must be one of: pending, paid']]);
+    expect(await refusal(await json('GET', '/admin/payments?status=lost'))).toEqual([400, ['status must be one of: pending, paid, cancelled']]);
+    expect((await json('GET', '/admin/payments?status=cancelled')).status).toBe(200);
     expect(await refusal(await json('GET', '/admin/payments?accountId=1'))).toEqual([400, ['accountId must be an account ID: 12 digits']]);
     expect(await refusal(await json('GET', '/admin/payments?limit=0'))).toEqual([400, ['limit must not be less than 1']]);
+  });
+
+  it('cancel a pending pro-forma with its reason, 200 with it; a reason and an ID needed (P-74)', async () => {
+    const res = await json('POST', `/admin/payments/${PAYMENT}/cancel`, { reason: 'Asked for twice by mistake' });
+
+    expect([res.status, await res.json()]).toEqual([200, { id: PAYMENT, status: 'cancelled' }]);
+    expect(payments.cancelPayment).toHaveBeenCalledWith(PAYMENT, 'Asked for twice by mistake');
+    expect(await refusal(await json('POST', `/admin/payments/${PAYMENT}/cancel`, {}))).toEqual([
+      400,
+      ['reason must be longer than or equal to 3 characters', 'reason must be a string'],
+    ]);
+    expect((await json('POST', '/admin/payments/FF-7KQ2-9MXA/cancel', { reason: 'Asked for twice' })).status).toBe(400);
+    expect(payments.cancelPayment).toHaveBeenCalledTimes(1);
   });
 
   it('record a transfer as the bank statement shows it, with its reason', async () => {

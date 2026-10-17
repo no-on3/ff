@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Put, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Req, Res } from '@nestjs/common';
 import { ApiConsumes, ApiHeader, ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { raw } from 'express';
 import type { Request, RequestHandler, Response } from 'express';
 import { AdminPaymentView, AdminPaymentsPage, AdminPaymentsQuery, RecordTransferDto } from '../billing/payments/payments.dto';
 import { CERTIFICATE_LIMIT, CERTIFICATE_TYPES, PaymentsService } from '../billing/payments/payments.service';
+import { AdminChange } from './admin.dto';
 import { AdminRoutes, REASON_HEADER, reasonOf } from './operator';
 
 /** A withholding certificate's body, a PDF or an image, read as is: before the guard, which then finds its reason in a header. */
@@ -11,8 +12,8 @@ export const certificateBody = (): RequestHandler => raw({ type: CERTIFICATE_TYP
 
 /**
  * Payments, for FF's operators (P-35, P-74): every pro-forma and its transfer,
- * the transfer recorded from the bank statement, and the withholding
- * certificate that credits the share withheld at source.
+ * the transfer recorded from the bank statement, the withholding certificate
+ * that credits the share withheld at source, and a pending one cancelled.
  */
 @ApiTags('admin')
 @AdminRoutes()
@@ -35,6 +36,17 @@ export class AdminPaymentsController {
   @ApiResponse({ status: 201, type: AdminPaymentView })
   record(@Body() body: RecordTransferDto): Promise<AdminPaymentView> {
     return this.payments.recordTransfer(body, body.reason);
+  }
+
+  @Post('payments/:id/cancel')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Cancels a pending pro-forma, with a reason, which the owners\' e-mail gives (operators only)',
+    description: 'A cancelled one stays as it is; a paid one is never cancelled (409). A transfer that comes anyway is still recorded against it.',
+  })
+  @ApiResponse({ status: 200, type: AdminPaymentView })
+  cancel(@Param('id', ParseUUIDPipe) id: string, @Body() body: AdminChange): Promise<AdminPaymentView> {
+    return this.payments.cancelPayment(id, body.reason);
   }
 
   @Put('payments/:id/withholding-certificate')

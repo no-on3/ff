@@ -5,10 +5,12 @@
  * reference, whole or net of the share withheld at source, and its ledger
  * entries; the certificate that credits that share; what is refused, with
  * nothing written; two operators at once; the owners' e-mails; the
- * operators' list.
+ * operators' list. A pending pro-forma cancelled by its owner or an operator,
+ * and a transfer that comes for it anyway (P-74).
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Account, AccountStatus } from '../../accounts/entities/account.entity';
 import { Membership } from '../../accounts/entities/membership.entity';
@@ -247,6 +249,100 @@ run('bank transfers (L2, P-35)', () => {
       expect(results.map((result) => result.status).sort()).toEqual(['fulfilled', 'rejected']);
       expect(String((results.find((result) => result.status === 'rejected') as PromiseRejectedResult).reason)).toContain(`The transfer for ${proForma.reference} was recorded on`);
       expect(await ledger.balance(a, 'TND')).toBe(100000n);
+    });
+  });
+
+  describe('cancelling a pending pro-forma (P-74)', () => {
+    it("by its owner: cancelled, when and by whom, in the audit log; again, nothing more; no e-mail, the owner did it", async () => {
+      const a = await account('Cancel Labs', ['cancel-owner@ff.test']);
+      const proForma = await as(OWNER, () => payments.requestProForma(a, '50'));
+      const at = new Date('2026-10-17T09:00:00Z');
+
+      const cancelled = await as(OWNER, () => payments.cancelProForma(a, proForma.id, at));
+
+      expect([cancelled.status, cancelled.cancelledAt, cancelled.transfer]).toEqual(['cancelled', at, null]);
+      expect(await query('SELECT status, cancelled_at, cancelled_by FROM payments WHERE id = $1', [proForma.id])).toEqual([{ status: 'cancelled', cancelled_at: at, cancelled_by: OWNER.id }]);
+      const logged = () => audit(a).then((entries) => entries.map((entry) => [entry.actor, entry.action, entry.details]));
+      expect(await logged()).toEqual([
+        [OWNER.id, 'billing.pro_forma', expect.anything()],
+        [OWNER.id, 'billing.pro_forma_cancel', { reference: proForma.reference, total: '59.500', currency: 'TND' }],
+      ]);
+
+      const again = await as(OWNER, () => payments.cancelProForma(a, proForma.id, new Date('2026-10-18T09:00:00Z')));
+      expect([again.status, again.cancelledAt, (await logged()).length, sent.length]).toEqual(['cancelled', at, 2, 0]);
+      expect((await payments.proFormas(a)).map((one) => one.status)).toEqual(['cancelled']);
+    });
+
+    it("refuses another account's, writing nothing, and a paid one", async () => {
+      const [a, b] = [await account(), await account()];
+      const proForma = await payments.requestProForma(a, '10');
+
+      await expect(payments.cancelProForma(b, proForma.id)).rejects.toThrow(new NotFoundException(`Pro-forma ${proForma.id} not found`));
+      expect((await payments.proForma(a, proForma.id)).status).toBe('pending');
+
+      await payments.recordTransfer(transfer(proForma.reference, '11.900', '0', '2026-10-15'), 'Paid');
+      await expect(payments.cancelProForma(a, proForma.id)).rejects.toThrow(
+        new ConflictException(`The transfer for ${proForma.reference} was recorded on ${new Date().toISOString().slice(0, 10)}: a paid pro-forma isn't cancelled`),
+      );
+      await expect(payments.cancelPayment(proForma.id, 'Asked twice')).rejects.toThrow("a paid pro-forma isn't cancelled");
+      await expect(payments.cancelPayment('6f1c2d3e-4b5a-4c6d-8e7f-001122334455', 'Asked twice')).rejects.toThrow(
+        new NotFoundException('Payment 6f1c2d3e-4b5a-4c6d-8e7f-001122334455 not found'),
+      );
+    });
+
+    it('by an operator, with a reason: in the audit log, and the owners told why, not the other members', async () => {
+      const a = await account('Ops Labs', ['ops-owner@ff.test'], ['ops-dev@ff.test']);
+      const proForma = await payments.requestProForma(a, '20');
+
+      const cancelled = await as(OPERATOR, () => payments.cancelPayment(proForma.id, 'Asked for twice by mistake'));
+
+      expect([cancelled.status, cancelled.cancelledBy, cancelled.accountId]).toEqual(['cancelled', OPERATOR.id, a]);
+      expect((await audit(a)).at(-1)).toMatchObject({
+        actor: OPERATOR.id,
+        action: 'payment.cancel',
+        resource: `payment:${proForma.id}`,
+        details: { reason: 'Asked for twice by mistake', reference: proForma.reference, total: '23.800', currency: 'TND' },
+      });
+      expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([['ops-owner@ff.test', `Your pro-forma ${proForma.reference} was cancelled: Ops Labs`]]);
+      expect(sent[0].text).toContain('Why: Asked for twice by mistake');
+
+      sent.length = 0;
+      await as(OPERATOR, () => payments.cancelPayment(proForma.id, 'Again'));
+      expect([sent.length, (await audit(a)).length]).toEqual([0, 2]);
+    });
+
+    it('lets a transfer that comes anyway pay it: credited, the cancellation kept, the audit entry saying so', async () => {
+      const a = await account('Late Labs', ['late-owner@ff.test']);
+      const proForma = await payments.requestProForma(a, '50');
+      const at = new Date('2026-10-17T09:00:00Z');
+      await as(OWNER, () => payments.cancelProForma(a, proForma.id, at));
+
+      const paid = await as(OPERATOR, () => payments.recordTransfer(transfer(proForma.reference, '59.500'), 'It came anyway'));
+
+      expect([paid.status, paid.cancelledAt, paid.cancelledBy, paid.transfer?.credited]).toEqual(['paid', at, OWNER.id, '50.000']);
+      expect(await ledger.balance(a, 'TND')).toBe(50000n);
+      expect((await audit(a)).at(-1)).toMatchObject({ action: 'payment.record', details: { reason: 'It came anyway', wasCancelled: true } });
+      expect(sent.map((mail) => mail.subject)).toEqual(['Your transfer was received: Late Labs']);
+    });
+
+    it('lists the cancelled ones for operators, and the database keeps the dates and statuses together', async () => {
+      const a = await account();
+      const [kept, dropped] = [await payments.requestProForma(a, '10'), await payments.requestProForma(a, '30')];
+      await as(OWNER, () => payments.cancelProForma(a, dropped.id));
+
+      const cancelled = await payments.forOperators({ status: PaymentStatus.CANCELLED, accountId: a }, { limit: 50 });
+      const pending = await payments.forOperators({ status: PaymentStatus.PENDING, accountId: a }, { limit: 50 });
+      expect([cancelled.payments.map((payment) => payment.id), pending.payments.map((payment) => payment.id)]).toEqual([[dropped.id], [kept.id]]);
+
+      // A pending one with a date, a cancelled one without, a date without who: each refused.
+      for (const change of [
+        `status = 'pending', cancelled_at = now(), cancelled_by = 'user:x'`,
+        `status = 'cancelled', cancelled_at = NULL, cancelled_by = NULL`,
+        `cancelled_at = now(), cancelled_by = NULL`,
+      ]) {
+        const id = change.startsWith(`status = 'pending'`) ? dropped.id : change.startsWith(`status = 'cancelled'`) ? kept.id : dropped.id;
+        await expect(query(`UPDATE payments SET ${change} WHERE id = $1`, [id])).rejects.toThrow('violates check constraint "CHK_67b14a70c30673f7e1ef7250fb"');
+      }
     });
   });
 

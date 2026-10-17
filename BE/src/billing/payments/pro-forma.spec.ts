@@ -1,10 +1,11 @@
 /**
  * L1: pro-formas and bank transfers (client-readiness plan, P-35, D9): the
  * VAT on top of the credit, the payment reference, what a transfer recorded
- * against a pro-forma must add up to, and the owners' e-mails. The ledger
+ * against a pro-forma must add up to, and the owners' e-mails, the one for a
+ * pro-forma an operator cancelled among them (P-74). The ledger
  * entries run against PostgreSQL in payments.db.spec.ts.
  */
-import { CREDIT_LIMITS, REFERENCE, newReference, normalizedReference, transferMail, transferProblem, vatOf, withholdingMail } from './pro-forma';
+import { CREDIT_LIMITS, REFERENCE, cancelMail, newReference, normalizedReference, transferMail, transferProblem, vatOf, withholdingMail } from './pro-forma';
 
 const AMOUNTS = { creditMinor: 50000n, vatMinor: 9500n, totalMinor: 59500n };
 
@@ -72,6 +73,30 @@ describe('pro-formas and bank transfers (L1, P-35)', () => {
         'We received the withholding certificate for your transfer for the pro-forma FF-7KQ2-9MXA: the 0.892 TND withheld at source was added to the credit of your account "Tunis Labs" (000000000001).',
         '',
         'Your balance: https://console.ff.example/billing',
+      ].join('\n'),
+    });
+  });
+
+  it("tells the owners a pro-forma an operator cancelled: don't pay it, why, and that a transfer already sent still counts (P-74)", () => {
+    expect(
+      cancelMail({
+        account: { id: '000000000001', name: 'Tunis Labs' },
+        reference: 'FF-7KQ2-9MXA',
+        totalMinor: 59500n,
+        exponent: 3,
+        currency: 'TND',
+        reason: 'Asked for twice by mistake',
+        consoleUrl: 'https://console.ff.example',
+      }),
+    ).toEqual({
+      subject: 'Your pro-forma FF-7KQ2-9MXA was cancelled: Tunis Labs',
+      text: [
+        'FF cancelled the pro-forma FF-7KQ2-9MXA, for 59.500 TND, of your account "Tunis Labs" (000000000001): don\'t transfer for it.',
+        'Why: Asked for twice by mistake',
+        '',
+        'A transfer for it that is already on its way is still credited when it arrives.',
+        '',
+        'Ask for another pro-forma on the Billing page: https://console.ff.example/billing',
       ].join('\n'),
     });
   });

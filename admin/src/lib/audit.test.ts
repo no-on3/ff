@@ -113,6 +113,13 @@ describe('describeAction', () => {
     expect(describeAction(entry({ action: 'billing.pro_forma', details: { reference: 'FF-7KQ2-9MXA', credit: '50.000', total: '59.500', currency: 'TND' } }))).toBe(
       'FF-7KQ2-9MXA: pro-forma for 50.000 TND of credit, 59.500 TND with VAT',
     );
+    // P-74: a pro-forma cancelled, by an operator or its owner; a transfer recorded for one anyway.
+    const cancelled = { reference: 'FF-7KQ2-9MXA', total: '59.500', currency: 'TND' };
+    expect(describeAction(entry({ action: 'payment.cancel', details: { reason: 'r', ...cancelled } }))).toBe('FF-7KQ2-9MXA: pro-forma for 59.500 TND cancelled');
+    expect(describeAction(entry({ action: 'billing.pro_forma_cancel', details: cancelled }))).toBe('FF-7KQ2-9MXA: pro-forma for 59.500 TND cancelled');
+    expect(describeAction(entry({ action: 'payment.record', details: { ...recorded, received: '59.500', withheld: '0.000', wasCancelled: true } }))).toBe(
+      'FF-7KQ2-9MXA: 59.500 TND received on 2026-10-20, for a cancelled pro-forma',
+    );
   });
 
   it("names an invoice by its number, month, total and stamp duty, and a credit note by the invoice it corrects (P-36)", () => {
@@ -141,7 +148,7 @@ describe('describeAction', () => {
 describe('labels and names', () => {
   it('names a known action, and shows an unknown one as the API does', () => {
     expect([actionLabel('settings.update'), actionLabel('account.reopen')]).toEqual(['Settings changed', 'account.reopen']);
-    expect([actionLabel('payment.record'), actionLabel('payment.withholding')]).toEqual(['Bank transfer recorded', 'Withholding certificate added']);
+    expect([actionLabel('payment.record'), actionLabel('payment.withholding'), actionLabel('payment.cancel')]).toEqual(['Bank transfer recorded', 'Withholding certificate added', 'Pro-forma cancelled']);
     expect([actionLabel('invoice.issue'), actionLabel('invoice.credit_note')]).toEqual(['Invoice issued', 'Credit note issued']);
     expect([actionLabel('credit.promo'), actionLabel('credit.adjustment')]).toEqual(['Promotional credit granted', 'Credit corrected']);
   });

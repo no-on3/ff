@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../../auth/principal';
 import { RequireRole, RequireScope } from '../../auth/route-rules';
@@ -8,8 +8,9 @@ import { PaymentsService } from './payments.service';
 /**
  * Pro-formas for bank transfers (client-readiness plan, P-35, D9): an owner
  * asks for one, with a user's token, whatever the account's status, since a
- * suspended or closed account may still owe usage; every member reads them,
- * and an API key with usage:read, as for the account's other money.
+ * suspended or closed account may still owe usage, and may cancel a pending
+ * one (P-74); every member reads them, and an API key with usage:read, as for
+ * the account's other money.
  */
 @ApiTags('billing')
 @Controller('billing/pro-formas')
@@ -33,6 +34,18 @@ export class ProFormasController {
   @ApiResponse({ status: 200, type: ProFormasPage })
   async list(@Principal() principal: Principal): Promise<ProFormasPage> {
     return { proFormas: await this.payments.proFormas(principal.accountId), vatPercent: await this.payments.vatPercentNow() };
+  }
+
+  @Post(':id/cancel')
+  @RequireRole('owner')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Cancels a pending pro-forma, so that nobody pays it (P-74)',
+    description: 'A cancelled one stays as it is; a paid one is never cancelled (409). A transfer that comes anyway still pays it, and is credited.',
+  })
+  @ApiResponse({ status: 200, type: ProFormaView })
+  cancel(@Principal() principal: Principal, @Param('id', ParseUUIDPipe) id: string): Promise<ProFormaView> {
+    return this.payments.cancelProForma(principal.accountId, id);
   }
 
   @Get(':id')

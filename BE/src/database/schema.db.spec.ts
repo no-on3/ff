@@ -44,6 +44,8 @@ const LEDGER = migrationNames.find((name) => name.startsWith('Ledger')) as strin
 const RATING = migrationNames.find((name) => name.startsWith('Rating')) as string;
 const CREDIT_CONTROLS = migrationNames.find((name) => name.startsWith('CreditControls')) as string;
 const BANK_TRANSFERS = migrationNames.find((name) => name.startsWith('BankTransfers')) as string;
+const INVOICES = migrationNames.find((name) => name.startsWith('Invoices')) as string;
+const CANCELLED_PRO_FORMAS = migrationNames.find((name) => name.startsWith('CancelledProFormas')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -258,6 +260,7 @@ run('database schema (L2, real PostgreSQL)', () => {
          VALUES (gen_random_uuid(), $1, 'invoice', 'FAC-2026-000001', 2026, 1, '2026-10', '2026-11-02', 'operator:kc-op-1', 'TND', 50000, 9500, 0, 59500, 'A', 'invoices/FAC-2026-000001.pdf')`,
         [ACCOUNT],
       );
+      await migrateDownTo(dataSource, INVOICES);
 
       await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow('1 invoice(s) or credit note(s) were issued: they are legal records, and reverting would drop them');
       expect(await dataSource.query(`SELECT count(*)::int AS n FROM invoices`)).toEqual([{ n: 1 }]); // nothing undone
@@ -270,6 +273,35 @@ run('database schema (L2, real PostgreSQL)', () => {
         await migrateDownTo(fresh, BANK_TRANSFERS);
 
         expect(await fresh.query(`SELECT to_regclass('invoices') AS i, to_regclass('invoice_counters') AS c, to_regclass('tax_rates') AS t`)).toEqual([{ i: null, c: null, t: null }]);
+        await fresh.runMigrations({ transaction: 'each' });
+        expect(await schemaDrift(fresh)).toEqual([]);
+      });
+    });
+  });
+
+  it('the cancelled-pro-formas migration refuses to revert while a pro-forma was cancelled, and reverts with pending and paid ones present (P-74)', async () => {
+    const proForma = (status: string, cancelled: boolean) =>
+      `INSERT INTO payments (account_id, method, reference, status, currency, credit_minor, vat_percent, vat_minor, total_minor, buyer_name, requested_by, cancelled_at, cancelled_by)
+       VALUES ('${ACCOUNT}', 'bank_transfer', 'FF-${status.slice(0, 4).toUpperCase()}-EFGH', '${status}', 'TND', 50000, 19, 9500, 59500, 'A', 'dev',
+               ${cancelled ? "now(), 'user:x'" : 'NULL, NULL'})`;
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(proForma('cancelled', true));
+      await migrateDownTo(dataSource, CANCELLED_PRO_FORMAS);
+
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow('1 pro-forma(s) were cancelled: reverting would lose that');
+      expect(await dataSource.query(`SELECT status FROM payments`)).toEqual([{ status: 'cancelled' }]); // nothing undone
+
+      await withScratchDatabase(settings, 'ff_test', async (fresh) => {
+        await fresh.runMigrations({ transaction: 'each' });
+        await fresh.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+        await fresh.query(proForma('pending', false));
+
+        await migrateDownTo(fresh, INVOICES);
+
+        expect(await fresh.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'payments' AND column_name LIKE 'cancelled%'`)).toEqual([]);
+        await expect(fresh.query(`UPDATE payments SET status = 'cancelled'`)).rejects.toThrow(/violates check constraint/);
         await fresh.runMigrations({ transaction: 'each' });
         expect(await schemaDrift(fresh)).toEqual([]);
       });

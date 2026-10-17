@@ -56,6 +56,7 @@ export class ProFormaView {
   @ApiProperty({ type: SellerView }) seller: SellerView;
   @ApiProperty({ type: BankView, description: 'Where to pay' }) bank: BankView;
   @ApiProperty({ nullable: true, type: TransferView, description: 'Null until FF records the transfer' }) transfer: TransferView | null;
+  @ApiProperty({ nullable: true, type: String, description: 'When it was cancelled (P-74); a transfer that came anyway still paid it' }) cancelledAt: Date | null;
 }
 
 export class ProFormasPage {
@@ -70,6 +71,8 @@ export class AdminPaymentView extends ProFormaView {
   @ApiProperty({ nullable: true, type: String }) bankReference: string | null;
   @ApiProperty({ nullable: true, type: String, example: 'operator:kc-op-1' }) recordedBy: string | null;
   @ApiProperty({ nullable: true, type: String, example: 'application/pdf', description: "The withholding certificate's type, once added" }) certificateType: string | null;
+  @ApiProperty({ nullable: true, type: String, example: 'user:3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f', description: 'Who cancelled it: an owner, or an operator' })
+  cancelledBy: string | null;
 }
 
 export class AdminPaymentsPage {
@@ -78,7 +81,7 @@ export class AdminPaymentsPage {
 }
 
 export class AdminPaymentsQuery {
-  @ApiPropertyOptional({ enum: PaymentStatus, description: 'pending: pro-formas waiting for their transfer' })
+  @ApiPropertyOptional({ enum: PaymentStatus, description: 'pending: pro-formas waiting for their transfer; cancelled: those cancelled and never paid' })
   @IsOptional()
   @IsIn(Object.values(PaymentStatus), { message: `status must be one of: ${Object.values(PaymentStatus).join(', ')}` })
   status?: PaymentStatus;

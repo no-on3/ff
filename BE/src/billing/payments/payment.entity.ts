@@ -14,6 +14,12 @@ export enum PaymentStatus {
   PENDING = 'pending',
   /** The transfer was recorded and credited: all of it, or all but the share withheld at source. */
   PAID = 'paid',
+  /**
+   * Its owner or an operator cancelled it before any transfer (P-74). A
+   * transfer that still comes is recorded against it, and makes it paid:
+   * the money is never left without a pro-forma.
+   */
+  CANCELLED = 'cancelled',
 }
 
 /**
@@ -21,14 +27,16 @@ export enum PaymentStatus {
  * owner asked for, with the credit, the VAT on top and a payment reference;
  * then the transfer an operator recorded against that reference, with any
  * share withheld at source; then, for that share, the withholding
- * certificate. Each step credits the wallet through the ledger.
+ * certificate. Each step credits the wallet through the ledger. A pending
+ * one may be cancelled (P-74); a transfer that comes anyway still pays it.
  */
 @Entity('payments')
 @Check(`"method" IN ('bank_transfer')`)
-@Check(`"status" IN ('pending', 'paid')`)
+@Check(`"status" IN ('pending', 'paid', 'cancelled')`)
 @Check(`"credit_minor" > 0 AND "vat_minor" >= 0 AND "total_minor" = "credit_minor" + "vat_minor"`)
 @Check(`("status" = 'paid') = ("received_minor" IS NOT NULL AND "withheld_minor" IS NOT NULL AND "received_minor" + "withheld_minor" = "total_minor")`)
 @Check(`("certificate_key" IS NULL) = ("certificate_transaction_id" IS NULL) AND ("certificate_key" IS NULL OR "withheld_minor" > 0)`)
+@Check(`("cancelled_at" IS NULL) = ("cancelled_by" IS NULL) AND ("status" <> 'cancelled' OR "cancelled_at" IS NOT NULL) AND ("status" <> 'pending' OR "cancelled_at" IS NULL)`)
 export class Payment {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -137,4 +145,12 @@ export class Payment {
   @ManyToOne(() => LedgerTransaction)
   @JoinColumn({ name: 'certificate_transaction_id' })
   certificateTransaction?: LedgerTransaction;
+
+  /** When it was cancelled (P-74). It stays when a transfer comes anyway, and pays it. */
+  @Column({ type: 'timestamptz', nullable: true })
+  cancelledAt: Date | null;
+
+  /** Who cancelled it: user:<id> for an owner, operator:<id> for FF. */
+  @Column({ type: 'text', nullable: true })
+  cancelledBy: string | null;
 }

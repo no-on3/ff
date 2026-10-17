@@ -7,11 +7,12 @@ import { whenUtc } from './time';
  * string with every decimal of its currency. contract.test.ts checks the
  * fields, the statuses and the certificate's rules against the API's.
  */
-export type PaymentStatus = 'pending' | 'paid';
+export type PaymentStatus = 'pending' | 'paid' | 'cancelled';
 
 export const PAYMENT_STATUSES: Array<{ value: PaymentStatus; label: string }> = [
   { value: 'pending', label: 'Waiting for the transfer' },
   { value: 'paid', label: 'Paid' },
+  { value: 'cancelled', label: 'Cancelled' },
 ];
 
 export interface AdminPayment {
@@ -36,15 +37,19 @@ export interface AdminPayment {
     credited: string;
     withheldCreditedAt: string | null;
   } | null;
+  /** When an owner or an operator cancelled it (P-74); a transfer that came anyway still paid it. */
+  cancelledAt: string | null;
   accountId: string;
   requestedBy: string;
   bankReference: string | null;
   recordedBy: string | null;
   certificateType: string | null;
+  /** user:<id> for an owner, operator:<id> for FF. */
+  cancelledBy: string | null;
 }
 
 /** AdminPaymentView's fields after the pro-forma's, in the API's order. */
-export const ADMIN_PAYMENT_FIELDS = ['accountId', 'requestedBy', 'bankReference', 'recordedBy', 'certificateType'] as const;
+export const ADMIN_PAYMENT_FIELDS = ['accountId', 'requestedBy', 'bankReference', 'recordedBy', 'certificateType', 'cancelledBy'] as const;
 
 /** What a withholding certificate may be, as the API takes it: the tax platform's PDF, or a scan. */
 export const CERTIFICATE_TYPES = ['application/pdf', 'image/png', 'image/jpeg'];
@@ -112,15 +117,23 @@ export function transferOutcome(payment: Pick<AdminPayment, 'credit' | 'total' |
 export const certificateDue = (payment: AdminPayment): boolean =>
   payment.transfer !== null && !/^0(\.0+)?$/.test(payment.transfer.withheld) && payment.certificateType === null;
 
-/** Where a payment stands, for the tables: the transfer, then the share withheld at source, if any. */
+/** Who cancelled a pro-forma: its owner, or FF. */
+const cancelledBy = (payment: Pick<AdminPayment, 'cancelledBy'>): string => (payment.cancelledBy?.startsWith('operator:') ? 'by FF' : 'by its owner');
+
+/** Where a payment stands, for the tables: the transfer, then the share withheld at source, if any; or that it was cancelled (P-74). */
 export function paymentState(payment: AdminPayment): { label: string; note: string | null } {
   const { transfer, currency } = payment;
+  if (!transfer && payment.cancelledAt) return { label: `Cancelled ${whenUtc(payment.cancelledAt)}`, note: `${cancelledBy(payment)}; a transfer that comes anyway can still be recorded` };
   if (!transfer) return { label: 'Waiting for the transfer', note: null };
   const label = `Received ${transfer.receivedOn}: ${formatMoney(transfer.credited, currency)} credited`;
-  if (/^0(\.0+)?$/.test(transfer.withheld)) return { label, note: null };
-  const withheld = formatMoney(transfer.withheld, currency);
-  return {
-    label,
-    note: transfer.withheldCreditedAt ? `${withheld} withheld: certificate added ${whenUtc(transfer.withheldCreditedAt)}` : `${withheld} withheld: certificate to add`,
-  };
+  const notes: string[] = [];
+  if (!/^0(\.0+)?$/.test(transfer.withheld)) {
+    const withheld = formatMoney(transfer.withheld, currency);
+    notes.push(transfer.withheldCreditedAt ? `${withheld} withheld: certificate added ${whenUtc(transfer.withheldCreditedAt)}` : `${withheld} withheld: certificate to add`);
+  }
+  if (payment.cancelledAt) notes.push(`it had been cancelled ${cancelledBy(payment)} ${whenUtc(payment.cancelledAt)}`);
+  return { label, note: notes.length ? notes.join('; ') : null };
 }
+
+/** Whether a transfer can be recorded against it: pending, or cancelled, as a transfer may come anyway. */
+export const canRecord = (payment: Pick<AdminPayment, 'status'>): boolean => payment.status === 'pending' || payment.status === 'cancelled';

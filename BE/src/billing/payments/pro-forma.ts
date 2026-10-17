@@ -76,6 +76,33 @@ export function transferMail(facts: TransferFacts): Omit<Mail, 'to'> {
   return { subject: `Your transfer was received: ${facts.account.name}`, text: lines.join('\n') };
 }
 
+/** What the owners' e-mail says of a pro-forma an operator cancelled (P-74). */
+export interface CancelFacts {
+  account: { id: string; name: string };
+  reference: string;
+  totalMinor: bigint;
+  exponent: number;
+  currency: string;
+  reason: string;
+  consoleUrl: string;
+}
+
+/** The owners' e-mail when an operator cancels a pending pro-forma: don't pay it, and why; a transfer already sent is still credited. */
+export function cancelMail(facts: CancelFacts): Omit<Mail, 'to'> {
+  const total = `${formatMinor(facts.totalMinor, facts.exponent)} ${facts.currency}`;
+  return {
+    subject: `Your pro-forma ${facts.reference} was cancelled: ${facts.account.name}`,
+    text: [
+      `FF cancelled the pro-forma ${facts.reference}, for ${total}, of your account "${facts.account.name}" (${facts.account.id}): don't transfer for it.`,
+      `Why: ${facts.reason}`,
+      '',
+      'A transfer for it that is already on its way is still credited when it arrives.',
+      '',
+      `Ask for another pro-forma on the Billing page: ${facts.consoleUrl}/billing`,
+    ].join('\n'),
+  };
+}
+
 /** The owners' e-mail when the withholding certificate is added: the withheld share is credited. */
 export function withholdingMail(facts: TransferFacts): Omit<Mail, 'to'> {
   const money = (minor: bigint) => `${formatMinor(minor, facts.exponent)} ${facts.currency}`;

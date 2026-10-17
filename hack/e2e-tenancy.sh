@@ -348,6 +348,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b GET "/billing/pro-formas/$pf_a" >/dev/null
       check "$route: B gets 404 for A's pro-forma (P-35)" "404 Pro-forma $pf_a not found" "$(status) $(message)"
       ;;
+    "POST /billing/pro-formas/{id}/cancel")
+      as_b POST "/billing/pro-formas/$pf_a/cancel" >/dev/null
+      check "$route: B can't cancel A's pro-forma: 404 (P-74)" "404 Pro-forma $pf_a not found" "$(status) $(message)"
+      check "  ... which stays pending for A" pending "$(as_a GET "/billing/pro-formas/$pf_a" | jq -r .status)"
+      ;;
     "GET /billing/invoices")
       invoices_b="$(as_b GET /billing/invoices)"
       check "$route: B lists its own invoices: none (P-36)" "200 0" "$(status) $(jq '.invoices | length' <<<"$invoices_b")"
@@ -554,6 +559,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 GET "/billing/pro-formas/$pf_1" >/dev/null
       check "$route: account 1's pro-forma is not found for account 2 (P-35)" "404 Pro-forma $pf_1 not found" "$(status) $(message)"
       ;;
+    "POST /billing/pro-formas/{id}/cancel")
+      as_user_2 POST "/billing/pro-formas/$pf_1/cancel" >/dev/null
+      check "$route: account 2 can't cancel account 1's pro-forma: 404 (P-74)" "404 Pro-forma $pf_1 not found" "$(status) $(message)"
+      check "  ... which stays pending" pending "$(as_user_1 GET "/billing/pro-formas/$pf_1" | jq -r .status)"
+      ;;
     "GET /billing/invoices")
       invoices_2="$(as_user_2 GET /billing/invoices)"
       check "$route: account 2 lists its own invoices: none (P-36)" "200 0" "$(status) $(jq '.invoices | length' <<<"$invoices_2")"
@@ -614,6 +624,8 @@ pro_formas_key="$(with_token "$key_usage" GET /billing/pro-formas)"
 check "and its own account's pro-formas, none of account 1's (P-35)" "200 $pf_2" "$(status) $(jq -r '[.proFormas[].id] | join(" ")' <<<"$pro_formas_key")"
 with_token "$key_usage" POST /billing/pro-formas '{"credit": "20"}' >/dev/null
 check "but can't ask for one: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
+with_token "$key_usage" POST "/billing/pro-formas/$pf_2/cancel" >/dev/null
+check "nor cancel one (P-74)" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 invoices_key="$(with_token "$key_usage" GET /billing/invoices)"
 check "and lists its own account's invoices (P-36)" "200 0" "$(status) $(jq '.invoices | length' <<<"$invoices_key")"
 check "and downloads its usage statements" "200 application/pdf" "$(fetch_pdf "$api_oidc" "/billing/statements/$(date -u +%Y-%m)/pdf" -H "Authorization: Bearer $key_usage")"
@@ -670,6 +682,8 @@ listed_pro_formas="$(as_member GET /billing/pro-formas | jq -r '[.proFormas[].id
 check "but reads account 1's pro-formas (P-35)" "200 $pf_1" "$(status) $listed_pro_formas"
 as_member POST /billing/pro-formas '{"credit": "20"}' >/dev/null
 check "and can't ask for one (P-35)" "403 The viewer role can't do this" "$(status) $(message)"
+as_member POST "/billing/pro-formas/$pf_1/cancel" >/dev/null
+check "nor cancel one (P-74)" "403 The viewer role can't do this" "$(status) $(message)"
 user_2_id="$(with_token "$token_2" GET /me | jq -r .user.id)"
 as_user_1 PATCH "/members/$user_2_id" '{"role": "developer"}' >/dev/null
 check "the owner makes user 2 a developer" 200 "$(status)"
@@ -681,6 +695,8 @@ as_member PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "nor the low-balance e-mails, which are the owners' (P-33)" "403 The developer role can't do this" "$(status) $(message)"
 as_member POST /billing/pro-formas '{"credit": "20"}' >/dev/null
 check "nor ask for a pro-forma, the owners' too (P-35)" "403 The developer role can't do this" "$(status) $(message)"
+as_member POST "/billing/pro-formas/$pf_1/cancel" >/dev/null
+check "nor cancel one (P-74)" "403 The developer role can't do this" "$(status) $(message)"
 as_user_1 DELETE "/members/$user_1_id" >/dev/null
 check "the last owner can't leave" "400 An account needs an owner: make another member owner first" "$(status) $(message)"
 as_user_1 DELETE "/members/$user_2_id" >/dev/null
@@ -931,6 +947,36 @@ page_credit="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
 check "the account page has the credit: balance, state, this month's charges only rated in shadow mode, the threshold" \
   "200 $(plus_millimes "$balance_after_grant" -500) ok true $(date -u +%Y-%m) 0.000 100.000" \
   "$(status) $(jq -r '.credit | "\(.balance) \(.state.state) \(.shadowMode) \(.month) \(.debited) \(.largeCreditThreshold)"' <<<"$page_credit")"
+echo "== cancelling pro-formas (P-74)"
+dropped="$(as_user_1 POST /billing/pro-formas '{"credit": "30"}')"
+dropped_id="$(jq -r .id <<<"$dropped")"
+dropped_ref="$(jq -r .reference <<<"$dropped")"
+cancelled="$(as_user_1 POST "/billing/pro-formas/$dropped_id/cancel")"
+check "account 1's owner cancels a pending pro-forma" "200 cancelled true" "$(status) $(jq -r '"\(.status) \(.cancelledAt != null)"' <<<"$cancelled")"
+again_cancelled="$(as_user_1 POST "/billing/pro-formas/$dropped_id/cancel")"
+check "cancelling it again changes nothing" "200 cancelled $(jq -r .cancelledAt <<<"$cancelled")" "$(status) $(jq -r '"\(.status) \(.cancelledAt)"' <<<"$again_cancelled")"
+as_user_1 POST "/billing/pro-formas/$pf_1/cancel" >/dev/null
+check "a paid one is never cancelled" "409 The transfer for $ref_1 was recorded on $today: a paid pro-forma isn't cancelled" "$(status) $(message)"
+twice="$(as_user_1 POST /billing/pro-formas '{"credit": "40"}')"
+twice_id="$(jq -r .id <<<"$twice")"
+twice_ref="$(jq -r .reference <<<"$twice")"
+with_token "$operator_token" POST "/admin/payments/$twice_id/cancel" '{}' >/dev/null
+check "an operator cancels only with a reason" "400 Every admin change needs a reason: send reason, 3 to 500 characters, in the body" "$(status) $(message)"
+op_cancelled="$(with_token "$operator_token" POST "/admin/payments/$twice_id/cancel" '{"reason": "l5: asked for twice"}')"
+check "the operator cancels another, with a reason" "200 cancelled true" "$(status) $(jq -r '"\(.status) \(.cancelledBy | startswith("operator:"))"' <<<"$op_cancelled")"
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^Your pro-forma' && break; sleep 0.5; done
+check "the owner gets an e-mail that gives the reason" "Your pro-forma $twice_ref was cancelled: L5 one true" \
+  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep -q '^Why: l5: asked for twice$' && echo true || echo false)"
+listed_cancelled="$(with_token "$operator_token" GET "/admin/payments?status=cancelled&accountId=$account_1")"
+check "the operator lists account 1's cancelled pro-formas, newest first" "200 $twice_ref,$dropped_ref" "$(status) $(jq -r '[.payments[].reference] | join(",")' <<<"$listed_cancelled")"
+balance_before_late="$(with_token "$operator_token" GET "/admin/accounts/$account_1" | jq -r .credit.balance)"
+late_paid="$(with_token "$operator_token" POST /admin/bank-transfers \
+  "$(jq -cn --arg reference "$dropped_ref" --arg on "$today" '{reference: $reference, received: "35.700", withheld: "0", receivedOn: $on, reason: "l5: it came anyway"}')")"
+check "a transfer that comes for a cancelled pro-forma still pays it, keeping when it was cancelled" "201 paid true" "$(status) $(jq -r '"\(.status) \(.cancelledAt != null)"' <<<"$late_paid")"
+check "and its credit reaches the wallet" "$(plus_millimes "$balance_before_late" 30000)" "$(with_token "$operator_token" GET "/admin/accounts/$account_1" | jq -r .credit.balance)"
+log_cancel="$(as_user_1 GET '/audit-log?limit=100')"
+check "account 1's audit log: the owner's cancel, FF's, and the transfer that came anyway" "billing.pro_forma_cancel:$user_1 payment.cancel:FF payment.record:FF" \
+  "$(jq -r '[.entries[] | select(.action == "billing.pro_forma_cancel" or .action == "payment.cancel" or (.action == "payment.record" and .details.wasCancelled == true)) | "\(.action):\(.actorLabel)"] | reverse | join(" ")' <<<"$log_cancel")"
 log_invoices="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's audit log has both, as FF's" "invoice.issue:FF invoice.credit_note:FF" \
   "$(jq -r '[.entries[] | select(.action | startswith("invoice.")) | "\(.action):\(.actorLabel)"] | reverse | join(" ")' <<<"$log_invoices")"
@@ -938,7 +984,7 @@ check "and the grants, as FF's, with their reasons (P-74)" "credit.promo:FF:l5: 
   "$(jq -r '[.entries[] | select(.action | startswith("credit.")) | "\(.action):\(.actorLabel):\(.details.reason)"] | reverse | join("|")' <<<"$log_invoices")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -946,7 +992,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 19 account.approve,account.egress,account.plan,account.reactivate,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
+  "200 21 account.approve,account.egress,account.plan,account.reactivate,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

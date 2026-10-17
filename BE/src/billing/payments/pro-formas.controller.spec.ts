@@ -1,5 +1,5 @@
 /**
- * L1: the pro-forma routes (client-readiness plan, P-35) through HTTP, with
+ * L1: the pro-forma routes (client-readiness plan, P-35; cancelling, P-74) through HTTP, with
  * the validation main.ts sets up: who may call them, the account they act
  * for, and what they refuse. The service runs against PostgreSQL in
  * payments.db.spec.ts.
@@ -24,6 +24,7 @@ describe('the pro-forma routes (L1, P-35)', () => {
     proFormas: jest.fn(async () => [{ id: PAYMENT }]),
     vatPercentNow: jest.fn(async () => 19),
     proForma: jest.fn(async () => ({ id: PAYMENT })),
+    cancelProForma: jest.fn(async () => ({ id: PAYMENT, status: 'cancelled' })),
   };
 
   beforeAll(async () => {
@@ -51,6 +52,17 @@ describe('the pro-forma routes (L1, P-35)', () => {
     expect(rules(ProFormasController.prototype.request)).toEqual([['owner'], undefined, undefined]); // no scope: no API key
     expect(rules(ProFormasController.prototype.list)).toEqual([undefined, undefined, 'usage:read']);
     expect(rules(ProFormasController.prototype.get)).toEqual([undefined, undefined, 'usage:read']);
+    expect(rules(ProFormasController.prototype.cancel)).toEqual([['owner'], undefined, undefined]); // as asking: an owner, any status, no key
+  });
+
+  it("cancel the caller's account's, 200 with it, and refuse an ID that is not one (P-74)", async () => {
+    const cancel = (id: string) => fetch(`${baseUrl}/billing/pro-formas/${id}/cancel`, { method: 'POST' });
+
+    const res = await cancel(PAYMENT);
+    expect([res.status, await res.json()]).toEqual([200, { id: PAYMENT, status: 'cancelled' }]);
+    expect(payments.cancelProForma).toHaveBeenCalledWith(ACCOUNT, PAYMENT);
+    expect((await cancel('FF-7KQ2-9MXA')).status).toBe(400);
+    expect(payments.cancelProForma).toHaveBeenCalledTimes(1);
   });
 
   it("ask for one for the caller's account, and refuse a credit that is not an amount", async () => {

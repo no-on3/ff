@@ -18,6 +18,7 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'account.egress', label: 'Internet egress changed' },
   { value: 'payment.record', label: 'Bank transfer recorded' },
   { value: 'payment.withholding', label: 'Withholding certificate added' },
+  { value: 'payment.cancel', label: 'Pro-forma cancelled' },
   { value: 'invoice.issue', label: 'Invoice issued' },
   { value: 'invoice.credit_note', label: 'Credit note issued' },
   { value: 'credit.promo', label: 'Promotional credit granted' },
@@ -104,12 +105,14 @@ function describeChange(name: string, { from, to }: { from: unknown; to: unknown
   return `${setting.label}: ${value(from)} → ${value(to)}`;
 }
 
-/** A payment's step, by its reference: the pro-forma asked for, the transfer recorded, the certificate added. */
-function describePayment(details: Record<string, unknown>): string {
+/** A payment's step, by its reference: the pro-forma asked for or cancelled, the transfer recorded, the certificate added. */
+function describePayment(action: string, details: Record<string, unknown>): string {
   const money = (name: string) => `${shown(details[name])} ${shown(details.currency)}`;
   const zero = (name: string) => /^0(\.0+)?$/.test(String(details[name]));
+  if (action.endsWith('_cancel') || action.endsWith('.cancel')) return `${shown(details.reference)}: pro-forma for ${money('total')} cancelled`;
   if (details.received !== undefined) {
-    return `${shown(details.reference)}: ${money('received')} received on ${shown(details.receivedOn)}${zero('withheld') ? '' : `, ${money('withheld')} withheld at source`}`;
+    const late = details.wasCancelled === true ? ', for a cancelled pro-forma' : '';
+    return `${shown(details.reference)}: ${money('received')} received on ${shown(details.receivedOn)}${zero('withheld') ? '' : `, ${money('withheld')} withheld at source`}${late}`;
   }
   if (details.certificate !== undefined) return `${shown(details.reference)}: certificate added, ${money('withheld')} credited`;
   if (details.total !== undefined) return `${shown(details.reference)}: pro-forma for ${money('credit')} of credit, ${money('total')} with VAT`;
@@ -131,7 +134,7 @@ function describeCredit(details: Record<string, unknown>): string {
 }
 
 /** What an action did, to read: each change's from → to, else what it was on. */
-export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource'>): string {
+export function describeAction(entry: Pick<OperatorAction, 'action' | 'details' | 'resource'>): string {
   const changes = entry.details?.changes as Record<string, { from: unknown; to: unknown }> | undefined;
   if (changes) {
     return Object.entries(changes)
@@ -141,7 +144,7 @@ export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource
   // A price book, by when it starts (P-73).
   if (typeof entry.details?.validFrom === 'string') return `Book from ${whenUtc(entry.details.validFrom)}`;
   // A pro-forma, a transfer or a certificate, by its reference (P-35).
-  if (typeof entry.details?.reference === 'string') return describePayment(entry.details);
+  if (typeof entry.details?.reference === 'string') return describePayment(entry.action, entry.details);
   // An invoice or credit note, by its number (P-36).
   if (typeof entry.details?.number === 'string') return describeInvoice(entry.details);
   // A grant, by what it moved (P-74).

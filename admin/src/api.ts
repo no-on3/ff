@@ -131,6 +131,8 @@ export const paymentsApi = {
       headers: { 'Content-Type': file.type, [REASON_HEADER]: encodeURIComponent(reason) },
     }),
   certificate: (id: string) => api.get<Blob>(`/admin/payments/${encodeURIComponent(id)}/withholding-certificate`, { responseType: 'blob' }),
+  /** A pending pro-forma cancelled, with the reason the owners' e-mail gives (P-74). */
+  cancel: (id: string, reason: string) => api.post<AdminPayment>(`/admin/payments/${encodeURIComponent(id)}/cancel`, { reason }),
 };
 
 /** The invoice routes (P-36): a month's drafts, issuing them with a reason, the issued documents, their PDFs, and credit notes. */

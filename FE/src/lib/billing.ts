@@ -123,6 +123,7 @@ const shortDay = (iso: string) => new Date(iso.length === 10 ? `${iso}T00:00:00Z
 /** Where a pro-forma stands, as the Billing page lists it: the transfer, then the share withheld at source, if any. */
 export function proFormaState(proForma: ProForma): { label: string; note: string | null } {
   const { transfer, currency } = proForma;
+  if (!transfer && proForma.cancelledAt) return { label: `Cancelled on ${shortDay(proForma.cancelledAt)}`, note: "Don't transfer for it." };
   if (!transfer) return { label: 'Waiting for the transfer', note: null };
   const label = `Paid on ${shortDay(transfer.receivedOn)}: ${formatMoney(transfer.credited, currency)} credited`;
   if (/^0(\.0+)?$/.test(transfer.withheld)) return { label, note: null };

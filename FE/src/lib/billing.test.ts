@@ -117,6 +117,7 @@ const PRO_FORMA: ProForma = {
   seller: { name: 'FF', taxId: '0000000/A/A/M/000', address: 'Tunis, Tunisia' },
   bank: { name: 'A bank', iban: 'TN59 1000 6035 1835 9847 8831', bic: null },
   transfer: null,
+  cancelledAt: null,
 };
 const PAID = { received: '58.608', withheld: '0.892', receivedOn: '2026-10-20', recordedAt: '2026-10-21T08:00:00.000Z', credited: '49.108', withheldCreditedAt: null };
 
@@ -175,6 +176,15 @@ describe("a pro-forma's state (P-35)", () => {
     });
     expect(proFormaState({ ...paid, transfer: { ...PAID, withheldCreditedAt: '2026-10-23T14:00:00.000Z' } }).note).toBe(
       '0.892 TND withheld at source, credited on 23 Oct 2026 with the certificate',
+    );
+  });
+
+  it('says when it was cancelled, and not to pay it; paid anyway, it says what was paid (P-74)', () => {
+    const cancelled = { ...PRO_FORMA, status: 'cancelled' as const, cancelledAt: '2026-10-18T07:30:00.000Z' };
+
+    expect(proFormaState(cancelled)).toEqual({ label: 'Cancelled on 18 Oct 2026', note: "Don't transfer for it." });
+    expect(proFormaState({ ...cancelled, status: 'paid', transfer: { ...PAID, received: '59.500', withheld: '0.000', credited: '50.000' } }).label).toBe(
+      'Paid on 20 Oct 2026: 50.000 TND credited',
     );
   });
 });

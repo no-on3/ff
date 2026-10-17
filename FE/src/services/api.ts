@@ -258,7 +258,7 @@ export interface Alerts {
  * reference for the transfer's label, and the transfer once FF recorded it.
  * contract.test.ts checks these names against the API's.
  */
-export const PRO_FORMA_FIELDS = ['id', 'reference', 'status', 'currency', 'credit', 'vatPercent', 'vat', 'total', 'createdAt', 'buyer', 'seller', 'bank', 'transfer'] as const;
+export const PRO_FORMA_FIELDS = ['id', 'reference', 'status', 'currency', 'credit', 'vatPercent', 'vat', 'total', 'createdAt', 'buyer', 'seller', 'bank', 'transfer', 'cancelledAt'] as const;
 export const TRANSFER_FIELDS = ['received', 'withheld', 'receivedOn', 'recordedAt', 'credited', 'withheldCreditedAt'] as const;
 /** GET /billing/pro-formas: the account's pro-formas, and the VAT rate one asked for now gets (P-36: rates are dated data). */
 export const PRO_FORMAS_PAGE_FIELDS = ['proFormas', 'vatPercent'] as const;
@@ -310,8 +310,8 @@ export interface ProForma {
   id: string;
   /** FF-XXXX-XXXX: what the buyer writes in the transfer's label. */
   reference: string;
-  /** pending: waiting for the transfer; paid: FF recorded it. */
-  status: 'pending' | 'paid';
+  /** pending: waiting for the transfer; paid: FF recorded it; cancelled: an owner or FF cancelled it before any transfer (P-74). */
+  status: 'pending' | 'paid' | 'cancelled';
   currency: string;
   credit: string;
   vatPercent: number;
@@ -324,6 +324,8 @@ export interface ProForma {
   /** Where to pay. */
   bank: { name: string; iban: string; bic: string | null };
   transfer: Transfer | null;
+  /** When it was cancelled; a transfer that came anyway still paid it. */
+  cancelledAt: string | null;
 }
 
 export const billingApi = {
@@ -339,6 +341,8 @@ export const billingApi = {
   /** The account's last 100, newest first, with the VAT rate a new one gets. */
   getProFormas: () => api.get<ProFormasPage>('/billing/pro-formas'),
   getProForma: (id: string) => api.get<ProForma>(`/billing/pro-formas/${encodeURIComponent(id)}`),
+  /** An owner's, of a pending one (P-74): nobody should pay it any more. */
+  cancelProForma: (id: string) => api.post<ProForma>(`/billing/pro-formas/${encodeURIComponent(id)}/cancel`),
   /** The account's issued invoices and credit notes, newest first (P-36). */
   getInvoices: () => api.get<{ invoices: Invoice[] }>('/billing/invoices'),
   /** An invoice or credit note's PDF, as it was issued. */

@@ -52,6 +52,12 @@ const realm = JSON.parse(realmSource) as {
 };
 const flow = (alias: string) => realm.authenticationFlows.find((f) => f.alias === alias)!;
 
+/** The fields of a backend class, from its start: after @ApiProperty on their line, or on a line of their own after it. */
+const fieldsOf = (source: string, start: string) => {
+  const body = source.slice(source.indexOf(start));
+  return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(?:@ApiProperty(?:Optional)?\(.*\) )?(\w+)\??: /gm)].map((match) => match[1]);
+};
+
 describe("the admin dashboard's address", () => {
   it('is fixed at 5198, and the backend links to it and lets it call the API in development', () => {
     expect(port).toBe('5198');
@@ -164,10 +170,7 @@ describe("the plans' limits and the price books' SKUs (P-73)", () => {
 
 describe('payments (P-35)', () => {
   it("have the API's operator fields, after the pro-forma's", () => {
-    const body = paymentsDtoSource.slice(paymentsDtoSource.indexOf('export class AdminPaymentView extends ProFormaView {'));
-    const fields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): /gm)].map((match) => match[1]);
-
-    expect(fields).toEqual([...ADMIN_PAYMENT_FIELDS]);
+    expect(fieldsOf(paymentsDtoSource, 'export class AdminPaymentView extends ProFormaView {')).toEqual([...ADMIN_PAYMENT_FIELDS]);
   });
 
   it("have the API's statuses", () => {
@@ -186,10 +189,7 @@ describe('payments (P-35)', () => {
 
 describe('invoices (P-36)', () => {
   it("have the API's operator fields, after the customer's", () => {
-    const body = invoicesDtoSource.slice(invoicesDtoSource.indexOf('export class AdminInvoiceView extends InvoiceView {'));
-    const fields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): /gm)].map((match) => match[1]);
-
-    expect(fields).toEqual([...ADMIN_INVOICE_FIELDS]);
+    expect(fieldsOf(invoicesDtoSource, 'export class AdminInvoiceView extends InvoiceView {')).toEqual([...ADMIN_INVOICE_FIELDS]);
   });
 
   it("have the API's kinds", () => {
@@ -201,11 +201,6 @@ describe('invoices (P-36)', () => {
 });
 
 describe('credit grants and the account page\'s credit (P-74)', () => {
-  /** The fields of a backend class: after @ApiProperty on its line, or on a line of their own after it. */
-  const fieldsOf = (source: string, start: string) => {
-    const body = source.slice(source.indexOf(start));
-    return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(?:@ApiProperty(?:Optional)?\(.*\) )?(\w+)\??: /gm)].map((match) => match[1]);
-  };
   /** The fields of a DTO whose decorators sit on their own lines. */
   const dtoFieldsOf = (source: string, start: string) => {
     const body = source.slice(source.indexOf(start));

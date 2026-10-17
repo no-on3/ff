@@ -17,7 +17,7 @@ import { Payment, PaymentMethod, PaymentStatus } from './payment.entity';
 import { AdminPaymentView, AdminPaymentsPage, BankView, PAYMENTS_CURSOR, ProFormaView, SellerView } from './payments.dto';
 import { vatPercentOn } from '../tax-rates';
 import { tunisDay } from '../tunisia';
-import { CREDIT_LIMITS, TransferFacts, newReference, normalizedReference, transferMail, transferProblem, vatOf, withholdingMail } from './pro-forma';
+import { CREDIT_LIMITS, TransferFacts, cancelMail, newReference, normalizedReference, transferMail, transferProblem, vatOf, withholdingMail } from './pro-forma';
 
 /** The types a withholding certificate may have: the tax platform's PDF, or a scan. */
 export const CERTIFICATE_TYPES = ['application/pdf', 'image/png', 'image/jpeg'];
@@ -217,14 +217,62 @@ export class PaymentsService {
             withheld: formatMinor(amounts.withheld, exponent),
             receivedOn: entry.receivedOn,
             bankReference: entry.bankReference ?? null,
+            // A transfer that came for a cancelled pro-forma still pays it: the money has a pro-forma.
+            ...(found.status === PaymentStatus.CANCELLED ? { wasCancelled: true } : {}),
           },
         },
         manager,
       );
       return { payment: { ...found, ...changes }, exponent };
     });
-    await this.tellOwners(payment, exponent, transferMail);
+    await this.tellOwners(payment, (account, consoleUrl) => transferMail(transferFacts(payment, exponent, account, consoleUrl)));
     return this.adminView(payment, exponent);
+  }
+
+  /**
+   * POST /billing/pro-formas/:id/cancel: an owner cancels the account's
+   * pending pro-forma (P-74), so that nobody pays it. A cancelled one stays
+   * as it is; a paid one is never cancelled.
+   */
+  async cancelProForma(accountId: string, id: string, now = new Date()): Promise<ProFormaView> {
+    const { payment, exponent } = await this.cancel(id, accountId, null, now);
+    return this.view(payment, exponent);
+  }
+
+  /** POST /admin/payments/:id/cancel: an operator cancels a pending pro-forma, with the reason, which the owners' e-mail gives. */
+  async cancelPayment(id: string, reason: string, now = new Date()): Promise<AdminPaymentView> {
+    const { payment, exponent, cancelled } = await this.cancel(id, null, reason, now);
+    if (cancelled) {
+      await this.tellOwners(payment, (account, consoleUrl) =>
+        cancelMail({ account, reference: payment.reference, totalMinor: payment.totalMinor, exponent, currency: payment.currency, reason, consoleUrl }),
+      );
+    }
+    return this.adminView(payment, exponent);
+  }
+
+  /** Cancels a pending pro-forma, the account's own when given, with its audit entry: an owner's, or an operator's with a reason. */
+  private cancel(id: string, accountId: string | null, reason: string | null, now: Date): Promise<{ payment: Payment; exponent: number; cancelled: boolean }> {
+    return this.dataSource.transaction(async (manager) => {
+      const found = await manager.findOne(Payment, { where: accountId === null ? { id } : { id, accountId }, lock: { mode: 'pessimistic_write' } });
+      if (!found) throw new NotFoundException(accountId === null ? `Payment ${id} not found` : `Pro-forma ${id} not found`);
+      const exponent = await this.exponentOf(found.currency, manager);
+      if (found.status === PaymentStatus.PAID) {
+        throw new ConflictException(`The transfer for ${found.reference} was recorded on ${(found.recordedAt as Date).toISOString().slice(0, 10)}: a paid pro-forma isn't cancelled`);
+      }
+      if (found.status === PaymentStatus.CANCELLED) return { payment: found, exponent, cancelled: false };
+      const changes = { status: PaymentStatus.CANCELLED, cancelledAt: now, cancelledBy: currentRequest()?.actor?.id ?? 'system' };
+      await manager.update(Payment, { id: found.id }, changes);
+      await this.audit.record(
+        {
+          accountId: found.accountId,
+          action: reason === null ? 'billing.pro_forma_cancel' : 'payment.cancel',
+          resource: `payment:${found.id}`,
+          details: { ...(reason === null ? {} : { reason }), reference: found.reference, total: formatMinor(found.totalMinor, exponent), currency: found.currency },
+        },
+        manager,
+      );
+      return { payment: { ...found, ...changes }, exponent, cancelled: true };
+    });
   }
 
   /**
@@ -269,7 +317,7 @@ export class PaymentsService {
       );
       return { payment: { ...found, ...changes }, exponent };
     });
-    await this.tellOwners(payment, exponent, withholdingMail);
+    await this.tellOwners(payment, (account, consoleUrl) => withholdingMail(transferFacts(payment, exponent, account, consoleUrl)));
     return this.adminView(payment, exponent);
   }
 
@@ -298,20 +346,11 @@ export class PaymentsService {
   }
 
   /** E-mails each owner, after the change has committed; a failure is logged, never the request's. */
-  private async tellOwners(payment: Payment, exponent: number, mail: (facts: TransferFacts) => Omit<Mail, 'to'>): Promise<void> {
+  private async tellOwners(payment: Payment, mail: (account: Account, consoleUrl: string) => Omit<Mail, 'to'>): Promise<void> {
     try {
       const account = await this.dataSource.getRepository(Account).findOneByOrFail({ id: payment.accountId });
       const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
-      const message = mail({
-        account,
-        reference: payment.reference,
-        creditMinor: payment.creditMinor,
-        receivedMinor: payment.receivedMinor as bigint,
-        withheldMinor: payment.withheldMinor as bigint,
-        exponent,
-        currency: payment.currency,
-        consoleUrl,
-      });
+      const message = mail(account, consoleUrl);
       const owners = await this.dataSource.getRepository(Membership).find({ where: { accountId: payment.accountId, role: 'owner' }, relations: { user: true } });
       for (const owner of owners) if (owner.user?.email) await this.mail.send({ to: owner.user.email, ...message });
     } catch (error) {
@@ -346,6 +385,7 @@ export class PaymentsService {
               withheldCreditedAt: payment.certificateAt,
             }
           : null,
+      cancelledAt: payment.cancelledAt,
     };
   }
 
@@ -357,6 +397,21 @@ export class PaymentsService {
       bankReference: payment.bankReference,
       recordedBy: payment.recordedBy,
       certificateType: payment.certificateType,
+      cancelledBy: payment.cancelledBy,
     };
   }
+}
+
+/** What the owners' transfer e-mails say of a paid pro-forma. */
+function transferFacts(payment: Payment, exponent: number, account: Account, consoleUrl: string): TransferFacts {
+  return {
+    account,
+    reference: payment.reference,
+    creditMinor: payment.creditMinor,
+    receivedMinor: payment.receivedMinor as bigint,
+    withheldMinor: payment.withheldMinor as bigint,
+    exponent,
+    currency: payment.currency,
+    consoleUrl,
+  };
 }

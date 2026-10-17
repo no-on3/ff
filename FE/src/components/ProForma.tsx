@@ -26,6 +26,11 @@ const Document: React.FC<{ proForma: ProForma; accountId: string }> = ({ proForm
             N°&nbsp;<span className="font-mono">{proForma.reference}</span>
           </div>
           <div>Date&nbsp;: {frenchDate(proForma.createdAt)}</div>
+          {proForma.status === 'cancelled' && proForma.cancelledAt && (
+            <div className="mt-2 inline-block rounded border-2 border-red-700 px-2 py-1 font-bold uppercase tracking-wide text-red-700">
+              Annulée le {frenchDate(proForma.cancelledAt)}&nbsp;: ne pas régler
+            </div>
+          )}
         </div>
         <div className="text-right">
           <div className="font-semibold">{seller.name}</div>
@@ -91,14 +96,30 @@ const Document: React.FC<{ proForma: ProForma; accountId: string }> = ({ proForm
 
 /**
  * A pro-forma (P-35, D9), to print or save as PDF from the browser, and above
- * it, in the console's language, where it stands: what to transfer, or what
- * FF received and credited.
+ * it, in the console's language, where it stands: what to transfer, what FF
+ * received and credited, or that it was cancelled. An owner may cancel a
+ * pending one (P-74).
  */
 const ProFormaPage: React.FC = () => {
   const { id = '' } = useParams();
   const { account } = useSession();
   const [proForma, setProForma] = useState<ProForma | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+
+  const cancel = async () => {
+    if (!proForma) return;
+    if (!window.confirm(`Cancel the pro-forma ${proForma.reference}? Nobody should pay it any more; a transfer already sent for it is still credited.`)) return;
+    setCancelling(true);
+    setError(null);
+    try {
+      setProForma((await billingApi.cancelProForma(proForma.id)).data);
+    } catch (failure) {
+      setError(apiErrorMessage(failure));
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   useEffect(() => {
     billingApi
@@ -117,6 +138,11 @@ const ProFormaPage: React.FC = () => {
           <Link to="/billing" className="btn btn-secondary">
             Billing
           </Link>
+          {proForma?.status === 'pending' && account?.role === 'owner' && (
+            <button type="button" className="btn btn-secondary" disabled={cancelling} onClick={() => void cancel()}>
+              Cancel this pro-forma
+            </button>
+          )}
           {proForma && (
             <button type="button" className="btn btn-primary" onClick={() => window.print()}>
               Print or save as PDF
@@ -136,6 +162,8 @@ const ProFormaPage: React.FC = () => {
               <>
                 {state.label}.{state.note && ` ${state.note}.`}
               </>
+            ) : proForma.status === 'cancelled' ? (
+              <>{state.label}: don't transfer for it. If a transfer for it was already sent, FF still credits it when it arrives.</>
             ) : (
               <>
                 Transfer {formatMoney(proForma.total, proForma.currency)} to the account below, with <strong className="font-mono">{proForma.reference}</strong> in the transfer's label: FF

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AdminPayment, certificateDue, certificateName, certificateProblem, paymentState, transferOutcome } from './payments';
+import { AdminPayment, canRecord, certificateDue, certificateName, certificateProblem, paymentState, transferOutcome } from './payments';
 
 const PENDING: AdminPayment = {
   id: '7d0b8a3e-9a51-4c7e-8d5f-1b2c3d4e5f60',
@@ -15,11 +15,13 @@ const PENDING: AdminPayment = {
   seller: { name: 'FF', taxId: '0000000/A/A/M/000', address: 'Tunis, Tunisia' },
   bank: { name: 'A bank', iban: 'TN59 1000 6035 1835 9847 8831', bic: null },
   transfer: null,
+  cancelledAt: null,
   accountId: '000000000001',
   requestedBy: 'user:1',
   bankReference: null,
   recordedBy: null,
   certificateType: null,
+  cancelledBy: null,
 };
 const TRANSFER = { received: '58.608', withheld: '0.892', receivedOn: '2026-10-20', recordedAt: '2026-10-21T08:00:00.000Z', credited: '49.108', withheldCreditedAt: null };
 const PAID: AdminPayment = { ...PENDING, status: 'paid', transfer: TRANSFER, recordedBy: 'operator:kc-op-1' };
@@ -80,5 +82,18 @@ describe("a payment's state (P-35)", () => {
       label: 'Received 2026-10-20: 50.000 TND credited',
       note: null,
     });
+  });
+
+  it('says when it was cancelled and by whom, and that a transfer that comes anyway can be recorded; paid anyway, it says so (P-74)', () => {
+    const byOwner: AdminPayment = { ...PENDING, status: 'cancelled', cancelledAt: '2026-10-18T07:30:00.000Z', cancelledBy: 'user:1' };
+    const byFf: AdminPayment = { ...byOwner, cancelledBy: 'operator:kc-op-1' };
+
+    expect(paymentState(byOwner)).toEqual({ label: 'Cancelled 2026-10-18 07:30:00 UTC', note: 'by its owner; a transfer that comes anyway can still be recorded' });
+    expect(paymentState(byFf).note).toBe('by FF; a transfer that comes anyway can still be recorded');
+    expect(paymentState({ ...byFf, status: 'paid', transfer: TRANSFER })).toEqual({
+      label: 'Received 2026-10-20: 49.108 TND credited',
+      note: '0.892 TND withheld: certificate to add; it had been cancelled by FF 2026-10-18 07:30:00 UTC',
+    });
+    expect([canRecord(PENDING), canRecord(byOwner), canRecord(PAID)]).toEqual([true, true, false]);
   });
 });

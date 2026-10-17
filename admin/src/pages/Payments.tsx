@@ -12,6 +12,7 @@ import {
   CERTIFICATE_MAX_MB,
   CERTIFICATE_TYPES,
   PAYMENT_STATUSES,
+  canRecord,
   certificateDue,
   certificateName,
   certificateProblem,
@@ -59,6 +60,11 @@ const RecordTransfer: React.FC<{ payment: AdminPayment; onDone: (payment: AdminP
       <p>
         {payment.buyer.name} ({payment.accountId}) asked for {formatMoney(payment.credit, currency)} of credit: {formatMoney(payment.total, currency)} with VAT.
       </p>
+      {payment.cancelledAt && (
+        <p className="mt-2 rounded bg-amber-50 px-3 py-2 text-amber-900">
+          It was cancelled {whenUtc(payment.cancelledAt)}: record a transfer only if one came for it anyway. It pays the pro-forma, and the wallet gets its credit.
+        </p>
+      )}
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <label className="block font-medium">
           Received, in {currency}
@@ -120,7 +126,9 @@ const AddCertificate: React.FC<{ payment: AdminPayment; onDone: (payment: AdminP
  * Payments (P-35, P-74): the pro-formas owners asked for, newest first, and
  * the transfers recorded against them. An operator finds a transfer's
  * pro-forma by the reference in its label and records it, then adds the
- * withholding certificate when the buyer withheld a share at source.
+ * withholding certificate when the buyer withheld a share at source. A
+ * pending one may be cancelled, with a reason; a transfer that comes for a
+ * cancelled one is still recorded.
  */
 const Payments: React.FC<{ email: string | undefined; initial: Record<string, string> }> = ({ email, initial }) => {
   const [query, setQuery] = useState<TableQuery>({ search: '', filters: initial });
@@ -128,7 +136,7 @@ const Payments: React.FC<{ email: string | undefined; initial: Record<string, st
   const [page, setPage] = useState<{ rows: AdminPayment[]; next: string | null } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [refused, setRefused] = useState(false);
-  const [dialog, setDialog] = useState<{ kind: 'record' | 'certificate'; payment: AdminPayment } | null>(null);
+  const [dialog, setDialog] = useState<{ kind: 'record' | 'certificate' | 'cancel'; payment: AdminPayment } | null>(null);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [changes, setChanges] = useState(0);
 
@@ -154,6 +162,14 @@ const Payments: React.FC<{ email: string | undefined; initial: Record<string, st
     setDialog(null);
     setNotice({ ok: true, text });
     setChanges((n) => n + 1);
+  };
+  const cancel = async (payment: AdminPayment, reason: string) => {
+    try {
+      const { data } = await paymentsApi.cancel(payment.id, reason);
+      done(`Cancelled ${data.reference}: ${data.buyer.name}'s owners got an e-mail with your reason.`);
+    } catch (error) {
+      throw new Error(apiErrorMessage(error));
+    }
   };
   const download = async (payment: AdminPayment) => {
     setNotice(null);
@@ -201,10 +217,21 @@ const Payments: React.FC<{ email: string | undefined; initial: Record<string, st
     {
       label: 'Actions',
       cell: (payment) =>
-        payment.status === 'pending' ? (
-          <button type="button" className="btn btn-primary whitespace-nowrap" onClick={() => setDialog({ kind: 'record', payment })}>
-            Record the transfer
-          </button>
+        canRecord(payment) ? (
+          <span className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={`btn whitespace-nowrap ${payment.status === 'pending' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setDialog({ kind: 'record', payment })}
+            >
+              Record the transfer
+            </button>
+            {payment.status === 'pending' && (
+              <button type="button" className="btn btn-secondary whitespace-nowrap" onClick={() => setDialog({ kind: 'cancel', payment })}>
+                Cancel
+              </button>
+            )}
+          </span>
         ) : certificateDue(payment) ? (
           <button type="button" className="btn btn-primary whitespace-nowrap" onClick={() => setDialog({ kind: 'certificate', payment })}>
             Add the certificate
@@ -257,6 +284,20 @@ const Payments: React.FC<{ email: string | undefined; initial: Record<string, st
             done(`Recorded ${payment.reference}: ${formatMoney(payment.transfer?.credited ?? '0', payment.currency)} credited to ${payment.buyer.name}.`)
           }
         />
+      )}
+      {dialog?.kind === 'cancel' && (
+        <ReasonDialog
+          title={`Cancel ${dialog.payment.reference}?`}
+          confirmLabel="Cancel the pro-forma"
+          onConfirm={(reason) => cancel(dialog.payment, reason)}
+          onCancel={() => setDialog(null)}
+        >
+          <p>
+            {dialog.payment.buyer.name} ({dialog.payment.accountId}) asked for it {whenUtc(dialog.payment.createdAt)}: {formatMoney(dialog.payment.total, dialog.payment.currency)} to
+            transfer. Nobody should pay it any more.
+          </p>
+          <p className="mt-2 text-gray-600">The owners get an e-mail that gives your reason. A transfer that comes anyway can still be recorded against it.</p>
+        </ReasonDialog>
       )}
       {dialog?.kind === 'certificate' && (
         <AddCertificate

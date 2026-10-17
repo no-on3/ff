@@ -54,7 +54,8 @@ run('API keys (L2, P-13)', () => {
     expect(created.key).toMatch(API_KEY);
     expect(created).toMatchObject({ name: 'CI', scopes: ['functions:read', 'functions:invoke'], createdBy: owner.id, expiresAt: null });
     const [row] = await db.dataSource.query('SELECT * FROM api_keys WHERE id = $1', [created.id]);
-    expect(JSON.stringify(row)).not.toContain(created.key.split('_')[2]); // the secret is nowhere
+    // The secret is nowhere. It is base64url, which has "_" too: the format's pattern takes it whole.
+    expect(JSON.stringify(row)).not.toContain((API_KEY.exec(created.key) as RegExpExecArray)[2]);
     expect(row.secret_sha256).toHaveLength(32);
     const listed = await service.list(accountId);
     expect(listed).toEqual([expect.not.objectContaining({ key: expect.anything() })]);
@@ -90,7 +91,7 @@ run('API keys (L2, P-13)', () => {
   it('gives one answer for an unknown key, a wrong secret and a malformed key', async () => {
     const accountId = await account();
     const { key } = await service.create(accountId, owner.id, { name: 'k', scopes: ['functions:read'] });
-    const secret = key.split('_')[2];
+    const secret = (API_KEY.exec(key) as RegExpExecArray)[2];
     const wrongSecret = key.replace(secret, `${secret.slice(0, -1)}${secret.endsWith('A') ? 'B' : 'A'}`);
 
     for (const value of [wrongSecret, `ffk_aaaaaaaaaaaa_${secret}`, 'ffk_short']) {
