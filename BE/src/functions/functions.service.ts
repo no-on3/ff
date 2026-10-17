@@ -6,7 +6,7 @@ import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { describeError } from '../common/describe-error';
 import { CodeTooLargeError, FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, initMsOf } from '../orchestrator/orchestrator.errors';
-import { ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
+import { LogsQuery, ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService, tenantLimits } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
@@ -15,6 +15,7 @@ import { failureStatus, usageRecord } from '../usage/usage';
 import { UsageService } from '../usage/usage.service';
 import { CreditService } from '../billing/credit.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
+import { FunctionLogsView } from './dto/function-logs.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
@@ -455,6 +456,17 @@ export class FunctionsService {
       skip: page.offset,
     });
     return { invocations, total };
+  }
+
+  /**
+   * GET /functions/:id/logs (P-40): the account's function's newest lines,
+   * read from its running instances. Another account's function is not found.
+   * An instance's lines go with it, at scale to zero too, until the log store
+   * keeps them (P-42), when `next` pages back through them (P-43).
+   */
+  async logs(accountId: string, id: string, query: LogsQuery): Promise<FunctionLogsView> {
+    const function_ = await this.findOne(accountId, id);
+    return { lines: await this.orchestrator.logs(function_, query), next: null };
   }
 
   /** Where object storage keeps the copy of a function's code. */

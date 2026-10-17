@@ -24,6 +24,23 @@ export interface FunctionWorkload {
   maxInstances: number;
 }
 
+/** One line of a function's log (P-40), in the shape the log store gives too (P-43). */
+export interface FunctionLogLine {
+  /** When it was written: RFC 3339, UTC, with nine decimals. */
+  time: string;
+  /** The instance that wrote it. */
+  instance: string;
+  /** The call it belongs to, from its START to its REPORT; null outside a call. */
+  requestId: string | null;
+  message: string;
+}
+
+/** Which lines to read: the newest `tail`, written in the last `sinceSeconds` when given. */
+export interface LogsQuery {
+  tail: number;
+  sinceSeconds?: number;
+}
+
 /** What a scheduler applies to an account as a whole: its plan's quota (D5). */
 export interface TenantLimits {
   /** All the account's functions together. */
@@ -77,4 +94,9 @@ export interface Orchestrator {
    * many: FF's capacity at this moment, from one call (P-21).
    */
   readyInstancesByFunction(): Promise<Map<string, number>>;
+  /**
+   * The function's log lines, oldest first, read from its running instances
+   * (P-40): an instance's lines go with it, until the log store keeps them (P-42).
+   */
+  logs(fn: FunctionWorkload, query: LogsQuery): Promise<FunctionLogLine[]>;
 }

@@ -496,7 +496,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
         "$(as_user_2 GET /api-keys | jq --arg id "$key_1_id" 'map(select(.id == $id)) | length')"
       ;;
     "POST /api-keys")
-      key_2="$(as_user_2 POST /api-keys '{"name": "l5 two", "scopes": ["functions:read", "functions:write", "functions:invoke", "metrics:read"]}' | jq -r .key)"
+      key_2="$(as_user_2 POST /api-keys '{"name": "l5 two", "scopes": ["functions:read", "functions:write", "functions:invoke", "logs:read", "metrics:read"]}' | jq -r .key)"
       check "$route: account 2 makes its own key" 201 "$(status)"
       ;;
     "DELETE /api-keys/{id}")
@@ -631,6 +631,8 @@ check "and lists its own account's invoices (P-36)" "200 0" "$(status) $(jq '.in
 check "and downloads its usage statements" "200 application/pdf" "$(fetch_pdf "$api_oidc" "/billing/statements/$(date -u +%Y-%m)/pdf" -H "Authorization: Bearer $key_usage")"
 with_token "$key_1" GET /billing/invoices >/dev/null
 check "a key without usage:read can't list invoices" "403 This API key lacks the scope usage:read" "$(status) $(message)"
+with_token "$key_1" GET "/functions/$fn_1/logs" >/dev/null
+check "a key without logs:read can't read a function's logs (P-40)" "403 This API key lacks the scope logs:read" "$(status) $(message)"
 with_token "$key_1" GET /billing/pro-formas >/dev/null
 check "a key without usage:read can't list them" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
@@ -678,6 +680,8 @@ as_member PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "nor set the low-balance e-mails (P-33)" "403 The viewer role can't do this" "$(status) $(message)"
 as_member GET /billing/invoices >/dev/null
 check "a viewer reads account 1's invoices (P-36)" 200 "$(status)"
+as_member GET "/functions/$fn_1/logs?tail=5" >/dev/null
+check "and its function's logs (P-40)" 200 "$(status)"
 listed_pro_formas="$(as_member GET /billing/pro-formas | jq -r '[.proFormas[].id] | join(" ")')"
 check "but reads account 1's pro-formas (P-35)" "200 $pf_1" "$(status) $listed_pro_formas"
 as_member POST /billing/pro-formas '{"credit": "20"}' >/dev/null
@@ -777,6 +781,30 @@ with_token "$operator_token" POST "/admin/accounts/$account_1/reactivate" '{"rea
 check "the operator reactivates it" 200 "$(status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"again"}}' >/dev/null
 check "and its function answers again, from a cold start" 201 "$(status)"
+echo "== the function's logs (P-40)"
+logged="$(as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"logs"}}')"
+logged_id="$(jq -r .id <<<"$logged")"
+# The runtime writes END and REPORT as the answer goes, and the container runtime its log file a moment later.
+for _ in $(seq 1 20); do
+  logs_1="$(as_user_1 GET "/functions/$fn_1/logs")"
+  [ "$(jq --arg id "$logged_id" '[.lines[] | select(.requestId == $id)] | length' <<<"$logs_1")" -ge 3 ] && break
+  sleep 0.5
+done
+check "the owner reads the call's START, END and REPORT lines, each with its request ID" "200 START,END,REPORT" \
+  "$(status) $(jq -r --arg id "$logged_id" '[.lines[] | select(.requestId == $id) | .message | capture("^(?<kind>START|END|REPORT) RequestId: (?<id>\\S+)") | select(.id == $id) | .kind] | join(",")' <<<"$logs_1")"
+check "each line with its time to the nanosecond and its instance, oldest first, and no next page yet" "true true true null" \
+  "$(jq '[.lines[].time | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}\\.[0-9]{9}Z$")] | all' <<<"$logs_1") $(jq --arg fn "fn-$fn_1" '[.lines[].instance | startswith($fn)] | all' <<<"$logs_1") $(jq '[.lines[].time] | . == sort' <<<"$logs_1") $(jq -c .next <<<"$logs_1")"
+newest="$(as_user_1 GET "/functions/$fn_1/logs?tail=1")"
+check "tail=1 gives the newest line alone" "200 1 $(jq -r '.lines[-1].message' <<<"$logs_1")" "$(status) $(jq '.lines | length' <<<"$newest") $(jq -r '.lines[0].message' <<<"$newest")"
+recent="$(as_user_1 GET "/functions/$fn_1/logs?sinceSeconds=3600")"
+check "sinceSeconds keeps the last hour's, the call among them" "200 true" "$(status) $(jq --arg id "$logged_id" '[.lines[] | select(.requestId == $id)] | length >= 3' <<<"$recent")"
+as_user_1 GET "/functions/$fn_1/logs?tail=1001" >/dev/null
+check "more than 1,000 lines is refused" "400 tail must not be greater than 1000" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+key_logs="$(as_user_1 POST /api-keys '{"name": "l5 logs", "scopes": ["logs:read"]}' | jq -r .key)"
+by_key="$(with_token "$key_logs" GET "/functions/$fn_1/logs?tail=5")"
+check "a key with logs:read reads them" "200 5" "$(status) $(jq '.lines | length' <<<"$by_key")"
+with_token "$key_logs" GET "/functions/$fn_1" >/dev/null
+check "and only them" "403 This API key lacks the scope functions:read" "$(status) $(message)"
 beta_limits="$(with_token "$operator_token" GET /admin/plans | jq -c '.[] | select(.id == "beta") | .limits')"
 with_token "$operator_token" POST /admin/plans \
   "$(jq -cn --argjson limits "$beta_limits" '{id: "l5-large", name: "L5 large", limits: ($limits | .quota = {pods: 30, cpu: "12", memory: "12Gi"}), reason: "l5: a plan with room"}')" >/dev/null

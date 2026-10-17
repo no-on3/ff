@@ -4,6 +4,7 @@ import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { Invocation } from '../plans/rate-limits';
 import { CreateFunctionDto } from './dto/create-function.dto';
+import { DEFAULT_LOG_LINES, FunctionLogsQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
@@ -97,6 +98,19 @@ export class FunctionsController {
     @Principal() principal: Principal,
   ): Promise<{ invocations: FunctionInvocation[]; total: number }> {
     return this.functionsService.getInvocations(principal.accountId, id, page);
+  }
+
+  @Get(':id/logs')
+  @RequireScope('logs:read')
+  @ApiOperation({
+    summary: "The function's log lines, oldest first: the newest across its running instances, each with its call's request ID (P-40)",
+    description:
+      'Every member reads them, and an API key with logs:read. They come from the running instances, so they go when an instance stops, and a function ' +
+      'scaled to zero has none, until the log store keeps them (P-42). A call\'s lines run from its START line to its REPORT.',
+  })
+  @ApiResponse({ status: 200, type: FunctionLogsView })
+  logs(@Param('id', ParseUUIDPipe) id: string, @Query() query: FunctionLogsQuery, @Principal() principal: Principal): Promise<FunctionLogsView> {
+    return this.functionsService.logs(principal.accountId, id, { tail: query.tail ?? DEFAULT_LOG_LINES, sinceSeconds: query.sinceSeconds });
   }
 
   @Get(':id/scaling-config')

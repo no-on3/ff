@@ -414,7 +414,7 @@
           <tr><td>The code the pod runs</td><td>ConfigMap <code>fn-&lt;id&gt;-&lt;hash&gt;</code>, immutable, mounted read-only at <code>/var/task</code></td><td>create, update</td><td>the runtime, when it starts</td></tr>
           <tr><td>Desired and ready instances</td><td>Deployment <code>fn-&lt;id&gt;</code>: <code>spec.replicas</code>, <code>status.readyReplicas</code></td><td>create, update, the autoscaler, the idle sweep, cold starts; an operator's suspension or closure, and the minute's hold of such accounts at zero (P-71)</td><td>invoke, the waits, the metrics tick</td></tr>
           <tr><td>The current minute's metrics, and each function's last invocation time</td><td>Backend memory</td><td>invoke</td><td>the metrics tick and the idle sweep (one backend replica assumed)</td></tr>
-          <tr><td>Logs: START, END, REPORT, your output, errors</td><td>Pod stdout (the container log)</td><td>the runtime and your code</td><td><code>kubectl logs</code>, the backend's diagnosis when a function doesn't become ready</td></tr>
+          <tr><td>Logs: START, END, REPORT, your output, errors</td><td>Pod stdout (the container log), kept while the pod lives</td><td>the runtime and your code</td><td><code>kubectl logs</code>; <code>GET /functions/:id/logs</code>, each line with its instance and its call's request ID (P-40); the backend's diagnosis when a function doesn't become ready</td></tr>
         </tbody>
       </table>
     </div>
@@ -1302,6 +1302,40 @@ const SCENARIOS = [
         text: 'The dashboard says the grant was made before, and nothing was granted again. The balance is still 146.500 TND.',
         code: 'admin/src/lib/credits.ts grantNotice()',
         msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { grant: { id: '4e7a…', amount: '150.000', balance: '146.500', replayed: true, '…': '…' }, account: { '…': '…' } } } },
+    ],
+  },
+  {
+    id: 'logs', title: 'Read a function\'s logs', lanes: ['user', 'api', 'db', 'k8s', 'pod'],
+    summary: 'GET /functions/:id/logs gives the function\'s newest lines without cluster access (P-40): the backend reads each running instance\'s container log through the Kubernetes API, merges the lines by time, and gives each one the call it belongs to. The lines live with the pods until the log store keeps them (P-42).',
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/logs?tail=200', title: 'You ask for the logs',
+        text: 'The newest 200 lines by default, 1,000 at most, and only the last sinceSeconds when given. Every member of the account may read them, and an API key with logs:read.',
+        code: 'functions/functions.controller.ts logs() · functions/dto/function-logs.dto.ts',
+        msg: { kind: 'http', first: 'GET /functions/' + FN + '/logs?tail=200 HTTP/1.1', headers: { host: 'localhost:3000', authorization: 'Bearer eyJhbGciOiJSUzI1NiIs… (ff-console)', 'x-ff-account': '000000000001' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT the function · the account\'s?', title: 'The account\'s own function',
+        text: 'As for every function route, another account\'s function answers 404, exactly as one that doesn\'t exist (D4).',
+        code: 'functions/functions.service.ts logs() findOne()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"account_id\" = '000000000001';" } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'GET pods?labelSelector=ff.dev/function-id=…', title: 'Its instances',
+        text: 'The function\'s pods, in its account\'s namespace. A function scaled to zero has none, and so no lines: they went with its last instance.',
+        code: 'orchestrator/kubernetes/kubernetes.orchestrator.ts logs()',
+        msg: { kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods?labelSelector=ff.dev%2Ffunction-id%3D' + FN + ' HTTP/1.1', headers: { authorization: 'Bearer … (the backend\'s ServiceAccount)' } },
+        hl: ['k8sapi'] },
+      { from: 'k8s', to: 'pod', kind: 'req', label: 'GET …/pods/fn-…/log?timestamps=true', title: 'Each instance\'s log, with times',
+        text: 'The kubelet reads the function container\'s log: the last 200 lines, each after its time, and 4 MiB at most a pod, so that a function printing huge lines can\'t fill the backend\'s memory. A pod still starting has no log yet, and gives no lines.',
+        code: 'orchestrator/kubernetes/kube-client.ts podLog()',
+        msg: { kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods/fn-' + FN + '-7d9f8b6c5-x2x9q/log?container=function&tailLines=200&timestamps=true&limitBytes=4194304 HTTP/1.1' } },
+      { from: 'pod', to: 'k8s', kind: 'res', label: 'the lines, each after its time', title: 'The container\'s output',
+        text: 'Kubernetes trims the times\' trailing zeros; the backend writes all nine decimals, so that they sort as text.',
+        code: 'kubelet · the container runtime\'s log file',
+        msg: { kind: 'log', lines: ['2026-10-17T10:00:01.0123Z START RequestId: ' + REQ + ' Version: $LATEST', '2026-10-17T10:00:01.0154Z greeting Tunis', '2026-10-17T10:00:01.0161Z END RequestId: ' + REQ, '2026-10-17T10:00:01.0162Z REPORT RequestId: ' + REQ + '\tDuration: 1.09 ms\tBilled Duration: 2 ms\tMemory Size: 128 MB\tMax Memory Used: 98 MB'] } },
+      { from: 'api', to: 'api', kind: 'int', label: 'merge by time · each line\'s call', title: 'One list, each line with its call',
+        text: 'An instance runs one call at a time (D14), so a call\'s lines are those from its START line to its REPORT; lines before a pod\'s first START, as at a cold start, have none, and a read that begins inside a call takes it from its END. The instances\' lines merge by time, and the newest 200 are kept.',
+        code: 'orchestrator/kubernetes/pod-logs.ts podLogLines() mergeLogs()' },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · the lines, oldest first', title: 'The lines, with their calls',
+        text: 'Each line has its time, its instance and its request ID: the invocation\'s ID in the history. next stays null until the log store pages back through older lines (P-43).',
+        code: 'functions/dto/function-logs.dto.ts FunctionLogsView',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { lines: [{ time: '2026-10-17T10:00:01.012300000Z', instance: 'fn-' + FN + '-7d9f8b6c5-x2x9q', requestId: REQ, message: 'START RequestId: ' + REQ + ' Version: $LATEST' }, { time: '2026-10-17T10:00:01.015400000Z', instance: 'fn-' + FN + '-7d9f8b6c5-x2x9q', requestId: REQ, message: 'greeting Tunis' }, '…'], next: null } } },
     ],
   },
   {

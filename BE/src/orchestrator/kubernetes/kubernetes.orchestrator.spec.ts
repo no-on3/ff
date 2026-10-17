@@ -9,8 +9,8 @@ import {
   OrchestratorError,
   initMsOf,
 } from '../orchestrator.errors';
-import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
-import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
+import { KubeApi, KubeRequestTimeoutError, KubeResponse, PodLogOptions, RequestOptions } from './kube-client';
+import { KubernetesOrchestrator, LOG_BYTES, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { MAX_CODE_BYTES, RUNTIME_PORT, TENANT_QUOTA_NAME } from './manifests';
 import { functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
@@ -62,8 +62,12 @@ class FakeKubeApi implements KubeApi {
     this.listed.push({ path, selector });
     return (this.lists.get(path) as T[]) ?? [];
   }
-  async podLog(): Promise<string> {
-    return this.podLogText;
+  /** Each pod's own log, by name, for GET /functions/:id/logs (P-40); a pod not in it has podLogText. */
+  podLogs = new Map<string, string>();
+  podLogReads: Array<{ namespace: string; pod: string; container: string; options: PodLogOptions }> = [];
+  async podLog(namespace: string, pod: string, container: string, options: PodLogOptions): Promise<string> {
+    this.podLogReads.push({ namespace, pod, container, options });
+    return this.podLogs.get(pod) ?? this.podLogText;
   }
   async request(method: string, path: string, options?: RequestOptions): Promise<KubeResponse> {
     this.requests.push({ method, path, options });
@@ -467,6 +471,47 @@ describe('KubernetesOrchestrator', () => {
         expect(initMsOf(error)).toBeGreaterThanOrEqual(50);
         expect(api.requests).toEqual([]);
       });
+    });
+  });
+
+  describe('logs (P-40)', () => {
+    const podsPath = `/api/v1/namespaces/${ns}/pods`;
+    const pod = (podName: string) => ({ metadata: { name: podName } });
+
+    it("reads each pod of the function in its account's namespace, with times, the window and the byte limit, and merges them", async () => {
+      api.lists.set(podsPath, [pod('fn-b'), pod('fn-a')]);
+      api.podLogs.set('fn-a', '2026-10-17T10:00:01Z START RequestId: req-1 Version: 1\n2026-10-17T10:00:02Z from a\n');
+      api.podLogs.set('fn-b', '2026-10-17T10:00:01.5Z from b, between calls\n');
+
+      const lines = await orchestrator.logs(fn, { tail: 50, sinceSeconds: 600 });
+
+      expect(api.listed).toEqual([{ path: podsPath, selector: `ff.dev/function-id=${fn.id}` }]);
+      expect(api.podLogReads).toEqual(
+        ['fn-b', 'fn-a'].map((podName) => ({ namespace: ns, pod: podName, container: 'function', options: { tailLines: 50, sinceSeconds: 600, timestamps: true, limitBytes: LOG_BYTES } })),
+      );
+      expect(lines.map((line) => [line.instance, line.requestId, line.message])).toEqual([
+        ['fn-a', 'req-1', 'START RequestId: req-1 Version: 1'],
+        ['fn-b', null, 'from b, between calls'],
+        ['fn-a', 'req-1', 'from a'],
+      ]);
+    });
+
+    it('gives the newest `tail` lines across the pods', async () => {
+      api.lists.set(podsPath, [pod('fn-a'), pod('fn-b')]);
+      api.podLogs.set('fn-a', '2026-10-17T10:00:01Z a1\n2026-10-17T10:00:03Z a2\n');
+      api.podLogs.set('fn-b', '2026-10-17T10:00:02Z b1\n2026-10-17T10:00:04Z b2\n');
+
+      expect((await orchestrator.logs(fn, { tail: 2 })).map((line) => line.message)).toEqual(['a2', 'b2']);
+      expect(api.podLogReads[0].options).toEqual({ tailLines: 2, sinceSeconds: undefined, timestamps: true, limitBytes: LOG_BYTES });
+    });
+
+    it('gives none for a function without pods, scaled to zero, and none for a pod whose log is not there yet', async () => {
+      expect(await orchestrator.logs(fn, { tail: 200 })).toEqual([]);
+      expect(api.podLogReads).toEqual([]);
+
+      api.lists.set(podsPath, [pod('fn-starting')]);
+      api.podLogs.set('fn-starting', ''); // the client gives '' for a container waiting to start
+      expect(await orchestrator.logs(fn, { tail: 200 })).toEqual([]);
     });
   });
 

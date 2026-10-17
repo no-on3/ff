@@ -106,6 +106,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       desiredInstances: jest.fn(),
       readyInstancesByFunction: jest.fn(),
       applyTenantLimits: jest.fn(),
+      logs: jest.fn(),
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -874,6 +875,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       invocationsRepo.findAndCount.mockResolvedValue([[], 0]);
       orchestrator.invoke.mockResolvedValue({ output: 'hi' });
       orchestrator.desiredInstances.mockResolvedValue(1);
+      orchestrator.logs.mockResolvedValue([]);
     });
 
     const calls: Array<[string, (accountId: string, id?: string) => Promise<unknown>]> = [
@@ -883,6 +885,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       ['invoke', (accountId, id = ID) => service.invoke(accountId, id, {})],
       ['getInvocations', (accountId, id = ID) => service.getInvocations(accountId, id, { limit: 10, offset: 0 })],
       ['updateScalingConfig', (accountId, id = ID) => service.updateScalingConfig(accountId, id, { maxInstances: 2 })],
+      ['logs', (accountId, id = ID) => service.logs(accountId, id, { tail: 200 })],
     ];
 
     it.each(calls)("%s answers another account exactly as for a function that doesn't exist, and does nothing", async (_name, call) => {
@@ -906,6 +909,14 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     it("lists only the calling account's functions", async () => {
       await expect(service.findAll('user-2')).resolves.toEqual([]);
       await expect(service.findAll('user-1')).resolves.toEqual([owned()]);
+    });
+
+    it("reads the account's function's logs from its instances, with the query, and has no next page yet (P-40)", async () => {
+      const line = { time: '2026-10-17T10:00:00.000000000Z', instance: 'fn-a', requestId: null, message: 'hi' };
+      orchestrator.logs.mockResolvedValue([line]);
+
+      await expect(service.logs('user-1', ID, { tail: 20, sinceSeconds: 60 })).resolves.toEqual({ lines: [line], next: null });
+      expect(orchestrator.logs).toHaveBeenCalledWith(owned(), { tail: 20, sinceSeconds: 60 });
     });
 
     it('puts the account in the history query itself, not only in the check before it', async () => {

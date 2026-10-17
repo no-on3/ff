@@ -236,6 +236,13 @@ The logs belong to the current pod, so a rollout starts them afresh.
 kubectl -n "$NS" logs deploy/fn-$ID
 ```
 
+Without cluster access, `GET /functions/:id/logs` gives the same lines (P-40). It reads every running instance of the function, merges their lines oldest first, and gives the newest 200, or `tail` up to 1,000, optionally only those of the last `sinceSeconds`. Each line has its time to the nanosecond (UTC), the instance that wrote it, and the request ID of the call it belongs to: from the call's `START` line to its `REPORT`, the invocation's `id` in the history. Lines outside a call, such as a cold start's, have none. Every member of the account reads them, and so does an API key with `logs:read`; another account's function answers 404. The lines come from the running instances: they go when an instance stops, and a function scaled to zero has none, until the log store keeps them (P-42). A line longer than 16,384 characters is cut, and ends with `…[truncated]`.
+
+```bash
+curl -s "$FF/functions/$ID/logs?tail=20" | jq -r '.lines[] | "\(.time) \(.requestId // "-") \(.message)"'
+curl -s "$FF/functions/$ID/logs?sinceSeconds=300" | jq -c --arg id "$REQUEST" '[.lines[] | select(.requestId == $id) | .message]'   # one call's lines
+```
+
 **Call a runtime directly**, without the backend, to see its raw response and headers. Here the request body *is* the event body:
 
 ```bash

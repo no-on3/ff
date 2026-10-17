@@ -165,8 +165,20 @@ describe('KubeClient', () => {
   it('returns pod logs as text and swallows errors (diagnostics are best effort)', async () => {
     const { client } = await setup((req) => (req.url.includes('/broken/') ? { status: 500 } : { status: 200, body: 'line' }));
 
-    await expect(client.podLog('n', 'pod-1', 'function', 20)).resolves.toBe('"line"');
-    await expect(client.podLog('n', 'broken', 'function', 20)).resolves.toBe('');
+    await expect(client.podLog('n', 'pod-1', 'function', { tailLines: 20 })).resolves.toBe('"line"');
+    await expect(client.podLog('n', 'broken', 'function', { tailLines: 20 })).resolves.toBe('');
+  });
+
+  it('asks for the last lines, and for the logs endpoint their times, a window and a byte limit (P-40)', async () => {
+    const { server, client } = await setup(() => ({ status: 200, body: 'line' }));
+
+    await client.podLog('n', 'pod-1', 'function', { tailLines: 20 });
+    await client.podLog('n', 'pod-1', 'function', { tailLines: 200, sinceSeconds: 60, timestamps: true, limitBytes: 4096 });
+
+    expect(server.captured.map((req) => req.url)).toEqual([
+      '/api/v1/namespaces/n/pods/pod-1/log?container=function&tailLines=20',
+      '/api/v1/namespaces/n/pods/pod-1/log?container=function&tailLines=200&sinceSeconds=60&timestamps=true&limitBytes=4096',
+    ]);
   });
 
   it('rejects unsupported URL schemes', () => {
