@@ -43,7 +43,9 @@ const FunctionList: React.FC = () => {
         {functions.map((func) => (
           <div key={func.id} className="card">
             <h2 className="text-xl font-semibold mb-2">{func.name}</h2>
-            <p className="text-gray-600 mb-4">{func.description}</p>
+            <p className="text-gray-600 mb-4">
+              {func.runtime} · {func.memory} MB · {func.status}
+            </p>
             <div className="flex justify-between items-center">
               <Link
                 to={`/functions/${func.id}`}

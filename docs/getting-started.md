@@ -109,7 +109,7 @@ source hack/k8s/env.sh && kubectl delete namespace "ff-t-$(printf %s 1 | sha256s
 cd FE && npm install && npm run dev
 ```
 
-It runs on http://localhost:5173 and calls the API on localhost:3000.
+It runs on http://localhost:5173 and calls the API on localhost:3000. It creates, invokes, and edits functions, and shows their invocation history; the scaling tab is read-only for now.
 
 **9. The gVisor sandbox (optional).** This runs every function in gVisor, an extra isolation layer. Restart the backend afterwards.
 
@@ -283,6 +283,7 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 (cd BE && npm test)                                      # backend unit tests, seconds
 (cd BE && npm run test:db)                               # migrations against real PostgreSQL (compose), seconds
 (cd BE && npm run migration:check)                       # the migrations build exactly the entities' schema
+(cd FE && npm test)                                      # dashboard unit tests, seconds
 (cd runtimes/nodejs && npm test)                         # Node.js runtime protocol
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 3 min

@@ -72,7 +72,7 @@ curl -s -X POST localhost:3000/functions/<id>/invoke -H 'content-type: applicati
 
 For Python, use `"runtime": "python"` and code such as `"def handler(event, context):\n    return {\"message\": \"Hello \" + event[\"body\"].get(\"name\", \"world\")}\n"`. Creating a function returns once it is running (`"status": "ACTIVE"`). The memory range is 128–1024 MB and the timeout 1–300 s.
 
-To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http://localhost:5173 and calls the API on localhost:3000, which allows that origin (`CORS_ORIGIN`). Its pages were not reviewed during the Kubernetes migration.
+To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http://localhost:5173 and calls the API on localhost:3000, which allows that origin (`CORS_ORIGIN`). Its function pages work against today's API: create, invoke, history, and edit. The scaling tab is read-only for now, and the metrics charts get a new source in the client-readiness plan (P-50).
 
 ## Tests
 
@@ -80,6 +80,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 |---|---|---|
 | L1 backend | `cd BE && npm test` | Unit tests: orchestrator against a fake API server, manifests, scaling, services |
 | L1 runtimes | `cd runtimes/nodejs && npm test`; `cd runtimes/python && python3 -m unittest discover -s tests` | The runtime protocol on real processes |
+| L1 dashboard | `cd FE && npm test` | What the dashboard sends and shows: the fields of an edit, invoke input, API error messages, units (Vitest) |
 | L2 database | `cd BE && npm run test:db`; `npm run migration:check` | The migrations against real PostgreSQL, each case in its own scratch database; no drift between the migrations and the entities |
 | L2 images | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities |
 | L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor), and the function lifecycle (repair, rollback, updates at zero) |

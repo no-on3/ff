@@ -1,34 +1,38 @@
 import React, { useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
+import { apiErrorMessage } from '../lib/functions';
+import { NewFunction, Runtime } from '../services/api';
 import { createFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
-export enum Runtime {
-  NODEJS = 'nodejs',
-  PYTHON = 'python',
-}
+
 const CreateFunction: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
-  
-  const [formData, setFormData] = useState({
+
+  const [formData, setFormData] = useState<NewFunction>({
     name: '',
-    // description: '',
     code: '',
-    runtime : Runtime.NODEJS,
-    memory : 128,
-    timeout : 5,
-    metadata : {}
+    runtime: 'nodejs',
+    memory: 128,
+    timeout: 5,
+    metadata: {},
   });
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    setCreating(true);
+    setError(null);
     try {
       await dispatch(createFunction(formData)).unwrap();
       navigate('/functions');
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err) {
+      // The API's reason: a validation error, or why the function didn't become ready.
+      setError(apiErrorMessage(err));
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -56,19 +60,6 @@ const CreateFunction: React.FC = () => {
           />
         </div>
 
-        {/* <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Description
-          </label>
-          <textarea
-            value={formData.description}
-            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-            className="input mt-1"
-            rows={3}
-            required
-          />
-        </div> */}
-
         <div>
           <label className="block text-sm font-medium text-gray-700">
             Code
@@ -92,8 +83,8 @@ const CreateFunction: React.FC = () => {
             className="input mt-1"
             required
           >
-            <option value={Runtime.NODEJS}>Node.js</option>
-            <option value={Runtime.PYTHON}>Python</option>
+            <option value="nodejs">Node.js</option>
+            <option value="python">Python</option>
           </select>
         </div>
 
@@ -123,24 +114,13 @@ const CreateFunction: React.FC = () => {
           />
         </div>
 
-        {/* <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Metadata
-          </label>
-          <input
-            type="text"
-            value={formData.metadata}
-            onChange={(e) => setFormData({ ...formData, metadata: e.target.value })}
-            className="input mt-1"
-          />
-        </div> */}
-
         <div className="flex gap-4">
           <button
             type="submit"
             className="btn btn-primary"
+            disabled={creating}
           >
-            Create Function
+            {creating ? 'Creating… (waits until it runs)' : 'Create Function'}
           </button>
           <button
             type="button"

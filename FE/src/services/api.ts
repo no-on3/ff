@@ -16,69 +16,88 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+export type Runtime = 'nodejs' | 'python';
+export type FunctionStatus = 'CREATING' | 'ACTIVE' | 'ERROR' | 'DELETED';
+
+/** A function, as the API returns it. */
 export interface Function {
   id: string;
   name: string;
-  description: string;
-  code: string;
   userId: string;
+  runtime: Runtime;
+  code: string;
+  /** MB */
+  memory: number;
+  /** Seconds */
+  timeout: number;
+  status: FunctionStatus;
+  /** Why the function is in ERROR. */
+  error?: string | null;
+  minInstances: number;
+  maxInstances: number;
+  scaleToZero: boolean;
+  metadata?: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
 }
 
+/** What POST /functions accepts. */
+export type NewFunction = Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'> & {
+  metadata?: Record<string, unknown>;
+};
+
+/** What PUT /functions/:id accepts: any subset of these. */
+export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'>>;
+
+export type InvocationStatus = 'RUNNING' | 'COMPLETED' | 'ERROR' | 'TIMEOUT';
+
+/** An invocation, as the API returns it: from POST /functions/:id/invoke, and in the history. */
 export interface FunctionInvocation {
   id: string;
   functionId: string;
-  input: any;
-  output: any;
-  status: 'RUNNING' | 'COMPLETED' | 'ERROR';
-  duration?: number;
-  memoryUsed?: number;
-  cpuUsed?: number;
-  error?: string;
+  input: unknown;
+  output: unknown;
+  status: InvocationStatus;
+  /** Milliseconds, as the runtime measured it. */
+  duration: number;
+  /** MB: the runtime's peak memory. */
+  memoryUsed?: number | null;
+  error?: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface InvocationResponse {
-  id: string;
-  status: 'RUNNING' | 'COMPLETED' | 'ERROR';
-  input: any;
-  output: any;
-  metrics: {
-    memoryUsed: number;
-    cpuUsed: number;
-    startTime: string;
-    endTime: string;
-    duration: number;
-  };
-  error?: string;
+/** One page of GET /functions/:id/invocations, newest first. */
+export interface InvocationPage {
+  invocations: FunctionInvocation[];
+  total: number;
+}
+
+/** GET /functions/:id/scaling-config. There is no route to change it yet. */
+export interface ScalingConfig {
+  minInstances: number;
+  maxInstances: number;
+  targetConcurrency: number;
+  scaleToZero: boolean;
 }
 
 export const functionsApi = {
-  // Get all functions
   getAllFunctions: () => api.get<Function[]>('/functions'),
-  
-  // Get function by ID
+
   getFunction: (id: string) => api.get<Function>(`/functions/${id}`),
-  
-  // Create function
-  createFunction: (data: Partial<Function>) => api.post<Function>('/functions', data),
-  
-  // Update function
-  updateFunction: (id: string, data: Partial<Function>) => 
-    api.put<Function>(`/functions/${id}`, data),
-  
-  // Delete function
+
+  createFunction: (data: NewFunction) => api.post<Function>('/functions', data),
+
+  updateFunction: (id: string, data: FunctionUpdate) => api.put<Function>(`/functions/${id}`, data),
+
   deleteFunction: (id: string) => api.delete(`/functions/${id}`),
-  
-  // Invoke function
-  invokeFunction: (id: string, input: any) => 
-    api.post<InvocationResponse>(`/functions/${id}/invoke`, { ...input }),
-  
-  // Get function invocations
-  getFunctionInvocations: (id: string) => 
-    api.get<FunctionInvocation[]>(`/functions/${id}/invocations`),
+
+  /** `input` becomes the handler's event.body. */
+  invokeFunction: (id: string, input: Record<string, unknown>) =>
+    api.post<FunctionInvocation>(`/functions/${id}/invoke`, { input }),
+
+  getFunctionInvocations: (id: string, limit = 20) =>
+    api.get<InvocationPage>(`/functions/${id}/invocations`, { params: { limit } }),
 };
 
 // Metrics API endpoints
@@ -92,14 +111,8 @@ export const getMetrics = async (functionId: string, start: Date, end: Date) => 
   return response.data;
 };
 
-// Scaling Configuration API endpoints
-export const getScalingConfig = async (functionId: string) => {
-  const response = await api.get(`/functions/${functionId}/scaling-config`);
-  return response.data;
-};
-
-export const updateScalingConfig = async (functionId: string, config: any) => {
-  const response = await api.put(`/functions/${functionId}/scaling-config`, config);
+export const getScalingConfig = async (functionId: string): Promise<ScalingConfig> => {
+  const response = await api.get<ScalingConfig>(`/functions/${functionId}/scaling-config`);
   return response.data;
 };
 
