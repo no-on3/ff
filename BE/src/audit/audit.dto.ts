@@ -23,8 +23,8 @@ export class AuditQuery {
 export class AuditEntryView {
   @ApiProperty({ example: '42' }) id: string;
   @ApiProperty() at: Date;
-  @ApiProperty({ example: 'user:3f9c2a1e-…', description: 'user:<id>, key:<id>, dev, or system' }) actor: string;
-  @ApiProperty({ example: 'amira@ff.test', description: "The user's e-mail, or the key's name, at the time" }) actorLabel: string;
+  @ApiProperty({ example: 'user:3f9c2a1e-…', description: 'user:<id>, key:<id>, dev, system, or operator: FF acting on the account' }) actor: string;
+  @ApiProperty({ example: 'amira@ff.test', description: "The user's e-mail, or the key's name, at the time; FF for an operator" }) actorLabel: string;
   @ApiProperty({ example: 'function.create' }) action: string;
   @ApiProperty({ nullable: true, type: String, example: 'function:3f9c2a1e-…' }) resource: string | null;
   @ApiProperty({ nullable: true, type: String }) ip: string | null;

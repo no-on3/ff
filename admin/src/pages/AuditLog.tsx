@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { auditApi } from '../api';
 import DataTable, { Column, Filter } from '../components/DataTable';
 import { ErrorState } from '../components/States';
-import { OPERATOR_ACTIONS, OperatorAction, actionLabel, auditCsvName, auditParams, describeAction, exportParams, whenUtc } from '../lib/audit';
+import { OPERATOR_ACTIONS, OperatorAction, actionLabel, auditCsvName, auditParams, describeAction, exportParams } from '../lib/audit';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
 import { TableQuery, currentCursor, firstPage, nextPage, pageNumber, previousPage } from '../lib/table';
+import { whenUtc } from '../lib/time';
 
 const FILTERS: Filter[] = [
   { name: 'operator', label: 'Operator', placeholder: 'part of an e-mail' },

@@ -18,11 +18,14 @@ import { FunctionsService } from './functions/functions.service';
 import { HealthController } from './health/health.controller';
 import { MetricsController } from './metrics/metrics.controller';
 import { MetricsService } from './metrics/metrics.service';
+import { AdminAccountsController, AdminPlansController } from './admin/admin-accounts.controller';
+import { AdminAccountsService } from './admin/admin-accounts.service';
 import { AdminAuditController } from './admin/admin-audit.controller';
 import { AdminSettingsController } from './admin/admin-settings.controller';
 import { AuditService } from './audit/audit.service';
 import { PlatformSettingsService } from './admin/platform-settings.service';
 import { UsageController } from './usage/usage.controller';
+import { PlansService } from './plans/plans.service';
 import { UsageService } from './usage/usage.service';
 
 const ACCOUNT = '000000000001';
@@ -51,6 +54,8 @@ describe('the OpenAPI document (L1, P-08)', () => {
         UsageController,
         AdminSettingsController,
         AdminAuditController,
+        AdminAccountsController,
+        AdminPlansController,
       ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
@@ -61,6 +66,8 @@ describe('the OpenAPI document (L1, P-08)', () => {
         { provide: UsageService, useValue: succeeding(UsageService) },
         { provide: PlatformSettingsService, useValue: succeeding(PlatformSettingsService) },
         { provide: AuditService, useValue: succeeding(AuditService, { operatorActions: async () => ({ entries: [], next: null }) }) },
+        { provide: AdminAccountsService, useValue: succeeding(AdminAccountsService) },
+        { provide: PlansService, useValue: succeeding(PlansService, { list: async () => [] }) },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -87,7 +94,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
     const checked: Array<{ route: string; documented: string[]; answered: number }> = [];
     for (const { method, path, operation } of routes) {
       // Account routes take an account ID, key routes a key ID, and the others a function ID.
-      const param = path.startsWith('/accounts/') ? ACCOUNT : path.startsWith('/api-keys/') ? '0123456789ab' : ID;
+      const param = /^\/(admin\/)?accounts\//.test(path) ? ACCOUNT : path.startsWith('/api-keys/') ? '0123456789ab' : ID;
       const res = await fetch(baseUrl + path.replace(/\{\w+\}/g, param), {
         method: method.toUpperCase(),
         headers: { 'content-type': 'application/json' },
@@ -97,7 +104,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans']));
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
   });
 

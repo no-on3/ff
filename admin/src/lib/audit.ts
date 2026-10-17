@@ -6,7 +6,16 @@ import { TableQuery, pageParams } from './table';
  * dashboard calls each. contract.test.ts checks each against the API's
  * actions; P-71 and the tasks after it add theirs.
  */
-export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [{ value: 'settings.update', label: 'Settings changed' }];
+export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
+  { value: 'account.approve', label: 'Account approved' },
+  { value: 'account.reject', label: 'Account rejected' },
+  { value: 'account.suspend', label: 'Account suspended' },
+  { value: 'account.reactivate', label: 'Account reactivated' },
+  { value: 'account.close', label: 'Account closed' },
+  { value: 'account.plan', label: 'Plan changed' },
+  { value: 'account.egress', label: 'Internet egress changed' },
+  { value: 'settings.update', label: 'Settings changed' },
+];
 
 /** One operator action, as GET /admin/audit-log gives it. */
 export interface OperatorAction {
@@ -54,8 +63,21 @@ const shown = (value: unknown): string => {
   return typeof value === 'object' ? JSON.stringify(value) : String(value);
 };
 
-/** One change, from → to: a setting by its label, as the Settings page shows it; anything else as the API names it. */
+/** What an account's changes are called (P-71), and how their values read. */
+const ACCOUNT_FIELDS: Record<string, { label: string; value?: (value: unknown) => string }> = {
+  status: { label: 'Status' },
+  planId: { label: 'Plan' },
+  internetEgress: { label: 'Internet egress', value: (value) => (value === true ? 'on' : value === false ? 'off' : shown(value)) },
+};
+
+/**
+ * One change, from → to: a setting by its label, as the Settings page shows
+ * it; an account's status, plan or egress by name; anything else as the API
+ * names it.
+ */
 function describeChange(name: string, { from, to }: { from: unknown; to: unknown }): string {
+  const field = ACCOUNT_FIELDS[name];
+  if (field) return `${field.label}: ${(field.value ?? shown)(from)} → ${(field.value ?? shown)(to)}`;
   const setting = SETTINGS.find((known) => known.key === name);
   if (!setting) return `${name}: ${shown(from)} → ${shown(to)}`;
   // An old entry may hold a value of another shape: shown as it is, never a broken page.
@@ -64,7 +86,7 @@ function describeChange(name: string, { from, to }: { from: unknown; to: unknown
 }
 
 /** What an action did, to read: each change's from → to, else what it was on. */
-export function describeAction(entry: OperatorAction): string {
+export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource'>): string {
   const changes = entry.details?.changes as Record<string, { from: unknown; to: unknown }> | undefined;
   if (changes) {
     return Object.entries(changes)
@@ -72,12 +94,6 @@ export function describeAction(entry: OperatorAction): string {
       .join('; ');
   }
   return entry.resource ?? '';
-}
-
-/** When it happened, in UTC like the filters and the CSV: "2026-10-17 10:13:11 UTC". */
-export function whenUtc(at: string): string {
-  const iso = new Date(at).toISOString();
-  return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
 }
 
 export const actionLabel = (action: string): string => OPERATOR_ACTIONS.find((known) => known.value === action)?.label ?? action;

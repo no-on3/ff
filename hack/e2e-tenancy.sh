@@ -115,12 +115,13 @@ mail_to() {
   id="$(curl -sS "$mailpit/api/v1/search?query=to:$1" | jq -r '.messages[0].ID // empty')"
   [ -z "$id" ] || curl -sS "$mailpit/api/v1/message/$id" | jq -r '.Subject + "\n" + .Text' | tr -d '\r'
 }
-# approve <account...>: as P-71's admin route will, until it exists.
+# approve <account...>: the operator approves each one, as the admin dashboard does (P-71).
 approve() {
-  local ids
-  ids="$(printf "'%s'," "$@")"
-  "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc \
-    "UPDATE accounts SET status = 'active' WHERE id IN (${ids%,})" >/dev/null
+  local account
+  for account in "$@"; do
+    with_token "$operator_token" POST "/admin/accounts/$account/approve" '{"reason": "l5: use case checked"}' >/dev/null
+    [ "$(status)" = 200 ] || fail "the operator could not approve $account: $(status) $(message)"
+  done
 }
 
 e2e_dependencies keycloak mailpit
@@ -172,7 +173,7 @@ mapfile -t routes < <(jq -r '.paths | to_entries[] | .key as $path | .value | to
 path_for() {
   local template=$1 method=$2 path name params=()
   case $template in
-    /accounts/*) path="${template//\{id\}/$4}" ;;
+    /accounts/* | /admin/accounts/*) path="${template//\{id\}/$4}" ;;
     /api-keys/*) path="${template//\{id\}/${5:-0123456789ab}}" ;;
     *) path="${template//\{id\}/$3}" ;;
   esac
@@ -202,6 +203,9 @@ body_for() {
     "POST /api-keys") echo '{"name": "l5", "scopes": ["functions:read"]}' ;;
     "POST /members") echo '{"email": "l5-invitee@ff.test", "role": "viewer"}' ;;
     "PUT /admin/settings") echo '{"settings": {"gracePeriodHours": 1}, "reason": "l5 tries"}' ;;
+    "PUT /admin/accounts/{id}/plan") echo '{"planId": "beta", "reason": "l5 tries"}' ;;
+    "PUT /admin/accounts/{id}/egress") echo '{"internetEgress": true, "reason": "l5 tries"}' ;;
+    "POST /admin/accounts/"*) echo '{"reason": "l5 tries"}' ;;
     "PATCH /members/{userId}") echo '{"role": "viewer"}' ;;
     POST* | PUT* | PATCH*) echo '{}' ;;
   esac
@@ -321,7 +325,13 @@ check "a pending account can't deploy" \
 account_2="$(with_token "$token_2" POST /accounts '{"name": "L5 two"}' | jq -r .id)"
 check "user 2 creates an account" 201 "$(status)"
 e2e_namespaces+=("$(tenant_namespace "$account_1")" "$(tenant_namespace "$account_2")")
+operator_token="$(keycloak_token ff-admin "$operator_email" "$operator_password")"
+queue="$(with_token "$operator_token" GET '/admin/accounts?status=pending')"
+check "both wait in the operator's approvals queue, with who signed up and what for (P-71)" "200 2 isolation tests $user_1" \
+  "$(status) $(jq -r --arg a "$account_1" --arg b "$account_2" '[.accounts[] | select(.id == $a or .id == $b)] | length' <<<"$queue") $(jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | "\(.useCase) \(.owners[0].email)"' <<<"$queue")"
 approve "$account_1" "$account_2"
+check "the operator approves them, and the owner gets an e-mail that says so" "active Your FF account is approved: L5 one" \
+  "$(as_user_1 GET "/accounts/$account_1" | jq -r .status) $(mail_to "$user_1" | head -1)"
 
 created="$(as_user_1 POST /functions "$(function_body l5-one)")"
 check "approved, account 1 deploys a function" "201 ACTIVE $account_1" \
@@ -502,13 +512,15 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
-check "account 1's log has each change, oldest to newest" \
-  "account.create function.create api_key.create member.invite api_key.revoke member.invite member.join member.role member.remove" \
+check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
+  "account.create account.approve function.create api_key.create member.invite api_key.revoke member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
 check "with the address and the request's ID" true \
-  "$(jq '[.entries[] | (.ip != null and (.requestId | test("^[0-9a-f-]{36}$")))] | all' <<<"$log_1")"
+  "$(jq '[.entries[] | select(.actor != "operator") | (.ip != null and (.requestId | test("^[0-9a-f-]{36}$")))] | all' <<<"$log_1")"
+check "the approval is FF's, with the operator's reason, but neither their e-mail nor their address" "operator FF null l5: use case checked" \
+  "$(jq -r '.entries[] | select(.action == "account.approve") | "\(.actor) \(.actorLabel) \(.ip) \(.details.reason)"' <<<"$log_1")"
 as_user_1 GET '/audit-log?limit=0' >/dev/null
 check "a page of nothing is refused" "400 limit must not be less than 1" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 
@@ -526,12 +538,54 @@ check "and the audit log keeps who, why, and what it replaced" "operator@ff.test
   "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F '|' -c \
     "SELECT actor_label, details->>'reason', details->'changes'->'gracePeriodHours'->>'from', details->'changes'->'gracePeriodHours'->>'to'
        FROM audit_log WHERE action = 'settings.update' AND actor LIKE 'operator:%'")"
+echo "== the operator's accounts (P-71)"
+found="$(with_token "$operator_token" GET "/admin/accounts?q=$user_1")"
+check "the operator finds account 1 by its owner's e-mail" "200 $account_1" "$(status) $(jq -r '[.accounts[].id] | join(" ")' <<<"$found")"
+page_1="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
+check "its page: the owner, the function and its last call, this month's usage, and how it became active" \
+  "200 $user_1 l5-one true true pending,active" \
+  "$(status) $(jq -r '"\(.members[0].email) \(.functions[0].name) \(.functions[0].lastInvokedAt != null) \(.usage.totals.requests > 0) \([.statusHistory[].status] | join(","))"' <<<"$page_1")"
+with_token "$operator_token" POST "/admin/accounts/$account_1/suspend" '{"reason": "l5: abuse report"}' >/dev/null
+check "the operator suspends account 1" 200 "$(status)"
+check "its function is scaled to zero at once" 0 \
+  "$(kubectl -n "$(tenant_namespace "$account_1")" get deployment "fn-$fn_1" -o jsonpath='{.spec.replicas}')"
+as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"one"}}' >/dev/null
+check "its owner can't invoke" "403 Your account is suspended" "$(status) $(message)"
+as_user_1 POST /functions "$(function_body l5-suspended)" >/dev/null
+check "nor deploy" "403 Your account is suspended" "$(status) $(message)"
+as_user_1 GET "/functions/$fn_1" >/dev/null
+check "but still reads its functions" 200 "$(status)"
+check "the owner gets an e-mail that says why" "Your FF account is suspended: L5 one true" \
+  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep -q '^Why: l5: abuse report$' && echo true || echo false)"
+log_1="$(as_user_1 GET '/audit-log?limit=1')"
+check "and sees it in the account's audit log as FF's, with the reason, without the operator's address" "account.suspend operator FF null l5: abuse report" \
+  "$(jq -r '.entries[0] | "\(.action) \(.actor) \(.actorLabel) \(.ip) \(.details.reason)"' <<<"$log_1")"
+with_token "$operator_token" POST "/admin/accounts/$account_1/approve" '{"reason": "l5 tries"}' >/dev/null
+check "a change that doesn't apply is refused" "409 Account $account_1 is suspended: only a pending account can be approved" "$(status) $(message)"
+with_token "$operator_token" POST "/admin/accounts/$account_1/reactivate" '{"reason": "l5: the owner fixed it"}' >/dev/null
+check "the operator reactivates it" 200 "$(status)"
+as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"again"}}' >/dev/null
+check "and its function answers again, from a cold start" 201 "$(status)"
+"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc \
+  "INSERT INTO plans (id, name, limits) SELECT 'l5-large', 'L5 large', jsonb_set(limits, '{quota}', '{\"pods\": 30, \"cpu\": \"12\", \"memory\": \"12Gi\"}') FROM plans WHERE id = 'beta'" >/dev/null
+moved="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/plan" '{"planId": "l5-large", "reason": "l5: needs more room"}')"
+check "the operator moves account 1 to a larger plan, and its quota follows at once" "200 l5-large 30 12 12Gi" \
+  "$(status) $(jq -r .account.planId <<<"$moved") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
+with_token "$operator_token" PUT "/admin/accounts/$account_1/plan" '{"planId": "imaginary", "reason": "l5 tries"}' >/dev/null
+check "a plan that doesn't exist is refused" "404 Plan imaginary not found" "$(status) $(message)"
+egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '{"internetEgress": true, "reason": "l5: calls a payment API"}')"
+check "internet egress is turned on for account 1" "200 true" "$(status) $(jq -r .account.internetEgress <<<"$egress")"
+by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
+check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress" \
+  "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
   "200 operator@ff.test settings.update 24 48 l5: pilot customers asked" \
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
-check "and, unfiltered, none of the customers' many actions: only the operator's" "200 1 settings.update" \
+check "and, unfiltered, none of the customers' many actions: only the operator's" \
+  "200 7 account.approve,account.egress,account.plan,account.reactivate,account.suspend,settings.update" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

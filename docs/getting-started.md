@@ -290,8 +290,11 @@ AUTH="Authorization: Bearer $TOKEN"
 curl -s $FF/me -H "$AUTH" | jq -c .                       # {"user":{…"email":"amira@ff.test"…},"accounts":[]}
 ACCOUNT=$(curl -s -X POST $FF/accounts -H "$AUTH" -H 'content-type: application/json' \
   -d '{"name": "Atelier Sfax", "useCase": "Resize product photos"}' | jq -r .id)   # status "pending"
-# approve it, as the admin dashboard will (client-readiness plan, P-71):
-docker compose exec -T postgres psql -U postgres -d serverless_platform -c "UPDATE accounts SET status = 'active' WHERE id = '$ACCOUNT'"
+# approve it as FF's operator: in the admin dashboard's Approvals (below), or with the operator's token
+OP=$(curl -s -X POST $KC/realms/ff/protocol/openid-connect/token -d grant_type=password -d client_id=ff-admin \
+  -d username=operator@ff.test -d password=operator-dev-1 | jq -r .access_token)   # the development realm only
+curl -s -X POST $FF/admin/accounts/$ACCOUNT/approve -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"reason": "Use case checked"}' | jq -r .account.status   # "active"; the owner's e-mail is in Mailpit
 curl -s $FF/functions -H "$AUTH"                         # now acts for that account
 ```
 
@@ -321,7 +324,7 @@ curl -s -X DELETE $FF/members/invitations/<invitation ID> -H "$AUTH" # cancel on
 
 Inviting an address again renews its invitation, with the new role.
 
-**The audit log.** Owners read who changed what in their account, when, from which address, and in which request: account changes, functions created, changed and deleted, scaling, API keys, invitations, joins, role changes and removals. Entries are never changed or deleted: the database refuses it.
+**The audit log.** Owners read who changed what in their account, when, from which address, and in which request: account changes, functions created, changed and deleted, scaling, API keys, invitations, joins, role changes and removals. FF's own changes to the account (its approval, a suspension, its plan) are there too, as FF's, with the operator's reason but without their e-mail or address. Entries are never changed or deleted: the database refuses it.
 
 ```bash
 curl -s "$FF/audit-log?limit=20" -H "$AUTH" | jq -c '.entries[] | {at, actorLabel, action, resource}'
@@ -375,7 +378,7 @@ One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bil
 
 The console keeps its tokens in the tab's session storage, and renews the 5-minute access token with the refresh token before it expires. "Log out" ends the Keycloak session too. When that session ends another way (30 minutes without a renewal, as after the laptop slept, or a logout in another tab), the next call gets 401, and the console asks you to log in again.
 
-**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for the platform's settings and the operator audit log now, and accounts and approvals as they land. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
+**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for approvals and accounts, the operator audit log and the platform's settings, and billing as it lands. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
 
 ```bash
 cd admin && cp .env.example .env.local && npm install && npm run dev
@@ -402,6 +405,31 @@ curl -s "$FF/admin/audit-log?action=settings.update&limit=5" -H "Authorization: 
   | jq -c '.entries[] | {at, operator: .operator.email, action, reason}'
 # {"at":"2026-10-17T10:00:00.000Z","operator":"operator@ff.test","action":"settings.update","reason":"Pilot customers asked for more time"}
 curl -s "$FF/admin/audit-log?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z" -H "Authorization: Bearer $OP" -H 'Accept: text/csv'
+```
+
+**Accounts and approvals** (P-71). The dashboard opens on **Approvals**: the accounts waiting for your approval, with who signed up and what they plan to build; the new-account e-mail links there. **Accounts** lists every account, newest first, searched by ID, name or a member's e-mail, and filtered by status and plan. An account's page shows its owners and members, its functions with their last call, this month's usage, its status history and its whole audit log, and makes the changes. Each change takes a reason, which the account's audit log keeps, and sends each owner an e-mail:
+
+| Change | From | Then |
+|---|---|---|
+| Approve | pending | active: it deploys and invokes |
+| Reject | pending | rejected: it never deploys |
+| Suspend | active | suspended: its functions scale to zero at once (a call under way finishes first), and it can't deploy or invoke. Nothing is deleted |
+| Reactivate | suspended | active: functions with warm instances (`minInstances`) get them back; the others start at their next call |
+| Close | any but closed | closed, for good: its functions scale to zero. P-45 will delete what it holds after a notice period |
+
+The e-mail of a rejection, a suspension or a closure gives your reason. A change that doesn't apply to the account's status answers 409. Once a minute, the backend scales back to zero any function of a suspended or closed account that started anyway, such as with a call already under way. Moving an account to another plan applies the plan's quota to its namespace at once. Internet egress is recorded per account; until P-62 writes it into the account's NetworkPolicy, `K8S_EGRESS_INTERNET` decides for every account.
+
+```bash
+curl -s "$FF/admin/accounts?status=pending" -H "Authorization: Bearer $OP" | jq -c '.accounts[] | {id, name, useCase, owners: [.owners[].email]}'
+curl -s "$FF/admin/accounts?q=amira" -H "Authorization: Bearer $OP" | jq -c '.accounts[] | {id, name, status, planId}'
+curl -s $FF/admin/accounts/$ACCOUNT -H "Authorization: Bearer $OP" | jq '{status: .account.status, functions: [.functions[].name], requests: .usage.totals.requests, history: [.statusHistory[] | "\(.status) by \(.by)"]}'
+curl -s -X POST $FF/admin/accounts/$ACCOUNT/suspend -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"reason": "Abuse report: mining cryptocurrency"}' | jq -r .account.status        # also /approve, /reject, /reactivate, /close
+curl -s -X PUT $FF/admin/accounts/$ACCOUNT/plan -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"planId": "beta", "reason": "Back to the beta plan"}' | jq -r .account.planId    # the plans: GET /admin/plans
+curl -s -X PUT $FF/admin/accounts/$ACCOUNT/egress -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"internetEgress": true, "reason": "Calls a payment API"}' | jq -r .account.internetEgress
+curl -s "$FF/admin/accounts/$ACCOUNT/audit-log?limit=20" -H "Authorization: Bearer $OP" | jq -c '.entries[] | {at, actorLabel, action}'
 ```
 
 **Reset Keycloak** with `docker compose --profile auth down -v keycloak`: it deletes Keycloak's users, and imports the realm again at the next start. Keycloak reads `deploy/keycloak/ff-realm.json` only at its first start, so a change to that file needs this reset. Name the service: without it, `down -v` deletes the database and S3 volumes too.
@@ -491,6 +519,7 @@ docker compose down -v
 | Keycloak answers `Invalid parameter: redirect_uri` | Your Keycloak still has the realm it imported before the console moved to port 5199 (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows, and sign up again. |
 | The admin dashboard's login answers `Client not found`, or `operator@ff.test` can't log in | Your Keycloak imported the realm before the admin dashboard existed (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows. |
 | 403 `The admin routes take a token issued to the admin dashboard (ff-admin)` | The token came from another client, such as the console's. Log in to the admin dashboard, or get the token through `ff-admin`. |
+| 409 `Account … is active: only a pending account can be approved` | The change doesn't apply to the account's status any more: another operator changed it first. Reload the account's page; its status history says who did what. |
 | 403 `The admin routes are for FF's operators` | The user hasn't the realm role `ff-operator`. Give it in Keycloak's admin console (Users → Role mapping), then log in again. |
 | 400 `Every admin change needs a reason` | Send `reason`, 3 to 500 characters, in the body. |
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. With `FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read` or `K8S_TENANT_QUOTA_… is no longer read`, remove those lines: the account's plan sets them now. |

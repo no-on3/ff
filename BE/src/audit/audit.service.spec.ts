@@ -12,7 +12,7 @@ import { RequestIdInterceptor } from '../common/request-context';
 import { ROLES, SCOPE } from '../auth/route-rules';
 import { AuditEntry } from './audit-entry.entity';
 import { AuditController } from './audit.controller';
-import { AuditService, SYSTEM } from './audit.service';
+import { AuditService, SYSTEM, asCustomerSees } from './audit.service';
 
 const entries = { insert: jest.fn() };
 
@@ -150,5 +150,43 @@ describe('GET /audit-log route rules (L1, P-17)', () => {
 
     expect(reflector.get(ROLES, list)).toEqual(['owner']);
     expect(reflector.get(SCOPE, list)).toBeUndefined();
+  });
+});
+
+describe("an operator's action, as the account's owners see it (L1, P-71)", () => {
+  const entry = (overrides: Partial<AuditEntry>): AuditEntry =>
+    ({
+      id: '7',
+      at: new Date('2026-10-17T10:00:00Z'),
+      accountId: '000000000042',
+      actor: 'operator:kc-op-1',
+      actorLabel: 'operator@ff.test',
+      action: 'account.suspend',
+      resource: 'account:000000000042',
+      ip: '10.0.0.7',
+      requestId: 'req-1',
+      details: { reason: 'Mining cryptocurrency', changes: { status: { from: 'active', to: 'suspended' } } },
+      ...overrides,
+    });
+
+  it("is FF's, without the operator's ID, e-mail or address; what happened and why stay", () => {
+    expect(asCustomerSees(entry({}))).toEqual({ ...entry({}), actor: 'operator', actorLabel: 'FF', ip: null });
+  });
+
+  it("leaves the account's own people and keys as they are", () => {
+    const own = entry({ actor: 'user:u-1', actorLabel: 'amira@ff.test', action: 'function.create' });
+
+    expect(asCustomerSees(own)).toBe(own);
+  });
+
+  it('is how GET /audit-log gives it to the owners', async () => {
+    const list = jest.fn(async () => ({ entries: [entry({})], next: '6' }));
+    const controller = new AuditController({ list } as unknown as AuditService);
+
+    const page = await controller.list({ accountId: '000000000042' } as never, { limit: 10 });
+
+    expect(page).toEqual({ entries: [asCustomerSees(entry({}))], next: '6' });
+    expect(page.entries[0]).toMatchObject({ actorLabel: 'FF', ip: null });
+    expect(list).toHaveBeenCalledWith('000000000042', { limit: 10, before: undefined });
   });
 });

@@ -1,16 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, LessThan, Repository } from 'typeorm';
+import { EntityManager, In, LessThan, Repository } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { describeError } from '../common/describe-error';
+import { likeLiteral } from '../common/like';
 import { Actor, currentRequest } from '../common/request-context';
 import { AuditEntry } from './audit-entry.entity';
 
-/** Every action the audit log records (P-17). Credit, status and /admin actions come with their tasks. */
+/** Every action the audit log records (P-17). Credit and the other /admin actions come with their tasks. */
 export type AuditAction =
   | 'account.create'
   | 'account.update'
   | 'account.plan'
+  | 'account.approve'
+  | 'account.reject'
+  | 'account.suspend'
+  | 'account.reactivate'
+  | 'account.close'
+  | 'account.egress'
   | 'function.create'
   | 'function.update'
   | 'function.delete'
@@ -56,8 +63,18 @@ export interface OperatorActionFilter {
 /** The actor of every operator action: operator:<Keycloak ID> (P-70). */
 export const OPERATOR_ACTOR = 'operator:';
 
-/** Text to match as itself in LIKE: its wildcards and the escape character escaped. */
-const literal = (text: string) => text.replace(/[\\%_]/g, (character) => `\\${character}`);
+/** The actions that set an account's status: its creation (pending), then each operator's change (P-71). */
+export const STATUS_ACTIONS: AuditAction[] = ['account.create', 'account.approve', 'account.reject', 'account.suspend', 'account.reactivate', 'account.close'];
+
+/**
+ * An entry as the account's owners see it (P-71): an operator's action on
+ * their account is FF's, without the operator's ID, e-mail or address. The
+ * action, the reason and what changed stay.
+ */
+export function asCustomerSees(entry: AuditEntry): AuditEntry {
+  if (!entry.actor.startsWith(OPERATOR_ACTOR)) return entry;
+  return { ...entry, actor: 'operator', actorLabel: 'FF', ip: null };
+}
 
 export interface AuditPage {
   entries: AuditEntry[];
@@ -124,12 +141,17 @@ export class AuditService {
 
   private operatorQuery(filter: OperatorActionFilter) {
     const query = this.entries.createQueryBuilder('entry').where('entry.actor LIKE :actor', { actor: `${OPERATOR_ACTOR}%` });
-    if (filter.operator) query.andWhere(`entry.actorLabel ILIKE :operator ESCAPE '\\'`, { operator: `%${literal(filter.operator)}%` });
+    if (filter.operator) query.andWhere(`entry.actorLabel ILIKE :operator ESCAPE '\\'`, { operator: `%${likeLiteral(filter.operator)}%` });
     if (filter.accountId) query.andWhere('entry.accountId = :accountId', { accountId: filter.accountId });
     if (filter.action) query.andWhere('entry.action = :action', { action: filter.action });
     if (filter.from) query.andWhere('entry.at >= :from', { from: filter.from });
     if (filter.to) query.andWhere('entry.at < :to', { to: filter.to });
     return query;
+  }
+
+  /** An account's status changes, oldest first: its creation, then each operator's change (P-71). */
+  statusHistory(accountId: string): Promise<AuditEntry[]> {
+    return this.entries.find({ where: { accountId, action: In(STATUS_ACTIONS) }, order: { id: 'ASC' } });
   }
 
   /** GET /audit-log: an account's entries, newest first, a page at a time. */

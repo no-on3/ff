@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { ApiAuth } from './auth/oidc';
 import { DEFAULT_API_URL, config } from './config';
+import type { AccountSummary, AccountView, PlanOption, StatusChange } from './lib/accounts';
 import type { OperatorAction } from './lib/audit';
 import type { PlatformSettings } from './lib/settings';
 
@@ -52,6 +53,41 @@ export const auditApi = {
     const res = await api.get<string>('/admin/audit-log', { params, headers: { Accept: 'text/csv' }, responseType: 'text' });
     return { text: res.data, truncated: res.headers['x-ff-truncated'] === 'true' };
   },
+};
+
+/** GET /admin/accounts: a page of accounts (P-71). */
+export interface AccountPage {
+  accounts: AccountSummary[];
+  /** `before` for the next page, older; null on the last. */
+  next: string | null;
+}
+
+/** An entry of an account's audit log, operators named (GET /admin/accounts/:id/audit-log). */
+export interface AccountAuditEntry {
+  id: string;
+  at: string;
+  actor: string;
+  actorLabel: string;
+  action: string;
+  resource: string | null;
+  details: Record<string, unknown> | null;
+}
+
+const accountPath = (id: string) => `/admin/accounts/${encodeURIComponent(id)}`;
+
+/** The accounts routes (P-71): every change carries the operator's reason, and answers with the account page. */
+export const accountsApi = {
+  page: (params: Record<string, string>) => api.get<AccountPage>('/admin/accounts', { params }),
+  get: (id: string) => api.get<AccountView>(accountPath(id)),
+  auditLog: (id: string, params: Record<string, string>) =>
+    api.get<{ entries: AccountAuditEntry[]; next: string | null }>(`${accountPath(id)}/audit-log`, { params }),
+  change: (id: string, change: StatusChange, reason: string) => api.post<AccountView>(`${accountPath(id)}/${change}`, { reason }),
+  plan: (id: string, planId: string, reason: string) => api.put<AccountView>(`${accountPath(id)}/plan`, { planId, reason }),
+  egress: (id: string, internetEgress: boolean, reason: string) => api.put<AccountView>(`${accountPath(id)}/egress`, { internetEgress, reason }),
+};
+
+export const plansApi = {
+  list: () => api.get<PlanOption[]>('/admin/plans'),
 };
 
 export const settingsApi = {

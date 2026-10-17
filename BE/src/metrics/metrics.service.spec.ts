@@ -1,4 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
+import { In } from 'typeorm';
+import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
@@ -23,8 +25,11 @@ describe('MetricsService', () => {
       scaleToZero: true,
       status: FunctionStatus.ACTIVE,
       updatedAt: new Date(now - 3_600_000),
+      account: { id: '123456789012', status: AccountStatus.ACTIVE } as Account,
       ...overrides,
     }) as Function;
+  /** The function of an account that is suspended or closed (P-71). */
+  const stopped = (status: AccountStatus, overrides: Partial<Function> = {}) => fn({ account: { id: '123456789012', status } as Account, ...overrides });
 
   let orchestrator: jest.Mocked<Orchestrator>;
   let functionRepository: { findOne: jest.Mock; find: jest.Mock; exists: jest.Mock };
@@ -181,6 +186,23 @@ describe('MetricsService', () => {
       expect(replicas).toBe(2);
     });
 
+    it("leaves a suspended account's function at zero: no step back to minInstances, and no longer stepped down (P-71)", async () => {
+      const f = fn({ minInstances: 2, maxInstances: 5 });
+      for (let i = 0; i < 4; i++) service.invocationStarted(f);
+      await settle();
+      for (let i = 0; i < 4; i++) service.invocationFinished(f);
+      orchestrator.scale.mockClear();
+      replicas = 0; // the suspension scaled it down
+      functionRepository.findOne.mockResolvedValue(stopped(AccountStatus.SUSPENDED, { minInstances: 2, maxInstances: 5 }));
+
+      await service.aggregate();
+      functionRepository.findOne.mockResolvedValue(fn({ minInstances: 2, maxInstances: 5 })); // reactivated
+      await service.aggregate();
+
+      expect(orchestrator.scale).not.toHaveBeenCalled();
+      expect(functionRepository.findOne).toHaveBeenCalledWith({ where: { id: 'fn-1' }, relations: { account: true } });
+    });
+
     it('skips functions deleted since the window opened', async () => {
       functionRepository.findOne.mockResolvedValue(null);
       service.recordMetric('gone', 100, 30, false);
@@ -273,6 +295,44 @@ describe('MetricsService', () => {
       await service.sweepIdleFunctions(now + 3_600_000);
 
       expect(orchestrator.scale).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('holdStoppedAccounts (P-71)', () => {
+    it('scales the working functions of suspended and closed accounts to zero, and only those with instances', async () => {
+      functionRepository.find.mockResolvedValue([
+        stopped(AccountStatus.SUSPENDED, { id: 'started-after' }),
+        stopped(AccountStatus.CLOSED, { id: 'at-zero' }),
+      ]);
+      orchestrator.desiredInstances.mockImplementation(async (workload) => (workload.id === 'started-after' ? 2 : 0));
+
+      await service.holdStoppedAccounts();
+
+      expect(functionRepository.find).toHaveBeenCalledWith({
+        where: { status: FunctionStatus.ACTIVE, account: { status: In([AccountStatus.SUSPENDED, AccountStatus.CLOSED]) } },
+      });
+      expect(orchestrator.scale.mock.calls.map(([workload, count]) => [workload.id, count])).toEqual([['started-after', 0]]);
+    });
+
+    it('keeps holding the others when one scale call fails', async () => {
+      functionRepository.find.mockResolvedValue([stopped(AccountStatus.SUSPENDED, { id: 'a' }), stopped(AccountStatus.SUSPENDED, { id: 'b' })]);
+      orchestrator.scale.mockRejectedValueOnce(new Error('api down'));
+
+      await service.holdStoppedAccounts();
+
+      expect(orchestrator.scale.mock.calls.map(([workload]) => workload.id)).toEqual(['a', 'b']);
+    });
+
+    it('runs each minute, after the idle sweep, even when aggregation failed', async () => {
+      functionRepository.findOne.mockRejectedValue(new Error('database down'));
+      service.recordMetric('fn-1', 100, 30, false);
+      functionRepository.find.mockImplementation(async (options: { where: { account?: unknown } }) =>
+        options.where.account ? [stopped(AccountStatus.CLOSED)] : [],
+      );
+
+      await service.tick();
+
+      expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 0);
     });
   });
 

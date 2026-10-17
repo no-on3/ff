@@ -400,12 +400,13 @@
           <tr><td>Invocations: input, output, status, duration, memory, error</td><td>PostgreSQL <code>function_invocations</code></td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST)</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
           <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td><code>GET /usage</code> and the console's Usage page; the capacity report; then billing (P-32)</td></tr>
           <tr><td>The platform's settings: shadow billing, the negative buffer and grace period, low-balance e-mails, the invoice reminder, the large-credit threshold</td><td>PostgreSQL <code>platform_settings</code>; a setting without a row has its default (<code>BE/src/admin/platform-settings.ts</code>)</td><td>the admin dashboard, with a reason, through <code>PUT /admin/settings</code></td><td>the tasks that use them: P-32, P-33, P-36, P-74</td></tr>
+          <tr><td>Accounts: name, status, plan, country, tax ID, what they plan to build, internet egress</td><td>PostgreSQL <code>accounts</code></td><td>sign-up (<code>POST /accounts</code>, pending) and its owners; operators, with a reason: approval, suspension, closure, plan, egress (<code>/admin/accounts</code>, P-71)</td><td>the guard on every request (an account that isn't active can't deploy or invoke), the console, the admin dashboard</td></tr>
           <tr><td>Who changed what: an account's changes to itself, its functions, API keys and members; and every operator action, with its reason</td><td>PostgreSQL <code>audit_log</code>; never changed or deleted</td><td>each change it records (P-17); the admin routes, with the operator and the reason (P-70)</td><td>the account's <code>GET /audit-log</code>; the operators' <code>GET /admin/audit-log</code>, the admin dashboard's Audit log page and its CSV (P-76)</td></tr>
           <tr><td>Capacity: each function's ready instances, a minute at a time, with its memory and <code>minInstances</code></td><td>PostgreSQL <code>capacity_samples</code>, a partition per month (UTC); never changed or deleted</td><td>the capacity sample, 5 s into every minute</td><td><code>npm run capacity:report</code>; then metrics (P-50), billing of <code>minInstances</code> (P-32) and the admin overview (P-75)</td></tr>
           <tr><td>Per-minute metrics: request and error counts, p50/p95/p99, averages, instances</td><td>PostgreSQL <code>function_metrics</code></td><td>the metrics tick, every 60 s</td><td>the console (<code>GET /metrics/:id</code>)</td></tr>
           <tr><td>An archive copy of the code</td><td>S3 bucket <code>functions</code>, key <code>&lt;id&gt;/code.ts</code> or <code>code.py</code></td><td>create, update</td><td>nothing yet: the cluster gets the code from the ConfigMap</td></tr>
           <tr><td>The code the pod runs</td><td>ConfigMap <code>fn-&lt;id&gt;-&lt;hash&gt;</code>, immutable, mounted read-only at <code>/var/task</code></td><td>create, update</td><td>the runtime, when it starts</td></tr>
-          <tr><td>Desired and ready instances</td><td>Deployment <code>fn-&lt;id&gt;</code>: <code>spec.replicas</code>, <code>status.readyReplicas</code></td><td>create, update, the autoscaler, the idle sweep, cold starts</td><td>invoke, the waits, the metrics tick</td></tr>
+          <tr><td>Desired and ready instances</td><td>Deployment <code>fn-&lt;id&gt;</code>: <code>spec.replicas</code>, <code>status.readyReplicas</code></td><td>create, update, the autoscaler, the idle sweep, cold starts; an operator's suspension or closure, and the minute's hold of such accounts at zero (P-71)</td><td>invoke, the waits, the metrics tick</td></tr>
           <tr><td>The current minute's metrics, and each function's last invocation time</td><td>Backend memory</td><td>invoke</td><td>the metrics tick and the idle sweep (one backend replica assumed)</td></tr>
           <tr><td>Logs: START, END, REPORT, your output, errors</td><td>Pod stdout (the container log)</td><td>the runtime and your code</td><td><code>kubectl logs</code>, the backend's diagnosis when a function doesn't become ready</td></tr>
         </tbody>
@@ -507,6 +508,7 @@
           <tr><td>The caller of a request, and its account</td><td><code>BE/src/auth/principal.ts</code></td></tr>
           <tr><td>API keys</td><td><code>BE/src/api-keys/</code></td></tr>
           <tr><td>The admin dashboard: its routes, the operator check, the platform's settings, and the app</td><td><code>BE/src/admin/</code>, <code>BE/src/auth/auth.guard.ts</code> <code>authenticateOperator()</code>, <code>admin/src/</code></td></tr>
+          <tr><td>Accounts for operators: the approvals queue, the account page, status changes and their rules, plan and egress</td><td><code>BE/src/admin/admin-accounts.service.ts</code>, <code>account-status-changes.ts</code>, <code>BE/src/metrics/metrics.service.ts</code> <code>holdStoppedAccounts()</code>, <code>admin/src/pages/Accounts.tsx</code>, <code>Account.tsx</code></td></tr>
           <tr><td>The audit log: what it records, each account's log, and the operator audit log with its CSV</td><td><code>BE/src/audit/</code>, <code>BE/src/admin/admin-audit.controller.ts</code>, <code>BE/src/common/csv.ts</code>, <code>admin/src/pages/AuditLog.tsx</code></td></tr>
           <tr><td>The development realm (Keycloak)</td><td><code>deploy/keycloak/ff-realm.json</code></td></tr>
           <tr><td>Request IDs, and error answers</td><td><code>BE/src/common/request-context.ts</code>, <code>api-exception.filter.ts</code></td></tr>
@@ -1176,6 +1178,40 @@ const SCENARIOS = [
         code: 'FE/src/auth/oidc.ts oidcApiAuth() · automaticSilentRenew',
         msg: [{ kind: 'http', first: 'POST /realms/ff/protocol/openid-connect/token HTTP/1.1', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=refresh_token&refresh_token=eyJhbGciOiJIUzUxMiIs…&client_id=ff-console' },
           { kind: 'http', first: 'HTTP/1.1 200 OK', body: { access_token: 'eyJhbGciOiJSUzI1NiIs… (a new one)', expires_in: 300, refresh_token: '…', '…': '…' } }] },
+    ],
+  },
+  {
+    id: 'suspend', title: 'Suspend an account', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod'],
+    summary: 'You, as FF\'s operator, suspend an active account from the admin dashboard, with a reason (P-71): its status changes in one transaction with its audit entry, its functions scale to zero at once, and each owner gets an e-mail. Nothing is deleted; reactivating it gives warm instances back.',
+    initial: activeState(FN, HASH_V1, 'code.ts'),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /admin/accounts/…/suspend', title: 'You suspend the account, with a reason',
+        text: 'In the admin dashboard: the account\'s page, Suspend. The dialog says what happens, and that the owners will read the reason, which it needs. The global guard lets in only an operator\'s token issued to ff-admin (P-70); a change without a reason gets 400.',
+        code: 'admin/src/pages/Account.tsx · BE/src/admin/admin-accounts.controller.ts suspend()',
+        msg: { kind: 'http', first: 'POST /admin/accounts/000000000001/suspend HTTP/1.1', headers: { host: 'localhost:3000', authorization: 'Bearer eyJhbGciOiJSUzI1NiIs… (ff-admin, ff-operator)', 'content-type': 'application/json' }, body: { reason: 'Abuse report: mining cryptocurrency' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'FOR UPDATE · UPDATE · INSERT audit_log', title: 'One transaction: the status and its audit entry',
+        text: 'The account\'s row is locked, so two operators\' changes go one after the other, the second seeing the first\'s status. Only an active account can be suspended: anything else gets 409, with nothing written. The audit entry names the operator, with the reason and the change from → to. It is the account\'s, so its owners see it in their audit log, as FF\'s, without the operator\'s e-mail or address.',
+        code: 'admin/admin-accounts.service.ts changeStatus() · account-status-changes.ts',
+        msg: { kind: 'sql', text: "BEGIN;\nSELECT … FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;   -- active\nUPDATE \"accounts\" SET \"status\" = 'suspended' WHERE \"id\" = '000000000001';\nINSERT INTO \"audit_log\" (\"account_id\", \"actor\", \"actor_label\", \"action\", \"resource\", \"details\")\n  VALUES ('000000000001', 'operator:kc-op-1', 'operator@ff.test', 'account.suspend', 'account:000000000001',\n          '{\"reason\": \"Abuse report: mining cryptocurrency\", \"changes\": {\"status\": {\"from\": \"active\", \"to\": \"suspended\"}}}');\nCOMMIT;" } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'PATCH …/scale → 0', title: 'Each working function scales to zero',
+        text: 'Once committed, every ACTIVE function of the account, one by one. One that fails is logged: the minute\'s hold catches it.', code: 'admin-accounts.service.ts scaleFunctions() · kubernetes.orchestrator.ts scale()', hl: ['deployment'],
+        msg: { kind: 'http', first: 'PATCH ' + DEPLOY_PATH + '/scale?fieldManager=ff-scaler HTTP/1.1', headers: { 'content-type': 'application/merge-patch+json' }, body: { spec: { replicas: 0 } } },
+        set: { [K + '.Deployment']: 'replicas 0 · scaling down' } },
+      { from: 'k8s', to: 'node', kind: 'req', label: 'delete the pod', title: 'The ReplicaSet removes the pod', text: 'As for an idle function.', code: 'Deployment controller', hl: ['pod-box'], set: { [K + '.Pod']: 'Terminating' } },
+      { from: 'node', to: 'pod', kind: 'int', label: 'SIGTERM · exit', title: 'The runtime stops', text: 'A call under way finishes first, within the function\'s timeout; new calls never reach it, as the guard refuses them.', code: 'runtimes/nodejs/src/main.ts shutdown()',
+        msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-17T11:02:00.512Z', 0)] },
+        set: { [K + '.Pod']: null, [K + '.Deployment']: 'replicas 0 · ready 0/0', 'Runtime.main process': null, 'Runtime.worker': null } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · the account page', title: 'Suspended, and its owners told',
+        text: 'Each owner gets an e-mail, "Your FF account is suspended", which gives the reason and says nothing is deleted. The answer is the account\'s page, whose status history now ends with the suspension. The functions, their records and the namespace stay.',
+        code: 'admin-accounts.service.ts tellOwners() · ownerMail()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { account: { id: '000000000001', status: 'suspended', '…': '…' }, statusHistory: [{ status: 'pending', by: 'amira@ff.test' }, { status: 'active', by: 'operator@ff.test' }, { status: 'suspended', by: 'operator@ff.test', reason: 'Abuse report: mining cryptocurrency' }], '…': '…' } } },
+      { from: 'api', to: 'user', kind: 'err', label: '403 · Your account is suspended', title: 'Its invokes and deploys are refused',
+        text: 'The guard reads the account\'s status on every request, from a token or an API key: invoking, deploying and changing a function get 403. Its members still read and delete their functions.',
+        code: 'BE/src/auth/auth.guard.ts canActivate() · @RequireActiveAccount()',
+        msg: [{ kind: 'http', first: 'POST /functions/' + FN + '/invoke HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 403 Forbidden', body: { statusCode: 403, message: 'Your account is suspended', error: 'Forbidden' } }] },
+      { from: 'api', to: 'api', kind: 'int', label: 'timer: every 60 s', title: 'The minute\'s hold',
+        text: 'Each metrics tick, any function of a suspended or closed account that has instances anyway, such as from a call that was already past the guard, scales back to zero; the autoscaler never steps one up to its minInstances. Reactivating the account brings warm instances back; the other functions start at their next call.',
+        code: 'BE/src/metrics/metrics.service.ts holdStoppedAccounts()' },
     ],
   },
 ];

@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OperatorAction, actionLabel, auditCsvName, auditParams, describeAction, exportParams, whenUtc } from './audit';
+import { describe, expect, it } from 'vitest';
+import { OperatorAction, actionLabel, auditCsvName, auditParams, describeAction, exportParams } from './audit';
 
 const entry = (overrides: Partial<OperatorAction> = {}): OperatorAction => ({
   id: '42',
@@ -54,15 +54,25 @@ describe('describeAction', () => {
     );
   });
 
+  it("reads an account's status, plan and internet egress by name (P-71)", () => {
+    const changes = {
+      status: { from: 'pending', to: 'active' },
+      planId: { from: 'beta', to: 'large' },
+      internetEgress: { from: false, to: true },
+    };
+
+    expect(describeAction(entry({ action: 'account.approve', details: { changes } }))).toBe('Status: pending → active; Plan: beta → large; Internet egress: off → on');
+  });
+
   it('names any other change as the API does: none for no value, JSON for one with parts', () => {
     const changes = {
-      status: { from: 'active', to: 'suspended' },
+      reviewer: { from: 'sami', to: 'amira' },
       taxId: { from: null, to: '1234567A' },
       quota: { from: { pods: 10, memory: '2Gi' }, to: { pods: 20, memory: '4Gi' } },
     };
 
-    expect(describeAction(entry({ action: 'account.update', details: { changes } }))).toBe(
-      'status: active → suspended; taxId: none → 1234567A; quota: {"pods":10,"memory":"2Gi"} → {"pods":20,"memory":"4Gi"}',
+    expect(describeAction(entry({ action: 'plan.update', details: { changes } }))).toBe(
+      'reviewer: sami → amira; taxId: none → 1234567A; quota: {"pods":10,"memory":"2Gi"} → {"pods":20,"memory":"4Gi"}',
     );
   });
 
@@ -74,20 +84,6 @@ describe('describeAction', () => {
 
   it('else names what the action was on', () => {
     expect(describeAction(entry({ action: 'account.suspend', resource: 'account:000000000001' }))).toBe('account:000000000001');
-  });
-});
-
-describe('whenUtc', () => {
-  // A zone other than UTC, wherever the tests run, so that a local time would show: Tunis is UTC+1 all year.
-  beforeEach(() => vi.stubEnv('TZ', 'Africa/Tunis'));
-  afterEach(() => vi.unstubAllEnvs());
-
-  it('gives the time in UTC, as the filters and the CSV do, whatever offset it came with', () => {
-    expect(new Date('2026-10-17T10:13:11Z').getHours()).toBe(11); // the zone applies
-    expect([whenUtc('2026-10-17T10:13:11.986Z'), whenUtc('2026-10-18T00:30:00+01:00')]).toEqual([
-      '2026-10-17 10:13:11 UTC',
-      '2026-10-17 23:30:00 UTC',
-    ]);
   });
 });
 

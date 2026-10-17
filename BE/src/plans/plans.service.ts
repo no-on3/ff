@@ -56,17 +56,31 @@ export class PlansService {
     return plans;
   }
 
+  /** Every plan, by ID: the admin dashboard's choice of plans (P-71). */
+  async list(): Promise<PlanView[]> {
+    const rows = await this.plans.find({ order: { id: 'ASC' } });
+    return Promise.all(rows.map((row) => this.get(row.id, { fresh: true })));
+  }
+
   /**
-   * Moves an account to another plan, and applies its quota to the account's
-   * namespace at once (D5). The admin dashboard's plan change calls it (P-71).
+   * Moves an account to another plan, for an operator's reason (P-71), in one
+   * transaction with the audit entry, then applies the plan's quota to the
+   * account's namespace at once (D5). The same plan writes nothing, but
+   * applies the quota again: a retry after the cluster refused it.
    */
-  async assign(accountId: string, planId: string): Promise<PlanView> {
+  async assign(accountId: string, planId: string, reason: string): Promise<PlanView> {
     if (!(await this.plans.exists({ where: { id: planId } }))) throw new NotFoundException(`Plan ${planId} not found`);
     const plan = await this.get(planId, { fresh: true });
-    const account = await this.accounts.findOne({ where: { id: accountId }, select: { id: true, planId: true } });
-    if (!account) throw new NotFoundException(`Account ${accountId} not found`);
-    await this.accounts.update({ id: accountId }, { planId });
-    await this.audit.record({ accountId, action: 'account.plan', resource: `account:${accountId}`, details: { from: account.planId, to: planId } });
+    await this.accounts.manager.transaction(async (manager) => {
+      const account = await manager.findOne(Account, { where: { id: accountId }, lock: { mode: 'pessimistic_write' } });
+      if (!account) throw new NotFoundException(`Account ${accountId} not found`);
+      if (account.planId === planId) return;
+      await manager.update(Account, { id: accountId }, { planId });
+      await this.audit.record(
+        { accountId, action: 'account.plan', resource: `account:${accountId}`, details: { reason, changes: { planId: { from: account.planId, to: planId } } } },
+        manager,
+      );
+    });
     await this.orchestrator.applyTenantLimits(accountId, tenantLimits(plan.limits));
     return plan;
   }

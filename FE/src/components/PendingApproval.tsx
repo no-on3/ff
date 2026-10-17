@@ -3,9 +3,13 @@ import { Link } from 'react-router-dom';
 import { apiErrorMessage } from '../lib/functions';
 import { useSession } from '../session/session';
 
-/** The home page of an account waiting for approval: it can't deploy or invoke yet (P-12). */
+/**
+ * The home page of an account waiting for approval: it can't deploy or invoke
+ * yet (P-12). Its owners get an e-mail when an operator approves or rejects
+ * it (P-71); "Check again" shows the functions once it is approved.
+ */
 const PendingApproval: React.FC = () => {
-  const { account, reload } = useSession();
+  const { me, account, reload } = useSession();
   const [checking, setChecking] = useState(false);
   const [checkedAt, setCheckedAt] = useState(() => new Date());
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +33,14 @@ const PendingApproval: React.FC = () => {
         <h1 className="text-2xl font-bold mb-4">Waiting for approval</h1>
         <p className="mb-3">
           Your account <strong>{account?.name}</strong> ({account?.id}) is waiting for approval. During the beta, we approve each
-          new account by hand.
+          new account by hand.{' '}
+          {account?.role === 'owner' && me.user?.email ? (
+            <>
+              We'll e-mail you at <strong>{me.user.email}</strong> once it's approved, or if it isn't.
+            </>
+          ) : (
+            "We'll e-mail its owners once it's approved, or if it isn't."
+          )}
         </p>
         <p className="mb-6 text-gray-600">
           Until then, you can't deploy or invoke functions. You can already fill in the account's details and create API keys.

@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, Repository } from 'typeorm';
+import { Between, In, Repository } from 'typeorm';
+import { AccountStatus } from '../accounts/entities/account.entity';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
 import { describeError } from '../common/describe-error';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
@@ -22,7 +23,8 @@ interface MetricsWindow {
  * the function gets one instance per call in flight, up to maxInstances. Once
  * a minute, functions with traffic, and those scaled up earlier, step back
  * down by one instance. Idle functions are scaled to zero after the idle
- * window; their next invocation cold-starts them. Runs in the API process and
+ * window; their next invocation cold-starts them. A suspended or closed
+ * account's functions stay at zero (P-71). Runs in the API process and
  * assumes a single backend replica; several replicas need leader election and
  * a shared count of calls in flight (parent plan R-06).
  */
@@ -106,7 +108,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     this.lastInvokedAt.set(functionId, Date.now());
   }
 
-  /** One window: persist metrics and adjust replicas, then scale idle functions to zero. */
+  /** One window: persist metrics and adjust replicas, then scale idle functions, and those of stopped accounts, to zero. */
   async tick(): Promise<void> {
     try {
       await this.aggregate();
@@ -117,6 +119,11 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
       await this.sweepIdleFunctions();
     } catch (error) {
       this.logger.error(`Error in idle sweep: ${describeError(error)}`);
+    }
+    try {
+      await this.holdStoppedAccounts();
+    } catch (error) {
+      this.logger.error(`Error holding stopped accounts' functions at zero: ${describeError(error)}`);
     }
   }
 
@@ -132,7 +139,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
       const peakConcurrency = this.concurrency.takePeak(functionId);
       this.burstTargets.delete(functionId); // the next burst compares with the Deployment again
       try {
-        const function_ = await this.functionRepository.findOne({ where: { id: functionId } });
+        const function_ = await this.functionRepository.findOne({ where: { id: functionId }, relations: { account: true } });
         if (!function_) {
           this.scaledUp.delete(functionId); // deleted since
           continue;
@@ -154,7 +161,9 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
           await this.metricsRepository.save(metrics);
         }
 
-        await this.applyScalingDecision(function_, peakConcurrency);
+        // A suspended or closed account's functions stay at zero (holdStoppedAccounts): no step to minInstances.
+        if (function_.account?.status === AccountStatus.ACTIVE) await this.applyScalingDecision(function_, peakConcurrency);
+        else this.scaledUp.delete(functionId);
       } catch (error) {
         this.logger.error(`Error aggregating metrics for function ${functionId}: ${describeError(error)}`);
       }
@@ -217,6 +226,29 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
         this.logger.log(`Scaled idle function ${function_.id} to zero (no invocations for ${idleSeconds} s)`);
       } catch (error) {
         this.logger.error(`Error scaling idle function ${function_.id} to zero: ${describeError(error)}`);
+      }
+    }
+  }
+
+  /**
+   * Functions of a suspended or closed account (P-71) stay at zero instances.
+   * The operator's change scales them down at once; this catches a call that
+   * was already past the guard and started an instance, and a scale-down that
+   * failed. One read of each such function a minute, until P-45 deletes a
+   * closed account's functions.
+   */
+  async holdStoppedAccounts(): Promise<void> {
+    const held = await this.functionRepository.find({
+      where: { status: FunctionStatus.ACTIVE, account: { status: In([AccountStatus.SUSPENDED, AccountStatus.CLOSED]) } },
+    });
+    for (const function_ of held) {
+      this.scaledUp.delete(function_.id);
+      try {
+        if ((await this.orchestrator.desiredInstances(function_)) === 0) continue;
+        await this.orchestrator.scale(function_, 0);
+        this.logger.log(`Scaled function ${function_.id} to zero: its account is suspended or closed`);
+      } catch (error) {
+        this.logger.error(`Error scaling function ${function_.id} of a stopped account to zero: ${describeError(error)}`);
       }
     }
   }

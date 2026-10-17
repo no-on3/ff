@@ -1,13 +1,15 @@
 import { UserManager } from 'oidc-client-ts';
 import { useEffect } from 'react';
 import { AuthProvider, hasAuthParams, useAuth } from 'react-oidc-context';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
 import { setApiAuth } from './api';
 import { LOGGED_OUT_PATH, oidcApiAuth, oidcSettings } from './auth/oidc';
 import Layout from './components/Layout';
 import LoginPage from './components/LoginPage';
 import { ErrorState } from './components/States';
 import { config } from './config';
+import Account from './pages/Account';
+import Accounts from './pages/Accounts';
 import AuditLog from './pages/AuditLog';
 import Settings from './pages/Settings';
 
@@ -23,7 +25,14 @@ if (userManager) {
   );
 }
 
-/** The login page until the operator is logged in, then the dashboard. */
+/** The approvals queue, or every account: a new status in the address starts the list over. */
+function AccountsRoute({ email }: { email: string | undefined }) {
+  const [params] = useSearchParams();
+  const status = params.get('status') ?? '';
+  return <Accounts key={status} email={email} status={status} />;
+}
+
+/** The login page until the operator is logged in, then the dashboard, which opens on the approvals queue (P-71). */
 function LoginGate() {
   const auth = useAuth();
   const failed = !auth.isLoading && !auth.isAuthenticated && auth.error !== undefined;
@@ -51,9 +60,11 @@ function LoginGate() {
     <BrowserRouter>
       <Layout email={email} onLogOut={() => void auth.signoutRedirect()}>
         <Routes>
+          <Route path="/accounts" element={<AccountsRoute email={email} />} />
+          <Route path="/accounts/:id" element={<Account email={email} />} />
           <Route path="/settings" element={<Settings email={email} />} />
           <Route path="/audit-log" element={<AuditLog email={email} />} />
-          <Route path="*" element={<Navigate to="/settings" replace />} />
+          <Route path="*" element={<Navigate to="/accounts?status=pending" replace />} />
         </Routes>
       </Layout>
     </BrowserRouter>

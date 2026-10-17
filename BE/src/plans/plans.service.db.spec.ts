@@ -94,21 +94,35 @@ run('plans (L2, P-15)', () => {
     await expect(plans.get('changing', { now: t0 + 1 + PLAN_CACHE_MS })).resolves.toMatchObject({ limits: { functions: 8 } });
   });
 
-  it("moves an account to another plan, and applies the new plan's quota to its namespace at once", async () => {
+  const planEntries = (accountId: string) => db.dataSource.getRepository(AuditEntry).find({ where: { accountId, action: 'account.plan' } });
+
+  it("moves an account to another plan for the operator's reason, kept in the audit log, and applies the new plan's quota at once", async () => {
     await addPlan('large', { ...BETA_LIMITS, quota: { pods: 60, cpu: '24', memory: '24Gi' } });
     const id = await account();
 
-    await expect(plans.assign(id, 'large')).resolves.toMatchObject({ id: 'large', name: 'Large' });
+    await expect(plans.assign(id, 'large', 'Pilot needs more room')).resolves.toMatchObject({ id: 'large', name: 'Large' });
 
     expect(await planOf(id)).toBe('large');
     expect(applied).toEqual([{ accountId: id, tenant: { quota: { pods: 60, cpu: '24', memory: '24Gi' } } }]);
+    expect((await planEntries(id)).map((entry) => entry.details)).toEqual([
+      { reason: 'Pilot needs more room', changes: { planId: { from: 'beta', to: 'large' } } },
+    ]);
+  });
+
+  it('writes nothing for the plan the account has, but applies its quota again, as a retry after the cluster refused it', async () => {
+    const id = await account();
+
+    await plans.assign(id, 'beta', 'The quota did not apply');
+
+    expect(await planEntries(id)).toEqual([]);
+    expect(applied).toEqual([{ accountId: id, tenant: { quota: BETA_LIMITS.quota } }]);
   });
 
   it("refuses a plan or an account that doesn't exist, and changes nothing", async () => {
     const id = await account();
 
-    await expect(plans.assign(id, 'imaginary')).rejects.toThrow(new NotFoundException('Plan imaginary not found'));
-    await expect(plans.assign('999999999999', 'beta')).rejects.toThrow(new NotFoundException('Account 999999999999 not found'));
+    await expect(plans.assign(id, 'imaginary', 'why not')).rejects.toThrow(new NotFoundException('Plan imaginary not found'));
+    await expect(plans.assign('999999999999', 'beta', 'why not')).rejects.toThrow(new NotFoundException('Account 999999999999 not found'));
     expect(await planOf(id)).toBe('beta');
     expect(applied).toEqual([]);
   });

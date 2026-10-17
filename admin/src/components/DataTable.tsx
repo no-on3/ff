@@ -30,6 +30,7 @@ function DataTable<Row>({
   error,
   empty,
   filters = [],
+  initial = {},
   search,
   onQuery,
   page,
@@ -45,6 +46,8 @@ function DataTable<Row>({
   /** What an empty page means. */
   empty: string;
   filters?: Filter[];
+  /** Filter values to start with, such as the approvals queue's status=pending; the page fetches with the same. */
+  initial?: Record<string, string>;
   /** The search box's placeholder; no search without it. */
   search?: string;
   onQuery: (query: TableQuery) => void;
@@ -53,7 +56,10 @@ function DataTable<Row>({
   onNext: () => void;
   onPrevious: () => void;
 }) {
-  const [query, setQuery] = useState<TableQuery>({ search: '', filters: Object.fromEntries(filters.map((f) => [f.name, ''])) });
+  const [query, setQuery] = useState<TableQuery>(() => ({
+    search: '',
+    filters: Object.fromEntries(filters.map((f) => [f.name, initial[f.name] ?? ''])),
+  }));
   const apply = (next: TableQuery) => {
     setQuery(next);
     onQuery(next);
@@ -81,7 +87,7 @@ function DataTable<Row>({
               {filter.options ? (
                 <select
                   className="input"
-                  value={query.filters[filter.name]}
+                  value={query.filters[filter.name] ?? ''}
                   onChange={(e) => apply({ ...query, filters: { ...query.filters, [filter.name]: e.target.value } })}
                 >
                   <option value="">Any</option>
@@ -96,7 +102,7 @@ function DataTable<Row>({
                   className="input"
                   type={filter.type ?? 'text'}
                   placeholder={filter.placeholder}
-                  value={query.filters[filter.name]}
+                  value={query.filters[filter.name] ?? ''}
                   onChange={(e) => setQuery({ ...query, filters: { ...query.filters, [filter.name]: e.target.value } })}
                 />
               )}

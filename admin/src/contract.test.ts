@@ -4,9 +4,12 @@ import backendEnvExample from '../../BE/.env.example?raw';
 import operatorSource from '../../BE/src/admin/operator.ts?raw';
 import settingsSource from '../../BE/src/admin/platform-settings.ts?raw';
 import auditSource from '../../BE/src/audit/audit.service.ts?raw';
+import accountEntitySource from '../../BE/src/accounts/entities/account.entity.ts?raw';
+import statusChangesSource from '../../BE/src/admin/account-status-changes.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
+import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
 import { OPERATOR_ACTIONS } from './lib/audit';
 import { REASON_LENGTH } from './lib/reason';
 import { SETTINGS } from './lib/settings';
@@ -81,6 +84,30 @@ describe('the operator actions the audit log page names (P-76)', () => {
     const backendActions = [...union.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map((match) => match[1]);
 
     expect(backendActions).toEqual(expect.arrayContaining(OPERATOR_ACTIONS.map((action) => action.value)));
+  });
+});
+
+describe('the account statuses and their changes (P-71)', () => {
+  // The backend's enum, NAME → value, and its table of changes, in the enum's names.
+  const enumBody = accountEntitySource.slice(accountEntitySource.indexOf('export enum AccountStatus'), accountEntitySource.indexOf('}', accountEntitySource.indexOf('export enum AccountStatus')));
+  const statuses = new Map([...enumBody.matchAll(/(\w+) = '(\w+)'/g)].map(([, name, value]) => [name, value]));
+  const value = (name: string) => statuses.get(name.trim().replace('AccountStatus.', ''));
+  const backendChanges = Object.fromEntries(
+    [...statusChangesSource.matchAll(/(\w+): \{ from: \[([^\]]*)\], to: (AccountStatus\.\w+) \}/g)].map(([, change, from, to]) => [
+      change,
+      { from: from.split(',').map(value), to: value(to) },
+    ]),
+  );
+
+  it("are the backend's statuses", () => {
+    expect(ACCOUNT_STATUSES.map((status) => status.value)).toEqual([...statuses.values()]);
+  });
+
+  it("are the backend's changes: each from the same statuses, to the same one", () => {
+    const appChanges = Object.fromEntries(Object.entries(STATUS_CHANGES).map(([change, { from, to }]) => [change, { from, to }]));
+
+    expect(Object.keys(backendChanges)).toHaveLength(5);
+    expect(appChanges).toEqual(backendChanges);
   });
 });
 
