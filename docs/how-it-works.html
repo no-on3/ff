@@ -382,7 +382,7 @@
     <h2>Data model</h2>
     <p class="lead">Three tables hold everything the backend knows. A function's invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>user_id</code> is <code>userId</code>).</p>
     <div class="card pad scrollx"><div id="erDiagram" class="capped"></div></div>
-    <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set. The columns <code>cpu</code>, <code>target_concurrency</code>, and <code>cpu_used</code> aren't used yet, so <code>cpu_usage</code> is always 0.</p>
+    <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set.</p>
     <h3>Lifecycles</h3>
     <div class="card pad scrollx"><div id="stateMachines" class="capped"></div></div>
     <h3>Kubernetes objects of one tenant</h3>
@@ -624,7 +624,7 @@ const SCENARIOS = [
         text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. @User() picks the tenant: the authenticated user, or FF_DEV_ACCOUNT_ID ("000000000001") when FF_AUTH_MODE=dev in development; without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413.',
         code: 'BE/src/main.ts · BE/src/auth/decorators/user.decorator.ts' },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
-        text: 'The row gets its UUID, the tenant ID, and the defaults: cpu 100, minInstances 0, maxInstances 1, targetConcurrency 100, scaleToZero true.',
+        text: 'The row gets its UUID, the tenant ID, and the defaults: minInstances 0, maxInstances 3, scaleToZero true.',
         code: 'BE/src/functions/functions.service.ts create()',
         msg: { kind: 'sql', text: "INSERT INTO \"functions\" (\"name\", \"user_id\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '000000000001', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
         set: { 'PostgreSQL.functions': 'CREATING' } },
@@ -697,7 +697,7 @@ const SCENARIOS = [
       { from: 'api', to: 'user', kind: 'res', label: '201 Created · the function', title: 'You get the function back',
         text: 'The response is the stored record. Keep its id: you need it to invoke, update, or delete the function.',
         code: 'functions.controller.ts create()',
-        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, id: FN, cpu: 100, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:00:09.412Z' } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, id: FN, minInstances: 0, maxInstances: 3, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:00:09.412Z' } } },
     ],
   },
   {
@@ -730,7 +730,7 @@ const SCENARIOS = [
         code: 'Kubernetes API server', hl: ['service', 'pod-box'],
         msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', '…': '…' }, body: { name: 'Tunis' } } },
       { from: 'pod', to: 'pod', kind: 'int', label: 'parse · queue · START · timer', title: 'The runtime accepts the invocation',
-        text: 'The body must be valid JSON of at most 6 MB. One invocation runs at a time, up to 32 more wait, and beyond that the answer is 429. The backend sends no x-ff-request-id header, so the runtime generates a UUID as the request ID. It writes the START line and arms the 5 s timer.',
+        text: 'The body must be valid JSON of at most 6 MB. One invocation runs at a time; up to 32 more wait, each at most one timeout for its turn, and beyond either limit the answer is 429. The backend sends no x-ff-request-id header, so the runtime generates a UUID as the request ID. It writes the START line and arms the 5 s timer.',
         code: 'runtimes/nodejs/src/main.ts acceptInvocation(), dispatch()',
         msg: { kind: 'log', lines: ['START RequestId: ' + REQ + ' Version: $LATEST'] },
         set: { 'Runtime.worker': 'busy' } },
@@ -767,7 +767,7 @@ const SCENARIOS = [
       { from: 'api', to: 'user', kind: 'res', label: '201 · the invocation', title: 'You get the result',
         text: 'The response is the invocation record; output holds what your handler returned.',
         code: 'functions.controller.ts invoke()',
-        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { functionId: FN, input: { name: 'Tunis' }, status: 'COMPLETED', output: { message: 'Hello Tunis', requestId: REQ }, memoryUsed: 98, cpuUsed: null, error: null, id: INV, duration: 1.09, createdAt: '2026-10-16T14:02:10.212Z', updatedAt: '2026-10-16T14:02:10.251Z' } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { functionId: FN, input: { name: 'Tunis' }, status: 'COMPLETED', output: { message: 'Hello Tunis', requestId: REQ }, memoryUsed: 98, error: null, id: INV, duration: 1.09, createdAt: '2026-10-16T14:02:10.212Z', updatedAt: '2026-10-16T14:02:10.251Z' } } },
     ],
   },
   {
@@ -853,8 +853,8 @@ const SCENARIOS = [
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'An invocation that runs too long', text: 'The function\'s timeout is 2 s; the input asks for a 5 s sleep.', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(SLOW, { seconds: 5 }) },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'Recorded as RUNNING', text: 'As usual.', code: 'functions.service.ts invoke()', set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
-      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke (waits ≤ 2 s + 2 s)', title: 'The backend waits at most 4 s',
-        text: 'Its own HTTP timeout is the function\'s timeout plus 2 s, so the runtime\'s answer always arrives first.', code: 'kubernetes.orchestrator.ts post()', hl: ['k8sapi', 'service'],
+      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke (waits ≤ 2 + 2 + 2 s)', title: 'The backend waits at most 6 s',
+        text: 'Its own HTTP timeout covers one timeout of waiting for a free instance (after that the runtime answers 429), the run itself, and 2 s more, so the runtime\'s answer always arrives first.', code: 'kubernetes.orchestrator.ts post()', hl: ['k8sapi', 'service'],
         msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', '…': '…' }, body: { seconds: 5 } } },
       { from: 'pod', to: 'worker', kind: 'req', label: 'event · 2 s timer', title: 'The handler starts, and the clock runs', text: 'The main process waits for the worker\'s reply for at most FUNCTION_TIMEOUT, 2000 ms.', code: 'runtimes/python/ff_runtime/main.py Supervisor._run()', set: { 'Runtime.worker': 'busy (sleeping)' } },
       { from: 'pod', to: 'pod', kind: 'int', label: '2.00 s: time is up', title: 'Time is up',
@@ -918,7 +918,7 @@ const SCENARIOS = [
       { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced, last', text: 'Same key, new content. Only a version that went live is archived. A failure here is logged and doesn\'t fail the update: nothing reads the copy yet.', code: 'functions.service.ts archiveCode() · minio-client.service.ts uploadCode()',
         set: { 'S3 (bucket functions).object': FN + '/code.ts (451 bytes, new)' } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · the function', title: 'Done', text: 'The next invocation answers "Marhba Tunis".', code: 'functions.controller.ts update()',
-        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, cpu: 100, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 3, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
     ],
   },
   {
@@ -984,11 +984,11 @@ const SCENARIOS = [
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { status: { readyReplicas: 1, '…': '…' }, '…': '…' } }] },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT function_metrics', title: 'One row per function per minute',
         text: 'Counts, percentiles, averages, and instances. The window is swapped out first, so invocations that arrive during the tick count in the next one. A minute without invocations writes no row.', code: 'metrics.service.ts aggregate()',
-        msg: { kind: 'sql', text: "INSERT INTO \"function_metrics\" (\"function_id\", \"timestamp\", \"request_count\", \"error_count\",\n  \"response_time_p50\", \"response_time_p95\", \"response_time_p99\", \"cpu_usage\", \"memory_usage\", \"active_instances\")\nVALUES ('" + FN + "', '2026-10-16T14:03:00.004Z', 3, 0, 41, 55, 55, 0, 98, 1);" },
+        msg: { kind: 'sql', text: "INSERT INTO \"function_metrics\" (\"function_id\", \"timestamp\", \"request_count\", \"error_count\",\n  \"response_time_p50\", \"response_time_p95\", \"response_time_p99\", \"memory_usage\", \"active_instances\", \"max_concurrency\")\nVALUES ('" + FN + "', '2026-10-16T14:03:00.004Z', 3, 0, 41, 55, 55, 98, 1, 1);" },
         set: { 'PostgreSQL.function_metrics': '1 row (14:03)' } },
       { from: 'api', to: 'api', kind: 'int', label: 'decideReplicas → no change', title: 'The autoscaling decision',
-        text: '3 requests on 1 instance is more than MAX_REQUESTS_PER_INSTANCE (2 per minute), so the rule asks for one more. But maxInstances is 1, a default the API can\'t change yet, so the function stays at one instance and nothing is called. The rule moves one instance per minute: up above 2 requests per instance or a p95 over 1 s, down below 1.2.', code: 'BE/src/metrics/scaling.ts decideReplicas()',
-        msg: { kind: 'ipc', title: 'decideReplicas(…) returns null: keep the current count', body: { activeInstances: 1, requestCount: 3, responseTimeP95: 55, minInstances: 0, maxInstances: 1, maxRequestsPerInstance: 2 } } },
+        text: 'The signal is concurrency: each instance serves one call at a time, as on Lambda. These 3 calls came one after another, so at most 1 was in flight at once, and one instance is enough. Calls that arrive together are scaled for at once, as each finds every instance busy: one instance per call in flight, up to maxInstances (3 by default; PUT /functions/:id/scaling-config changes it). This tick then takes one instance away per quiet minute, and the idle sweep takes the last one after 15 minutes.', code: 'BE/src/metrics/scaling.ts decideReplicas() · metrics.service.ts scaleForBurst()',
+        msg: { kind: 'ipc', title: 'decideReplicas(…) returns null: keep the current count', body: { desiredInstances: 1, peakConcurrency: 1, minInstances: 0, maxInstances: 3 } } },
       { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/invocations', title: 'The dashboard reads the history', text: 'Newest first. The dashboard asks for the latest 20; without a limit the API returns 10.', code: 'functions.controller.ts getInvocations() · FE/src/services/api.ts',
         msg: { kind: 'http', first: 'GET /functions/' + FN + '/invocations?limit=20 HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT … ORDER BY created_at DESC', title: 'One page of invocations', text: 'With the total count, for paging.', code: 'functions.service.ts getInvocations()',
@@ -998,7 +998,7 @@ const SCENARIOS = [
       { from: 'user', to: 'api', kind: 'req', label: 'GET /metrics/:id?start&end', title: 'The dashboard reads the metrics', text: 'For its charts, over a time range.', code: 'BE/src/metrics/metrics.controller.ts',
         msg: { kind: 'http', first: 'GET /metrics/' + FN + '?start=2026-10-16T13:00:00Z&end=2026-10-16T15:00:00Z HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · metrics rows', title: 'The metrics', text: 'One row per minute that had invocations, oldest first.', code: 'metrics.service.ts getMetrics()',
-        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: [{ functionId: FN, timestamp: '2026-10-16T14:03:00.004Z', requestCount: 3, errorCount: 0, responseTimeP50: 41, responseTimeP95: 55, responseTimeP99: 55, cpuUsage: 0, memoryUsage: 98, activeInstances: 1, '…': '…' }] } },
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: [{ functionId: FN, timestamp: '2026-10-16T14:03:00.004Z', requestCount: 3, errorCount: 0, responseTimeP50: 41, responseTimeP95: 55, responseTimeP99: 55, memoryUsage: 98, activeInstances: 1, maxConcurrency: 1, '…': '…' }] } },
     ],
   },
   {
@@ -1524,9 +1524,9 @@ function initSimulator() {
 /* ---------- data diagrams ---------- */
 function erDiagram() {
   const tables = [
-    { name: 'function_invocations', x: 16, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · TIMEOUT'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['cpu_used', 'float, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
-    { name: 'functions', x: 350, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['user_id', 'varchar · the tenant'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['cpu', 'int = 100'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 1'], ['target_concurrency', 'int = 100'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
-    { name: 'function_metrics', x: 684, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['request_count', 'int'], ['error_count', 'int'], ['response_time_p50', 'float, ms'], ['response_time_p95', 'float, ms'], ['response_time_p99', 'float, ms'], ['cpu_usage', 'float'], ['memory_usage', 'float, MB'], ['active_instances', 'int'], ['created_at', 'timestamptz']] },
+    { name: 'function_invocations', x: 16, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · TIMEOUT'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'functions', x: 350, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['user_id', 'varchar · the tenant'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'function_metrics', x: 684, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['request_count', 'int'], ['error_count', 'int'], ['response_time_p50', 'float, ms'], ['response_time_p95', 'float, ms'], ['response_time_p99', 'float, ms'], ['memory_usage', 'float, MB'], ['active_instances', 'int'], ['max_concurrency', 'int, calls at once'], ['created_at', 'timestamptz']] },
   ];
   const RH = 21, W = 300, TOP = 10, HEAD = 30;
   const tallest = Math.max.apply(null, tables.map((t) => t.cols.length));

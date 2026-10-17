@@ -139,6 +139,14 @@ if [ -n "${K8S_RUNTIME_CLASS:-}" ]; then
     "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.runtimeClassName}')"
 fi
 
+scaling="$(http PUT "/functions/$id/scaling-config" '{"maxInstances": 2}')"
+check "scaling limits can be changed" "200 0 2 true" \
+  "$(status) $(jq -r '"\(.minInstances) \(.maxInstances) \(.scaleToZero)"' <<<"$scaling")"
+http PUT "/functions/$id/scaling-config" '{"minInstances": 3}' >/dev/null
+check "minInstances above maxInstances is refused" 400 "$(status)"
+http PUT "/functions/$id/scaling-config" '{"maxInstances": 11}' >/dev/null
+check "maxInstances above the limit is refused" 400 "$(status)"
+
 invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"e2e"}}')"
 check "invoke returns 201" 201 "$(status)"
 check "invocation is COMPLETED" COMPLETED "$(jq -r .status <<<"$invoked")"

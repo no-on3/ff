@@ -8,7 +8,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
   - create, update, delete, and invoke functions;
   - see the invocation history with durations, and collect metrics.
 
-  Functions scale to zero when idle and start again on the next invocation.
+  Functions scale out when calls arrive together (one instance per call in flight, up to `maxInstances`), scale to zero when idle, and start again on the next invocation.
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
   - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy;
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;

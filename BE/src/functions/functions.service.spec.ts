@@ -27,7 +27,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   };
   const invocationsRepo = { create: jest.fn(), save: jest.fn() };
   const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
-  const metrics = { recordMetric: jest.fn() };
+  const metrics = { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() };
 
   const activeFunction = (): Function =>
     ({
@@ -37,10 +37,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       runtime: Runtime.NODEJS,
       code: 'export const handler = async () => 1;',
       memory: 128,
-      cpu: 100,
       timeout: 5,
       minInstances: 0,
-      maxInstances: 1,
+      maxInstances: 3,
+      scaleToZero: true,
       status: FunctionStatus.ACTIVE,
     }) as Function;
 
@@ -63,6 +63,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       invoke: jest.fn(),
       scale: jest.fn(),
       readyInstances: jest.fn(),
+      desiredInstances: jest.fn(),
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -290,7 +291,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     it('stores output, runtime-reported duration and memory on a COMPLETED invocation', async () => {
       const fn = activeFunction();
       functionsRepo.findOne.mockResolvedValue(fn);
-      orchestrator.invoke.mockResolvedValue({ output: { hello: 'world' }, durationMs: 12.5, memoryUsedMb: 12, cpuUsed: 3 });
+      orchestrator.invoke.mockResolvedValue({ output: { hello: 'world' }, durationMs: 12.5, memoryUsedMb: 12 });
 
       const invocation = await service.invoke('fn-1', { a: 1 });
 
@@ -300,9 +301,31 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         output: { hello: 'world' },
         duration: 12.5,
         memoryUsed: 12,
-        cpuUsed: 3,
       });
-      expect(metrics.recordMetric).toHaveBeenCalledWith('fn-1', expect.any(Number), 3, 12, false);
+      expect(metrics.recordMetric).toHaveBeenCalledWith('fn-1', expect.any(Number), 12, false);
+    });
+
+    it('counts the call as in flight while the runtime runs it: the scaling signal', async () => {
+      const fn = activeFunction();
+      functionsRepo.findOne.mockResolvedValue(fn);
+      orchestrator.invoke.mockImplementation(async () => {
+        expect(metrics.invocationStarted).toHaveBeenCalledWith(fn);
+        expect(metrics.invocationFinished).not.toHaveBeenCalled();
+        return { output: 1 };
+      });
+
+      await service.invoke('fn-1', {});
+
+      expect(metrics.invocationFinished).toHaveBeenCalledWith(fn);
+    });
+
+    it('counts a failed call as finished too', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockRejectedValue(new Error('connection refused'));
+
+      await expect(service.invoke('fn-1', {})).rejects.toBeInstanceOf(BadRequestException);
+      expect(metrics.invocationStarted).toHaveBeenCalledTimes(1);
+      expect(metrics.invocationFinished).toHaveBeenCalledTimes(1);
     });
 
     it('falls back to the measured end-to-end duration when the runtime reports none', async () => {
@@ -323,7 +346,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(invocationsRepo.save).toHaveBeenLastCalledWith(
         expect.objectContaining({ status: InvocationStatus.TIMEOUT, duration: expect.any(Number) }),
       );
-      expect(metrics.recordMetric).toHaveBeenCalledWith('fn-1', expect.any(Number), 0, 0, true);
+      expect(metrics.recordMetric).toHaveBeenCalledWith('fn-1', expect.any(Number), 0, true);
     });
 
     it('records the runtime error type for function errors', async () => {
@@ -351,6 +374,71 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await expect(service.invoke('fn-1', {})).rejects.toBeInstanceOf(BadRequestException);
       expect(orchestrator.invoke).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('scaling configuration', () => {
+    it('reports the limits, and that a function scales to zero exactly when minInstances is 0', () => {
+      expect(service.scalingConfig(activeFunction())).toEqual({ minInstances: 0, maxInstances: 3, scaleToZero: true });
+      expect(service.scalingConfig({ ...activeFunction(), minInstances: 1 } as Function).scaleToZero).toBe(false);
+    });
+
+    it('saves new limits and brings the running instances within them at once', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.desiredInstances.mockResolvedValue(4);
+
+      const config = await service.updateScalingConfig('fn-1', { maxInstances: 2 });
+
+      expect(config).toEqual({ minInstances: 0, maxInstances: 2, scaleToZero: true });
+      expect(functionsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ maxInstances: 2 }));
+      expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 2);
+    });
+
+    it('starts the instances a higher minInstances asks for, without a rollout', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.desiredInstances.mockResolvedValue(0);
+
+      const config = await service.updateScalingConfig('fn-1', { minInstances: 2 });
+
+      expect(config).toEqual({ minInstances: 2, maxInstances: 3, scaleToZero: false });
+      expect(orchestrator.scale).toHaveBeenCalledWith(expect.anything(), 2);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it('leaves the instances alone when they are within the new limits', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.desiredInstances.mockResolvedValue(1);
+
+      await service.updateScalingConfig('fn-1', { maxInstances: 5 });
+
+      expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    it('refuses a minInstances above maxInstances, counting the stored values', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction()); // maxInstances 3
+
+      await expect(service.updateScalingConfig('fn-1', { minInstances: 4 })).rejects.toThrow(
+        "minInstances (4) can't be more than maxInstances (3)",
+      );
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('only saves the limits of a function that is not ACTIVE: its next rollout applies them', async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR });
+
+      await service.updateScalingConfig('fn-1', { minInstances: 1 });
+
+      expect(functionsRepo.save).toHaveBeenCalled();
+      expect(orchestrator.desiredInstances).not.toHaveBeenCalled();
+      expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    it('keeps the saved limits when the cluster cannot be reached', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.desiredInstances.mockRejectedValue(new Error('api down'));
+
+      await expect(service.updateScalingConfig('fn-1', { maxInstances: 2 })).resolves.toMatchObject({ maxInstances: 2 });
+      expect(functionsRepo.save).toHaveBeenCalled();
     });
   });
 });

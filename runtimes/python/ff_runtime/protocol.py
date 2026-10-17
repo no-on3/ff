@@ -30,6 +30,10 @@ TIMEOUT_MS = env_int("FUNCTION_TIMEOUT", 30_000)
 MEMORY_MB = env_int("FUNCTION_MEMORY_LIMIT", 128)
 INIT_TIMEOUT_MS = env_int("FF_INIT_TIMEOUT_MS", max(10_000, TIMEOUT_MS))
 MAX_QUEUE = env_int("FF_MAX_QUEUE", 32)
+# How long a call may wait for the worker to be free. Then it gets 429, as on Lambda when no
+# environment is free. The backend waits this long plus the timeout, so it never gives up on a
+# call that is only queued (client-readiness plan, P-06).
+MAX_QUEUE_WAIT_MS = env_int("FF_MAX_QUEUE_WAIT_MS", TIMEOUT_MS)
 TASK_ROOT = os.environ.get("LAMBDA_TASK_ROOT", "/var/task")
 # "<module>.<function>", e.g. "function.handler" or "src/app.handler".
 HANDLER = os.environ.get("FF_HANDLER", "function.handler")

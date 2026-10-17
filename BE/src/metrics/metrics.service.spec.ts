@@ -27,16 +27,22 @@ describe('MetricsService', () => {
   let functionRepository: { findOne: jest.Mock; find: jest.Mock };
   let metricsRepository: { save: jest.Mock; find: jest.Mock };
   let service: MetricsService;
+  /** The Deployment's replicas, as the fake orchestrator keeps them. */
+  let replicas: number;
 
   const create = (idleSeconds = 900) => {
+    replicas = 1;
     orchestrator = {
       deploy: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),
       waitUntilReady: jest.fn(),
       invoke: jest.fn(),
-      scale: jest.fn(),
-      readyInstances: jest.fn().mockResolvedValue(1),
+      scale: jest.fn(async (_fn, count: number) => {
+        replicas = count;
+      }),
+      readyInstances: jest.fn(async () => replicas),
+      desiredInstances: jest.fn(async () => replicas),
     } as any;
     functionRepository = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
     metricsRepository = { save: jest.fn(), find: jest.fn() };
@@ -45,26 +51,134 @@ describe('MetricsService', () => {
     } as unknown as ConfigService;
     service = new MetricsService(metricsRepository as any, functionRepository as any, orchestrator, config);
   };
+  /** Lets the scale-up that invocationStarted launches in the background finish. */
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
 
   beforeEach(() => create());
 
-  describe('aggregate', () => {
-    it('persists window metrics and scales overloaded functions within maxInstances', async () => {
-      functionRepository.findOne.mockResolvedValue(fn({ maxInstances: 2 }));
-      orchestrator.readyInstances.mockResolvedValue(1);
-      for (let i = 0; i < 10; i++) await service.recordMetric('fn-1', 100, 0, 30, i === 0);
+  describe('a burst of calls', () => {
+    it('scales up at once when a call finds every instance busy: one instance per call in flight', async () => {
+      const f = fn({ maxInstances: 5 });
+
+      service.invocationStarted(f);
+      await settle();
+      expect(orchestrator.scale).not.toHaveBeenCalled(); // one call, one instance
+
+      service.invocationStarted(f);
+      await settle();
+      service.invocationStarted(f);
+      await settle();
+
+      expect(orchestrator.scale.mock.calls.map(([, count]) => count)).toEqual([2, 3]);
+      expect(service.inFlight('fn-1')).toBe(3);
+    });
+
+    it('never asks for more than maxInstances', async () => {
+      const f = fn({ maxInstances: 2 });
+      for (let i = 0; i < 6; i++) service.invocationStarted(f);
+      await settle();
+
+      expect(orchestrator.scale.mock.calls.map(([, count]) => count)).toEqual([2]);
+    });
+
+    it('reads the Deployment once per new high, not once per call', async () => {
+      const f = fn({ maxInstances: 2 });
+      for (let i = 0; i < 6; i++) service.invocationStarted(f);
+      await settle();
+
+      expect(orchestrator.desiredInstances).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a function alone that already has instances enough', async () => {
+      replicas = 3;
+      const f = fn({ maxInstances: 5 });
+      service.invocationStarted(f);
+      service.invocationStarted(f);
+      await settle();
+
+      expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    it('tries again with the next call when a scale-up fails', async () => {
+      const f = fn({ maxInstances: 5 });
+      orchestrator.scale.mockRejectedValueOnce(new Error('api down'));
+      service.invocationStarted(f);
+      service.invocationStarted(f);
+      await settle();
+      service.invocationFinished(f);
+      service.invocationStarted(f);
+      await settle();
+
+      expect(orchestrator.scale.mock.calls.map(([, count]) => count)).toEqual([2, 2]);
+      expect(replicas).toBe(2);
+    });
+
+    it('counts a call as finished whatever its outcome', () => {
+      const f = fn();
+      service.invocationStarted(f);
+      service.invocationStarted(f);
+      service.invocationFinished(f);
+
+      expect(service.inFlight('fn-1')).toBe(1);
+    });
+  });
+
+  describe('aggregate (each minute)', () => {
+    it('persists the window metrics, with the most calls in flight at once', async () => {
+      functionRepository.findOne.mockResolvedValue(fn());
+      const f = fn();
+      service.invocationStarted(f);
+      service.invocationStarted(f);
+      await settle();
+      service.invocationFinished(f);
+      service.invocationFinished(f);
+      for (let i = 0; i < 4; i++) await service.recordMetric('fn-1', 100, 30, i === 0);
 
       await service.aggregate();
 
       expect(metricsRepository.save).toHaveBeenCalledWith(
-        expect.objectContaining({ functionId: 'fn-1', requestCount: 10, errorCount: 1, activeInstances: 1 }),
+        expect.objectContaining({ functionId: 'fn-1', requestCount: 4, errorCount: 1, maxConcurrency: 2, activeInstances: 2 }),
       );
-      expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 2);
+    });
+
+    it('steps a scaled-up function down by one instance per minute once its calls are over', async () => {
+      functionRepository.findOne.mockResolvedValue(fn({ maxInstances: 5 }));
+      const f = fn({ maxInstances: 5 });
+      for (let i = 0; i < 3; i++) service.invocationStarted(f);
+      await settle();
+      for (let i = 0; i < 3; i++) service.invocationFinished(f);
+      expect(replicas).toBe(3);
+
+      await service.aggregate(); // the peak of that minute was 3: no change
+      await service.aggregate(); // a quiet minute
+      await service.aggregate();
+      await service.aggregate(); // already at one: stays
+
+      expect(orchestrator.scale.mock.calls.map(([, count]) => count)).toEqual([2, 3, 2, 1]);
+      expect(replicas).toBe(1);
+    });
+
+    it('scales up again in a new burst after stepping down', async () => {
+      functionRepository.findOne.mockResolvedValue(fn({ maxInstances: 5 }));
+      const f = fn({ maxInstances: 5 });
+      service.invocationStarted(f);
+      service.invocationStarted(f);
+      await settle();
+      service.invocationFinished(f);
+      service.invocationFinished(f);
+      await service.aggregate();
+      await service.aggregate(); // back to one
+
+      service.invocationStarted(f);
+      service.invocationStarted(f);
+      await settle();
+
+      expect(replicas).toBe(2);
     });
 
     it('skips functions deleted since the window opened', async () => {
       functionRepository.findOne.mockResolvedValue(null);
-      await service.recordMetric('gone', 100, 0, 30, false);
+      await service.recordMetric('gone', 100, 30, false);
 
       await service.aggregate();
 
@@ -74,7 +188,7 @@ describe('MetricsService', () => {
 
     it('starts a fresh window, so a second aggregate has nothing to report', async () => {
       functionRepository.findOne.mockResolvedValue(fn());
-      await service.recordMetric('fn-1', 100, 0, 30, false);
+      await service.recordMetric('fn-1', 100, 30, false);
 
       await service.aggregate();
       await service.aggregate();
@@ -102,11 +216,20 @@ describe('MetricsService', () => {
 
     it('leaves recently invoked functions alone, without calling the scheduler', async () => {
       functionRepository.find.mockResolvedValue([fn()]);
-      await service.recordMetric('fn-1', 100, 0, 30, false);
+      await service.recordMetric('fn-1', 100, 30, false);
 
       await service.sweepIdleFunctions(Date.now() + 60_000);
 
       expect(orchestrator.readyInstances).not.toHaveBeenCalled();
+      expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    it('never scales a function to zero while one of its calls runs', async () => {
+      functionRepository.find.mockResolvedValue([fn()]);
+      service.invocationStarted(fn());
+
+      await service.sweepIdleFunctions(Date.now() + 3_600_000);
+
       expect(orchestrator.scale).not.toHaveBeenCalled();
     });
 

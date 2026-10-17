@@ -444,6 +444,31 @@ describe('request validation and limits', () => {
     await rt.stop();
   });
 
+  it('answers 429 to a call that waited longer than FF_MAX_QUEUE_WAIT_MS for the instance', async () => {
+    const rt = await startRuntime('slow-echo', { FF_MAX_QUEUE_WAIT_MS: '100' }); // each call takes 200 ms
+    await readyz(rt, 200);
+
+    const results = await Promise.all([invoke(rt, { n: 1 }), invoke(rt, { n: 2 })]);
+
+    assert.deepEqual(results.map((r) => r.status).sort(), [200, 429]);
+    assert.deepEqual(results.find((r) => r.status === 429).json, {
+      errorType: 'TooManyRequestsException',
+      errorMessage: 'Rate exceeded: no instance was free within 0.10 seconds',
+    });
+    await rt.stop();
+  });
+
+  it('lets a call wait at most one function timeout by default', async () => {
+    const rt = await startRuntime('slow-echo', { FUNCTION_TIMEOUT: '300' }); // each call takes 200 ms
+    await readyz(rt, 200);
+
+    // The second call waits about 200 ms, the third about 400 ms: more than the 300 ms timeout.
+    const results = await Promise.all([invoke(rt, { n: 1 }), invoke(rt, { n: 2 }), invoke(rt, { n: 3 })]);
+
+    assert.deepEqual(results.map((r) => r.status).sort(), [200, 200, 429]);
+    await rt.stop();
+  });
+
   it('answers unknown routes with 404', async () => {
     const rt = await startRuntime('js-function');
 

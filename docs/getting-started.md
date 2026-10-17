@@ -180,6 +180,13 @@ curl -s "$FF/functions/$ID/invocations?limit=5" | jq '{total, invocations: [.inv
 curl -s "$FF/functions/$ID/scaling-config" | jq -c .
 ```
 
+**Scaling.** Each instance serves one call at a time, as on Lambda. Calls that arrive together get more instances at once, one per call in flight, up to `maxInstances`. Each quiet minute takes one instance away, and 15 idle minutes take the function to zero, unless `minInstances` is above 0. A call waits at most one timeout for a free instance. Change the limits like this:
+
+```bash
+curl -s -X PUT "$FF/functions/$ID/scaling-config" -H 'content-type: application/json' -d '{"maxInstances": 5}' | jq -c .
+# {"minInstances":0,"maxInstances":5,"scaleToZero":true}
+```
+
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
 ```bash
@@ -198,7 +205,8 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 - one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
 - up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
 - 128–1024 MB of memory;
-- a timeout of 1–300 s.
+- a timeout of 1–300 s;
+- up to 3 instances by default, and 10 at most (`maxInstances`); `minInstances` from 0 to 10 keeps instances running when idle.
 
 The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runtimes/nodejs/README.md) and [Python](../runtimes/python/README.md) runtime READMEs describe `event`, `context`, and the error names.
 
@@ -316,6 +324,7 @@ docker compose down -v
 | Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. |
 | `create` takes 90 s, then fails | The function cannot load. The error message contains the runtime's reason. Fix the code and send it with `PUT /functions/<id>`: see "If a function cannot load" in section 3. |
 | An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first. The previous version still serves, and the record is unchanged. |
+| An invoke answers 400 with `Invocation failed with HTTP 429: … Rate exceeded: no instance was free within …` | More calls arrived together than the function's instances could take within one timeout. Raise `maxInstances` (`PUT /functions/<id>/scaling-config`), or make the calls shorter. The client-readiness plan's P-15 turns this answer into a 429. |
 | `jq: parse error` after `echo "$response" \| jq` in zsh | zsh's `echo` expands `\n` inside JSON strings. Pipe `curl` straight into `jq`, or use `printf '%s' "$response"`. |
 
 More symptoms and fixes are in the dev guide's [troubleshooting table](kubernetes-dev-guide.md#troubleshooting).

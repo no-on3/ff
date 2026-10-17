@@ -25,6 +25,12 @@ const timeoutMs = Number(env.FUNCTION_TIMEOUT ?? 30_000);
 const memoryLimitMb = Number(env.FUNCTION_MEMORY_LIMIT ?? 128);
 const initTimeoutMs = Number(env.FF_INIT_TIMEOUT_MS ?? Math.max(10_000, timeoutMs));
 const maxQueue = Number(env.FF_MAX_QUEUE ?? 32);
+/**
+ * How long a call may wait for the instance to be free. Then it gets 429, as on Lambda when no
+ * environment is free. The backend waits this long plus the timeout, so it never gives up on
+ * a call that is only queued (client-readiness plan, P-06).
+ */
+const maxQueueWaitMs = Number(env.FF_MAX_QUEUE_WAIT_MS ?? timeoutMs);
 /** AWS Lambda's synchronous request and response limit. */
 const MAX_PAYLOAD_BYTES = 6 * 1024 * 1024;
 const MB = 1024 * 1024;
@@ -88,6 +94,8 @@ interface Invocation {
   startedAt?: number;
   durationMs?: number;
   timer?: NodeJS.Timeout;
+  /** Answers 429 if the call is still queued after maxQueueWaitMs. */
+  queueTimer?: NodeJS.Timeout;
 }
 
 let worker: Worker | undefined;
@@ -181,6 +189,7 @@ function fail(error: FunctionError): void {
   current = undefined;
   for (const inv of pending) {
     if (inv.timer) clearTimeout(inv.timer);
+    if (inv.queueTimer) clearTimeout(inv.queueTimer);
     respondError(inv, 500, error);
   }
   if (everReady) {
@@ -271,11 +280,15 @@ function onTimeout(inv: Invocation): void {
 function dispatch(): void {
   if (current || state !== 'ready' || !worker) return;
   let inv = queue.shift();
-  while (inv && inv.res.destroyed) inv = queue.shift(); // callers that gave up while queued
+  while (inv && inv.res.destroyed) {
+    clearTimeout(inv.queueTimer);
+    inv = queue.shift(); // callers that gave up while queued
+  }
   if (!inv) {
     if (shuttingDown) process.exit(0);
     return;
   }
+  clearTimeout(inv.queueTimer);
   current = inv;
   inv.startedAt = performance.now();
   console.log(`START RequestId: ${inv.requestId} Version: ${workerConfig.functionVersion}`);
@@ -337,7 +350,7 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
     return;
   }
   const header = req.headers['x-ff-request-id'];
-  queue.push({
+  const inv: Invocation = {
     id: nextId++,
     requestId: (Array.isArray(header) ? header[0] : header) || randomUUID(),
     res,
@@ -348,8 +361,21 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
       query: Object.fromEntries(url.searchParams),
       path: url.pathname,
     },
-  });
+  };
+  inv.queueTimer = setTimeout(() => expireQueued(inv), maxQueueWaitMs);
+  queue.push(inv);
   dispatch();
+}
+
+/** A call that waited maxQueueWaitMs without the instance becoming free: 429, as on Lambda. */
+function expireQueued(inv: Invocation): void {
+  const index = queue.indexOf(inv);
+  if (index === -1) return; // it started, or was answered
+  queue.splice(index, 1);
+  sendJson(inv.res, 429, {
+    errorType: 'TooManyRequestsException',
+    errorMessage: `Rate exceeded: no instance was free within ${(maxQueueWaitMs / 1000).toFixed(2)} seconds`,
+  });
 }
 
 const server = http.createServer((req, res) => {
@@ -387,6 +413,7 @@ server.listen(port, () => {
     msg: 'runtime listening',
     port,
     timeoutMs,
+    maxQueueWaitMs,
     memoryLimitMb,
     heapLimitMb: heapLimits.maxOldGenerationSizeMb + heapLimits.maxYoungGenerationSizeMb,
     handler: workerConfig.handler,

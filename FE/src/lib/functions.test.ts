@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Function } from '../services/api';
-import { apiErrorMessage, changedFields, formatDuration, formatMemory, parseInvokeInput } from './functions';
+import { apiErrorMessage, changedFields, formatDuration, formatMemory, parseInvokeInput, scalingLimitsError } from './functions';
 
 const stored: Function = {
   id: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
@@ -93,5 +93,22 @@ describe('formatting', () => {
   it('shows durations in milliseconds', () => {
     expect(formatDuration(1.087)).toBe('1.09 ms');
     expect(formatDuration(0)).toBe('N/A');
+  });
+});
+
+describe('scalingLimitsError', () => {
+  it('accepts limits the API accepts', () => {
+    expect(scalingLimitsError({ minInstances: 0, maxInstances: 3 })).toBeNull();
+    expect(scalingLimitsError({ minInstances: 10, maxInstances: 10 })).toBeNull();
+  });
+
+  it.each([
+    [{ minInstances: -1, maxInstances: 3 }, 'Minimum instances must be a whole number from 0 to 10'],
+    [{ minInstances: 1.5, maxInstances: 3 }, 'Minimum instances must be a whole number from 0 to 10'],
+    [{ minInstances: 0, maxInstances: 0 }, 'Maximum instances must be a whole number from 1 to 10'],
+    [{ minInstances: 0, maxInstances: 11 }, 'Maximum instances must be a whole number from 1 to 10'],
+    [{ minInstances: 4, maxInstances: 3 }, "Minimum instances can't be more than maximum instances"],
+  ])('refuses %o', (limits, message) => {
+    expect(scalingLimitsError(limits)).toBe(message);
   });
 });

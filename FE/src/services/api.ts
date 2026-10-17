@@ -73,13 +73,17 @@ export interface InvocationPage {
   total: number;
 }
 
-/** GET /functions/:id/scaling-config. There is no route to change it yet. */
+/** GET and PUT /functions/:id/scaling-config. Each instance serves one call at a time. */
 export interface ScalingConfig {
+  /** Instances kept running even when idle. */
   minInstances: number;
+  /** The most instances autoscaling may run. */
   maxInstances: number;
-  targetConcurrency: number;
+  /** Whether the function scales to zero when idle: exactly when minInstances is 0. */
   scaleToZero: boolean;
 }
+
+export type ScalingLimits = Pick<ScalingConfig, 'minInstances' | 'maxInstances'>;
 
 export const functionsApi = {
   getAllFunctions: () => api.get<Function[]>('/functions'),
@@ -113,6 +117,11 @@ export const getMetrics = async (functionId: string, start: Date, end: Date) => 
 
 export const getScalingConfig = async (functionId: string): Promise<ScalingConfig> => {
   const response = await api.get<ScalingConfig>(`/functions/${functionId}/scaling-config`);
+  return response.data;
+};
+
+export const updateScalingConfig = async (functionId: string, limits: Partial<ScalingLimits>): Promise<ScalingConfig> => {
+  const response = await api.put<ScalingConfig>(`/functions/${functionId}/scaling-config`, limits);
   return response.data;
 };
 

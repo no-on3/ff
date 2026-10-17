@@ -205,7 +205,8 @@ describe('KubernetesOrchestrator', () => {
       expect(api.requests[0]).toMatchObject({
         method: 'POST',
         path: `/api/v1/namespaces/${ns}/services/${name}:http/proxy/invoke`,
-        options: { body: '{"a":1}', timeoutMs: 12_000 },
+        // One timeout of waiting for a free instance, then the run, plus a margin.
+        options: { body: '{"a":1}', timeoutMs: 22_000 },
       });
       expect(api.scaled).toEqual([]);
     });
@@ -219,10 +220,37 @@ describe('KubernetesOrchestrator', () => {
       expect(api.requests).toHaveLength(1);
     });
 
+    it('waits for instances already starting, without scaling them back to one', async () => {
+      // A burst asked for two instances; neither is ready yet.
+      api.objects.set(deploymentPath, { ...rolledOut(2), status: { readyReplicas: 0 } });
+      setTimeout(() => api.objects.set(deploymentPath, rolledOut(2)), 20);
+
+      await orchestrator.invoke(fn, {});
+
+      expect(api.scaled).toEqual([]);
+      expect(api.requests).toHaveLength(1);
+    });
+
+    it('serves a cold start as soon as one instance is ready, not when all of them are', async () => {
+      const starting = (ready: number) => ({
+        metadata: { name: 'd', generation: 1 },
+        spec: { replicas: 3 },
+        status: { observedGeneration: 1, replicas: 3, updatedReplicas: 3, readyReplicas: ready, availableReplicas: ready },
+      });
+      api.objects.set(deploymentPath, starting(0));
+      setTimeout(() => api.objects.set(deploymentPath, starting(1)), 20); // two of three still starting
+
+      await orchestrator.invoke(fn, {});
+
+      expect(api.requests).toHaveLength(1);
+    });
+
     it.each([
       [504, { errorType: 'Sandbox.Timedout', errorMessage: 'Task timed out after 10.00 seconds' }, { 'x-ff-function-error': 'Unhandled' }, FunctionTimeoutError],
       [500, { errorType: 'TypeError', errorMessage: 'bad input' }, { 'x-ff-function-error': 'Unhandled' }, FunctionRuntimeError],
       [503, { kind: 'Status', message: 'no endpoints available for service' }, {}, OrchestratorError],
+      // The runtime's 429 (queue full, or no free instance within one timeout) until P-15 maps it.
+      [429, { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded: no instance was free within 10.00 seconds' }, {}, OrchestratorError],
     ])('maps HTTP %i to the right error type', async (status, body, headers, errorClass) => {
       api.objects.set(deploymentPath, rolledOut(1));
       api.responses.push({ status, headers, body: JSON.stringify(body) });
@@ -244,6 +272,23 @@ describe('KubernetesOrchestrator', () => {
 
     expect(api.scaled).toEqual([3]);
     await expect(orchestrator.readyInstances(fn)).resolves.toBe(2);
+  });
+
+  it('refuses a replica count that is not a number, rather than sending null (which means zero)', async () => {
+    await expect(orchestrator.scale(fn, Number.NaN)).rejects.toThrow('Invalid replica count NaN');
+    await expect(orchestrator.update(workload({ minInstances: undefined as unknown as number }))).rejects.toThrow(
+      'Invalid minInstances undefined',
+    );
+    expect(api.scaled).toEqual([]);
+    expect(api.applied.filter((a) => a.manifest.kind === 'Deployment')).toEqual([]);
+  });
+
+  it('reports the desired replicas, ready or starting, and 0 without a Deployment', async () => {
+    await expect(orchestrator.desiredInstances(fn)).resolves.toBe(0);
+    api.objects.set(deploymentPath, { ...rolledOut(3), status: { readyReplicas: 1 } });
+
+    await expect(orchestrator.desiredInstances(fn)).resolves.toBe(3);
+    await expect(orchestrator.readyInstances(fn)).resolves.toBe(1);
   });
 
   describe('isRolledOut', () => {

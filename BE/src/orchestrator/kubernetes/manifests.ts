@@ -38,6 +38,14 @@ export const BLOCKED_EGRESS_CIDRS = [
 ];
 const RUNTIME_UID = 10001;
 
+/**
+ * How long a call may wait for a free instance before the runtime answers 429:
+ * one function timeout. The backend waits this long plus the timeout (P-06, D14).
+ */
+export function maxQueueWaitMs(fn: Pick<FunctionWorkload, 'timeout'>): number {
+  return fn.timeout * 1000;
+}
+
 /** Lambda-like proportional CPU: 1,769 MB ≈ 1 vCPU, never below 100m. */
 export function cpuMillicores(memoryMb: number): number {
   return Math.max(100, Math.round((memoryMb / 1769) * 1000));
@@ -228,6 +236,7 @@ export function deploymentManifest(
                 { name: 'FUNCTION_VERSION', value: '$LATEST' },
                 { name: 'FUNCTION_MEMORY_LIMIT', value: String(fn.memory) },
                 { name: 'FUNCTION_TIMEOUT', value: String(fn.timeout * 1000) },
+                { name: 'FF_MAX_QUEUE_WAIT_MS', value: String(maxQueueWaitMs(fn)) },
                 { name: 'LAMBDA_TASK_ROOT', value: '/var/task' },
                 { name: 'FF_HANDLER', value: 'function.handler' },
                 { name: 'PORT', value: String(RUNTIME_PORT) },

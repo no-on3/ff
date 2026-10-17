@@ -39,6 +39,47 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it('the scaling-model migration keeps existing rows, and reverts with rows present (P-06)', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.undoLastMigration({ transaction: 'each' }); // back to the baseline
+      const [{ id }] = await dataSource.query(
+        `INSERT INTO functions (name, user_id, runtime, code, memory, timeout, status)
+         VALUES ('before', 't', 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+      );
+      await dataSource.query(
+        `INSERT INTO function_metrics (function_id, "timestamp", cpu_usage, memory_usage, request_count,
+           response_time_p50, response_time_p95, response_time_p99, error_count, active_instances)
+         VALUES ($1, now(), 0, 30, 3, 1, 2, 2, 0, 1)`,
+        [id],
+      );
+      await dataSource.query(`INSERT INTO function_invocations (function_id, status, cpu_used) VALUES ($1, 'COMPLETED', 0.5)`, [id]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const [before] = await dataSource.query('SELECT max_instances FROM functions WHERE id = $1', [id]);
+      const [metrics] = await dataSource.query('SELECT max_concurrency, request_count FROM function_metrics');
+      const [{ id: after }] = await dataSource.query(
+        `INSERT INTO functions (name, user_id, runtime, code, memory, timeout) VALUES ('after', 't', 'nodejs', 'x', 128, 5) RETURNING id`,
+      );
+      const [created] = await dataSource.query('SELECT max_instances FROM functions WHERE id = $1', [after]);
+      expect({ before, metrics, created }).toEqual({
+        before: { max_instances: 1 }, // existing functions keep their limit
+        metrics: { max_concurrency: 0, request_count: 3 },
+        created: { max_instances: 3 }, // new ones may scale to 3
+      });
+      expect(await dataSource.query('SELECT count(*)::int AS n FROM function_invocations')).toEqual([{ n: 1 }]);
+
+      // The way back works with rows in every table, and so does the way forward again.
+      await dataSource.undoLastMigration({ transaction: 'each' });
+      expect(await dataSource.query('SELECT cpu, target_concurrency FROM functions WHERE id = $1', [id])).toEqual([
+        { cpu: 100, target_concurrency: 100 },
+      ]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   describe('after the migrations', () => {
     let db: ScratchDatabase;
 
@@ -107,7 +148,7 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(await functions.findOneBy({ id: fn.id })).toMatchObject({
         userId: 'tenant-1',
         minInstances: 0,
-        maxInstances: 1,
+        maxInstances: 3,
         scaleToZero: true,
       });
       const [raw] = await db.dataSource.query(
@@ -128,7 +169,6 @@ run('database schema (L2, real PostgreSQL)', () => {
       await db.dataSource.getRepository(FunctionMetrics).save({
         functionId: fn.id,
         timestamp: new Date(),
-        cpuUsage: 0,
         memoryUsage: 0,
         requestCount: 1,
         responseTimeP50: 2,
@@ -136,6 +176,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         responseTimeP99: 2,
         errorCount: 1,
         activeInstances: 1,
+        maxConcurrency: 1,
       });
 
       await functions.delete(fn.id);
@@ -152,8 +193,8 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(await db.dataSource.runMigrations({ transaction: 'each' })).toEqual([]);
     });
 
-    it('the baseline reverts completely, and applies again', async () => {
-      await db.dataSource.undoLastMigration({ transaction: 'each' });
+    it('every migration reverts, newest first, and applies again', async () => {
+      for (let i = 0; i < MIGRATIONS.length; i++) await db.dataSource.undoLastMigration({ transaction: 'each' });
 
       expect([...new Set((await columns()).map((row) => row.table_name))]).toEqual(['migrations']);
       const enums = await db.dataSource.query(

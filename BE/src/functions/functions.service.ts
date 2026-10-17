@@ -8,6 +8,7 @@ import { CodeTooLargeError, FunctionRuntimeError, FunctionTimeoutError } from '.
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
+import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
 
@@ -216,39 +217,74 @@ export class FunctionsService {
 
     await this.invocationsRepository.save(invocation);
 
+    // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once (D14).
+    this.metricsService.invocationStarted(function_);
     const startTime = Date.now();
     try {
       const result = await this.orchestrator.invoke(function_, input || {});
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
-      await this.metricsService.recordMetric(
-        id,
-        duration,
-        result.cpuUsed || 0,
-        result.memoryUsedMb || 0,
-        false
-      );
+      await this.metricsService.recordMetric(id, duration, result.memoryUsedMb || 0, false);
 
       // Update invocation with results and metrics. Duration is the execution
       // time reported by the runtime (the basis for metering), else end-to-end.
       invocation.output = result.output as Record<string, any>;
       invocation.duration = result.durationMs ?? duration;
       invocation.memoryUsed = result.memoryUsedMb;
-      invocation.cpuUsed = result.cpuUsed;
       invocation.status = InvocationStatus.COMPLETED;
       await this.invocationsRepository.save(invocation);
 
       return invocation;
     } catch (error) {
       const duration = Date.now() - startTime;
-      await this.metricsService.recordMetric(id, duration, 0, 0, true);
+      await this.metricsService.recordMetric(id, duration, 0, true);
 
       invocation.duration = duration;
       invocation.status = error instanceof FunctionTimeoutError ? InvocationStatus.TIMEOUT : InvocationStatus.ERROR;
       invocation.error = error instanceof FunctionRuntimeError ? `${error.errorType}: ${error.message}` : error.message;
       await this.invocationsRepository.save(invocation);
       throw new BadRequestException(invocation.error);
+    } finally {
+      this.metricsService.invocationFinished(function_);
+    }
+  }
+
+  /** What GET /functions/:id/scaling-config answers. */
+  scalingConfig(function_: Function): ScalingConfig {
+    return {
+      minInstances: function_.minInstances,
+      maxInstances: function_.maxInstances,
+      scaleToZero: function_.scaleToZero !== false && function_.minInstances === 0,
+    };
+  }
+
+  /**
+   * Changes a function's instance limits (D14), and brings its running instances
+   * within them at once: more for a higher minInstances, fewer for a lower
+   * maxInstances. Nothing is rolled out: the code doesn't change.
+   */
+  async updateScalingConfig(id: string, changes: UpdateScalingConfigDto): Promise<ScalingConfig> {
+    const function_ = await this.findOne(id);
+    const minInstances = changes.minInstances ?? function_.minInstances;
+    const maxInstances = changes.maxInstances ?? function_.maxInstances;
+    if (minInstances > maxInstances) {
+      throw new BadRequestException(`minInstances (${minInstances}) can't be more than maxInstances (${maxInstances})`);
+    }
+    Object.assign(function_, { minInstances, maxInstances });
+    const saved = await this.functionsRepository.save(function_);
+    if (saved.status === FunctionStatus.ACTIVE) await this.applyInstanceLimits(saved);
+    return this.scalingConfig(saved);
+  }
+
+  private async applyInstanceLimits(function_: Function): Promise<void> {
+    try {
+      const desired = await this.orchestrator.desiredInstances(function_);
+      const target = Math.min(function_.maxInstances, Math.max(function_.minInstances, desired));
+      if (target !== desired) await this.orchestrator.scale(function_, target);
+    } catch (error) {
+      // The limits are saved: the next rollout applies them, and so does the scaler's next tick with traffic.
+      this.logger.warn(`Could not apply the instance limits of function ${function_.id}: ${(error as Error).message}`);
     }
   }
 

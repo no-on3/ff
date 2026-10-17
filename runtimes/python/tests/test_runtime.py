@@ -438,6 +438,30 @@ class RequestValidation(RuntimeTest):
 
         self.assertEqual(sorted(r.status for r in results), [200, 200, 429])
 
+    def test_answers_429_to_a_call_that_waited_longer_than_the_queue_wait_limit(self):
+        rt = self.start("slow-echo", FF_MAX_QUEUE_WAIT_MS="100")  # each call takes 200 ms
+        rt.ready()
+
+        with ThreadPoolExecutor(2) as pool:
+            results = list(pool.map(lambda n: rt.invoke({"n": n}), [1, 2]))
+
+        self.assertEqual(sorted(r.status for r in results), [200, 429])
+        throttled = next(r for r in results if r.status == 429)
+        self.assertEqual(
+            throttled.json,
+            {"errorType": "TooManyRequestsException", "errorMessage": "Rate exceeded: no instance was free within 0.10 seconds"},
+        )
+
+    def test_lets_a_call_wait_at_most_one_function_timeout_by_default(self):
+        rt = self.start("slow-echo", FUNCTION_TIMEOUT="300")  # each call takes 200 ms
+        rt.ready()
+
+        # The second call waits about 200 ms, the third about 400 ms: more than the 300 ms timeout.
+        with ThreadPoolExecutor(3) as pool:
+            results = list(pool.map(lambda n: rt.invoke({"n": n}), [1, 2, 3]))
+
+        self.assertEqual(sorted(r.status for r in results), [200, 200, 429])
+
     def test_answers_unknown_routes_with_404(self):
         rt = self.start("echo")
 

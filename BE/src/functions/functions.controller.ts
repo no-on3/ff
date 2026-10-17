@@ -15,6 +15,7 @@ import { User } from '../auth/decorators/user.decorator';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
+import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
@@ -102,17 +103,23 @@ export class FunctionsController {
 
   @Get(':id/scaling-config')
   @ApiOperation({ summary: 'Get function scaling configuration' })
-  @ApiResponse({ status: 200, description: 'Scaling configuration details' })
-  async getScalingConfig(
+  @ApiResponse({ status: 200, description: 'Scaling configuration details', type: ScalingConfig })
+  async getScalingConfig(@Param('id') id: string, @User() userId: string): Promise<ScalingConfig> {
+    return this.functionsService.scalingConfig(await this.functionsService.findOne(id));
+  }
+
+  @Put(':id/scaling-config')
+  @ApiOperation({ summary: 'Change how many instances a function may have' })
+  @ApiResponse({ status: 200, description: 'The new scaling configuration', type: ScalingConfig })
+  async updateScalingConfig(
     @Param('id') id: string,
+    @Body() updateScalingConfigDto: UpdateScalingConfigDto,
     @User() userId: string,
-  ) {
+  ): Promise<ScalingConfig> {
     const func = await this.functionsService.findOne(id);
-    return {
-      minInstances: func.minInstances || 0,
-      maxInstances: func.maxInstances || 1,
-      targetConcurrency: func.targetConcurrency || 100,
-      scaleToZero: func.scaleToZero !== false,
-    };
+    if (func.userId !== userId) {
+      throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
+    }
+    return this.functionsService.updateScalingConfig(id, updateScalingConfigDto);
   }
 }

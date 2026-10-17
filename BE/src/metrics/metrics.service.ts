@@ -4,23 +4,26 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Between, Repository } from 'typeorm';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { ConcurrencyTracker } from './concurrency';
 import { FunctionMetrics } from './entities/function-metrics.entity';
-import { decideReplicas, shouldScaleToZero } from './scaling';
+import { burstTarget, decideReplicas, shouldScaleToZero } from './scaling';
 
 interface MetricsWindow {
   requestCount: number;
   errorCount: number;
   responseTimes: number[];
-  cpuUsage: number[];
   memoryUsage: number[];
 }
 
 /**
- * Aggregates invocation metrics per one-minute window, adjusts replicas from
- * them (decideReplicas), and scales idle functions to zero; their next
- * invocation cold-starts them. Runs in the API process and assumes a single
- * backend replica; multi-replica deployments need leader election (parent
- * plan R-06).
+ * Scales functions on concurrency (client-readiness plan, D14) and keeps
+ * per-minute metrics for that. As soon as a call finds every instance busy,
+ * the function gets one instance per call in flight, up to maxInstances. Once
+ * a minute, functions with traffic, and those scaled up earlier, step back
+ * down by one instance. Idle functions are scaled to zero after the idle
+ * window; their next invocation cold-starts them. Runs in the API process and
+ * assumes a single backend replica; several replicas need leader election and
+ * a shared count of calls in flight (parent plan R-06).
  */
 @Injectable()
 export class MetricsService implements OnModuleInit, OnModuleDestroy {
@@ -31,6 +34,11 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
   /** Epoch ms of each function's last invocation seen by this process. */
   private readonly lastInvokedAt = new Map<string, number>();
   private readonly startedAt = Date.now();
+  private readonly concurrency = new ConcurrencyTracker();
+  /** The highest replica count a burst asked for, per function, since the last tick. */
+  private readonly burstTargets = new Map<string, number>();
+  /** Functions this process scaled above one instance (or minInstances): each tick may step them down. */
+  private readonly scaledUp = new Set<string>();
 
   constructor(
     @InjectRepository(FunctionMetrics)
@@ -49,29 +57,50 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     if (this.aggregationTimer) clearInterval(this.aggregationTimer);
   }
 
-  async recordMetric(
-    functionId: string,
-    responseTime: number,
-    cpuUsage: number,
-    memoryUsage: number,
-    isError: boolean,
-  ) {
+  /** A call is about to be sent to the function: counted, and the function scaled up at once if every instance is busy. */
+  invocationStarted(function_: Function): void {
+    const inFlight = this.concurrency.begin(function_.id);
+    this.lastInvokedAt.set(function_.id, Date.now());
+    if (inFlight > 1) void this.scaleForBurst(function_, inFlight);
+  }
+
+  /** The call ended, whatever the outcome. */
+  invocationFinished(function_: Function): void {
+    this.concurrency.end(function_.id);
+  }
+
+  /** How many calls the function has in flight now. */
+  inFlight(functionId: string): number {
+    return this.concurrency.current(functionId);
+  }
+
+  private async scaleForBurst(function_: Function, inFlight: number): Promise<void> {
+    const target = burstTarget(inFlight, function_.maxInstances);
+    // One check per new high: later calls of the same burst only scale up past it.
+    if (target <= (this.burstTargets.get(function_.id) ?? 1)) return;
+    this.burstTargets.set(function_.id, target);
+    try {
+      const desired = await this.orchestrator.desiredInstances(function_);
+      if (target <= desired) return;
+      await this.orchestrator.scale(function_, target);
+      this.scaledUp.add(function_.id);
+      this.logger.log(`Scaled function ${function_.id} from ${desired} to ${target} instances: ${inFlight} calls in flight`);
+    } catch (error) {
+      this.burstTargets.delete(function_.id); // the next call tries again
+      this.logger.error(`Error scaling function ${function_.id} for ${inFlight} calls in flight:`, error);
+    }
+  }
+
+  async recordMetric(functionId: string, responseTime: number, memoryUsage: number, isError: boolean) {
     let window = this.metricsWindows.get(functionId);
     if (!window) {
-      window = {
-        requestCount: 0,
-        errorCount: 0,
-        responseTimes: [],
-        cpuUsage: [],
-        memoryUsage: [],
-      };
+      window = { requestCount: 0, errorCount: 0, responseTimes: [], memoryUsage: [] };
       this.metricsWindows.set(functionId, window);
     }
 
     window.requestCount++;
     if (isError) window.errorCount++;
     window.responseTimes.push(responseTime);
-    window.cpuUsage.push(cpuUsage);
     window.memoryUsage.push(memoryUsage);
     this.lastInvokedAt.set(functionId, Date.now());
   }
@@ -96,45 +125,60 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     const windows = this.metricsWindows;
     this.metricsWindows = new Map();
 
-    for (const [functionId, window] of windows) {
-      if (window.requestCount === 0) continue;
+    // Functions with calls in the window, and functions scaled up earlier that may now step down.
+    for (const functionId of new Set([...windows.keys(), ...this.scaledUp])) {
+      const window = windows.get(functionId);
+      const peakConcurrency = this.concurrency.takePeak(functionId);
+      this.burstTargets.delete(functionId); // the next burst compares with the Deployment again
       try {
         const function_ = await this.functionRepository.findOne({ where: { id: functionId } });
-        if (!function_) continue; // deleted since the window opened
+        if (!function_) {
+          this.scaledUp.delete(functionId); // deleted since
+          continue;
+        }
 
-        window.responseTimes.sort((a, b) => a - b);
-        const metrics = new FunctionMetrics();
-        metrics.functionId = functionId;
-        metrics.timestamp = timestamp;
-        metrics.requestCount = window.requestCount;
-        metrics.errorCount = window.errorCount;
-        metrics.responseTimeP50 = this.getPercentile(window.responseTimes, 50);
-        metrics.responseTimeP95 = this.getPercentile(window.responseTimes, 95);
-        metrics.responseTimeP99 = this.getPercentile(window.responseTimes, 99);
-        metrics.cpuUsage = this.average(window.cpuUsage);
-        metrics.memoryUsage = this.average(window.memoryUsage);
-        metrics.activeInstances = await this.orchestrator.readyInstances(function_);
+        if (window && window.requestCount > 0) {
+          window.responseTimes.sort((a, b) => a - b);
+          const metrics = new FunctionMetrics();
+          metrics.functionId = functionId;
+          metrics.timestamp = timestamp;
+          metrics.requestCount = window.requestCount;
+          metrics.errorCount = window.errorCount;
+          metrics.responseTimeP50 = this.getPercentile(window.responseTimes, 50);
+          metrics.responseTimeP95 = this.getPercentile(window.responseTimes, 95);
+          metrics.responseTimeP99 = this.getPercentile(window.responseTimes, 99);
+          metrics.memoryUsage = this.average(window.memoryUsage);
+          metrics.activeInstances = await this.orchestrator.readyInstances(function_);
+          metrics.maxConcurrency = peakConcurrency;
+          await this.metricsRepository.save(metrics);
+        }
 
-        await this.metricsRepository.save(metrics);
-        await this.applyScalingDecision(function_, metrics);
+        await this.applyScalingDecision(function_, peakConcurrency);
       } catch (error) {
         this.logger.error(`Error aggregating metrics for function ${functionId}:`, error);
       }
     }
   }
 
-  private async applyScalingDecision(function_: Function, metrics: FunctionMetrics): Promise<void> {
+  private async applyScalingDecision(function_: Function, peakConcurrency: number): Promise<void> {
+    const desired = await this.orchestrator.desiredInstances(function_);
     const target = decideReplicas({
-      activeInstances: metrics.activeInstances,
-      requestCount: metrics.requestCount,
-      responseTimeP95: metrics.responseTimeP95,
+      desiredInstances: desired,
+      peakConcurrency,
       minInstances: function_.minInstances,
       maxInstances: function_.maxInstances,
-      maxRequestsPerInstance: this.configService.get<number>('scaling.maxRequestsPerInstance', 2),
     });
-    if (target === null) return;
+    const base = Math.max(1, function_.minInstances);
+    if (target === null) {
+      if (desired <= base) this.scaledUp.delete(function_.id);
+      return;
+    }
     await this.orchestrator.scale(function_, target);
-    this.logger.log(`Scaled function ${function_.id} from ${metrics.activeInstances} to ${target} instances`);
+    if (target > base) this.scaledUp.add(function_.id);
+    else this.scaledUp.delete(function_.id);
+    this.logger.log(
+      `Scaled function ${function_.id} from ${desired} to ${target} instances (at most ${peakConcurrency} calls at once in the last minute)`,
+    );
   }
 
   /** Scales eligible functions (scaleToZero, minInstances 0) to zero after the idle period. */
@@ -145,6 +189,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     });
 
     for (const function_ of candidates) {
+      if (this.concurrency.current(function_.id) > 0) continue; // a call is running
       // Without a recorded invocation (e.g. after a restart), count from boot or the last change.
       const lastActivityMs = Math.max(
         this.lastInvokedAt.get(function_.id) ?? 0,
@@ -164,6 +209,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
         });
         if (!eligible) continue;
         await this.orchestrator.scale(function_, 0);
+        this.scaledUp.delete(function_.id);
         this.logger.log(`Scaled idle function ${function_.id} to zero (no invocations for ${idleSeconds} s)`);
       } catch (error) {
         this.logger.error(`Error scaling idle function ${function_.id} to zero:`, error);

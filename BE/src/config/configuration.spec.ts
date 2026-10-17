@@ -51,7 +51,7 @@ describe('configuration', () => {
       },
       minio: { endPoint: 'localhost', port: 9003, useSSL: false, bucketName: 'functions' },
       orchestrator: { driver: 'kubernetes', readyTimeoutSeconds: 90 },
-      scaling: { scaleToZeroIdleSeconds: 900, maxRequestsPerInstance: 2 },
+      scaling: { scaleToZeroIdleSeconds: 900 },
       kubernetes: {
         apiUrl: '',
         tokenFile: '/var/run/secrets/kubernetes.io/serviceaccount/token',

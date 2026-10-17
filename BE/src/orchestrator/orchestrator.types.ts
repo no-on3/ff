@@ -17,7 +17,6 @@ export interface FunctionWorkload {
   code: string;
   /** Memory in MB. */
   memory: number;
-  cpu?: number;
   /** Timeout in seconds. */
   timeout: number;
   minInstances: number;
@@ -29,7 +28,6 @@ export interface InvokeResult {
   output: unknown;
   durationMs?: number;
   memoryUsedMb?: number;
-  cpuUsed?: number;
 }
 
 export interface Orchestrator {
@@ -50,5 +48,8 @@ export interface Orchestrator {
   waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void>;
   invoke(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<InvokeResult>;
   scale(fn: FunctionWorkload, replicas: number): Promise<void>;
+  /** Instances that can serve now. */
   readyInstances(fn: FunctionWorkload): Promise<number>;
+  /** Instances asked for, ready or starting (0 when the function has none). */
+  desiredInstances(fn: FunctionWorkload): Promise<number>;
 }

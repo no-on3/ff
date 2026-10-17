@@ -46,7 +46,7 @@ If that new worker can't load code that loaded before, the environment is broken
 | 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Runtime.CallbackHandlerDeprecated`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
 | 400 | `InvalidRequestContentException` | Body is not JSON |
 | 413 | `RequestEntityTooLargeException` | Body above 6 MB |
-| 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting |
+| 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting, or one waited longer than `FF_MAX_QUEUE_WAIT_MS` for its turn: `Rate exceeded: no instance was free within X.XX seconds` |
 
 The error names follow AWS Lambda's, so code and tooling port across.
 
@@ -76,6 +76,7 @@ export async function handler(event, context) { … }
 | `FUNCTION_NAME`, `FUNCTION_VERSION` | `unknown`, `$LATEST` | Reported in `context` and the logs |
 | `FF_INIT_TIMEOUT_MS` | `max(10000, FUNCTION_TIMEOUT)` | Limit for loading user code |
 | `FF_MAX_QUEUE` | `32` | Invocations allowed to wait behind the running one |
+| `FF_MAX_QUEUE_WAIT_MS` | `FUNCTION_TIMEOUT` | How long an invocation may wait for its turn before it gets 429. The backend's own timeout covers this wait plus the run, so it never gives up on a call that is only waiting |
 | `PORT` | `8080` | HTTP port |
 
 ## Memory
@@ -120,12 +121,13 @@ Protocol v2 (2026-10-17, client-readiness plan P-04) keeps v1's HTTP interface, 
 | A result JSON can't hold | `undefined` body, which could crash the main thread | `Runtime.MarshalError` |
 | Callback handlers | loaded, then failed with `TypeError` | refused at load: `Runtime.CallbackHandlerDeprecated` |
 | A reload that fails after a crash | pod unready for good | the runtime exits, and Kubernetes restarts it |
+| A call waiting for its turn | waited as long as the queue took | waits at most `FF_MAX_QUEUE_WAIT_MS`, one timeout by default, then gets 429 |
 
 ## Developing and testing
 
 ```bash
 cd runtimes/nodejs
 npm install
-npm test                       # L1: 29 protocol tests on real processes, ~10 s, no Docker
+npm test                       # L1: 31 protocol tests on real processes, ~10 s, no Docker
 test/container-smoke.sh        # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```

@@ -51,8 +51,6 @@ export class FunctionInvocation {
 
   @Column('float',{ nullable: true })
   memoryUsed?: number;
-  @Column('float',{ nullable: true })
-  cpuUsed?: number;
 
   @Column({ nullable: true })
   error?: string;

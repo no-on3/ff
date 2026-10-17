@@ -44,9 +44,6 @@ export class Function {
   @Column()
   memory: number;
 
-  @Column({ default: 100 })
-  cpu: number;
-
   @Column()
   timeout: number;
 
@@ -64,15 +61,15 @@ export class Function {
   @Column({ type: 'varchar', nullable: true })
   error?: string | null;
 
+  /** Instances kept even when idle (provisioned concurrency on Lambda, billed as such: D8). */
   @Column({ default: 0 })
   minInstances: number;
 
-  @Column({ default: 1 })
+  /** The most instances autoscaling may run: each serves one call at a time (D14). */
+  @Column({ default: 3 })
   maxInstances: number;
 
-  @Column({ default: 100 })
-  targetConcurrency: number;
-
+  /** Not settable: a function scales to zero exactly when its minInstances is 0. */
   @Column({ default: true })
   scaleToZero: boolean;
 

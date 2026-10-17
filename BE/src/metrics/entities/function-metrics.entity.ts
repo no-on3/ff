@@ -27,9 +27,6 @@ export class FunctionMetrics {
   timestamp: Date;
 
   @Column('float')
-  cpuUsage: number;
-
-  @Column('float')
   memoryUsage: number;
 
   @Column('integer')
@@ -49,6 +46,10 @@ export class FunctionMetrics {
 
   @Column('integer')
   activeInstances: number;
+
+  /** The most calls in flight at once during the minute: the scaling signal (D14). */
+  @Column('integer', { default: 0 })
+  maxConcurrency: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

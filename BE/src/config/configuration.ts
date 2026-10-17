@@ -202,7 +202,6 @@ const appShape = {
   ORCHESTRATOR: oneOf(['kubernetes'], 'kubernetes'),
   FF_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: integer(900, 1, 7 * 24 * 3600),
-  MAX_REQUESTS_PER_INSTANCE: integer(2, 1, 100_000),
 
   K8S_API_URL: optionalText(httpUrl),
   K8S_TOKEN_FILE: text(`${IN_CLUSTER_SECRETS}/token`),
@@ -371,7 +370,6 @@ export default function configuration(env: Env = process.env) {
     scaling: {
       // Idle time before a function with scaleToZero and minInstances 0 is scaled to zero.
       scaleToZeroIdleSeconds: parsed.FF_SCALE_TO_ZERO_IDLE_SECONDS,
-      maxRequestsPerInstance: parsed.MAX_REQUESTS_PER_INSTANCE,
     },
     // Kubernetes driver settings (docs/kubernetes-migration-plan.md §4.5).
     kubernetes: {

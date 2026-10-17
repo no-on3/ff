@@ -92,6 +92,8 @@ describe('Kubernetes manifests', () => {
       expect(env).toMatchObject({
         FUNCTION_NAME: 'hello',
         FUNCTION_TIMEOUT: '10000',
+        // A call waits at most one timeout for a free instance, then gets 429 (D14).
+        FF_MAX_QUEUE_WAIT_MS: '10000',
         FUNCTION_MEMORY_LIMIT: '512',
         LAMBDA_TASK_ROOT: '/var/task',
         FF_HANDLER: 'function.handler',

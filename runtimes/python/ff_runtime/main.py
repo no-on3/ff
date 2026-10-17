@@ -30,7 +30,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 from ff_runtime import protocol
-from ff_runtime.protocol import FUNCTION_VERSION, HANDLER, INIT_TIMEOUT_MS, MAX_PAYLOAD_BYTES, MAX_QUEUE, MEMORY_MB, TIMEOUT_MS, log
+from ff_runtime.protocol import (
+    FUNCTION_VERSION,
+    HANDLER,
+    INIT_TIMEOUT_MS,
+    MAX_PAYLOAD_BYTES,
+    MAX_QUEUE,
+    MAX_QUEUE_WAIT_MS,
+    MEMORY_MB,
+    TIMEOUT_MS,
+    log,
+)
 
 
 def start_thread(target, *args):
@@ -193,7 +203,10 @@ class Supervisor:
 
     def invoke(self, request_id, event):
         """Runs one admitted invocation. Returns (status, body, headers)."""
-        with self.exec_lock:
+        if not self.exec_lock.acquire(timeout=MAX_QUEUE_WAIT_MS / 1000):
+            message = f"Rate exceeded: no instance was free within {MAX_QUEUE_WAIT_MS / 1000:.2f} seconds"
+            return 429, json.dumps({"errorType": "TooManyRequestsException", "errorMessage": message}), {}
+        try:
             with self.lock:
                 # After a timeout or crash, a fresh worker is loading user code.
                 self.lock.wait_for(lambda: self.state != "starting", INIT_TIMEOUT_MS / 1000 + 5)
@@ -202,6 +215,8 @@ class Supervisor:
                     return 500, json.dumps(error), {"x-ff-function-error": "Unhandled"}
                 process, sock = self.process, self.sock
             return self._run(process, sock, request_id, event)
+        finally:
+            self.exec_lock.release()
 
     def _run(self, process, sock, request_id, event):
         print(f"START RequestId: {request_id} Version: {FUNCTION_VERSION}", flush=True)
@@ -445,8 +460,8 @@ def main():
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
-    log(level="info", msg="runtime listening", port=protocol.PORT, timeoutMs=TIMEOUT_MS, memoryLimitMb=MEMORY_MB,
-        handler=HANDLER, protocol=2)
+    log(level="info", msg="runtime listening", port=protocol.PORT, timeoutMs=TIMEOUT_MS, maxQueueWaitMs=MAX_QUEUE_WAIT_MS,
+        memoryLimitMb=MEMORY_MB, handler=HANDLER, protocol=2)
     server.serve_forever()
     SUPERVISOR.drain(TIMEOUT_MS / 1000 + 1)
     with SUPERVISOR.lock:

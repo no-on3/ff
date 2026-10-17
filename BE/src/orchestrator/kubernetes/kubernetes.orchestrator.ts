@@ -13,6 +13,7 @@ import {
   codeConfigMapManifest,
   deploymentManifest,
   limitRangeManifest,
+  maxQueueWaitMs,
   namespaceManifest,
   networkPolicyManifest,
   resourceQuotaManifest,
@@ -115,6 +116,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     // idle sweep scales it back down after the idle window.
     const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
     const replicas = Math.max(existing?.spec?.replicas ?? 0, fn.minInstances, 1);
+    if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid minInstances ${fn.minInstances} for function ${fn.id}`);
     await this.api.apply(
       paths.apps(ns, 'deployments', name),
       deploymentManifest(fn, ns, configMap, hash, this.settings, replicas),
@@ -142,6 +144,15 @@ export class KubernetesOrchestrator implements Orchestrator {
   }
 
   async waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void> {
+    await this.waitFor(fn, timeoutMs, isRolledOut);
+  }
+
+  /** For a cold start: one ready instance is enough to serve the call. */
+  private async waitForAnInstance(fn: FunctionWorkload, timeoutMs: number): Promise<void> {
+    await this.waitFor(fn, timeoutMs, (deployment) => (deployment.status?.readyReplicas ?? 0) >= 1);
+  }
+
+  private async waitFor(fn: FunctionWorkload, timeoutMs: number, done: (deployment: Deployment) => boolean): Promise<void> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const deadline = Date.now() + timeoutMs;
@@ -149,7 +160,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     for (;;) {
       deployment = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
       if (!deployment) throw new OrchestratorError(`Deployment ${ns}/${name} does not exist`);
-      if (isRolledOut(deployment)) return;
+      if (done(deployment)) return;
       if (Date.now() >= deadline) break;
       await sleep(this.pollIntervalMs);
     }
@@ -190,21 +201,37 @@ export class KubernetesOrchestrator implements Orchestrator {
   }
 
   async scale(fn: FunctionWorkload, replicas: number): Promise<void> {
+    // NaN would go out as "replicas": null, which Kubernetes takes as zero.
+    if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid replica count ${replicas} for function ${fn.id}`);
     await this.api.scaleDeployment(this.namespaceOf(fn), functionResourceName(fn.id), Math.max(0, Math.floor(replicas)));
   }
 
-  async readyInstances(fn: FunctionWorkload): Promise<number> {
+  /** The Deployment's desired and ready replicas, in one read; zeros when it doesn't exist. */
+  private async instances(fn: FunctionWorkload): Promise<{ desired: number; ready: number }> {
     const deployment = await this.api.get<Deployment>(
       paths.apps(this.namespaceOf(fn), 'deployments', functionResourceName(fn.id)),
     );
-    return deployment?.status?.readyReplicas ?? 0;
+    return { desired: deployment?.spec?.replicas ?? 0, ready: deployment?.status?.readyReplicas ?? 0 };
+  }
+
+  async readyInstances(fn: FunctionWorkload): Promise<number> {
+    return (await this.instances(fn)).ready;
+  }
+
+  async desiredInstances(fn: FunctionWorkload): Promise<number> {
+    return (await this.instances(fn)).desired;
   }
 
   async invoke(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<InvokeResult> {
-    if ((await this.readyInstances(fn)) === 0) {
-      this.logger.log(`Cold start: scaling ${fn.id} from zero`);
-      await this.scale(fn, 1);
-      await this.waitUntilReady(fn, this.settings.readyTimeoutSeconds * 1000);
+    const { desired, ready } = await this.instances(fn);
+    if (ready === 0) {
+      // Only raise from zero: an instance may already be starting, perhaps asked for by the
+      // scaler for a burst of calls, and setting 1 here would take the others away again.
+      if (desired === 0) {
+        this.logger.log(`Cold start: scaling ${fn.id} from zero`);
+        await this.scale(fn, 1);
+      }
+      await this.waitForAnInstance(fn, this.settings.readyTimeoutSeconds * 1000);
     }
     return this.toResult(await this.post(fn, payload));
   }
@@ -213,7 +240,8 @@ export class KubernetesOrchestrator implements Orchestrator {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const body = JSON.stringify(payload);
-    const timeoutMs = fn.timeout * 1000 + 2000;
+    // A call may wait for a free instance (the runtime then answers 429), then runs up to its timeout.
+    const timeoutMs = maxQueueWaitMs(fn) + fn.timeout * 1000 + 2000;
     if (this.settings.invokeMode === 'proxy') {
       return this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs });
     }

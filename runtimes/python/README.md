@@ -53,7 +53,7 @@ Each connection gets its own thread, started with the low-level `_thread` call. 
 | 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
 | 400 | `InvalidRequestContentException` | Body is not JSON |
 | 413 | `RequestEntityTooLargeException` | Body above 6 MB |
-| 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting |
+| 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting, or one waited longer than `FF_MAX_QUEUE_WAIT_MS` for its turn: `Rate exceeded: no instance was free within X.XX seconds` |
 
 The error names and messages follow AWS Lambda's (for example `Unable to import module 'function': No module named 'requests'`), so code and tooling port across.
 
@@ -99,6 +99,7 @@ On Kubernetes the container's memory limit equals the function's memory, as on L
 | `FUNCTION_NAME`, `FUNCTION_VERSION` | `unknown`, `$LATEST` | Reported in `context` and the logs |
 | `FF_INIT_TIMEOUT_MS` | `max(10000, FUNCTION_TIMEOUT)` | Limit for loading user code |
 | `FF_MAX_QUEUE` | `32` | Invocations allowed to wait behind the running one |
+| `FF_MAX_QUEUE_WAIT_MS` | `FUNCTION_TIMEOUT` | How long an invocation may wait for its turn before it gets 429. The backend's own timeout covers this wait plus the run, so it never gives up on a call that is only waiting |
 | `PORT` | `8080` | HTTP port (all IPv6 and IPv4 addresses) |
 
 The function's own environment variables reach user code unchanged.
@@ -125,13 +126,13 @@ A worker replaced after `Runtime.OutOfMemory` is logged as `function worker cras
 
 ## What changed in v2
 
-Protocol v2 (2026-10-17, client-readiness plan P-04) keeps v1's HTTP interface, so the backend works with both; a function moves to v2 at its next update. For Python, two things changed, to match the Node.js runtime: the out-of-memory replacement is logged, and a reload that fails after a crash makes the runtime exit, so that Kubernetes restarts the container, instead of leaving the pod unready for good. The startup line says `"protocol": 2`, and the server header `ff-runtime-python/2`.
+Protocol v2 (2026-10-17, client-readiness plan P-04) keeps v1's HTTP interface, so the backend works with both; a function moves to v2 at its next update. For Python, three things changed, as for Node.js: the out-of-memory replacement is logged; a reload that fails after a crash makes the runtime exit, so that Kubernetes restarts the container, instead of leaving the pod unready for good; and a call waits at most `FF_MAX_QUEUE_WAIT_MS` (one timeout by default) for its turn, then gets 429. The startup line says `"protocol": 2`, and the server header `ff-runtime-python/2`.
 
 ## Developing and testing
 
 ```bash
 cd runtimes/python
-python3 -m unittest discover -s tests -v   # L1: 27 protocol tests on real processes, ~10 s, no Docker, no packages
+python3 -m unittest discover -s tests -v   # L1: 29 protocol tests on real processes, ~10 s, no Docker, no packages
 tests/container-smoke.sh                   # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```
 

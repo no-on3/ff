@@ -6,7 +6,7 @@
  *   npm run test:it      (or hack/k8s/test-it.sh)
  */
 import { BadRequestException } from '@nestjs/common';
-import { randomInt, randomUUID } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import * as path from 'node:path';
 import { KubeClient, paths } from '../orchestrator/kubernetes/kube-client';
 import { KubernetesOrchestrator } from '../orchestrator/kubernetes/kubernetes.orchestrator';
@@ -14,6 +14,7 @@ import { LABELS, functionResourceName, tenantNamespace } from '../orchestrator/k
 import { settings } from '../orchestrator/kubernetes/test-fixtures';
 import { FunctionStatus, Function, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
+import { FUNCTION_DEFAULTS, MemoryRepository, eventually } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' ? describe : describe.skip;
 const kubeDir = path.resolve(__dirname, '../../../hack/.kube');
@@ -25,46 +26,6 @@ export async function handler(event: { body: { name?: string } }) {
 }`;
 // Loads, then throws: the pod runs but never becomes ready.
 const broken = 'throw new Error("boom at init");';
-
-/** A repository that keeps rows in memory and, like a database, hands out copies. */
-class MemoryRepository<T extends { id?: string }> {
-  readonly rows = new Map<string, T>();
-
-  create(values: Partial<T>): T {
-    return { ...values } as T;
-  }
-
-  async save(entity: T): Promise<T> {
-    entity.id ??= randomUUID();
-    Object.assign(entity, { updatedAt: new Date() });
-    this.rows.set(entity.id, { ...entity });
-    return entity;
-  }
-
-  async findOne(options: { where: { id: string } }): Promise<T | null> {
-    const row = this.rows.get(options.where.id);
-    return row ? { ...row } : null;
-  }
-
-  async remove(entity: T): Promise<T> {
-    this.rows.delete(entity.id as string);
-    return entity;
-  }
-
-  byName(name: string): T {
-    const row = [...this.rows.values()].find((r) => (r as { name?: string }).name === name);
-    if (!row) throw new Error(`no record named ${name}`);
-    return { ...row };
-  }
-}
-
-async function eventually(check: () => Promise<boolean>, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error('condition not met in time');
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-}
 
 run('function lifecycle against the dev cluster (L3, P-03)', () => {
   jest.setTimeout(240_000);
@@ -81,7 +42,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
   const orchestrator = new KubernetesOrchestrator(s, client);
   const account = String(randomInt(1e12)).padStart(12, '0');
   const ns = tenantNamespace(s.namespacePrefix, account);
-  const functions = new MemoryRepository<Function>();
+  const functions = new MemoryRepository<Function>(FUNCTION_DEFAULTS);
   const invocations = new MemoryRepository<{ id?: string }>();
   const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
   const config = {
@@ -93,7 +54,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     storage as never,
     orchestrator,
     config as never,
-    { recordMetric: jest.fn() } as never,
+    { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() } as never,
   );
   const spec = (name: string, code: string) => ({ name, runtime: Runtime.NODEJS, code, memory: 128, timeout: 3 });
 
