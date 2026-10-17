@@ -1,0 +1,69 @@
+# P-41 spike: VictoriaLogs v1.53.0 (2026-10-01), one node, in a namespace of its own that run.sh deletes after.
+# The deletion API is on, behind a key, as account closures need it (D10); retention is 31 days, the longest plan's
+# window plus a day for the partition being written.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ff-logging-spike
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoria-logs
+  namespace: ff-logging-spike
+spec:
+  selector:
+    app: victoria-logs
+  ports:
+    - name: http
+      port: 9428
+      targetPort: 9428
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: victoria-logs
+  namespace: ff-logging-spike
+spec:
+  serviceName: victoria-logs
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victoria-logs
+  template:
+    metadata:
+      labels:
+        app: victoria-logs
+    spec:
+      containers:
+        - name: victoria-logs
+          image: victoriametrics/victoria-logs:v1.53.0
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod=31d
+            - -delete.enable
+            - -deleteAuthKey=spike-delete-key
+          ports:
+            - containerPort: 9428
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9428
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
