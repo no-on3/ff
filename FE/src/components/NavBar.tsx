@@ -28,7 +28,7 @@ const NavBar: React.FC = () => {
   };
 
   return (
-    <nav className="bg-white shadow-sm">
+    <nav className="bg-white shadow-sm print:hidden">
       <div className="container mx-auto px-4 py-3 flex flex-wrap items-center gap-x-8 gap-y-3">
         <Link to="/" className="text-xl font-bold text-gray-800">
           FF console

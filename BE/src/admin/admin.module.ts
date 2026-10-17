@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { BillingModule } from '../billing/billing.module';
@@ -15,6 +15,7 @@ import { UsageModule } from '../usage/usage.module';
 import { AdminAccountsController } from './admin-accounts.controller';
 import { AdminAccountsService } from './admin-accounts.service';
 import { AdminAuditController } from './admin-audit.controller';
+import { AdminPaymentsController, certificateBody } from './admin-payments.controller';
 import { AdminPlansController } from './admin-plans.controller';
 import { AdminPricesController } from './admin-prices.controller';
 import { AdminPricesService } from './admin-prices.service';
@@ -33,7 +34,12 @@ import { PlatformSettingsModule } from './platform-settings.module';
     PlansModule,
     UsageModule,
   ],
-  controllers: [AdminSettingsController, AdminAuditController, AdminAccountsController, AdminPlansController, AdminPricesController],
+  controllers: [AdminSettingsController, AdminAuditController, AdminAccountsController, AdminPlansController, AdminPricesController, AdminPaymentsController],
   providers: [AdminAccountsService, AdminPricesService],
 })
-export class AdminModule {}
+export class AdminModule implements NestModule {
+  /** A withholding certificate comes as the request's body (P-35). */
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(certificateBody()).forRoutes({ path: 'admin/payments/:id/withholding-certificate', method: RequestMethod.PUT });
+  }
+}

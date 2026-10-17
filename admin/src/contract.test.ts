@@ -9,14 +9,18 @@ import statusChangesSource from '../../BE/src/admin/account-status-changes.ts?ra
 import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
 import priceBookSource from '../../BE/src/billing/price-book.ts?raw';
 import priceBooksMigration from '../../BE/src/migrations/1792235773406-PriceBooks.ts?raw';
+import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw';
+import paymentEntitySource from '../../BE/src/billing/payments/payment.entity.ts?raw';
+import paymentsServiceSource from '../../BE/src/billing/payments/payments.service.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
 import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
 import { OPERATOR_ACTIONS } from './lib/audit';
+import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
 import { LIMIT_FIELDS } from './lib/plans';
 import { SKUS, multiplyDecimals } from './lib/prices';
-import { REASON_LENGTH } from './lib/reason';
+import { REASON_HEADER, REASON_LENGTH } from './lib/reason';
 import { SETTINGS } from './lib/settings';
 
 // What the admin dashboard shares with the API and the development realm, read from their files (P-70, D12).
@@ -147,6 +151,28 @@ describe("the plans' limits and the price books' SKUs (P-73)", () => {
 
     expect(numbers(usd)).toHaveLength(6);
     expect(numbers(usd).map((price) => multiplyDecimals(price, rate))).toEqual(numbers(tnd));
+  });
+});
+
+describe('payments (P-35)', () => {
+  it("have the API's operator fields, after the pro-forma's", () => {
+    const body = paymentsDtoSource.slice(paymentsDtoSource.indexOf('export class AdminPaymentView extends ProFormaView {'));
+    const fields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): /gm)].map((match) => match[1]);
+
+    expect(fields).toEqual([...ADMIN_PAYMENT_FIELDS]);
+  });
+
+  it("have the API's statuses", () => {
+    const body = paymentEntitySource.slice(paymentEntitySource.indexOf('export enum PaymentStatus'));
+    const statuses = [...body.slice(0, body.indexOf('}')).matchAll(/= '(\w+)'/g)].map((match) => match[1]);
+
+    expect(PAYMENT_STATUSES.map((status) => status.value)).toEqual(statuses);
+  });
+
+  it("send a certificate the API takes, its reason in the header the API reads", () => {
+    expect(paymentsServiceSource).toContain(`export const CERTIFICATE_TYPES = [${CERTIFICATE_TYPES.map((type) => `'${type}'`).join(', ')}];`);
+    expect(paymentsServiceSource).toContain(`export const CERTIFICATE_LIMIT = '${CERTIFICATE_MAX_MB}mb';`);
+    expect(constant('REASON_HEADER')).toBe(REASON_HEADER.toLowerCase());
   });
 });
 

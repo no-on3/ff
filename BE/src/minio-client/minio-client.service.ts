@@ -1,4 +1,4 @@
-import { CreateBucketCommand, DeleteObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { CreateBucketCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { describeError } from '../common/describe-error';
@@ -64,6 +64,18 @@ export class MinioClientService implements OnModuleInit, OnModuleDestroy {
 
   async deleteCode(path: string): Promise<void> {
     await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: path }));
+  }
+
+  /** A document kept for the record, such as a withholding certificate (P-35). */
+  async putDocument(key: string, body: Buffer, contentType: string): Promise<void> {
+    await this.s3.send(new PutObjectCommand({ Bucket: this.bucketName, Key: key, Body: body, ContentType: contentType }));
+  }
+
+  /** A document kept, with its type. */
+  async getDocument(key: string): Promise<{ body: Buffer; contentType: string }> {
+    const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key }));
+    if (!object.Body) throw new Error(`The object ${key} has no body`);
+    return { body: Buffer.from(await object.Body.transformToByteArray()), contentType: object.ContentType ?? 'application/octet-stream' };
   }
 
   private async bucketExists(): Promise<boolean> {

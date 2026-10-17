@@ -18,7 +18,7 @@ import { requestIdOf } from '../common/request-context';
 import { IS_PUBLIC } from './public.decorator';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from './route-rules';
 import { Identity, InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
-import { ADMIN_CLIENT, CHANGES_NOTHING, IS_ADMIN, OPERATOR_ROLE, REASON_LENGTH, RequestWithOperator, validReason } from '../admin/operator';
+import { ADMIN_CLIENT, CHANGES_NOTHING, IS_ADMIN, OPERATOR_ROLE, REASON_LENGTH, RequestWithOperator, reasonOf } from '../admin/operator';
 
 type GuardedRequest = RequestWithPrincipal &
   RequestWithOperator & { user?: User; ip?: string; requestId?: string; method?: string; body?: unknown };
@@ -149,10 +149,10 @@ export class AuthGuard implements CanActivate {
     }
     if (!identity.realmRoles?.includes(OPERATOR_ROLE)) throw new ForbiddenException("The admin routes are for FF's operators");
     request.operator = { id: identity.userId, email: identity.email ?? identity.userId, ...(identity.name ? { name: identity.name } : {}) };
-    if (!changesNothing && !READS.has(request.method ?? 'GET') && !validReason((request.body as { reason?: unknown } | undefined)?.reason)) {
-      throw new BadRequestException(
-        `Every admin change needs a reason: send reason, ${REASON_LENGTH.min} to ${REASON_LENGTH.max} characters, in the body`,
-      );
+    if (!changesNothing && !READS.has(request.method ?? 'GET') && !reasonOf(request)) {
+      // A file for a body, such as a withholding certificate (P-35), has its reason in a header.
+      const where = Buffer.isBuffer(request.body) ? 'in the X-FF-Reason header, URI-encoded: the body is the file' : 'in the body';
+      throw new BadRequestException(`Every admin change needs a reason: send reason, ${REASON_LENGTH.min} to ${REASON_LENGTH.max} characters, ${where}`);
     }
   }
 

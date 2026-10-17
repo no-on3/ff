@@ -22,6 +22,11 @@
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
 #   - The audit log (P-17): each account reads its own, which names who did what.
+#   - Bank transfers (P-35): an owner asks for a pro-forma, which other accounts
+#     never see; the operator finds it by the reference typed from the statement,
+#     records the transfer net of a share withheld at source, then uploads the
+#     withholding certificate as a raw body with its reason in X-FF-Reason. Each
+#     credit reaches the balance, the ledger and the owner's mailbox.
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
 # compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
@@ -127,6 +132,13 @@ grant() {
         FROM ledger_transactions t, ledger_accounts a
        WHERE t.idempotency_key = '$3' AND a.currency = 'TND'
          AND (a.account_id = '$1' OR (a.account_id IS NULL AND a.type = 'promotional_credit'));" >/dev/null
+}
+# upload <path> <file> [reason]: the operator PUTs a PDF as the body, as the admin dashboard does, its reason URI-encoded in X-FF-Reason (P-35).
+upload() {
+  local args=(-sS -o "$work/body" -w '%{http_code}' -X PUT -H "Authorization: Bearer $operator_token" -H 'content-type: application/pdf' --data-binary "@$2")
+  [ -z "${3:-}" ] || args+=(-H "X-FF-Reason: $(jq -rn --arg reason "$3" '$reason | @uri')")
+  curl "${args[@]}" "$api_oidc$1" >"$work/status"
+  cat "$work/body"
 }
 # approve <account...>: the operator approves each one, as the admin dashboard does (P-71).
 approve() {
@@ -241,6 +253,10 @@ grant "$account_a" 3000 "promo:l5-a"
 balance_a="$(as_a GET /billing/balance)"
 check "A reads its balance: 3.000 TND of credit (P-32)" "200 3.000 TND" "$(status) $(jq -r '"\(.balance) \(.currency)"' <<<"$balance_a")"
 check "and the credit among its transactions" "promo 3.000" "$(as_a GET /billing/transactions | jq -r '.transactions[] | "\(.kind) \(.amount)"')"
+proforma_a="$(as_a POST /billing/pro-formas '{"credit": "50"}')"
+check "A asks for a pro-forma: 50.000 TND of credit, 19% VAT on top, a reference to transfer with (P-35)" "201 pending 50.000 9.500 59.500 true" \
+  "$(status) $(jq -r '"\(.status) \(.credit) \(.vat) \(.total) \(.reference | test("^FF-[A-HJKMNP-TV-Z2-9]{4}-[A-HJKMNP-TV-Z2-9]{4}$"))"' <<<"$proforma_a")"
+pf_a="$(jq -r .id <<<"$proforma_a")"
 own=""
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
@@ -303,6 +319,21 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B sets its own shares (P-33)" 200 "$(status)"
       alerts_a="$(as_a GET /billing/alerts)"
       check "  ... which are not A's" "200 null" "$(status) $(jq -c .lowBalancePercents <<<"$alerts_a")"
+      ;;
+    "POST /billing/pro-formas")
+      pf_b="$(as_b POST /billing/pro-formas '{"credit": "20"}' | jq -r .id)"
+      check "$route: B asks for its own pro-forma (P-35)" 201 "$(status)"
+      check "  ... which A's list doesn't show: A's has its own only" "$pf_a" "$(as_a GET /billing/pro-formas | jq -r '[.proFormas[].id] | join(" ")')"
+      as_a GET "/billing/pro-formas/$pf_b" >/dev/null
+      check "  ... nor A reads" "404 Pro-forma $pf_b not found" "$(status) $(message)"
+      ;;
+    "GET /billing/pro-formas")
+      pro_formas_b="$(as_b GET /billing/pro-formas)"
+      check "$route: B lists none of A's pro-formas (P-35)" "200 0" "$(status) $(jq --arg id "$pf_a" '[.proFormas[] | select(.id == $id)] | length' <<<"$pro_formas_b")"
+      ;;
+    "GET /billing/pro-formas/{id}")
+      as_b GET "/billing/pro-formas/$pf_a" >/dev/null
+      check "$route: B gets 404 for A's pro-forma (P-35)" "404 Pro-forma $pf_a not found" "$(status) $(message)"
       ;;
     *" /members"*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
@@ -390,6 +421,11 @@ user_1_id="$(jq -r .user.id <<<"$me_1")"
 before_1="$(snapshot as_user_1 "$fn_1")"
 name_1="$(as_user_1 GET "/accounts/$account_1" | jq -r .name)"
 members_1="$(as_user_1 GET /members | jq -c '{members: [.members[].email], invitations: [.invitations[].email]}')"
+
+proforma_1="$(as_user_1 POST /billing/pro-formas '{"credit": "50.000"}')"
+check "account 1's owner asks for a pro-forma (P-35)" "201 pending 59.500 L5 one" "$(status) $(jq -r '"\(.status) \(.total) \(.buyer.name)"' <<<"$proforma_1")"
+pf_1="$(jq -r .id <<<"$proforma_1")"
+ref_1="$(jq -r .reference <<<"$proforma_1")"
 
 grant "$account_1" 5000 "promo:l5-1"
 echo "== account 2, on account 1's function and account, on every route (${#routes[@]})"
@@ -480,6 +516,19 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       alerts_1="$(as_user_1 GET /billing/alerts)"
       check "  ... and account 1 keeps FF's" "200 null" "$(status) $(jq -c .lowBalancePercents <<<"$alerts_1")"
       ;;
+    "POST /billing/pro-formas")
+      pf_2="$(as_user_2 POST /billing/pro-formas '{"credit": "20"}' | jq -r .id)"
+      check "$route: user 2 asks for account 2's own pro-forma (P-35)" 201 "$(status)"
+      check "  ... which account 1's list doesn't show" "$pf_1" "$(as_user_1 GET /billing/pro-formas | jq -r '[.proFormas[].id] | join(" ")')"
+      ;;
+    "GET /billing/pro-formas")
+      pro_formas_2="$(as_user_2 GET /billing/pro-formas)"
+      check "$route: account 2 lists none of account 1's pro-formas (P-35)" "200 0" "$(status) $(jq --arg id "$pf_1" '[.proFormas[] | select(.id == $id)] | length' <<<"$pro_formas_2")"
+      ;;
+    "GET /billing/pro-formas/{id}")
+      as_user_2 GET "/billing/pro-formas/$pf_1" >/dev/null
+      check "$route: account 1's pro-forma is not found for account 2 (P-35)" "404 Pro-forma $pf_1 not found" "$(status) $(message)"
+      ;;
     *" /admin/"*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: a customer's token is not the admin dashboard's" "$not_admin_client" "$(status) $(message)"
@@ -524,6 +573,12 @@ balance_key="$(with_token "$key_usage" GET /billing/balance)"
 check "and its own account's balance, without account 1's credit (P-32)" "200 0.000" "$(status) $(jq -r .balance <<<"$balance_key")"
 alerts_key="$(with_token "$key_usage" GET /billing/alerts)"
 check "and its low-balance shares (P-33)" "200 [90]" "$(status) $(jq -c .lowBalancePercents <<<"$alerts_key")"
+pro_formas_key="$(with_token "$key_usage" GET /billing/pro-formas)"
+check "and its own account's pro-formas, none of account 1's (P-35)" "200 $pf_2" "$(status) $(jq -r '[.proFormas[].id] | join(" ")' <<<"$pro_formas_key")"
+with_token "$key_usage" POST /billing/pro-formas '{"credit": "20"}' >/dev/null
+check "but can't ask for one: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
+with_token "$key_1" GET /billing/pro-formas >/dev/null
+check "a key without usage:read can't list them" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 for path in /me /api-keys /members /audit-log; do
@@ -567,6 +622,10 @@ as_member POST "/functions/$fn_1/invoke" '{"input":{}}' >/dev/null
 check "but can't invoke them" "403 The viewer role can't do this" "$(status) $(message)"
 as_member PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "nor set the low-balance e-mails (P-33)" "403 The viewer role can't do this" "$(status) $(message)"
+listed_pro_formas="$(as_member GET /billing/pro-formas | jq -r '[.proFormas[].id] | join(" ")')"
+check "but reads account 1's pro-formas (P-35)" "200 $pf_1" "$(status) $listed_pro_formas"
+as_member POST /billing/pro-formas '{"credit": "20"}' >/dev/null
+check "and can't ask for one (P-35)" "403 The viewer role can't do this" "$(status) $(message)"
 user_2_id="$(with_token "$token_2" GET /me | jq -r .user.id)"
 as_user_1 PATCH "/members/$user_2_id" '{"role": "developer"}' >/dev/null
 check "the owner makes user 2 a developer" 200 "$(status)"
@@ -576,6 +635,8 @@ as_member GET /members >/dev/null
 check "but doesn't manage members" "403 The developer role can't do this" "$(status) $(message)"
 as_member PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "nor the low-balance e-mails, which are the owners' (P-33)" "403 The developer role can't do this" "$(status) $(message)"
+as_member POST /billing/pro-formas '{"credit": "20"}' >/dev/null
+check "nor ask for a pro-forma, the owners' too (P-35)" "403 The developer role can't do this" "$(status) $(message)"
 as_user_1 DELETE "/members/$user_1_id" >/dev/null
 check "the last owner can't leave" "400 An account needs an owner: make another member owner first" "$(status) $(message)"
 as_user_1 DELETE "/members/$user_2_id" >/dev/null
@@ -586,7 +647,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite api_key.revoke member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma api_key.revoke member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
@@ -690,9 +751,65 @@ with_token "$operator_token" DELETE "/admin/price-books/$(jq -r '.[0].id' <<<"$b
 check "the active book is never removed" 409 "$(status)"
 with_token "$operator_token" DELETE "/admin/price-books/$(jq -r .id <<<"$created")" '{"reason": "l5: not yet"}' >/dev/null
 check "a scheduled one is" "200 1" "$(status) $(with_token "$operator_token" GET /admin/price-books | jq length)"
+echo "== bank transfers (P-35)"
+typed="$(tr 'A-Z' 'a-z' <<<"${ref_1//-/}")"
+found="$(with_token "$operator_token" GET "/admin/payments?reference=$typed")"
+check "the operator finds account 1's pro-forma by its reference, typed from the statement without dashes" "200 $pf_1 pending 59.500 $account_1" \
+  "$(status) $(jq -r '[.payments[] | "\(.id) \(.status) \(.total) \(.accountId)"] | join(",")' <<<"$found")"
+before_transfer="$(as_user_1 GET /billing/balance | jq -r .balance)"
+# plus_millimes <amount> <millimes>: the amount, as the API writes TND, plus that many millimes.
+plus_millimes() { node -e 'const [a, m] = process.argv.slice(1); console.log(((Math.round(Number(a) * 1000) + Number(m)) / 1000).toFixed(3))' "$1" "$2"; }
+today="$(date -u +%F)"
+transfer() { jq -cn --arg reference "$typed" --arg received "$1" --arg withheld "$2" --arg on "$today" \
+  '{reference: $reference, received: $received, withheld: $withheld, receivedOn: $on, bankReference: "VIR-L5-1", reason: "l5: statement of today"}'; }
+with_token "$operator_token" POST /admin/bank-transfers "$(transfer 58.000 0.892)" >/dev/null
+check "a transfer that doesn't make the total is refused, naming the amounts" \
+  "400 received 58.000 TND and withheld 0.892 TND make 58.892 TND, not the pro-forma's 59.500 TND" "$(status) $(message)"
+recorded="$(with_token "$operator_token" POST /admin/bank-transfers "$(transfer 58.608 0.892)")"
+check "the operator records the transfer, net of 0.892 TND withheld at source" "201 paid 58.608 0.892 49.108 operator:" \
+  "$(status) $(jq -r '"\(.status) \(.transfer.received) \(.transfer.withheld) \(.transfer.credited) \(.recordedBy | sub("(?<k>operator:).*"; "\(.k)"))"' <<<"$recorded")"
+check "account 1's balance grows by the credit less the withheld share, $before_transfer + 49.108 TND" \
+  "$(plus_millimes "$before_transfer" 49108)" "$(as_user_1 GET /billing/balance | jq -r .balance)"
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^Your transfer was received' && break; sleep 0.5; done
+check "account 1's owner gets an e-mail: the transfer, the credit added, the withheld share to come" \
+  "Your transfer was received: L5 one|58.608 TND for the pro-forma $ref_1: 49.108 TND of credit|0.892 TND was withheld at source" \
+  "$(mail_to "$user_1" | head -1)|$(mail_to "$user_1" | grep -o "58.608 TND for the pro-forma $ref_1: 49.108 TND of credit")|$(mail_to "$user_1" | grep -o '0.892 TND was withheld at source')"
+with_token "$operator_token" POST /admin/bank-transfers "$(transfer 58.608 0.892)" >/dev/null
+check "the same transfer, recorded twice, is refused" "409 The transfer for $ref_1 was recorded on $today: 58.608 TND received" "$(status) $(message)"
+printf '%%PDF-1.4\n%% l5: a withholding certificate\n' >"$work/certificate.pdf"
+upload "/admin/payments/$pf_1/withholding-certificate" "$work/certificate.pdf" >/dev/null
+check "a certificate without a reason is refused, which says where the reason goes" \
+  "400 Every admin change needs a reason: send reason, 3 to 500 characters, in the X-FF-Reason header, URI-encoded: the body is the file" "$(status) $(message)"
+certified="$(upload "/admin/payments/$pf_1/withholding-certificate" "$work/certificate.pdf" "l5: certificat de retenue reçu")"
+check "with its reason in X-FF-Reason, the certificate is kept, and the withheld share credited" "200 application/pdf true" \
+  "$(status) $(jq -r '"\(.certificateType) \(.transfer.withheldCreditedAt != null)"' <<<"$certified")"
+check "account 1's balance now has the whole credit, $before_transfer + 50.000 TND" \
+  "$(plus_millimes "$before_transfer" 50000)" "$(as_user_1 GET /billing/balance | jq -r .balance)"
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^The share withheld' && break; sleep 0.5; done
+check "and its owner an e-mail that says so" "The share withheld at source was added: L5 one" "$(mail_to "$user_1" | head -1)"
+check "the reason reached the audit log as typed, accents and all" "l5: certificat de retenue reçu" \
+  "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "SELECT details->>'reason' FROM audit_log WHERE action = 'payment.withholding'")"
+download="$(curl -sS -o "$work/downloaded.pdf" -w '%{http_code} %{content_type}' -H "Authorization: Bearer $operator_token" "$api_oidc/admin/payments/$pf_1/withholding-certificate")"
+check "the operator downloads the certificate as it was added" "200 application/pdf true" \
+  "$download $(cmp -s "$work/certificate.pdf" "$work/downloaded.pdf" && echo true || echo false)"
+upload "/admin/payments/$pf_1/withholding-certificate" "$work/certificate.pdf" "l5 tries" >/dev/null
+check "a second certificate is refused" "409 The certificate for $ref_1 was added on $today" "$(status) $(message)"
+check "the ledger has both postings: the transfer (bank, VAT, wallet), then the certificate (receivable, wallet)" \
+  "provider_clearing:-58608 vat_payable:9500 wallet:49108 wallet:892 withholding_receivable:-892" \
+  "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "
+    SELECT string_agg(a.type || ':' || e.amount_minor, ' ' ORDER BY t.idempotency_key, a.type)
+      FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.ledger_account_id JOIN ledger_transactions t ON t.id = e.transaction_id
+     WHERE t.idempotency_key IN ('transfer:$pf_1', 'withholding:$pf_1')")"
+paid="$(as_user_1 GET "/billing/pro-formas/$pf_1")"
+check "account 1's owner sees the pro-forma paid: 49.108 TND credited, then the withheld share" "200 paid 49.108 true" \
+  "$(status) $(jq -r '"\(.status) \(.transfer.credited) \(.transfer.withheldCreditedAt != null)"' <<<"$paid")"
+log_payments="$(as_user_1 GET '/audit-log?limit=100')"
+check "and, in the account's audit log, who asked for it and FF's two credits, without the operator's address" \
+  "billing.pro_forma:$user_1:true payment.record:FF:null payment.withholding:FF:null" \
+  "$(jq -r '[.entries[] | select(.action == "billing.pro_forma" or (.action | startswith("payment."))) | "\(.action):\(.actorLabel):\(if .actor == "operator" then .ip else (.ip != null) end)"] | reverse | join(" ")' <<<"$log_payments")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress payment.record payment.withholding" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -700,7 +817,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 11 account.approve,account.egress,account.plan,account.reactivate,account.suspend,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
+  "200 13 account.approve,account.egress,account.plan,account.reactivate,account.suspend,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

@@ -253,6 +253,48 @@ export interface Alerts {
   defaultPercents: number[];
 }
 
+/**
+ * A pro-forma for a bank transfer (P-35, D9): the credit, the VAT on top, the
+ * reference for the transfer's label, and the transfer once FF recorded it.
+ * contract.test.ts checks these names against the API's.
+ */
+export const PRO_FORMA_FIELDS = ['id', 'reference', 'status', 'currency', 'credit', 'vatPercent', 'vat', 'total', 'createdAt', 'buyer', 'seller', 'bank', 'transfer'] as const;
+export const TRANSFER_FIELDS = ['received', 'withheld', 'receivedOn', 'recordedAt', 'credited', 'withheldCreditedAt'] as const;
+/** Who sells, who buys, and where to pay, as each pro-forma carries them. */
+export const PRO_FORMA_PARTY_FIELDS = { buyer: ['name', 'taxId'], seller: ['name', 'taxId', 'address'], bank: ['name', 'iban', 'bic'] } as const;
+export interface Transfer {
+  /** What reached FF's account. */
+  received: string;
+  /** What the buyer withheld at source; "0.000" for none. */
+  withheld: string;
+  /** The transfer's date on the bank statement, YYYY-MM-DD. */
+  receivedOn: string;
+  recordedAt: string;
+  /** The credit added with the transfer: the credit less the share withheld. */
+  credited: string;
+  /** When the withholding certificate came and the withheld share was credited. */
+  withheldCreditedAt: string | null;
+}
+export interface ProForma {
+  id: string;
+  /** FF-XXXX-XXXX: what the buyer writes in the transfer's label. */
+  reference: string;
+  /** pending: waiting for the transfer; paid: FF recorded it. */
+  status: 'pending' | 'paid';
+  currency: string;
+  credit: string;
+  vatPercent: number;
+  vat: string;
+  total: string;
+  createdAt: string;
+  /** The account as it was when the pro-forma was asked for. */
+  buyer: { name: string; taxId: string | null };
+  seller: { name: string; taxId: string | null; address: string };
+  /** Where to pay. */
+  bank: { name: string; iban: string; bic: string | null };
+  transfer: Transfer | null;
+}
+
 export const billingApi = {
   getBalance: () => api.get<Balance>('/billing/balance'),
   /** Newest first; `before` is the previous page's `next`. */
@@ -261,6 +303,11 @@ export const billingApi = {
   getAlerts: () => api.get<Alerts>('/billing/alerts'),
   /** An owner's shares, or null for FF's. */
   setAlerts: (lowBalancePercents: number[] | null) => api.put<Alerts>('/billing/alerts', { lowBalancePercents }),
+  /** An owner asks for a pro-forma: the credit before tax, such as "50.000". */
+  requestProForma: (credit: string) => api.post<ProForma>('/billing/pro-formas', { credit }),
+  /** The account's last 100, newest first. */
+  getProFormas: () => api.get<{ proFormas: ProForma[] }>('/billing/pro-formas'),
+  getProForma: (id: string) => api.get<ProForma>(`/billing/pro-formas/${encodeURIComponent(id)}`),
 };
 
 // Metrics API endpoints

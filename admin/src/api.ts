@@ -3,6 +3,8 @@ import type { ApiAuth } from './auth/oidc';
 import { DEFAULT_API_URL, config } from './config';
 import type { AccountSummary, AccountView, StatusChange } from './lib/accounts';
 import type { OperatorAction } from './lib/audit';
+import type { AdminPayment } from './lib/payments';
+import { REASON_HEADER } from './lib/reason';
 import type { Plan, PlanLimits } from './lib/plans';
 import type { PriceBook, PriceBookPreview, PriceDocument } from './lib/prices';
 import type { PlatformSettings } from './lib/settings';
@@ -103,6 +105,28 @@ export const pricesApi = {
   /** Last month priced with the draft; nothing is saved, so no reason. */
   preview: (document: PriceDocument) => api.post<PriceBookPreview>('/admin/price-books/preview', { document }),
   remove: (id: string, reason: string) => api.delete(`/admin/price-books/${encodeURIComponent(id)}`, { data: { reason } }),
+};
+
+/** A transfer as the bank statement shows it, against its pro-forma's reference (P-35). */
+export interface TransferEntry {
+  reference: string;
+  received: string;
+  withheld: string;
+  /** YYYY-MM-DD, the transfer's date on the statement. */
+  receivedOn: string;
+  bankReference?: string;
+}
+
+/** The payments routes (P-35): every change carries the operator's reason, and answers with the payment. */
+export const paymentsApi = {
+  page: (params: Record<string, string>) => api.get<{ payments: AdminPayment[]; next: string | null }>('/admin/payments', { params }),
+  record: (entry: TransferEntry, reason: string) => api.post<AdminPayment>('/admin/bank-transfers', { ...entry, reason }),
+  /** The file is the body, as is; the reason goes in X-FF-Reason, URI-encoded. */
+  addCertificate: (id: string, file: Blob, reason: string) =>
+    api.put<AdminPayment>(`/admin/payments/${encodeURIComponent(id)}/withholding-certificate`, file, {
+      headers: { 'Content-Type': file.type, [REASON_HEADER]: encodeURIComponent(reason) },
+    }),
+  certificate: (id: string) => api.get<Blob>(`/admin/payments/${encodeURIComponent(id)}/withholding-certificate`, { responseType: 'blob' }),
 };
 
 export const settingsApi = {

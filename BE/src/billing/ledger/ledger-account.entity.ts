@@ -16,6 +16,8 @@ export enum LedgerAccountType {
   PROVIDER_CLEARING = 'provider_clearing',
   /** What the credit FF gives away costs it: promotions and corrections in a customer's favour. */
   PROMOTIONAL_CREDIT = 'promotional_credit',
+  /** Tax a customer withheld at source on a payment (parent §8.5), FF's to claim with the certificate (P-35). */
+  WITHHOLDING_RECEIVABLE = 'withholding_receivable',
 }
 
 /**
@@ -24,7 +26,7 @@ export enum LedgerAccountType {
  * one wallet per customer account and currency.
  */
 @Entity('ledger_accounts')
-@Check(`"type" IN ('wallet', 'revenue', 'vat_payable', 'stamp_duty', 'provider_clearing', 'promotional_credit')`)
+@Check(`"type" IN ('wallet', 'revenue', 'vat_payable', 'stamp_duty', 'provider_clearing', 'promotional_credit', 'withholding_receivable')`)
 @Check(`("type" = 'wallet') = ("account_id" IS NOT NULL)`)
 @Index(['accountId', 'type', 'currency'], { unique: true, where: '"account_id" IS NOT NULL' })
 @Index(['type', 'currency'], { unique: true, where: '"account_id" IS NULL' })

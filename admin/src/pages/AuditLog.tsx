@@ -3,6 +3,7 @@ import { auditApi } from '../api';
 import DataTable, { Column, Filter } from '../components/DataTable';
 import { ErrorState } from '../components/States';
 import { OPERATOR_ACTIONS, OperatorAction, actionLabel, auditCsvName, auditParams, describeAction, exportParams } from '../lib/audit';
+import { saveFile } from '../lib/download';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
 import { TableQuery, currentCursor, firstPage, nextPage, pageNumber, previousPage } from '../lib/table';
 import { whenUtc } from '../lib/time';
@@ -23,16 +24,6 @@ const COLUMNS: Array<Column<OperatorAction>> = [
   { label: 'What', cell: (entry) => describeAction(entry) },
   { label: 'Reason', cell: (entry) => entry.reason ?? '' },
 ];
-
-/** Saves text as a file, from the browser. */
-function download(name: string, text: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = name;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1_000);
-}
 
 /** Every operator action (P-76): who did what, when, on which account, and why. */
 const AuditLog: React.FC<{ email: string | undefined }> = ({ email }) => {
@@ -65,7 +56,7 @@ const AuditLog: React.FC<{ email: string | undefined }> = ({ email }) => {
     setExportNote(null);
     try {
       const { text, truncated } = await auditApi.csv(exportParams(query));
-      download(auditCsvName(new Date()), text);
+      saveFile(auditCsvName(new Date()), new Blob([text], { type: 'text/csv' }));
       if (truncated) setExportNote('The CSV holds the newest 10,000 entries that match: narrow the filters for the others.');
     } catch (error) {
       setExportNote(apiErrorMessage(error));

@@ -65,3 +65,10 @@
     @apply w-full rounded-md border border-gray-300 bg-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500;
   }
 }
+
+/* A printed page (the pro-forma, P-35): the page's margins; the console's header and banners hide with print:hidden. */
+@media print {
+  @page {
+    margin: 16mm;
+  }
+}

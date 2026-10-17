@@ -100,6 +100,21 @@ describe('describeAction', () => {
     expect(describeAction(odd)).toBe('Low-balance e-mails: none → 50');
   });
 
+  it("names a payment's steps by its reference: the transfer, with any share withheld at source, the certificate, the pro-forma (P-35)", () => {
+    const recorded = { reason: 'r', reference: 'FF-7KQ2-9MXA', currency: 'TND', received: '58.608', withheld: '0.892', receivedOn: '2026-10-20', bankReference: null };
+
+    expect(describeAction(entry({ action: 'payment.record', resource: 'payment:1', details: recorded }))).toBe(
+      'FF-7KQ2-9MXA: 58.608 TND received on 2026-10-20, 0.892 TND withheld at source',
+    );
+    expect(describeAction(entry({ action: 'payment.record', details: { ...recorded, received: '59.500', withheld: '0.000' } }))).toBe('FF-7KQ2-9MXA: 59.500 TND received on 2026-10-20');
+    expect(
+      describeAction(entry({ action: 'payment.withholding', details: { reason: 'r', reference: 'FF-7KQ2-9MXA', currency: 'TND', withheld: '0.892', certificate: { type: 'application/pdf', bytes: 9 } } })),
+    ).toBe('FF-7KQ2-9MXA: certificate added, 0.892 TND credited');
+    expect(describeAction(entry({ action: 'billing.pro_forma', details: { reference: 'FF-7KQ2-9MXA', credit: '50.000', total: '59.500', currency: 'TND' } }))).toBe(
+      'FF-7KQ2-9MXA: pro-forma for 50.000 TND of credit, 59.500 TND with VAT',
+    );
+  });
+
   it('else names what the action was on', () => {
     expect(describeAction(entry({ action: 'account.suspend', resource: 'account:000000000001' }))).toBe('account:000000000001');
   });
@@ -108,6 +123,7 @@ describe('describeAction', () => {
 describe('labels and names', () => {
   it('names a known action, and shows an unknown one as the API does', () => {
     expect([actionLabel('settings.update'), actionLabel('account.reopen')]).toEqual(['Settings changed', 'account.reopen']);
+    expect([actionLabel('payment.record'), actionLabel('payment.withholding')]).toEqual(['Bank transfer recorded', 'Withholding certificate added']);
   });
 
   it("names the CSV as the API's Content-Disposition does", () => {

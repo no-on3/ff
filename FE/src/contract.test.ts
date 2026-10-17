@@ -6,11 +6,24 @@ import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
 import invocationSource from '../../BE/src/functions/entities/function-invocation.entity.ts?raw';
 import usageDtoSource from '../../BE/src/usage/usage.dto.ts?raw';
 import billingDtoSource from '../../BE/src/billing/billing.dto.ts?raw';
+import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw';
+import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
+import { CREDIT_LIMITS, VAT_PERCENT } from './lib/billing';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
-import { BALANCE_FIELDS, CREDIT_STATE_FIELDS, INVOCATION_STATUSES, SCOPES, USAGE_AMOUNTS, USAGE_ESTIMATE_FIELDS } from './services/api';
+import {
+  BALANCE_FIELDS,
+  CREDIT_STATE_FIELDS,
+  INVOCATION_STATUSES,
+  PRO_FORMA_FIELDS,
+  PRO_FORMA_PARTY_FIELDS,
+  SCOPES,
+  TRANSFER_FIELDS,
+  USAGE_AMOUNTS,
+  USAGE_ESTIMATE_FIELDS,
+} from './services/api';
 
 // What the console shares with the API and the development realm, read from
 // their files: a console on another port than the realm and the API allow
@@ -120,6 +133,34 @@ describe("the account's balance (P-32)", () => {
     const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
 
     expect(backendFields).toEqual([...CREDIT_STATE_FIELDS]);
+  });
+});
+
+/** The fields of a class in a DTO file, its own only: `  @ApiProperty(...) name:` or `  name:` lines. */
+function dtoFields(source: string, start: string): string[] {
+  const body = source.slice(source.indexOf(start));
+  return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
+}
+
+describe('a pro-forma (P-35)', () => {
+  it("has the API's fields, and its transfer too, so the Billing page and the printed pro-forma read each one there is", () => {
+    expect(dtoFields(paymentsDtoSource, 'export class ProFormaView {')).toEqual([...PRO_FORMA_FIELDS]);
+    expect(dtoFields(paymentsDtoSource, 'export class TransferView {')).toEqual([...TRANSFER_FIELDS]);
+  });
+
+  it("names the buyer, the seller and FF's bank as the API does", () => {
+    const party = dtoFields(paymentsDtoSource, 'export class PartyView {');
+
+    expect(party).toEqual([...PRO_FORMA_PARTY_FIELDS.buyer]);
+    expect(paymentsDtoSource).toContain('export class SellerView extends PartyView {');
+    expect([...party, ...dtoFields(paymentsDtoSource, 'export class SellerView extends PartyView {')]).toEqual([...PRO_FORMA_PARTY_FIELDS.seller]);
+    expect(dtoFields(paymentsDtoSource, 'export class BankView {')).toEqual([...PRO_FORMA_PARTY_FIELDS.bank]);
+  });
+
+  it("quotes the API's VAT and takes the API's credit limits, so the quote is the pro-forma's", () => {
+    expect(/export const VAT_PERCENT = (\d+);/.exec(proFormaSource)?.[1]).toBe(String(VAT_PERCENT));
+    const limits = /export const CREDIT_LIMITS = \{ min: ([\d_]+)n, max: ([\d_]+)n \};/.exec(proFormaSource);
+    expect(limits?.slice(1).map((limit) => Number(limit.replace(/_/g, '')))).toEqual([CREDIT_LIMITS.min, CREDIT_LIMITS.max]);
   });
 });
 

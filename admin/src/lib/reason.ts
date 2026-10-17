@@ -1,3 +1,6 @@
+/** Where a change whose body is a file sends its reason (P-35), URI-encoded: the API reads it there. */
+export const REASON_HEADER = 'X-FF-Reason';
+
 /** The rule the API applies to every admin change's reason (P-70): the audit log keeps it with the change. */
 export const REASON_LENGTH = { min: 3, max: 500 } as const;
 

@@ -42,6 +42,7 @@ const USAGE_RECORDS = migrationNames.find((name) => name.startsWith('UsageRecord
 const PRICE_BOOKS = migrationNames.find((name) => name.startsWith('PriceBooks')) as string;
 const LEDGER = migrationNames.find((name) => name.startsWith('Ledger')) as string;
 const RATING = migrationNames.find((name) => name.startsWith('Rating')) as string;
+const CREDIT_CONTROLS = migrationNames.find((name) => name.startsWith('CreditControls')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -243,6 +244,39 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it('the bank-transfers migration reverts with a pro-forma present, unless a withholding receivable exists, which the ledger keeps (P-35)', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO payments (account_id, method, reference, currency, credit_minor, vat_percent, vat_minor, total_minor, buyer_name, requested_by)
+         VALUES ($1, 'bank_transfer', 'FF-ABCD-EFGH', 'TND', 50000, 19, 9500, 59500, 'A', 'dev')`,
+        [ACCOUNT],
+      );
+      await dataSource.query(`INSERT INTO ledger_accounts (type, currency) VALUES ('withholding_receivable', 'TND')`);
+
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(/violated by some row/);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM payments`)).toEqual([{ n: 1 }]); // nothing undone
+
+      await withScratchDatabase(settings, 'ff_test', async (fresh) => {
+        await fresh.runMigrations({ transaction: 'each' });
+        await fresh.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+        await fresh.query(
+          `INSERT INTO payments (account_id, method, reference, currency, credit_minor, vat_percent, vat_minor, total_minor, buyer_name, requested_by)
+           VALUES ($1, 'bank_transfer', 'FF-ABCD-EFGH', 'TND', 50000, 19, 9500, 59500, 'A', 'dev')`,
+          [ACCOUNT],
+        );
+
+        await migrateDownTo(fresh, CREDIT_CONTROLS);
+
+        expect(await fresh.query(`SELECT to_regclass('payments') AS t`)).toEqual([{ t: null }]);
+        await expect(fresh.query(`INSERT INTO ledger_accounts (type, currency) VALUES ('withholding_receivable', 'TND')`)).rejects.toThrow(/violates check constraint/);
+        await fresh.runMigrations({ transaction: 'each' });
+        expect(await schemaDrift(fresh)).toEqual([]);
+      });
+    });
+  });
+
   it("the credit-controls migration reverts with e-mails sent and an owner's shares, and the ledger stops notifying (P-33)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -354,6 +388,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'low_balance_notices',
         'memberships',
         'migrations',
+        'payments',
         'plans',
         'platform_settings',
         'price_books',
@@ -370,7 +405,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

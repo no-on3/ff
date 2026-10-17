@@ -16,6 +16,8 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'account.close', label: 'Account closed' },
   { value: 'account.plan', label: 'Account moved to a plan' },
   { value: 'account.egress', label: 'Internet egress changed' },
+  { value: 'payment.record', label: 'Bank transfer recorded' },
+  { value: 'payment.withholding', label: 'Withholding certificate added' },
   { value: 'plan.create', label: 'Plan created' },
   { value: 'plan.update', label: 'Plan changed' },
   { value: 'price_book.create', label: 'Price book created' },
@@ -98,6 +100,18 @@ function describeChange(name: string, { from, to }: { from: unknown; to: unknown
   return `${setting.label}: ${value(from)} → ${value(to)}`;
 }
 
+/** A payment's step, by its reference: the pro-forma asked for, the transfer recorded, the certificate added. */
+function describePayment(details: Record<string, unknown>): string {
+  const money = (name: string) => `${shown(details[name])} ${shown(details.currency)}`;
+  const zero = (name: string) => /^0(\.0+)?$/.test(String(details[name]));
+  if (details.received !== undefined) {
+    return `${shown(details.reference)}: ${money('received')} received on ${shown(details.receivedOn)}${zero('withheld') ? '' : `, ${money('withheld')} withheld at source`}`;
+  }
+  if (details.certificate !== undefined) return `${shown(details.reference)}: certificate added, ${money('withheld')} credited`;
+  if (details.total !== undefined) return `${shown(details.reference)}: pro-forma for ${money('credit')} of credit, ${money('total')} with VAT`;
+  return shown(details.reference);
+}
+
 /** What an action did, to read: each change's from → to, else what it was on. */
 export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource'>): string {
   const changes = entry.details?.changes as Record<string, { from: unknown; to: unknown }> | undefined;
@@ -108,6 +122,8 @@ export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource
   }
   // A price book, by when it starts (P-73).
   if (typeof entry.details?.validFrom === 'string') return `Book from ${whenUtc(entry.details.validFrom)}`;
+  // A pro-forma, a transfer or a certificate, by its reference (P-35).
+  if (typeof entry.details?.reference === 'string') return describePayment(entry.details);
   return entry.resource ?? '';
 }
 

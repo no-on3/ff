@@ -34,7 +34,10 @@ export type AuditAction =
   | 'price_book.delete'
   | 'plan.create'
   | 'plan.update'
-  | 'billing.alerts';
+  | 'billing.alerts'
+  | 'billing.pro_forma'
+  | 'payment.record'
+  | 'payment.withholding';
 
 export interface AuditEvent {
   /** null for an action on no account. */

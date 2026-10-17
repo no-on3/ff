@@ -38,6 +38,18 @@ const DEV_CORS_ORIGIN = 'http://localhost:5199';
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
 const DEV_CONSOLE_URL = 'http://localhost:5199';
+/**
+ * Who sells, and where transfers go, as pro-formas say it (P-35). The
+ * development values are no real seller or account (the IBAN is the usual
+ * example of a Tunisian one): production refuses them.
+ */
+export const DEV_SELLER = {
+  FF_SELLER_NAME: 'FF (development, not a seller)',
+  FF_SELLER_TAX_ID: '0000000/A/A/M/000',
+  FF_SELLER_ADDRESS: 'Tunis, Tunisia',
+  FF_BANK_NAME: 'Development bank: no transfer arrives',
+  FF_BANK_IBAN: 'TN59 1000 6035 1835 9847 8831',
+} as const;
 const IN_CLUSTER_SECRETS = '/var/run/secrets/kubernetes.io/serviceaccount';
 
 // ---------- one variable ----------
@@ -171,6 +183,16 @@ const bucketName = {
   expected: 'an S3 bucket name (3 to 63 lowercase letters, digits, "." and "-")',
 };
 const accountId = { test: (v: string) => /^\d{12}$/.test(v), expected: 'an account ID: 12 digits' };
+/** An IBAN: country, check digits and account, its check digits right (ISO 13616). Spaces are allowed. */
+const iban = {
+  test: (v: string) => {
+    const compact = v.replace(/ /g, '');
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(compact)) return false;
+    const digits = [...compact.slice(4) + compact.slice(0, 4)].map((c) => parseInt(c, 36)).join('');
+    return BigInt(digits) % 97n === 1n;
+  },
+  expected: 'an IBAN, such as TN59 1000 6035 1835 9847 8831, its check digits right',
+};
 const smtpUrl = {
   test: (v: string) => isUrl(v, ['smtp:', 'smtps:']),
   expected: 'an smtp:// or smtps:// URL, such as smtp://localhost:51025 (credentials go in it: smtps://user:password@host)',
@@ -239,6 +261,13 @@ const appShape = {
   FF_OPERATOR_EMAIL: optionalText(emailAddress),
   FF_ADMIN_URL: text(DEV_ADMIN_URL, httpUrl),
   FF_CONSOLE_URL: text(DEV_CONSOLE_URL, httpUrl),
+
+  FF_SELLER_NAME: text(DEV_SELLER.FF_SELLER_NAME),
+  FF_SELLER_TAX_ID: text(DEV_SELLER.FF_SELLER_TAX_ID),
+  FF_SELLER_ADDRESS: text(DEV_SELLER.FF_SELLER_ADDRESS),
+  FF_BANK_NAME: text(DEV_SELLER.FF_BANK_NAME),
+  FF_BANK_IBAN: text(DEV_SELLER.FF_BANK_IBAN, iban),
+  FF_BANK_BIC: optionalText(),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -312,6 +341,9 @@ function appRules(env: AppEnv): string[] {
     }
     if (!env.FF_OPERATOR_EMAIL) {
       problems.push('FF_OPERATOR_EMAIL is required when NODE_ENV=production: new accounts wait for your approval there');
+    }
+    for (const name of Object.keys(DEV_SELLER) as Array<keyof typeof DEV_SELLER>) {
+      if (env[name] === DEV_SELLER[name]) problems.push(`${name} must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)`);
     }
   }
   return problems;
@@ -419,6 +451,16 @@ export default function configuration(env: Env = process.env) {
       adminUrl: parsed.FF_ADMIN_URL.replace(/\/$/, ''),
       // The console, which invitation e-mails link to (P-16).
       consoleUrl: parsed.FF_CONSOLE_URL.replace(/\/$/, ''),
+    },
+    // Who sells, and where transfers go, as pro-formas say it (P-35).
+    billing: {
+      seller: { name: parsed.FF_SELLER_NAME, taxId: parsed.FF_SELLER_TAX_ID, address: parsed.FF_SELLER_ADDRESS },
+      bank: {
+        name: parsed.FF_BANK_NAME,
+        // In groups of four, as a person reads and types it.
+        iban: parsed.FF_BANK_IBAN.replace(/ /g, '').replace(/(.{4})/g, '$1 ').trim(),
+        bic: parsed.FF_BANK_BIC ?? null,
+      },
     },
     // Kubernetes driver settings (docs/kubernetes-migration-plan.md §4.5).
     kubernetes: {

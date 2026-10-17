@@ -1,8 +1,21 @@
 import React, { useEffect, useState } from 'react';
-import { balanceLabel, invokesLabel, parsePercents, percentsText, transactionLabel, trialNote } from '../lib/billing';
+import { Link, useNavigate } from 'react-router-dom';
+import {
+  CREDIT_PACKS,
+  VAT_PERCENT,
+  balanceLabel,
+  decimalsOf,
+  invokesLabel,
+  parsePercents,
+  percentsText,
+  proFormaQuote,
+  proFormaState,
+  transactionLabel,
+  trialNote,
+} from '../lib/billing';
 import { apiErrorMessage } from '../lib/functions';
 import { formatMoney } from '../lib/usage';
-import { Alerts, BillingTransaction, billingApi } from '../services/api';
+import { Alerts, BillingTransaction, ProForma, billingApi } from '../services/api';
 import { useSession } from '../session/session';
 import { useBalance } from '../session/balance';
 
@@ -94,10 +107,128 @@ const LowBalanceEmails: React.FC<{ owner: boolean }> = ({ owner }) => {
   );
 };
 
+const OTHER = 'other';
+
 /**
- * The account's money (P-32, P-33): its balance, whether invokes go on, this
- * month's charges, when the owners hear of a low balance, and what moved the
- * balance. Every member reads it.
+ * Adding credit (P-35, D9): an owner asks for a pro-forma for a pack or
+ * another amount, and gets the total to transfer, FF's bank account and the
+ * reference for the transfer's label; every member sees the account's
+ * pro-formas and where each one stands. The currency and its decimals are the
+ * balance's.
+ */
+const AddingCredit: React.FC<{ owner: boolean; currency: string | null; decimals: number | null }> = ({ owner, currency, decimals }) => {
+  const navigate = useNavigate();
+  const [proFormas, setProFormas] = useState<ProForma[] | null>(null);
+  const [choice, setChoice] = useState(CREDIT_PACKS[1]);
+  const [other, setOther] = useState('');
+  const [problem, setProblem] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+
+  useEffect(() => {
+    billingApi
+      .getProFormas()
+      .then(({ data }) => setProFormas(data.proFormas))
+      .catch((failure) => setProblem(apiErrorMessage(failure)));
+  }, []);
+
+  const quote = decimals === null ? null : proFormaQuote(choice === OTHER ? other : choice, decimals);
+  const ask = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!quote || 'problem' in quote) {
+      setProblem(quote ? quote.problem : 'The balance did not load: try again in a moment');
+      return;
+    }
+    setAsking(true);
+    setProblem(null);
+    try {
+      const { data } = await billingApi.requestProForma(quote.credit);
+      navigate(`/billing/pro-formas/${data.id}`);
+    } catch (failure) {
+      setProblem(apiErrorMessage(failure));
+      setAsking(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="card">
+        Credit comes by bank transfer. {owner ? 'Ask' : 'An owner of the account asks'} for a pro-forma: it gives the total to transfer, with {VAT_PERCENT}% VAT on top of the credit, FF's bank
+        account, and a reference to write in the transfer's label. FF adds the credit when the transfer arrives; a share withheld at source is added when FF receives the withholding certificate.
+      </p>
+      {owner && currency && (
+        <form onSubmit={(event) => void ask(event)} className="card space-y-4" aria-label="Ask for a pro-forma">
+          <fieldset className="flex flex-wrap gap-3">
+            <legend className="text-sm text-gray-700 mb-2">Credit, before VAT</legend>
+            {[...CREDIT_PACKS, OTHER].map((option) => (
+              <label key={option} className={`flex items-center gap-2 rounded-md border px-3 py-2 ${choice === option ? 'border-blue-600 bg-blue-50' : 'border-gray-300'}`}>
+                <input type="radio" name="credit" value={option} checked={choice === option} onChange={() => setChoice(option)} />
+                {option === OTHER ? 'Another amount' : formatMoney(option, currency)}
+              </label>
+            ))}
+          </fieldset>
+          {choice === OTHER && (
+            <label className="block text-sm">
+              <span className="block text-gray-700 mb-1">Amount, in {currency}</span>
+              <input aria-label="Amount" value={other} onChange={(event) => setOther(event.target.value)} className="rounded-md border border-gray-300 px-3 py-2 w-48" placeholder="250" inputMode="decimal" />
+            </label>
+          )}
+          {quote && 'credit' in quote && (
+            <p aria-label="Quote" className="tabular-nums">
+              {formatMoney(quote.credit, currency)} of credit + {formatMoney(quote.vat, currency)} VAT ({VAT_PERCENT}%) = <strong>{formatMoney(quote.total, currency)}</strong> to transfer
+            </p>
+          )}
+          <button type="submit" className="btn btn-primary" disabled={asking}>
+            Get the pro-forma
+          </button>
+        </form>
+      )}
+      {problem && (
+        <p role="alert" className="text-red-700">
+          {problem}
+        </p>
+      )}
+      {proFormas && proFormas.length > 0 && (
+        <div className="card overflow-x-auto p-0">
+          <table className="w-full text-left text-sm" aria-label="Pro-formas">
+            <thead className="bg-gray-50 text-gray-600">
+              <tr>
+                <th className="px-4 py-2 font-medium">Reference</th>
+                <th className="px-4 py-2 font-medium">Asked for</th>
+                <th className="px-4 py-2 text-right font-medium">Credit</th>
+                <th className="px-4 py-2 text-right font-medium">To transfer</th>
+                <th className="px-4 py-2 font-medium">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {proFormas.map((proForma) => {
+                const state = proFormaState(proForma);
+                return (
+                  <tr key={proForma.id} className="border-t border-gray-200 align-top">
+                    <td className="px-4 py-2 whitespace-nowrap font-mono">
+                      <Link to={`/billing/pro-formas/${proForma.id}`}>{proForma.reference}</Link>
+                    </td>
+                    <td className="px-4 py-2 whitespace-nowrap">{proForma.createdAt.slice(0, 10)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums whitespace-nowrap">{formatMoney(proForma.credit, proForma.currency)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums whitespace-nowrap">{formatMoney(proForma.total, proForma.currency)}</td>
+                    <td className="px-4 py-2">
+                      {state.label}
+                      {state.note && <div className="text-gray-600">{state.note}</div>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * The account's money (P-32, P-33, P-35): its balance, whether invokes go on,
+ * this month's charges, adding credit, when the owners hear of a low balance,
+ * and what moved the balance. Every member reads it.
  */
 const Billing: React.FC = () => {
   const { account } = useSession();
@@ -140,7 +271,7 @@ const Billing: React.FC = () => {
 
       <section className="space-y-2">
         <h2 className="text-lg font-semibold">Adding credit</h2>
-        <p className="card">Credit comes by bank transfer, against a pro-forma invoice with its payment reference. Until you can ask for one here, FF adds credit for you on request.</p>
+        <AddingCredit owner={account.role === 'owner'} currency={balance?.currency ?? null} decimals={balance ? decimalsOf(balance.balance) : null} />
       </section>
 
       <section className="space-y-2">

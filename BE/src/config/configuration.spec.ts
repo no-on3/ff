@@ -21,6 +21,11 @@ const production: Env = {
   FF_SMTP_URL: 'smtps://ff:mail-secret@mail.ff.example:465',
   FF_OPERATOR_EMAIL: 'ops@ff.example',
   FF_CONSOLE_URL: 'https://console.ff.example',
+  FF_SELLER_NAME: 'FF SARL',
+  FF_SELLER_TAX_ID: '1234567/A/M/000',
+  FF_SELLER_ADDRESS: '1 rue du Lac, 1053 Tunis',
+  FF_BANK_NAME: 'Banque de Tunisie',
+  FF_BANK_IBAN: 'TN5910006035183598478831',
 };
 
 /** The problems a configuration is refused for; fails the test if it is accepted. */
@@ -147,6 +152,8 @@ describe('configuration', () => {
       ['no SMTP server, so no e-mail would leave (P-12)', { FF_SMTP_URL: undefined }, 'FF_SMTP_URL is required when NODE_ENV=production'],
       ['nobody to approve new accounts (P-12)', { FF_OPERATOR_EMAIL: '' }, 'FF_OPERATOR_EMAIL is required when NODE_ENV=production'],
       ['invitations linking to a development console (P-16)', { FF_CONSOLE_URL: undefined }, 'FF_CONSOLE_URL must be set when NODE_ENV=production'],
+      ['pro-formas naming no real seller (P-35)', { FF_SELLER_NAME: undefined }, 'FF_SELLER_NAME must be set when NODE_ENV=production'],
+      ['pro-formas with the example IBAN (P-35)', { FF_BANK_IBAN: 'TN59 1000 6035 1835 9847 8831' }, 'FF_BANK_IBAN must be set when NODE_ENV=production'],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 
@@ -166,6 +173,28 @@ describe('configuration', () => {
       expect(message).toContain('MINIO_SECRET_KEY');
       expect(message).not.toContain('ffdevsecretkey-local-only');
       expect(message).not.toMatch(/"postgres"|: postgres/);
+    });
+  });
+
+  describe('the seller and the bank, for pro-formas (P-35)', () => {
+    it('names a development seller and the example IBAN by default, the IBAN in groups of four', () => {
+      expect(configuration(dev).billing).toEqual({
+        seller: { name: 'FF (development, not a seller)', taxId: '0000000/A/A/M/000', address: 'Tunis, Tunisia' },
+        bank: { name: 'Development bank: no transfer arrives', iban: 'TN59 1000 6035 1835 9847 8831', bic: null },
+      });
+      expect(configuration(production).billing.bank).toEqual({ name: 'Banque de Tunisie', iban: 'TN59 1000 6035 1835 9847 8831', bic: null });
+    });
+
+    it('takes an IBAN only with its check digits right', () => {
+      expect(problems({ ...dev, FF_BANK_IBAN: 'TN59 1000 6035 1835 9847 8832' })).toEqual([
+        'FF_BANK_IBAN must be an IBAN, such as TN59 1000 6035 1835 9847 8831, its check digits right; got "TN59 1000 6035 1835 9847 8832"',
+      ]);
+      expect(problems({ ...dev, FF_BANK_IBAN: '12345' })).toEqual([expect.stringContaining('FF_BANK_IBAN must be an IBAN')]);
+      expect(configuration({ ...dev, FF_BANK_IBAN: 'FR7630006000011234567890189', FF_BANK_BIC: 'AGRIFRPP' }).billing.bank).toEqual({
+        name: 'Development bank: no transfer arrives',
+        iban: 'FR76 3000 6000 0112 3456 7890 189',
+        bic: 'AGRIFRPP',
+      });
     });
   });
 

@@ -47,3 +47,20 @@ export const REASON_LENGTH = { min: 3, max: 500 } as const;
 export function validReason(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length >= REASON_LENGTH.min && value.length <= REASON_LENGTH.max;
 }
+
+/** The header that carries a change's reason when the body is a file, such as a withholding certificate (P-35): URI-encoded. */
+export const REASON_HEADER = 'x-ff-reason';
+
+/** A change's reason: in the JSON body, or with a file for a body, in the X-FF-Reason header. Null when neither has one. */
+export function reasonOf(request: { body?: unknown; headers: Record<string, string | string[] | undefined> }): string | null {
+  const fromBody = Buffer.isBuffer(request.body) ? undefined : (request.body as { reason?: unknown } | undefined)?.reason;
+  if (validReason(fromBody)) return fromBody;
+  const header = request.headers[REASON_HEADER];
+  if (typeof header !== 'string') return null;
+  try {
+    const decoded = decodeURIComponent(header);
+    return validReason(decoded) ? decoded : null;
+  } catch {
+    return null; // not URI-encoded
+  }
+}

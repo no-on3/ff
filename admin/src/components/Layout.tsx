@@ -21,6 +21,9 @@ const Layout: React.FC<{ email: string | undefined; onLogOut: () => void; childr
             <Link to="/accounts" className={linkClass({ isActive: pathname.startsWith('/accounts') && !approvals })}>
               Accounts
             </Link>
+            <NavLink to="/payments" className={linkClass}>
+              Payments
+            </NavLink>
             <NavLink to="/prices" className={linkClass}>
               Prices
             </NavLink>

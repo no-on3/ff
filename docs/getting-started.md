@@ -368,7 +368,7 @@ curl -s "$FF/usage" | jq -c '.functions[] | {functionName, gbSeconds, cost}'
 docker compose exec -T postgres psql -U postgres -d serverless_platform -c "SELECT valid_from, prices->'source'->>'usdRate' AS rate FROM price_books"
 ```
 
-**Credit and the ledger** (P-31, D9). Money lives in a double-entry ledger in PostgreSQL. Each movement is a transaction of entries in whole millimes, each added to an account's balance, and they sum to zero: a top-up of 50.000 TND of credit is +50.000 on the account's wallet, +9.500 of VAT that FF owes, and −59.500 that the payment provider holds for FF. An account's balance is the sum of its wallet's entries, and the admin dashboard's account page shows it; below zero, it is usage the credit didn't cover. Each transaction has an idempotency key (`usage:<account>:<hour>`, a payment's own), so a retry never writes it twice. The database checks each transaction's sum when it commits, and nothing in the ledger is ever changed or deleted: a correction is another transaction. Usage is debited once shadow mode is off (P-32, below); bank transfers come with P-35 and credit grants with the admin dashboard (P-74); Konnect top-ups were skipped (P-34). To read the balances:
+**Credit and the ledger** (P-31, D9). Money lives in a double-entry ledger in PostgreSQL. Each movement is a transaction of entries in whole millimes, each added to an account's balance, and they sum to zero: a top-up of 50.000 TND of credit is +50.000 on the account's wallet, +9.500 of VAT that FF owes, and −59.500 that the payment provider holds for FF. An account's balance is the sum of its wallet's entries, and the admin dashboard's account page shows it; below zero, it is usage the credit didn't cover. Each transaction has an idempotency key (`usage:<account>:<hour>`, a payment's own), so a retry never writes it twice. The database checks each transaction's sum when it commits, and nothing in the ledger is ever changed or deleted: a correction is another transaction. Usage is debited once shadow mode is off (P-32, below); credit comes by bank transfer, recorded by an operator (P-35, below), and from FF with the admin dashboard (P-74); Konnect top-ups were skipped (P-34). To read the balances:
 
 ```bash
 docker compose exec -T postgres psql -U postgres -d serverless_platform -c "
@@ -410,6 +410,18 @@ curl -s -X PUT $FF/billing/alerts -H 'content-type: application/json' -d '{"lowB
 
 Any member reads the shares, and an API key with `usage:read`; only an owner, with a login, changes them, and the account's audit log keeps each change (`billing.alerts`).
 
+**Adding credit by bank transfer** (P-35, D9). Credit comes by bank transfer, against a pro-forma. An owner asks for one on the console's Billing page, for a prepaid pack (20, 50, 100 or 500 TND) or another amount from 10 to 1,000,000 TND, before VAT. The pro-forma gives the credit, 19% VAT on top, the total to transfer, FF's bank account, and a reference such as `FF-7KQ2-9MXA` to write in the transfer's label; its page is in French, and prints, or saves as PDF from the browser's print dialog. Every member sees the account's pro-formas and where each one stands, and so does an API key with `usage:read`. Only an owner, with a login, asks for one, whatever the account's status, since a suspended account may still owe usage. The account's audit log keeps each request (`billing.pro_forma`).
+
+```bash
+curl -s -X POST $FF/billing/pro-formas -H 'content-type: application/json' -d '{"credit": "50"}' | jq -c '{id, reference, credit, vat, total, bank}'
+# {"id":"…","reference":"FF-7KQ2-9MXA","credit":"50.000","vat":"9.500","total":"59.500","bank":{"name":"Development bank: no transfer arrives","iban":"TN59 1000 6035 1835 9847 8831","bic":null}}
+curl -s $FF/billing/pro-formas | jq -c '.proFormas[] | {reference, status, total, transfer}'   # newest first, the last 100
+```
+
+Each pro-forma names FF and its bank from `FF_SELLER_NAME`, `FF_SELLER_TAX_ID`, `FF_SELLER_ADDRESS`, `FF_BANK_NAME`, `FF_BANK_IBAN` (its check digits are verified) and `FF_BANK_BIC` (optional). In development they have defaults that say they are not real; in production the backend refuses to start without them (`BE/.env.example`).
+
+When the transfer shows on FF's bank statement, you record it on the admin dashboard's Payments page (below). The wallet gets the credit at once, less any share the buyer withheld at source, and invokes go on again at once (P-33). The withheld share is credited when you add the buyer's withholding certificate. The owners get an e-mail each time.
+
 **Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known.
 
 **Capacity samples.** Five seconds into every minute, the backend lists FF's Deployments in one Kubernetes call and writes a row to `capacity_samples` for each function with a ready instance: how many, its memory and its `minInstances` (D6 and D8 of the client-readiness plan). A warm instance holds its memory whether or not it runs a call, and these samples show how much. Like usage records, samples are never changed or deleted, and the table has a partition per month. The capacity report weighs, per account and day, the GB-s held for ready instances against the GB-s the usage records bill:
@@ -429,7 +441,7 @@ One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bil
 
 The console keeps its tokens in the tab's session storage, and renews the 5-minute access token with the refresh token before it expires. "Log out" ends the Keycloak session too. When that session ends another way (30 minutes without a renewal, as after the laptop slept, or a logout in another tab), the next call gets 401, and the console asks you to log in again.
 
-**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for approvals and accounts, the operator audit log and the platform's settings, and billing as it lands. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
+**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for approvals and accounts, payments, the operator audit log and the platform's settings, and billing as it lands. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
 
 ```bash
 cd admin && cp .env.example .env.local && npm install && npm run dev
@@ -448,6 +460,23 @@ curl -s -X PUT $FF/admin/settings -H "Authorization: Bearer $OP" -H 'content-typ
 ```
 
 The password grant works only in the development realm, for scripts and tests; production's realm turns it off for `ff-admin` (P-60). **The settings** are values the tasks read: shadow billing, which the hourly rating reads each hour (P-32, above), the negative buffer and grace period (P-33), the low-balance e-mails (P-33), the invoice reminder (P-36) and the large-credit threshold (P-74). Each is its default until changed. Amounts are in TND with three decimals, as strings.
+
+**Payments** (P-35): the dashboard's Payments page lists the pro-formas owners asked for, newest first, with what each one is waiting for. To record a transfer from the bank statement:
+1. Find its pro-forma by the reference in the transfer's label, typed in any case, with or without dashes. You can also filter by status or account.
+2. "Record the transfer": enter what arrived, what the buyer withheld at source (0 for none), the date on the statement and the bank's reference, then a reason. The two amounts must make the pro-forma's total, and the share withheld must be less than the credit. The dialog says what the wallet gets before you confirm.
+3. The wallet gets the credit less the withheld share. This is one ledger transaction, keyed `transfer:<payment>`. For 50.000 TND of credit paid with 0.892 withheld, it is: wallet +49.108, VAT payable +9.500, and the bank's clearing −58.608.
+4. When the buyer sends the withholding certificate (*certificat de retenue à la source*), "Add the certificate" uploads it: a PDF, a PNG or a JPEG, 5 MB at most. It is kept in the S3 bucket under `withholding-certificates/<payment>`, and the withheld share is credited, keyed `withholding:<payment>`: wallet +0.892, withholding-tax receivable −0.892. "Certificate" downloads it again.
+
+A transfer is recorded once, and so is a certificate. The operator audit log keeps each step (`payment.record`, `payment.withholding`), as does the account's own log, as FF's. Sort out partial payments and over-payments with the buyer before you record anything; refunds come with P-74. The account page lists the account's last payments. With the API, the certificate's body is the file itself, so its reason goes in the `X-FF-Reason` header, URI-encoded:
+
+```bash
+curl -s "$FF/admin/payments?reference=ff7kq29mxa" -H "Authorization: Bearer $OP" | jq -c '.payments[] | {id, accountId, status, total}'
+curl -s -X POST $FF/admin/bank-transfers -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"reference": "FF-7KQ2-9MXA", "received": "58.608", "withheld": "0.892", "receivedOn": "2026-10-20", "bankReference": "VIR-0042", "reason": "Statement of 20 October"}'
+curl -s -X PUT $FF/admin/payments/$PAYMENT/withholding-certificate -H "Authorization: Bearer $OP" -H 'content-type: application/pdf' \
+  -H "X-FF-Reason: $(jq -rn '"Certificate from the tax platform" | @uri')" --data-binary @certificate.pdf
+curl -s $FF/admin/payments/$PAYMENT/withholding-certificate -H "Authorization: Bearer $OP" -o certificate.pdf
+```
 
 **The operator audit log** (P-76): the dashboard's "Audit log" page lists what operators did, newest first: when (in UTC), who, the action, the account, what changed, and why. `GET /admin/audit-log` gives the same, 50 entries a page (`limit`, at most 100; pass `next` as `before` for the next page, older), filtered by part of the operator's e-mail in any case (`operator`), the account (`accountId`), the action (`action`) and a time range (`from` included, `to` excluded, ISO 8601). With `Accept: text/csv` it gives the newest 10,000 entries that match, and the header `X-FF-Truncated: true` when more matched: narrow the filters for the rest. Only operators' actions are in it; customers' are in each account's own log, above.
 
@@ -587,7 +616,10 @@ docker compose down -v
 | `migration:run` stops with `Price books must start at a whole hour, UTC, for the hourly rating (P-32)` | A book in your database starts within an hour, which the admin dashboard never makes. Remove it if it hasn't started (`DELETE FROM price_books WHERE id = '…'`); one that has started can't be changed, so ask before going further. |
 | The backend logs `The hourly rating failed: …` every minute, and `GET /billing/balance`'s `ratedUntil` stops moving | The rating stops at the hour it can't finish, so that no hour is skipped: the message names the problem, such as a database that can't be reached. Fix it; the next turn rates the hour, then every hour after it, and charges each account once. |
 | `npm run billing:reconcile` marks an account `DIFFERENT` | Usage reached the database after its hour was rated, and no charge includes it. Compare the account's usage records with `usage_hourly` for the month's hours to find the late ones, and keep shadow mode on until the cause is fixed. |
-| 402 `InsufficientCreditException: Invokes stopped at …` | The account's balance has been below the negative buffer for the grace period (P-33). Add credit; invokes go on at once. Bank transfers (P-35) and credit from FF (P-74) come to the admin dashboard; shadow mode, in its Settings, also lets every invoke through. |
+| 402 `InsufficientCreditException: Invokes stopped at …` | The account's balance has been below the negative buffer for the grace period (P-33). Add credit; invokes go on at once. An owner asks for a pro-forma on the console's Billing page and transfers its total, and you record the transfer on the admin dashboard's Payments page (P-35); credit from FF comes with P-74. Shadow mode, in its Settings, also lets every invoke through. |
+| The backend won't start: `FF_SELLER_NAME must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)` | In production, set `FF_SELLER_NAME`, `FF_SELLER_TAX_ID`, `FF_SELLER_ADDRESS`, `FF_BANK_NAME` and `FF_BANK_IBAN`: each pro-forma prints them. The development defaults say they are not real, so production refuses them. |
+| 400 `received … and withheld … make …, not the pro-forma's …` when recording a transfer | What arrived and what was withheld at source must add up to the pro-forma's total. A partial payment or an over-payment isn't recorded: sort it out with the buyer first. |
+| 409 `The transfer for FF-… was recorded on …` | The transfer was already recorded: each pro-forma takes one. The Payments page shows it, with what it credited. |
 | The backend logs `Not listening to the ledger: …. Again in 5 s` | Its connection for the ledger's NOTIFY broke, and it opens another. Meanwhile, a cached balance can be a minute old at most. If it repeats, check the database. |
 | `ledger_entries is append-only: UPDATE refused` (or `DELETE`, `TRUNCATE`; the same for `ledger_transactions` and `ledger_accounts`) | The ledger is never changed. Post a correcting transaction instead: the movement the other way. |
 | 409 `The ledger key … was posted before, with other entries` | A movement reused another's idempotency key: the first stands, and nothing was written. A retry must post the same entries. |

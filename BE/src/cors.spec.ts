@@ -53,6 +53,12 @@ describe('CORS for the console (L1, P-14)', () => {
     expect(allowed).toEqual(expect.arrayContaining(['authorization', 'content-type', 'x-ff-account']));
   });
 
+  it("lets the admin dashboard send a file's reason in X-FF-Reason (P-35)", async () => {
+    const res = await preflight(CONSOLE, 'authorization,content-type,x-ff-reason');
+
+    expect(res.headers.get('access-control-allow-headers')?.toLowerCase().split(',')).toContain('x-ff-reason');
+  });
+
   it("lets the console read each answer's request ID, the one to quote when asking for help", async () => {
     const res = await fetch(`${baseUrl}/probe`, { headers: { origin: CONSOLE } });
 

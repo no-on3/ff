@@ -32,6 +32,9 @@ import { PlansService } from './plans/plans.service';
 import { PricingService } from './billing/pricing.service';
 import { BillingController } from './billing/billing.controller';
 import { BillingService } from './billing/billing.service';
+import { ProFormasController } from './billing/payments/pro-formas.controller';
+import { PaymentsService } from './billing/payments/payments.service';
+import { AdminPaymentsController } from './admin/admin-payments.controller';
 import { UsageService } from './usage/usage.service';
 
 const ACCOUNT = '000000000001';
@@ -64,6 +67,8 @@ describe('the OpenAPI document (L1, P-08)', () => {
         AdminPlansController,
         AdminPricesController,
         BillingController,
+        ProFormasController,
+        AdminPaymentsController,
       ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
@@ -84,6 +89,10 @@ describe('the OpenAPI document (L1, P-08)', () => {
         { provide: PlansService, useValue: succeeding(PlansService, { list: async () => [] }) },
         { provide: AdminPricesService, useValue: succeeding(AdminPricesService, { list: async () => [] }) },
         { provide: BillingService, useValue: succeeding(BillingService) },
+        {
+          provide: PaymentsService,
+          useValue: succeeding(PaymentsService, { certificate: async () => ({ body: Buffer.from('%PDF-1.4'), contentType: 'application/pdf', reference: 'FF-ABCD-EFGH' }) }),
+        },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -120,7 +129,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /admin/bank-transfers', 'PUT /admin/payments/{id}/withholding-certificate']));
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
   });
 

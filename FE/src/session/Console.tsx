@@ -13,6 +13,7 @@ import Members from '../components/Members';
 import NavBar from '../components/NavBar';
 import Onboarding from '../components/Onboarding';
 import PendingApproval from '../components/PendingApproval';
+import ProFormaPage from '../components/ProForma';
 import Usage from '../components/Usage';
 import { config } from '../config';
 import { accountView, chooseAccount, loadErrorMessage, rememberAccount, rememberedAccount } from '../lib/session';
@@ -28,12 +29,12 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
   return (
     <>
       {banner && (
-        <div role="status" className="bg-amber-50 border-b border-amber-200 text-amber-900">
+        <div role="status" className="bg-amber-50 border-b border-amber-200 text-amber-900 print:hidden">
           <div className="container mx-auto px-4 py-2">{banner}</div>
         </div>
       )}
       <CreditBanner />
-      <main className="py-6">
+      <main className="py-6 print:py-0">
         <Routes>
           <Route path="/accounts/new" element={<Onboarding />} />
           <Route path="/account" element={account ? <AccountSettings /> : <Navigate to="/" replace />} />
@@ -47,6 +48,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
               <Route path="/functions/:id" element={<FunctionDetail />} />
               <Route path="/usage" element={<Usage />} />
               <Route path="/billing" element={<Billing />} />
+              <Route path="/billing/pro-formas/:id" element={<ProFormaPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </>
           ) : (
@@ -121,7 +123,7 @@ const Console: React.FC<{ login: Login | null }> = ({ login }) => {
     <SessionContext.Provider value={session}>
       <BrowserRouter>
         <BalanceProvider>
-          <div className="min-h-screen bg-gray-50">
+          <div className="min-h-screen bg-gray-50 print:bg-white">
             <NavBar />
             <AccountRoutes account={session.account} />
           </div>

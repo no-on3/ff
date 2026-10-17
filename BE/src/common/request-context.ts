@@ -50,6 +50,11 @@ export function currentRequest(): RequestContext | undefined {
   return storage.getStore();
 }
 
+/** Runs `work` as part of a request with this context, as the interceptor does: for tests, and work done for someone. */
+export function withRequestContext<T>(context: RequestContext, work: () => T): T {
+  return storage.run(context, work);
+}
+
 /** The caller of a request, as the audit log names them: an operator, an API key, a user, or development mode. */
 export function actorOf(request: WithCaller): Actor | undefined {
   const { principal, user, operator } = request;

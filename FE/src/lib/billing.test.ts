@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import type { Balance } from '../services/api';
-import { balanceLabel, creditBanner, invokesLabel, parsePercents, percentsText, transactionLabel, trialNote } from './billing';
+import type { Balance, ProForma } from '../services/api';
+import {
+  CREDIT_PACKS,
+  balanceLabel,
+  creditBanner,
+  decimalsOf,
+  frenchDate,
+  frenchMoney,
+  invokesLabel,
+  parsePercents,
+  percentsText,
+  proFormaQuote,
+  proFormaState,
+  transactionLabel,
+  trialNote,
+} from './billing';
 
 const BALANCE: Balance = {
   currency: 'TND',
@@ -83,5 +97,92 @@ describe('the balance check, as the console tells it (P-33)', () => {
     expect(parsePercents('12.5')).toEqual({ problem: 'Each share is a whole percent from 0 to 100, such as 50, 20, 0' });
     expect(parsePercents('90, 70, 50, 30, 10, 0')).toEqual({ problem: 'Five shares at most' });
     expect(percentsText([50, 20, 0])).toBe('50, 20, 0');
+  });
+});
+
+const PRO_FORMA: ProForma = {
+  id: '7d0b8a3e-9a51-4c7e-8d5f-1b2c3d4e5f60',
+  reference: 'FF-7KQ2-9MXA',
+  status: 'pending',
+  currency: 'TND',
+  credit: '50.000',
+  vatPercent: 19,
+  vat: '9.500',
+  total: '59.500',
+  createdAt: '2026-10-17T09:30:00.000Z',
+  buyer: { name: 'Tunis Labs', taxId: '1234567/A/B/M/000' },
+  seller: { name: 'FF', taxId: '0000000/A/A/M/000', address: 'Tunis, Tunisia' },
+  bank: { name: 'A bank', iban: 'TN59 1000 6035 1835 9847 8831', bic: null },
+  transfer: null,
+};
+const PAID = { received: '58.608', withheld: '0.892', receivedOn: '2026-10-20', recordedAt: '2026-10-21T08:00:00.000Z', credited: '49.108', withheldCreditedAt: null };
+
+describe('asking for a pro-forma (P-35)', () => {
+  it("quotes a pack as the API will write it: the credit, D9's 19% VAT on top, and the total to transfer", () => {
+    expect(CREDIT_PACKS.map((pack) => proFormaQuote(pack, 3))).toEqual([
+      { credit: '20.000', vat: '3.800', total: '23.800' },
+      { credit: '50.000', vat: '9.500', total: '59.500' },
+      { credit: '100.000', vat: '19.000', total: '119.000' },
+      { credit: '500.000', vat: '95.000', total: '595.000' },
+    ]);
+  });
+
+  it('rounds the VAT once to the millime, half up, as the API does (pro-forma.spec.ts has the same amounts)', () => {
+    expect(proFormaQuote('50.001', 3)).toEqual({ credit: '50.001', vat: '9.500', total: '59.501' }); // 9500.19
+    expect(proFormaQuote('50.003', 3)).toEqual({ credit: '50.003', vat: '9.501', total: '59.504' }); // 9500.57
+    expect(proFormaQuote('10.050', 3)).toEqual({ credit: '10.050', vat: '1.910', total: '11.960' }); // 1909.5
+    expect(proFormaQuote(' 12.5 ', 3)).toEqual({ credit: '12.500', vat: '2.375', total: '14.875' });
+    expect(proFormaQuote('50', 0)).toEqual({ credit: '50', vat: '10', total: '60' }); // 9.5, in a currency without decimals
+  });
+
+  it("refuses what the API would, from 10 to 1,000,000 of credit, with the currency's decimals at most", () => {
+    expect(proFormaQuote('10', 3)).toEqual({ credit: '10.000', vat: '1.900', total: '11.900' });
+    expect(proFormaQuote('1000000', 3)).toEqual({ credit: '1000000.000', vat: '190000.000', total: '1190000.000' });
+    for (const amount of ['9.999', '1000000.001', '0']) expect(proFormaQuote(amount, 3)).toEqual({ problem: 'The credit is from 10 to 1,000,000' });
+    for (const amount of ['fifty', '-50', '50,000', '50.', '', '1e3']) expect(proFormaQuote(amount, 3)).toEqual({ problem: 'The credit is an amount, such as 50 or 50.500' });
+    expect(proFormaQuote('50.0001', 3)).toEqual({ problem: 'The credit has at most 3 decimals' });
+    expect(proFormaQuote('50.5', 0)).toEqual({ problem: 'The credit is a whole amount' });
+  });
+
+  it("reads the currency's decimals from an amount the API wrote", () => {
+    expect([decimalsOf('12.500'), decimalsOf('-0.250'), decimalsOf('7')]).toEqual([3, 3, 0]);
+  });
+});
+
+describe("a pro-forma's state (P-35)", () => {
+  it('waits for the transfer, then says when it came and the credit it added', () => {
+    expect(proFormaState(PRO_FORMA)).toEqual({ label: 'Waiting for the transfer', note: null });
+    expect(proFormaState({ ...PRO_FORMA, status: 'paid', transfer: { ...PAID, received: '59.500', withheld: '0.000', credited: '50.000' } })).toEqual({
+      label: 'Paid on 20 Oct 2026: 50.000 TND credited',
+      note: null,
+    });
+  });
+
+  it('names the share withheld at source, until the certificate credits it, and after', () => {
+    const paid = { ...PRO_FORMA, status: 'paid' as const, transfer: PAID };
+
+    expect(proFormaState(paid)).toEqual({
+      label: 'Paid on 20 Oct 2026: 49.108 TND credited',
+      note: '0.892 TND withheld at source: credited when FF receives the withholding certificate',
+    });
+    expect(proFormaState({ ...paid, transfer: { ...PAID, withheldCreditedAt: '2026-10-23T14:00:00.000Z' } }).note).toBe(
+      '0.892 TND withheld at source, credited on 23 Oct 2026 with the certificate',
+    );
+  });
+});
+
+describe('the printed pro-forma, in French (P-35)', () => {
+  it('writes amounts the French way: a decimal comma, thousands apart with a narrow space, the currency after a fixed space', () => {
+    expect(frenchMoney('59.500', 'TND')).toBe('59,500\u00a0TND');
+    expect(frenchMoney('1190000.000', 'TND')).toBe('1\u202f190\u202f000,000\u00a0TND');
+    expect(frenchMoney('1000', 'XOF')).toBe('1\u202f000\u00a0XOF');
+    expect(frenchMoney('-0.250', 'TND')).toBe('-0,250\u00a0TND');
+  });
+
+  it('writes dates the French way, in UTC, the first of the month as 1er', () => {
+    expect(frenchDate('2026-10-17T09:30:00.000Z')).toBe('17 octobre 2026');
+    expect(frenchDate('2026-08-01T00:00:00.000Z')).toBe('1er août 2026');
+    expect(frenchDate('2026-12-31T23:59:59.000Z')).toBe('31 décembre 2026');
+    expect(frenchDate('2026-02-01')).toBe('1er février 2026');
   });
 });

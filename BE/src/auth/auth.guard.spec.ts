@@ -7,6 +7,7 @@ import { Body, Controller, ForbiddenException, Get, INestApplication, Logger, Po
 import { ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
+import { raw } from 'express';
 import { exportJWK, generateKeyPair, JWK, JWTPayload, SignJWT } from 'jose';
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
@@ -192,6 +193,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
       ],
     }).compile();
     const started = moduleRef.createNestApplication({ logger: false });
+    started.use(raw({ type: 'application/pdf' })); // a file for a body, as the admin module reads a certificate (P-35)
     await started.listen(0, '127.0.0.1');
     return started;
   }
@@ -333,6 +335,30 @@ describe('the global guard and token checks (L1, P-11)', () => {
 
       const res = await admin(OPERATOR, 'PUT', { reason: 'Pilot customers asked for it' });
       expect([res.status, await res.json()]).toEqual([200, { changedBy: 'kc-user-1', reason: 'Pilot customers asked for it' }]);
+    });
+
+    it("take a file's reason from the X-FF-Reason header, URI-encoded, when the body is the file (P-35)", async () => {
+      const withHeader = async (reason: string) =>
+        fetch(`${baseUrl}/admin/settings`, {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${await token(OPERATOR)}`, 'content-type': 'application/json', 'x-ff-reason': reason },
+          body: '{}',
+        });
+
+      expect((await withHeader(encodeURIComponent('Certificat reçu par e-mail'))).status).toBe(200);
+      const missing = 'Every admin change needs a reason: send reason, 3 to 500 characters, in the body';
+      expect(await refusal(await withHeader('%E0%A4%A'))).toEqual([400, missing]); // not URI-encoded
+      expect(await refusal(await withHeader('ok'))).toEqual([400, missing]);
+
+      // The body a file: the refusal says where its reason goes.
+      const file = async (headers: Record<string, string>) =>
+        fetch(`${baseUrl}/admin/settings`, {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${await token(OPERATOR)}`, 'content-type': 'application/pdf', ...headers },
+          body: Buffer.from('%PDF-1.4\n{"reason": "In the file, which is not JSON"}'),
+        });
+      expect(await refusal(await file({}))).toEqual([400, 'Every admin change needs a reason: send reason, 3 to 500 characters, in the X-FF-Reason header, URI-encoded: the body is the file']);
+      expect((await file({ 'x-ff-reason': 'Certificate%20from%20the%20tax%20platform' })).status).toBe(200);
     });
 
     it('take no reason for a route that changes nothing, such as a preview: still for operators only (P-73)', async () => {

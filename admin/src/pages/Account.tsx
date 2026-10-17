@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { AccountAuditEntry, accountsApi, plansApi } from '../api';
+import { AccountAuditEntry, accountsApi, paymentsApi, plansApi } from '../api';
 import DataTable, { Column } from '../components/DataTable';
 import ReasonDialog from '../components/ReasonDialog';
 import { EmptyState, ErrorState, Loading } from '../components/States';
@@ -9,6 +9,7 @@ import { AccountView, PlanOption, STATUS_CHANGES, StatusChange, changedNotice, c
 import { actionLabel, describeAction } from '../lib/audit';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
 import { balanceNote, formatMoney } from '../lib/money';
+import { AdminPayment, paymentState } from '../lib/payments';
 import { currentCursor, firstPage, nextPage, pageNumber, previousPage } from '../lib/table';
 import { whenUtc } from '../lib/time';
 
@@ -57,10 +58,50 @@ const Table: React.FC<{ head: string[]; rows: React.ReactNode[][] }> = ({ head, 
   </div>
 );
 
+/** The account's last payments (P-35), with a link to the Payments page, where transfers are recorded. */
+const AccountPayments: React.FC<{ accountId: string }> = ({ accountId }) => {
+  const [payments, setPayments] = useState<{ rows: AdminPayment[]; more: boolean } | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  useEffect(() => {
+    paymentsApi.page({ accountId, limit: '5' }).then(
+      ({ data }) => setPayments({ rows: data.payments, more: data.next !== null }),
+      (error) => setFailure(apiErrorMessage(error)),
+    );
+  }, [accountId]);
+
+  if (failure) return <ErrorState message={failure} />;
+  if (!payments) return <Loading />;
+  if (payments.rows.length === 0) return <EmptyState>No pro-forma asked for yet.</EmptyState>;
+  return (
+    <>
+      <Table
+        head={['Reference', 'Asked for', 'To transfer', 'State']}
+        rows={payments.rows.map((payment) => {
+          const state = paymentState(payment);
+          return [
+            <span key="reference" className="whitespace-nowrap font-mono">
+              {payment.reference}
+            </span>,
+            whenUtc(payment.createdAt),
+            <span key="total" className="whitespace-nowrap">
+              {formatMoney(payment.total, payment.currency)}
+            </span>,
+            state.note ? `${state.label}; ${state.note}` : state.label,
+          ];
+        })}
+      />
+      <Link to={`/payments?accountId=${accountId}`} className="text-sm text-blue-700 hover:underline">
+        {payments.more ? 'All its payments' : 'On the Payments page'}, to record a transfer or add a certificate →
+      </Link>
+    </>
+  );
+};
+
 /**
  * One account (P-71): what sign-up collected, its people, functions, this
- * month's usage and its history, and the operator's changes, each with a
- * reason that goes to the account's audit log.
+ * month's usage, its balance and payments, and its history, and the
+ * operator's changes, each with a reason that goes to the account's audit log.
  */
 const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
   const { id } = useParams();
@@ -301,6 +342,11 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
             ))}
           </dl>
         )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Payments</h2>
+        <AccountPayments key={changes} accountId={account.id} />
       </section>
 
       <section className="space-y-3">
