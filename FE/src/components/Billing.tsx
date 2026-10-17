@@ -140,7 +140,7 @@ const Billing: React.FC = () => {
 
       <section className="space-y-2">
         <h2 className="text-lg font-semibold">Adding credit</h2>
-        <p className="card">Top-ups by card and bank transfer come with the next release. Until then, FF adds credit for you on request.</p>
+        <p className="card">Credit comes by bank transfer, against a pro-forma invoice with its payment reference. Until you can ask for one here, FF adds credit for you on request.</p>
       </section>
 
       <section className="space-y-2">
