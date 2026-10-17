@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parentPort, workerData } from 'node:worker_threads';
+import { END_OF_CALL } from './protocol';
 import type { FunctionError, InvokeMessage, WorkerConfig, WorkerMessage } from './protocol';
 import { registerTypeScript } from './ts-hook';
 
@@ -15,6 +16,10 @@ type Handler = (event: unknown, context: unknown) => unknown;
 const config = workerData as WorkerConfig;
 const port = parentPort!;
 const send = (message: WorkerMessage) => port.postMessage(message);
+// The end-of-call markers go through the streams' own write, taken before user code loads: code that
+// replaces process.stdout.write, to add a prefix for example, would otherwise change or keep them.
+const writeStdout = process.stdout.write.bind(process.stdout);
+const writeStderr = process.stderr.write.bind(process.stderr);
 
 class InitError extends Error {
   constructor(
@@ -103,6 +108,15 @@ try {
 
 port.on('message', async (message: InvokeMessage) => {
   if (message.type !== 'invoke' || !handler) return;
+  const result = await run(handler, message);
+  // The call's output ends here, on both streams, ahead of its result: main.ts prints END after both markers.
+  writeStdout(`${END_OF_CALL}${message.id}\n`);
+  writeStderr(`${END_OF_CALL}${message.id}\n`);
+  send(result);
+});
+
+/** Runs the handler once: the result message, the handler's value as JSON, or its error. */
+async function run(handler: Handler, message: InvokeMessage): Promise<WorkerMessage> {
   const context = {
     functionName: config.functionName,
     functionVersion: config.functionVersion,
@@ -118,16 +132,12 @@ port.on('message', async (message: InvokeMessage) => {
   } catch (err) {
     const error = toError(err);
     const failure: FunctionError = { errorType: error.name || 'Error', errorMessage: error.message };
-    send({ type: 'result', id: message.id, ok: false, ...failure, stackTrace: userFrames(error) });
-    return;
+    return { type: 'result', id: message.id, ok: false, ...failure, stackTrace: userFrames(error) };
   }
-  let body: string;
   try {
-    body = marshal(value);
+    return { type: 'result', id: message.id, ok: true, body: marshal(value) };
   } catch (err) {
     const errorMessage = `Unable to marshal response: ${toError(err).message}`;
-    send({ type: 'result', id: message.id, ok: false, errorType: 'Runtime.MarshalError', errorMessage });
-    return;
+    return { type: 'result', id: message.id, ok: false, errorType: 'Runtime.MarshalError', errorMessage };
   }
-  send({ type: 'result', id: message.id, ok: true, body });
-});
+}

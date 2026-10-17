@@ -65,7 +65,7 @@ Each measurement is the last of several runs: the earlier ones found the five th
 1. **Vector falls behind on a burst.** It holds the burst's lines for 8 to 30 s before they reach the store, while using 25 times Fluent Bit's memory. Fluent Bit had them stored within 8 s.
 2. **A rate limit by the time of processing drops a backlog.** Vector's `throttle` transform counts the lines it processes in each second. So does a Lua filter counting by the wall clock. When a collector restarts, or catches up, it reads minutes of lines in seconds: one namespace's budget is used up at once, and normal lines are dropped. The spike first hit this when Fluent Bit read the previous phase's 20,000-line burst again. Both collectors now count each namespace's lines per second of the lines' own time, in Lua: a backlog keeps each of its seconds' budgets.
 3. **Long lines need a setting in Vector.** Containers write a line over 16 KiB in parts, and both collectors merge them. Vector then drops a merged line over 32 KiB unless told to cut it. Fluent Bit merged the 100,000-character line, and the Lua filter cut it.
-4. **Node.js user lines come after their call's `END`.** The Node.js runtime runs the handler in a worker thread, whose output reaches the process's stdout asynchronously. The main thread prints `END` and `REPORT` as soon as the result arrives. Every call's last `console.log` line landed after `END`, so a tag running from `START` to `REPORT` misses it. Python's lines are written in order (`PYTHONUNBUFFERED`), and all of them were tagged. P-40's endpoint tags lines the same way, so it has the same gap.
+4. **Node.js user lines come after their call's `END`.** The Node.js runtime runs the handler in a worker thread, whose output reaches the process's stdout asynchronously. The main thread prints `END` and `REPORT` as soon as the result arrives. Every call's last `console.log` line landed after `END`, so a tag running from `START` to `REPORT` misses it. Python's lines are written in order (`PYTHONUNBUFFERED`), and all of them were tagged. P-40's endpoint tags lines the same way, so it has the same gap. **Fixed first in P-42:** run again with the fixed runtime, the Fluent Bit phase tagged all 10 Node.js calls whole, and no user line came after its `END`.
 5. **VictoriaLogs reads a JSON line body only with a JSON content type.** With curl's default form type, it reads no line and still answers 200. The collectors send the right type; FF's own writes, if any, must too.
 
 ## Decision
@@ -104,7 +104,7 @@ Each measurement is the last of several runs: the earlier ones found the five th
 
 ## Consequences
 - **P-42:**
-  - the Node.js runtime's ordering change, with a test that checks a call's last line comes before its `END`;
+  - the Node.js runtime's ordering change, with a test that checks a call's last line comes before its `END` (done first);
   - the manifests in `deploy/k8s/logging/`: VictoriaLogs as a StatefulSet with a volume, Fluent Bit as a DaemonSet with read-only access to pods' and namespaces' metadata, and the NetworkPolicies;
   - the limit's production figure, the line counting what was dropped, and the cut on a character boundary;
   - L3 tests: a `print` arrives with its function ID and request ID, and a namespace printing in a loop is limited without affecting another.

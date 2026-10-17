@@ -3,6 +3,15 @@
  * hosts user code (worker.ts). Runtime protocol v2.
  */
 
+/**
+ * What the worker writes to its stdout and to its stderr once a call has
+ * settled, before it posts the result. The main thread forwards the worker's
+ * output itself, takes the markers out, and prints END only after both, so a
+ * call's output always comes before its END in the log (client-readiness
+ * plan, P-42; ADR 0005): the log store tags a call's lines from START to REPORT.
+ */
+export const END_OF_CALL = '\u0000ff-end-of-call:';
+
 /** The event passed to handlers. Unchanged from the original FF wrapper. */
 export interface FunctionEvent {
   body: unknown;

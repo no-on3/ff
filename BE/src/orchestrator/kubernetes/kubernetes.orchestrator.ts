@@ -320,7 +320,8 @@ export class KubernetesOrchestrator implements Orchestrator {
     const body = JSON.stringify(payload);
     // The runtime logs the call under this ID, and answers with it (D6).
     const headers: Record<string, string> = requestId ? { [REQUEST_ID_HEADER]: requestId } : {};
-    // A call may wait for a free instance (the runtime then answers 429), then runs up to its timeout.
+    // A call may wait for a free instance (the runtime then answers 429), then runs up to its timeout. The
+    // 2 s past that include the second the Node.js runtime may wait for the call's output (OUTPUT_WAIT_MS).
     const timeoutMs = maxQueueWaitMs(fn) + fn.timeout * 1000 + 2000;
     if (this.settings.invokeMode === 'proxy') {
       try {

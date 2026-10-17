@@ -17,6 +17,7 @@ main thread (main.ts)                        worker thread (worker.ts)
  HTTP :8080  /healthz /readyz /invoke ──────▶ loads /var/task/function.(ts|js|cjs) once
  queue: one invocation at a time               runs handler(event, context)
  timer per invocation ── timeout/OOM/crash ──▶ terminate + start a fresh worker
+ forwards output (relay.ts); END last ◀────── stdout, stderr; marks each call's end
 ```
 
 User code never runs on the main thread. A CPU-bound infinite loop, a memory blow-up, or `process.exit()` only kills the worker: the main thread answers probes, reports a Lambda-style error, and starts a new worker. This fixes findings H-8 and H-9 of the review (environment dump, no timeout).
@@ -91,7 +92,7 @@ At 0.1 CPU, V8's last collections before it gives up can take several seconds, s
 
 ## Logs
 
-The user's `console.*` output goes to stdout unchanged. Each invocation adds Lambda-format lines:
+The user's `console.*` output goes to stdout, or stderr for `console.error` and `console.warn`, unchanged. Each invocation adds Lambda-format lines:
 
 ```
 START RequestId: <id> Version: $LATEST
@@ -109,9 +110,18 @@ An error thrown by the handler is also logged, before `END`, as one JSON line, t
 
 The stack trace points at the lines of the TypeScript source (source maps are on), and leaves out the runtime's own frames and Node's internals. Platform events (start, initialization, timeouts, restarts) are one-line JSON too. **Environment variables are never logged.**
 
+**A call's output comes before its `END`.** The log collector gives each line the request ID of the call between its pod's `START` and `REPORT` lines ([ADR 0005](../../docs/adr/0005-log-pipeline.md)), and so does `GET /functions/:id/logs`, so a line written after `END` would have none. A worker thread's output reaches the process asynchronously, so the main thread forwards it itself:
+- **The end of a call's output is marked.** When the handler settles, the worker writes an end-of-call marker to its stdout and to its stderr, through the streams' own `write`, so code that replaced `process.stdout.write` changes nothing. The main thread takes the markers out of what it forwards. It writes `END` and `REPORT` once both markers have come, and only then answers the call and starts the next one.
+- **It waits a second at most.** Work the handler left running can block the worker after the call, and hold the markers up. The call then ends after a second, and the rest of its output comes after its `END`. `Duration` stops when the handler settles, so the wait is never billed, and the backend's deadline leaves 2 s for it past the queue wait and the timeout.
+- **Lines written after the handler settles,** by a timer or a promise it left running, come after `END`, as on Lambda. They have no request ID, or the next call's.
+- **A line left open,** by `process.stdout.write` without a newline, is ended before the runtime's next line, so that `START`, `END`, `REPORT` and the JSON lines always start a line.
+- **A worker that dies after its handler returned,** because work left running filled the heap or exited, doesn't fail that call: it keeps its answer, and the crash is logged after its `REPORT`, without a request ID. The next call gets a fresh worker.
+
+The Python runtime needs none of this: its worker is a process that writes to the same stdout and stderr, unbuffered (`PYTHONUNBUFFERED`), before it sends its result.
+
 ## What changed in v2
 
-Protocol v2 (2026-10-17, client-readiness plan P-04) keeps v1's HTTP interface, so the backend works with both. A function moves to v2 at its next update. What changed:
+Protocol v2 (2026-10-17, client-readiness plan P-04; the order of the logs, P-42) keeps v1's HTTP interface, so the backend works with both. A function moves to v2 at its next update. What changed:
 
 | | v1 | v2 |
 |---|---|---|
@@ -122,12 +132,13 @@ Protocol v2 (2026-10-17, client-readiness plan P-04) keeps v1's HTTP interface, 
 | Callback handlers | loaded, then failed with `TypeError` | refused at load: `Runtime.CallbackHandlerDeprecated` |
 | A reload that fails after a crash | pod unready for good | the runtime exits, and Kubernetes restarts it |
 | A call waiting for its turn | waited as long as the queue took | waits at most `FF_MAX_QUEUE_WAIT_MS`, one timeout by default, then gets 429 |
+| A call's output | could reach the log after its `END`: the worker's last `console.log` line did for every call measured in P-41 | before its `END`, which waits a second at most for it (see [Logs](#logs)) |
 
 ## Developing and testing
 
 ```bash
 cd runtimes/nodejs
 npm install
-npm test                       # L1: 31 protocol tests on real processes, ~10 s, no Docker
+npm test                       # L1: 36 protocol tests on real processes and 4 for the output relay, ~20 s, no Docker
 test/container-smoke.sh        # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```

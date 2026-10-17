@@ -25,8 +25,14 @@ async function freePort() {
   return port;
 }
 
-async function startRuntime(fixture, env = {}) {
+/**
+ * Starts the runtime on a fixture. With `oneFile`, its stdout and stderr are one file, as `2>&1` would make
+ * them: the lines keep the order in which the runtime wrote them, across the two streams.
+ */
+async function startRuntime(fixture, env = {}, { oneFile = false } = {}) {
   const port = await freePort();
+  const dir = oneFile ? fs.mkdtempSync(path.join(os.tmpdir(), 'ff-runtime-test-')) : undefined;
+  const fd = dir ? fs.openSync(path.join(dir, 'output.log'), 'w') : undefined;
   const proc = spawn(process.execPath, [path.join(root, 'dist/main.js')], {
     env: {
       PATH: process.env.PATH,
@@ -37,16 +43,23 @@ async function startRuntime(fixture, env = {}) {
       FUNCTION_MEMORY_LIMIT: '128',
       ...env,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: dir ? ['ignore', fd, fd] : ['ignore', 'pipe', 'pipe'],
   });
+  if (fd !== undefined) fs.closeSync(fd);
   let logs = '';
-  proc.stdout.on('data', (chunk) => (logs += chunk));
-  proc.stderr.on('data', (chunk) => (logs += chunk));
+  let stdout = '';
+  proc.stdout?.on('data', (chunk) => {
+    logs += chunk;
+    stdout += chunk;
+  });
+  proc.stderr?.on('data', (chunk) => (logs += chunk));
   const base = `http://127.0.0.1:${port}`;
   const exited = new Promise((resolve) => proc.once('exit', (code) => resolve(code)));
   const runtime = {
     base,
-    logs: () => logs,
+    logs: () => (dir ? fs.readFileSync(path.join(dir, 'output.log'), 'utf8') : logs),
+    /** What the runtime wrote to stdout alone. Not with `oneFile`. */
+    stdout: () => stdout,
     /** The exit code once the process exits, or 'running' after waitMs. */
     exitCode: (waitMs) => Promise.race([exited, sleep(waitMs).then(() => 'running')]),
     async stop() {
@@ -55,6 +68,7 @@ async function startRuntime(fixture, env = {}) {
         proc.kill('SIGKILL');
         await once(proc, 'exit');
       }
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
     },
   };
   running.add(runtime);
@@ -91,6 +105,25 @@ function logLines(runtime, msg) {
     .filter((line) => line.startsWith('{'))
     .map((line) => JSON.parse(line))
     .filter((entry) => entry.msg === msg);
+}
+
+/** The lines of these calls that aren't between their call's START and END, from the `output` fixture. */
+function outsideTheirCall(output, calls) {
+  const outside = [];
+  for (const { id, lines = 20, errors = 1, open = true } of calls) {
+    const start = output.indexOf(`START RequestId: ${id} `);
+    const end = output.indexOf(`END RequestId: ${id}\n`);
+    const own = [
+      ...Array.from({ length: lines }, (_, i) => `${id}: line ${i + 1}\n`),
+      ...Array.from({ length: errors }, (_, i) => `${id}: error ${i + 1}\n`),
+      ...(open ? [`${id}: left open`] : []),
+    ];
+    for (const text of own) {
+      const at = output.indexOf(text);
+      if (!(start >= 0 && start < at && at < end)) outside.push(text.trim());
+    }
+  }
+  return outside;
 }
 
 async function invoke(runtime, body, headers = {}) {
@@ -475,6 +508,96 @@ describe('request validation and limits', () => {
     const res = await fetch(`${rt.base}/nope`);
 
     assert.equal(res.status, 404);
+    await rt.stop();
+  });
+});
+
+describe("logs: a call's output comes before its END", () => {
+  // The collector tags each line with the call between its pod's START and REPORT lines (ADR 0005), so a
+  // line that came after END would go untagged. The worker's output reaches this process through the main
+  // thread, which prints END once the worker has marked the end of the call's output on both streams.
+  it('writes every line of a call before its END, on stdout and stderr, and never the end-of-call markers', async () => {
+    const rt = await startRuntime('output', { FUNCTION_TIMEOUT: '5000' }, { oneFile: true });
+    await readyz(rt, 200);
+
+    // Calls that write mostly to stdout, and calls that write only to stderr: END waits for both streams.
+    const calls = Array.from({ length: 20 }, (_, i) =>
+      i % 2 ? { id: `req-order-${i + 1}`, lines: 0, errors: 20, open: false } : { id: `req-order-${i + 1}`, lines: 20, errors: 1 },
+    );
+    for (const { id, ...body } of calls) assert.equal((await invoke(rt, body, { 'x-ff-request-id': id })).status, 200);
+
+    const output = rt.logs();
+    assert.ok(!output.includes('ff-end-of-call'), 'an end-of-call marker reached the output');
+    assert.deepEqual(outsideTheirCall(output, calls), [], `lines outside their call's START and END:\n${output}`);
+    await rt.stop();
+  });
+
+  it('starts its own lines on a line of their own when the call left one open, and adds no empty line otherwise', async () => {
+    const rt = await startRuntime('output', { FUNCTION_TIMEOUT: '5000' });
+    await readyz(rt, 200);
+
+    await invoke(rt, { lines: 1 }, { 'x-ff-request-id': 'req-open' });
+    await invoke(rt, { lines: 1, open: false }, { 'x-ff-request-id': 'req-closed' });
+
+    const stdout = rt.stdout();
+    assert.match(stdout, /\nreq-open: line 1\nreq-open: left open\nEND RequestId: req-open\nREPORT RequestId: req-open\t/);
+    assert.match(stdout, /\nSTART RequestId: req-closed Version: \$LATEST\nreq-closed: line 1\nEND RequestId: req-closed\nREPORT /);
+    await rt.stop();
+  });
+
+  it('waits a second at most for output that work left running holds up, and leaves the wait out of the duration', async () => {
+    const rt = await startRuntime('output', { FUNCTION_TIMEOUT: '5000' }, { oneFile: true });
+    await readyz(rt, 200);
+
+    // The handler returns, then blocks its worker for 3 s: the end of its output can't come before that.
+    const started = Date.now();
+    const blocked = await invoke(rt, { lines: 1, busyMs: 3000 }, { 'x-ff-request-id': 'req-blocked' });
+    const elapsed = Date.now() - started;
+    const next = { id: 'req-next', lines: 20, errors: 20, open: false };
+    const { id: nextId, ...nextBody } = next;
+    const answer = await invoke(rt, nextBody, { 'x-ff-request-id': nextId });
+
+    assert.equal(blocked.status, 200);
+    assert.ok(elapsed >= 1000 && elapsed < 2500, `answered after ${elapsed} ms`);
+    assert.ok(Number(blocked.headers.get('x-ff-duration-ms')) < 500, `duration ${blocked.headers.get('x-ff-duration-ms')} ms`);
+    // The blocked call's late output is kept, its markers taken out, and they don't end the next call early.
+    assert.equal(answer.status, 200);
+    const output = rt.logs();
+    assert.ok(!output.includes('ff-end-of-call'), 'an end-of-call marker reached the output');
+    assert.ok(output.includes('req-blocked: left open'), "the blocked call's late output was lost");
+    assert.deepEqual(outsideTheirCall(output, [next]), [], `lines outside their call's START and END:\n${output}`);
+    await rt.stop();
+  });
+
+  it("marks the end of a call's output even when the code replaced process.stdout.write", async () => {
+    const rt = await startRuntime('prefixed-stdout', { FUNCTION_TIMEOUT: '5000' });
+    await readyz(rt, 200);
+
+    const started = Date.now();
+    for (const id of ['req-prefixed-1', 'req-prefixed-2']) await invoke(rt, {}, { 'x-ff-request-id': id });
+    const elapsed = Date.now() - started;
+
+    // The markers don't go through the replacement, so they neither leave a prefix behind nor get lost.
+    assert.match(rt.stdout(), /\[app\] req-prefixed-1: hello\nEND RequestId: req-prefixed-1\n/);
+    assert.ok(!rt.stdout().includes('ff-end-of-call'), 'an end-of-call marker reached the output');
+    assert.ok(elapsed < 1000, `two calls took ${elapsed} ms`);
+    await rt.stop();
+  });
+
+  it('keeps the answer of a call whose handler returned when work it left running then fills the heap', async () => {
+    const rt = await startRuntime('late-oom', { FUNCTION_TIMEOUT: '10000' });
+    await readyz(rt, 200);
+
+    const res = await invoke(rt, {}, { 'x-ff-request-id': 'req-late' });
+    await readyz(rt, 200);
+    const next = await invoke(rt, { hoard: false }, { 'x-ff-request-id': 'req-after-crash' });
+
+    assert.deepEqual([res.status, res.json], [200, 'answered']);
+    assert.deepEqual([next.status, next.json], [200, 'answered']);
+    // The crash is the worker's, after the call: logged after its REPORT, with no request ID.
+    const [crash] = logLines(rt, 'function worker crashed; restarting');
+    assert.deepEqual([crash?.errorType, crash?.requestId], ['Runtime.OutOfMemory', undefined]);
+    assert.ok(rt.logs().indexOf('REPORT RequestId: req-late') < rt.logs().indexOf('function worker crashed'));
     await rt.stop();
   });
 });
