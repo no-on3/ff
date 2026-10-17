@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed, not started. Your decisions of 2026-10-16, and the points the accountant must confirm, are in §9. |
+| **Status** | In progress since 2026-10-17, on the branch `feat/client-ready`. What is done is in the progress log (§11). Your decisions of 2026-10-16, the points the accountant must confirm, and the actions waiting for you are in §9. |
 | **Goal** | The parent plan's paid private beta: "a pilot customer can sign up, top up in TND, run functions, and receive a compliant invoice", plus logs and alarms the customer can read without cluster access |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): findings C-1 to C-3, C-7, H-4, H-5, M-1; tasks F-01, F-04, F-05, F-09 to F-11, R-08, R-09, B-01 to B-07, B-10, B-11; ADR-006 and ADR-008; §4.8, §4.9, §8, §9.2, §11 |
 | **Builds on** | The [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12) and the [CLI plan](cli-plan.md) (C-05 logs endpoint, C-40 login) |
@@ -136,7 +136,7 @@ Found on 2026-10-16 while checking [How FF works](how-it-works.html) against the
 D1 to D5 and D12 are recorded in ADR 0004 (task P-00). D10 is confirmed by a spike and recorded in ADR 0005 (P-41).
 
 ### D1. The tenant is an account, not a user
-- **Accounts** have a random 12-digit ID (the AWS-shaped format of parent ADR-006), a name, a status (`pending`, `active`, `suspended`, `closed`), a plan, a country, and an optional tax ID for B2B invoices.
+- **Accounts** have a random 12-digit ID (the AWS-shaped format of parent ADR-006), a name, a status (`pending`, `active`, `rejected`, `suspended`, `closed`), a plan, a country, and an optional tax ID for B2B invoices.
 - **Users** belong to accounts through memberships with a role (D4). A user can belong to several accounts.
 - **Functions belong to the account.** `functions.userId` becomes `accountId`, and the tenant namespace becomes `ff-t-<first 12 hex of sha256(account ID)>`.
 - **Why now:** changing the tenancy key later means moving every customer's namespace and Deployments. Pilot customers (agencies, startups, a university lab) are teams.
@@ -157,14 +157,15 @@ D1 to D5 and D12 are recorded in ADR 0004 (task P-00). D10 is confirmed by a spi
 - **Development mode** stays: `FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, and a header `X-FF-Dev-Account` to act as a second account in tests. Production refuses to start in this mode (P-02).
 
 ### D3. API keys for scripts, CI and the CLI
-- **Format:** `Authorization: Bearer ffk_<key ID>_<secret>`, with 32 random bytes of secret. The guard tells keys from tokens by the prefix, which secret scanners can also match.
+- **Format:** `Authorization: Bearer ffk_<key ID>_<secret>`, with 32 random bytes of secret. The guard tells keys from tokens by the prefix, which secret scanners can also match. ADR 0004 fixes the exact format.
 - **Storage:** the SHA-256 of the secret. The secret is random and long, so a slow password hash isn't needed. It is shown once, at creation.
-- **Scopes:** `functions:read`, `functions:write`, `functions:invoke`, `logs:read`, `metrics:read`, `usage:read`. A key never gets more than its creator's role.
+- **Scopes:** `functions:read`, `functions:write`, `functions:invoke`, `logs:read`, `metrics:read`, `usage:read`. A key never gets more than its creator's role. This is checked on every request, so a key loses access when its creator's role is lowered or its creator leaves the account.
 - **Life cycle:** an optional expiry, `last_used_at`, and revocation. At most 20 keys per account.
 
 ### D4. Authorization: queries scoped to the account
 - **The guard is global** (`APP_GUARD`) and denies by default. `@Public()` marks the few open routes: health checks and payment webhooks.
 - **The principal** is `{ accountId, userId or keyId, role, scopes }`, set by the guard. `@User()` is replaced by `@Principal()`.
+- **Choosing the account** (added by ADR 0004, because a user can belong to several accounts): an API key acts on its own account. A user's token acts on the account named by the `X-FF-Account` header, or on the user's only account when there is no header. A user with several accounts and no header gets 400; naming an account the user doesn't belong to gets 404.
 - **Services take the account ID,** and every query includes it (`where: { id, accountId }`). A resource of another account answers **404**, exactly like one that doesn't exist. Controllers never load a resource by ID alone.
 - **Roles for the pilot:**
 
@@ -462,7 +463,7 @@ The same as the Kubernetes migration and the CLI plan:
 ### Phase 0: groundwork
 
 #### P-00: Preparation and ADR 0004
-- Create the branch. Write `docs/adr/0004-identity-and-tenancy.md`, recording D1 to D5.
+- Create the branch. Write `docs/adr/0004-identity-and-tenancy.md`, recording D1 to D5 and D12.
 - **External lead times, started now:** the Konnect merchant onboarding (sandbox first), the accountant's questions in §9, and the TunTrust certificate for El Fatoora (parent §16).
 - **Done when:** the ADR passes `hack/check-docs.py`.
 
@@ -960,6 +961,16 @@ Each task ships with the phase it serves:
 4. Which withholding rate applies to cloud services, 1.5% or 3% (parent §8.6)? How are refunds of unused credit handled? (P-35, P-74.)
 5. What are the mandatory invoice details, and how long must usage records and invoices be kept? (P-36, D6.)
 
+**Actions waiting for you.** P-00 lists them because each has a long lead time. None blocks phases 0 to 2, and only you can start them:
+
+| Action | Why now | Needed by | Status |
+|---|---|---|---|
+| Start Konnect's merchant onboarding, sandbox first. Its know-your-business checks ask for the company's documents (parent §9.1) | P-34's tests need sandbox credentials: an API key and a wallet ID | P-34 | ⏳ Not started |
+| Send the five questions above to the accountant | Each answer changes one task, from P-34 to P-37 | P-34 | ⏳ Not started |
+| Order the TunTrust certificate, and register on TTN's El Fatoora (parent §8.6) | The certificate takes time, and P-37 can't be tested without TTN's test access | P-37 | ⏳ Not started |
+
+When one of these moves, its status changes here.
+
 ## 10. Effort (rough estimates, one developer)
 
 | Phase | Working days | Notes |
@@ -980,7 +991,7 @@ Without the fixes of P-03 to P-08, this is smaller than the parent plan's Phase 
 
 | Task | Status | Commit | Evidence |
 |---|---|---|---|
-| P-00 Preparation and ADR 0004 | ⏳ Planned | | |
+| P-00 Preparation and ADR 0004 | ✅ Done | (this commit) | • Branch `feat/client-ready` created from `master` at `5434ad9`. Baseline before any change: `tsc --noEmit` exit 0, `npm test` **12 suites / 122 tests**.<br>• [ADR 0004](adr/0004-identity-and-tenancy.md) records D1 to D5 and D12. It adds three precisions that the later tasks need: how a request chooses its account (`X-FF-Account`, now in D4), the exact API-key format, and that a key's limit to its creator's role is checked on every request (now in D3).<br>• D1 lists the `rejected` status, as §4 already did.<br>• The external actions are listed in §9, waiting for you.<br>• `hack/check-docs.py` passes on the ADR, this plan, and the docs index. |
 | P-01 Schema baseline | ⏳ Planned | | |
 | P-02 Validated configuration | ⏳ Planned | | |
 | P-03 Function lifecycle fixes | ⏳ Planned | | |
