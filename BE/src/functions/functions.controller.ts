@@ -79,7 +79,7 @@ export class FunctionsController {
 
   @Post(':id/invoke')
   @ApiOperation({ summary: 'Invoke a function' })
-  @ApiResponse({ status: 200, description: 'Function invoked successfully', type: FunctionInvocation })
+  @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
   async invoke(
     @Param('id') id: string,
     @Body() invokeFunctionDto: InvokeFunctionDto,

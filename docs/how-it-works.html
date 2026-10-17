@@ -430,7 +430,7 @@
             <tbody id="errorRows"></tbody>
           </table>
         </div>
-        <p class="note">Errors from an invocation carry <code>x-ff-function-error: Unhandled</code>. The backend records <code>Sandbox.Timedout</code> as an invocation with status <code>TIMEOUT</code> and every other error as <code>ERROR</code>, then answers the caller with 400 and <code>"&lt;errorType&gt;: &lt;message&gt;"</code>.</p>
+        <p class="note">Errors from an invocation carry <code>x-ff-function-error: Unhandled</code>. The backend records <code>Sandbox.Timedout</code> as an invocation with status <code>TIMEOUT</code> and every other error as <code>ERROR</code>, then answers the caller with 400 and <code>"&lt;errorType&gt;: &lt;message&gt;"</code>. A call that gets no answer within the backend's own wait (see the limits below) is <code>TIMEOUT</code> too, with <code>No response within … ms</code>, in both invoke modes.</p>
       </div>
     </div>
   </div>
@@ -471,11 +471,12 @@
             <tr><td>Code</td><td>About 100 KB per API request today (the JSON body limit); 900 KiB fit in a ConfigMap</td></tr>
             <tr><td>Invocation input</td><td>About 100 KB per API request today; the runtime accepts 6 MB</td></tr>
             <tr><td>Result</td><td>6 MB</td></tr>
-            <tr><td>Concurrency</td><td>One invocation per pod at a time, 32 waiting, then 429</td></tr>
+            <tr><td>Concurrency</td><td>One invocation per pod at a time; up to 32 wait, each for at most one timeout, then 429</td></tr>
+            <tr><td>Backend wait for an answer</td><td>One timeout of waiting for a free instance, plus the timeout, plus 2 s; then the invocation is <code>TIMEOUT</code></td></tr>
             <tr><td>Wait for create or update</td><td>90 s (<code>FF_READY_TIMEOUT_SECONDS</code>)</td></tr>
             <tr><td>Wait for a cold start</td><td>90 s (<code>K8S_READY_TIMEOUT_SECONDS</code>)</td></tr>
             <tr><td>Scale to zero</td><td>After 900 s without invocations (<code>FF_SCALE_TO_ZERO_IDLE_SECONDS</code>)</td></tr>
-            <tr><td>Instances</td><td>min 0, max 1 by default; the API can't change them yet</td></tr>
+            <tr><td>Instances</td><td>min 0, max 3 by default; <code>PUT /functions/:id/scaling-config</code> sets them, min 0–10 and max 1–10</td></tr>
           </tbody>
         </table>
       </div>
@@ -1080,7 +1081,7 @@ const ERROR_ROWS = [
   ['500', ['Function.ResponseSizeTooLarge'], 'The result is over 6 MB'],
   ['413', ['RequestEntityTooLargeException'], 'The request body is over 6 MB'],
   ['400', ['InvalidRequestContentException'], 'The request body isn\'t JSON'],
-  ['429', ['TooManyRequestsException'], '32 invocations already wait behind the running one'],
+  ['429', ['TooManyRequestsException'], '32 invocations already wait behind the running one, or a call waited one timeout for its turn'],
   ['503', ['ServiceUnavailableException'], 'The runtime is shutting down after SIGTERM'],
 ];
 

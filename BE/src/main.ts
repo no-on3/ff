@@ -1,10 +1,11 @@
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { WinstonModule } from 'nest-winston';
 import { DataSource } from 'typeorm';
+import { apiDocument } from './api-document';
 import { AppModule } from './app.module';
 import { describeError } from './common/describe-error';
 import { winstonConfig } from './config/winston.config';
@@ -40,15 +41,8 @@ async function bootstrap() {
     }),
   );
 
-  // Swagger setup
-  const config = new DocumentBuilder()
-    .setTitle('Serverless Platform API')
-    .setDescription('The Serverless Platform API description')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api', app, document);
+  // The OpenAPI document and its viewer, at /api
+  SwaggerModule.setup('api', app, apiDocument(app));
 
   // Start the server
   

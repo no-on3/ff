@@ -1,5 +1,5 @@
 import { CodeTooLargeError, FunctionRuntimeError, FunctionTimeoutError, OrchestratorError } from '../orchestrator.errors';
-import { KubeApi, KubeResponse, RequestOptions } from './kube-client';
+import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut } from './kubernetes.orchestrator';
 import { MAX_CODE_BYTES } from './manifests';
 import { functionResourceName, tenantNamespace } from './naming';
@@ -21,7 +21,8 @@ class FakeKubeApi implements KubeApi {
   deletedCollections: Array<{ path: string; selector: string }> = [];
   scaled: number[] = [];
   requests: Array<{ method: string; path: string; options?: RequestOptions }> = [];
-  responses: KubeResponse[] = [];
+  /** What request() answers next; an Error is thrown, as the client would. */
+  responses: Array<KubeResponse | Error> = [];
 
   async apply<T>(path: string, manifest: object): Promise<T> {
     this.applied.push({ path, manifest });
@@ -50,7 +51,9 @@ class FakeKubeApi implements KubeApi {
   }
   async request(method: string, path: string, options?: RequestOptions): Promise<KubeResponse> {
     this.requests.push({ method, path, options });
-    return this.responses.shift() ?? { status: 200, headers: {}, body: 'null' };
+    const next = this.responses.shift() ?? { status: 200, headers: {}, body: 'null' };
+    if (next instanceof Error) throw next;
+    return next;
   }
 }
 
@@ -256,6 +259,25 @@ describe('KubernetesOrchestrator', () => {
       api.responses.push({ status, headers, body: JSON.stringify(body) });
 
       await expect(orchestrator.invoke(fn, {})).rejects.toBeInstanceOf(errorClass);
+    });
+
+    it('records giving up on a proxied call as a function timeout, as a direct call does', async () => {
+      api.objects.set(deploymentPath, rolledOut(1));
+      api.responses.push(new KubeRequestTimeoutError(22_000, 'POST', `/api/v1/namespaces/${ns}/services/${name}:http/proxy/invoke`));
+
+      const error = await orchestrator.invoke(fn, {}).catch((err) => err);
+
+      // The message of the direct mode, which postJson raises when its socket times out.
+      expect(error).toBeInstanceOf(FunctionTimeoutError);
+      expect(error).toMatchObject({ errorType: 'Sandbox.Timedout', message: 'No response within 22000 ms' });
+    });
+
+    it('passes other proxy failures on unchanged: only a timeout is a function timeout', async () => {
+      api.objects.set(deploymentPath, rolledOut(1));
+      const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:6550'), { code: 'ECONNREFUSED' });
+      api.responses.push(refused);
+
+      await expect(orchestrator.invoke(fn, {})).rejects.toBe(refused);
     });
 
     it('keeps the runtime error type on FunctionRuntimeError', async () => {

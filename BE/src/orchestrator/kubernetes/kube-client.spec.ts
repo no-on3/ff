@@ -3,7 +3,7 @@ import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { KubeApiError, KubeClient } from './kube-client';
+import { KubeApiError, KubeClient, KubeRequestTimeoutError } from './kube-client';
 
 interface Captured {
   method: string;
@@ -142,10 +142,24 @@ describe('KubeClient', () => {
     expect(server.captured.map((r) => r.headers.authorization)).toEqual(['Bearer token-one', 'Bearer token-two']);
   });
 
-  it('fails requests that exceed their timeout', async () => {
+  it('fails requests that exceed their timeout with KubeRequestTimeoutError, so callers can tell a timeout apart', async () => {
     const { client } = await setup(() => ({ status: 200, body: {}, delayMs: 2000 }));
 
-    await expect(client.request('GET', '/slow', { timeoutMs: 100 })).rejects.toThrow('timed out after 100 ms');
+    const error = await client.request('POST', '/slow', { timeoutMs: 100 }).catch((err) => err);
+
+    expect(error).toBeInstanceOf(KubeRequestTimeoutError);
+    expect(error).toMatchObject({ timeoutMs: 100, message: 'Kubernetes API request timed out after 100 ms: POST /slow' });
+  });
+
+  it('does not report other failures as timeouts', async () => {
+    const { server } = await setup(() => ({ status: 200 }));
+    const url = server.url;
+    await server.close(); // nothing listens there any more
+
+    const error = await new KubeClient({ server: url, token: 't' }).request('GET', '/x').catch((err) => err);
+
+    expect(error).toMatchObject({ code: 'ECONNREFUSED' });
+    expect(error).not.toBeInstanceOf(KubeRequestTimeoutError);
   });
 
   it('returns pod logs as text and swallows errors (diagnostics are best effort)', async () => {

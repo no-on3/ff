@@ -46,6 +46,18 @@ export class KubeApiError extends Error {
   }
 }
 
+/** No answer within the request's timeout: the request was abandoned. */
+export class KubeRequestTimeoutError extends Error {
+  constructor(
+    readonly timeoutMs: number,
+    method: string,
+    path: string,
+  ) {
+    super(`Kubernetes API request timed out after ${timeoutMs} ms: ${method} ${path}`);
+    this.name = 'KubeRequestTimeoutError';
+  }
+}
+
 /** The surface the orchestrator depends on (lets tests substitute a fake). */
 export interface KubeApi {
   request(method: string, path: string, options?: RequestOptions): Promise<KubeResponse>;
@@ -134,7 +146,7 @@ export class KubeClient implements KubeApi {
           res.on('error', reject);
         },
       );
-      req.setTimeout(timeoutMs, () => req.destroy(new Error(`Kubernetes API request timed out after ${timeoutMs} ms: ${method} ${path}`)));
+      req.setTimeout(timeoutMs, () => req.destroy(new KubeRequestTimeoutError(timeoutMs, method, path)));
       req.on('error', reject);
       if (options.body !== undefined) req.write(options.body);
       req.end();

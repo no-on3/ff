@@ -1,0 +1,75 @@
+/**
+ * L1: the OpenAPI document says what the API answers. Generated clients and
+ * the L5 suite read it, so a route that answers another status than its
+ * document says breaks them (client-readiness plan, P-08).
+ */
+import { INestApplication } from '@nestjs/common';
+import { OpenAPIObject } from '@nestjs/swagger';
+import { Test } from '@nestjs/testing';
+import { apiDocument } from './api-document';
+import { FunctionsController } from './functions/functions.controller';
+import { FunctionsService } from './functions/functions.service';
+import { MetricsController } from './metrics/metrics.controller';
+import { MetricsService } from './metrics/metrics.service';
+
+const ACCOUNT = '000000000001';
+const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
+const METHODS = ['get', 'put', 'post', 'delete', 'patch'] as const;
+
+/** Every method of the service succeeds, with an empty answer unless given one. */
+function succeeding(service: { prototype: object }, methods: Record<string, unknown> = {}) {
+  const names = Object.getOwnPropertyNames(service.prototype).filter((name) => name !== 'constructor');
+  return Object.fromEntries(names.map((name) => [name, methods[name] ?? (async () => ({}))]));
+}
+
+describe('the OpenAPI document (L1, P-08)', () => {
+  let app: INestApplication;
+  let document: OpenAPIObject;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [FunctionsController, MetricsController],
+      providers: [
+        // The caller owns the function, so the ownership checks pass.
+        { provide: FunctionsService, useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, userId: ACCOUNT }) }) },
+        { provide: MetricsService, useValue: succeeding(MetricsService) },
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication({ logger: false });
+    // The caller's account, where the authentication guard (P-11) will put it.
+    app.use((req: { user?: string }, _res: unknown, next: () => void) => {
+      req.user = ACCOUNT;
+      next();
+    });
+    document = apiDocument(app);
+    await app.listen(0, '127.0.0.1');
+    baseUrl = await app.getUrl();
+  });
+
+  afterAll(() => app.close());
+
+  it('documents, for every route, the success status the route answers', async () => {
+    const routes = Object.entries(document.paths).flatMap(([path, item]) =>
+      METHODS.filter((method) => item[method]).map((method) => ({ method, path, operation: item[method]! })),
+    );
+
+    const checked: Array<{ route: string; documented: string[]; answered: number }> = [];
+    for (const { method, path, operation } of routes) {
+      const res = await fetch(baseUrl + path.replace(/\{\w+\}/g, ID), {
+        method: method.toUpperCase(),
+        headers: { 'content-type': 'application/json' },
+        body: method === 'get' || method === 'delete' ? undefined : '{}',
+      });
+      const documented = Object.keys(operation.responses).filter((status) => status.startsWith('2'));
+      checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
+    }
+
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke']));
+    expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
+  });
+
+  it('documents invoke as 201 Created, which hack/e2e.sh checks too', () => {
+    expect(Object.keys(document.paths['/functions/{id}/invoke'].post!.responses)).toEqual(['201']);
+  });
+});

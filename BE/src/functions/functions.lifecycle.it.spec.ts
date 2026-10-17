@@ -1,5 +1,5 @@
 /**
- * L3: the function lifecycle (client-readiness plan, P-03) on the live dev
+ * L3: the function lifecycle (client-readiness plan, P-03 and P-08) on the live dev
  * cluster: FunctionsService with the real Kubernetes driver and the
  * least-privilege ff-controller token. Records live in memory: what is under
  * test is how the service drives Kubernetes, and the database is not.
@@ -12,6 +12,7 @@ import { KubeClient, paths } from '../orchestrator/kubernetes/kube-client';
 import { KubernetesOrchestrator } from '../orchestrator/kubernetes/kubernetes.orchestrator';
 import { LABELS, functionResourceName, tenantNamespace } from '../orchestrator/kubernetes/naming';
 import { settings } from '../orchestrator/kubernetes/test-fixtures';
+import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { FunctionStatus, Function, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 import { FUNCTION_DEFAULTS, MemoryRepository, eventually } from './test-fixtures';
@@ -43,7 +44,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
   const account = String(randomInt(1e12)).padStart(12, '0');
   const ns = tenantNamespace(s.namespacePrefix, account);
   const functions = new MemoryRepository<Function>(FUNCTION_DEFAULTS);
-  const invocations = new MemoryRepository<{ id?: string }>();
+  const invocations = new MemoryRepository<FunctionInvocation>();
   const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
   const config = {
     get: (key: string, fallback?: unknown) => (key === 'orchestrator.readyTimeoutSeconds' ? READY_TIMEOUT_SECONDS : fallback),
@@ -116,5 +117,24 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     expect(updated.status).toBe(FunctionStatus.ACTIVE);
     expect(await orchestrator.readyInstances(updated)).toBeGreaterThanOrEqual(1);
     expect((await service.invoke(fn.id, {})).output).toEqual({ version: 'v2', message: 'Hello world' });
+  });
+
+  it('records a call the runtime never answers as TIMEOUT through the API server proxy too, as in direct mode (P-08)', async () => {
+    const fn = await service.create(spec('it-silent', greeter('v1')), account);
+    // A hung runtime: it answers its probes, but never an invocation.
+    const silent = "require('http').createServer((req, res) => { if (req.url !== '/invoke') res.end('ok'); }).listen(8080)";
+    await client.request('PATCH', paths.apps(ns, 'deployments', functionResourceName(fn.id)), {
+      body: JSON.stringify({ spec: { template: { spec: { containers: [{ name: 'function', command: ['node', '-e', silent] }] } } } }),
+      contentType: 'application/strategic-merge-patch+json',
+    });
+    await orchestrator.waitUntilReady(fn, 90_000);
+
+    const failure = await service.invoke(fn.id, {}).catch((error: unknown) => error);
+
+    // The backend waits one timeout for a free instance, then the 3 s timeout, then 2 s more.
+    expect(failure).toBeInstanceOf(BadRequestException);
+    expect(await invocations.find({ where: { functionId: fn.id } })).toEqual([
+      expect.objectContaining({ status: InvocationStatus.TIMEOUT, error: 'Sandbox.Timedout: No response within 8000 ms' }),
+    ]);
   });
 });

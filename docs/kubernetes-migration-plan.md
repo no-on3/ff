@@ -273,6 +273,8 @@ The rules:
     }
     ```
     Every method takes the workload, not an ID, because Kubernetes needs the tenant (namespace) as well.
+
+    Since 2026-10-17 ([client-readiness plan](client-readiness-plan.md), P-06), `cpu` and `cpuUsed` are gone and `desiredInstances(fn)` was added: see `src/orchestrator/orchestrator.types.ts`.
   - `src/orchestrator/orchestrator.module.ts`: a provider factory that selects the implementation from `orchestrator.driver` (`ORCHESTRATOR` env). Unknown values fail fast at boot.
   - `src/orchestrator/nomad/nomad.orchestrator.ts`: an adapter delegating to the existing `NomadService`, keeping its current behaviour (including the no-op update and delete). This keeps the change reviewable.
   - FunctionsService and MetricsService inject `ORCHESTRATOR` instead of `NomadService`.
@@ -392,15 +394,15 @@ The rules:
       - Resolved from `K8S_API_URL` / `K8S_TOKEN_FILE` / `K8S_CA_FILE`, or from the in-cluster defaults (§4.5).
       - The token file is re-read every 60 s.
       - Both `https://` and `http://` servers are supported (the latter only for unit tests).
-    - **Methods:**
-      - `apply(obj)`: server-side apply, `PATCH …?fieldManager=ff-controller&force=true` with `Content-Type: application/apply-patch+yaml` (a JSON body).
+    - **Methods,** as built (the names were corrected on 2026-10-17, [client-readiness plan](client-readiness-plan.md) P-08):
+      - `apply(path, manifest)`: server-side apply, `PATCH …?fieldManager=ff-controller&force=true` with `Content-Type: application/apply-patch+yaml` (a JSON body).
       - `get(path)`: returns `null` on 404.
       - `delete(path)`: propagation Background; returns `false` on 404.
       - `deleteCollection(path, labelSelector)`.
-      - `scale(ns, name, n)`: a merge-patch on `deployments/{name}/scale`.
-      - `listPods(ns, selector)` and `podLog(ns, pod, tailLines)`.
-      - `proxyPost(ns, service, portName, path, body, headers, timeoutMs)` through `/api/v1/namespaces/{ns}/services/{svc}:{port}/proxy/{path}`.
-    - **Errors:** API failures become `KubeApiError {status, reason, message}`, parsed from the Kubernetes `Status` object.
+      - `scaleDeployment(ns, name, replicas)`: a merge-patch on `deployments/{name}/scale`, as the field manager `ff-scaler`.
+      - `list(path, labelSelector)`, and `podLog(ns, pod, container, tailLines)`, which is best effort: it returns `''` on any failure.
+      - `request(method, path, {body, timeoutMs})`. Invocations in proxy mode use it on `paths.serviceProxy(ns, service, port, path)`, which is `/api/v1/namespaces/{ns}/services/{svc}:{port}/proxy/{path}`.
+    - **Errors:** API failures become `KubeApiError {status, reason, message}`, parsed from the Kubernetes `Status` object. A request with no answer within its timeout fails with `KubeRequestTimeoutError` (P-08), which the driver turns into a function timeout for an invocation.
   - **`naming.ts`:** tenant namespace, object names, code hash.
   - **`manifests.ts`:** pure builders for:
     - Namespace (PSA labels);

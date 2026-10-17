@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import * as http from 'node:http';
 import { FunctionRuntimeError, FunctionTimeoutError, OrchestratorError } from '../orchestrator.errors';
 import { FunctionWorkload, InvokeResult, Orchestrator } from '../orchestrator.types';
-import { KubeApi, KubeResponse, paths } from './kube-client';
+import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
 import {
   K8sObject,
@@ -236,14 +236,20 @@ export class KubernetesOrchestrator implements Orchestrator {
     return this.toResult(await this.post(fn, payload));
   }
 
-  private post(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<KubeResponse> {
+  private async post(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<KubeResponse> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const body = JSON.stringify(payload);
     // A call may wait for a free instance (the runtime then answers 429), then runs up to its timeout.
     const timeoutMs = maxQueueWaitMs(fn) + fn.timeout * 1000 + 2000;
     if (this.settings.invokeMode === 'proxy') {
-      return this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs });
+      try {
+        return await this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs });
+      } catch (error) {
+        // Giving up waiting is the same timeout in both modes, so development records what production does.
+        if (error instanceof KubeRequestTimeoutError) throw noResponseWithin(timeoutMs);
+        throw error;
+      }
     }
     return postJson(`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`, body, timeoutMs);
   }
@@ -271,6 +277,11 @@ export class KubernetesOrchestrator implements Orchestrator {
   }
 }
 
+/** The backend gave up waiting for the function's answer. */
+function noResponseWithin(timeoutMs: number): FunctionTimeoutError {
+  return new FunctionTimeoutError(`No response within ${timeoutMs} ms`);
+}
+
 /** Direct (in-cluster) call to a function Service. */
 function postJson(url: string, body: string, timeoutMs: number): Promise<KubeResponse> {
   return new Promise((resolve, reject) => {
@@ -286,7 +297,7 @@ function postJson(url: string, body: string, timeoutMs: number): Promise<KubeRes
         res.on('error', reject);
       },
     );
-    req.setTimeout(timeoutMs, () => req.destroy(new FunctionTimeoutError(`No response within ${timeoutMs} ms`)));
+    req.setTimeout(timeoutMs, () => req.destroy(noResponseWithin(timeoutMs)));
     req.on('error', reject);
     req.end(body);
   });

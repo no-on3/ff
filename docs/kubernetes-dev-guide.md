@@ -74,7 +74,7 @@ hack/k8s/test-it.sh functions.lifecycle    # only the suites whose path matches
 - a Python and a Node.js memory hog: each gets `Runtime.OutOfMemory`, the next invocation works, and the container is never restarted;
 - functions of both runtimes inside gVisor, with the network policy still enforced (only where the `gvisor` RuntimeClass exists; see [Sandboxing with gVisor](#sandboxing-with-gvisor));
 - scaling on concurrency (`functions.scaling.it.spec.ts`): a burst of slow calls takes a function to two instances without a failed call, later calls are spread over both, and a quiet minute steps it back to one;
-- the function lifecycle, through `FunctionsService` (`functions.lifecycle.it.spec.ts`): a broken create is released and then repaired by an update; a broken update of a working function is rolled back, so the next cold start runs the old code; an update of a function scaled to zero is checked on a real pod;
+- the function lifecycle, through `FunctionsService` (`functions.lifecycle.it.spec.ts`): a broken create is released and then repaired by an update; a broken update of a working function is rolled back, so the next cold start runs the old code; an update of a function scaled to zero is checked on a real pod; a call that a hung runtime never answers is recorded as `TIMEOUT` through the API server proxy, as in direct mode;
 - clean-up.
 
 It deletes everything it creates. The default `npm test` skips these suites.
