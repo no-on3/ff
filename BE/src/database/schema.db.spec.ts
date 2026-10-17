@@ -202,13 +202,14 @@ run('database schema (L2, real PostgreSQL)', () => {
         'function_invocations',
         'function_metrics',
         'functions',
+        'invitations',
         'memberships',
         'migrations',
         'plans',
         'users',
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

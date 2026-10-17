@@ -1,5 +1,5 @@
 import type { ErrorContext } from 'react-oidc-context';
-import type { AccountStatus, MeAccount } from '../services/api';
+import type { AccountStatus, MeAccount, Role } from '../services/api';
 
 /** The headers every API request carries: the user's token, and the account it acts for (X-FF-Account, D4). */
 export function requestHeaders(token: string | undefined, accountId: string | undefined): Record<string, string> {
@@ -7,6 +7,15 @@ export function requestHeaders(token: string | undefined, accountId: string | un
   if (token) headers.Authorization = `Bearer ${token}`;
   if (accountId) headers['X-FF-Account'] = accountId;
   return headers;
+}
+
+/** What a role may do in its account (D4): change functions, or also manage the account. */
+export type Permission = 'change functions' | 'manage the account';
+
+/** Whether a role may do it, as the API decides (P-12): the console hides what it would refuse. */
+export function can(role: Role, permission: Permission): boolean {
+  if (permission === 'manage the account') return role === 'owner';
+  return role === 'owner' || role === 'developer';
 }
 
 /**

@@ -307,10 +307,22 @@ curl -s -X DELETE $FF/api-keys/${KEY:4:12} -H "$AUTH"      # revoked: it stops w
 
 A key never does more than its creator's role allows, checked on every request: it stops when its creator leaves the account. An account has at most 20 keys; `expiresAt` (ISO 8601) makes one expire. Keys can't manage accounts or keys.
 
+**Members.** An owner invites people by e-mail, with a role: `owner` (everything), `developer` (functions) or `viewer` (reads). Whoever next calls the API with a login for that address joins, within 7 days: Keycloak has verified the address. The invitation e-mail links to the console (`FF_CONSOLE_URL`). Owners change roles and remove members, but an account always keeps an owner, and a removed member's API keys stop at once.
+
+```bash
+curl -s -X POST $FF/members -H "$AUTH" -H 'content-type: application/json' -d '{"email": "salma@ff.test", "role": "developer"}'
+curl -s $FF/members -H "$AUTH" | jq .                               # members, and invitations not accepted yet
+curl -s -X PATCH $FF/members/<user ID> -H "$AUTH" -H 'content-type: application/json' -d '{"role": "viewer"}'
+curl -s -X DELETE $FF/members/<user ID> -H "$AUTH"
+curl -s -X DELETE $FF/members/invitations/<invitation ID> -H "$AUTH" # cancel one
+```
+
+Inviting an address again renews its invitation, with the new role.
+
 **The console with a login.** With the backend in OIDC mode as above, copy `FE/.env.example` to `FE/.env.local`, set `VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff` in it, and restart `npm run dev`. The console then opens on a login page:
 1. "Sign up" opens Keycloak's registration form. The verification e-mail arrives in Mailpit (http://localhost:58025); its link asks for a password, then brings you back to the console, logged in.
 2. The console asks you to create your account, which then waits for approval. Approve it as above, and "Check again" shows the functions.
-3. "Account" shows the account; its owners rename it or set its tax ID. "API keys" lists, creates and revokes the account's keys, and shows a new key once. The account switcher in the header lists your accounts, and "New account…" makes another.
+3. "Account" shows the account; its owners rename it or set its tax ID. "Members" invites people and changes their roles. "API keys" lists, creates and revokes the account's keys, and shows a new key once. The account switcher in the header lists your accounts, and "New account…" makes another. A viewer sees no button to create, change or invoke.
 
 The console keeps its tokens in the tab's session storage, and renews the 5-minute access token with the refresh token before it expires. "Log out" ends the Keycloak session too. When that session ends another way (30 minutes without a renewal, as after the laptop slept, or a logout in another tab), the next call gets 401, and the console asks you to log in again.
 
@@ -401,6 +413,8 @@ docker compose down -v
 | Keycloak answers `Invalid parameter: redirect_uri` | Your Keycloak still has the realm it imported before the console moved to port 5199 (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows, and sign up again. |
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. With `FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read` or `K8S_TENANT_QUOTA_… is no longer read`, remove those lines: the account's plan sets them now. |
 | 400 `… must be at most … on the Beta plan`, or `The Beta plan allows 25 functions per account` | The request goes beyond the account's plan. Ask for less, or move the account to a larger plan ("Plans and limits" in section 5). |
+| 400 `An account needs an owner: make another member owner first` | Make another member owner, then change or remove the first one. |
+| An invited person doesn't see the account | They must log in with the invited address, within 7 days of the invitation. `GET /members` (or the console's "Members") shows the invitation, and whether it expired; invite again to renew it. |
 | 429 `TooManyRequestsException: Rate exceeded: the Beta plan allows …` | The account made more changes or invocations than its plan allows. Wait for the seconds in `Retry-After`. |
 | Every API call returns 401 | `FF_AUTH_MODE` isn't `dev`, and the call has no valid token. Use the development values from `BE/.env.example`, or send a token: see "Log in with Keycloak" in section 5. |
 | 401 `The token was issued by another issuer` | `FF_OIDC_ISSUER` must be exactly the token's `iss`, `http://localhost:8180/realms/ff` for the local Keycloak, including `localhost`. |

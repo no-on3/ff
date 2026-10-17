@@ -1590,14 +1590,15 @@ function initSimulator() {
 
 /* ---------- data diagrams ---------- */
 function erDiagram() {
-  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12).
+  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16).
   const tables = [
-    { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · TIMEOUT'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · …'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
     { name: 'functions', x: 350, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['account_id', 'char(12) · FK, indexed'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
     { name: 'function_metrics', x: 684, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['request_count', 'int'], ['error_count', 'int'], ['response_time_p50', 'float, ms'], ['response_time_p95', 'float, ms'], ['response_time_p99', 'float, ms'], ['memory_usage', 'float, MB'], ['active_instances', 'int'], ['max_concurrency', 'int, calls at once'], ['created_at', 'timestamptz']] },
     { name: 'plans', x: 16, row: 1, cols: [['id', 'text · PK, "beta"', 'pk'], ['name', 'text'], ['limits', 'jsonb (P-15)']] },
     { name: 'accounts', x: 350, row: 1, cols: [['id', 'char(12) · PK, random digits', 'pk'], ['name', 'text'], ['status', 'pending · active · …'], ['plan_id', 'text · FK'], ['country', "char(2) = 'TN'"], ['tax_id', 'text, null'], ['internet_egress', 'bool = false'], ['use_case', 'text, null'], ['created_at', 'timestamptz']] },
     { name: 'memberships', x: 684, row: 1, cols: [['account_id', 'char(12) · PK, FK, cascade', 'pk'], ['user_id', 'uuid · PK, FK, cascade', 'pk'], ['role', 'owner · developer · viewer'], ['created_at', 'timestamptz']] },
+    { name: 'invitations', x: 350, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['account_id', 'char(12) · FK, cascade'], ['email', 'text, lowercase, indexed'], ['role', 'owner · developer · viewer'], ['invited_by', 'uuid · FK → users'], ['created_at', 'timestamptz'], ['expires_at', 'timestamptz, 7 days'], ['accepted_at', 'timestamptz, null'], ['accepted_by', 'uuid · FK → users, null']] },
     { name: 'users', x: 684, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['oidc_sub', "text · unique, Keycloak's ID"], ['email', 'text'], ['name', 'text, null'], ['locale', "text = 'fr-TN'"], ['created_at', 'timestamptz']] },
   ];
   const RH = 21, W = 300, TOP = 10, HEAD = 30, GAP = 34;
@@ -1608,8 +1609,8 @@ function erDiagram() {
   const top = (t) => rowTop[t.row];
   const byName = (name) => tables.find((t) => t.name === name);
   const colY = (name, col) => { const t = byName(name); return top(t) + HEAD + RH * t.cols.findIndex((c) => c[0] === col) + 11; };
-  const bottom = byName('users');
-  let s = '<svg class="diagram" viewBox="0 0 1000 ' + (top(bottom) + height(bottom) + 16) + '" role="img" aria-label="The tables and their columns">';
+  const bottom = rowTop[2] + Math.max.apply(null, tables.filter((t) => t.row === 2).map(height));
+  let s = '<svg class="diagram" viewBox="0 0 1000 ' + (bottom + 16) + '" role="img" aria-label="The tables and their columns">';
   tables.forEach((t) => {
     const y0 = top(t);
     s += '<g class="tbl"><rect class="body" x="' + t.x + '" y="' + y0 + '" width="' + W + '" height="' + height(t) + '" rx="8"/>' +
@@ -1642,6 +1643,8 @@ function erDiagram() {
   s += side(350, colY('accounts', 'plan_id'), 316, colY('plans', 'id'), 'n', '1'); // accounts.plan_id → plans
   s += side(684, colY('memberships', 'account_id'), 650, colY('accounts', 'id'), 'n', '1'); // memberships → accounts
   s += down(834, byName('memberships'), byName('users'), 'n', '1'); // memberships.user_id → users
+  s += down(500, byName('accounts'), byName('invitations'), '1', 'n'); // invitations.account_id → accounts
+  s += side(650, colY('invitations', 'invited_by'), 684, colY('users', 'id'), 'n', '1'); // invitations.invited_by → users
   return s + '</svg>';
 }
 
@@ -1649,7 +1652,7 @@ function stateMachines() {
   const node = (x, y, w, label, cls) => '<g class="' + (cls || '') + '"><rect x="' + x + '" y="' + y + '" width="' + w + '" height="36" rx="18"/><text x="' + (x + w / 2) + '" y="' + (y + 23) + '" text-anchor="middle" font-weight="600">' + escText(label) + '</text></g>';
   const edge = (d, label, lx, ly) => '<path d="' + d + '" marker-end="url(#sm-arrow)"/>' + (label ? '<text class="e" x="' + lx + '" y="' + ly + '" text-anchor="middle">' + escText(label) + '</text>' : '');
   const note = (x, y, lines) => lines.map((t, n) => '<text class="e" x="' + x + '" y="' + (y + 16 * n) + '">' + escText(t) + '</text>').join('');
-  return '<svg class="diagram sm" viewBox="0 0 1000 300" role="img" aria-label="Lifecycles of a function and of an invocation">' +
+  return '<svg class="diagram sm" viewBox="0 0 1000 340" role="img" aria-label="Lifecycles of a function and of an invocation">' +
     '<defs>' + arrowDefs('sm-arrow', '--muted') + '</defs>' +
     '<text class="ttl" x="16" y="22">A function</text>' +
     node(16, 50, 130, 'CREATING') + node(320, 14, 120, 'ACTIVE', 'ok') + node(320, 90, 120, 'ERROR', 'bad') + node(600, 52, 150, 'deleted') +
@@ -1665,6 +1668,8 @@ function stateMachines() {
     edge('M146,226 C230,206 260,194 328,194', '200 from the runtime', 236, 196) +
     edge('M146,236 C300,250 420,252 518,252', 'an error: thrown, out of memory, crashed', 330, 238) +
     edge('M146,242 C380,296 640,290 718,256', 'Sandbox.Timedout', 600, 295) +
+    node(16, 292, 130, 'THROTTLED', 'bad') +
+    edge('M81,250 L81,290', '429: no instance was free in time (P-15)', 238, 276) +
     note(870, 246, ['A row stays RUNNING', 'if the backend stops', 'during the call.']) +
     '</svg>';
 }

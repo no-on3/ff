@@ -20,6 +20,7 @@ const production: Env = {
   CORS_ORIGIN: 'https://console.ff.example',
   FF_SMTP_URL: 'smtps://ff:mail-secret@mail.ff.example:465',
   FF_OPERATOR_EMAIL: 'ops@ff.example',
+  FF_CONSOLE_URL: 'https://console.ff.example',
 };
 
 /** The problems a configuration is refused for; fails the test if it is accepted. */
@@ -145,6 +146,7 @@ describe('configuration', () => {
       ['a missing console origin for CORS', { CORS_ORIGIN: undefined }, "CORS_ORIGIN must be set to the console's origin"],
       ['no SMTP server, so no e-mail would leave (P-12)', { FF_SMTP_URL: undefined }, 'FF_SMTP_URL is required when NODE_ENV=production'],
       ['nobody to approve new accounts (P-12)', { FF_OPERATOR_EMAIL: '' }, 'FF_OPERATOR_EMAIL is required when NODE_ENV=production'],
+      ['invitations linking to a development console (P-16)', { FF_CONSOLE_URL: undefined }, 'FF_CONSOLE_URL must be set when NODE_ENV=production'],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 
@@ -174,6 +176,7 @@ describe('configuration', () => {
         from: 'FF <no-reply@ff.localhost>',
         operatorEmail: '',
         adminUrl: 'http://localhost:5174',
+        consoleUrl: 'http://localhost:5199',
       });
       expect(configuration({ ...dev, FF_ADMIN_URL: 'https://admin.ff.example/', FF_SMTP_URL: 'smtp://localhost:51025' }).mail).toMatchObject({
         smtpUrl: 'smtp://localhost:51025',

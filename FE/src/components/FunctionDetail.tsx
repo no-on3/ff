@@ -11,6 +11,7 @@ import {
   parseInvokeInput,
 } from '../lib/functions';
 import { Function, FunctionInvocation, functionsApi } from '../services/api';
+import { can } from '../lib/session';
 import { useSession } from '../session/session';
 import { updateFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
@@ -31,7 +32,8 @@ const statusStyle = (status: string) => STATUS_STYLES[status] ?? 'bg-red-100 tex
 const FunctionDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const plan = useSession().account!.plan; // the function pages show only for an account
+  const { plan, role } = useSession().account!; // the function pages show only for an account
+  const mayChange = can(role, 'change functions');
   const dispatch = useDispatch<AppDispatch>();
 
   const [func, setFunc] = useState<Function | null>(null);
@@ -160,7 +162,8 @@ const FunctionDetail: React.FC = () => {
             <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">{saveError}</div>
           )}
 
-          <form onSubmit={handleUpdate} className="space-y-4">
+          <form onSubmit={handleUpdate}>
+            <fieldset disabled={!mayChange} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700">Name</label>
               <input
@@ -208,10 +211,15 @@ const FunctionDetail: React.FC = () => {
             <p className="text-sm text-gray-500">
               The {plan.name} plan allows up to {plan.limits.memoryMb} MB and {plan.limits.timeoutSeconds} s per function.
             </p>
+            </fieldset>
 
-            <button type="submit" className="btn btn-primary" disabled={saving}>
-              {saving ? 'Updating… (waits until the new version is live)' : 'Update Function'}
-            </button>
+            {mayChange ? (
+              <button type="submit" className="btn btn-primary mt-4" disabled={saving}>
+                {saving ? 'Updating… (waits until the new version is live)' : 'Update Function'}
+              </button>
+            ) : (
+              <p className="mt-4 text-sm text-gray-600">As a viewer, you read this function; owners and developers change it.</p>
+            )}
           </form>
         </div>
       )}
@@ -219,7 +227,8 @@ const FunctionDetail: React.FC = () => {
       {activeTab === 1 && (
         <div className="mt-12">
           <h2 className="text-xl font-bold mb-4">Invoke Function</h2>
-          <div className="flex gap-4">
+          {!mayChange && <p className="text-sm text-gray-600">As a viewer, you read the history; owners and developers invoke.</p>}
+          <div className={mayChange ? 'flex gap-4' : 'hidden'}>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}

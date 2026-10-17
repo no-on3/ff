@@ -251,6 +251,46 @@ export interface NewApiKey {
   expiresAt?: string;
 }
 
+/** A member of the account (P-16): GET /members, owners only. */
+export interface Member {
+  userId: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  joinedAt: string;
+}
+
+/** An invitation nobody has accepted yet: whoever next logs in with its address joins. */
+export interface Invitation {
+  id: string;
+  email: string;
+  role: Role;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  /** Past its expiry: invite again to renew it. */
+  expired: boolean;
+}
+
+export interface Members {
+  members: Member[];
+  invitations: Invitation[];
+}
+
+/** The chosen account's members and invitations: its owners' only. */
+export const membersApi = {
+  listMembers: () => api.get<Members>('/members'),
+
+  /** Invites an address, or renews its invitation with this role. */
+  invite: (email: string, role: Role) => api.post<Invitation>('/members', { email, role }),
+
+  changeRole: (userId: string, role: Role) => api.patch<Member>(`/members/${userId}`, { role }),
+
+  removeMember: (userId: string) => api.delete(`/members/${userId}`),
+
+  cancelInvitation: (id: string) => api.delete(`/members/invitations/${id}`),
+};
+
 export const accountsApi = {
   me: () => api.get<Me>('/me'),
 

@@ -41,9 +41,14 @@ const NavBar: React.FC = () => {
               Account
             </NavLink>
             {account.role === 'owner' && (
-              <NavLink to="/account/api-keys" className={linkClass}>
-                API keys
-              </NavLink>
+              <>
+                <NavLink to="/account/members" className={linkClass}>
+                  Members
+                </NavLink>
+                <NavLink to="/account/api-keys" className={linkClass}>
+                  API keys
+                </NavLink>
+              </>
             )}
           </div>
         )}

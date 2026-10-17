@@ -9,6 +9,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { AccountsService } from '../accounts/accounts.service';
+import { MembersService } from '../accounts/members.service';
 import { ApiKeysService } from '../api-keys/api-keys.service';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { User } from '../accounts/entities/user.entity';
@@ -40,9 +41,10 @@ const STATUS_MESSAGES: Record<Exclude<AccountStatus, AccountStatus.ACTIVE>, stri
  * - Development mode acts as the owner of FF_DEV_ACCOUNT_ID, or of the account
  *   that X-FF-Dev-Account names, created the first time.
  * - Otherwise the request needs a valid access token (P-11) or API key (P-13).
- *   A token's user is found, or created on the first call, and the account
- *   chosen from the user's memberships and X-FF-Account (P-12); when that
- *   fails, @Principal() says why. A key acts for its own account.
+ *   A token's user is found, or created on the first call, joins the accounts
+ *   that invited its address (P-16), and the account is chosen from the user's
+ *   memberships and X-FF-Account (P-12); when that fails, @Principal() says
+ *   why. A key acts for its own account.
  * Then the route's rules apply: who may call it (@RequireRole), whether the
  * account must be active (@RequireActiveAccount), and for a key, the scope it
  * needs (@RequireScope); a route without one takes no key.
@@ -53,6 +55,7 @@ export class AuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly verifier: TokenVerifier,
     private readonly accounts: AccountsService,
+    private readonly members: MembersService,
     private readonly apiKeys: ApiKeysService,
     private readonly config: ConfigService,
   ) {}
@@ -111,6 +114,7 @@ export class AuthGuard implements CanActivate {
       throw error; // the realm's keys couldn't be read: a platform failure
     }
     request.user = await this.accounts.userFor(request.identity);
+    await this.members.acceptInvitations(request.user); // the accounts that invited the user's address (P-16)
     const choice = await this.accounts.choose(request.user, request.headers[ACCOUNT_HEADER]);
     if ('principal' in choice) request.principal = choice.principal;
     else request.principalProblem = choice.problem;

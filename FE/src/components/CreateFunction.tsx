@@ -3,6 +3,7 @@ import { useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import { apiErrorMessage } from '../lib/functions';
 import { NewFunction, Runtime } from '../services/api';
+import { can } from '../lib/session';
 import { useSession } from '../session/session';
 import { createFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
@@ -10,7 +11,7 @@ import { AppDispatch } from '../store/store';
 const CreateFunction: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
-  const plan = useSession().account!.plan; // the function pages show only for an account
+  const { plan, role } = useSession().account!; // the function pages show only for an account
 
   const [formData, setFormData] = useState<NewFunction>({
     name: '',
@@ -37,6 +38,14 @@ const CreateFunction: React.FC = () => {
       setCreating(false);
     }
   };
+
+  if (!can(role, 'change functions')) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="card">As a viewer, you read this account's functions; owners and developers create them.</div>
+      </div>
+    );
+  }
 
   return (
     <div className="container mx-auto px-4 py-8">

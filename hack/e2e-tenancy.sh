@@ -18,6 +18,9 @@
 #     and one meant for another API, get 401.
 #   - API keys (P-13): account 1's key reads and invokes (L4), within its scopes,
 #     and stops when revoked; account 2's key gets 404 on account 1's function.
+#   - Members (P-16): user 2 is invited into account 1 and joins on the next call
+#     (L4), reads as a viewer, writes as a developer, then is removed; the last
+#     owner can't leave. Member routes never reach another account's members.
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
 # compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
@@ -168,6 +171,7 @@ path_for() {
     *) path="${template//\{id\}/$3}" ;;
   esac
   path="${path//\{functionId\}/$3}"
+  path="${path//\{userId\}/$missing}"
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
     case $name in
@@ -190,11 +194,14 @@ body_for() {
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "POST /api-keys") echo '{"name": "l5", "scopes": ["functions:read"]}' ;;
+    "POST /members") echo '{"email": "l5-invitee@ff.test", "role": "viewer"}' ;;
+    "PATCH /members/{userId}") echo '{"role": "viewer"}' ;;
     POST* | PUT* | PATCH*) echo '{}' ;;
   esac
 }
 needs_user="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage accounts"
 needs_user_for_keys="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage API keys"
+needs_user_for_members="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage members"
 
 echo "== development mode, account B, on every route (${#routes[@]})"
 own=""
@@ -231,6 +238,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /api-keys" | "POST /api-keys" | "DELETE /api-keys/{id}")
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: needs a logged-in user" "$needs_user_for_keys" "$(status) $(message)"
+      ;;
+    *" /members"*)
+      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: needs a logged-in user" "$needs_user_for_members" "$(status) $(message)"
       ;;
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
@@ -298,8 +309,12 @@ check "and invokes it" 201 "$(status)"
 key_1="$(as_user_1 POST /api-keys '{"name": "l5 reader", "scopes": ["functions:read", "functions:invoke"]}' | jq -r .key)"
 check "account 1's owner creates an API key, shown once" "201 true" "$(status) $([[ $key_1 =~ ^ffk_[0-9a-f]{12}_ ]] && echo true || echo false)"
 key_1_id="$(cut -d_ -f2 <<<"$key_1")"
+invitation_1="$(as_user_1 POST /members '{"email": "l5-someone@ff.test", "role": "viewer"}' | jq -r .id)"
+check "account 1's owner invites someone" 201 "$(status)"
+user_1_id="$(jq -r .user.id <<<"$me_1")"
 before_1="$(snapshot as_user_1 "$fn_1")"
 name_1="$(as_user_1 GET "/accounts/$account_1" | jq -r .name)"
+members_1="$(as_user_1 GET /members | jq -c '{members: [.members[].email], invitations: [.invitations[].email]}')"
 
 echo "== account 2, on account 1's function and account, on every route (${#routes[@]})"
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
@@ -346,6 +361,24 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 DELETE "/api-keys/$key_1_id" >/dev/null
       check "$route: account 2 can't revoke account 1's key" "404 API key $key_1_id not found" "$(status) $(message)"
       ;;
+    "GET /members")
+      people="$(as_user_2 GET /members)"
+      check "$route: user 2 sees account 2's members, none of account 1's people" "200 true 0" \
+        "$(status) $(jq -r --arg me "$user_2" --arg u1 "$user_1" \
+          '"\([.members[].email] | index($me) != null) \([.members[].email, .invitations[].email] | map(select(. == $u1 or . == "l5-someone@ff.test")) | length)"' <<<"$people")"
+      ;;
+    "POST /members")
+      as_user_2 POST /members '{"email": "l5-second-invitee@ff.test", "role": "viewer"}' >/dev/null
+      check "$route: user 2 invites into account 2 only" 201 "$(status)"
+      ;;
+    "PATCH /members/{userId}" | "DELETE /members/{userId}")
+      as_user_2 "$method" "/members/$user_1_id" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: user 1 is not a member of account 2" "404 Member $user_1_id not found" "$(status) $(message)"
+      ;;
+    "DELETE /members/invitations/{id}")
+      as_user_2 DELETE "/members/invitations/$invitation_1" >/dev/null
+      check "$route: account 2 can't cancel account 1's invitation" "404 Invitation $invitation_1 not found" "$(status) $(message)"
+      ;;
     *'{'*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
@@ -355,6 +388,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
 done
 check "account 1's function, history and limits are unchanged" "$before_1" "$(snapshot as_user_1 "$fn_1")"
 check "and so is its name" "$name_1" "$(as_user_1 GET "/accounts/$account_1" | jq -r .name)"
+check "and so are its members and invitations" "$members_1" \
+  "$(as_user_1 GET /members | jq -c '{members: [.members[].email], invitations: [.invitations[].email]}')"
 with_token "$token_2" GET /functions '' -H "X-FF-Account: $account_1" >/dev/null
 check "naming account 1 in X-FF-Account: 404" "404 Account $account_1 not found" "$(status) $(message)"
 with_token "$token_2" GET /functions >/dev/null
@@ -367,7 +402,7 @@ with_token "$key_1" POST "/functions/$fn_1/invoke" '{"input":{"name":"key"}}' >/
 check "and invokes them" 201 "$(status)"
 with_token "$key_1" PUT "/functions/$fn_1" '{"name": "renamed"}' >/dev/null
 check "but can't change one without functions:write" "403 This API key lacks the scope functions:write" "$(status) $(message)"
-for path in /me /api-keys; do
+for path in /me /api-keys /members; do
   with_token "$key_1" GET "$path" >/dev/null
   check "a key can't call GET $path, which takes a user's token" \
     "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
@@ -385,6 +420,32 @@ with_token "$key_1" GET /functions >/dev/null
 check "which stops working at once" "401 The API key was revoked" "$(status) $(message)"
 check "account 1's function was invoked once more, by its key, and is otherwise unchanged" \
   "$(jq -c '.invocations += 1' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
+
+echo "== members (P-16): user 2 is invited into account 1"
+as_user_1 POST /members "$(jq -cn --arg email "$user_2" '{email: $email, role: "viewer"}')" >/dev/null
+check "account 1's owner invites user 2's address as a viewer" 201 "$(status)"
+check "user 2 gets an e-mail with the console's address" true \
+  "$(mail_to "$user_2" | grep -q 'http://localhost:5199' && echo true || echo false)"
+check "user 2 joins on the next call: account 1 is in GET /me, as a viewer" "viewer" \
+  "$(with_token "$token_2" GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .role')"
+as_member() { with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: $account_1"; }
+listed="$(as_member GET /functions | jq --arg id "$fn_1" 'map(select(.id == $id)) | length')"
+check "as a viewer, user 2 reads account 1's functions" "200 1" "$(status) $listed"
+as_member POST "/functions/$fn_1/invoke" '{"input":{}}' >/dev/null
+check "but can't invoke them" "403 The viewer role can't do this" "$(status) $(message)"
+user_2_id="$(with_token "$token_2" GET /me | jq -r .user.id)"
+as_user_1 PATCH "/members/$user_2_id" '{"role": "developer"}' >/dev/null
+check "the owner makes user 2 a developer" 200 "$(status)"
+as_member POST "/functions/$fn_1/invoke" '{"input":{}}' >/dev/null
+check "who now invokes" 201 "$(status)"
+as_member GET /members >/dev/null
+check "but doesn't manage members" "403 The developer role can't do this" "$(status) $(message)"
+as_user_1 DELETE "/members/$user_1_id" >/dev/null
+check "the last owner can't leave" "400 An account needs an owner: make another member owner first" "$(status) $(message)"
+as_user_1 DELETE "/members/$user_2_id" >/dev/null
+check "the owner removes user 2" 200 "$(status)"
+as_member GET /functions >/dev/null
+check "who can't reach account 1 any more" "404 Account $account_1 not found" "$(status) $(message)"
 
 with_token "${token_1%?????}AAAAA" GET /functions >/dev/null
 check "a tampered token: 401" "401 The token is invalid" "$(status) $(message)"

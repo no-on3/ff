@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, TextField, Typography } from '@mui/material';
 import { apiErrorMessage, scalingLimitsError } from '../lib/functions';
+import { can } from '../lib/session';
 import { ScalingConfig, ScalingLimits, getScalingConfig, updateScalingConfig } from '../services/api';
 import { useSession } from '../session/session';
 
@@ -14,8 +15,9 @@ interface ScalingConfigurationProps {
  * maximum, and goes back to zero when idle unless a minimum is set.
  */
 export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ functionId }) => {
-  const plan = useSession().account!.plan; // the function pages show only for an account
+  const { plan, role } = useSession().account!; // the function pages show only for an account
   const maxInstances = plan.limits.instancesPerFunction;
+  const mayChange = can(role, 'change functions');
   const [config, setConfig] = useState<ScalingConfig | null>(null);
   const [form, setForm] = useState<ScalingLimits | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +88,7 @@ export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ func
               <TextField
                 label="Minimum instances"
                 type="number"
+                disabled={!mayChange}
                 value={form.minInstances}
                 onChange={field('minInstances')}
                 sx={{ minWidth: 220 }}
@@ -95,6 +98,7 @@ export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ func
               <TextField
                 label="Maximum instances"
                 type="number"
+                disabled={!mayChange}
                 value={form.maxInstances}
                 onChange={field('maxInstances')}
                 sx={{ minWidth: 220 }}
@@ -102,9 +106,15 @@ export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ func
                 helperText={`At most ${maxInstances} on the ${plan.name} plan`}
               />
             </Box>
-            <Button type="submit" variant="contained" disabled={saving} sx={{ mt: 2 }}>
-              {saving ? 'Saving…' : 'Save'}
-            </Button>
+            {mayChange ? (
+              <Button type="submit" variant="contained" disabled={saving} sx={{ mt: 2 }}>
+                {saving ? 'Saving…' : 'Save'}
+              </Button>
+            ) : (
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+                As a viewer, you read these limits; owners and developers change them.
+              </Typography>
+            )}
           </form>
         )}
       </CardContent>

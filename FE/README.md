@@ -1,6 +1,6 @@
 # FF console
 
-The web console for FF. Users log in or sign up through Keycloak, create their account, and wait for its approval. Then they list, create, edit and invoke functions, change their instance limits, and view their metrics. Owners rename the account, set its tax ID, and manage its API keys. It is a React app built with Vite, and it uses Redux Toolkit, MUI, Tailwind, and `react-oidc-context`.
+The web console for FF. Users log in or sign up through Keycloak, create their account, and wait for its approval. Then they list, create, edit and invoke functions, change their instance limits, and view their metrics. Owners rename the account, set its tax ID, and manage its members and API keys. It is a React app built with Vite, and it uses Redux Toolkit, MUI, Tailwind, and `react-oidc-context`.
 
 ```bash
 npm install
@@ -30,11 +30,11 @@ They are built into the bundle, so a production build needs its own values. The 
 - **The account it acts for** (`src/session/Console.tsx`, `src/lib/session.ts`): `GET /me` lists the user's accounts. The console acts for the one chosen last in this browser, else the first active one, and names it in `X-FF-Account` on every request. Switching accounts reloads the page, so nothing of the other account survives.
 - **What it shows:** no account yet, the onboarding form; a pending account, the "waiting for approval" page, with "Check again"; a rejected one, why; a suspended or closed one, its functions with a banner saying what still works. Account settings and API keys are under "Account" and "API keys".
 - **The plan's limits** (P-15): `GET /me` gives each account's plan. The create, edit and scaling forms take their maximums from it, and the account page lists every limit (`src/lib/plans.ts`).
+- **Members** (`src/components/Members.tsx`, P-16): owners invite people by e-mail with a role, change roles, remove members and cancel invitations. The pages show each role only what it may do (`can()` in `src/lib/session.ts`): a viewer gets no button to create, change or invoke functions.
 - **API keys** (`src/components/ApiKeys.tsx`): owners create a key with a name, scopes and an expiry, see it once, and revoke it. The list shows each key by its prefix, `ffk_<id>_…`.
 
 `dependencies` lists exactly what ships in the bundle, so `npm audit --omit=dev` audits what users get; the build and test tools are `devDependencies`.
 
 Known gaps, each with its task in the [client-readiness plan](../docs/client-readiness-plan.md):
 - the metrics page reads an API that P-50 replaces, and has the two lint errors left;
-- two UI kits (MUI and Tailwind) are used side by side;
-- members and invitations come with P-16; until then each account has its owner only.
+- two UI kits (MUI and Tailwind) are used side by side.

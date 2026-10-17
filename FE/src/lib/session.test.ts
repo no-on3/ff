@@ -3,6 +3,7 @@ import type { MeAccount } from '../services/api';
 import { BETA_PLAN } from '../test-fixtures';
 import {
   accountView,
+  can,
   chooseAccount,
   loadErrorMessage,
   loginNotice,
@@ -35,6 +36,24 @@ describe('requestHeaders', () => {
 
   it('sends neither in development mode, where the API reads no token', () => {
     expect(requestHeaders(undefined, undefined)).toEqual({});
+  });
+});
+
+describe('can', () => {
+  it("lets owners and developers change functions, as the API's route rules do (D4)", () => {
+    expect([can('owner', 'change functions'), can('developer', 'change functions'), can('viewer', 'change functions')]).toEqual([
+      true,
+      true,
+      false,
+    ]);
+  });
+
+  it('lets owners alone manage the account: members, API keys, its details', () => {
+    expect([can('owner', 'manage the account'), can('developer', 'manage the account'), can('viewer', 'manage the account')]).toEqual([
+      true,
+      false,
+      false,
+    ]);
   });
 });
 

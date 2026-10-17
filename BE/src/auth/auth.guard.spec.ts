@@ -11,6 +11,7 @@ import { exportJWK, generateKeyPair, JWK, JWTPayload, SignJWT } from 'jose';
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
 import { AccountChoice, AccountsService } from '../accounts/accounts.service';
+import { MembersService } from '../accounts/members.service';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { ApiKeysService } from '../api-keys/api-keys.service';
 import { ApiExceptionFilter } from '../common/api-exception.filter';
@@ -76,14 +77,18 @@ const apiKeys = {
 };
 
 /** The accounts service, as the guard sees it: what each user's request acts for. */
+/** What the guard asked of the accounts and members services, in order. */
+const calls: string[] = [];
 const accounts = {
   choice: undefined as AccountChoice | undefined,
   developmentAccounts: [] as string[],
   developmentStatus: AccountStatus.ACTIVE,
   async userFor(identity: Identity) {
+    calls.push(`userFor ${identity.userId}`);
     return { id: `user-of-${identity.userId}`, email: identity.email };
   },
   async choose() {
+    calls.push('choose');
     return this.choice ?? { problem: new ForbiddenException('This user has no account yet: create one with POST /accounts') };
   },
   async developmentAccount(id: string) {
@@ -157,6 +162,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
         TokenVerifier,
         { provide: ConfigService, useValue: config },
         { provide: AccountsService, useValue: accounts },
+        { provide: MembersService, useValue: { acceptInvitations: async (user: { id: string }) => void calls.push(`accept ${user.id}`) } },
         { provide: ApiKeysService, useValue: apiKeys },
         { provide: APP_GUARD, useClass: AuthGuard },
         { provide: APP_FILTER, useClass: ApiExceptionFilter },
@@ -177,6 +183,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
 
   beforeEach(() => {
     mode = 'oidc';
+    calls.length = 0;
     accounts.choice = undefined;
     accounts.developmentAccounts = [];
     accounts.developmentStatus = AccountStatus.ACTIVE;
@@ -195,6 +202,12 @@ describe('the global guard and token checks (L1, P-11)', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ userId: 'kc-user-1', email: 'amira@example.tn' });
+  });
+
+  it("lets a token's user join the accounts that invited its address, before choosing the account (P-16)", async () => {
+    await get('/functions', `Bearer ${await token()}`);
+
+    expect(calls).toEqual(['userFor kc-user-1', 'accept user-of-kc-user-1', 'choose']);
   });
 
   it("answers an account route with the reason the user's request can't act for an account (P-12)", async () => {
@@ -220,6 +233,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
 
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ accountId: '123456789012', keyId: '0123456789ab', scopes: ['functions:read'] });
+      expect(calls).toEqual([]); // a key has no user to join anything (P-16)
     });
 
     it('need the scope that the route names', async () => {
@@ -380,6 +394,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ accountId: '000000000001', accountStatus: 'active', planId: 'beta', userId: 'dev', role: 'owner' });
       expect(accounts.developmentAccounts).toEqual(['000000000001']);
+      expect(calls).toEqual([]); // nobody joins anything without a user (P-16)
     });
 
     it('acts as the account that X-FF-Dev-Account names', async () => {

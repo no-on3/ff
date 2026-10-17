@@ -34,6 +34,8 @@ export const DEVELOPMENT_CREDENTIALS = {
 } as const;
 
 const DEV_CORS_ORIGIN = 'http://localhost:5199';
+/** The console in development: invitation e-mails link to it (P-16). */
+const DEV_CONSOLE_URL = 'http://localhost:5199';
 const IN_CLUSTER_SECRETS = '/var/run/secrets/kubernetes.io/serviceaccount';
 
 // ---------- one variable ----------
@@ -234,6 +236,7 @@ const appShape = {
   FF_MAIL_FROM: text('FF <no-reply@ff.localhost>', mailbox),
   FF_OPERATOR_EMAIL: optionalText(emailAddress),
   FF_ADMIN_URL: text('http://localhost:5174', httpUrl),
+  FF_CONSOLE_URL: text(DEV_CONSOLE_URL, httpUrl),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -302,6 +305,9 @@ function appRules(env: AppEnv): string[] {
     }
     // The beta's sign-ups wait for your approval (P-12): their e-mails must reach you.
     if (!env.FF_SMTP_URL) problems.push('FF_SMTP_URL is required when NODE_ENV=production, so that e-mails are sent');
+    if (env.FF_CONSOLE_URL === DEV_CONSOLE_URL) {
+      problems.push("FF_CONSOLE_URL must be set when NODE_ENV=production: invitation e-mails link to the console");
+    }
     if (!env.FF_OPERATOR_EMAIL) {
       problems.push('FF_OPERATOR_EMAIL is required when NODE_ENV=production: new accounts wait for your approval there');
     }
@@ -409,6 +415,8 @@ export default function configuration(env: Env = process.env) {
       operatorEmail: parsed.FF_OPERATOR_EMAIL ?? '',
       // The admin dashboard (P-70), linked from those e-mails.
       adminUrl: parsed.FF_ADMIN_URL.replace(/\/$/, ''),
+      // The console, which invitation e-mails link to (P-16).
+      consoleUrl: parsed.FF_CONSOLE_URL.replace(/\/$/, ''),
     },
     // Kubernetes driver settings (docs/kubernetes-migration-plan.md §4.5).
     kubernetes: {
