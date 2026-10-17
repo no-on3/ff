@@ -80,7 +80,7 @@ keycloak_register() {
   local email=$1 jar="$work/register.jar" next link
   rm -f "$jar"
   curl -sS -c "$jar" -b "$jar" -o "$work/register.html" \
-    "$keycloak/realms/ff/protocol/openid-connect/registrations?client_id=ff-console&response_type=code&scope=openid&redirect_uri=http%3A%2F%2Flocalhost%3A5173%2F&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
+    "$keycloak/realms/ff/protocol/openid-connect/registrations?client_id=ff-console&response_type=code&scope=openid&redirect_uri=http%3A%2F%2Flocalhost%3A5199%2F&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
   next="$(curl -sS -c "$jar" -b "$jar" -o /dev/null -w '%{redirect_url}' -X POST "$(form_action "$work/register.html")" \
     --data-urlencode "email=$email" --data-urlencode firstName=L5 --data-urlencode lastName=Signup)"
   [[ $next == *VERIFY_EMAIL* ]] || fail "the registration form did not lead to e-mail verification (got: $next)"
@@ -259,7 +259,7 @@ echo "== sign-up: Keycloak's form, e-mail verification through Mailpit, a pendin
 user_1="l5-$account_a@ff.test"
 user_2="l5-$account_b@ff.test"
 check "user 1 registers, verifies the address and sets a password, back to the console with a code" true \
-  "$([[ "$(keycloak_register "$user_1")" == http://localhost:5173/?*code=* ]] && echo true || echo false)"
+  "$([[ "$(keycloak_register "$user_1")" == http://localhost:5199/?*code=* ]] && echo true || echo false)"
 check "user 2 is made through the admin API" 201 "$(keycloak_user "$user_2")"
 token_1="$(keycloak_token ff-e2e "$user_1")"
 token_2="$(keycloak_token ff-e2e "$user_2")"

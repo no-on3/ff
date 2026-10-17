@@ -45,14 +45,14 @@
         }
       ],
       "redirectUris": [
-        "http://localhost:5173/*"
+        "http://localhost:5199/*"
       ],
       "webOrigins": [
-        "http://localhost:5173"
+        "http://localhost:5199"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:5173/*"
+        "post.logout.redirect.uris": "http://localhost:5199/*"
       }
     },
     {

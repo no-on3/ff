@@ -40,7 +40,7 @@ describe('configuration', () => {
     expect(config).toMatchObject({
       nodeEnv: 'development',
       port: 3000,
-      cors: { origins: ['http://localhost:5173'] },
+      cors: { origins: ['http://localhost:5199'] },
       auth: { mode: 'dev', devAccountId: '000000000001', oidc: undefined },
       database: {
         host: 'localhost',

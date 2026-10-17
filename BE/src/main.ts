@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 import { apiDocument } from './api-document';
 import { AppModule } from './app.module';
 import { describeError } from './common/describe-error';
+import { corsOptions } from './cors';
 import { winstonConfig } from './config/winston.config';
 import { assertSchemaUpToDate } from './database/schema-check';
 
@@ -24,13 +25,7 @@ async function bootstrap() {
 
   // Global middleware
   app.use(helmet());
-  app.enableCors({
-    origin: configService.getOrThrow<string[]>('cors.origins'),
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-    credentials: true,
-    maxAge: 3600,
-  });
+  app.enableCors(corsOptions(configService.getOrThrow<string[]>('cors.origins')));
   
   // Global pipes
   app.useGlobalPipes(

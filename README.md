@@ -19,10 +19,11 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
   - out-of-memory and crashes are handled per invocation, without restarting the container; a replacement that can't load the code again restarts it;
   - non-root, read-only images that install nothing at start.
 - **Optional gVisor sandbox** for untrusted code: `K8S_RUNTIME_CLASS=gvisor`. See the [dev guide](docs/kubernetes-dev-guide.md#sandboxing-with-gvisor).
-- **Dashboard:** a React + Vite frontend in `FE/`.
+- **Accounts and login:** users sign up and log in through Keycloak (`docker compose --profile auth` starts the development realm), in the console or with tokens. They create accounts that wait for your approval, and act for one account per request. Owners make API keys for scripts and CI, limited to scopes. Another account's functions answer 404 on every route (`hack/e2e-tenancy.sh`). Development acts as one account (`FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, or another one named by `X-FF-Dev-Account`), which production refuses.
+- **Console:** a React + Vite web app in `FE/`: login and sign-up, the new account's onboarding and approval, account settings, API keys, and the function pages.
 
 **Not implemented yet**, despite what older documents say:
-- **Accounts work through the API; the console has no login yet** (client-readiness plan, P-14). Users log in through Keycloak (`docker compose --profile auth` starts the development realm), create accounts that wait for your approval, and act for one account per request. Owners make API keys for scripts and CI, limited to scopes. Another account's functions answer 404 on every route (`hack/e2e-tenancy.sh`). Approving accounts takes SQL until the admin dashboard (P-71). Development acts as one account (`FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, or another one named by `X-FF-Dev-Account`), which production refuses.
+- Approving accounts takes SQL until the admin dashboard (client-readiness plan, P-71).
 - Billing and payments: no Stripe or local gateways yet; see the market plan.
 - Custom domains and function versioning.
 - Multi-file packages with dependencies, which need the zip pipeline (parent plan R-02).
@@ -34,7 +35,7 @@ Nomad is no longer used; its development VM was removed.
 | Path | Contents |
 |---|---|
 | `BE/` | Backend: functions API, metrics, scaling, and the orchestrator (`src/orchestrator/kubernetes`) |
-| `FE/` | Dashboard (React, Vite, Tailwind) |
+| `FE/` | Console (React, Vite, Tailwind) |
 | `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol v1 |
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
@@ -72,7 +73,7 @@ curl -s -X POST localhost:3000/functions/<id>/invoke -H 'content-type: applicati
 
 For Python, use `"runtime": "python"` and code such as `"def handler(event, context):\n    return {\"message\": \"Hello \" + event[\"body\"].get(\"name\", \"world\")}\n"`. Creating a function returns once it is running (`"status": "ACTIVE"`). The memory range is 128–1024 MB and the timeout 1–300 s.
 
-To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http://localhost:5173 and calls the API on localhost:3000, which allows that origin (`CORS_ORIGIN`). Its function pages work against today's API: create, invoke, history, and edit. The scaling tab is read-only for now, and the metrics charts get a new source in the client-readiness plan (P-50).
+To start the console: `cd FE && npm install && npm run dev`. It runs on http://localhost:5199 and calls the API on localhost:3000, which allows that origin (`CORS_ORIGIN`). Without a login, it acts as the backend's development account. With `VITE_OIDC_AUTHORITY` set (`FE/.env.example`), users log in through Keycloak, sign up, create their account, and manage API keys: see "Log in with Keycloak" in [Getting started](docs/getting-started.md). The metrics charts get a new source in the client-readiness plan (P-50).
 
 ## Tests
 
@@ -81,7 +82,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 | L0 backend | `cd BE && npx tsc --noEmit && npm run lint` | Types, and ESLint with type information: promises nobody awaits, unchecked `any` values |
 | L1 backend | `cd BE && npm test` | Unit tests: orchestrator against a fake API server, manifests, scaling, services |
 | L1 runtimes | `cd runtimes/nodejs && npm test`; `cd runtimes/python && python3 -m unittest discover -s tests` | The runtime protocol on real processes |
-| L1 dashboard | `cd FE && npm test` | What the dashboard sends and shows: the fields of an edit, invoke input, API error messages, units (Vitest) |
+| L1 console | `cd FE && npm test` | What the console sends and shows: the fields of an edit, invoke input, API error messages, units; the token and account on each request, token renewal, the account it acts for, API keys; and that its port, client and scopes match the realm and the API (Vitest) |
 | L2 database | `cd BE && npm run test:db`; `npm run migration:check` | The migrations against real PostgreSQL, each case in its own scratch database; no drift between the migrations and the entities |
 | L2 images | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities |
 | L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor), and the function lifecycle (repair, rollback, updates at zero, a runtime that never answers) |

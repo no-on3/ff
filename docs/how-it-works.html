@@ -27,6 +27,7 @@
     --c-node: #5b6676;
     --c-pod: #0b7489;
     --c-worker: #b8186a;
+    --c-idp: #7a6400;
     --code-bg: #f3f4f0;
     --j-key: #2561c9;
     --j-str: #0f6f5c;
@@ -57,6 +58,7 @@
       --c-node: #9aa6b6;
       --c-pod: #4dc6dc;
       --c-worker: #ff70b5;
+      --c-idp: #e0c341;
       --code-bg: #151815;
       --j-key: #8ab4ff;
       --j-str: #6fd8bc;
@@ -87,6 +89,7 @@
     --c-node: #9aa6b6;
     --c-pod: #4dc6dc;
     --c-worker: #ff70b5;
+    --c-idp: #e0c341;
     --code-bg: #151815;
     --j-key: #8ab4ff;
     --j-str: #6fd8bc;
@@ -395,7 +398,7 @@
         <tbody>
           <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
           <tr><td>Invocations: input, output, status, duration, memory, error</td><td>PostgreSQL <code>function_invocations</code></td><td>invoke (RUNNING, then the outcome)</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
-          <tr><td>Per-minute metrics: request and error counts, p50/p95/p99, averages, instances</td><td>PostgreSQL <code>function_metrics</code></td><td>the metrics tick, every 60 s</td><td>the dashboard (<code>GET /metrics/:id</code>)</td></tr>
+          <tr><td>Per-minute metrics: request and error counts, p50/p95/p99, averages, instances</td><td>PostgreSQL <code>function_metrics</code></td><td>the metrics tick, every 60 s</td><td>the console (<code>GET /metrics/:id</code>)</td></tr>
           <tr><td>An archive copy of the code</td><td>S3 bucket <code>functions</code>, key <code>&lt;id&gt;/code.ts</code> or <code>code.py</code></td><td>create, update</td><td>nothing yet: the cluster gets the code from the ConfigMap</td></tr>
           <tr><td>The code the pod runs</td><td>ConfigMap <code>fn-&lt;id&gt;-&lt;hash&gt;</code>, immutable, mounted read-only at <code>/var/task</code></td><td>create, update</td><td>the runtime, when it starts</td></tr>
           <tr><td>Desired and ready instances</td><td>Deployment <code>fn-&lt;id&gt;</code>: <code>spec.replicas</code>, <code>status.readyReplicas</code></td><td>create, update, the autoscaler, the idle sweep, cold starts</td><td>invoke, the waits, the metrics tick</td></tr>
@@ -506,7 +509,8 @@
           <tr><td>Configuration and its defaults</td><td><code>BE/src/config/configuration.ts</code>, <code>BE/.env</code></td></tr>
           <tr><td>Runtimes</td><td><code>runtimes/nodejs/src/</code>, <code>runtimes/python/ff_runtime/</code></td></tr>
           <tr><td>Cluster RBAC and admission policy</td><td><code>deploy/k8s/base/</code>, and <code>deploy/k8s/dev/</code> for development</td></tr>
-          <tr><td>Dashboard</td><td><code>FE/src/components/</code>, <code>FE/src/services/api.ts</code></td></tr>
+          <tr><td>Console: pages, API client</td><td><code>FE/src/components/</code>, <code>FE/src/services/api.ts</code></td></tr>
+          <tr><td>Console: login, and the account it acts for</td><td><code>FE/src/App.tsx</code>, <code>FE/src/auth/oidc.ts</code>, <code>FE/src/session/</code>, <code>FE/src/lib/session.ts</code></td></tr>
         </tbody>
       </table>
     </div>
@@ -596,8 +600,9 @@ const LANES = {
   node:   { label: 'Node', sub: 'kubelet', color: '--c-node', map: 'node' },
   pod:    { label: 'Runtime', sub: 'pod, main', color: '--c-pod', map: 'pod' },
   worker: { label: 'Handler', sub: 'your code', color: '--c-worker', map: 'worker' },
+  idp:    { label: 'Keycloak', sub: 'realm ff', color: '--c-idp', map: 'idp' },
 };
-const MAP_IDS = ['user', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'service', 'configmap', 'deployment', 'pod-box', 'pod', 'worker', 'node'];
+const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'service', 'configmap', 'deployment', 'pod-box', 'pod', 'worker', 'node'];
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
@@ -624,7 +629,7 @@ const SCENARIOS = [
     initial: {},
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions', title: 'You send the function',
-        text: 'The dashboard form, Swagger UI (/api), or curl sends the function as JSON: a name, the runtime, the code, the memory in MB, and the timeout in seconds.',
+        text: 'The console\'s form, Swagger UI (/api), or curl sends the function as JSON: a name, the runtime, the code, the memory in MB, and the timeout in seconds.',
         code: 'FE/src/components/CreateFunction.tsx · BE/src/functions/functions.controller.ts',
         msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'hello', runtime: 'nodejs', code: CODE_TS, memory: 128, timeout: 5 } } },
       { from: 'api', to: 'api', kind: 'int', label: 'validate · resolve the tenant', title: 'Validation and the tenant',
@@ -982,7 +987,7 @@ const SCENARIOS = [
   },
   {
     id: 'metrics', title: 'Metrics, autoscaling, and history', lanes: ['user', 'api', 'db', 'k8s'],
-    summary: 'Three invocations within a minute, then the 60 s tick: one metrics row and one autoscaling decision. Then the dashboard reads the history and the metrics.',
+    summary: 'Three invocations within a minute, then the 60 s tick: one metrics row and one autoscaling decision. Then the console reads the history and the metrics.',
     initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '3 rows (COMPLETED)' }),
     steps: [
       { from: 'api', to: 'api', kind: 'int', label: 'window: 3 requests, 0 errors', title: 'The invocations were recorded in memory',
@@ -996,13 +1001,13 @@ const SCENARIOS = [
       { from: 'api', to: 'api', kind: 'int', label: 'decideReplicas → no change', title: 'The autoscaling decision',
         text: 'The signal is concurrency: each instance serves one call at a time, as on Lambda. These 3 calls came one after another, so at most 1 was in flight at once, and one instance is enough. Calls that arrive together are scaled for at once, as each finds every instance busy: one instance per call in flight, up to maxInstances (3 by default; PUT /functions/:id/scaling-config changes it). This tick then takes one instance away per quiet minute, and the idle sweep takes the last one after 15 minutes.', code: 'BE/src/metrics/scaling.ts decideReplicas() · metrics.service.ts scaleForBurst()',
         msg: { kind: 'ipc', title: 'decideReplicas(…) returns null: keep the current count', body: { desiredInstances: 1, peakConcurrency: 1, minInstances: 0, maxInstances: 3 } } },
-      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/invocations', title: 'The dashboard reads the history', text: 'Newest first. The dashboard asks for the latest 20; without a limit the API returns 10.', code: 'functions.controller.ts getInvocations() · FE/src/services/api.ts',
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/invocations', title: 'The console reads the history', text: 'Newest first. The console asks for the latest 20; without a limit the API returns 10.', code: 'functions.controller.ts getInvocations() · FE/src/services/api.ts',
         msg: { kind: 'http', first: 'GET /functions/' + FN + '/invocations?limit=20 HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT … ORDER BY created_at DESC', title: 'One page of invocations', text: 'With the total count, for paging.', code: 'functions.service.ts getInvocations()',
         msg: { kind: 'sql', text: "SELECT … FROM \"function_invocations\" WHERE \"function_id\" = '" + FN + "'\n ORDER BY \"created_at\" DESC LIMIT 20 OFFSET 0;   -- and COUNT(*)" } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · { invocations, total }', title: 'The history', text: 'An object with the page and the total.', code: 'functions.service.ts getInvocations()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { invocations: [{ id: INV, status: 'COMPLETED', duration: 1.09, memoryUsed: 98, output: { message: 'Hello Tunis', requestId: REQ }, '…': '…' }, '… 2 more'], total: 3 } } },
-      { from: 'user', to: 'api', kind: 'req', label: 'GET /metrics/:id?start&end', title: 'The dashboard reads the metrics', text: 'For its charts, over a time range.', code: 'BE/src/metrics/metrics.controller.ts',
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /metrics/:id?start&end', title: 'The console reads the metrics', text: 'For its charts, over a time range.', code: 'BE/src/metrics/metrics.controller.ts',
         msg: { kind: 'http', first: 'GET /metrics/' + FN + '?start=2026-10-16T13:00:00Z&end=2026-10-16T15:00:00Z HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · metrics rows', title: 'The metrics', text: 'One row per minute that had invocations, oldest first.', code: 'metrics.service.ts getMetrics()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: [{ functionId: FN, timestamp: '2026-10-16T14:03:00.004Z', requestCount: 3, errorCount: 0, responseTimeP50: 41, responseTimeP95: 55, responseTimeP99: 55, memoryUsage: 98, activeInstances: 1, maxConcurrency: 1, '…': '…' }] } },
@@ -1044,10 +1049,59 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8', 'x-ff-request-id': '…' }, body: { message: LOAD_FAILED, error: 'Bad Request', statusCode: 400, requestId: '…' } } },
     ],
   },
+  {
+    id: 'login', title: 'Log in to the console', lanes: ['user', 'idp', 'api', 'db'],
+    summary: 'With VITE_OIDC_AUTHORITY set, the console logs in through Keycloak with the authorization code flow and PKCE, reads GET /me, and then names one account on every request. The access token lasts 5 minutes, and the console renews it with the refresh token.',
+    initial: {},
+    steps: [
+      { from: 'user', to: 'idp', kind: 'req', label: 'GET /auth · code_challenge', title: 'The console sends you to Keycloak',
+        text: '"Log in" leaves the console for the realm\'s login page; "Sign up" adds prompt=create, which opens the registration form instead. The console keeps a random code verifier, and the page you were on, in the tab\'s session storage, and sends only the verifier\'s SHA-256: the code that comes back is useless without the verifier.',
+        code: 'FE/src/App.tsx · FE/src/auth/oidc.ts oidcSettings() · oidc-client-ts',
+        msg: { kind: 'http', first: 'GET /realms/ff/protocol/openid-connect/auth?client_id=ff-console&redirect_uri=http%3A%2F%2Flocalhost%3A5199%2F&response_type=code&scope=openid+profile+email&state=f1c9…&code_challenge=E9Mel…&code_challenge_method=S256 HTTP/1.1', headers: { host: 'localhost:8180' } } },
+      { from: 'idp', to: 'user', kind: 'res', label: '302 → :5199/?code=…', title: 'Keycloak sends you back with a code',
+        text: 'After your password, or at once when Keycloak already knows you from another tab, it redirects to the console with a one-time code. The development realm lets ff-console come back only to http://localhost:5199/*: the console\'s port is fixed for that reason.',
+        code: 'deploy/keycloak/ff-realm.json (client ff-console) · FE/vite.config.ts',
+        msg: { kind: 'http', first: 'HTTP/1.1 302 Found', headers: { location: 'http://localhost:5199/?state=f1c9…&session_state=…&code=8a2f…' } } },
+      { from: 'user', to: 'idp', kind: 'req', label: 'POST /token · code + verifier', title: 'The console trades the code for tokens',
+        text: 'With the verifier that only this tab has. ff-console is a public client, without a secret, which a browser couldn\'t keep.',
+        code: 'oidc-client-ts signinCallback()',
+        msg: { kind: 'http', first: 'POST /realms/ff/protocol/openid-connect/token HTTP/1.1', headers: { host: 'localhost:8180', origin: 'http://localhost:5199', 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=authorization_code&code=8a2f…&redirect_uri=http%3A%2F%2Flocalhost%3A5199%2F&code_verifier=dBjf…&client_id=ff-console' } },
+      { from: 'idp', to: 'user', kind: 'res', label: '200 · access, refresh, ID tokens', title: 'The tokens',
+        text: 'The access token is a signed JWT for the API (audience ff-api) and lasts 5 minutes. The refresh token renews it while the Keycloak session lives: 30 minutes without a renewal. Both stay in the tab\'s session storage. The console then removes the code from the address, and goes back to the page you were on.',
+        code: 'FE/src/App.tsx afterLogin() · FE/src/lib/session.ts returnPath()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json' }, body: { access_token: 'eyJhbGciOiJSUzI1NiIs…', expires_in: 300, refresh_token: 'eyJhbGciOiJIUzUxMiIs…', id_token: 'eyJhbGciOiJSUzI1NiIs…', token_type: 'Bearer' } } },
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /me · Bearer', title: 'Who you are, and your accounts',
+        text: 'Every request carries the access token. This one names no account yet: it asks which accounts you belong to.',
+        code: 'FE/src/session/Console.tsx · FE/src/services/api.ts',
+        msg: { kind: 'http', first: 'GET /me HTTP/1.1', headers: { host: 'localhost:3000', origin: 'http://localhost:5199', authorization: 'Bearer eyJhbGciOiJSUzI1NiIs…' } } },
+      { from: 'api', to: 'idp', kind: 'req', label: 'GET /certs (first time)', title: 'The backend checks the token',
+        text: 'Its signature, with the realm\'s public keys: fetched once and cached, and fetched again only for a key ID it hasn\'t seen, at most every 30 s. Then the issuer, the ff-api audience, the expiry, and a verified e-mail address.',
+        code: 'BE/src/auth/token-verifier.ts · auth.guard.ts',
+        msg: { kind: 'http', first: 'GET /realms/ff/protocol/openid-connect/certs HTTP/1.1', headers: { host: 'localhost:8180' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT users · memberships', title: 'Your user, made on your first call',
+        text: 'Found by the token\'s subject, Keycloak\'s ID for you, or created. Then the accounts you belong to, with your role in each.',
+        code: 'BE/src/accounts/accounts.service.ts userFor() · me()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"users\" WHERE \"oidc_sub\" = '5f0c…';   -- INSERT on the first call\nSELECT … FROM \"memberships\" INNER JOIN \"accounts\" … WHERE \"user_id\" = '…';" } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · you and your accounts', title: 'The console chooses the account',
+        text: 'The one chosen last in this browser, else the first active one. With no account yet, it shows the form that creates one; for an account waiting for approval, the page that says so, with "Check again".',
+        code: 'FE/src/lib/session.ts chooseAccount() · accountView()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { user: { id: '…', email: 'amira@ff.test', name: 'Amira Test', locale: 'fr-TN' }, accounts: [{ id: '418306527941', name: 'Atelier Sfax', status: 'active', role: 'owner' }] } } },
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions · X-FF-Account', title: 'Every request names the account',
+        text: 'The guard checks that you belong to it, and acts with your role there; another account answers 404, as one that doesn\'t exist. Choosing another account in the header reloads the page, so nothing of the first one stays on screen.',
+        code: 'FE/src/services/api.ts · BE/src/auth/auth.guard.ts',
+        msg: { kind: 'http', first: 'GET /functions HTTP/1.1', headers: { host: 'localhost:3000', authorization: 'Bearer eyJhbGciOiJSUzI1NiIs…', 'x-ff-account': '418306527941' } } },
+      { from: 'user', to: 'idp', kind: 'req', label: 'POST /token · refresh_token', title: 'A new access token, a minute before expiry',
+        text: 'Without leaving the page. A request about to go out with an expiring token waits for the renewal. When the Keycloak session has ended, the renewal fails, the API answers 401, and the console shows the login page with the reason. "Log out" ends the Keycloak session, and comes back through /logged-out.',
+        code: 'FE/src/auth/oidc.ts oidcApiAuth() · automaticSilentRenew',
+        msg: [{ kind: 'http', first: 'POST /realms/ff/protocol/openid-connect/token HTTP/1.1', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=refresh_token&refresh_token=eyJhbGciOiJIUzUxMiIs…&client_id=ff-console' },
+          { kind: 'http', first: 'HTTP/1.1 200 OK', body: { access_token: 'eyJhbGciOiJSUzI1NiIs… (a new one)', expires_in: 300, refresh_token: '…', '…': '…' } }] },
+    ],
+  },
 ];
 
 const ARCH_INFO = {
-  user: ['You', 'The dashboard (React, on :5173), Swagger UI on /api, or curl. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · docs/getting-started.md'],
+  user: ['You', 'The console (React, on :5199), Swagger UI on /api, or curl. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · docs/getting-started.md'],
+  idp: ['Keycloak', 'Logs users in and signs them up, for the realm ff (development: localhost:8180). The console gets its tokens from it with the authorization code flow and PKCE; the backend checks each access token against the realm\'s public keys, which it fetches once and caches.', 'deploy/keycloak/ff-realm.json · FE/src/auth/oidc.ts · BE/src/auth/token-verifier.ts'],
   api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL, archives code in S3, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep.', 'BE/src/functions · BE/src/metrics · BE/src/orchestrator'],
   db: ['PostgreSQL', 'Three tables: functions, function_invocations, and function_metrics. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
   s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds an archive copy of each function\'s code. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
@@ -1213,12 +1267,13 @@ const svgLink = (d, label, lx, ly, anchor) => '<g class="arch-link"><path d="' +
 
 /* ---------- architecture maps ---------- */
 function archBig() {
-  return '<svg class="diagram" viewBox="0 0 1000 556" role="img" aria-label="Architecture: you, the backend with PostgreSQL and S3, and the Kubernetes cluster with the tenant namespace">' +
+  return '<svg class="diagram" viewBox="0 0 1000 556" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL and S3, and the Kubernetes cluster with the tenant namespace">' +
     '<defs>' + arrowDefs('arch-arrow', '--muted') + '</defs>' +
     svgGroup(208, 20, 300, 420, 'Your machine or server') +
     svgGroup(560, 20, 428, 520, 'Kubernetes cluster (k3s)') +
     svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-27d6fbbe5c7d (dev account)', 'end') +
-    svgBox('user', 16, 136, 150, 76, 'You', 'dashboard · curl') +
+    svgBox('user', 16, 136, 150, 76, 'You', 'console · curl') +
+    svgBox('idp', 16, 252, 150, 64, 'Keycloak', 'login · realm ff') +
     svgBox('api', 226, 52, 264, 244, 'Backend API', 'NestJS · :3000', { top: true }) +
     svgComp(242, 108, 232, 36, 'Functions: controller · service') +
     svgComp(242, 152, 232, 36, 'Metrics · autoscaler · idle sweep') +
@@ -1236,6 +1291,8 @@ function archBig() {
     svgBox('worker', 784, 362, 158, 52, 'Your handler', 'worker') +
     svgBox('node', 578, 456, 392, 60, 'Node: scheduler · kubelet · containerd', 'starts pods · mounts the code · probes') +
     svgLink('M166,174 L224,174', 'HTTP', 187, 166) +
+    svgLink('M91,212 L91,250', 'login', 99, 236, 'start') +
+    svgLink('M226,284 L168,284', 'keys', 197, 276) +
     svgLink('M288,296 L288,342', 'SQL', 296, 324, 'start') +
     svgLink('M428,296 L428,342', 'S3 API', 436, 324, 'start') +
     svgLink('M490,80 L576,80', 'HTTPS', 534, 72) +
@@ -1251,6 +1308,7 @@ function archMini() {
   const o = { inert: true };
   return '<svg class="diagram" viewBox="0 0 420 424" role="img" aria-label="Where this step happens">' +
     svgBox('user', 10, 10, 120, 40, 'You', '', o) +
+    svgBox('idp', 10, 60, 120, 36, 'Keycloak', '', o) +
     svgBox('api', 140, 10, 270, 40, 'Backend API', '', o) +
     svgBox('db', 140, 60, 130, 36, 'PostgreSQL', '', o) +
     svgBox('s3', 280, 60, 130, 36, 'S3 storage', '', o) +

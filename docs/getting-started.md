@@ -3,7 +3,7 @@
 This guide takes a developer from a fresh clone to a working FF on their own machine, then shows the everyday commands. At the end you will have:
 
 ```
-curl, Swagger UI, dashboard ──▶ backend API (localhost:3000) ──▶ PostgreSQL + S3 (docker compose)
+curl, Swagger UI, console ──▶ backend API (localhost:3000) ──▶ PostgreSQL + S3 (docker compose)
                                     │
                                     └──▶ local Kubernetes (k3d) ──▶ one namespace per tenant ──▶ function pods
 ```
@@ -19,7 +19,7 @@ The commands were checked on a Linux machine, against a running stack. `git clon
 | Tool | Version | Used for |
 |---|---|---|
 | Docker, with the compose plugin | 24+ | PostgreSQL, S3, and the k3d cluster node |
-| Node.js and npm | 24 | Backend, dashboard, Node.js runtime tests |
+| Node.js and npm | 24 | Backend, console, Node.js runtime tests |
 | Python | 3.11+ | Python runtime tests |
 | git, curl, jq | jq 1.6+ | Getting the code; the commands in this guide |
 | zstd, sha512sum | any | Only for the optional gVisor sandbox |
@@ -28,7 +28,7 @@ The commands were checked on a Linux machine, against a running stack. `git clon
 
 **Machine.**
 - At least 3.5 GB of free memory and 6 GB free on Docker's disk, plus about 1 GB for the repository.
-- These ports free on 127.0.0.1: 5432 (PostgreSQL), 9003 (S3), 6550 (Kubernetes API), 3000 (backend), and 5173 (dashboard). Section 6 shows how to move them.
+- These ports free on 127.0.0.1: 5432 (PostgreSQL), 9003 (S3), 6550 (Kubernetes API), 3000 (backend), and 5199 (console). Section 6 shows how to move them.
 - The first run downloads several hundred MB of container images and npm packages.
 
 ## 2. Set up (once)
@@ -89,7 +89,7 @@ npm run migration:run
 npm run start:dev
 ```
 
-- The defaults in `.env.example` match the steps above. In development the backend acts as one account, `FF_DEV_ACCOUNT_ID` (`FF_AUTH_MODE=dev`), until Keycloak login exists. To act as another account, send the header `X-FF-Dev-Account: <12 digits>`: each account sees only its own functions, and another account's answer 404, as functions that don't exist.
+- The defaults in `.env.example` match the steps above. In development the backend acts as one account, `FF_DEV_ACCOUNT_ID` (`FF_AUTH_MODE=dev`), without a login; section 5 shows how to log in with Keycloak instead. To act as another account, send the header `X-FF-Dev-Account: <12 digits>`: each account sees only its own functions, and another account's answer 404, as functions that don't exist.
 - **Every variable is checked when the backend starts.** A missing or bad value stops it with a message that names the variable and what it expects. `NODE_ENV=production` also refuses the development settings: the dev account, and the default database and storage credentials.
 - A `BE/.env` from before 2026-10-17 sets `FF_DEV_USER_ID`, which is no longer read: copy `BE/.env.example` again. The backend says so if you forget.
 - **The schema comes from migrations,** in development as in production. `npm run migration:run` applies the ones your database hasn't had yet. Run it again whenever you pull changes that add a migration (`BE/src/migrations/`). The backend refuses to start while a migration is pending, and says so.
@@ -103,13 +103,13 @@ source hack/k8s/env.sh && kubectl delete namespace "ff-t-$(printf %s 1 | sha256s
 (cd BE && npm run migration:run)
 ```
 
-**8. The dashboard (optional)**, in its own terminal:
+**8. The console (optional)**, in its own terminal:
 
 ```bash
 cd FE && npm install && npm run dev
 ```
 
-It runs on http://localhost:5173 and calls the API on localhost:3000. It creates, invokes, and edits functions, and shows their invocation history; the scaling tab is read-only for now.
+It runs on http://localhost:5199 and calls the API on localhost:3000. Without a login, as here, it acts as the backend's development account: it creates, invokes, and edits functions, shows their invocation history, and changes their instance limits. "Log in with Keycloak" in section 5 adds the login, sign-up, accounts and API keys.
 
 **9. The gVisor sandbox (optional).** This runs every function in gVisor, an extra isolation layer. Restart the backend afterwards.
 
@@ -304,7 +304,16 @@ curl -s $FF/api-keys -H "$AUTH" | jq -c '.[] | {id, name, lastUsedAt}'
 curl -s -X DELETE $FF/api-keys/${KEY:4:12} -H "$AUTH"      # revoked: it stops working at once
 ```
 
-A key never does more than its creator's role allows, checked on every request: it stops when its creator leaves the account. An account has at most 20 keys; `expiresAt` (ISO 8601) makes one expire. Keys can't manage accounts or keys. `docker compose --profile auth down -v` resets Keycloak.
+A key never does more than its creator's role allows, checked on every request: it stops when its creator leaves the account. An account has at most 20 keys; `expiresAt` (ISO 8601) makes one expire. Keys can't manage accounts or keys.
+
+**The console with a login.** With the backend in OIDC mode as above, copy `FE/.env.example` to `FE/.env.local`, set `VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff` in it, and restart `npm run dev`. The console then opens on a login page:
+1. "Sign up" opens Keycloak's registration form. The verification e-mail arrives in Mailpit (http://localhost:58025); its link asks for a password, then brings you back to the console, logged in.
+2. The console asks you to create your account, which then waits for approval. Approve it as above, and "Check again" shows the functions.
+3. "Account" shows the account; its owners rename it or set its tax ID. "API keys" lists, creates and revokes the account's keys, and shows a new key once. The account switcher in the header lists your accounts, and "New account…" makes another.
+
+The console keeps its tokens in the tab's session storage, and renews the 5-minute access token with the refresh token before it expires. "Log out" ends the Keycloak session too. When that session ends another way (30 minutes without a renewal, as after the laptop slept, or a logout in another tab), the next call gets 401, and the console asks you to log in again.
+
+**Reset Keycloak** with `docker compose --profile auth down -v keycloak`: it deletes Keycloak's users, and imports the realm again at the next start. Keycloak reads `deploy/keycloak/ff-realm.json` only at its first start, so a change to that file needs this reset. Name the service: without it, `down -v` deletes the database and S3 volumes too.
 
 **Change the database schema.** Change the entity, then let TypeORM write the migration, read it, and register it:
 
@@ -334,7 +343,7 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 (cd BE && npm test)                                      # backend unit tests, seconds
 (cd BE && npm run test:db)                               # migrations against real PostgreSQL (compose), seconds
 (cd BE && npm run migration:check)                       # the migrations build exactly the entities' schema
-(cd FE && npm test)                                      # dashboard unit tests, seconds
+(cd FE && npm test)                                      # console unit tests, seconds
 (cd runtimes/nodejs && npm test)                         # Node.js runtime protocol
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
@@ -357,8 +366,11 @@ docker compose down -v
 | `resources: FAIL …` | Free memory or disk first. The thresholds protect the machine; don't lower them to push through. |
 | Port 5432 or 9003 already in use | `FF_PG_PORT=55432 FF_S3_PORT=59003 docker compose up -d --wait`, then set `DB_PORT` and `MINIO_PORT` in `BE/.env` to match. |
 | Port 6550 already in use | `export FF_API_PORT=6551` before `hack/k8s/cluster-up.sh`, then set `K8S_API_URL=https://127.0.0.1:6551` in `BE/.env`. |
-| Port 3000 already in use | Set `PORT` in `BE/.env`. The dashboard has the API address hard-coded in `FE/src/services/api.ts`, so change it there as well. |
-| Port 5173 already in use | Vite moves to the next free port and prints it. Set `CORS_ORIGIN` in `BE/.env` to that address, or the browser blocks the dashboard's API calls. |
+| Port 3000 already in use | Set `PORT` in `BE/.env`, and `VITE_API_URL` in `FE/.env.local` to match (see `FE/.env.example`). |
+| `Port 5199 is already in use` | The console doesn't move to another port: the login and the backend's `CORS_ORIGIN` name this one. Stop what holds it (`ss -ltnp 'sport = :5199'`). To use another port anyway, change `CONSOLE_PORT` in `FE/vite.config.ts`, add the address to `ff-console`'s redirect URIs and web origins in Keycloak's admin console, and set `CORS_ORIGIN` in `BE/.env`. |
+| The console says `Can't reach the API at …` | The backend isn't running at `VITE_API_URL`, or its `CORS_ORIGIN` doesn't include http://localhost:5199. A `BE/.env` from before 2026-10-17 says 5173: take the line from `BE/.env.example`. |
+| The console says `The API asks for a login, but this console has none` | The backend runs in OIDC mode, and the console without a login. Set `VITE_OIDC_AUTHORITY` in `FE/.env.local` and restart `npm run dev`, or set `FF_AUTH_MODE=dev` in `BE/.env`. |
+| Keycloak answers `Invalid parameter: redirect_uri` | Your Keycloak still has the realm it imported before the console moved to port 5199 (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows, and sign up again. |
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. |
 | Every API call returns 401 | `FF_AUTH_MODE` isn't `dev`, and the call has no valid token. Use the development values from `BE/.env.example`, or send a token: see "Log in with Keycloak" in section 5. |
 | 401 `The token was issued by another issuer` | `FF_OIDC_ISSUER` must be exactly the token's `iss`, `http://localhost:8180/realms/ff` for the local Keycloak, including `localhost`. |
@@ -368,7 +380,7 @@ docker compose down -v
 | 403 `This API key lacks the scope …` | The key wasn't given that scope. Make one that has it; scopes can't be added to a key. |
 | 401 `The API key was revoked`, or `has expired` | Make a new key. |
 | `migration:run` stops with `tenants that are not 12-digit account IDs` | Functions from before 2026-10-17 can't move to accounts. Reset the database once, as shown after step 7. |
-| A function you can see in the dashboard answers 404 to `curl` | The two act as different accounts: `curl` sent `X-FF-Dev-Account`, or the backend runs with another `FF_DEV_ACCOUNT_ID` than when the function was created. |
+| A function you can see in the console answers 404 to `curl` | The two act as different accounts: `curl` sent `X-FF-Dev-Account`, or the backend runs with another `FF_DEV_ACCOUNT_ID` than when the function was created. |
 | An answer is 500 with `… failed because of an internal error (request <id>)` | A failure of the platform, not of your function. The backend's log has the details: search it for the request ID, which every answer also carries in `x-ff-request-id`. |
 | `The backend did not start: The database schema is out of date: … pending` | `cd BE && npm run migration:run`, then start it again. |
 | `migration:run` fails with `relation "functions" already exists` | The database was created before migrations were used. Reset it once, as shown after step 7. |

@@ -33,7 +33,7 @@ export const DEVELOPMENT_CREDENTIALS = {
   MINIO_SECRET_KEY: ['minioadmin', 'ffdevsecretkey-local-only'],
 } as const;
 
-const DEV_CORS_ORIGIN = 'http://localhost:5173';
+const DEV_CORS_ORIGIN = 'http://localhost:5199';
 const IN_CLUSTER_SECRETS = '/var/run/secrets/kubernetes.io/serviceaccount';
 
 // ---------- one variable ----------
