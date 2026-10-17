@@ -5,7 +5,11 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   OneToMany,
+  ManyToOne,
+  JoinColumn,
+  Index,
 } from 'typeorm';
+import { Account } from '../../accounts/entities/account.entity';
 import { FunctionInvocation } from './function-invocation.entity';
 
 export enum FunctionStatus {
@@ -28,8 +32,14 @@ export class Function {
   @Column()
   name: string;
 
-  @Column()
-  userId: string;
+  /** The account that owns the function (D1). Every query includes it (D4). */
+  @Index()
+  @Column({ type: 'char', length: 12 })
+  accountId: string;
+
+  @ManyToOne(() => Account)
+  @JoinColumn({ name: 'account_id' })
+  account?: Account;
 
   @Column({
     type: 'enum',

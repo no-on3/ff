@@ -39,7 +39,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     ({
       id: 'fn-1',
       name: 'hello',
-      userId: 'user-1',
+      accountId: 'user-1',
       runtime: Runtime.NODEJS,
       code: 'export const handler = async () => 1;',
       memory: 128,
@@ -99,7 +99,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       const result = await service.create('user-42', dto);
 
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'x');
-      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1', userId: 'user-42' }));
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1', accountId: 'user-42' }));
       expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 90_000);
       expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ACTIVE]);
       expect(result.status).toBe(FunctionStatus.ACTIVE);
@@ -561,7 +561,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.getInvocations('user-1', ID, { limit: 5, offset: 10 });
 
       expect(invocationsRepo.findAndCount).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { functionId: ID, function: { userId: 'user-1' } }, take: 5, skip: 10 }),
+        expect.objectContaining({ where: { functionId: ID, function: { accountId: 'user-1' } }, take: 5, skip: 10 }),
       );
     });
   });

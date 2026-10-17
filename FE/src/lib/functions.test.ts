@@ -5,7 +5,7 @@ import { apiErrorMessage, changedFields, formatDuration, formatMemory, parseInvo
 const stored: Function = {
   id: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
   name: 'hello',
-  userId: '000000000001',
+  accountId: '000000000001',
   runtime: 'nodejs',
   code: 'export const handler = async () => 1;',
   memory: 128,

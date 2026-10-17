@@ -11,6 +11,7 @@ import {
   resourceQuotaManifest,
   serviceManifest,
 } from './manifests';
+import { accountHash } from './naming';
 import { settings, workload } from './test-fixtures';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -28,16 +29,17 @@ describe('Kubernetes manifests', () => {
   });
 
   describe('Namespace', () => {
-    it('is marked as FF-managed, enforces Pod Security "restricted", and records the tenant', () => {
-      const ns: any = namespaceManifest('ff-t-abc', 'user-1');
+    it('is marked as FF-managed, enforces Pod Security "restricted", and records its account (P-12)', () => {
+      const ns: any = namespaceManifest('ff-t-abc', '123456789012');
 
       expect(ns.metadata.labels).toMatchObject({
         'app.kubernetes.io/managed-by': 'ff-controller',
+        'ff.dev/account-hash': accountHash('123456789012'),
         'pod-security.kubernetes.io/enforce': 'restricted',
         'pod-security.kubernetes.io/warn': 'restricted',
         'pod-security.kubernetes.io/audit': 'restricted',
       });
-      expect(ns.metadata.annotations['ff.dev/tenant-id']).toBe('user-1');
+      expect(ns.metadata.annotations['ff.dev/account-id']).toBe('123456789012');
     });
   });
 

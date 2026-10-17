@@ -6,6 +6,9 @@
 import { INestApplication } from '@nestjs/common';
 import { OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
 import { Test } from '@nestjs/testing';
+import { AccountStatus } from './accounts/entities/account.entity';
+import { AccountsController } from './accounts/accounts.controller';
+import { AccountsService } from './accounts/accounts.service';
 import { apiDocument } from './api-document';
 import { Principal } from './auth/principal';
 import { FunctionsController } from './functions/functions.controller';
@@ -31,17 +34,19 @@ describe('the OpenAPI document (L1, P-08)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [FunctionsController, MetricsController, HealthController],
+      controllers: [FunctionsController, MetricsController, HealthController, AccountsController],
       providers: [
         // The caller owns the function, so the ownership checks pass.
-        { provide: FunctionsService, useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, userId: ACCOUNT }) }) },
+        { provide: FunctionsService, useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }) }) },
         { provide: MetricsService, useValue: succeeding(MetricsService) },
+        { provide: AccountsService, useValue: succeeding(AccountsService) },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     // The caller, where the authentication guard (P-11) will put it.
-    app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
-      req.principal = { accountId: ACCOUNT, role: 'owner' };
+    app.use((req: { principal?: Principal; user?: object }, _res: unknown, next: () => void) => {
+      req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, role: 'owner' };
+      req.user = { id: 'u-1', email: 'amira@example.tn' };
       next();
     });
     document = apiDocument(app);
@@ -59,7 +64,8 @@ describe('the OpenAPI document (L1, P-08)', () => {
 
     const checked: Array<{ route: string; documented: string[]; answered: number }> = [];
     for (const { method, path, operation } of routes) {
-      const res = await fetch(baseUrl + path.replace(/\{\w+\}/g, ID), {
+      // Account routes take an account ID; the others a function ID.
+      const res = await fetch(baseUrl + path.replace(/\{\w+\}/g, path.startsWith('/accounts/') ? ACCOUNT : ID), {
         method: method.toUpperCase(),
         headers: { 'content-type': 'application/json' },
         body: method === 'get' || method === 'delete' ? undefined : '{}',

@@ -7,12 +7,13 @@ export const ORCHESTRATOR = Symbol('ORCHESTRATOR');
  * Everything a scheduler needs to run one function. The Function entity
  * satisfies this shape structurally, so services can pass entities directly.
  * Methods take the whole workload, not just an ID, because some drivers
- * (Kubernetes) also need the tenant to locate resources.
+ * (Kubernetes) also need the account to locate resources.
  */
 export interface FunctionWorkload {
   id: string;
   name: string;
-  userId: string;
+  /** The account that owns the function (D1): it names the namespace. */
+  accountId: string;
   runtime: Runtime;
   code: string;
   /** Memory in MB. */

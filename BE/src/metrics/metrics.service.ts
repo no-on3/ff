@@ -231,8 +231,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
 
   /** A function's metrics, for its own account only: another account's function is not found (D4). */
   async getMetrics(accountId: string, functionId: string, timeRange: { start: Date; end: Date }) {
-    // userId holds the account ID until P-12 renames it.
-    if (!(await this.functionRepository.exists({ where: { id: functionId, userId: accountId } }))) {
+    if (!(await this.functionRepository.exists({ where: { id: functionId, accountId } }))) {
       throw new NotFoundException(`Function with ID ${functionId} not found`);
     }
     return this.metricsRepository.find({

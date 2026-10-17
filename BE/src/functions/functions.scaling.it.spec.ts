@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { MetricsService } from '../metrics/metrics.service';
 import { KubeClient, paths } from '../orchestrator/kubernetes/kube-client';
 import { KubernetesOrchestrator } from '../orchestrator/kubernetes/kubernetes.orchestrator';
-import { tenantNamespace } from '../orchestrator/kubernetes/naming';
+import { accountNamespace } from '../orchestrator/kubernetes/naming';
 import { settings } from '../orchestrator/kubernetes/test-fixtures';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
@@ -42,7 +42,7 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
   const client = new KubeClient({ server: s.apiUrl, tokenFile: s.tokenFile, caFile: s.caFile });
   const orchestrator = new KubernetesOrchestrator(s, client);
   const account = String(randomInt(1e12)).padStart(12, '0');
-  const ns = tenantNamespace(s.namespacePrefix, account);
+  const ns = accountNamespace(s.namespacePrefix, account);
   const functions = new MemoryRepository<Function>(FUNCTION_DEFAULTS);
   const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
   const metrics = new MetricsService(new MemoryRepository() as never, functions as never, orchestrator, config);

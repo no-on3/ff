@@ -6,7 +6,7 @@ import { Runtime } from '../../functions/entities/function.entity';
 import { CodeTooLargeError } from '../orchestrator.errors';
 import { FunctionWorkload } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
-import { ANNOTATIONS, LABELS, MANAGED_BY, functionResourceName, tenantHash } from './naming';
+import { ANNOTATIONS, LABELS, MANAGED_BY, accountHash, functionResourceName } from './naming';
 
 export interface K8sObject {
   apiVersion: string;
@@ -67,20 +67,20 @@ function functionLabels(fn: FunctionWorkload): Record<string, string> {
   });
 }
 
-export function namespaceManifest(name: string, userId: string): K8sObject {
+export function namespaceManifest(name: string, accountId: string): K8sObject {
   return {
     apiVersion: 'v1',
     kind: 'Namespace',
     metadata: {
       name,
       labels: managedLabels({
-        [LABELS.tenantHash]: tenantHash(userId),
+        [LABELS.accountHash]: accountHash(accountId),
         'pod-security.kubernetes.io/enforce': 'restricted',
         'pod-security.kubernetes.io/enforce-version': 'latest',
         'pod-security.kubernetes.io/warn': 'restricted',
         'pod-security.kubernetes.io/audit': 'restricted',
       }),
-      annotations: { [ANNOTATIONS.tenantId]: userId },
+      annotations: { [ANNOTATIONS.accountId]: accountId },
     },
   };
 }

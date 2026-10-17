@@ -57,7 +57,7 @@ export class FunctionsService {
   async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<Function> {
     const function_ = this.functionsRepository.create({
       ...createFunctionDto,
-      userId: accountId, // the account: P-12 renames the column
+      accountId,
       status: FunctionStatus.CREATING,
     });
 
@@ -87,15 +87,14 @@ export class FunctionsService {
 
   async findAll(accountId: string): Promise<Function[]> {
     return this.functionsRepository.find({
-      where: { userId: accountId },
+      where: { accountId },
       order: { createdAt: 'DESC' },
     });
   }
 
   /** The account's function; another account's is not found, exactly like one that doesn't exist (D4). */
   async findOne(accountId: string, id: string): Promise<Function> {
-    // userId holds the account ID until P-12 renames it.
-    const function_ = await this.functionsRepository.findOne({ where: { id, userId: accountId } });
+    const function_ = await this.functionsRepository.findOne({ where: { id, accountId } });
     if (!function_) {
       throw new NotFoundException(`Function with ID ${id} not found`);
     }
@@ -309,7 +308,7 @@ export class FunctionsService {
     await this.findOne(accountId, id); // another account's function is not found
     const [invocations, total] = await this.invocationsRepository.findAndCount({
       // The account here too, so that this query alone never reads another account's history.
-      where: { functionId: id, function: { userId: accountId } },
+      where: { functionId: id, function: { accountId } },
       order: { createdAt: 'DESC' },
       take: page.limit,
       skip: page.offset,

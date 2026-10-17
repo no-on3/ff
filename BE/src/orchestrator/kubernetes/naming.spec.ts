@@ -2,18 +2,18 @@ import {
   codeConfigMapName,
   codeHash,
   functionResourceName,
-  tenantHash,
-  tenantNamespace,
+  accountHash,
+  accountNamespace,
 } from './naming';
 
 describe('Kubernetes naming', () => {
   const id = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
 
   it('derives a deterministic 12-hex tenant hash without exposing the ID', () => {
-    expect(tenantHash('user-1')).toMatch(/^[0-9a-f]{12}$/);
-    expect(tenantHash('user-1')).toBe(tenantHash('user-1'));
-    expect(tenantHash('user-1')).not.toBe(tenantHash('user-2'));
-    expect(tenantNamespace('ff-t-', 'auth0|abc@example.com')).toMatch(/^ff-t-[0-9a-f]{12}$/);
+    expect(accountHash('123456789012')).toMatch(/^[0-9a-f]{12}$/);
+    expect(accountHash('123456789012')).toBe(accountHash('123456789012'));
+    expect(accountHash('123456789012')).not.toBe(accountHash('210987654321'));
+    expect(accountNamespace('ff-t-', '000000000001')).toMatch(/^ff-t-[0-9a-f]{12}$/);
   });
 
   it('names function resources fn-<id>, normalizing case', () => {

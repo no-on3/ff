@@ -70,6 +70,11 @@ function secret(fallback?: string) {
   return z.preprocess(prepare(fallback, false), z.string({ error: 'is required' }));
 }
 
+/** A URL that may hold a password: may be unset, and is never repeated in an error message. */
+function optionalSecretUrl(rule: { test: (value: string) => boolean; expected: string }) {
+  return z.preprocess(prepare(undefined), z.string().refine(rule.test, { error: `must be ${rule.expected}` }).optional());
+}
+
 function integer(fallback: number, min: number, max: number) {
   const expected = `a whole number from ${min} to ${max}`;
   return z.preprocess(
@@ -167,6 +172,15 @@ const bucketName = {
   expected: 'an S3 bucket name (3 to 63 lowercase letters, digits, "." and "-")',
 };
 const accountId = { test: (v: string) => /^\d{12}$/.test(v), expected: 'an account ID: 12 digits' };
+const smtpUrl = {
+  test: (v: string) => isUrl(v, ['smtp:', 'smtps:']),
+  expected: 'an smtp:// or smtps:// URL, such as smtp://localhost:51025 (credentials go in it: smtps://user:password@host)',
+};
+const emailAddress = { test: (v: string) => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(v), expected: 'an e-mail address' };
+const mailbox = {
+  test: (v: string) => emailAddress.test(v) || /^[^<>]*<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>$/.test(v),
+  expected: 'an e-mail address, or "Name <address>"',
+};
 
 // ---------- the schema ----------
 
@@ -220,6 +234,11 @@ const appShape = {
   K8S_TENANT_QUOTA_PODS: text('20', wholeNumber),
   K8S_TENANT_QUOTA_CPU: text('8', quantity),
   K8S_TENANT_QUOTA_MEMORY: text('8Gi', quantity),
+
+  FF_SMTP_URL: optionalSecretUrl(smtpUrl),
+  FF_MAIL_FROM: text('FF <no-reply@ff.localhost>', mailbox),
+  FF_OPERATOR_EMAIL: optionalText(emailAddress),
+  FF_ADMIN_URL: text('http://localhost:5174', httpUrl),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -272,6 +291,11 @@ function appRules(env: AppEnv): string[] {
     }
     if (env.CORS_ORIGIN.length === 0) {
       problems.push("CORS_ORIGIN must be set to the console's origin when NODE_ENV=production");
+    }
+    // The beta's sign-ups wait for your approval (P-12): their e-mails must reach you.
+    if (!env.FF_SMTP_URL) problems.push('FF_SMTP_URL is required when NODE_ENV=production, so that e-mails are sent');
+    if (!env.FF_OPERATOR_EMAIL) {
+      problems.push('FF_OPERATOR_EMAIL is required when NODE_ENV=production: new accounts wait for your approval there');
     }
   }
   return problems;
@@ -372,6 +396,15 @@ export default function configuration(env: Env = process.env) {
     scaling: {
       // Idle time before a function with scaleToZero and minInstances 0 is scaled to zero.
       scaleToZeroIdleSeconds: parsed.FF_SCALE_TO_ZERO_IDLE_SECONDS,
+    },
+    mail: {
+      // Empty: e-mails are written to the log instead of being sent.
+      smtpUrl: parsed.FF_SMTP_URL ?? '',
+      from: parsed.FF_MAIL_FROM,
+      // Who is told about each new account (P-12); empty: nobody.
+      operatorEmail: parsed.FF_OPERATOR_EMAIL ?? '',
+      // The admin dashboard (P-70), linked from those e-mails.
+      adminUrl: parsed.FF_ADMIN_URL.replace(/\/$/, ''),
     },
     // Kubernetes driver settings (docs/kubernetes-migration-plan.md §4.5).
     kubernetes: {

@@ -23,7 +23,8 @@ export type FunctionStatus = 'CREATING' | 'ACTIVE' | 'ERROR' | 'DELETED';
 export interface Function {
   id: string;
   name: string;
-  userId: string;
+  /** The account that owns the function (D1). */
+  accountId: string;
   runtime: Runtime;
   code: string;
   /** MB */

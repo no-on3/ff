@@ -18,6 +18,8 @@ const production: Env = {
   MINIO_ACCESS_KEY: 'prod-access-key',
   MINIO_SECRET_KEY: 'prod-secret-key',
   CORS_ORIGIN: 'https://console.ff.example',
+  FF_SMTP_URL: 'smtps://ff:mail-secret@mail.ff.example:465',
+  FF_OPERATOR_EMAIL: 'ops@ff.example',
 };
 
 /** The problems a configuration is refused for; fails the test if it is accepted. */
@@ -146,6 +148,8 @@ describe('configuration', () => {
       ['a missing Keycloak audience', { FF_OIDC_AUDIENCE: '' }, 'FF_OIDC_AUDIENCE is required when FF_AUTH_MODE is oidc'],
       ['an issuer without TLS', { FF_OIDC_ISSUER: 'http://login.ff.example/realms/ff' }, 'FF_OIDC_ISSUER must be an https:// URL'],
       ['a missing console origin for CORS', { CORS_ORIGIN: undefined }, "CORS_ORIGIN must be set to the console's origin"],
+      ['no SMTP server, so no e-mail would leave (P-12)', { FF_SMTP_URL: undefined }, 'FF_SMTP_URL is required when NODE_ENV=production'],
+      ['nobody to approve new accounts (P-12)', { FF_OPERATOR_EMAIL: '' }, 'FF_OPERATOR_EMAIL is required when NODE_ENV=production'],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 
@@ -165,6 +169,35 @@ describe('configuration', () => {
       expect(message).toContain('MINIO_SECRET_KEY');
       expect(message).not.toContain('ffdevsecretkey-local-only');
       expect(message).not.toMatch(/"postgres"|: postgres/);
+    });
+  });
+
+  describe('e-mail (P-12)', () => {
+    it('logs e-mails instead of sending them when no SMTP server is set, and tells nobody by default', () => {
+      expect(configuration(dev).mail).toEqual({
+        smtpUrl: '',
+        from: 'FF <no-reply@ff.localhost>',
+        operatorEmail: '',
+        adminUrl: 'http://localhost:5174',
+      });
+      expect(configuration({ ...dev, FF_ADMIN_URL: 'https://admin.ff.example/', FF_SMTP_URL: 'smtp://localhost:51025' }).mail).toMatchObject({
+        smtpUrl: 'smtp://localhost:51025',
+        adminUrl: 'https://admin.ff.example',
+      });
+    });
+
+    it('refuses an SMTP URL it can not use without repeating it: it may hold a password', () => {
+      const found = problems({ ...dev, FF_SMTP_URL: 'https://ff:mail-secret@mail.ff.example' });
+
+      expect(found).toEqual([expect.stringContaining('FF_SMTP_URL must be an smtp:// or smtps:// URL')]);
+      expect(found.join(' ')).not.toContain('mail-secret');
+    });
+
+    it.each([
+      ['FF_OPERATOR_EMAIL', 'ops at ff.example', 'must be an e-mail address'],
+      ['FF_MAIL_FROM', 'FF <no-reply>', 'must be an e-mail address, or "Name <address>"'],
+    ])('refuses %s=%j', (name, value, expected) => {
+      expect(problems({ ...dev, [name]: value })).toEqual([expect.stringContaining(`${name} ${expected}`)]);
     });
   });
 

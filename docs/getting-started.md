@@ -280,7 +280,19 @@ curl -s -X POST $KC/admin/realms/ff/users -H "authorization: Bearer $ADMIN" -H '
 TOKEN=$(curl -s -X POST $KC/realms/ff/protocol/openid-connect/token -d grant_type=password -d client_id=ff-e2e -d username=amira@ff.test -d password=change-me-1 | jq -r .access_token)
 ```
 
-Start the backend in OIDC mode, as `BE/.env.example` shows: `FF_AUTH_MODE=oidc`, `FF_OIDC_ISSUER=http://localhost:8180/realms/ff`, `FF_OIDC_AUDIENCE=ff-api`. Every call then needs `-H "Authorization: Bearer $TOKEN"`, except `GET /healthz`. Without a token, the answer is 401. With one, a user has no account until P-12 of the client-readiness plan creates accounts, so the answer is 403 `This user has no account yet`. `docker compose --profile auth down -v` resets Keycloak.
+Start the backend in OIDC mode, as `BE/.env.example` shows: `FF_AUTH_MODE=oidc`, `FF_OIDC_ISSUER=http://localhost:8180/realms/ff`, `FF_OIDC_AUDIENCE=ff-api`, and `FF_SMTP_URL=smtp://localhost:51025` so that its e-mails reach Mailpit. Every call then needs `-H "Authorization: Bearer $TOKEN"`, except `GET /healthz`; without a token, the answer is 401. The backend creates the user on its first call. Then make an account; it waits for approval during the beta, and you get an e-mail about it in Mailpit:
+
+```bash
+AUTH="Authorization: Bearer $TOKEN"
+curl -s $FF/me -H "$AUTH" | jq -c .                       # {"user":{…"email":"amira@ff.test"…},"accounts":[]}
+ACCOUNT=$(curl -s -X POST $FF/accounts -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"name": "Atelier Sfax", "useCase": "Resize product photos"}' | jq -r .id)   # status "pending"
+# approve it, as the admin dashboard will (client-readiness plan, P-71):
+docker compose exec -T postgres psql -U postgres -d serverless_platform -c "UPDATE accounts SET status = 'active' WHERE id = '$ACCOUNT'"
+curl -s $FF/functions -H "$AUTH"                         # now acts for that account
+```
+
+A user who belongs to several accounts names one with `-H "X-FF-Account: <id>"`. `docker compose --profile auth down -v` resets Keycloak.
 
 **Change the database schema.** Change the entity, then let TypeORM write the migration, read it, and register it:
 
@@ -338,7 +350,10 @@ docker compose down -v
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. |
 | Every API call returns 401 | `FF_AUTH_MODE` isn't `dev`, and the call has no valid token. Use the development values from `BE/.env.example`, or send a token: see "Log in with Keycloak" in section 5. |
 | 401 `The token was issued by another issuer` | `FF_OIDC_ISSUER` must be exactly the token's `iss`, `http://localhost:8180/realms/ff` for the local Keycloak, including `localhost`. |
-| 403 `This user has no account yet` | Expected until accounts exist (client-readiness plan P-12): the token is valid, but there is no account to act for. Use development mode in the meantime. |
+| 403 `This user has no account yet: create one with POST /accounts` | The token is valid, but the user has no account to act for: create one, as "Log in with Keycloak" in section 5 shows. |
+| 403 `Your account is waiting for approval` | A new account can't deploy or invoke until it is approved. Until the admin dashboard exists, approve it in the database (section 5). |
+| 400 `This user belongs to several accounts` | Name one: `-H "X-FF-Account: <account ID>"`. `GET /me` lists them. |
+| `migration:run` stops with `tenants that are not 12-digit account IDs` | Functions from before 2026-10-17 can't move to accounts. Reset the database once, as shown after step 7. |
 | A function you can see in the dashboard answers 404 to `curl` | The two act as different accounts: `curl` sent `X-FF-Dev-Account`, or the backend runs with another `FF_DEV_ACCOUNT_ID` than when the function was created. |
 | An answer is 500 with `… failed because of an internal error (request <id>)` | A failure of the platform, not of your function. The backend's log has the details: search it for the request ID, which every answer also carries in `x-ff-request-id`. |
 | `The backend did not start: The database schema is out of date: … pending` | `cd BE && npm run migration:run`, then start it again. |

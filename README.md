@@ -22,7 +22,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Dashboard:** a React + Vite frontend in `FE/`.
 
 **Not implemented yet**, despite what older documents say:
-- **Login is half built.** Every route acts for the caller's account, and another account's functions answer 404 (`hack/e2e-tenancy.sh` checks every route). The backend checks Keycloak's access tokens (`docker compose --profile auth` starts the development realm), but accounts come with P-12 of the client-readiness plan: until then a logged-in user gets 403. Development acts as one account (`FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, or another one named by `X-FF-Dev-Account`), which production refuses.
+- **Accounts work through the API; the console has no login yet** (client-readiness plan, P-14). Users log in through Keycloak (`docker compose --profile auth` starts the development realm), create accounts that wait for your approval, and act for one account per request. Another account's functions answer 404 on every route (`hack/e2e-tenancy.sh`). Approving accounts takes SQL until the admin dashboard (P-71). Development acts as one account (`FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, or another one named by `X-FF-Dev-Account`), which production refuses.
 - Billing and payments: no Stripe or local gateways yet; see the market plan.
 - Custom domains and function versioning.
 - Multi-file packages with dependencies, which need the zip pipeline (parent plan R-02).
@@ -87,7 +87,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 | L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor), and the function lifecycle (repair, rollback, updates at zero, a runtime that never answers) |
 | RBAC | `hack/k8s/test-rbac.sh` | What the backend's ServiceAccount may and may not do |
 | L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes, and the code archive in object storage |
-| L5 | `hack/e2e-tenancy.sh` | Every route of the OpenAPI document, as another account (404, nothing changes), anonymously (401), and with real Keycloak tokens |
+| L5 | `hack/e2e-tenancy.sh` | Every route of the OpenAPI document, as another account (404, nothing changes) and anonymously (401); sign-up through Keycloak and Mailpit; isolation between two real accounts |
 
 ## Documentation
 

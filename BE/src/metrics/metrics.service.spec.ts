@@ -11,7 +11,7 @@ describe('MetricsService', () => {
     ({
       id: 'fn-1',
       name: 'hello',
-      userId: 'user-1',
+      accountId: '123456789012',
       runtime: Runtime.NODEJS,
       code: 'x',
       memory: 128,
@@ -260,7 +260,7 @@ describe('MetricsService', () => {
       metricsRepository.find.mockResolvedValue([{ functionId: 'fn-1', invocations: 3 }]);
 
       await expect(service.getMetrics('000000000001', 'fn-1', period)).resolves.toEqual([{ functionId: 'fn-1', invocations: 3 }]);
-      expect(functionRepository.exists).toHaveBeenCalledWith({ where: { id: 'fn-1', userId: '000000000001' } });
+      expect(functionRepository.exists).toHaveBeenCalledWith({ where: { id: 'fn-1', accountId: '000000000001' } });
     });
 
     it("answer another account with 404, without reading them", async () => {

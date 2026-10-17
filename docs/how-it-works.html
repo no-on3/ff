@@ -380,7 +380,7 @@
 <section id="data">
   <div class="wrap">
     <h2>Data model</h2>
-    <p class="lead">Three tables hold everything the backend knows. A function's invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>user_id</code> is <code>userId</code>).</p>
+    <p class="lead">Seven tables hold everything the backend knows: functions with their invocations and metrics, and since P-12 accounts, with their plans, users and memberships. A function belongs to an account, and its invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). A user belongs to accounts through memberships, each with a role. The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>account_id</code> is <code>accountId</code>).</p>
     <div class="card pad scrollx"><div id="erDiagram" class="capped"></div></div>
     <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set.</p>
     <h3>Lifecycles</h3>
@@ -547,7 +547,7 @@ function pyJSON(v) {
 /* The manifests below are what BE/src/orchestrator/kubernetes/manifests.ts produces for the sample function. */
 const MANAGED = { 'app.kubernetes.io/managed-by': 'ff-controller' };
 const FN_LABELS = { 'app.kubernetes.io/managed-by': 'ff-controller', 'app.kubernetes.io/name': 'ff-function', 'ff.dev/function-id': FN, 'ff.dev/runtime': 'nodejs' };
-const M_NAMESPACE = { apiVersion: 'v1', kind: 'Namespace', metadata: { name: NS, labels: { 'app.kubernetes.io/managed-by': 'ff-controller', 'ff.dev/tenant-hash': '27d6fbbe5c7d', 'pod-security.kubernetes.io/enforce': 'restricted', 'pod-security.kubernetes.io/enforce-version': 'latest', 'pod-security.kubernetes.io/warn': 'restricted', 'pod-security.kubernetes.io/audit': 'restricted' }, annotations: { 'ff.dev/tenant-id': '000000000001' } } };
+const M_NAMESPACE = { apiVersion: 'v1', kind: 'Namespace', metadata: { name: NS, labels: { 'app.kubernetes.io/managed-by': 'ff-controller', 'ff.dev/account-hash': '27d6fbbe5c7d', 'pod-security.kubernetes.io/enforce': 'restricted', 'pod-security.kubernetes.io/enforce-version': 'latest', 'pod-security.kubernetes.io/warn': 'restricted', 'pod-security.kubernetes.io/audit': 'restricted' }, annotations: { 'ff.dev/account-id': '000000000001' } } };
 const M_QUOTA = { apiVersion: 'v1', kind: 'ResourceQuota', metadata: { name: 'ff-tenant-quota', namespace: NS, labels: MANAGED }, spec: { hard: { pods: '20', 'requests.cpu': '8', 'limits.cpu': '8', 'requests.memory': '8Gi', 'limits.memory': '8Gi', configmaps: '60', services: '30' } } };
 const M_LIMITS = { apiVersion: 'v1', kind: 'LimitRange', metadata: { name: 'ff-tenant-limits', namespace: NS, labels: MANAGED }, spec: { limits: [{ type: 'Container', default: { cpu: '100m', memory: '128Mi' }, defaultRequest: { cpu: '100m', memory: '128Mi' }, max: { cpu: '6', memory: '10240Mi' } }] } };
 const M_NETPOL = { apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', metadata: { name: 'ff-default-deny', namespace: NS, labels: MANAGED }, spec: { podSelector: {}, policyTypes: ['Ingress', 'Egress'],
@@ -627,12 +627,12 @@ const SCENARIOS = [
         code: 'FE/src/components/CreateFunction.tsx · BE/src/functions/functions.controller.ts',
         msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'hello', runtime: 'nodejs', code: CODE_TS, memory: 128, timeout: 5 } } },
       { from: 'api', to: 'api', kind: 'int', label: 'validate · resolve the tenant', title: 'Validation and the tenant',
-        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. In OIDC mode, the global guard first checks the access token: its signature against the Keycloak realm\'s published keys, an asymmetric algorithm, the issuer, the ff-api audience, the expiry, and a verified e-mail address (401 or 403 otherwise). @Principal() then names the caller\'s account; until accounts exist (P-12), a logged-in user has none and gets 403. In development (FF_AUTH_MODE=dev), the caller is the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names. Without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID.',
+        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. In OIDC mode, the global guard first checks the access token: its signature against the Keycloak realm\'s published keys, an asymmetric algorithm, the issuer, the ff-api audience, the expiry, and a verified e-mail address (401 or 403 otherwise). The guard then finds the user (created on the first call) and the account the request acts for: the user\'s only account, or the one an X-FF-Account header names (400 to choose among several, 403 without any, 404 for one the user isn\'t a member of). Writing needs the owner or developer role, and deploying or invoking an account that was approved: a new one waits for approval. In development (FF_AUTH_MODE=dev), the caller is the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names, created the first time. Without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID.',
         code: 'BE/src/main.ts · BE/src/auth/auth.guard.ts · token-verifier.ts · principal.ts · BE/src/common/request-context.ts' },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
         text: 'The row gets its UUID, the tenant ID, and the defaults: minInstances 0, maxInstances 3, scaleToZero true.',
         code: 'BE/src/functions/functions.service.ts create()',
-        msg: { kind: 'sql', text: "INSERT INTO \"functions\" (\"name\", \"user_id\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '000000000001', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
+        msg: { kind: 'sql', text: "INSERT INTO \"functions\" (\"name\", \"account_id\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '000000000001', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
         set: { 'PostgreSQL.functions': 'CREATING' } },
       { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts', title: 'An archive copy of the code',
         text: 'The code goes to the functions bucket under <id>/code.ts, through the AWS SDK\'s S3 client, which signs every request with the storage key (SigV4). Nothing reads it back today: the cluster gets the code through a ConfigMap.',
@@ -703,7 +703,7 @@ const SCENARIOS = [
       { from: 'api', to: 'user', kind: 'res', label: '201 Created · the function', title: 'You get the function back',
         text: 'The response is the stored record. Keep its id: you need it to invoke, update, or delete the function.',
         code: 'functions.controller.ts create()',
-        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, id: FN, minInstances: 0, maxInstances: 3, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:00:09.412Z' } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'hello', accountId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, id: FN, minInstances: 0, maxInstances: 3, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:00:09.412Z' } } },
     ],
   },
   {
@@ -893,7 +893,7 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'PUT /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { code: CODE_TS_V2 } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT · in your account?', title: 'Only your account\'s function is found',
         text: 'Every query includes the caller\'s account. Another account\'s function isn\'t found: the answer is 404, exactly as for one that doesn\'t exist.', code: 'functions.service.ts findOne()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"user_id\" = '000000000001' LIMIT 1;   -- the caller's account (P-12 renames the column)" } },
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"account_id\" = '000000000001' LIMIT 1;   -- the caller's account" } },
       { from: 'api', to: 'api', kind: 'int', label: 'the code changed → roll out', title: 'Does this need a rollout?',
         text: 'A change to the code, runtime, memory, or timeout rolls out a new version, when the value differs from the stored one. A function that isn\'t ACTIVE always rolls out, even unchanged, so the same code can be retried after a passing failure. Other fields are just saved.', code: 'functions.service.ts update() · ROLLOUT_FIELDS' },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply namespace · guardrails (no change)', title: 'The tenant is ensured again',
@@ -924,7 +924,7 @@ const SCENARIOS = [
       { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced, last', text: 'Same key, new content. Only a version that went live is archived. A failure here is logged and doesn\'t fail the update: nothing reads the copy yet.', code: 'functions.service.ts archiveCode() · minio-client.service.ts uploadCode()',
         set: { 'S3 (bucket functions).object': FN + '/code.ts (451 bytes, new)' } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · the function', title: 'Done', text: 'The next invocation answers "Marhba Tunis".', code: 'functions.controller.ts update()',
-        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 3, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', accountId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 3, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
     ],
   },
   {
@@ -934,7 +934,7 @@ const SCENARIOS = [
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'DELETE /functions/:id', title: 'You delete the function', text: 'No body.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'DELETE /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT · in your account?', title: 'Only your account\'s function is found', text: 'Another account\'s function answers 404, as one that doesn\'t exist.', code: 'functions.service.ts remove() → findOne()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"user_id\" = '000000000001' LIMIT 1;   -- the caller's account" } },
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"account_id\" = '000000000001' LIMIT 1;   -- the caller's account" } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Deployment', title: 'The Deployment goes first', text: 'Its ReplicaSet and pods go with it.', code: 'kubernetes.orchestrator.ts remove()', hl: ['deployment'],
         msg: { kind: 'http', first: 'DELETE ' + DEPLOY_PATH + ' HTTP/1.1' },
         set: { [K + '.Deployment']: null, [K + '.Pod']: 'Terminating' } },
@@ -1529,30 +1529,58 @@ function initSimulator() {
 
 /* ---------- data diagrams ---------- */
 function erDiagram() {
+  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12).
   const tables = [
-    { name: 'function_invocations', x: 16, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · TIMEOUT'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
-    { name: 'functions', x: 350, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['user_id', 'varchar · the tenant'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
-    { name: 'function_metrics', x: 684, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['request_count', 'int'], ['error_count', 'int'], ['response_time_p50', 'float, ms'], ['response_time_p95', 'float, ms'], ['response_time_p99', 'float, ms'], ['memory_usage', 'float, MB'], ['active_instances', 'int'], ['max_concurrency', 'int, calls at once'], ['created_at', 'timestamptz']] },
+    { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · TIMEOUT'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'functions', x: 350, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['account_id', 'char(12) · FK, indexed'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'function_metrics', x: 684, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['request_count', 'int'], ['error_count', 'int'], ['response_time_p50', 'float, ms'], ['response_time_p95', 'float, ms'], ['response_time_p99', 'float, ms'], ['memory_usage', 'float, MB'], ['active_instances', 'int'], ['max_concurrency', 'int, calls at once'], ['created_at', 'timestamptz']] },
+    { name: 'plans', x: 16, row: 1, cols: [['id', 'text · PK, "beta"', 'pk'], ['name', 'text'], ['limits', 'jsonb (P-15)']] },
+    { name: 'accounts', x: 350, row: 1, cols: [['id', 'char(12) · PK, random digits', 'pk'], ['name', 'text'], ['status', 'pending · active · …'], ['plan_id', 'text · FK'], ['country', "char(2) = 'TN'"], ['tax_id', 'text, null'], ['internet_egress', 'bool = false'], ['use_case', 'text, null'], ['created_at', 'timestamptz']] },
+    { name: 'memberships', x: 684, row: 1, cols: [['account_id', 'char(12) · PK, FK, cascade', 'pk'], ['user_id', 'uuid · PK, FK, cascade', 'pk'], ['role', 'owner · developer · viewer'], ['created_at', 'timestamptz']] },
+    { name: 'users', x: 684, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['oidc_sub', "text · unique, Keycloak's ID"], ['email', 'text'], ['name', 'text, null'], ['locale', "text = 'fr-TN'"], ['created_at', 'timestamptz']] },
   ];
-  const RH = 21, W = 300, TOP = 10, HEAD = 30;
-  const tallest = Math.max.apply(null, tables.map((t) => t.cols.length));
-  let s = '<svg class="diagram" viewBox="0 0 1000 ' + (TOP + HEAD + RH * tallest + 20) + '" role="img" aria-label="The three tables and their columns">';
+  const RH = 21, W = 300, TOP = 10, HEAD = 30, GAP = 34;
+  const height = (t) => HEAD + RH * t.cols.length + 6;
+  // Each row starts below the tallest table of the row above.
+  const rowTop = [TOP];
+  for (let r = 1; r <= 2; r++) rowTop[r] = rowTop[r - 1] + Math.max.apply(null, tables.filter((t) => t.row === r - 1).map(height)) + GAP;
+  const top = (t) => rowTop[t.row];
+  const byName = (name) => tables.find((t) => t.name === name);
+  const colY = (name, col) => { const t = byName(name); return top(t) + HEAD + RH * t.cols.findIndex((c) => c[0] === col) + 11; };
+  const bottom = byName('users');
+  let s = '<svg class="diagram" viewBox="0 0 1000 ' + (top(bottom) + height(bottom) + 16) + '" role="img" aria-label="The tables and their columns">';
   tables.forEach((t) => {
-    const h = HEAD + RH * t.cols.length + 6;
-    s += '<g class="tbl"><rect class="body" x="' + t.x + '" y="' + TOP + '" width="' + W + '" height="' + h + '" rx="8"/>' +
-      '<rect class="h" x="' + t.x + '" y="' + TOP + '" width="' + W + '" height="' + (HEAD - 2) + '" rx="8"/><rect class="h" x="' + t.x + '" y="' + (TOP + 18) + '" width="' + W + '" height="' + (HEAD - 20) + '"/>' +
-      '<text class="h" x="' + (t.x + 12) + '" y="' + (TOP + 19) + '">' + t.name + '</text>';
+    const y0 = top(t);
+    s += '<g class="tbl"><rect class="body" x="' + t.x + '" y="' + y0 + '" width="' + W + '" height="' + height(t) + '" rx="8"/>' +
+      '<rect class="h" x="' + t.x + '" y="' + y0 + '" width="' + W + '" height="' + (HEAD - 2) + '" rx="8"/><rect class="h" x="' + t.x + '" y="' + (y0 + 18) + '" width="' + W + '" height="' + (HEAD - 20) + '"/>' +
+      '<text class="h" x="' + (t.x + 12) + '" y="' + (y0 + 19) + '">' + t.name + '</text>';
     t.cols.forEach((c, n) => {
-      const y = TOP + HEAD + RH * n + 15;
+      const y = y0 + HEAD + RH * n + 15;
       if (n) s += '<line x1="' + (t.x + 8) + '" x2="' + (t.x + W - 8) + '" y1="' + (y - 15) + '" y2="' + (y - 15) + '"/>';
       s += '<text x="' + (t.x + 12) + '" y="' + y + '"' + (c[2] === 'pk' ? ' class="pk"' : '') + '>' + escText(c[0]) + '</text>' +
         '<text class="t" x="' + (t.x + W - 10) + '" y="' + y + '" text-anchor="end">' + escText(c[1]) + '</text>';
     });
     s += '</g>';
   });
-  const y0 = TOP + HEAD + 11, y1 = y0 + RH;
-  s += '<g class="rel"><path d="M350,' + y0 + ' C333,' + y0 + ' 333,' + y1 + ' 316,' + y1 + '"/><text x="342" y="' + (y0 - 5) + '" text-anchor="middle">1</text><text x="324" y="' + (y1 + 14) + '" text-anchor="middle">n</text></g>';
-  s += '<g class="rel"><path d="M650,' + y0 + ' C667,' + y0 + ' 667,' + y1 + ' 684,' + y1 + '"/><text x="658" y="' + (y0 - 5) + '" text-anchor="middle">1</text><text x="676" y="' + (y1 + 14) + '" text-anchor="middle">n</text></g>';
+  // A sideways link between two tables of one row: from (x1, y1) to (x2, y2), with its cardinalities.
+  const side = (x1, y1, x2, y2, a, b) => {
+    const mid = (x1 + x2) / 2;
+    return '<g class="rel"><path d="M' + x1 + ',' + y1 + ' C' + mid + ',' + y1 + ' ' + mid + ',' + y2 + ' ' + x2 + ',' + y2 + '"/>' +
+      '<text x="' + (x1 + (x2 > x1 ? 8 : -8)) + '" y="' + (y1 - 5) + '" text-anchor="middle">' + a + '</text>' +
+      '<text x="' + (x2 + (x2 > x1 ? -8 : 8)) + '" y="' + (y2 + 14) + '" text-anchor="middle">' + b + '</text></g>';
+  };
+  // A link down from one table's bottom to the top of the one below it.
+  const down = (x, from, to, a, b) =>
+    '<g class="rel"><path d="M' + x + ',' + (top(from) + height(from)) + ' L' + x + ',' + top(to) + '"/>' +
+    '<text x="' + (x + 10) + '" y="' + (top(from) + height(from) + 14) + '">' + a + '</text>' +
+    '<text x="' + (x + 10) + '" y="' + (top(to) - 5) + '">' + b + '</text></g>';
+  const y0 = colY('functions', 'id');
+  s += side(350, y0, 316, y0 + RH, '1', 'n'); // functions → function_invocations
+  s += side(650, y0, 684, y0 + RH, '1', 'n'); // functions → function_metrics
+  s += down(500, byName('functions'), byName('accounts'), 'n', '1'); // functions.account_id → accounts
+  s += side(350, colY('accounts', 'plan_id'), 316, colY('plans', 'id'), 'n', '1'); // accounts.plan_id → plans
+  s += side(684, colY('memberships', 'account_id'), 650, colY('accounts', 'id'), 'n', '1'); // memberships → accounts
+  s += down(834, byName('memberships'), byName('users'), 'n', '1'); // memberships.user_id → users
   return s + '</svg>';
 }
 

@@ -3,17 +3,20 @@
  * through a real HTTP server, with tokens signed locally and the keys served
  * by a fake OpenID issuer.
  */
-import { Controller, Get, INestApplication, Logger, Req } from '@nestjs/common';
+import { Controller, ForbiddenException, Get, INestApplication, Logger, Post, Req } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { exportJWK, generateKeyPair, JWK, JWTPayload, SignJWT } from 'jose';
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
+import { AccountChoice, AccountsService } from '../accounts/accounts.service';
+import { AccountStatus } from '../accounts/entities/account.entity';
 import { ApiExceptionFilter } from '../common/api-exception.filter';
 import { AuthGuard } from './auth.guard';
 import { Principal } from './principal';
 import { Public } from './public.decorator';
+import { RequireActiveAccount, RequireRole, WRITERS } from './route-rules';
 import { Identity, InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
 
 const AUDIENCE = 'ff-api';
@@ -36,7 +39,32 @@ class ProbeController {
   functions(@Principal() principal: Principal) {
     return principal;
   }
+
+  /** Like POST /functions: writers only, and an active account. */
+  @Post('functions')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
+  deploy(@Principal() principal: Principal) {
+    return { deployedFor: principal.accountId };
+  }
 }
+
+/** The accounts service, as the guard sees it: what each user's request acts for. */
+const accounts = {
+  choice: undefined as AccountChoice | undefined,
+  developmentAccounts: [] as string[],
+  developmentStatus: AccountStatus.ACTIVE,
+  async userFor(identity: Identity) {
+    return { id: `user-of-${identity.userId}`, email: identity.email };
+  },
+  async choose() {
+    return this.choice ?? { problem: new ForbiddenException('This user has no account yet: create one with POST /accounts') };
+  },
+  async developmentAccount(id: string) {
+    this.developmentAccounts.push(id);
+    return { id, status: this.developmentStatus };
+  },
+};
 
 type Key = Awaited<ReturnType<typeof generateKeyPair>> & { kid: string };
 
@@ -73,6 +101,9 @@ describe('the global guard and token checks (L1, P-11)', () => {
   let app: INestApplication;
   let baseUrl: string;
   let mode: 'oidc' | 'dev' = 'oidc';
+  const asMember = (role: Principal['role'], accountStatus = AccountStatus.ACTIVE): AccountChoice => ({
+    principal: { accountId: '123456789012', accountStatus, userId: 'user-of-kc-user-1', role },
+  });
 
   /** A token as Keycloak would issue it, with `claims` changed. */
   async function token(claims: JWTPayload = {}, signer: Key = key, header: Record<string, unknown> = {}): Promise<string> {
@@ -92,13 +123,14 @@ describe('the global guard and token checks (L1, P-11)', () => {
   async function startApp(issuerUrl: () => string): Promise<INestApplication> {
     const config = {
       get: (path: string) => (path === 'auth.mode' ? mode : undefined),
-      getOrThrow: () => ({ issuer: issuerUrl(), audience: AUDIENCE }),
+      getOrThrow: (path: string) => (path === 'auth.devAccountId' ? '000000000001' : { issuer: issuerUrl(), audience: AUDIENCE }),
     };
     const moduleRef = await Test.createTestingModule({
       controllers: [ProbeController],
       providers: [
         TokenVerifier,
         { provide: ConfigService, useValue: config },
+        { provide: AccountsService, useValue: accounts },
         { provide: APP_GUARD, useClass: AuthGuard },
         { provide: APP_FILTER, useClass: ApiExceptionFilter },
       ],
@@ -118,6 +150,9 @@ describe('the global guard and token checks (L1, P-11)', () => {
 
   beforeEach(() => {
     mode = 'oidc';
+    accounts.choice = undefined;
+    accounts.developmentAccounts = [];
+    accounts.developmentStatus = AccountStatus.ACTIVE;
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
   });
 
@@ -135,11 +170,60 @@ describe('the global guard and token checks (L1, P-11)', () => {
     expect(await res.json()).toEqual({ userId: 'kc-user-1', email: 'amira@example.tn' });
   });
 
-  it('gives that user no account yet: account routes answer 403 until P-12', async () => {
+  it("answers an account route with the reason the user's request can't act for an account (P-12)", async () => {
     const res = await get('/functions', `Bearer ${await token()}`);
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toMatchObject({ message: 'This user has no account yet' });
+    expect(await res.json()).toMatchObject({ message: 'This user has no account yet: create one with POST /accounts' });
+  });
+
+  it("acts for the account the user's memberships give", async () => {
+    accounts.choice = asMember('developer');
+
+    const res = await get('/functions', `Bearer ${await token()}`);
+
+    expect(await res.json()).toMatchObject({ accountId: '123456789012', role: 'developer', userId: 'user-of-kc-user-1' });
+  });
+
+  describe("the route's rules (P-12)", () => {
+    const deploy = async () =>
+      fetch(`${baseUrl}/functions`, { method: 'POST', headers: { authorization: `Bearer ${await token()}` } });
+
+    it('lets an owner or a developer of an active account deploy', async () => {
+      for (const role of ['owner', 'developer'] as const) {
+        accounts.choice = asMember(role);
+
+        expect((await deploy()).status).toBe(201);
+      }
+    });
+
+    it('refuses a viewer: viewers only read', async () => {
+      accounts.choice = asMember('viewer');
+      const res = await deploy();
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ message: "The viewer role can't do this" });
+    });
+
+    it.each([
+      [AccountStatus.PENDING, 'Your account is waiting for approval: you can deploy and invoke functions once it is approved'],
+      [AccountStatus.REJECTED, 'Your account was not approved'],
+      [AccountStatus.SUSPENDED, 'Your account is suspended'],
+      [AccountStatus.CLOSED, 'Your account is closed'],
+    ])('refuses a %s account, saying why', async (status, message) => {
+      accounts.choice = asMember('owner', status);
+      const res = await deploy();
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ message });
+    });
+
+    it('answers a user without an account with that reason, before any rule', async () => {
+      const res = await deploy();
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ message: 'This user has no account yet: create one with POST /accounts' });
+    });
   });
 
   it.each([
@@ -233,19 +317,42 @@ describe('the global guard and token checks (L1, P-11)', () => {
     expect(res.status).toBe(200);
   });
 
-  it('reads no token in development mode: @Principal() acts as the development account', async () => {
-    mode = 'dev';
-    process.env.FF_AUTH_MODE = 'dev';
-    process.env.FF_DEV_ACCOUNT_ID = '000000000001';
-    try {
+  describe('development mode', () => {
+    beforeEach(() => {
+      mode = 'dev';
+    });
+
+    it("reads no token: the caller owns FF_DEV_ACCOUNT_ID, which exists from the first call", async () => {
       const res = await get('/functions');
 
       expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ accountId: '000000000001', role: 'owner' });
-    } finally {
-      delete process.env.FF_AUTH_MODE;
-      delete process.env.FF_DEV_ACCOUNT_ID;
-    }
+      expect(await res.json()).toEqual({ accountId: '000000000001', accountStatus: 'active', userId: 'dev', role: 'owner' });
+      expect(accounts.developmentAccounts).toEqual(['000000000001']);
+    });
+
+    it('acts as the account that X-FF-Dev-Account names', async () => {
+      const res = await fetch(`${baseUrl}/functions`, { headers: { 'x-ff-dev-account': '000000000002' } });
+
+      expect(await res.json()).toMatchObject({ accountId: '000000000002' });
+    });
+
+    it.each([['an empty value', ''], ['too few digits', '12345'], ['a letter', '00000000000a']])(
+      'refuses X-FF-Dev-Account with %s',
+      async (_label, value) => {
+        const res = await fetch(`${baseUrl}/functions`, { headers: { 'x-ff-dev-account': value } });
+
+        expect(res.status).toBe(400);
+        expect(accounts.developmentAccounts).toEqual([]);
+      },
+    );
+
+    it("applies the route's rules there too", async () => {
+      accounts.developmentStatus = AccountStatus.PENDING;
+
+      const res = await fetch(`${baseUrl}/functions`, { method: 'POST' });
+
+      expect(res.status).toBe(403);
+    });
   });
 
   it("answers a platform failure, not 401, when the realm's keys can't be read", async () => {

@@ -22,7 +22,7 @@ export const settings = (overrides: Partial<KubernetesSettings> = {}): Kubernete
 export const workload = (overrides: Partial<FunctionWorkload> = {}): FunctionWorkload => ({
   id: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
   name: 'hello',
-  userId: 'user-1',
+  accountId: '123456789012',
   runtime: Runtime.NODEJS,
   code: 'export const handler = async () => 1;',
   memory: 512,

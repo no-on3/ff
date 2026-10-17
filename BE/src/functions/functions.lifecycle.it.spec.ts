@@ -10,7 +10,7 @@ import { randomInt } from 'node:crypto';
 import * as path from 'node:path';
 import { KubeClient, paths } from '../orchestrator/kubernetes/kube-client';
 import { KubernetesOrchestrator } from '../orchestrator/kubernetes/kubernetes.orchestrator';
-import { LABELS, functionResourceName, tenantNamespace } from '../orchestrator/kubernetes/naming';
+import { LABELS, functionResourceName, accountNamespace } from '../orchestrator/kubernetes/naming';
 import { settings } from '../orchestrator/kubernetes/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { FunctionStatus, Function, Runtime } from './entities/function.entity';
@@ -42,7 +42,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
   const client = new KubeClient({ server: s.apiUrl, tokenFile: s.tokenFile, caFile: s.caFile });
   const orchestrator = new KubernetesOrchestrator(s, client);
   const account = String(randomInt(1e12)).padStart(12, '0');
-  const ns = tenantNamespace(s.namespacePrefix, account);
+  const ns = accountNamespace(s.namespacePrefix, account);
   const functions = new MemoryRepository<Function>(FUNCTION_DEFAULTS);
   const invocations = new MemoryRepository<FunctionInvocation>();
   const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };

@@ -9,7 +9,7 @@ import {
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { MAX_CODE_BYTES } from './manifests';
-import { functionResourceName, tenantNamespace } from './naming';
+import { functionResourceName, accountNamespace } from './naming';
 import { settings, workload } from './test-fixtures';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -70,7 +70,7 @@ class FakeKubeApi implements KubeApi {
 
 describe('KubernetesOrchestrator', () => {
   const fn = workload();
-  const ns = tenantNamespace('ff-t-', fn.userId);
+  const ns = accountNamespace('ff-t-', fn.accountId);
   const name = functionResourceName(fn.id);
   const deploymentPath = `/apis/apps/v1/namespaces/${ns}/deployments/${name}`;
   let api: FakeKubeApi;

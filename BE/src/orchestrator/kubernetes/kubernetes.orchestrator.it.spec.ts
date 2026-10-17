@@ -10,7 +10,7 @@ import { Runtime } from '../../functions/entities/function.entity';
 import { FunctionLoadError, OrchestratorError } from '../orchestrator.errors';
 import { KubeClient, paths } from './kube-client';
 import { KubernetesOrchestrator } from './kubernetes.orchestrator';
-import { LABELS, functionResourceName, tenantNamespace } from './naming';
+import { LABELS, functionResourceName, accountNamespace } from './naming';
 import { settings, workload } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' ? describe : describe.skip;
@@ -118,8 +118,8 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   const client = new KubeClient({ server: s.apiUrl, tokenFile: s.tokenFile, caFile: s.caFile });
   const orchestrator = new KubernetesOrchestrator(s, client);
   const tenant = `it-${randomUUID()}`;
-  const ns = tenantNamespace(s.namespacePrefix, tenant);
-  const fn = workload({ id: randomUUID(), userId: tenant, name: 'it-greeter', code: greeter(1), memory: 128, timeout: 5 });
+  const ns = accountNamespace(s.namespacePrefix, tenant);
+  const fn = workload({ id: randomUUID(), accountId: tenant, name: 'it-greeter', code: greeter(1), memory: 128, timeout: 5 });
   const deploymentPath = paths.apps(ns, 'deployments', functionResourceName(fn.id));
 
   afterAll(async () => {
@@ -167,7 +167,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   });
 
   it("reports the function's own load error, from its runtime's log, instead of hanging (P-10)", async () => {
-    const broken = workload({ id: randomUUID(), userId: tenant, name: 'it-broken', code: 'throw new Error("boom at init");', timeout: 3 });
+    const broken = workload({ id: randomUUID(), accountId: tenant, name: 'it-broken', code: 'throw new Error("boom at init");', timeout: 3 });
     try {
       await orchestrator.deploy(broken);
       const failure = await orchestrator.waitUntilReady(broken, 25_000).catch((error: unknown) => error);
@@ -179,7 +179,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   });
 
   it('runs a Python function with the Lambda handler signature and error names', async () => {
-    const py = workload({ id: randomUUID(), userId: tenant, name: 'it-python', runtime: Runtime.PYTHON, code: pythonGreeter, memory: 128, timeout: 5 });
+    const py = workload({ id: randomUUID(), accountId: tenant, name: 'it-python', runtime: Runtime.PYTHON, code: pythonGreeter, memory: 128, timeout: 5 });
     try {
       await orchestrator.deploy(py);
       await orchestrator.waitUntilReady(py, 90_000);
@@ -199,7 +199,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   it('turns a Python memory hog into Runtime.OutOfMemory without restarting the container', async () => {
     // The container limit equals the function memory, as on Lambda. Reaching it would get
     // the whole container killed, so the runtime must stop the worker first.
-    const hog = workload({ id: randomUUID(), userId: tenant, name: 'it-python-hog', runtime: Runtime.PYTHON, code: pythonHog, memory: 128, timeout: 10 });
+    const hog = workload({ id: randomUUID(), accountId: tenant, name: 'it-python-hog', runtime: Runtime.PYTHON, code: pythonHog, memory: 128, timeout: 10 });
     try {
       await orchestrator.deploy(hog);
       await orchestrator.waitUntilReady(hog, 90_000);
@@ -217,7 +217,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   });
 
   it('runs a Node.js function in /var/task, where a relative path finds the files next to its code', async () => {
-    const reader = workload({ id: randomUUID(), userId: tenant, name: 'it-cwd', code: readsItsOwnCode, memory: 128, timeout: 5 });
+    const reader = workload({ id: randomUUID(), accountId: tenant, name: 'it-cwd', code: readsItsOwnCode, memory: 128, timeout: 5 });
     try {
       await orchestrator.deploy(reader);
       await orchestrator.waitUntilReady(reader, 90_000);
@@ -231,7 +231,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   it('turns a Node.js heap hog into Runtime.OutOfMemory without restarting the container', async () => {
     // 30 s, not 10: at 0.1 CPU, V8's last collections near the heap limit once took
     // longer than 10 s, and the invocation timed out first (P-04).
-    const hog = workload({ id: randomUUID(), userId: tenant, name: 'it-node-hog', code: nodeHog, memory: 128, timeout: 30 });
+    const hog = workload({ id: randomUUID(), accountId: tenant, name: 'it-node-hog', code: nodeHog, memory: 128, timeout: 30 });
     try {
       await orchestrator.deploy(hog);
       await orchestrator.waitUntilReady(hog, 90_000);
@@ -252,9 +252,9 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     const sandboxed = new KubernetesOrchestrator({ ...s, runtimeClass: sandboxClass! }, client);
     const fns = [
       ...[Runtime.NODEJS, Runtime.PYTHON].map((runtime) =>
-        workload({ id: randomUUID(), userId: tenant, name: `it-sandbox-${runtime}`, runtime, code: kernelProbe[runtime], memory: 128, timeout: 5 }),
+        workload({ id: randomUUID(), accountId: tenant, name: `it-sandbox-${runtime}`, runtime, code: kernelProbe[runtime], memory: 128, timeout: 5 }),
       ),
-      workload({ id: randomUUID(), userId: tenant, name: 'it-sandbox-network', code: networkProbe, memory: 128, timeout: 10 }),
+      workload({ id: randomUUID(), accountId: tenant, name: 'it-sandbox-network', code: networkProbe, memory: 128, timeout: 10 }),
     ];
     try {
       for (const f of fns) await sandboxed.deploy(f);
@@ -274,7 +274,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
 
   it('explains a missing RuntimeClass instead of waiting silently', async () => {
     const misconfigured = new KubernetesOrchestrator({ ...s, runtimeClass: 'ff-missing' }, client);
-    const lost = workload({ id: randomUUID(), userId: tenant, name: 'it-no-runtimeclass', code: greeter(1), timeout: 3 });
+    const lost = workload({ id: randomUUID(), accountId: tenant, name: 'it-no-runtimeclass', code: greeter(1), timeout: 3 });
     try {
       await misconfigured.deploy(lost);
       const failure = misconfigured.waitUntilReady(lost, 15_000);

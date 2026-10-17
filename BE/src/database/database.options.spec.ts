@@ -1,4 +1,6 @@
-import { DataSource } from 'typeorm';
+import { Account } from '../accounts/entities/account.entity';
+import { Membership } from '../accounts/entities/membership.entity';
+import { DataSource, EntityTarget } from 'typeorm';
 import { PostgresDriver } from 'typeorm/driver/postgres/PostgresDriver';
 import { databaseConfiguration } from '../config/configuration';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
@@ -88,7 +90,7 @@ describe('dataSourceOptions', () => {
 
       expect(columns).toEqual(
         expect.arrayContaining([
-          ['userId', 'user_id'],
+          ['accountId', 'account_id'],
           ['minInstances', 'min_instances'],
           ['maxInstances', 'max_instances'],
           ['scaleToZero', 'scale_to_zero'],
@@ -109,6 +111,18 @@ describe('dataSourceOptions', () => {
       expect(meta.findRelationWithPropertyPath('function')?.joinColumns.map((c) => c.databaseName)).toEqual([
         'function_id',
       ]);
+    });
+
+    it.each<[string, EntityTarget<object>, string, string, string]>([
+      ['Function.account', Function, 'accountId', 'account', 'account_id'],
+      ['Membership.account', Membership, 'accountId', 'account', 'account_id'],
+      ['Membership.user', Membership, 'userId', 'user', 'user_id'],
+      ['Account.plan', Account, 'planId', 'plan', 'plan_id'],
+    ])('%s: one column, shared by the property and the relation (P-12)', (_name, entity, property, relation, column) => {
+      const meta = dataSource.getMetadata(entity);
+
+      expect(meta.columns.filter((c) => c.databaseName === column).map((c) => c.propertyName)).toEqual([property]);
+      expect(meta.findRelationWithPropertyPath(relation)?.joinColumns.map((c) => c.databaseName)).toEqual([column]);
     });
 
     it('stores every timestamp with its time zone', () => {

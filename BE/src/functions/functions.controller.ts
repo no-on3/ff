@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
+import { RequireActiveAccount, RequireRole, WRITERS } from '../auth/route-rules';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
@@ -13,7 +14,8 @@ import { FunctionsService } from './functions.service';
 /**
  * Every route acts for the caller's account (D4): without a principal it
  * answers 401, and another account's function answers 404, exactly like one
- * that doesn't exist. The service scopes every query to the account.
+ * that doesn't exist. The service scopes every query to the account. Viewers
+ * only read; deploying and invoking need an active account (P-12).
  */
 @ApiTags('functions')
 @Controller('functions')
@@ -21,6 +23,8 @@ export class FunctionsController {
   constructor(private readonly functionsService: FunctionsService) {}
 
   @Post()
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
   @ApiOperation({ summary: 'Create a new function' })
   @ApiResponse({ status: 201, description: 'Function created successfully', type: Function })
   async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<Function> {
@@ -42,6 +46,8 @@ export class FunctionsController {
   }
 
   @Put(':id')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
   @ApiOperation({ summary: 'Update a function' })
   @ApiResponse({ status: 200, description: 'Function updated successfully', type: Function })
   async update(
@@ -53,6 +59,7 @@ export class FunctionsController {
   }
 
   @Delete(':id')
+  @RequireRole(...WRITERS)
   @ApiOperation({ summary: 'Delete a function' })
   @ApiResponse({ status: 200, description: 'Function deleted successfully' })
   async remove(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<void> {
@@ -60,6 +67,8 @@ export class FunctionsController {
   }
 
   @Post(':id/invoke')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
   @ApiOperation({ summary: 'Invoke a function' })
   @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
   async invoke(
@@ -89,6 +98,8 @@ export class FunctionsController {
   }
 
   @Put(':id/scaling-config')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
   @ApiOperation({ summary: 'Change how many instances a function may have' })
   @ApiResponse({ status: 200, description: 'The new scaling configuration', type: ScalingConfig })
   async updateScalingConfig(

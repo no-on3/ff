@@ -25,7 +25,7 @@ import {
   resourceQuotaManifest,
   serviceManifest,
 } from './manifests';
-import { LABELS, codeConfigMapName, codeHash, functionResourceName, tenantNamespace } from './naming';
+import { LABELS, accountNamespace, codeConfigMapName, codeHash, functionResourceName } from './naming';
 
 interface Deployment extends K8sObject {
   metadata: K8sObject['metadata'] & { generation?: number };
@@ -70,7 +70,7 @@ export function isRolledOut(deployment: Deployment): boolean {
 }
 
 /**
- * Runs each function as a Deployment in its tenant's namespace (one namespace
+ * Runs each function as a Deployment in its account's namespace (one namespace
  * per user), with code in an immutable ConfigMap and a ClusterIP Service in
  * front. See docs/kubernetes-migration-plan.md, K-06.
  */
@@ -84,7 +84,7 @@ export class KubernetesOrchestrator implements Orchestrator {
   ) {}
 
   private namespaceOf(fn: FunctionWorkload): string {
-    return tenantNamespace(this.settings.namespacePrefix, fn.userId);
+    return accountNamespace(this.settings.namespacePrefix, fn.accountId);
   }
 
   async deploy(fn: FunctionWorkload): Promise<void> {
@@ -96,7 +96,7 @@ export class KubernetesOrchestrator implements Orchestrator {
   }
 
   private async ensureTenant(fn: FunctionWorkload, ns: string): Promise<void> {
-    await this.api.apply(paths.namespace(ns), namespaceManifest(ns, fn.userId));
+    await this.api.apply(paths.namespace(ns), namespaceManifest(ns, fn.accountId));
     await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, this.settings));
     await this.api.apply(paths.core(ns, 'limitranges', TENANT_LIMITS_NAME), limitRangeManifest(ns));
     await this.api.apply(

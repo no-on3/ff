@@ -7,6 +7,8 @@ export interface Identity {
   /** The token's subject: Keycloak's user ID. */
   userId: string;
   email?: string;
+  /** The user's full name, as Keycloak's profile has it. */
+  name?: string;
 }
 
 /** Asymmetric algorithms only: "none" and the HMAC ones (HS*) are refused (ADR 0004). */
@@ -82,7 +84,11 @@ export class TokenVerifier {
     }
     if (typeof payload.sub !== 'string' || payload.sub === '') throw new InvalidTokenError('The token has no valid subject');
     if (payload.email_verified !== true) throw new UnverifiedEmailError('Verify your e-mail address first');
-    return { userId: payload.sub, email: typeof payload.email === 'string' ? payload.email : undefined };
+    return {
+      userId: payload.sub,
+      email: typeof payload.email === 'string' ? payload.email : undefined,
+      name: typeof payload.name === 'string' ? payload.name : undefined,
+    };
   }
 
   /**
