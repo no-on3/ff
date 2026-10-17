@@ -3,7 +3,7 @@ import { MonthlyUsageView } from './usage.dto';
 
 export { csvField, wantsCsv } from '../common/csv';
 
-const COLUMNS = ['function_id', 'function_name', 'deleted', 'requests', 'billed_ms', 'gb_seconds', 'throttled', 'platform_errors', 'lost'];
+const COLUMNS = ['function_id', 'function_name', 'deleted', 'requests', 'billed_ms', 'gb_seconds', 'throttled', 'platform_errors', 'lost', 'cost'];
 
 /**
  * GET /usage as CSV (P-22): a header, then one line per function. No total
@@ -20,6 +20,7 @@ export function usageCsv(view: MonthlyUsageView): string {
     csvField(usage.throttled),
     csvField(usage.platformErrors),
     csvField(usage.lost),
+    csvField(usage.cost),
   ]);
   return csvLines([COLUMNS, ...lines]);
 }

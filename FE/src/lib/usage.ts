@@ -1,4 +1,4 @@
-import type { UsageAmounts } from '../services/api';
+import type { UsageAmounts, UsageEstimate } from '../services/api';
 
 const MS = { second: 1_000, minute: 60_000, hour: 3_600_000 };
 const decimals = (value: number, digits: number) => value.toLocaleString('en-US', { maximumFractionDigits: digits });
@@ -43,3 +43,27 @@ export function notBilled(amounts: UsageAmounts): string[] {
 
 /** The CSV's file name, as the API names the download. */
 export const usageCsvName = (accountId: string, month: string) => `ff-usage-${accountId}-${month}.csv`;
+
+/** An amount the API rounded, to read: "1,234.567 TND", "-20.655 TND". */
+export function formatMoney(amount: string, currency: string): string {
+  const [whole, fraction] = amount.replace(/^-/, '').split('.');
+  const sign = amount.startsWith('-') ? '-' : '';
+  return `${sign}${BigInt(whole).toLocaleString('en-US')}${fraction === undefined ? '' : `.${fraction}`} ${currency}`;
+}
+
+/** The estimate's lines, as the page lists them: the usage, then only the deductions and fees there are, then the total. */
+export function estimateLines(estimate: UsageEstimate): Array<[string, string]> {
+  const zero = (amount: string) => /^-?0(\.0+)?$/.test(amount);
+  const lines: Array<[string, string]> = [['Usage, before the free tier', estimate.usage]];
+  if (!zero(estimate.freeTier)) lines.push(['Free tier', estimate.freeTier]);
+  if (!zero(estimate.volumeTiers)) lines.push(['Volume tiers', estimate.volumeTiers]);
+  if (!zero(estimate.monthlyFee)) lines.push(['Monthly fee', estimate.monthlyFee]);
+  lines.push(['Estimated total', estimate.total]);
+  return lines.map(([label, amount]) => [label, formatMoney(amount, estimate.currency)]);
+}
+
+/** When the prices start after the month does, from when: "Priced from 2026-10-16 (UTC)"; else nothing. */
+export function pricedFromNote(month: string, estimate: UsageEstimate): string | null {
+  const from = estimate.pricedFrom.slice(0, 10);
+  return from === `${month}-01` ? null : `Priced from ${from} (UTC): no price applies before.`;
+}

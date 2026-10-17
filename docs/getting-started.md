@@ -350,7 +350,7 @@ curl -s "$FF/usage?month=2026-09" -H 'Accept: text/csv'                  # the s
 # {"month": "2026-10", "totals": {"requests": 4, "billedMs": 3016, "gbSeconds": "0.752", "throttled": 0, "platformErrors": 0, "lost": 1}}
 ```
 
-`gbSeconds` is billed duration × memory, counting 1,024 MB as 1 GB, as an exact decimal string, as AWS's Cost Explorer gives its amounts. The totals are the records' own sums, never the functions' rounded figures added up. A function deleted since keeps its usage, marked `"deleted": true`. Costs appear once prices exist (P-30). To read the raw records:
+`gbSeconds` is billed duration × memory, counting 1,024 MB as 1 GB, as an exact decimal string, as AWS's Cost Explorer gives its amounts. The totals are the records' own sums, never the functions' rounded figures added up. A function deleted since keeps its usage, marked `"deleted": true`. To read the raw records:
 
 ```bash
 docker compose exec -T postgres psql -U postgres -d serverless_platform \
@@ -358,6 +358,15 @@ docker compose exec -T postgres psql -U postgres -d serverless_platform \
 ```
 
 The table has a partition per month, by the UTC calendar (`usage_records_2026_10`, …). The backend creates this month's and the next two at startup and then daily, so a month is never missing.
+
+**Prices** (P-30, D8 of the client-readiness plan). FF charges what AWS Lambda charges, in TND, with the same free tier: 1 million requests and 400,000 GB-s per account and month. Prices live in price books, as data: the first is AWS's US East list at the BCT's rate of 14 October 2026, 3.0080 TND per US$, valid from 1 October 2026. A new book starts in the future, and a book that has started never changes, so past usage keeps its prices. `GET /usage` estimates the month's cost with the books valid during it: each function's cost before the free tier, then the free tier, the duration tiers past 6 billion GB-s, any monthly fee, and the total, each rounded to the millime. A function with `minInstances` above zero pays for those instances while they are ready, and for its calls at the provisioned price, without the free tier. Nothing is charged yet: prepaid credit comes with P-31 to P-34.
+
+```bash
+curl -s "$FF/usage" | jq '.estimate'
+# {"currency": "TND", "usage": "0.003", "freeTier": "-0.003", "volumeTiers": "0.000", "monthlyFee": "0.000", "total": "0.000", …}
+curl -s "$FF/usage" | jq -c '.functions[] | {functionName, gbSeconds, cost}'
+docker compose exec -T postgres psql -U postgres -d serverless_platform -c "SELECT valid_from, prices->'source'->>'usdRate' AS rate FROM price_books"
+```
 
 **Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known.
 

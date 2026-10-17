@@ -159,15 +159,40 @@ export interface FunctionUsage extends UsageAmounts {
   functionName: string;
   /** Deleted since: its usage stays. */
   deleted: boolean;
+  /** Its estimated cost before the free tier, rounded to the minor unit (P-30); null without a price book. */
+  cost: string | null;
+}
+
+/**
+ * The month's estimated cost at FF's prices (P-30, D8): AWS Lambda's, in TND.
+ * Each amount is rounded to the minor unit once, from the exact ones.
+ * contract.test.ts checks these names against the API's.
+ */
+export const USAGE_ESTIMATE_FIELDS = ['currency', 'usage', 'freeTier', 'volumeTiers', 'monthlyFee', 'total', 'pricedFrom', 'priceBooks'] as const;
+export interface UsageEstimate {
+  currency: string;
+  /** Every function, before the free tier. */
+  usage: string;
+  /** What the free tier takes off: zero or less. */
+  freeTier: string;
+  /** What the duration tiers past 6 billion GB-s take off: zero or less. */
+  volumeTiers: string;
+  monthlyFee: string;
+  total: string;
+  /** The first instant priced: the month's start, unless the first price book starts later. */
+  pricedFrom: string;
+  priceBooks: string[];
 }
 
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
   month: string;
-  /** Each function with calls in the month, the most GB-seconds first. */
+  /** Each function with calls in the month, the most GB-seconds first, then any that cost something without a call. */
   functions: FunctionUsage[];
   totals: UsageAmounts;
+  /** null when no price book covers the month. */
+  estimate: UsageEstimate | null;
 }
 
 export const usageApi = {

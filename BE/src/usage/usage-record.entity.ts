@@ -51,6 +51,14 @@ export class UsageRecord {
   @Column({ type: 'int' })
   memoryMb: number;
 
+  /**
+   * The function's minInstances when it was invoked (P-30): above zero, the
+   * call ran on provisioned concurrency, priced apart and without the free
+   * tier (D8). Records from before P-30 have 0.
+   */
+  @Column({ type: 'int', default: 0 })
+  minInstances: number;
+
   /** The runtime's measure; numeric(12,3), which the driver reads as a string. */
   @Column({ type: 'numeric', precision: 12, scale: 3 })
   durationMs: string;

@@ -7,7 +7,7 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { PLATFORM_LIMITS } from '../plans/plan-limits';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
-import { FunctionUsageView, MonthlyUsageView, UsageAmountsView } from './usage.dto';
+import { UsageAmountsView, UsageMonth } from './usage.dto';
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -102,9 +102,9 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
   async reapLost(now?: Date): Promise<number> {
     const coldStartSeconds = this.config.get<number>('kubernetes.readyTimeoutSeconds', 90);
     const lost = await this.dataSource.query<
-      Array<{ id: string; created_at: Date; function_id: string; account_id: string; name: string; runtime: string; memory: number; timeout: number }>
+      Array<{ id: string; created_at: Date; function_id: string; account_id: string; name: string; runtime: string; memory: number; timeout: number; min_instances: number }>
     >(
-      `SELECT i."id", i."created_at", f."id" AS "function_id", f."account_id", f."name", f."runtime", f."memory", f."timeout"
+      `SELECT i."id", i."created_at", f."id" AS "function_id", f."account_id", f."name", f."runtime", f."memory", f."timeout", f."min_instances"
          FROM "function_invocations" i JOIN "functions" f ON f."id" = i."function_id"
         WHERE i."status" = 'RUNNING'
           AND i."created_at" < coalesce($1::timestamptz, now())
@@ -124,7 +124,15 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
           .execute();
         const ended = (marking.raw as Array<{ updated_at: Date }>)[0]?.updated_at;
         if (!ended) return false;
-        const fn = { id: row.function_id, accountId: row.account_id, name: row.name, runtime: row.runtime, memory: row.memory, timeout: row.timeout };
+        const fn = {
+          id: row.function_id,
+          accountId: row.account_id,
+          name: row.name,
+          runtime: row.runtime,
+          memory: row.memory,
+          timeout: row.timeout,
+          minInstances: row.min_instances,
+        };
         await this.record(
           usageRecord(fn, { requestId: row.id, startedAt: row.created_at, endedAt: ended, status: UsageStatus.LOST, durationMs: 0 }),
           manager,
@@ -143,7 +151,7 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
    * sums, never the functions' added up. GB-s is exact: a sum of whole MB-ms
    * over 1,024,000, which always has a finite decimal form.
    */
-  async monthly(accountId: string, month: string): Promise<MonthlyUsageView> {
+  async monthly(accountId: string, month: string): Promise<UsageMonth> {
     const [year, number] = month.split('-').map(Number);
     const from = new Date(Date.UTC(year, number - 1, 1));
     const to = new Date(Date.UTC(year, number, 1));
@@ -164,11 +172,21 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
         ORDER BY GROUPING(u."function_id"), sum(u."billed_ms"::numeric * u."memory_mb") DESC, 3, 2`,
       [accountId, from, to],
     );
-    const functions: FunctionUsageView[] = rows
+    const functions: UsageMonth['functions'] = rows
       .filter((row) => !row.total)
       .map((row) => ({ functionId: row.function_id as string, functionName: row.function_name as string, deleted: row.deleted, ...amounts(row) }));
     const total = rows.find((row) => row.total);
     return { month, functions, totals: amounts(total as UsageRow) };
+  }
+
+  /** The names of the account's functions among these IDs; a function deleted since has none. */
+  async functionNames(accountId: string, functionIds: string[]): Promise<Map<string, string>> {
+    if (functionIds.length === 0) return new Map();
+    const rows = await this.records.manager.query<Array<{ id: string; name: string }>>(
+      'SELECT "id", "name" FROM "functions" WHERE "account_id" = $1 AND "id" = ANY($2::uuid[])',
+      [accountId, functionIds],
+    );
+    return new Map(rows.map((row) => [row.id, row.name]));
   }
 
   /**

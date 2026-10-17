@@ -9,7 +9,7 @@ import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
-import { INVOCATION_STATUSES, SCOPES, USAGE_AMOUNTS } from './services/api';
+import { INVOCATION_STATUSES, SCOPES, USAGE_AMOUNTS, USAGE_ESTIMATE_FIELDS } from './services/api';
 
 // What the console shares with the API and the development realm, read from
 // their files: a console on another port than the realm and the API allow
@@ -92,6 +92,17 @@ describe('the usage of a month (P-22)', () => {
     const backendAmounts = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
 
     expect(backendAmounts).toEqual([...USAGE_AMOUNTS]);
+  });
+});
+
+describe("the usage of a month's estimated cost (P-30)", () => {
+  it("has the API's fields, and each function its cost", () => {
+    const body = usageDtoSource.slice(usageDtoSource.indexOf('export class UsageEstimateView {'));
+    const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
+    const functionView = usageDtoSource.slice(usageDtoSource.indexOf('export class FunctionUsageView'));
+
+    expect(backendFields).toEqual([...USAGE_ESTIMATE_FIELDS]);
+    expect(functionView.slice(0, functionView.indexOf('\n}'))).toMatch(/^ {2}cost: string \| null;$/m);
   });
 });
 

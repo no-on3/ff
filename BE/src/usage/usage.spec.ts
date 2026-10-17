@@ -42,10 +42,10 @@ describe('usage records (P-20)', () => {
   });
 
   describe('the record of a call', () => {
-    const fn = { id: 'fn-1', accountId: '123456789012', name: 'hello', runtime: 'nodejs', memory: 512, timeout: 10 };
+    const fn = { id: 'fn-1', accountId: '123456789012', name: 'hello', runtime: 'nodejs', memory: 512, timeout: 10, minInstances: 2 };
     const call = { requestId: 'inv-1', startedAt: new Date('2026-10-17T10:00:00Z'), endedAt: new Date('2026-10-17T10:00:01Z') };
 
-    it('copies what the price depends on, as the function was when invoked, and keeps the cold start apart', () => {
+    it('copies what the price depends on, as the function was when invoked, its minInstances included (P-30), and keeps the cold start apart', () => {
       expect(usageRecord(fn, { ...call, status: UsageStatus.SUCCESS, durationMs: 41.25, initMs: 7412.6 })).toEqual({
         requestId: 'inv-1',
         startedAt: new Date('2026-10-17T10:00:00Z'),
@@ -55,6 +55,7 @@ describe('usage records (P-20)', () => {
         functionName: 'hello',
         runtime: 'nodejs',
         memoryMb: 512,
+        minInstances: 2,
         durationMs: '41.250',
         billedMs: 42,
         initMs: 7413,

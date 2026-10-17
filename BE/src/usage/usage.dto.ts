@@ -45,15 +45,62 @@ export class FunctionUsageView extends UsageAmountsView {
 
   @ApiProperty({ description: 'The function was deleted since: its usage stays' })
   deleted: boolean;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    example: '0.752',
+    description: "Its estimated cost in the estimate's currency, before the free tier, rounded to the minor unit (P-30); null without a price book",
+  })
+  cost: string | null;
+}
+
+/** The month's estimated cost at FF's prices (P-30, D8). Each amount is rounded once, from the exact ones. */
+export class UsageEstimateView {
+  @ApiProperty({ example: 'TND' })
+  currency: string;
+
+  @ApiProperty({ example: '28.877', description: 'Every function together, before the free tier' })
+  usage: string;
+
+  @ApiProperty({
+    example: '-20.655',
+    description: 'What the free tier takes off: 1 million requests and 400,000 GB-s a month, of calls without minInstances (D8)',
+  })
+  freeTier: string;
+
+  @ApiProperty({ example: '0.000', description: 'What the duration tiers past 6 billion GB-s a month take off' })
+  volumeTiers: string;
+
+  @ApiProperty({ example: '0.000', description: 'A monthly fee, if the price book has one (D8)' })
+  monthlyFee: string;
+
+  @ApiProperty({ example: '8.222', description: 'The exact sum, rounded once: the lines above may differ from it by a minor unit' })
+  total: string;
+
+  @ApiProperty({ description: "The first instant priced: the month's start, unless the first price book starts later" })
+  pricedFrom: Date;
+
+  @ApiProperty({ type: [String], description: 'The price books that priced the month, by ID, in time order' })
+  priceBooks: string[];
 }
 
 export class MonthlyUsageView {
   @ApiProperty({ example: '2026-10' })
   month: string;
 
-  @ApiProperty({ type: [FunctionUsageView], description: 'Each function with calls in the month, the most GB-seconds first' })
+  @ApiProperty({
+    type: [FunctionUsageView],
+    description: 'Each function with calls in the month, the most GB-seconds first, then any that cost something without a call',
+  })
   functions: FunctionUsageView[];
 
   @ApiProperty({ type: UsageAmountsView, description: "The account's month, from the same records" })
   totals: UsageAmountsView;
+
+  @ApiProperty({ type: () => UsageEstimateView, nullable: true, description: 'The estimated cost (P-30), or null without a price book for the month' })
+  estimate: UsageEstimateView | null;
 }
+
+/** The month as UsageService reads it from the records, before it is priced. */
+export type UsageMonth = Omit<MonthlyUsageView, 'functions' | 'estimate'> & { functions: Array<Omit<FunctionUsageView, 'cost'>> };

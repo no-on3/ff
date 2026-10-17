@@ -11,6 +11,8 @@ export interface Invoked {
   memory: number;
   /** Seconds */
   timeout: number;
+  /** Above zero, the call runs on provisioned concurrency, priced apart (D8, P-30). */
+  minInstances: number;
 }
 
 /**
@@ -52,6 +54,7 @@ export function usageRecord(
     functionName: fn.name,
     runtime: fn.runtime,
     memoryMb: fn.memory,
+    minInstances: fn.minInstances,
     durationMs: call.durationMs.toFixed(3),
     billedMs: billedMs(call.status, call.durationMs, fn.timeout),
     initMs: call.initMs === undefined ? null : Math.round(call.initMs),

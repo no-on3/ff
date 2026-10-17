@@ -644,8 +644,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   describe('usage records (P-20, D6, D7)', () => {
     const record = () => usage.record.mock.calls[0][0];
 
-    it("sends the invocation's ID to the runtime, and writes its usage record in the transaction that ends it", async () => {
-      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), memory: 256 });
+    it("sends the invocation's ID to the runtime, and writes its usage record, with the function's memory and minInstances, in the transaction that ends it", async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), memory: 256, minInstances: 1 });
       orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 1.09, memoryUsedMb: 50 });
 
       await service.invoke('user-1', 'fn-1', { name: 'x' });
@@ -661,6 +661,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
           functionName: 'hello',
           runtime: 'nodejs',
           memoryMb: 256,
+          minInstances: 1,
           durationMs: '1.090',
           billedMs: 2,
           initMs: null,

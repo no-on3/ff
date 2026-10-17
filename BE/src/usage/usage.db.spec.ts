@@ -129,8 +129,8 @@ run('usage records (L2, P-20)', () => {
     invoke.mockReset();
   });
 
-  it("writes an invocation's final state and its usage record together, as the function was when invoked", async () => {
-    const fn = await newFunction({ memory: 256 });
+  it("writes an invocation's final state and its usage record together, as the function was when invoked, minInstances included (P-30)", async () => {
+    const fn = await newFunction({ memory: 256, minInstances: 1 });
     invoke.mockResolvedValueOnce({ output: { ok: true }, durationMs: 12.34, memoryUsedMb: 50, initMs: 812 });
 
     const invocation = await functions.invoke(ACCOUNT, fn.id, { a: 1 });
@@ -148,6 +148,7 @@ run('usage records (L2, P-20)', () => {
         function_name: fn.name,
         runtime: 'nodejs',
         memory_mb: 256,
+        min_instances: 1,
         duration_ms: '12.340',
         billed_ms: 13,
         init_ms: 812,
@@ -199,7 +200,7 @@ run('usage records (L2, P-20)', () => {
 
   it('marks calls past the longest a call can take LOST, with records that bill nothing, and leaves the others', async () => {
     // timeout 5 s: the longest is 5 s waiting for an instance, 5 s running, after a 20 s cold start; then 30 s more: 60 s.
-    const fn = await newFunction({ memory: 512 });
+    const fn = await newFunction({ memory: 512, minInstances: 1 });
     await query(`UPDATE functions SET updated_at = now() - interval '1 day' WHERE id = $1`, [fn.id]);
     const young = await runningSince(fn, 55);
     const old = await runningSince(fn, 65);
@@ -218,6 +219,7 @@ run('usage records (L2, P-20)', () => {
         expect.objectContaining({
           function_id: fn_.id,
           memory_mb: fn_.memory,
+          min_instances: fn_.minInstances, // P-30
           status: 'lost',
           duration_ms: '0.000',
           billed_ms: 0,

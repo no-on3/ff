@@ -214,7 +214,8 @@ run('database schema (L2, real PostgreSQL)', () => {
   it("the capacity-samples migration replaces P-20's partition function, and reverts with samples present (P-21)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_month_partition', 'ff_refuse_change']);
+      // P-30's price book guard too, which reverting PriceBooks removes.
+      expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_month_partition', 'ff_guard_price_book', 'ff_refuse_change']);
       expect(await partitionsOf(dataSource, 'capacity_samples')).toEqual([
         { relname: monthPartition('capacity_samples', 0) },
         { relname: monthPartition('capacity_samples', 1) },
@@ -233,7 +234,7 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
-      expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_month_partition', 'ff_refuse_change']);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_month_partition', 'ff_guard_price_book', 'ff_refuse_change']);
     });
   });
 
@@ -272,6 +273,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'api_keys',
         'audit_log',
         'capacity_samples',
+        'currencies',
         'function_invocations',
         'function_metrics',
         'functions',
@@ -280,6 +282,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'migrations',
         'plans',
         'platform_settings',
+        'price_books',
         'usage_records',
         'users',
       ]);
@@ -290,7 +293,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

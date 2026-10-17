@@ -26,6 +26,7 @@ import { AuditService } from './audit/audit.service';
 import { PlatformSettingsService } from './admin/platform-settings.service';
 import { UsageController } from './usage/usage.controller';
 import { PlansService } from './plans/plans.service';
+import { PricingService } from './billing/pricing.service';
 import { UsageService } from './usage/usage.service';
 
 const ACCOUNT = '000000000001';
@@ -63,7 +64,13 @@ describe('the OpenAPI document (L1, P-08)', () => {
         { provide: MetricsService, useValue: succeeding(MetricsService) },
         { provide: AccountsService, useValue: succeeding(AccountsService) },
         { provide: ApiKeysService, useValue: succeeding(ApiKeysService) },
-        { provide: UsageService, useValue: succeeding(UsageService) },
+        {
+          provide: UsageService,
+          useValue: succeeding(UsageService, {
+            monthly: async () => ({ month: '2026-10', functions: [], totals: { requests: 0, billedMs: 0, gbSeconds: '0', throttled: 0, platformErrors: 0, lost: 0 } }),
+          }),
+        },
+        { provide: PricingService, useValue: succeeding(PricingService, { estimate: async () => null }) },
         { provide: PlatformSettingsService, useValue: succeeding(PlatformSettingsService) },
         { provide: AuditService, useValue: succeeding(AuditService, { operatorActions: async () => ({ entries: [], next: null }) }) },
         { provide: AdminAccountsService, useValue: succeeding(AdminAccountsService) },
