@@ -28,6 +28,7 @@
     --c-pod: #0b7489;
     --c-worker: #b8186a;
     --c-idp: #7a6400;
+    --c-store: #9a4a1c;
     --code-bg: #f3f4f0;
     --j-key: #2561c9;
     --j-str: #0f6f5c;
@@ -59,6 +60,7 @@
       --c-pod: #4dc6dc;
       --c-worker: #ff70b5;
       --c-idp: #e0c341;
+      --c-store: #f0a07a;
       --code-bg: #151815;
       --j-key: #8ab4ff;
       --j-str: #6fd8bc;
@@ -90,6 +92,7 @@
     --c-pod: #4dc6dc;
     --c-worker: #ff70b5;
     --c-idp: #e0c341;
+    --c-store: #f0a07a;
     --code-bg: #151815;
     --j-key: #8ab4ff;
     --j-str: #6fd8bc;
@@ -628,8 +631,9 @@ const LANES = {
   pod:    { label: 'Runtime', sub: 'pod, main', color: '--c-pod', map: 'pod' },
   worker: { label: 'Handler', sub: 'your code', color: '--c-worker', map: 'worker' },
   idp:    { label: 'Keycloak', sub: 'realm ff', color: '--c-idp', map: 'idp' },
+  store:  { label: 'Log store', sub: 'VictoriaLogs', color: '--c-store', map: 'logstore' },
 };
-const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'service', 'configmap', 'deployment', 'pod-box', 'pod', 'worker', 'node'];
+const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'service', 'configmap', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
@@ -1305,37 +1309,40 @@ const SCENARIOS = [
     ],
   },
   {
-    id: 'logs', title: 'Read a function\'s logs', lanes: ['user', 'api', 'db', 'k8s', 'pod'],
-    summary: 'GET /functions/:id/logs gives the function\'s newest lines without cluster access (P-40): the backend reads each running instance\'s container log through the Kubernetes API, merges the lines by time, and gives each one the call it belongs to. The lines live with the pods. Where the log pipeline is installed (P-42), Fluent Bit also copies every line, with its call, into VictoriaLogs, which keeps it 31 days; this API reads the store from P-43 on.',
+    id: 'logs', title: 'Read a function\'s logs', lanes: ['user', 'api', 'db', 'k8s', 'store'],
+    summary: 'GET /functions/:id/logs reads the log store (P-43): VictoriaLogs, which Fluent Bit fills from every node and which keeps a function\'s lines after its instance is gone. The backend always names the account\'s namespace and the function, and gives a page of lines, newest first in the store, oldest first in the answer, with a cursor to the older ones.',
     steps: [
-      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/logs?tail=200', title: 'You ask for the logs',
-        text: 'The newest 200 lines by default, 1,000 at most, and only the last sinceSeconds when given. Every member of the account may read them, and an API key with logs:read.',
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/logs?limit=200', title: 'You ask for the logs',
+        text: 'The newest 200 lines by default, 1,000 at most (limit, or tail, as ff logs sends it). The window runs from start, or sinceSeconds ago, to end; q keeps the lines with a phrase, requestId one call\'s; cursor, the page before\'s next, gives the older ones. Every member of the account may read them, and an API key with logs:read.',
         code: 'functions/functions.controller.ts logs() · functions/dto/function-logs.dto.ts',
-        msg: { kind: 'http', first: 'GET /functions/' + FN + '/logs?tail=200 HTTP/1.1', headers: { host: 'localhost:3000', authorization: 'Bearer eyJhbGciOiJSUzI1NiIs… (ff-console)', 'x-ff-account': '000000000001' } } },
-      { from: 'api', to: 'db', kind: 'req', label: 'SELECT the function · the account\'s?', title: 'The account\'s own function',
-        text: 'As for every function route, another account\'s function answers 404, exactly as one that doesn\'t exist (D4).',
-        code: 'functions/functions.service.ts logs() findOne()',
+        msg: { kind: 'http', first: 'GET /functions/' + FN + '/logs?limit=200 HTTP/1.1', headers: { host: 'localhost:3000', authorization: 'Bearer eyJhbGciOiJSUzI1NiIs… (ff-console)', 'x-ff-account': '000000000001' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT the function · the account\'s?', title: 'The account\'s own function, and its plan\'s window',
+        text: 'As for every function route, another account\'s function answers 404, exactly as one that doesn\'t exist (D4). The plan says how far back the window may start: 14 days on beta, though the store keeps 31 for the longest plan.',
+        code: 'functions/functions.service.ts logs() · functions/logs-window.ts logsQuery()',
         msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"account_id\" = '000000000001';" } },
-      { from: 'api', to: 'k8s', kind: 'req', label: 'GET pods?labelSelector=ff.dev/function-id=…', title: 'Its instances',
-        text: 'The function\'s pods, in its account\'s namespace. A function scaled to zero has none, and so no lines: they went with its last instance.',
-        code: 'orchestrator/kubernetes/kubernetes.orchestrator.ts logs()',
-        msg: { kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods?labelSelector=ff.dev%2Ffunction-id%3D' + FN + ' HTTP/1.1', headers: { authorization: 'Bearer … (the backend\'s ServiceAccount)' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'GET …/services/victoria-logs:9428/proxy/select/logsql/query', title: 'Through the API server, to the store',
+        text: 'In development the backend runs outside the cluster, so it asks the store through the API server\'s Service proxy, which the admission policy allows for this one Service. In production it calls the Service, whose NetworkPolicy admits the backend\'s pods and the collector\'s, and no one else.',
+        code: 'orchestrator/kubernetes/log-store.ts LogStore.query()',
+        msg: { kind: 'http', first: 'GET /api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/select/logsql/query?query=%7Bnamespace%3D%22' + NS + '%22… HTTP/1.1', headers: { authorization: 'Bearer … (the backend\'s ServiceAccount)' } },
         hl: ['k8sapi'] },
-      { from: 'k8s', to: 'pod', kind: 'req', label: 'GET …/pods/fn-…/log?timestamps=true', title: 'Each instance\'s log, with times',
-        text: 'The kubelet reads the function container\'s log: the last 200 lines, each after its time, and 4 MiB at most a pod, so that a function printing huge lines can\'t fill the backend\'s memory. A pod still starting has no log yet, and gives no lines.',
-        code: 'orchestrator/kubernetes/kube-client.ts podLog()',
-        msg: { kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods/fn-' + FN + '-7d9f8b6c5-x2x9q/log?container=function&tailLines=200&timestamps=true&limitBytes=4194304 HTTP/1.1' } },
-      { from: 'pod', to: 'k8s', kind: 'res', label: 'the lines, each after its time', title: 'The container\'s output',
-        text: 'Kubernetes trims the times\' trailing zeros; the backend writes all nine decimals, so that they sort as text.',
-        code: 'kubelet · the container runtime\'s log file',
-        msg: { kind: 'log', lines: ['2026-10-17T10:00:01.0123Z START RequestId: ' + REQ + ' Version: $LATEST', '2026-10-17T10:00:01.0154Z greeting Tunis', '2026-10-17T10:00:01.0161Z END RequestId: ' + REQ, '2026-10-17T10:00:01.0162Z REPORT RequestId: ' + REQ + '\tDuration: 1.09 ms\tBilled Duration: 2 ms\tMemory Size: 128 MB\tMax Memory Used: 98 MB'] } },
-      { from: 'api', to: 'api', kind: 'int', label: 'merge by time · each line\'s call', title: 'One list, each line with its call',
-        text: 'An instance runs one call at a time (D14), so a call\'s lines are those from its START line to its REPORT; lines before a pod\'s first START, as at a cold start, have none, and a read that begins inside a call takes it from its END. The instances\' lines merge by time, and the newest 200 are kept.',
-        code: 'orchestrator/kubernetes/pod-logs.ts podLogLines() mergeLogs()' },
-      { from: 'api', to: 'user', kind: 'res', label: '200 · the lines, oldest first', title: 'The lines, with their calls',
-        text: 'Each line has its time, its instance and its request ID: the invocation\'s ID in the history. next stays null until the log store pages back through older lines (P-43).',
+      { from: 'k8s', to: 'store', kind: 'req', label: 'the query, in LogsQL', title: 'The function\'s lines, newest first',
+        text: 'The account\'s namespace and the function are the stream filter, every time. Every value a caller gives goes in as a quoted string, so a phrase can\'t change the query. The store sorts the newest first, by time, then pod and message, and gives one line more than the page: it says whether there are older ones.',
+        code: 'orchestrator/kubernetes/log-store.ts pageQuery()',
+        msg: { kind: 'logsql', text: '{namespace="' + NS + '", function_id="' + FN + '"} _time:[2026-10-03T10:00:02.000Z, 2026-10-17T10:00:02.000Z)\n  | sort by (_time desc, pod desc, _msg desc) limit 201\n  | fields _time, _msg, pod, stream, request_id' } },
+      { from: 'store', to: 'k8s', kind: 'res', label: 'JSON lines, newest first', title: 'The rows',
+        text: 'Each row has its time to the microsecond, the line, its pod, its stream, and its call\'s request ID, which the collector found between the pod\'s START and REPORT lines.',
+        code: 'VictoriaLogs /select/logsql/query',
+        msg: { kind: 'ipc', title: 'JSON lines, from VictoriaLogs', body: [{ _time: '2026-10-17T10:00:01.0162Z', _msg: 'REPORT RequestId: ' + REQ + '\tDuration: 1.09 ms\t…', pod: 'fn-' + FN + '-7d9f8b6c5-x2x9q', stream: 'stdout', request_id: REQ }, { _time: '2026-10-17T10:00:01.0154Z', _msg: 'greeting Tunis', pod: 'fn-' + FN + '-7d9f8b6c5-x2x9q', stream: 'stdout', request_id: REQ }, '…'] } },
+      { from: 'k8s', to: 'api', kind: 'res', label: '200, relayed', title: 'The answer reaches the backend',
+        text: 'The API server passes it on. A store that doesn\'t answer gives 503: logs are unavailable for a moment, and the details are in the server log.',
+        code: 'orchestrator/kubernetes/log-store.ts' },
+      { from: 'api', to: 'api', kind: 'int', label: 'a page · oldest first · next', title: 'One page, and where the next starts',
+        text: 'The newest 200 lines, turned oldest first, each with its time to the nanosecond, its instance, stream and request ID. With a 201st line, next says where the page ended: the oldest line\'s time, and how many lines of that time it gave, so that the next page starts past them.',
+        code: 'orchestrator/kubernetes/log-store.ts toPage()' },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · the lines, oldest first, and next', title: 'The lines, with their calls',
+        text: 'Each line has its request ID: the invocation\'s ID in the history. Pass next as cursor, with the same parameters, for the lines before them; null means there are none.',
         code: 'functions/dto/function-logs.dto.ts FunctionLogsView',
-        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { lines: [{ time: '2026-10-17T10:00:01.012300000Z', instance: 'fn-' + FN + '-7d9f8b6c5-x2x9q', requestId: REQ, message: 'START RequestId: ' + REQ + ' Version: $LATEST' }, { time: '2026-10-17T10:00:01.015400000Z', instance: 'fn-' + FN + '-7d9f8b6c5-x2x9q', requestId: REQ, message: 'greeting Tunis' }, '…'], next: null } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { lines: [{ time: '2026-10-17T10:00:01.012300000Z', instance: 'fn-' + FN + '-7d9f8b6c5-x2x9q', requestId: REQ, stream: 'stdout', message: 'START RequestId: ' + REQ + ' Version: $LATEST' }, { time: '2026-10-17T10:00:01.015400000Z', instance: 'fn-' + FN + '-7d9f8b6c5-x2x9q', requestId: REQ, stream: 'stdout', message: 'greeting Tunis' }, '…'], next: null } } },
     ],
   },
   {
@@ -1474,6 +1481,7 @@ const ARCH_INFO = {
   pod: ['Runtime: the main process', 'Serves /healthz, /readyz, and /invoke on :8080. It queues invocations, enforces the timeout, writes the START, END, and REPORT lines, and supervises the worker.', 'runtimes/nodejs/src/main.ts · runtimes/python/ff_runtime/main.py'],
   worker: ['Worker: your handler', 'Loads your code once and runs handler(event, context) for each invocation. It is replaced after a timeout, an out-of-memory error, or a crash.', 'runtimes/nodejs/src/worker.ts · runtimes/python/ff_runtime/worker.py'],
   node: ['Node: scheduler, kubelet, containerd', 'Places pods, starts containers from the runtime images, mounts the code, and probes /readyz and /healthz.', 'manifests.ts (probes)'],
+  logstore: ['Log store: VictoriaLogs', 'In ff-system, it keeps every function\'s log lines for 31 days, after their instance is gone; each account reads its plan\'s window (14 days on beta). Fluent Bit, on every node, reads the function containers\' logs and adds each line\'s account, function, pod, stream and call, within 2,000 lines and 1 MiB a second per account. Only the collector and the backend reach it; in development the backend queries it through the API server\'s Service proxy.', 'deploy/k8s/logging · BE/src/orchestrator/kubernetes/log-store.ts'],
 };
 
 const TRACE = [
@@ -1529,7 +1537,7 @@ function validateScenarios() {
       if (!st.label || !st.title || typeof st.text !== 'string' || !st.code) problems.push(where + ': label, title, text, and code are required');
       const msgs = Array.isArray(st.msg) ? st.msg : st.msg ? [st.msg] : [];
       for (const m of msgs) {
-        if (!['http', 'sql', 'log', 'ipc'].includes(m.kind)) problems.push(where + ': unknown message kind ' + m.kind);
+        if (!['http', 'sql', 'log', 'ipc', 'logsql'].includes(m.kind)) problems.push(where + ': unknown message kind ' + m.kind);
         if (m.kind === 'http' && !m.first) problems.push(where + ': an HTTP message needs a first line');
       }
       for (const key of Object.keys(st.set || {})) if (!knownKey(key)) problems.push(where + ': unknown state key ' + key);
@@ -1626,10 +1634,10 @@ const svgLink = (d, label, lx, ly, anchor) => '<g class="arch-link"><path d="' +
 
 /* ---------- architecture maps ---------- */
 function archBig() {
-  return '<svg class="diagram" viewBox="0 0 1000 556" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL and S3, and the Kubernetes cluster with the tenant namespace">' +
+  return '<svg class="diagram" viewBox="0 0 1000 626" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL and S3, and the Kubernetes cluster with the tenant namespace and the log store">' +
     '<defs>' + arrowDefs('arch-arrow', '--muted') + '</defs>' +
     svgGroup(208, 20, 300, 420, 'Your machine or server') +
-    svgGroup(560, 20, 428, 520, 'Kubernetes cluster (k3s)') +
+    svgGroup(560, 20, 428, 590, 'Kubernetes cluster (k3s)') +
     svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-27d6fbbe5c7d (dev account)', 'end') +
     svgBox('user', 16, 136, 150, 76, 'You', 'console · curl') +
     svgBox('idp', 16, 252, 150, 64, 'Keycloak', 'login · realm ff') +
@@ -1649,6 +1657,7 @@ function archBig() {
     svgBox('pod', 606, 362, 166, 52, 'Runtime main', 'HTTP :8080 · probes') +
     svgBox('worker', 784, 362, 158, 52, 'Your handler', 'worker') +
     svgBox('node', 578, 456, 392, 60, 'Node: scheduler · kubelet · containerd', 'starts pods · mounts the code · probes') +
+    svgBox('logstore', 578, 532, 380, 60, 'Log store: VictoriaLogs', 'ff-system · 31 days · Fluent Bit on each node feeds it') +
     svgLink('M166,174 L224,174', 'HTTP', 187, 166) +
     svgLink('M91,212 L91,250', 'login', 99, 236, 'start') +
     svgLink('M226,284 L168,284', 'keys', 197, 276) +
@@ -1661,11 +1670,13 @@ function archBig() {
     svgLink('M869,326 L869,336', '', 0, 0) +
     svgLink('M772,388 L782,388', '', 0, 0) +
     svgLink('M700,456 L700,428', '', 0, 0) +
+    svgLink('M768,516 L768,530', '', 0, 0) +
+    svgLink('M970,94 L980,94 L980,562 L960,562', 'proxy', 976, 330, 'end') +
     '</svg>';
 }
 function archMini() {
   const o = { inert: true };
-  return '<svg class="diagram" viewBox="0 0 420 424" role="img" aria-label="Where this step happens">' +
+  return '<svg class="diagram" viewBox="0 0 420 470" role="img" aria-label="Where this step happens">' +
     svgBox('user', 10, 10, 120, 40, 'You', '', o) +
     svgBox('idp', 10, 60, 120, 36, 'Keycloak', '', o) +
     svgBox('api', 140, 10, 270, 40, 'Backend API', '', o) +
@@ -1681,6 +1692,7 @@ function archMini() {
     svgBox('pod', 28, 313, 180, 36, 'Runtime main', '', o) +
     svgBox('worker', 214, 313, 178, 36, 'Your handler', '', o) +
     svgBox('node', 10, 376, 400, 38, 'Node: scheduler · kubelet', '', o) +
+    svgBox('logstore', 10, 422, 400, 38, 'Log store (VictoriaLogs)', '', o) +
     '</svg>';
 }
 function mountArchBig() {
@@ -1772,6 +1784,7 @@ function renderOneMessage(m) {
   if (m.kind === 'sql') return head('SQL, sent by TypeORM (abridged)') + '<pre class="wire">' + escText(m.text) + '</pre>';
   if (m.kind === 'log') return head('Pod log (stdout)') + '<pre class="wire">' + escText(m.lines.join('\n')) + '</pre>';
   if (m.kind === 'ipc') return head(m.title || 'In-process message') + '<pre class="wire">' + showValue(m.body) + '</pre>';
+  if (m.kind === 'logsql') return head('LogsQL, run by the log store') + '<pre class="wire">' + escText(m.text) + '</pre>';
   let s = '<span class="first">' + escText(m.first) + '</span>';
   Object.entries(m.headers || {}).forEach(([k, v]) => { s += '\n<span class="hdr">' + escText(k === '…' ? '…' : k + ': ' + v) + '</span>'; });
   if (m.body !== undefined) s += '\n\n' + showValue(m.body);

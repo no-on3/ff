@@ -4,6 +4,9 @@
 # grants), must target either:
 #   - a Namespace named ff-t-* labelled app.kubernetes.io/managed-by=ff-controller, or
 #   - a namespaced object inside such a namespace.
+# One proxy call outside them is allowed: to the log store's Service,
+# ff-system/victoria-logs, port 9428, which the development backend queries
+# that way (client-readiness plan P-43). Production grants no proxy at all.
 # Anything else (kube-system, default, ff-system, unlabelled namespaces) is
 # denied, even though RBAC alone would allow it. Requests from other users
 # are not affected (matchConditions).
@@ -45,8 +48,15 @@ spec:
         request.resource.resource == 'namespaces'
           ? (request.operation == 'DELETE' ? oldObject : object)
           : namespaceObject
+    # A call through the log store's Service proxy, by the exact name and port.
+    - name: logStore
+      expression: >-
+        request.operation == 'CONNECT' &&
+        request.resource.resource == 'services' && request.subResource == 'proxy' &&
+        request.namespace == 'ff-system' && request.name == 'victoria-logs:9428'
   validations:
     - expression: >-
+        variables.logStore ||
         variables.ns != null &&
         variables.ns.metadata.name.startsWith('ff-t-') &&
         has(variables.ns.metadata.labels) &&
@@ -54,7 +64,8 @@ spec:
         variables.ns.metadata.labels['app.kubernetes.io/managed-by'] == 'ff-controller'
       message: >-
         ff-controller may only manage ff-t-* namespaces labelled
-        app.kubernetes.io/managed-by=ff-controller, and objects inside them
+        app.kubernetes.io/managed-by=ff-controller, and objects inside them,
+        and query the log store
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

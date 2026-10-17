@@ -781,18 +781,18 @@ with_token "$operator_token" POST "/admin/accounts/$account_1/reactivate" '{"rea
 check "the operator reactivates it" 200 "$(status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"again"}}' >/dev/null
 check "and its function answers again, from a cold start" 201 "$(status)"
-echo "== the function's logs (P-40)"
+echo "== the function's logs (P-40; from the log store, P-43)"
 logged="$(as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"logs"}}')"
 logged_id="$(jq -r .id <<<"$logged")"
-# The runtime writes END and REPORT as the answer goes, and the container runtime its log file a moment later.
-for _ in $(seq 1 20); do
+# The collector reads the container's log file and writes to the store within a few seconds.
+for _ in $(seq 1 40); do
   logs_1="$(as_user_1 GET "/functions/$fn_1/logs")"
   [ "$(jq --arg id "$logged_id" '[.lines[] | select(.requestId == $id)] | length' <<<"$logs_1")" -ge 3 ] && break
   sleep 0.5
 done
 check "the owner reads the call's START, END and REPORT lines, each with its request ID" "200 START,END,REPORT" \
   "$(status) $(jq -r --arg id "$logged_id" '[.lines[] | select(.requestId == $id) | .message | capture("^(?<kind>START|END|REPORT) RequestId: (?<id>\\S+)") | select(.id == $id) | .kind] | join(",")' <<<"$logs_1")"
-check "each line with its time to the nanosecond and its instance, oldest first, and no next page yet" "true true true null" \
+check "each line with its time to the nanosecond and its instance, oldest first, and no next page under 200 lines" "true true true null" \
   "$(jq '[.lines[].time | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}\\.[0-9]{9}Z$")] | all' <<<"$logs_1") $(jq --arg fn "fn-$fn_1" '[.lines[].instance | startswith($fn)] | all' <<<"$logs_1") $(jq '[.lines[].time] | . == sort' <<<"$logs_1") $(jq -c .next <<<"$logs_1")"
 newest="$(as_user_1 GET "/functions/$fn_1/logs?tail=1")"
 check "tail=1 gives the newest line alone" "200 1 $(jq -r '.lines[-1].message' <<<"$logs_1")" "$(status) $(jq '.lines | length' <<<"$newest") $(jq -r '.lines[0].message' <<<"$newest")"
@@ -800,6 +800,23 @@ recent="$(as_user_1 GET "/functions/$fn_1/logs?sinceSeconds=3600")"
 check "sinceSeconds keeps the last hour's, the call among them" "200 true" "$(status) $(jq --arg id "$logged_id" '[.lines[] | select(.requestId == $id)] | length >= 3' <<<"$recent")"
 as_user_1 GET "/functions/$fn_1/logs?tail=1001" >/dev/null
 check "more than 1,000 lines is refused" "400 tail must not be greater than 1000" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+call_lines="$(as_user_1 GET "/functions/$fn_1/logs?requestId=$logged_id")"
+check "requestId gives that call's lines alone, with their streams (P-43)" "200 true true" \
+  "$(status) $(jq --arg id "$logged_id" '(.lines | length >= 3) and ([.lines[].requestId == $id] | all)' <<<"$call_lines") $(jq '[.lines[].stream == "stdout"] | all' <<<"$call_lines")"
+by_phrase="$(as_user_1 GET "/functions/$fn_1/logs?q=$logged_id")"
+check "q finds the lines with the phrase: the call's START, END and REPORT" "200 START,END,REPORT" \
+  "$(status) $(jq -r '[.lines[].message | capture("^(?<kind>START|END|REPORT) ").kind] | join(",")' <<<"$by_phrase")"
+first_page="$(as_user_1 GET "/functions/$fn_1/logs?requestId=$logged_id&limit=1")"
+first_next="$(jq -r .next <<<"$first_page")"
+second_page="$(as_user_1 GET "/functions/$fn_1/logs?requestId=$logged_id&limit=1&cursor=$first_next")"
+check "a page of 1 has a next, which gives the line before it" "200 1 true" \
+  "$(status) $(jq '.lines | length' <<<"$second_page") $(jq -n --argjson a "$first_page" --argjson b "$second_page" '$b.lines[0].time <= $a.lines[0].time and $b.lines[0] != $a.lines[0]')"
+as_user_1 GET "/functions/$fn_1/logs?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z" >/dev/null
+check "a window older than the plan's retention has no lines" "200 0 null" "$(status) $(jq '.lines | length' "$work/body") $(jq -c .next "$work/body")"
+as_user_1 GET "/functions/$fn_1/logs?start=2026-10-17T11:00:00Z&end=2026-10-17T10:00:00Z" >/dev/null
+check "a start after the end is refused" "400 start must be before end" "$(status) $(message)"
+as_user_1 GET "/functions/$fn_1/logs?cursor=bm9wZQ" >/dev/null
+check "a cursor no page gave is refused" "400 Invalid cursor: pass the next value of the page before" "$(status) $(message)"
 key_logs="$(as_user_1 POST /api-keys '{"name": "l5 logs", "scopes": ["logs:read"]}' | jq -r .key)"
 by_key="$(with_token "$key_logs" GET "/functions/$fn_1/logs?tail=5")"
 check "a key with logs:read reads them" "200 5" "$(status) $(jq '.lines | length' <<<"$by_key")"

@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { Runtime } from '../../functions/entities/function.entity';
+import type { FunctionLogLine } from '../orchestrator.types';
 import { KubeClient, paths } from './kube-client';
 import { KubernetesOrchestrator } from './kubernetes.orchestrator';
 import { accountNamespace } from './naming';
@@ -209,6 +210,42 @@ run('the log pipeline on the dev cluster (L3)', () => {
     expect(py.map((l) => l._msg)).toEqual(expect.arrayContaining([`hello from python ${nonce}`, `END RequestId: ${pythonCall}`]));
     expect(py.every((l) => l.function_id === python.id && l.namespace === nsA && l.pod?.startsWith(`fn-${python.id}-`))).toBe(true);
     expect(delayMs).toBeLessThan(5000);
+  });
+
+  it("reads pages of a function's lines as the logs API does (P-43): a call's, a phrase's, and back with the cursor", async () => {
+    const nonce = word('page');
+    const first = `it-log-page-1-${randomUUID()}`;
+    await orchestrator.invoke(printerA, { nonce, lines: 5 }, first);
+    await orchestrator.invoke(printerA, { nonce: word('other'), lines: 1 }, `it-log-page-2-${randomUUID()}`);
+    const window = () => ({ start: new Date(Date.now() - 600_000), end: new Date(Date.now() + 1000), limit: 1000 });
+
+    // The first call: START, its 5 lines, END and REPORT, oldest first.
+    const call = await until<FunctionLogLine[]>("the first call's 8 lines", 30_000, async () => {
+      const { lines } = await orchestrator.logs(printerA, { ...window(), requestId: first });
+      return lines.length === 8 ? { done: lines } : { last: lines.map((l) => l.message) };
+    });
+    expect(call[0].message).toBe(`START RequestId: ${first} Version: $LATEST`);
+    expect(call.slice(1, 6).map((l) => l.message)).toEqual([1, 2, 3, 4, 5].map((i) => `${nonce} ${i}`));
+    expect(call.at(-1)?.message).toMatch(new RegExp(`^REPORT RequestId: ${first}\t`));
+    expect(call.every((l) => l.requestId === first && l.stream === 'stdout' && l.instance?.startsWith(`fn-${printerA.id}-`))).toBe(true);
+
+    // A phrase, as whole words.
+    expect((await orchestrator.logs(printerA, { ...window(), q: `${nonce} 3` })).lines.map((l) => l.message)).toEqual([`${nonce} 3`]);
+
+    // Pages of 3, back from the newest: the same 8 lines, none twice.
+    const fixed = window();
+    const pages: FunctionLogLine[][] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await orchestrator.logs(printerA, { ...fixed, limit: 3, requestId: first, cursor });
+      pages.push(page.lines);
+      cursor = page.next ?? undefined;
+    } while (cursor !== undefined);
+    expect(pages.map((page) => page.length)).toEqual([3, 3, 2]);
+    expect(pages.reverse().flat()).toEqual(call);
+
+    // A phrase written as LogsQL stays a phrase: nothing of other functions or accounts.
+    expect((await orchestrator.logs(printerA, { ...window(), q: '"} OR {namespace=~".*"} OR "' })).lines).toEqual([]);
   });
 
   it("limits a namespace printing in a loop to its budget a second, counts every line it drops, and keeps another namespace's", async () => {

@@ -1,4 +1,4 @@
-import { BadRequestException, HttpStatus, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, HttpStatus, InternalServerErrorException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -10,6 +10,8 @@ import {
   FunctionRuntimeError,
   FunctionThrottledError,
   FunctionTimeoutError,
+  InvalidLogCursorError,
+  LogStoreUnavailableError,
   OrchestratorError,
 } from '../orchestrator/orchestrator.errors';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
@@ -875,7 +877,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       invocationsRepo.findAndCount.mockResolvedValue([[], 0]);
       orchestrator.invoke.mockResolvedValue({ output: 'hi' });
       orchestrator.desiredInstances.mockResolvedValue(1);
-      orchestrator.logs.mockResolvedValue([]);
+      orchestrator.logs.mockResolvedValue({ lines: [], next: null });
     });
 
     const calls: Array<[string, (accountId: string, id?: string) => Promise<unknown>]> = [
@@ -911,12 +913,55 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await expect(service.findAll('user-1')).resolves.toEqual([owned()]);
     });
 
-    it("reads the account's function's logs from its instances, with the query, and has no next page yet (P-40)", async () => {
-      const line = { time: '2026-10-17T10:00:00.000000000Z', instance: 'fn-a', requestId: null, message: 'hi' };
-      orchestrator.logs.mockResolvedValue([line]);
+    describe('logs (P-43)', () => {
+      const page = {
+        lines: [{ time: '2026-10-17T10:00:00.000000000Z', instance: 'fn-a', requestId: null, stream: 'stdout' as const, message: 'hi' }],
+        next: 'next-page',
+      };
 
-      await expect(service.logs('user-1', ID, { tail: 20, sinceSeconds: 60 })).resolves.toEqual({ lines: [line], next: null });
-      expect(orchestrator.logs).toHaveBeenCalledWith(owned(), { tail: 20, sinceSeconds: 60 });
+      it("reads a page of the account's function's lines from the store, over its plan's retention, with the request", async () => {
+        accountPlan = plan({ logRetentionDays: 7 });
+        orchestrator.logs.mockResolvedValue(page);
+        const before = Date.now();
+
+        await expect(service.logs('user-1', ID, { tail: 20, q: 'time out', requestId: 'r-1', cursor: 'c-1' })).resolves.toEqual(page);
+
+        const [fn, query] = orchestrator.logs.mock.calls[0] as unknown as [unknown, { start: Date; end: Date }];
+        expect(fn).toEqual(owned());
+        expect(query).toMatchObject({ limit: 20, q: 'time out', requestId: 'r-1', cursor: 'c-1' });
+        expect(query.end.getTime()).toBeGreaterThanOrEqual(before);
+        expect(query.end.getTime() - query.start.getTime()).toBe(7 * 86_400_000);
+      });
+
+      it('asks the store nothing when the whole window is older than the retention', async () => {
+        await expect(service.logs('user-1', ID, { start: '2026-01-01T00:00:00Z', end: '2026-01-02T00:00:00Z' })).resolves.toEqual({ lines: [], next: null });
+        expect(orchestrator.logs).not.toHaveBeenCalled();
+      });
+
+      it('answers 400 for a cursor that no page gave', async () => {
+        orchestrator.logs.mockRejectedValue(new InvalidLogCursorError());
+
+        const error = await service.logs('user-1', ID, { cursor: 'nope' }).catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as Error).message).toBe('Invalid cursor: pass the next value of the page before');
+      });
+
+      it('answers 503 when the store is unavailable, its details only in the server log (D4)', async () => {
+        orchestrator.logs.mockRejectedValue(new LogStoreUnavailableError('The log store answered 503: no endpoints available for service "victoria-logs"'));
+
+        const error = await service.logs('user-1', ID, {}).catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(ServiceUnavailableException);
+        expect((error as Error).message).toBe('Logs are unavailable right now. Try again in a minute.');
+        expect(logged).toHaveBeenCalledWith(`The logs of function ${ID} could not be read: The log store answered 503: no endpoints available for service "victoria-logs"`);
+      });
+
+      it('passes any other failure on, as a platform failure', async () => {
+        orchestrator.logs.mockRejectedValue(new Error('boom'));
+
+        await expect(service.logs('user-1', ID, {})).rejects.toThrow('boom');
+      });
     });
 
     it('puts the account in the history query itself, not only in the check before it', async () => {

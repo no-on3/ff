@@ -64,6 +64,7 @@ docker compose up -d --wait
 - creates a one-node k3s cluster with k3d;
 - caps it at 2 GB of memory;
 - installs FF's RBAC and admission policy, with the Service proxy that a backend outside the cluster needs (`deploy/k8s/dev`);
+- installs the log pipeline (`deploy/k8s/logging`): Fluent Bit, which collects every function's output, and VictoriaLogs, which keeps it. The logs API reads it, and so do the load errors a deploy reports. `--no-logging` leaves it out, and those two with it;
 - writes credentials to `hack/.kube/`.
 
 It prints the `K8S_*` settings, which match the defaults in `BE/.env.example`.
@@ -236,11 +237,21 @@ The logs belong to the current pod, so a rollout starts them afresh.
 kubectl -n "$NS" logs deploy/fn-$ID
 ```
 
-Without cluster access, `GET /functions/:id/logs` gives the same lines (P-40). It reads every running instance of the function, merges their lines oldest first, and gives the newest 200, or `tail` up to 1,000, optionally only those of the last `sinceSeconds`. Each line has its time to the nanosecond (UTC), the instance that wrote it, and the request ID of the call it belongs to: from the call's `START` line to its `REPORT`, the invocation's `id` in the history. Everything a call writes before it returns comes before its `END`, in both runtimes. Lines outside a call, such as a cold start's, have none. So do lines written after the handler returned, by a timer or a promise it left running, unless the next call has started: they get its ID. Every member of the account reads them, and so does an API key with `logs:read`; another account's function answers 404. The lines come from the running instances: they go when an instance stops, and a function scaled to zero has none, until this API reads the log store (P-43). The store itself, Fluent Bit and VictoriaLogs, is optional in development: `hack/k8s/logging-up.sh` installs it, and the [Kubernetes dev guide](kubernetes-dev-guide.md#the-log-pipeline) shows how to query it. A line longer than 16,384 characters is cut, and ends with `…[truncated]`.
+Without cluster access, `GET /functions/:id/logs` gives the same lines, from the log store (P-43), which keeps them after the instance that wrote them is gone: a function scaled to zero still has its lines. It gives a page: the newest 200 lines of the window, or `limit` up to 1,000 (`tail`, its older name, still works), oldest first.
+- **The window** runs from `start` (RFC 3339), or `sinceSeconds` ago, to `end`, or now. It never starts before the plan's log retention, 14 days on beta: a window wholly older than that has no lines.
+- **`q`** keeps the lines with a phrase, as whole words and with its case: `q=time out` finds "a time out here", not "timeout". **`requestId`** keeps one call's lines: the invocation's `id` in the history.
+- **`next`** is set when there are older lines: pass it as `cursor`, with the same parameters, for the page before.
+- **Each line** has its time to the nanosecond (UTC), the instance that wrote it, its stream (`stdout` or `stderr`), and the request ID of the call it belongs to: from the call's `START` line to its `REPORT`. Everything a call writes before it returns comes before its `END`, in both runtimes. Lines outside a call, such as a cold start's, have none. So do lines written after the handler returned, by a timer or a promise it left running, unless the next call has started: they get its ID.
+- **The account's limit** keeps 2,000 lines and 1 MiB a second. Past it, lines are dropped, and the page then has a line with stream `ff` and no instance: "FF dropped N of this function's log lines written at …".
+- A line longer than 16,384 bytes is cut at the start of a character, and ends with ` …[truncated]`.
+
+Every member of the account reads them, and so does an API key with `logs:read`; another account's function answers 404. When the store can't be reached, the answer is 503: try again in a minute. The [Kubernetes dev guide](kubernetes-dev-guide.md#the-log-pipeline) shows how to query the store directly.
 
 ```bash
-curl -s "$FF/functions/$ID/logs?tail=20" | jq -r '.lines[] | "\(.time) \(.requestId // "-") \(.message)"'
-curl -s "$FF/functions/$ID/logs?sinceSeconds=300" | jq -c --arg id "$REQUEST" '[.lines[] | select(.requestId == $id) | .message]'   # one call's lines
+curl -s "$FF/functions/$ID/logs?limit=20" | jq -r '.lines[] | "\(.time) \(.requestId // "-") \(.message)"'
+curl -s "$FF/functions/$ID/logs?requestId=$REQUEST" | jq -r '.lines[].message'          # one call's lines
+curl -s "$FF/functions/$ID/logs?q=greeting&sinceSeconds=3600" | jq -r '.lines[].message'  # a phrase, in the last hour
+curl -s "$FF/functions/$ID/logs?limit=100&cursor=$NEXT" | jq -c '.next'                    # the page before the one whose next was $NEXT
 ```
 
 **Call a runtime directly**, without the backend, to see its raw response and headers. Here the request body *is* the event body:

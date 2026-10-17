@@ -96,6 +96,8 @@ e2e_cluster() {
   echo "== cluster"
   k3d cluster get "$FF_CLUSTER_NAME" >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/cluster-up.sh" >/dev/null
   "$FF_REPO_ROOT/hack/k8s/mint-token.sh" >/dev/null
+  # The logs API and the load errors read the log store (P-43): a cluster made before it gets it now.
+  kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/logging-up.sh" >/dev/null
   docker image inspect ff-runtime-nodejs:24-v2 >/dev/null 2>&1 ||
     docker build -q -t ff-runtime-nodejs:24-v2 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
   docker image inspect ff-runtime-python:3.13-v2 >/dev/null 2>&1 ||

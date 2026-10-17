@@ -81,3 +81,19 @@ export class CodeTooLargeError extends OrchestratorError {
     this.name = 'CodeTooLargeError';
   }
 }
+
+/** The log store could not be reached, or failed: logs can't be read for now (P-43). Its details are the platform's. */
+export class LogStoreUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LogStoreUnavailableError';
+  }
+}
+
+/** A logs cursor that no page gave: the caller's mistake (P-43). */
+export class InvalidLogCursorError extends Error {
+  constructor() {
+    super('Invalid cursor: pass the next value of the page before');
+    this.name = 'InvalidLogCursorError';
+  }
+}

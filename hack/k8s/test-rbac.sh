@@ -62,7 +62,6 @@ check "patch deployments/scale" yes "$(can patch deployments --subresource=scale
 check "deletecollection configmaps" yes "$(can deletecollection configmaps -n ff-t-x)"
 check "create networkpolicies" yes "$(can create networkpolicies.networking.k8s.io -n ff-t-x)"
 check "create services/proxy (dev overlay: the invoke path outside the cluster)" yes "$(can create services --subresource=proxy -n ff-t-x)"
-check "get pods/log (diagnostics)" yes "$(can get pods --subresource=log -n ff-t-x)"
 check "list deployments in every namespace at once (capacity samples)" yes "$(can list deployments.apps --all-namespaces)"
 check "create namespaces" yes "$(can create namespaces)"
 
@@ -74,6 +73,7 @@ check "create clusterroles" no "$(can create clusterroles.rbac.authorization.k8s
 check "create rolebindings" no "$(can create rolebindings.rbac.authorization.k8s.io -n ff-t-x)"
 check "delete nodes" no "$(can delete nodes)"
 check "impersonate users" no "$(can impersonate users)"
+check "get pods/log: logs and diagnostics read the log store (P-43)" no "$(can get pods --subresource=log -n ff-t-x)"
 
 echo "Production manifests (deploy/k8s/base, without the dev overlay's binding):"
 check "the base ClusterRole lists no services/proxy" 0 \
@@ -104,6 +104,12 @@ check "proxy to a Service in the managed namespace passes the policy" "passed th
   "$(policy as_sa get --raw /api/v1/namespaces/ff-t-rbactest/services/ff-vap-test:8080/proxy/)"
 check "proxy to a Service outside the tenant namespaces is denied" denied \
   "$(outcome as_sa get --raw /api/v1/namespaces/default/services/kubernetes:https/proxy/version)"
+check "proxy to the log store's Service passes the policy (P-43)" "passed the policy" \
+  "$(policy as_sa get --raw /api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/health)"
+check "proxy to the log store by another port is denied" denied \
+  "$(outcome as_sa get --raw /api/v1/namespaces/ff-system/services/victoria-logs:9429/proxy/health)"
+check "proxy to another Service in ff-system is denied" denied \
+  "$(outcome as_sa get --raw /api/v1/namespaces/ff-system/services/kube-dns:9428/proxy/health)"
 check "deleting the managed namespace is allowed" allowed \
   "$(outcome as_sa delete namespace ff-t-rbactest --wait=false)"
 check "users other than ff-controller are unaffected" allowed \

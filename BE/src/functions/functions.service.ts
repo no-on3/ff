@@ -1,12 +1,20 @@
-import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { describeError } from '../common/describe-error';
-import { CodeTooLargeError, FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, initMsOf } from '../orchestrator/orchestrator.errors';
-import { LogsQuery, ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
+import {
+  CodeTooLargeError,
+  FunctionRuntimeError,
+  FunctionThrottledError,
+  FunctionTimeoutError,
+  InvalidLogCursorError,
+  LogStoreUnavailableError,
+  initMsOf,
+} from '../orchestrator/orchestrator.errors';
+import { ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService, tenantLimits } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
@@ -15,13 +23,14 @@ import { failureStatus, usageRecord } from '../usage/usage';
 import { UsageService } from '../usage/usage.service';
 import { CreditService } from '../billing/credit.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
-import { FunctionLogsView } from './dto/function-logs.dto';
+import { FunctionLogsQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
 import { callersFailure, failureResponse, platformFailure } from './failures';
+import { logsQuery } from './logs-window';
 
 /** Fields whose change requires rolling out a new version of the function. */
 const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout'] as const;
@@ -464,9 +473,23 @@ export class FunctionsService {
    * An instance's lines go with it, at scale to zero too, until the log store
    * keeps them (P-42), when `next` pages back through them (P-43).
    */
-  async logs(accountId: string, id: string, query: LogsQuery): Promise<FunctionLogsView> {
+  /** A page of the function's log lines, from the log store, within its account's plan's retention (P-43). */
+  async logs(accountId: string, id: string, request: FunctionLogsQuery): Promise<FunctionLogsView> {
     const function_ = await this.findOne(accountId, id);
-    return { lines: await this.orchestrator.logs(function_, query), next: null };
+    const plan = await this.plans.forAccount(accountId);
+    const query = logsQuery(request, plan.limits.logRetentionDays, new Date());
+    if (!query) return { lines: [], next: null };
+    try {
+      return await this.orchestrator.logs(function_, query);
+    } catch (error) {
+      if (error instanceof InvalidLogCursorError) throw new BadRequestException(error.message);
+      if (error instanceof LogStoreUnavailableError) {
+        // A platform failure: its details are for the server log only (D4).
+        this.logger.error(`The logs of function ${id} could not be read: ${error.message}`);
+        throw new ServiceUnavailableException('Logs are unavailable right now. Try again in a minute.');
+      }
+      throw error;
+    }
   }
 
   /** Where object storage keeps the copy of a function's code. */

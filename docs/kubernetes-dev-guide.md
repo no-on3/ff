@@ -38,8 +38,8 @@ kubectl get pods -A
 ## Cluster lifecycle
 
 ```bash
-hack/k8s/cluster-up.sh             # create (or start) the cluster, apply deploy/k8s/dev, mint credentials
-hack/k8s/test-rbac.sh              # verify RBAC, the production manifests and the admission policy (32 checks)
+hack/k8s/cluster-up.sh             # create (or start) the cluster, apply deploy/k8s/dev, install the log pipeline, mint credentials
+hack/k8s/test-rbac.sh              # verify RBAC, the production manifests and the admission policy (35 checks)
 hack/k8s/cluster-down.sh           # delete the cluster and the local credentials
 ```
 
@@ -47,7 +47,8 @@ hack/k8s/cluster-down.sh           # delete the cluster and the local credential
 - one server node, no agents, and no load balancer container;
 - the API on `127.0.0.1:6550`;
 - a 2 GB node memory cap;
-- Traefik and metrics-server disabled.
+- Traefik and metrics-server disabled;
+- the log pipeline (below), unless `--no-logging`.
 
 It is safe to re-run.
 
@@ -174,10 +175,10 @@ Then, once for the cluster, run `kubectl apply -f deploy/k8s/optional/runtimecla
 
 ## The log pipeline
 
-Optional in development. Fluent Bit reads every function container's log on the node, and VictoriaLogs keeps the lines for 31 days ([ADR 0005](adr/0005-log-pipeline.md), client-readiness plan P-42). Until the logs API reads it (P-43), `GET /functions/:id/logs` reads the pods.
+Fluent Bit reads every function container's log on the node, and VictoriaLogs keeps the lines for 31 days ([ADR 0005](adr/0005-log-pipeline.md), client-readiness plan P-42). `GET /functions/:id/logs` reads it, and so does the diagnosis of a deploy that fails, for the load error the runtime logged (P-43): the backend no longer reads pod logs. `cluster-up.sh` installs it, unless `--no-logging`; without it, the logs API answers 503 and a failed deploy doesn't name its load error.
 
 ```bash
-hack/k8s/logging-up.sh                  # install it (or: hack/k8s/cluster-up.sh --logging), about 30 s
+hack/k8s/logging-up.sh                  # install it on a cluster made without it, about 30 s
 hack/k8s/test-logging-filter.sh         # L1: the collector's configuration and Lua filter, in its image; Docker only
 hack/k8s/test-it.sh log-pipeline        # L3: what functions print reaches the store, limited (about 2 min)
 hack/k8s/logging-down.sh                # remove it, with every stored line and the delete key
@@ -210,6 +211,7 @@ curl -s http://127.0.0.1:9428/select/logsql/query --data-urlencode 'query={names
 
 The L3 suite (`log-pipeline.it.spec.ts`, run where the pipeline is installed) deploys functions in two throw-away accounts and checks:
 - a Node.js call's lines (stdout and stderr) and a Python call's, with their namespace, function, pod, stream and request ID, all queryable within 5 s;
+- pages read as the logs API reads them: a call's lines, a phrase, pages of 3 back with the cursor giving the same lines once each, and a phrase written as LogsQL finding nothing;
 - a call printing 30,000 lines: at most 2,000 of them stored per second, every other one counted in a notice, so that stored and counted add up to the call's 30,003 lines; and another account calling meanwhile keeps all its lines;
 - a 120,000-byte line of euro signs, cut to 5,461 of them;
 - the store refusing a function pod and an unlabelled pod in `ff-system`, and accepting one labelled as the backend;
@@ -243,5 +245,6 @@ See [`deploy/k8s/README.md`](../deploy/k8s/README.md). In short:
 | `Unauthorized` from the backend after a day | The token expired: run `hack/k8s/mint-token.sh`. |
 | System pods stuck in `ContainerCreating` | Images are still being pulled inside the node; `kubectl -n kube-system get events` shows progress. |
 | `hack/e2e.sh`: `FAIL backend answers on …` with an empty backend log | The backend was still loading its modules. On a spinning disk with a cold page cache that alone took 23 s. The script waits up to 180 s; raise it with `FF_E2E_BACKEND_START_SECONDS`. |
+| `GET /functions/:id/logs` answers 503, and the backend logs `The logs of function … could not be read` | The log store isn't running or reachable. `kubectl -n ff-system get pods -l app.kubernetes.io/name=victoria-logs`; on a cluster made with `--no-logging` or before P-43, run `hack/k8s/logging-up.sh`. A failed deploy then names its load error again too. |
 | Fluent Bit logs `no upstream connections available to victoria-logs…` right after `logging-up.sh` | It started before VictoriaLogs was ready. It retries each chunk (10 times, for an hour or two in all), and the chunks wait on the node's disk: nothing is lost. |
 | Function pods in `ImagePullBackOff` for `ff-runtime-*` | kubelet's image GC deleted the imported image; it has no registry to re-pull from. GC runs when the disk passes the high threshold, which this cluster raises from 85% to 95% (`FF_IMAGE_GC_HIGH_THRESHOLD`). Re-import with `hack/k8s/load-images.sh`; `hack/k8s/test-it.sh` does this automatically. |

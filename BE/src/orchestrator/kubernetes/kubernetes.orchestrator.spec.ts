@@ -6,11 +6,14 @@ import {
   FunctionRuntimeError,
   FunctionThrottledError,
   FunctionTimeoutError,
+  InvalidLogCursorError,
+  LogStoreUnavailableError,
   OrchestratorError,
   initMsOf,
 } from '../orchestrator.errors';
-import { KubeApi, KubeRequestTimeoutError, KubeResponse, PodLogOptions, RequestOptions } from './kube-client';
-import { KubernetesOrchestrator, LOG_BYTES, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
+import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
+import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
+import { StoredLine, decodeCursor, pageQuery } from './log-store';
 import { MAX_CODE_BYTES, RUNTIME_PORT, TENANT_QUOTA_NAME } from './manifests';
 import { functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
@@ -21,6 +24,9 @@ const rolledOut = (replicas: number) => ({
   spec: { replicas },
   status: { observedGeneration: 1, replicas, updatedReplicas: replicas, readyReplicas: replicas, availableReplicas: replicas },
 });
+
+/** Where the log store's queries go through the API server (P-43). */
+const STORE_QUERY = '/api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/select/logsql/query?';
 
 /** In-memory stand-in for the API server. */
 class FakeKubeApi implements KubeApi {
@@ -34,10 +40,19 @@ class FakeKubeApi implements KubeApi {
   requests: Array<{ method: string; path: string; options?: RequestOptions }> = [];
   /** What request() answers next; an Error is thrown, as the client would. */
   responses: Array<KubeResponse | Error> = [];
-  /** The function container's log, as the runtime writes it: one JSON object per line. */
-  podLogText =
-    '{"level":"info","msg":"runtime listening","port":8080}\n' +
-    '{"level":"error","msg":"function initialization failed","errorType":"Runtime.ImportModuleError","errorMessage":"Cannot find module \'lodash\'"}';
+  /**
+   * The log store's answer to every query through its Service proxy (P-43): rows,
+   * newest first, as it sorts them; an Error is thrown. By default, the runtime's
+   * lines when its code failed to load: one JSON object per line.
+   */
+  storeRows: StoredLine[] | Error = [
+    {
+      _time: '2026-10-16T10:00:01Z',
+      _msg: '{"level":"error","msg":"function initialization failed","errorType":"Runtime.ImportModuleError","errorMessage":"Cannot find module \'lodash\'"}',
+    },
+    { _time: '2026-10-16T10:00:00Z', _msg: '{"level":"info","msg":"runtime listening","port":8080}' },
+  ];
+  storeQueries: string[] = [];
 
   async apply<T>(path: string, manifest: object): Promise<T> {
     this.applied.push({ path, manifest });
@@ -62,14 +77,12 @@ class FakeKubeApi implements KubeApi {
     this.listed.push({ path, selector });
     return (this.lists.get(path) as T[]) ?? [];
   }
-  /** Each pod's own log, by name, for GET /functions/:id/logs (P-40); a pod not in it has podLogText. */
-  podLogs = new Map<string, string>();
-  podLogReads: Array<{ namespace: string; pod: string; container: string; options: PodLogOptions }> = [];
-  async podLog(namespace: string, pod: string, container: string, options: PodLogOptions): Promise<string> {
-    this.podLogReads.push({ namespace, pod, container, options });
-    return this.podLogs.get(pod) ?? this.podLogText;
-  }
   async request(method: string, path: string, options?: RequestOptions): Promise<KubeResponse> {
+    if (path.startsWith(STORE_QUERY)) {
+      this.storeQueries.push(new URLSearchParams(path.slice(path.indexOf('?') + 1)).get('query') ?? '');
+      if (this.storeRows instanceof Error) throw this.storeRows;
+      return { status: 200, headers: {}, body: this.storeRows.map((row) => JSON.stringify(row)).join('\n') };
+    }
     this.requests.push({ method, path, options });
     const next = this.responses.shift() ?? { status: 200, headers: {}, body: 'null' };
     if (next instanceof Error) throw next;
@@ -235,9 +248,19 @@ describe('KubernetesOrchestrator', () => {
       expect(error).toMatchObject({ errorType: 'Runtime.ImportModuleError', message: "Cannot find module 'lodash'" });
     });
 
+    it("reads the newest pod's last lines from the log store, in its account's namespace (P-43)", async () => {
+      crashLooping();
+
+      await orchestrator.waitUntilReady(fn, 30).catch(() => undefined);
+
+      expect(api.storeQueries).toEqual([
+        `{namespace="${ns}", function_id="${fn.id}"} pod:="fn-pod" _time:1h | sort by (_time desc) limit 20 | fields _time, _msg`,
+      ]);
+    });
+
     it('fails with the platform diagnostics when the runtime logged no load error', async () => {
       crashLooping();
-      api.podLogText = '{"level":"info","msg":"runtime listening","port":8080}';
+      api.storeRows = [{ _time: '2026-10-16T10:00:00Z', _msg: '{"level":"info","msg":"runtime listening","port":8080}' }];
 
       const error = await orchestrator.waitUntilReady(fn, 30).catch((err) => err);
 
@@ -245,6 +268,18 @@ describe('KubernetesOrchestrator', () => {
       expect(error.message).toContain('did not become ready');
       expect(error.message).toContain('CrashLoopBackOff');
       expect(error.message).toContain('runtime listening');
+    });
+
+    it("still says why without the log store: the pods' state, and no load error", async () => {
+      crashLooping();
+      api.storeRows = new Error('connect ECONNREFUSED');
+
+      const error = await orchestrator.waitUntilReady(fn, 30).catch((err) => err);
+
+      expect(error).toBeInstanceOf(OrchestratorError);
+      expect(error).not.toBeInstanceOf(FunctionLoadError);
+      expect(error.message).toContain('CrashLoopBackOff');
+      expect(error.message).not.toContain('last log lines');
     });
 
     it('reports why no pods could be created, e.g. an unknown RuntimeClass', async () => {
@@ -474,44 +509,38 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
-  describe('logs (P-40)', () => {
-    const podsPath = `/api/v1/namespaces/${ns}/pods`;
-    const pod = (podName: string) => ({ metadata: { name: podName } });
+  describe('logs (P-43)', () => {
+    const window = { start: new Date('2026-10-17T10:00:00Z'), end: new Date('2026-10-17T11:00:00Z'), limit: 2 };
 
-    it("reads each pod of the function in its account's namespace, with times, the window and the byte limit, and merges them", async () => {
-      api.lists.set(podsPath, [pod('fn-b'), pod('fn-a')]);
-      api.podLogs.set('fn-a', '2026-10-17T10:00:01Z START RequestId: req-1 Version: 1\n2026-10-17T10:00:02Z from a\n');
-      api.podLogs.set('fn-b', '2026-10-17T10:00:01.5Z from b, between calls\n');
+    it("asks the log store for a page of the function's lines in its account's namespace, through the API server's proxy", async () => {
+      api.storeRows = [
+        { _time: '2026-10-17T10:00:03Z', _msg: 'third', pod: 'fn-a', stream: 'stdout', request_id: 'req-1' },
+        { _time: '2026-10-17T10:00:02Z', _msg: 'second', pod: 'fn-b', stream: 'stderr' },
+        { _time: '2026-10-17T10:00:01Z', _msg: 'first', pod: 'fn-a', stream: 'stdout' },
+      ];
 
-      const lines = await orchestrator.logs(fn, { tail: 50, sinceSeconds: 600 });
+      const page = await orchestrator.logs(fn, { ...window, q: 'time out', requestId: 'req-1' });
 
-      expect(api.listed).toEqual([{ path: podsPath, selector: `ff.dev/function-id=${fn.id}` }]);
-      expect(api.podLogReads).toEqual(
-        ['fn-b', 'fn-a'].map((podName) => ({ namespace: ns, pod: podName, container: 'function', options: { tailLines: 50, sinceSeconds: 600, timestamps: true, limitBytes: LOG_BYTES } })),
-      );
-      expect(lines.map((line) => [line.instance, line.requestId, line.message])).toEqual([
-        ['fn-a', 'req-1', 'START RequestId: req-1 Version: 1'],
-        ['fn-b', null, 'from b, between calls'],
-        ['fn-a', 'req-1', 'from a'],
+      expect(api.storeQueries).toEqual([pageQuery(ns, fn.id, { ...window, q: 'time out', requestId: 'req-1' })]);
+      expect(api.storeQueries[0]).toContain(`{namespace="${ns}", function_id="${fn.id}"}`);
+      expect(page.lines).toEqual([
+        { time: '2026-10-17T10:00:02.000000000Z', instance: 'fn-b', requestId: null, stream: 'stderr', message: 'second' },
+        { time: '2026-10-17T10:00:03.000000000Z', instance: 'fn-a', requestId: 'req-1', stream: 'stdout', message: 'third' },
       ]);
+      expect(decodeCursor(page.next!)).toEqual({ before: '2026-10-17T10:00:02Z', skip: 1 });
     });
 
-    it('gives the newest `tail` lines across the pods', async () => {
-      api.lists.set(podsPath, [pod('fn-a'), pod('fn-b')]);
-      api.podLogs.set('fn-a', '2026-10-17T10:00:01Z a1\n2026-10-17T10:00:03Z a2\n');
-      api.podLogs.set('fn-b', '2026-10-17T10:00:02Z b1\n2026-10-17T10:00:04Z b2\n');
+    it('gives no lines and no cursor for a function the store has nothing of', async () => {
+      api.storeRows = [];
 
-      expect((await orchestrator.logs(fn, { tail: 2 })).map((line) => line.message)).toEqual(['a2', 'b2']);
-      expect(api.podLogReads[0].options).toEqual({ tailLines: 2, sinceSeconds: undefined, timestamps: true, limitBytes: LOG_BYTES });
+      expect(await orchestrator.logs(fn, window)).toEqual({ lines: [], next: null });
     });
 
-    it('gives none for a function without pods, scaled to zero, and none for a pod whose log is not there yet', async () => {
-      expect(await orchestrator.logs(fn, { tail: 200 })).toEqual([]);
-      expect(api.podLogReads).toEqual([]);
+    it('rejects with the store unavailable when it fails, and with the cursor when no page gave it', async () => {
+      api.storeRows = new Error('connect ECONNREFUSED');
+      await expect(orchestrator.logs(fn, window)).rejects.toBeInstanceOf(LogStoreUnavailableError);
 
-      api.lists.set(podsPath, [pod('fn-starting')]);
-      api.podLogs.set('fn-starting', ''); // the client gives '' for a container waiting to start
-      expect(await orchestrator.logs(fn, { tail: 200 })).toEqual([]);
+      await expect(orchestrator.logs(fn, { ...window, cursor: 'bm9wZQ' })).rejects.toBeInstanceOf(InvalidLogCursorError);
     });
   });
 

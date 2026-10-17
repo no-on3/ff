@@ -3,8 +3,9 @@
 # ValidatingAdmissionPolicy (40-admission-policy.yaml) restricts every write to
 # FF-managed ff-t-* tenant namespaces. Reads stay cluster-wide: README.md says
 # what that exposes, and why the beta accepts it. Deliberately absent: secrets,
-# pods create/exec/attach, services/proxy (development only: deploy/k8s/dev),
-# roles and bindings, nodes, and any escalate/bind/impersonate verbs.
+# pods create/exec/attach, pods/log (logs come from the log store, P-43),
+# services/proxy (development only: deploy/k8s/dev), roles and bindings, nodes,
+# and any escalate/bind/impersonate verbs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -24,9 +25,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]

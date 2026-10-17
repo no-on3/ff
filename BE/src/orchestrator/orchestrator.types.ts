@@ -28,17 +28,33 @@ export interface FunctionWorkload {
 export interface FunctionLogLine {
   /** When it was written: RFC 3339, UTC, with nine decimals. */
   time: string;
-  /** The instance that wrote it. */
-  instance: string;
+  /** The instance that wrote it; null for the log store's own notices. */
+  instance: string | null;
   /** The call it belongs to, from its START to its REPORT; null outside a call. */
   requestId: string | null;
+  /** stdout or stderr; ff for the collector's notice of dropped lines; null if unknown. */
+  stream: 'stdout' | 'stderr' | 'ff' | null;
   message: string;
 }
 
-/** Which lines to read: the newest `tail`, written in the last `sinceSeconds` when given. */
+/** Which lines to read (P-43): the newest `limit` of the window, or of what comes before `cursor`. */
 export interface LogsQuery {
-  tail: number;
-  sinceSeconds?: number;
+  /** The window: from `start`, included, to `end`, excluded. */
+  start: Date;
+  end: Date;
+  limit: number;
+  /** Only lines with this phrase. */
+  q?: string;
+  /** Only the lines of this call. */
+  requestId?: string;
+  /** Where the page before ended: its `next`. */
+  cursor?: string;
+}
+
+/** A page of lines, oldest first, and where the older ones start; null when there are none. */
+export interface FunctionLogsPage {
+  lines: FunctionLogLine[];
+  next: string | null;
 }
 
 /** What a scheduler applies to an account as a whole: its plan's quota (D5). */
@@ -95,8 +111,9 @@ export interface Orchestrator {
    */
   readyInstancesByFunction(): Promise<Map<string, number>>;
   /**
-   * The function's log lines, oldest first, read from its running instances
-   * (P-40): an instance's lines go with it, until the log store keeps them (P-42).
+   * A page of the function's log lines, from the log store (P-43), which keeps
+   * them after their instance is gone. Rejects with LogStoreUnavailableError when
+   * the store can't answer, and InvalidLogCursorError for a cursor no page gave.
    */
-  logs(fn: FunctionWorkload, query: LogsQuery): Promise<FunctionLogLine[]>;
+  logs(fn: FunctionWorkload, query: LogsQuery): Promise<FunctionLogsPage>;
 }

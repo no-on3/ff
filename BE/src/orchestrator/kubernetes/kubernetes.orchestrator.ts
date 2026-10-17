@@ -9,9 +9,10 @@ import {
   withInitMs,
 } from '../orchestrator.errors';
 import { REQUEST_ID_HEADER } from '../../common/request-context';
-import { FunctionLogLine, FunctionWorkload, InvokeResult, LogsQuery, Orchestrator, TenantLimits } from '../orchestrator.types';
+import { FunctionLogsPage, FunctionWorkload, InvokeResult, LogsQuery, Orchestrator, TenantLimits } from '../orchestrator.types';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
+import { LogStore, pageQuery, quoted, toPage } from './log-store';
 import {
   K8sObject,
   RUNTIME_PORT,
@@ -28,7 +29,6 @@ import {
   serviceManifest,
 } from './manifests';
 import { LABELS, MANAGED_BY, accountNamespace, codeConfigMapName, codeHash, functionResourceName } from './naming';
-import { mergeLogs, podLogLines } from './pod-logs';
 
 interface Deployment extends K8sObject {
   metadata: K8sObject['metadata'] & { generation?: number };
@@ -60,9 +60,6 @@ interface Pod extends Listed {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The most of a pod's log read for GET /functions/:id/logs: a function that prints huge lines can't fill the backend's memory. */
-export const LOG_BYTES = 4 * 1024 * 1024;
-
 /** The rollout is finished: every replica runs the new template and is available (as `kubectl rollout status`). */
 export function isRolledOut(deployment: Deployment): boolean {
   const desired = deployment.spec?.replicas ?? 1;
@@ -82,12 +79,15 @@ export function isRolledOut(deployment: Deployment): boolean {
  */
 export class KubernetesOrchestrator implements Orchestrator {
   private readonly logger = new Logger(KubernetesOrchestrator.name);
+  private readonly logStore: LogStore;
 
   constructor(
     private readonly settings: KubernetesSettings,
     private readonly api: KubeApi,
     private readonly pollIntervalMs = 1000,
-  ) {}
+  ) {
+    this.logStore = new LogStore(settings.invokeMode, api);
+  }
 
   private namespaceOf(fn: FunctionWorkload): string {
     return accountNamespace(this.settings.namespacePrefix, fn.accountId);
@@ -224,7 +224,7 @@ export class KubernetesOrchestrator implements Orchestrator {
       const newest = [...pods].sort((a, b) =>
         (b.metadata.creationTimestamp ?? '').localeCompare(a.metadata.creationTimestamp ?? ''),
       )[0];
-      const log = (await this.api.podLog(ns, newest.metadata.name, 'function', { tailLines: 20 })).trim();
+      const log = await this.lastLines(fn, ns, newest.metadata.name);
       return {
         details: [...reasons, log && `last log lines: ${log.split('\n').slice(-5).join(' | ')}`].filter(Boolean).join('; '),
         loadError: loadErrorIn(log),
@@ -234,23 +234,30 @@ export class KubernetesOrchestrator implements Orchestrator {
     }
   }
 
+  /** A page of the function's lines from the log store, in its account's namespace (P-43). */
+  async logs(fn: FunctionWorkload, query: LogsQuery): Promise<FunctionLogsPage> {
+    const rows = await this.logStore.query(pageQuery(this.namespaceOf(fn), fn.id, query));
+    return toPage(rows, query.limit, query.cursor);
+  }
+
   /**
-   * The function's log lines, from each of its pods' function container, the
-   * newest `tail` across them, oldest first, each with its call (P-40). A pod
-   * that can't be read yet gives none; a read stops at LOG_BYTES a pod.
+   * A pod's last 20 lines of the past hour, from the log store, for the readiness
+   * diagnosis. Best effort, as diagnostics are: '' when the store can't answer.
    */
-  async logs(fn: FunctionWorkload, query: LogsQuery): Promise<FunctionLogLine[]> {
-    const ns = this.namespaceOf(fn);
-    const pods = await this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
-    const perPod = await Promise.all(
-      pods.map(async (pod) =>
-        podLogLines(
-          await this.api.podLog(ns, pod.metadata.name, 'function', { tailLines: query.tail, sinceSeconds: query.sinceSeconds, timestamps: true, limitBytes: LOG_BYTES }),
-          pod.metadata.name,
-        ),
-      ),
-    );
-    return mergeLogs(perPod, query.tail);
+  private async lastLines(fn: FunctionWorkload, ns: string, pod: string): Promise<string> {
+    try {
+      const rows = await this.logStore.query(
+        `{namespace=${quoted(ns)}, function_id=${quoted(fn.id)}} pod:=${quoted(pod)} _time:1h | sort by (_time desc) limit 20 | fields _time, _msg`,
+      );
+      return rows
+        .reverse()
+        .map((row) => row._msg ?? '')
+        .join('\n')
+        .trim();
+    } catch (error) {
+      this.logger.warn(`No log lines for the diagnosis of ${ns}/${pod}: ${(error as Error).message}`);
+      return '';
+    }
   }
 
   async scale(fn: FunctionWorkload, replicas: number): Promise<void> {

@@ -3,16 +3,19 @@
 # development manifests (deploy/k8s/dev: the production base plus the Service
 # proxy a backend outside the cluster needs) and mints ff-controller credentials.
 # Safe to re-run: an existing cluster is reused.
-#   hack/k8s/cluster-up.sh [--logging]
-# --logging installs the log pipeline too (hack/k8s/logging-up.sh).
+#   hack/k8s/cluster-up.sh [--no-logging]
+# It installs the log pipeline too (hack/k8s/logging-up.sh): the logs API and the
+# load errors read it (client-readiness plan P-43). --no-logging leaves it out,
+# and with it those two. --logging, the default, is accepted for older notes.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-logging=false
+logging=true
 for arg in "$@"; do
   case "$arg" in
     --logging) logging=true ;;
-    *) echo "usage: $0 [--logging]" >&2; exit 2 ;;
+    --no-logging) logging=false ;;
+    *) echo "usage: $0 [--no-logging]" >&2; exit 2 ;;
   esac
 done
 

@@ -4,7 +4,7 @@ import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { Invocation } from '../plans/rate-limits';
 import { CreateFunctionDto } from './dto/create-function.dto';
-import { DEFAULT_LOG_LINES, FunctionLogsQuery, FunctionLogsView } from './dto/function-logs.dto';
+import { FunctionLogsQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
@@ -103,14 +103,16 @@ export class FunctionsController {
   @Get(':id/logs')
   @RequireScope('logs:read')
   @ApiOperation({
-    summary: "The function's log lines, oldest first: the newest across its running instances, each with its call's request ID (P-40)",
+    summary: "A page of the function's log lines, oldest first: the newest of the window, each with its instance, stream and call's request ID (P-43)",
     description:
-      'Every member reads them, and an API key with logs:read. They come from the running instances, so they go when an instance stops, and a function ' +
-      'scaled to zero has none, until the log store keeps them (P-42). A call\'s lines run from its START line to its REPORT.',
+      'Every member reads them, and an API key with logs:read. They come from the log store, which keeps them after their instance is gone, ' +
+      "for the plan's log retention. A call's lines run from its START line to its REPORT. The window is start (or sinceSeconds) to end; q and " +
+      'requestId narrow it; next leads to the older lines. 503 when the log store is unavailable.',
   })
   @ApiResponse({ status: 200, type: FunctionLogsView })
+  @ApiResponse({ status: 503, description: 'The log store is unavailable: try again shortly' })
   logs(@Param('id', ParseUUIDPipe) id: string, @Query() query: FunctionLogsQuery, @Principal() principal: Principal): Promise<FunctionLogsView> {
-    return this.functionsService.logs(principal.accountId, id, { tail: query.tail ?? DEFAULT_LOG_LINES, sinceSeconds: query.sinceSeconds });
+    return this.functionsService.logs(principal.accountId, id, query);
   }
 
   @Get(':id/scaling-config')

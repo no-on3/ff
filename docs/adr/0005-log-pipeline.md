@@ -108,7 +108,7 @@ Each measurement is the last of several runs: the earlier ones found the five th
   - the manifests in `deploy/k8s/logging/`: VictoriaLogs as a StatefulSet with a volume, Fluent Bit as a DaemonSet with read-only access to pods' and namespaces' metadata, and the NetworkPolicies (done; Fluent Bit in a namespace of its own, `ff-logging`, as hostPath volumes need Pod Security `privileged`);
   - the limit's production figure, the line counting what was dropped, and the cut on a character boundary (done);
   - L3 tests: a `print` arrives with its function ID and request ID, and a namespace printing in a loop is limited without affecting another (done, with the NetworkPolicies and the collector's permissions checked too).
-- **P-43:**
+- **P-43** (its first part done: the reads, with `pods/log` gone from the backend's role):
   - the API keeps P-40's shape and reads VictoriaLogs instead of the pods;
   - `start` is bounded by the plan's retention;
   - `q` is a quoted phrase;

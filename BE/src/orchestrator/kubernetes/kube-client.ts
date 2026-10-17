@@ -67,19 +67,6 @@ export interface KubeApi {
   deleteCollection(path: string, labelSelector: string): Promise<void>;
   scaleDeployment(namespace: string, name: string, replicas: number): Promise<void>;
   list<T>(path: string, labelSelector: string): Promise<T[]>;
-  podLog(namespace: string, pod: string, container: string, options: PodLogOptions): Promise<string>;
-}
-
-/** Which part of a container's log to read. */
-export interface PodLogOptions {
-  /** The last lines. */
-  tailLines: number;
-  /** Only the lines of the last this many seconds. */
-  sinceSeconds?: number;
-  /** Each line after its time, RFC 3339. */
-  timestamps?: boolean;
-  /** The most bytes to read: the newest lines go first when the read is cut. */
-  limitBytes?: number;
 }
 
 export const paths = {
@@ -209,19 +196,5 @@ export class KubeClient implements KubeApi {
   async list<T>(path: string, labelSelector: string): Promise<T[]> {
     const list = await this.json<{ items?: T[] }>('GET', `${path}?labelSelector=${encodeURIComponent(labelSelector)}`);
     return list?.items ?? [];
-  }
-
-  /** Best effort: '' when the log can't be read, as for a pod still starting; diagnostics and logs must never fail the caller for one pod. */
-  async podLog(namespace: string, pod: string, container: string, options: PodLogOptions): Promise<string> {
-    const query = new URLSearchParams({ container, tailLines: String(options.tailLines) });
-    if (options.sinceSeconds !== undefined) query.set('sinceSeconds', String(options.sinceSeconds));
-    if (options.timestamps) query.set('timestamps', 'true');
-    if (options.limitBytes !== undefined) query.set('limitBytes', String(options.limitBytes));
-    try {
-      const res = await this.request('GET', `${paths.core(namespace, 'pods', pod)}/log?${query}`);
-      return res.status === 200 ? res.body : '';
-    } catch {
-      return '';
-    }
   }
 }
