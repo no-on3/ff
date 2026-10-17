@@ -109,9 +109,12 @@ export class KubernetesOrchestrator implements Orchestrator {
     await this.api.apply(paths.core(ns, 'configmaps', configMap), configMapManifest);
     await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
 
-    // Keep the current replica count (it may have been scaled since); never go below minInstances.
+    // Keep the current replica count (it may have been scaled since), never below
+    // minInstances, and never below one: every deploy and update is checked by
+    // waitUntilReady, which needs a pod, even for a function scaled to zero. The
+    // idle sweep scales it back down after the idle window.
     const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
-    const replicas = Math.max(existing?.spec?.replicas ?? Math.max(1, fn.minInstances), fn.minInstances);
+    const replicas = Math.max(existing?.spec?.replicas ?? 0, fn.minInstances, 1);
     await this.api.apply(
       paths.apps(ns, 'deployments', name),
       deploymentManifest(fn, ns, configMap, hash, this.settings, replicas),

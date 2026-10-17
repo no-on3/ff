@@ -60,8 +60,9 @@ export class Function {
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, any>;
 
-  @Column({ nullable: true })
-  error?: string;
+  /** Why the function is in ERROR: the last failed deploy or update. Cleared once a rollout succeeds. */
+  @Column({ type: 'varchar', nullable: true })
+  error?: string | null;
 
   @Column({ default: 0 })
   minInstances: number;

@@ -180,7 +180,7 @@ curl -s "$FF/functions/$ID/invocations?limit=5" | jq '{total, invocations: [.inv
 curl -s "$FF/functions/$ID/scaling-config" | jq -c .
 ```
 
-**Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then.
+**Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
 ```bash
 jq -n --rawfile code examples/hello.ts '{code: $code}' \
@@ -202,7 +202,7 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 
 The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runtimes/nodejs/README.md) and [Python](../runtimes/python/README.md) runtime READMEs describe `event`, `context`, and the error names.
 
-**If a function cannot load** (a syntax error, a missing handler, an exception at import), the create call waits for the readiness timeout (90 s, `FF_READY_TIMEOUT_SECONDS` in `BE/.env`). It then answers 400 with `Function "<name>" did not become ready within 90 s: last log lines: …`. Those lines include the runtime's reason, for example `"errorType":"Runtime.UserCodeSyntaxError","errorMessage":"SyntaxError: function.ts:2:11 Property assignment expected."`. The function stays listed with status `ERROR` until you delete it. While developing functions, a lower timeout such as 30 gives faster feedback.
+**If a function cannot load** (a syntax error, a missing handler, an exception at import), the create call waits for the readiness timeout (90 s, `FF_READY_TIMEOUT_SECONDS` in `BE/.env`). It then answers 400 with `Function "<name>" did not become ready within 90 s: last log lines: …`. Those lines include the runtime's reason, for example `"errorType":"Runtime.UserCodeSyntaxError","errorMessage":"SyntaxError: function.ts:2:11 Property assignment expected."`. The function is listed with status `ERROR` and that reason, and its pod is released. **Fix it with an update:** send the corrected code (`PUT /functions/<id>`), and the function becomes `ACTIVE`, keeping its ID. An update of an `ERROR` function always rolls out, even without changes, so `PUT` with `{}` retries the same code after a passing failure such as a full quota. While developing functions, a lower timeout such as 30 gives faster feedback.
 
 ## 4. Look inside the cluster
 
@@ -313,7 +313,8 @@ docker compose down -v
 | `npm run test:db` fails with `ECONNREFUSED` | PostgreSQL isn't running: `docker compose up -d --wait postgres`. The tests read `DB_*` from `BE/.env`. |
 | Kubernetes calls fail with `Unauthorized` | The token expired: `hack/k8s/mint-token.sh`. |
 | Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. |
-| `create` takes 90 s, then fails | The function cannot load. The error message contains the runtime's reason. See "If a function cannot load" in section 3. |
+| `create` takes 90 s, then fails | The function cannot load. The error message contains the runtime's reason. Fix the code and send it with `PUT /functions/<id>`: see "If a function cannot load" in section 3. |
+| An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first. The previous version still serves, and the record is unchanged. |
 | `jq: parse error` after `echo "$response" \| jq` in zsh | zsh's `echo` expands `\n` inside JSON strings. Pipe `curl` straight into `jq`, or use `printf '%s' "$response"`. |
 
 More symptoms and fixes are in the dev guide's [troubleshooting table](kubernetes-dev-guide.md#troubleshooting).

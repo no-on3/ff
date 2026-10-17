@@ -382,7 +382,7 @@
     <h2>Data model</h2>
     <p class="lead">Three tables hold everything the backend knows. A function's invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>user_id</code> is <code>userId</code>).</p>
     <div class="card pad scrollx"><div id="erDiagram" class="capped"></div></div>
-    <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set. The columns <code>cpu</code>, <code>targetConcurrency</code>, and <code>cpuUsed</code> aren't used yet, so <code>cpuUsage</code> is always 0.</p>
+    <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set. The columns <code>cpu</code>, <code>target_concurrency</code>, and <code>cpu_used</code> aren't used yet, so <code>cpu_usage</code> is always 0.</p>
     <h3>Lifecycles</h3>
     <div class="card pad scrollx"><div id="stateMachines" class="capped"></div></div>
     <h3>Kubernetes objects of one tenant</h3>
@@ -879,7 +879,7 @@ const SCENARIOS = [
   },
   {
     id: 'update', title: 'Update the code', lanes: ['user', 'api', 'db', 's3', 'k8s', 'node', 'pod'],
-    summary: 'PUT /functions/:id with new code: a new ConfigMap and a rolling update. The old pod keeps serving until the new one is ready, so invocations keep working. Measured: about 6 s.',
+    summary: 'PUT /functions/:id with new code: a new ConfigMap and a rolling update. The old pod keeps serving until the new one is ready, so invocations keep working. If the new version can\'t start, the previous one is put back. Measured: about 6 s.',
     initial: activeState(FN, HASH_V1, 'code.ts'),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'PUT /functions/:id', title: 'You send the new code',
@@ -889,9 +889,7 @@ const SCENARIOS = [
         text: 'Update and delete compare the function\'s userId with the caller\'s tenant, and refuse anyone else with 401.', code: 'functions.controller.ts update()',
         msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '000000000001' = the caller" } },
       { from: 'api', to: 'api', kind: 'int', label: 'the code changed → roll out', title: 'Does this need a rollout?',
-        text: 'Only a change to the code, runtime, memory, or timeout rolls out a new version, and only when the value differs from the stored one. Other fields are just saved.', code: 'functions.service.ts update() · ROLLOUT_FIELDS' },
-      { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced', text: 'Same key, new content.', code: 'BE/src/minio-client/minio-client.service.ts uploadCode()',
-        set: { 'S3 (bucket functions).object': FN + '/code.ts (451 bytes, new)' } },
+        text: 'A change to the code, runtime, memory, or timeout rolls out a new version, when the value differs from the stored one. A function that isn\'t ACTIVE always rolls out, even unchanged, so the same code can be retried after a passing failure. Other fields are just saved.', code: 'functions.service.ts update() · ROLLOUT_FIELDS' },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply namespace · guardrails (no change)', title: 'The tenant is ensured again',
         text: 'Applying the same objects again changes nothing. That is why create and update can share one code path.', code: 'kubernetes.orchestrator.ts update() → apply(), ensureTenant()', hl: ['ns', 'guard'] },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply ConfigMap …-9c9e249cb7', title: 'A new ConfigMap for the new code',
@@ -899,7 +897,7 @@ const SCENARIOS = [
         msg: APPLY('/api/v1/namespaces/' + NS + '/configmaps/' + cm(FN, HASH_V2), mConfigMap(HASH_V2, CODE_TS_V2)),
         set: { [K + '.ConfigMap']: cm(FN, HASH_V2) + ' and the previous …-c4d785b397' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply Deployment (new template)', title: 'The Deployment points at the new ConfigMap',
-        text: 'The pod template changes (the code volume and the ff.dev/code-sha256 annotation), which starts a rollout. The replica count is kept: the backend read it first. Then ConfigMaps older than the previous version are deleted; here there are none.', code: 'kubernetes.orchestrator.ts apply(), collectOldConfigMaps()', hl: ['deployment'],
+        text: 'The pod template changes (the code volume and the ff.dev/code-sha256 annotation), which starts a rollout. The replica count is kept, since the backend read it first, but it is at least 1: a function scaled to zero gets a pod, so the wait below checks real code. Then ConfigMaps older than the previous version are deleted; here there are none.', code: 'kubernetes.orchestrator.ts apply(), collectOldConfigMaps()', hl: ['deployment'],
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { spec: { replicas: 1, '…': '…' }, '…': '…' } }, APPLY(DEPLOY_PATH, mDeployment(HASH_V2, 1))],
         set: { [K + '.Deployment']: 'replicas 1 · rolling update' } },
       { from: 'k8s', to: 'node', kind: 'req', label: 'surge: start a new pod', title: 'A new pod starts next to the old one',
@@ -912,11 +910,13 @@ const SCENARIOS = [
         msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-16T14:05:05.903Z', 0)] },
         set: { [K + '.Pod']: 'new: Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment until rolled out', title: 'The backend waits for the rollout',
-        text: 'For up to 90 s. If the new pod isn\'t ready by then, the update fails with 400 and the record keeps the old code, while S3 and the Deployment already have the new one; the old pod keeps serving, because maxUnavailable is 0.', code: 'kubernetes.orchestrator.ts waitUntilReady()', t: '⏱ about 6 s in all',
+        text: 'For up to 90 s. If the new pod isn\'t ready by then, the backend applies the previous version again and waits for it, then answers 400 with the reason: the record, the Deployment and S3 all keep the old version, and the old pod never stopped serving, because maxUnavailable is 0. A function that wasn\'t ACTIVE has no version to go back to: it keeps the attempt, stays ERROR with the new reason, and is scaled to zero.', code: 'kubernetes.orchestrator.ts waitUntilReady() · functions.service.ts rollBack()', t: '⏱ about 6 s in all',
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { metadata: { generation: 2, '…': '…' }, status: { observedGeneration: 2, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } } }] },
-      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions (code)', title: 'The change is saved last', text: 'The record changes only once the new version is live. The status isn\'t touched: an update never changes it.', code: 'functions.service.ts update()',
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions (code)', title: 'The change is saved', text: 'The record changes only once the new version is live, and is then ACTIVE with no error, whatever it was before: an update also repairs a function in ERROR.', code: 'functions.service.ts update()',
         msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"code\" = '…Marhba…', \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = '" + FN + "';" },
         set: { 'PostgreSQL.functions': 'ACTIVE (new code)' } },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced, last', text: 'Same key, new content. Only a version that went live is archived. A failure here is logged and doesn\'t fail the update: nothing reads the copy yet.', code: 'functions.service.ts archiveCode() · minio-client.service.ts uploadCode()',
+        set: { 'S3 (bucket functions).object': FN + '/code.ts (451 bytes, new)' } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · the function', title: 'Done', text: 'The next invocation answers "Marhba Tunis".', code: 'functions.controller.ts update()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', userId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, cpu: 100, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 1, targetConcurrency: 100, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
     ],
@@ -1003,7 +1003,7 @@ const SCENARIOS = [
   },
   {
     id: 'loadfail', title: 'The function fails to load', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod', 'worker'],
-    summary: 'Code with a syntax error. Everything is deployed, but the runtime never reports ready; after 90 s the backend gives up, with the reason it found in the pod\'s log.',
+    summary: 'Code with a syntax error. Everything is deployed, but the runtime never reports ready; after 90 s the backend gives up, with the reason it found in the pod\'s log, and releases the pod. An update with fixed code repairs the function.',
     initial: {},
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions (broken code)', title: 'You create a function with a syntax error', text: 'Valid JSON and valid fields; only the code itself is broken.', code: 'functions.controller.ts create()',
@@ -1027,10 +1027,13 @@ const SCENARIOS = [
       { from: 'api', to: 'k8s', kind: 'req', label: '90 s later: read the pods and the log', title: 'The backend gives up, and finds out why',
         text: 'After FF_READY_TIMEOUT_SECONDS it lists the function\'s pods for waiting or terminated containers, then reads the newest pod\'s log and keeps its last 5 lines. A missing RuntimeClass or an exhausted quota would show up here too, as "no pods were created".', code: 'kubernetes.orchestrator.ts waitUntilReady(), diagnose()', t: '90 s',
         msg: [{ kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods?' + BY_FUNCTION(BAD) + ' HTTP/1.1' }, { kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods/' + fn(BAD) + '-…/log?container=function&tailLines=20 HTTP/1.1' }] },
-      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ERROR', title: 'The function is ERROR', text: 'The diagnosis is stored in its error column. Nothing is cleaned up: its objects stay in the cluster, and its archived code in S3, until you delete the function.', code: 'functions.service.ts create()',
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ERROR', title: 'The function is ERROR', text: 'The diagnosis is stored in its error column. Its objects stay in the cluster, and its archived code in S3, so that an update can repair it.', code: 'functions.service.ts create()',
         msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ERROR',\n       \"error\" = '" + NOT_READY.replace(/'/g, "''") + "'\n WHERE \"id\" = '" + BAD + "';" },
         set: { 'PostgreSQL.functions': 'ERROR (with the diagnosis)' } },
-      { from: 'api', to: 'user', kind: 'err', label: '400 · did not become ready', title: 'You get a 400, with the reason', text: 'An update can\'t repair it: it rolls out new code but never changes the status, so the function would stay ERROR. Delete it and create it again with the fixed code.', code: 'functions.service.ts create()',
+      { from: 'api', to: 'k8s', kind: 'req', label: 'scale Deployment → 0', title: 'Its pod is released', text: 'A pod that can never become ready would hold its memory and CPU in the tenant\'s quota for good, since the idle sweep only scales ACTIVE functions. So the backend scales the Deployment to zero.', code: 'functions.service.ts create() → releaseInstances()', hl: ['deployment'],
+        msg: { kind: 'http', first: 'PATCH /apis/apps/v1/namespaces/' + NS + '/deployments/' + fn(BAD) + '/scale?fieldManager=ff-scaler HTTP/1.1', headers: { 'content-type': 'application/merge-patch+json' }, body: { spec: { replicas: 0 } } },
+        set: { [K + '.Deployment']: 'replicas 0', [K + '.Pod']: 'Terminating' } },
+      { from: 'api', to: 'user', kind: 'err', label: '400 · did not become ready', title: 'You get a 400, with the reason', text: 'Fix the code and send it with an update (PUT /functions/:id). It rolls out, is checked on a real pod, and the function becomes ACTIVE, keeping its ID. Or delete it.', code: 'functions.service.ts create()',
         msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: NOT_READY, error: 'Bad Request', statusCode: 400 } } },
     ],
   },
@@ -1558,7 +1561,9 @@ function stateMachines() {
     edge('M146,76 C230,96 250,108 318,108', 'not ready within 90 s, or the deploy failed', 232, 140) +
     edge('M440,32 C520,32 540,62 598,66', 'DELETE', 522, 36) +
     edge('M440,108 C520,108 540,82 598,76', 'DELETE', 522, 112) +
-    note(770, 30, ['ACTIVE includes scaled to zero:', 'replicas live in the Deployment.', 'An update never changes the status:', 'an ERROR function stays ERROR.', 'DELETE removes the row.']) +
+    edge('M412,88 L412,52', 'an update goes live', 476, 75) +
+    edge('M348,52 L348,88', 'update and rollback fail', 272, 75) +
+    note(770, 30, ['ACTIVE includes scaled to zero:', 'replicas live in the Deployment.', 'A failed update of an ACTIVE', 'function is rolled back. ERROR', 'releases the pod. DELETE', 'removes the row.']) +
     '<text class="ttl" x="16" y="186">An invocation</text>' +
     node(16, 214, 130, 'RUNNING') + node(330, 176, 140, 'COMPLETED', 'ok') + node(520, 234, 120, 'ERROR', 'bad') + node(720, 234, 130, 'TIMEOUT', 'bad') +
     edge('M146,226 C230,206 260,194 328,194', '200 from the runtime', 236, 196) +

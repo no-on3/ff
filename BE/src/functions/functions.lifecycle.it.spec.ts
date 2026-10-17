@@ -1,0 +1,159 @@
+/**
+ * L3: the function lifecycle (client-readiness plan, P-03) on the live dev
+ * cluster: FunctionsService with the real Kubernetes driver and the
+ * least-privilege ff-controller token. Records live in memory: what is under
+ * test is how the service drives Kubernetes, and the database is not.
+ *   npm run test:it      (or hack/k8s/test-it.sh)
+ */
+import { BadRequestException } from '@nestjs/common';
+import { randomInt, randomUUID } from 'node:crypto';
+import * as path from 'node:path';
+import { KubeClient, paths } from '../orchestrator/kubernetes/kube-client';
+import { KubernetesOrchestrator } from '../orchestrator/kubernetes/kubernetes.orchestrator';
+import { LABELS, functionResourceName, tenantNamespace } from '../orchestrator/kubernetes/naming';
+import { settings } from '../orchestrator/kubernetes/test-fixtures';
+import { FunctionStatus, Function, Runtime } from './entities/function.entity';
+import { FunctionsService } from './functions.service';
+
+const run = process.env.K8S_IT === '1' ? describe : describe.skip;
+const kubeDir = path.resolve(__dirname, '../../../hack/.kube');
+const READY_TIMEOUT_SECONDS = 30;
+
+const greeter = (version: string) => `
+export async function handler(event: { body: { name?: string } }) {
+  return { version: '${version}', message: 'Hello ' + (event.body.name ?? 'world') };
+}`;
+// Loads, then throws: the pod runs but never becomes ready.
+const broken = 'throw new Error("boom at init");';
+
+/** A repository that keeps rows in memory and, like a database, hands out copies. */
+class MemoryRepository<T extends { id?: string }> {
+  readonly rows = new Map<string, T>();
+
+  create(values: Partial<T>): T {
+    return { ...values } as T;
+  }
+
+  async save(entity: T): Promise<T> {
+    entity.id ??= randomUUID();
+    Object.assign(entity, { updatedAt: new Date() });
+    this.rows.set(entity.id, { ...entity });
+    return entity;
+  }
+
+  async findOne(options: { where: { id: string } }): Promise<T | null> {
+    const row = this.rows.get(options.where.id);
+    return row ? { ...row } : null;
+  }
+
+  async remove(entity: T): Promise<T> {
+    this.rows.delete(entity.id as string);
+    return entity;
+  }
+
+  byName(name: string): T {
+    const row = [...this.rows.values()].find((r) => (r as { name?: string }).name === name);
+    if (!row) throw new Error(`no record named ${name}`);
+    return { ...row };
+  }
+}
+
+async function eventually(check: () => Promise<boolean>, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+run('function lifecycle against the dev cluster (L3, P-03)', () => {
+  jest.setTimeout(240_000);
+
+  const s = settings({
+    apiUrl: process.env.K8S_API_URL ?? 'https://127.0.0.1:6550',
+    tokenFile: process.env.K8S_TOKEN_FILE ?? path.join(kubeDir, 'ff-controller.token'),
+    caFile: process.env.K8S_CA_FILE ?? path.join(kubeDir, 'ca.crt'),
+    invokeMode: 'proxy',
+    readyTimeoutSeconds: 90,
+    ingressAllowCidrs: (process.env.K8S_INGRESS_ALLOW_CIDRS ?? '').split(',').filter(Boolean),
+  });
+  const client = new KubeClient({ server: s.apiUrl, tokenFile: s.tokenFile, caFile: s.caFile });
+  const orchestrator = new KubernetesOrchestrator(s, client);
+  const account = String(randomInt(1e12)).padStart(12, '0');
+  const ns = tenantNamespace(s.namespacePrefix, account);
+  const functions = new MemoryRepository<Function>();
+  const invocations = new MemoryRepository<{ id?: string }>();
+  const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
+  const config = {
+    get: (key: string, fallback?: unknown) => (key === 'orchestrator.readyTimeoutSeconds' ? READY_TIMEOUT_SECONDS : fallback),
+  };
+  const service = new FunctionsService(
+    functions as never,
+    invocations as never,
+    storage as never,
+    orchestrator,
+    config as never,
+    { recordMetric: jest.fn() } as never,
+  );
+  const spec = (name: string, code: string) => ({ name, runtime: Runtime.NODEJS, code, memory: 128, timeout: 3 });
+
+  const pods = (fn: Function) =>
+    client.list<{ metadata: { name: string } }>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
+  const desiredReplicas = async (fn: Function) =>
+    (await client.get<{ spec?: { replicas?: number } }>(paths.apps(ns, 'deployments', functionResourceName(fn.id))))
+      ?.spec?.replicas;
+  const scaledToZero = async (fn: Function) => {
+    await orchestrator.scale(fn, 0);
+    await eventually(async () => (await pods(fn)).length === 0, 90_000);
+  };
+
+  afterAll(async () => {
+    for (const fn of functions.rows.values()) await orchestrator.remove(fn).catch(() => undefined);
+    await client.delete(paths.namespace(ns)).catch(() => undefined); // allowed: managed ff-t-* namespace
+  });
+
+  it('a broken create ends ERROR without a pod; an update with fixed code makes it ACTIVE and invocable', async () => {
+    const failure = await service.create(spec('it-broken-create', broken), account).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(BadRequestException);
+    const fn = functions.byName('it-broken-create');
+    expect(fn).toMatchObject({ status: FunctionStatus.ERROR, error: expect.stringContaining('boom at init') });
+    expect(await desiredReplicas(fn)).toBe(0);
+    await eventually(async () => (await pods(fn)).length === 0, 90_000);
+
+    const repaired = await service.update(fn.id, { code: greeter('repaired') });
+
+    expect(repaired).toMatchObject({ status: FunctionStatus.ACTIVE, error: null });
+    expect((await service.invoke(fn.id, { name: 'again' })).output).toEqual({ version: 'repaired', message: 'Hello again' });
+  });
+
+  it('rolls back a broken update of a working function: after a scale to zero, the cold start still runs the old code', async () => {
+    const fn = await service.create(spec('it-rollback', greeter('v1')), account);
+
+    const failure = await service.update(fn.id, { code: broken }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(BadRequestException);
+    expect((failure as Error).message).toMatch(/boom at init.*The update was rolled back/s);
+    expect(functions.byName('it-rollback')).toMatchObject({ status: FunctionStatus.ACTIVE, code: greeter('v1') });
+
+    await scaledToZero(fn);
+    expect((await service.invoke(fn.id, {})).output).toEqual({ version: 'v1', message: 'Hello world' });
+  });
+
+  it('checks an update of a function scaled to zero on a real pod: broken code is refused, good code goes live', async () => {
+    const fn = functions.byName('it-rollback');
+    await scaledToZero(fn);
+
+    const failure = await service.update(fn.id, { code: broken }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(BadRequestException);
+    expect(functions.byName('it-rollback')).toMatchObject({ status: FunctionStatus.ACTIVE, code: greeter('v1') });
+
+    await scaledToZero(fn);
+    const updated = await service.update(fn.id, { code: greeter('v2') });
+
+    expect(updated.status).toBe(FunctionStatus.ACTIVE);
+    expect(await orchestrator.readyInstances(updated)).toBeGreaterThanOrEqual(1);
+    expect((await service.invoke(fn.id, {})).output).toEqual({ version: 'v2', message: 'Hello world' });
+  });
+});

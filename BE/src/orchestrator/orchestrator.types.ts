@@ -33,13 +33,20 @@ export interface InvokeResult {
 }
 
 export interface Orchestrator {
-  /** Create or replace everything needed to run the function. Idempotent. */
+  /** Create or replace everything needed to run the function, with at least one instance. Idempotent. */
   deploy(fn: FunctionWorkload): Promise<void>;
-  /** Roll out new code or configuration for an existing function. */
+  /**
+   * Roll out new code or configuration for an existing function, with at least
+   * one instance even if it was scaled to zero, so that waitUntilReady checks a
+   * real instance. Applying a previous version again is how an update is undone.
+   */
   update(fn: FunctionWorkload): Promise<void>;
   /** Delete every scheduler resource of the function. */
   remove(fn: FunctionWorkload): Promise<void>;
-  /** Resolve once at least one instance can serve; reject with diagnostics on timeout. */
+  /**
+   * Resolve once the rollout is complete: every desired instance runs the
+   * current version and can serve. Reject with diagnostics on timeout.
+   */
   waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void>;
   invoke(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<InvokeResult>;
   scale(fn: FunctionWorkload, replicas: number): Promise<void>;

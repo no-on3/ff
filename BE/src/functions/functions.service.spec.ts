@@ -4,7 +4,12 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
-import { FunctionRuntimeError, FunctionTimeoutError, OrchestratorError } from '../orchestrator/orchestrator.errors';
+import {
+  CodeTooLargeError,
+  FunctionRuntimeError,
+  FunctionTimeoutError,
+  OrchestratorError,
+} from '../orchestrator/orchestrator.errors';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
@@ -98,7 +103,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       );
     });
 
-    it('marks the function ERROR with the diagnostics when it never becomes ready', async () => {
+    it('marks the function ERROR with the diagnostics when it never becomes ready, and releases its pod', async () => {
       orchestrator.waitUntilReady.mockRejectedValue(
         new OrchestratorError('Function "hello" did not become ready within 90 s: CrashLoopBackOff'),
       );
@@ -107,19 +112,44 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(functionsRepo.save).toHaveBeenLastCalledWith(
         expect.objectContaining({ status: FunctionStatus.ERROR, error: expect.stringContaining('did not become ready') }),
       );
+      // The idle sweep only scales ACTIVE functions: without this, the pod would hold the quota for good.
+      expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 0);
+      expect(orchestrator.remove).not.toHaveBeenCalled();
+    });
+
+    it('still answers with the diagnosis when the pod cannot be released', async () => {
+      orchestrator.waitUntilReady.mockRejectedValue(new OrchestratorError('did not become ready'));
+      orchestrator.scale.mockRejectedValue(new Error('api down'));
+
+      await expect(service.create(dto, 'user-1')).rejects.toThrow('did not become ready');
+      expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ERROR]);
+    });
+
+    it('does not try to release anything when the code was refused before reaching the cluster', async () => {
+      orchestrator.deploy.mockRejectedValue(new CodeTooLargeError(2_000_000, 921_600));
+
+      await expect(service.create(dto, 'user-1')).rejects.toThrow('the current limit is 921600 bytes');
+      expect(orchestrator.scale).not.toHaveBeenCalled();
     });
   });
 
   describe('update', () => {
-    it('rolls out code changes, waits until they are live, then saves them', async () => {
+    const notReady = () => new OrchestratorError('Function "hello" did not become ready within 90 s: boom at init');
+    const errored = (): Function => ({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'old diagnosis' }) as Function;
+
+    it('rolls out code changes, waits until they are live, then saves them and archives the code', async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
 
       const result = await service.update('fn-1', { code: 'v2' });
 
-      expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'v2');
       expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: 'v2' }));
       expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ code: 'v2' }), 90_000);
-      expect(result.code).toBe('v2');
+      expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'v2');
+      // The copy in object storage is written only once the new version is live.
+      expect(storage.uploadCode.mock.invocationCallOrder[0]).toBeGreaterThan(
+        orchestrator.waitUntilReady.mock.invocationCallOrder[0],
+      );
+      expect(result).toMatchObject({ code: 'v2', status: FunctionStatus.ACTIVE, error: null });
     });
 
     it.each([
@@ -134,22 +164,114 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining(change));
     });
 
-    it('does not roll out when only the name changes, or when values are unchanged', async () => {
+    it('moves the archived copy when the runtime changes', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      await service.update('fn-1', { runtime: Runtime.PYTHON, code: 'def handler(e, c): return 1' });
+
+      expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.py', 'def handler(e, c): return 1');
+      expect(storage.deleteCode).toHaveBeenCalledWith('fn-1/code.ts');
+    });
+
+    it('does not roll out an ACTIVE function when only the name changes, or when values are unchanged', async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       await service.update('fn-1', { name: 'renamed' });
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       await service.update('fn-1', { memory: 128 });
 
       expect(orchestrator.update).not.toHaveBeenCalled();
-      expect(functionsRepo.save).toHaveBeenCalledTimes(2);
+      expect(storage.uploadCode).not.toHaveBeenCalled();
+      expect(savedStatuses).toEqual([FunctionStatus.ACTIVE, FunctionStatus.ACTIVE]);
     });
 
-    it('keeps the stored function unchanged when the rollout fails', async () => {
-      functionsRepo.findOne.mockResolvedValue(activeFunction());
-      orchestrator.waitUntilReady.mockRejectedValue(new OrchestratorError('did not become ready'));
+    it('repairs a function in ERROR: a successful rollout makes it ACTIVE and clears the error', async () => {
+      functionsRepo.findOne.mockResolvedValue(errored());
 
-      await expect(service.update('fn-1', { code: 'broken' })).rejects.toBeInstanceOf(BadRequestException);
+      const result = await service.update('fn-1', { code: 'fixed' });
+
+      expect(result).toMatchObject({ code: 'fixed', status: FunctionStatus.ACTIVE, error: null });
+    });
+
+    it.each([
+      ['no field', {}],
+      ['only the name', { name: 'renamed' }],
+    ])('rolls out a function in ERROR even when %s changes, so the same code can be retried', async (_label, change) => {
+      functionsRepo.findOne.mockResolvedValue(errored());
+
+      const result = await service.update('fn-1', change);
+
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: activeFunction().code }));
+      expect(orchestrator.waitUntilReady).toHaveBeenCalled();
+      expect(result.status).toBe(FunctionStatus.ACTIVE);
+    });
+
+    it('rolls a failed update of a working function back: the previous version is applied again, nothing is saved or archived', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.waitUntilReady.mockRejectedValueOnce(notReady()); // the new version; the previous one is ready
+
+      const failure = service.update('fn-1', { code: 'broken' });
+
+      await expect(failure).rejects.toBeInstanceOf(BadRequestException);
+      await expect(failure).rejects.toThrow(
+        'did not become ready within 90 s: boom at init. The update was rolled back: the previous version is still live.',
+      );
+      expect(orchestrator.update.mock.calls.map(([fn]) => fn.code)).toEqual(['broken', activeFunction().code]);
+      expect(orchestrator.waitUntilReady).toHaveBeenCalledTimes(2);
       expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(storage.uploadCode).not.toHaveBeenCalled();
+      expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    it('marks the function ERROR with both messages when the rollback fails too, and releases its pod', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.waitUntilReady
+        .mockRejectedValueOnce(notReady())
+        .mockRejectedValueOnce(new OrchestratorError('no pods were created: exceeded quota'));
+
+      await expect(service.update('fn-1', { code: 'broken' })).rejects.toThrow(
+        'The update failed: Function "hello" did not become ready within 90 s: boom at init. ' +
+          'Rolling back to the previous version failed too: no pods were created: exceeded quota',
+      );
+      expect(functionsRepo.save).toHaveBeenCalledTimes(1);
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: FunctionStatus.ERROR, code: activeFunction().code }),
+      );
+      expect(orchestrator.scale).toHaveBeenCalledWith(expect.anything(), 0);
+      expect(storage.uploadCode).not.toHaveBeenCalled();
+    });
+
+    it('keeps a failed attempt on a function in ERROR: no version to go back to, so the record shows what failed and why', async () => {
+      functionsRepo.findOne.mockResolvedValue(errored());
+      orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
+
+      await expect(service.update('fn-1', { code: 'still broken' })).rejects.toThrow('boom at init');
+
+      expect(orchestrator.update).toHaveBeenCalledTimes(1); // no rollback
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ code: 'still broken', status: FunctionStatus.ERROR, error: expect.stringContaining('boom at init') }),
+      );
+      expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ code: 'still broken' }), 0);
+      expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'still broken');
+    });
+
+    it('changes nothing when the code is refused before reaching the cluster', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.update.mockRejectedValueOnce(new CodeTooLargeError(2_000_000, 921_600));
+
+      await expect(service.update('fn-1', { code: 'x'.repeat(10) })).rejects.toThrow('the current limit is 921600 bytes');
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+      expect(orchestrator.waitUntilReady).not.toHaveBeenCalled();
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('saves a successful update even when its code cannot be archived (the copy is not read yet)', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      storage.uploadCode.mockRejectedValue(new Error('storage unavailable'));
+
+      const result = await service.update('fn-1', { code: 'v2' });
+
+      expect(result).toMatchObject({ code: 'v2', status: FunctionStatus.ACTIVE });
+      expect(functionsRepo.save).toHaveBeenCalledTimes(1);
     });
   });
 

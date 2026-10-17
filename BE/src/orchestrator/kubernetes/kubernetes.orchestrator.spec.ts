@@ -110,6 +110,15 @@ describe('KubernetesOrchestrator', () => {
       expect(replicas).toEqual([4, 6]);
     });
 
+    it('runs at least one replica for a function scaled to zero, so the wait checks a real pod', async () => {
+      api.objects.set(deploymentPath, rolledOut(0));
+
+      await orchestrator.update(fn);
+
+      const deployment = api.applied.find((a) => a.manifest.kind === 'Deployment')!.manifest;
+      expect(deployment.spec.replicas).toBe(1);
+    });
+
     it('garbage-collects code ConfigMaps older than the current and previous versions', async () => {
       const cm = (n: string, ts: string) => ({ metadata: { name: n, creationTimestamp: ts } });
       await orchestrator.update(fn);

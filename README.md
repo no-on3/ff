@@ -82,7 +82,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 | L1 runtimes | `cd runtimes/nodejs && npm test`; `cd runtimes/python && python3 -m unittest discover -s tests` | The runtime protocol on real processes |
 | L2 database | `cd BE && npm run test:db`; `npm run migration:check` | The migrations against real PostgreSQL, each case in its own scratch database; no drift between the migrations and the entities |
 | L2 images | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities |
-| L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor) |
+| L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor), and the function lifecycle (repair, rollback, updates at zero) |
 | RBAC | `hack/k8s/test-rbac.sh` | What the backend's ServiceAccount may and may not do |
 | L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes |
 
