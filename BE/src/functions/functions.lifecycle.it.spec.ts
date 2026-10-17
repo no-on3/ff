@@ -75,52 +75,53 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
   });
 
   it('a broken create ends ERROR without a pod; an update with fixed code makes it ACTIVE and invocable', async () => {
-    const failure = await service.create(spec('it-broken-create', broken), account).catch((error: unknown) => error);
+    const failure = await service.create(account, spec('it-broken-create', broken)).catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(BadRequestException);
     const fn = functions.byName('it-broken-create');
-    expect(fn).toMatchObject({ status: FunctionStatus.ERROR, error: expect.stringContaining('boom at init') });
+    // The function's own error, from its runtime's log, as its owner sees it (P-10).
+    expect(fn).toMatchObject({ status: FunctionStatus.ERROR, error: 'The function failed to load: Runtime.ImportModuleError: Error: boom at init' });
     expect(await desiredReplicas(fn)).toBe(0);
     await eventually(async () => (await pods(fn)).length === 0, 90_000);
 
-    const repaired = await service.update(fn.id, { code: greeter('repaired') });
+    const repaired = await service.update(account, fn.id, { code: greeter('repaired') });
 
     expect(repaired).toMatchObject({ status: FunctionStatus.ACTIVE, error: null });
-    expect((await service.invoke(fn.id, { name: 'again' })).output).toEqual({ version: 'repaired', message: 'Hello again' });
+    expect((await service.invoke(account, fn.id, { name: 'again' })).output).toEqual({ version: 'repaired', message: 'Hello again' });
   });
 
   it('rolls back a broken update of a working function: after a scale to zero, the cold start still runs the old code', async () => {
-    const fn = await service.create(spec('it-rollback', greeter('v1')), account);
+    const fn = await service.create(account, spec('it-rollback', greeter('v1')));
 
-    const failure = await service.update(fn.id, { code: broken }).catch((error: unknown) => error);
+    const failure = await service.update(account, fn.id, { code: broken }).catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(BadRequestException);
     expect((failure as Error).message).toMatch(/boom at init.*The update was rolled back/s);
     expect(functions.byName('it-rollback')).toMatchObject({ status: FunctionStatus.ACTIVE, code: greeter('v1') });
 
     await scaledToZero(fn);
-    expect((await service.invoke(fn.id, {})).output).toEqual({ version: 'v1', message: 'Hello world' });
+    expect((await service.invoke(account, fn.id, {})).output).toEqual({ version: 'v1', message: 'Hello world' });
   });
 
   it('checks an update of a function scaled to zero on a real pod: broken code is refused, good code goes live', async () => {
     const fn = functions.byName('it-rollback');
     await scaledToZero(fn);
 
-    const failure = await service.update(fn.id, { code: broken }).catch((error: unknown) => error);
+    const failure = await service.update(account, fn.id, { code: broken }).catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(BadRequestException);
     expect(functions.byName('it-rollback')).toMatchObject({ status: FunctionStatus.ACTIVE, code: greeter('v1') });
 
     await scaledToZero(fn);
-    const updated = await service.update(fn.id, { code: greeter('v2') });
+    const updated = await service.update(account, fn.id, { code: greeter('v2') });
 
     expect(updated.status).toBe(FunctionStatus.ACTIVE);
     expect(await orchestrator.readyInstances(updated)).toBeGreaterThanOrEqual(1);
-    expect((await service.invoke(fn.id, {})).output).toEqual({ version: 'v2', message: 'Hello world' });
+    expect((await service.invoke(account, fn.id, {})).output).toEqual({ version: 'v2', message: 'Hello world' });
   });
 
   it('records a call the runtime never answers as TIMEOUT through the API server proxy too, as in direct mode (P-08)', async () => {
-    const fn = await service.create(spec('it-silent', greeter('v1')), account);
+    const fn = await service.create(account, spec('it-silent', greeter('v1')));
     // A hung runtime: it answers its probes, but never an invocation.
     const silent = "require('http').createServer((req, res) => { if (req.url !== '/invoke') res.end('ok'); }).listen(8080)";
     await client.request('PATCH', paths.apps(ns, 'deployments', functionResourceName(fn.id)), {
@@ -129,7 +130,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     });
     await orchestrator.waitUntilReady(fn, 90_000);
 
-    const failure = await service.invoke(fn.id, {}).catch((error: unknown) => error);
+    const failure = await service.invoke(account, fn.id, {}).catch((error: unknown) => error);
 
     // The backend waits one timeout for a free instance, then the 3 s timeout, then 2 s more.
     expect(failure).toBeInstanceOf(BadRequestException);

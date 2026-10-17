@@ -92,7 +92,8 @@ cd BE && npm run migration:run && npm run start:dev
 - **The database schema comes from migrations.** `npm run migration:run` applies the pending ones, and the backend refuses to start while any is pending. A database created before 2026-10-17 must be reset once; see [Getting started](getting-started.md), step 7.
 
 - **Every variable is checked at boot.** A missing or bad value stops the backend with a message that names the variable (`BE/src/config/configuration.ts`).
-- **Nothing runs without a tenant.** Until Keycloak login exists (client-readiness plan P-11), development uses `FF_AUTH_MODE=dev`, which acts as the account `FF_DEV_ACCOUNT_ID`, as `.env.example` does. Production refuses this mode. `FF_DEV_USER_ID`, used before 2026-10-17, is no longer read, and the backend says so.
+- **Nothing runs without an account.** Until Keycloak login exists (client-readiness plan P-11), development uses `FF_AUTH_MODE=dev`, which acts as the account `FF_DEV_ACCOUNT_ID`, as `.env.example` does, or as the one an `X-FF-Dev-Account` header names. Every query is scoped to that account: another account's function answers 404. Production refuses this mode. `FF_DEV_USER_ID`, used before 2026-10-17, is no longer read, and the backend says so.
+- **Platform failures stay generic.** An answer only shows the function's own errors and the caller's mistakes. Anything else is 500 with `… failed because of an internal error (request <id>)`; the backend's log has the details under that request ID, which every answer carries in `x-ff-request-id`.
 - **What `docker compose up` starts.** Only PostgreSQL and S3. The backend and the dashboard run on the host (`npm run start:dev`, `npm run dev`).
 - **S3 storage.** SeaweedFS replaces the MinIO community image, which is no longer published. Its dev credentials are in `infrastructure/seaweedfs/s3.json` (local use only).
 
@@ -101,6 +102,7 @@ cd BE && npm run migration:run && npm run start:dev
 ```bash
 hack/e2e.sh                # L4: the whole stack through the REST API (~2 min)
 hack/e2e.sh --teardown     # … and delete the cluster afterwards
+hack/e2e-tenancy.sh        # L5: every route as another account and anonymously (~1 min)
 ```
 
 The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:

@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
@@ -24,7 +25,7 @@ describe('MetricsService', () => {
     }) as Function;
 
   let orchestrator: jest.Mocked<Orchestrator>;
-  let functionRepository: { findOne: jest.Mock; find: jest.Mock };
+  let functionRepository: { findOne: jest.Mock; find: jest.Mock; exists: jest.Mock };
   let metricsRepository: { save: jest.Mock; find: jest.Mock };
   let service: MetricsService;
   /** The Deployment's replicas, as the fake orchestrator keeps them. */
@@ -44,7 +45,7 @@ describe('MetricsService', () => {
       readyInstances: jest.fn(async () => replicas),
       desiredInstances: jest.fn(async () => replicas),
     } as any;
-    functionRepository = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
+    functionRepository = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]), exists: jest.fn() };
     metricsRepository = { save: jest.fn(), find: jest.fn() };
     const config = {
       get: jest.fn((key: string, fallback?: unknown) => (key === 'scaling.scaleToZeroIdleSeconds' ? idleSeconds : fallback)),
@@ -248,6 +249,25 @@ describe('MetricsService', () => {
       await service.sweepIdleFunctions(now + 3_600_000);
 
       expect(orchestrator.scale).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("a function's metrics (P-10)", () => {
+    const period = { start: new Date('2026-10-17T00:00:00Z'), end: new Date('2026-10-17T01:00:00Z') };
+
+    it('are read for the account that owns the function', async () => {
+      functionRepository.exists.mockResolvedValue(true);
+      metricsRepository.find.mockResolvedValue([{ functionId: 'fn-1', invocations: 3 }]);
+
+      await expect(service.getMetrics('000000000001', 'fn-1', period)).resolves.toEqual([{ functionId: 'fn-1', invocations: 3 }]);
+      expect(functionRepository.exists).toHaveBeenCalledWith({ where: { id: 'fn-1', userId: '000000000001' } });
+    });
+
+    it("answer another account with 404, without reading them", async () => {
+      functionRepository.exists.mockResolvedValue(false);
+
+      await expect(service.getMetrics('000000000002', 'fn-1', period)).rejects.toBeInstanceOf(NotFoundException);
+      expect(metricsRepository.find).not.toHaveBeenCalled();
     });
   });
 });

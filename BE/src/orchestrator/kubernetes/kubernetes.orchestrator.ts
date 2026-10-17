@@ -1,6 +1,12 @@
 import { Logger } from '@nestjs/common';
 import * as http from 'node:http';
-import { FunctionRuntimeError, FunctionTimeoutError, OrchestratorError } from '../orchestrator.errors';
+import {
+  FunctionLoadError,
+  FunctionRuntimeError,
+  FunctionThrottledError,
+  FunctionTimeoutError,
+  OrchestratorError,
+} from '../orchestrator.errors';
 import { FunctionWorkload, InvokeResult, Orchestrator } from '../orchestrator.types';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
@@ -164,22 +170,33 @@ export class KubernetesOrchestrator implements Orchestrator {
       if (Date.now() >= deadline) break;
       await sleep(this.pollIntervalMs);
     }
-    const diagnostics = await this.diagnose(fn, ns, deployment);
+    const { details, loadError } = await this.diagnose(fn, ns, deployment);
+    // The function's own error, which its owner may see; anything else is the platform's (D4).
+    if (loadError) throw loadError;
     throw new OrchestratorError(
-      `Function "${fn.name}" did not become ready within ${Math.round(timeoutMs / 1000)} s${diagnostics ? `: ${diagnostics}` : ''}`,
+      `Function "${fn.name}" did not become ready within ${Math.round(timeoutMs / 1000)} s${details ? `: ${details}` : ''}`,
     );
   }
 
-  /** Why pods are not ready: container waiting reasons plus the newest pod's last log lines. */
-  private async diagnose(fn: FunctionWorkload, ns: string, deployment: Deployment): Promise<string> {
+  /**
+   * Why pods are not ready: container waiting reasons plus the newest pod's last
+   * log lines, and the load error its runtime reported, if it did.
+   */
+  private async diagnose(
+    fn: FunctionWorkload,
+    ns: string,
+    deployment: Deployment,
+  ): Promise<{ details: string; loadError?: FunctionLoadError }> {
     try {
       const pods = await this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
       if (pods.length === 0) {
         // Pods that cannot even be created (quota exceeded, unknown RuntimeClass) show up here.
         const failure = deployment.status?.conditions?.find((c) => c.type === 'ReplicaFailure' && c.status === 'True');
-        return failure?.message
-          ? `no pods were created: ${failure.message}`
-          : 'no pods were created (check the tenant ResourceQuota and events)';
+        return {
+          details: failure?.message
+            ? `no pods were created: ${failure.message}`
+            : 'no pods were created (check the tenant ResourceQuota and events)',
+        };
       }
       const reasons = new Set<string>();
       for (const pod of pods) {
@@ -194,9 +211,12 @@ export class KubernetesOrchestrator implements Orchestrator {
         (b.metadata.creationTimestamp ?? '').localeCompare(a.metadata.creationTimestamp ?? ''),
       )[0];
       const log = (await this.api.podLog(ns, newest.metadata.name, 'function', 20)).trim();
-      return [...reasons, log && `last log lines: ${log.split('\n').slice(-5).join(' | ')}`].filter(Boolean).join('; ');
+      return {
+        details: [...reasons, log && `last log lines: ${log.split('\n').slice(-5).join(' | ')}`].filter(Boolean).join('; '),
+        loadError: loadErrorIn(log),
+      };
     } catch (err) {
-      return `diagnostics unavailable (${(err as Error).message})`;
+      return { details: `diagnostics unavailable (${(err as Error).message})` };
     }
   }
 
@@ -273,9 +293,29 @@ export class KubernetesOrchestrator implements Orchestrator {
     if (failure) {
       if (failure.errorType === 'Sandbox.Timedout') throw new FunctionTimeoutError(failure.errorMessage);
       if (res.headers['x-ff-function-error']) throw new FunctionRuntimeError(failure.errorType, failure.errorMessage);
+      // The runtime's queue: full, or no instance was free within one timeout.
+      if (res.status === 429 && failure.errorType === 'TooManyRequestsException') throw new FunctionThrottledError(failure.errorMessage);
     }
     throw new OrchestratorError(`Invocation failed with HTTP ${res.status}: ${res.body.slice(0, 300)}`);
   }
+}
+
+/**
+ * The error the runtime logged when the function's code failed to load: its
+ * last "function initialization failed" line (both runtimes log one, as JSON).
+ */
+export function loadErrorIn(log: string): FunctionLoadError | undefined {
+  for (const line of log.split('\n').reverse()) {
+    try {
+      const entry = JSON.parse(line) as { msg?: unknown; errorType?: unknown; errorMessage?: unknown };
+      if (entry?.msg === 'function initialization failed' && typeof entry.errorType === 'string') {
+        return new FunctionLoadError(entry.errorType, typeof entry.errorMessage === 'string' ? entry.errorMessage : '');
+      }
+    } catch {
+      // not a JSON line
+    }
+  }
+  return undefined;
 }
 
 /** The runtime's error answer, { errorType, errorMessage }, when the body is one. */

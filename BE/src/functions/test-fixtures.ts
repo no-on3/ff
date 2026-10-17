@@ -31,9 +31,10 @@ export class MemoryRepository<T extends { id?: string }> {
     return entity;
   }
 
-  async findOne(options: { where: { id: string } }): Promise<T | null> {
-    const row = this.rows.get(options.where.id);
-    return row ? { ...row } : null;
+  /** The first row whose fields equal every value of `where`, as the account-scoped queries need (P-10). */
+  async findOne(options: { where: Partial<T> }): Promise<T | null> {
+    const [row] = await this.find(options);
+    return row ?? null;
   }
 
   /** Rows whose fields equal every value of `where`. */

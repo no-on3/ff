@@ -7,6 +7,7 @@ import { INestApplication } from '@nestjs/common';
 import { OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
 import { Test } from '@nestjs/testing';
 import { apiDocument } from './api-document';
+import { Principal } from './auth/principal';
 import { FunctionsController } from './functions/functions.controller';
 import { FunctionsService } from './functions/functions.service';
 import { MetricsController } from './metrics/metrics.controller';
@@ -37,9 +38,9 @@ describe('the OpenAPI document (L1, P-08)', () => {
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
-    // The caller's account, where the authentication guard (P-11) will put it.
-    app.use((req: { user?: string }, _res: unknown, next: () => void) => {
-      req.user = ACCOUNT;
+    // The caller, where the authentication guard (P-11) will put it.
+    app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
+      req.principal = { accountId: ACCOUNT, role: 'owner' };
       next();
     });
     document = apiDocument(app);

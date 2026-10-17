@@ -183,7 +183,7 @@ developer machine                                   FF platform
   - `output.rs`;
   - tests under `tests/`.
 - **Deploy in phase 1.** `POST /functions` or `PUT /functions/:id` with the code inline, as the guide's `curl` commands do. The API already waits until the version is live (up to `FF_READY_TIMEOUT_SECONDS`, 90 s). The CLI's read timeout is therefore longer than that.
-- **Invoke.** `POST /functions/:id/invoke {"input": …}`. The API answers 400 when the function raises or times out, and the CLI maps that to exit code 5. The Lambda-shaped answer (200 with `X-Amz-Function-Error`) belongs to the API facade (parent §6.6), not to this API.
+- **Invoke.** `POST /functions/:id/invoke {"input": …}`. The API answers 400 when the function raises or times out, and the CLI maps that to exit code 5. Since P-10 of the [client-readiness plan](client-readiness-plan.md), a full queue answers 429, and a platform failure 500 with a request ID. The Lambda-shaped answer (200 with `X-Amz-Function-Error`) belongs to the API facade (parent §6.6), not to this API.
 - **Deploy in phase 2.** `ff package` builds the zip, then `ff deploy` compares its `CodeSha256` with the function's, uploads only when it differs, and waits for the rollout.
 - **Local runs.** The CLI starts the runtime container with production's flags:
   - `--read-only --tmpfs /tmp --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --memory <m>m`;
@@ -301,7 +301,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 - **Backend:**
   - `GET /functions/:id/logs?tail=200&sinceSeconds=` lists the function's pods by label (`ff.dev/function-id`) and reads each one's `function` container log with timestamps;
   - lines are prefixed with the pod name when there are several pods;
-  - an ownership check is made.
+  - it is scoped to the caller's account: another account's function answers 404 (D4 of the client-readiness plan).
 - **CLI:** `ff logs <name> [--tail N] [--follow]`. `--follow` polls every 2 s with `sinceSeconds` and drops lines it has already printed, using their timestamps. Streaming can come later.
 - **Tests:** L1 backend against the fake Kubernetes API (several pods, no pods, a pod with no log yet); L2 CLI; L3 for a `print` in a function showing up in `ff logs`.
 

@@ -1,6 +1,10 @@
-/** Errors any orchestrator driver may raise; callers map them to invocation statuses. */
+/**
+ * Errors any orchestrator driver may raise. The caller sees the function's own
+ * errors and its own mistakes as they are; any other failure is the platform's,
+ * and only the server log gets its details (D4).
+ */
 
-/** The scheduler could not do what was asked (deploy, readiness, routing). */
+/** The scheduler could not do what was asked (deploy, readiness, routing): a platform failure. */
 export class OrchestratorError extends Error {
   constructor(message: string) {
     super(message);
@@ -24,6 +28,24 @@ export class FunctionTimeoutError extends FunctionRuntimeError {
   constructor(message: string) {
     super('Sandbox.Timedout', message);
     this.name = 'FunctionTimeoutError';
+  }
+}
+
+/** The function's code failed to load: the error its runtime reported at start-up. */
+export class FunctionLoadError extends FunctionRuntimeError {
+  constructor(errorType: string, message: string) {
+    super(errorType, message);
+    this.name = 'FunctionLoadError';
+  }
+}
+
+/** No instance of the function could take the call in time: its runtime answered 429. */
+export class FunctionThrottledError extends Error {
+  readonly errorType = 'TooManyRequestsException';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'FunctionThrottledError';
   }
 }
 

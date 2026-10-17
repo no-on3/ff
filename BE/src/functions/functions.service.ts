@@ -1,17 +1,19 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { describeError } from '../common/describe-error';
-import { CodeTooLargeError, FunctionRuntimeError, FunctionTimeoutError } from '../orchestrator/orchestrator.errors';
+import { CodeTooLargeError, FunctionTimeoutError } from '../orchestrator/orchestrator.errors';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { CreateFunctionDto } from './dto/create-function.dto';
+import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
+import { callersFailure, failureResponse, platformFailure } from './failures';
 
 /** Fields whose change requires rolling out a new version of the function. */
 const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout'] as const;
@@ -27,6 +29,11 @@ const clause = (message: string): string => message.replace(/\.\s*$/, '');
  * - update: rolled out and checked on a real instance, even at zero. A failure
  *   rolls back to the working version; a function that had none (not ACTIVE)
  *   keeps the attempt and its diagnosis instead. A success makes it ACTIVE.
+ *
+ * Every method acts for one account (P-10, D4): it takes the account ID, every
+ * query includes it, and another account's function is not found. Failures
+ * show the function's own errors as they are, and platform failures as a
+ * generic message with the request ID (failures.ts).
  */
 @Injectable()
 export class FunctionsService {
@@ -47,10 +54,10 @@ export class FunctionsService {
     return this.configService.get<number>('orchestrator.readyTimeoutSeconds', 90) * 1000;
   }
 
-  async create(createFunctionDto: CreateFunctionDto, userId: string): Promise<Function> {
+  async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<Function> {
     const function_ = this.functionsRepository.create({
       ...createFunctionDto,
-      userId,
+      userId: accountId, // the account: P-12 renames the column
       status: FunctionStatus.CREATING,
     });
 
@@ -68,32 +75,35 @@ export class FunctionsService {
 
       return savedFunction;
     } catch (error) {
+      const failure = callersFailure(error) ?? platformFailure(this.logger, 'Deploying the function', error);
       savedFunction.status = FunctionStatus.ERROR;
-      savedFunction.error = describeError(error);
+      savedFunction.error = failure;
       await this.functionsRepository.save(savedFunction);
       // Its objects and the diagnosis stay, so an update can repair it, and a delete removes everything.
       if (!(error instanceof CodeTooLargeError)) await this.releaseInstances(savedFunction);
-      throw new BadRequestException(savedFunction.error);
+      throw failureResponse(error, failure);
     }
   }
 
-  async findAllByUser(userId: string): Promise<Function[]> {
+  async findAll(accountId: string): Promise<Function[]> {
     return this.functionsRepository.find({
-      where: { userId },
+      where: { userId: accountId },
       order: { createdAt: 'DESC' },
     });
   }
 
-  async findOne(id: string): Promise<Function> {
-    const function_ = await this.functionsRepository.findOne({ where: { id } });
+  /** The account's function; another account's is not found, exactly like one that doesn't exist (D4). */
+  async findOne(accountId: string, id: string): Promise<Function> {
+    // userId holds the account ID until P-12 renames it.
+    const function_ = await this.functionsRepository.findOne({ where: { id, userId: accountId } });
     if (!function_) {
       throw new NotFoundException(`Function with ID ${id} not found`);
     }
     return function_;
   }
 
-  async update(id: string, updateFunctionDto: UpdateFunctionDto): Promise<Function> {
-    const function_ = await this.findOne(id);
+  async update(accountId: string, id: string, updateFunctionDto: UpdateFunctionDto): Promise<Function> {
+    const function_ = await this.findOne(accountId, id);
     const updated = { ...function_, ...updateFunctionDto };
     const changesVersion = ROLLOUT_FIELDS.some(
       (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
@@ -130,21 +140,19 @@ export class FunctionsService {
    * fails too, the function is ERROR, with both messages.
    */
   private async rollBack(previous: Function, error: unknown): Promise<never> {
-    const failure = describeError(error);
-    this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${failure}`);
+    const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
+    this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
       await this.orchestrator.update(previous);
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {
       previous.status = FunctionStatus.ERROR;
-      previous.error =
-        `The update failed: ${clause(failure)}. ` +
-        `Rolling back to the previous version failed too: ${describeError(rollbackError)}`;
+      previous.error = `The update failed: ${clause(failure)}. ${platformFailure(this.logger, 'Rolling back to the previous version', rollbackError)}`;
       await this.functionsRepository.save(previous);
       await this.releaseInstances(previous);
-      throw new BadRequestException(previous.error);
+      throw new InternalServerErrorException(previous.error);
     }
-    throw new BadRequestException(`${clause(failure)}. The update was rolled back: the previous version is still live.`);
+    throw failureResponse(error, `${clause(failure)}. The update was rolled back: the previous version is still live.`);
   }
 
   /**
@@ -154,12 +162,12 @@ export class FunctionsService {
    */
   private async keepFailedAttempt(function_: Function, changes: UpdateFunctionDto, error: unknown): Promise<never> {
     const previousCodePath = this.codePath(function_);
-    const failure = describeError(error);
+    const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     Object.assign(function_, changes, { status: FunctionStatus.ERROR, error: failure });
     const saved = await this.functionsRepository.save(function_);
     await this.releaseInstances(saved);
     await this.archiveCode(saved, previousCodePath);
-    throw new BadRequestException(failure);
+    throw failureResponse(error, failure);
   }
 
   /**
@@ -190,9 +198,9 @@ export class FunctionsService {
     }
   }
 
-  async remove(id: string): Promise<void> {
-    const function_ = await this.findOne(id);
-    
+  async remove(accountId: string, id: string): Promise<void> {
+    const function_ = await this.findOne(accountId, id);
+
     try {
       await this.orchestrator.remove(function_);
       
@@ -202,12 +210,12 @@ export class FunctionsService {
       // Delete from database
       await this.functionsRepository.remove(function_);
     } catch (error) {
-      throw new BadRequestException(describeError(error));
+      throw new InternalServerErrorException(platformFailure(this.logger, 'Deleting the function', error));
     }
   }
 
-  async invoke(id: string, input?: Record<string, unknown>): Promise<FunctionInvocation> {
-    const function_ = await this.findOne(id);
+  async invoke(accountId: string, id: string, input?: Record<string, unknown>): Promise<FunctionInvocation> {
+    const function_ = await this.findOne(accountId, id);
     if (function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
     }
@@ -245,9 +253,10 @@ export class FunctionsService {
 
       invocation.duration = duration;
       invocation.status = error instanceof FunctionTimeoutError ? InvocationStatus.TIMEOUT : InvocationStatus.ERROR;
-      invocation.error = error instanceof FunctionRuntimeError ? `${error.errorType}: ${error.message}` : describeError(error);
+      // The history is the account's to read: a platform failure is generic there too (D4).
+      invocation.error = callersFailure(error) ?? platformFailure(this.logger, 'The invocation', error);
       await this.invocationsRepository.save(invocation);
-      throw new BadRequestException(invocation.error);
+      throw failureResponse(error, invocation.error);
     } finally {
       this.metricsService.invocationFinished(function_);
     }
@@ -267,8 +276,8 @@ export class FunctionsService {
    * within them at once: more for a higher minInstances, fewer for a lower
    * maxInstances. Nothing is rolled out: the code doesn't change.
    */
-  async updateScalingConfig(id: string, changes: UpdateScalingConfigDto): Promise<ScalingConfig> {
-    const function_ = await this.findOne(id);
+  async updateScalingConfig(accountId: string, id: string, changes: UpdateScalingConfigDto): Promise<ScalingConfig> {
+    const function_ = await this.findOne(accountId, id);
     const minInstances = changes.minInstances ?? function_.minInstances;
     const maxInstances = changes.maxInstances ?? function_.maxInstances;
     if (minInstances > maxInstances) {
@@ -291,19 +300,20 @@ export class FunctionsService {
     }
   }
 
+  /** One page of a function's history, newest first. */
   async getInvocations(
-    functionId: string,
-    limit: number,
-    offset: number,
+    accountId: string,
+    id: string,
+    page: Pick<ListInvocationsQuery, 'limit' | 'offset'>,
   ): Promise<{ invocations: FunctionInvocation[]; total: number }> {
+    await this.findOne(accountId, id); // another account's function is not found
     const [invocations, total] = await this.invocationsRepository.findAndCount({
-      where: { functionId },
+      // The account here too, so that this query alone never reads another account's history.
+      where: { functionId: id, function: { userId: accountId } },
       order: { createdAt: 'DESC' },
-      take: limit,
-      skip: offset,
+      take: page.limit,
+      skip: page.offset,
     });
-
-
     return { invocations, total };
   }
 

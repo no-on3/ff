@@ -430,7 +430,7 @@
             <tbody id="errorRows"></tbody>
           </table>
         </div>
-        <p class="note">Errors from an invocation carry <code>x-ff-function-error: Unhandled</code>. The backend records <code>Sandbox.Timedout</code> as an invocation with status <code>TIMEOUT</code> and every other error as <code>ERROR</code>, then answers the caller with 400 and <code>"&lt;errorType&gt;: &lt;message&gt;"</code>. A call that gets no answer within the backend's own wait (see the limits below) is <code>TIMEOUT</code> too, with <code>No response within … ms</code>, in both invoke modes.</p>
+        <p class="note">Errors from an invocation carry <code>x-ff-function-error: Unhandled</code>. The backend records <code>Sandbox.Timedout</code> as an invocation with status <code>TIMEOUT</code> and every other error as <code>ERROR</code>, then answers the caller with 400 and <code>"&lt;errorType&gt;: &lt;message&gt;"</code>; a full queue answers 429 with <code>TooManyRequestsException</code>. A platform failure, such as an unreachable pod, answers 500 with a generic message and the request ID, and the history records it the same way; the details go only to the server log (D4 of the client-readiness plan). A call that gets no answer within the backend's own wait (see the limits below) is <code>TIMEOUT</code> too, with <code>No response within … ms</code>, in both invoke modes.</p>
       </div>
     </div>
   </div>
@@ -493,7 +493,9 @@
         <tbody>
           <tr><td>REST API</td><td><code>BE/src/functions/functions.controller.ts</code>, <code>BE/src/metrics/metrics.controller.ts</code></td></tr>
           <tr><td>Create, update, delete, invoke</td><td><code>BE/src/functions/functions.service.ts</code></td></tr>
-          <tr><td>The tenant of a request</td><td><code>BE/src/auth/decorators/user.decorator.ts</code></td></tr>
+          <tr><td>The caller of a request, and its account</td><td><code>BE/src/auth/principal.ts</code></td></tr>
+          <tr><td>Request IDs, and error answers</td><td><code>BE/src/common/request-context.ts</code>, <code>api-exception.filter.ts</code></td></tr>
+          <tr><td>Which errors the caller sees</td><td><code>BE/src/functions/failures.ts</code></td></tr>
           <tr><td>Kubernetes driver</td><td><code>BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts</code>, <code>kube-client.ts</code>, <code>kubernetes.settings.ts</code></td></tr>
           <tr><td>Every Kubernetes object</td><td><code>BE/src/orchestrator/kubernetes/manifests.ts</code>, <code>naming.ts</code></td></tr>
           <tr><td>Metrics, autoscaling, scale to zero</td><td><code>BE/src/metrics/metrics.service.ts</code>, <code>scaling.ts</code></td></tr>
@@ -579,7 +581,8 @@ const BAD_LOG = [
   JSON.stringify({ time: '2026-10-16T14:10:03.881Z', level: 'info', msg: 'runtime listening', port: 8080, timeoutMs: 5000, memoryLimitMb: 128, heapLimitMb: 65, handler: 'function.handler', protocol: 2 }),
   JSON.stringify({ time: '2026-10-16T14:10:09.127Z', level: 'error', msg: 'function initialization failed', errorType: 'Runtime.UserCodeSyntaxError', errorMessage: SYNTAX_ERROR }),
 ];
-const NOT_READY = 'Function "broken" did not become ready within 90 s: last log lines: ' + BAD_LOG.join(' | ');
+// What the backend makes of BAD_LOG[1]: the function's own error, which its owner sees (P-10).
+const LOAD_FAILED = 'The function failed to load: Runtime.UserCodeSyntaxError: ' + SYNTAX_ERROR;
 
 const LANES = {
   user:   { label: 'You', sub: 'browser, curl', color: '--c-user', map: 'user' },
@@ -622,8 +625,8 @@ const SCENARIOS = [
         code: 'FE/src/components/CreateFunction.tsx · BE/src/functions/functions.controller.ts',
         msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'hello', runtime: 'nodejs', code: CODE_TS, memory: 128, timeout: 5 } } },
       { from: 'api', to: 'api', kind: 'int', label: 'validate · resolve the tenant', title: 'Validation and the tenant',
-        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. @User() picks the tenant: the authenticated user, or FF_DEV_ACCOUNT_ID ("000000000001") when FF_AUTH_MODE=dev in development; without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413.',
-        code: 'BE/src/main.ts · BE/src/auth/decorators/user.decorator.ts' },
+        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. @Principal() names the caller and its account: the principal that the guard sets (from P-11), or in development (FF_AUTH_MODE=dev) the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names. Without one, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID.',
+        code: 'BE/src/main.ts · BE/src/auth/principal.ts · BE/src/common/request-context.ts' },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
         text: 'The row gets its UUID, the tenant ID, and the defaults: minInstances 0, maxInstances 3, scaleToZero true.',
         code: 'BE/src/functions/functions.service.ts create()',
@@ -844,7 +847,7 @@ const SCENARIOS = [
         set: { 'PostgreSQL.function_invocations': 'ERROR · ValueError' } },
       { from: 'api', to: 'user', kind: 'err', label: '400 · "ValueError: …"', title: 'You get a 400',
         text: 'The message carries the error type and text. The history keeps the full record.', code: 'functions.service.ts invoke()',
-        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: 'ValueError: this name is not allowed', error: 'Bad Request', statusCode: 400 } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: 'ValueError: this name is not allowed', error: 'Bad Request', statusCode: 400, requestId: '…' } } },
     ],
   },
   {
@@ -871,7 +874,7 @@ const SCENARIOS = [
         msg: { kind: 'sql', text: "UPDATE \"function_invocations\" SET \"status\" = 'TIMEOUT', \"duration\" = 2010,\n       \"error\" = 'Sandbox.Timedout: Task timed out after 2.00 seconds', …\n WHERE \"id\" = '" + INV + "';" },
         set: { 'PostgreSQL.function_invocations': 'TIMEOUT · 2010 ms' } },
       { from: 'api', to: 'user', kind: 'err', label: '400 · "Sandbox.Timedout: …"', title: 'You get a 400', text: 'The message carries the error type and text.', code: 'functions.service.ts invoke()',
-        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: 'Sandbox.Timedout: Task timed out after 2.00 seconds', error: 'Bad Request', statusCode: 400 } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: 'Sandbox.Timedout: Task timed out after 2.00 seconds', error: 'Bad Request', statusCode: 400, requestId: '…' } } },
       { from: 'worker', to: 'pod', kind: 'res', label: 'fresh worker ready', title: 'The pod is ready again',
         text: 'The new worker has loaded the code: /readyz answers 200 again, and the next invocation runs on it.', code: 'runtimes/python/ff_runtime/worker.py serve()',
         msg: { kind: 'ipc', title: 'a message on the socket', body: ['ready'] },
@@ -886,9 +889,9 @@ const SCENARIOS = [
       { from: 'user', to: 'api', kind: 'req', label: 'PUT /functions/:id', title: 'You send the new code',
         text: 'Any subset of the create fields. Here the greeting becomes "Marhba".', code: 'functions.controller.ts update()',
         msg: { kind: 'http', first: 'PUT /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { code: CODE_TS_V2 } } },
-      { from: 'api', to: 'db', kind: 'req', label: 'SELECT · is it yours?', title: 'Only the owner may update',
-        text: 'Update and delete compare the function\'s userId with the caller\'s tenant, and refuse anyone else with 401.', code: 'functions.controller.ts update()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '000000000001' = the caller" } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT · in your account?', title: 'Only your account\'s function is found',
+        text: 'Every query includes the caller\'s account. Another account\'s function isn\'t found: the answer is 404, exactly as for one that doesn\'t exist.', code: 'functions.service.ts findOne()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"user_id\" = '000000000001' LIMIT 1;   -- the caller's account (P-12 renames the column)" } },
       { from: 'api', to: 'api', kind: 'int', label: 'the code changed → roll out', title: 'Does this need a rollout?',
         text: 'A change to the code, runtime, memory, or timeout rolls out a new version, when the value differs from the stored one. A function that isn\'t ACTIVE always rolls out, even unchanged, so the same code can be retried after a passing failure. Other fields are just saved.', code: 'functions.service.ts update() · ROLLOUT_FIELDS' },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply namespace · guardrails (no change)', title: 'The tenant is ensured again',
@@ -928,8 +931,8 @@ const SCENARIOS = [
     initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows', 'PostgreSQL.function_metrics': '3 rows' }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'DELETE /functions/:id', title: 'You delete the function', text: 'No body.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'DELETE /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000' } } },
-      { from: 'api', to: 'db', kind: 'req', label: 'SELECT · is it yours?', title: 'Only the owner may delete', text: 'Anyone else gets 401.', code: 'functions.controller.ts remove()',
-        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' LIMIT 1;   -- user_id '000000000001' = the caller" } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT · in your account?', title: 'Only your account\'s function is found', text: 'Another account\'s function answers 404, as one that doesn\'t exist.', code: 'functions.service.ts remove() → findOne()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"user_id\" = '000000000001' LIMIT 1;   -- the caller's account" } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Deployment', title: 'The Deployment goes first', text: 'Its ReplicaSet and pods go with it.', code: 'kubernetes.orchestrator.ts remove()', hl: ['deployment'],
         msg: { kind: 'http', first: 'DELETE ' + DEPLOY_PATH + ' HTTP/1.1' },
         set: { [K + '.Deployment']: null, [K + '.Pod']: 'Terminating' } },
@@ -1026,16 +1029,16 @@ const SCENARIOS = [
         msg: [{ kind: 'http', first: 'GET /readyz HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 503 Service Unavailable', headers: { 'content-type': 'application/json' }, body: { status: 'failed', error: { errorType: 'Runtime.UserCodeSyntaxError', errorMessage: SYNTAX_ERROR } } }],
         set: { [K + '.Pod']: 'Running · not ready (503)' } },
       { from: 'api', to: 'k8s', kind: 'req', label: '90 s later: read the pods and the log', title: 'The backend gives up, and finds out why',
-        text: 'After FF_READY_TIMEOUT_SECONDS it lists the function\'s pods for waiting or terminated containers, then reads the newest pod\'s log and keeps its last 5 lines. A missing RuntimeClass or an exhausted quota would show up here too, as "no pods were created".', code: 'kubernetes.orchestrator.ts waitUntilReady(), diagnose()', t: '90 s',
+        text: 'After FF_READY_TIMEOUT_SECONDS it lists the function\'s pods for waiting or terminated containers, then reads the newest pod\'s log. The runtime\'s "function initialization failed" line there is the function\'s own error, which its owner may see. A missing RuntimeClass or an exhausted quota would show up as "no pods were created": a platform failure, which the caller only sees as a generic message with the request ID, while the details go to the server log.', code: 'kubernetes.orchestrator.ts waitUntilReady(), diagnose(), loadErrorIn()', t: '90 s',
         msg: [{ kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods?' + BY_FUNCTION(BAD) + ' HTTP/1.1' }, { kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods/' + fn(BAD) + '-…/log?container=function&tailLines=20 HTTP/1.1' }] },
-      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ERROR', title: 'The function is ERROR', text: 'The diagnosis is stored in its error column. Its objects stay in the cluster, and its archived code in S3, so that an update can repair it.', code: 'functions.service.ts create()',
-        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ERROR',\n       \"error\" = '" + NOT_READY.replace(/'/g, "''") + "'\n WHERE \"id\" = '" + BAD + "';" },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ERROR', title: 'The function is ERROR', text: 'The load error is stored in its error column. Its objects stay in the cluster, and its archived code in S3, so that an update can repair it.', code: 'functions.service.ts create() · failures.ts callersFailure()',
+        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ERROR',\n       \"error\" = '" + LOAD_FAILED.replace(/'/g, "''") + "'\n WHERE \"id\" = '" + BAD + "';" },
         set: { 'PostgreSQL.functions': 'ERROR (with the diagnosis)' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'scale Deployment → 0', title: 'Its pod is released', text: 'A pod that can never become ready would hold its memory and CPU in the tenant\'s quota for good, since the idle sweep only scales ACTIVE functions. So the backend scales the Deployment to zero.', code: 'functions.service.ts create() → releaseInstances()', hl: ['deployment'],
         msg: { kind: 'http', first: 'PATCH /apis/apps/v1/namespaces/' + NS + '/deployments/' + fn(BAD) + '/scale?fieldManager=ff-scaler HTTP/1.1', headers: { 'content-type': 'application/merge-patch+json' }, body: { spec: { replicas: 0 } } },
         set: { [K + '.Deployment']: 'replicas 0', [K + '.Pod']: 'Terminating' } },
-      { from: 'api', to: 'user', kind: 'err', label: '400 · did not become ready', title: 'You get a 400, with the reason', text: 'Fix the code and send it with an update (PUT /functions/:id). It rolls out, is checked on a real pod, and the function becomes ACTIVE, keeping its ID. Or delete it.', code: 'functions.service.ts create()',
-        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { message: NOT_READY, error: 'Bad Request', statusCode: 400 } } },
+      { from: 'api', to: 'user', kind: 'err', label: '400 · failed to load', title: 'You get a 400, with the reason', text: 'Fix the code and send it with an update (PUT /functions/:id). It rolls out, is checked on a real pod, and the function becomes ACTIVE, keeping its ID. Or delete it.', code: 'functions.service.ts create()',
+        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8', 'x-ff-request-id': '…' }, body: { message: LOAD_FAILED, error: 'Bad Request', statusCode: 400, requestId: '…' } } },
     ],
   },
 ];

@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { Runtime } from '../../functions/entities/function.entity';
+import { FunctionLoadError, OrchestratorError } from '../orchestrator.errors';
 import { KubeClient, paths } from './kube-client';
 import { KubernetesOrchestrator } from './kubernetes.orchestrator';
 import { LABELS, functionResourceName, tenantNamespace } from './naming';
@@ -165,11 +166,13 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     expect(output).toEqual({ dnsLookup: true, kubeDnsTcp53: true, apiServer: false });
   });
 
-  it('reports initialization failures with diagnostics instead of hanging', async () => {
+  it("reports the function's own load error, from its runtime's log, instead of hanging (P-10)", async () => {
     const broken = workload({ id: randomUUID(), userId: tenant, name: 'it-broken', code: 'throw new Error("boom at init");', timeout: 3 });
     try {
       await orchestrator.deploy(broken);
-      await expect(orchestrator.waitUntilReady(broken, 25_000)).rejects.toThrow(/did not become ready.*boom at init/s);
+      const failure = await orchestrator.waitUntilReady(broken, 25_000).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(FunctionLoadError);
+      expect(failure).toMatchObject({ errorType: 'Runtime.ImportModuleError', message: 'Error: boom at init' });
     } finally {
       await orchestrator.remove(broken);
     }
@@ -274,7 +277,10 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     const lost = workload({ id: randomUUID(), userId: tenant, name: 'it-no-runtimeclass', code: greeter(1), timeout: 3 });
     try {
       await misconfigured.deploy(lost);
-      await expect(misconfigured.waitUntilReady(lost, 15_000)).rejects.toThrow(/no pods were created: .*RuntimeClass "ff-missing" not found/);
+      const failure = misconfigured.waitUntilReady(lost, 15_000);
+      // A platform failure: the details are for the server log (D4).
+      await expect(failure).rejects.toBeInstanceOf(OrchestratorError);
+      await expect(failure).rejects.toThrow(/no pods were created: .*RuntimeClass "ff-missing" not found/);
     } finally {
       await misconfigured.remove(lost);
     }

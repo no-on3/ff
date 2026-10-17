@@ -1,6 +1,13 @@
-import { CodeTooLargeError, FunctionRuntimeError, FunctionTimeoutError, OrchestratorError } from '../orchestrator.errors';
+import {
+  CodeTooLargeError,
+  FunctionLoadError,
+  FunctionRuntimeError,
+  FunctionThrottledError,
+  FunctionTimeoutError,
+  OrchestratorError,
+} from '../orchestrator.errors';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
-import { KubernetesOrchestrator, isRolledOut } from './kubernetes.orchestrator';
+import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { MAX_CODE_BYTES } from './manifests';
 import { functionResourceName, tenantNamespace } from './naming';
 import { settings, workload } from './test-fixtures';
@@ -23,6 +30,10 @@ class FakeKubeApi implements KubeApi {
   requests: Array<{ method: string; path: string; options?: RequestOptions }> = [];
   /** What request() answers next; an Error is thrown, as the client would. */
   responses: Array<KubeResponse | Error> = [];
+  /** The function container's log, as the runtime writes it: one JSON object per line. */
+  podLogText =
+    '{"level":"info","msg":"runtime listening","port":8080}\n' +
+    '{"level":"error","msg":"function initialization failed","errorType":"Runtime.ImportModuleError","errorMessage":"Cannot find module \'lodash\'"}';
 
   async apply<T>(path: string, manifest: object): Promise<T> {
     this.applied.push({ path, manifest });
@@ -47,7 +58,7 @@ class FakeKubeApi implements KubeApi {
     return (this.lists.get(path) as T[]) ?? [];
   }
   async podLog(): Promise<string> {
-    return '{"level":"error","msg":"function initialization failed","errorType":"Runtime.ImportModuleError"}';
+    return this.podLogText;
   }
   async request(method: string, path: string, options?: RequestOptions): Promise<KubeResponse> {
     this.requests.push({ method, path, options });
@@ -159,7 +170,7 @@ describe('KubernetesOrchestrator', () => {
       await expect(orchestrator.waitUntilReady(fn, 100)).resolves.toBeUndefined();
     });
 
-    it('fails with diagnostics when pods never become ready', async () => {
+    const crashLooping = () => {
       api.objects.set(deploymentPath, { ...rolledOut(1), status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 0 } });
       api.lists.set(`/api/v1/namespaces/${ns}/pods`, [
         {
@@ -167,13 +178,27 @@ describe('KubernetesOrchestrator', () => {
           status: { containerStatuses: [{ state: { waiting: { reason: 'CrashLoopBackOff' } } }] },
         },
       ]);
+    };
+
+    it("fails with the function's own load error when its runtime logged one (P-10)", async () => {
+      crashLooping();
+
+      const error = await orchestrator.waitUntilReady(fn, 30).catch((err) => err);
+
+      expect(error).toBeInstanceOf(FunctionLoadError);
+      expect(error).toMatchObject({ errorType: 'Runtime.ImportModuleError', message: "Cannot find module 'lodash'" });
+    });
+
+    it('fails with the platform diagnostics when the runtime logged no load error', async () => {
+      crashLooping();
+      api.podLogText = '{"level":"info","msg":"runtime listening","port":8080}';
 
       const error = await orchestrator.waitUntilReady(fn, 30).catch((err) => err);
 
       expect(error).toBeInstanceOf(OrchestratorError);
       expect(error.message).toContain('did not become ready');
       expect(error.message).toContain('CrashLoopBackOff');
-      expect(error.message).toContain('Runtime.ImportModuleError');
+      expect(error.message).toContain('runtime listening');
     });
 
     it('reports why no pods could be created, e.g. an unknown RuntimeClass', async () => {
@@ -252,8 +277,8 @@ describe('KubernetesOrchestrator', () => {
       [504, { errorType: 'Sandbox.Timedout', errorMessage: 'Task timed out after 10.00 seconds' }, { 'x-ff-function-error': 'Unhandled' }, FunctionTimeoutError],
       [500, { errorType: 'TypeError', errorMessage: 'bad input' }, { 'x-ff-function-error': 'Unhandled' }, FunctionRuntimeError],
       [503, { kind: 'Status', message: 'no endpoints available for service' }, {}, OrchestratorError],
-      // The runtime's 429 (queue full, or no free instance within one timeout) until P-15 maps it.
-      [429, { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded: no instance was free within 10.00 seconds' }, {}, OrchestratorError],
+      // The runtime's 429: its queue is full, or no instance was free within one timeout.
+      [429, { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded: no instance was free within 10.00 seconds' }, {}, FunctionThrottledError],
     ])('maps HTTP %i to the right error type', async (status, body, headers, errorClass) => {
       api.objects.set(deploymentPath, rolledOut(1));
       api.responses.push({ status, headers, body: JSON.stringify(body) });
@@ -311,6 +336,24 @@ describe('KubernetesOrchestrator', () => {
 
     await expect(orchestrator.desiredInstances(fn)).resolves.toBe(3);
     await expect(orchestrator.readyInstances(fn)).resolves.toBe(1);
+  });
+
+  describe('loadErrorIn', () => {
+    it("finds the runtime's last load error among other log lines, Node.js or Python", () => {
+      const log = [
+        'not JSON',
+        '{"level":"error","msg":"function initialization failed","errorType":"Old","errorMessage":"earlier attempt"}',
+        '{"time": "2026-10-17T03:00:00Z", "level": "error", "msg": "function initialization failed", "errorType": "Runtime.UserCodeSyntaxError", "errorMessage": "invalid syntax (function.py, line 2)"}',
+        '{"level":"info","msg":"shutting down"}',
+      ].join('\n');
+
+      expect(loadErrorIn(log)).toMatchObject({ errorType: 'Runtime.UserCodeSyntaxError', message: 'invalid syntax (function.py, line 2)' });
+    });
+
+    it('finds nothing in a log without one', () => {
+      expect(loadErrorIn('')).toBeUndefined();
+      expect(loadErrorIn('{"level":"error","msg":"function error","errorType":"TypeError"}')).toBeUndefined();
+    });
   });
 
   describe('isRolledOut', () => {

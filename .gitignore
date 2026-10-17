@@ -163,3 +163,4 @@ hack/.kube/
 
 # End-to-end test work files (K-08)
 hack/.e2e/
+hack/.e2e-tenancy/

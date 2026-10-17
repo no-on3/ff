@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, Repository } from 'typeorm';
@@ -229,7 +229,12 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     return array.reduce((a, b) => a + b, 0) / array.length;
   }
 
-  async getMetrics(functionId: string, timeRange: { start: Date; end: Date }) {
+  /** A function's metrics, for its own account only: another account's function is not found (D4). */
+  async getMetrics(accountId: string, functionId: string, timeRange: { start: Date; end: Date }) {
+    // userId holds the account ID until P-12 renames it.
+    if (!(await this.functionRepository.exists({ where: { id: functionId, userId: accountId } }))) {
+      throw new NotFoundException(`Function with ID ${functionId} not found`);
+    }
     return this.metricsRepository.find({
       where: {
         functionId,

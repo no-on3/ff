@@ -61,14 +61,14 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
   });
 
   it('a burst of slow calls scales the function to two instances, and every call succeeds', async () => {
-    const fn = await service.create({ name: 'it-burst', runtime: Runtime.NODEJS, code: sleeper, memory: 128, timeout: 15 }, account);
+    const fn = await service.create(account, { name: 'it-burst', runtime: Runtime.NODEJS, code: sleeper, memory: 128, timeout: 15 });
     expect(fn.status).toBe(FunctionStatus.ACTIVE);
-    await service.updateScalingConfig(fn.id, { maxInstances: 2 });
+    await service.updateScalingConfig(account, fn.id, { maxInstances: 2 });
     const limited = functions.byName('it-burst');
 
     // Four 3 s calls at once. The first instance runs them in turn, the longest waiting
     // about 9 s, within one 15 s timeout; meanwhile the second instance starts.
-    const results = await Promise.allSettled([1, 2, 3, 4].map(() => service.invoke(fn.id, { ms: 3000 })));
+    const results = await Promise.allSettled([1, 2, 3, 4].map(() => service.invoke(account, fn.id, { ms: 3000 })));
 
     expect(results.map((r) => (r.status === 'fulfilled' ? 'ok' : String(r.reason)))).toEqual(['ok', 'ok', 'ok', 'ok']);
     expect(await orchestrator.desiredInstances(limited)).toBe(2);
@@ -76,7 +76,7 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
 
     // Later calls are spread over both instances.
     const pods = new Set<string>();
-    for (let i = 0; i < 12; i++) pods.add(((await service.invoke(fn.id, {})).output as { pod: string }).pod);
+    for (let i = 0; i < 12; i++) pods.add(((await service.invoke(account, fn.id, {})).output as { pod: string }).pod);
     expect(pods.size).toBe(2);
   });
 
