@@ -35,11 +35,12 @@ export interface PriceBook {
   document: PriceDocument;
 }
 
+/** Last month at a draft (P-73), next to the books valid then and what the hourly rating charged (P-32): null before it rated the month. */
 export interface PriceBookPreview {
   month: string;
   currency: string;
-  accounts: Array<{ accountId: string; name: string; current: string | null; draft: string }>;
-  totals: { current: string; draft: string };
+  accounts: Array<{ accountId: string; name: string; current: string | null; charged: string | null; draft: string }>;
+  totals: { current: string; charged: string | null; draft: string };
 }
 
 /** The SKUs of a book's prices, in the order a page shows them. The knobs are D8's, FF's own. */

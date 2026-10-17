@@ -204,6 +204,30 @@ export const usageApi = {
     api.get<string>('/usage', { params: { month }, headers: { Accept: 'text/csv' }, responseType: 'text' }),
 };
 
+/**
+ * GET /billing/balance (P-32): the account's balance and this month's charges.
+ * Money is a string with every decimal of its currency, never a JSON number.
+ * contract.test.ts checks these names against the API's.
+ */
+export const BALANCE_FIELDS = ['currency', 'balance', 'shadowMode', 'month', 'charged', 'ratedUntil'] as const;
+export interface Balance {
+  currency: string;
+  /** The credit left; below zero, usage the credit didn't cover. */
+  balance: string;
+  /** D9's billing trial: usage is rated each hour and shown, not debited. */
+  shadowMode: boolean;
+  /** This month, YYYY-MM, UTC. */
+  month: string;
+  /** This month's hourly charges added up: debited, or in the trial only rated. */
+  charged: string;
+  /** The end of the last hour rated; usage after it isn't charged yet. */
+  ratedUntil: string | null;
+}
+
+export const billingApi = {
+  getBalance: () => api.get<Balance>('/billing/balance'),
+};
+
 // Metrics API endpoints
 export const getMetrics = async (functionId: string, start: Date, end: Date) => {
   const response = await api.get(`/metrics/${functionId}`, {

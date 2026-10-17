@@ -19,22 +19,21 @@ import { AdminPlansController } from './admin-plans.controller';
 import { AdminPricesController } from './admin-prices.controller';
 import { AdminPricesService } from './admin-prices.service';
 import { AdminSettingsController } from './admin-settings.controller';
-import { PlatformSetting } from './platform-setting.entity';
-import { PlatformSettingsService } from './platform-settings.service';
+import { PlatformSettingsModule } from './platform-settings.module';
 
 /** The admin dashboard's routes, under /admin, for FF's operators only (P-70, D12). */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([PlatformSetting, Account, Membership, Function, FunctionInvocation, PriceBook, Currency]),
+    TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, PriceBook, Currency]),
     AuditModule,
     BillingModule,
+    PlatformSettingsModule,
     MailModule,
     OrchestratorModule,
     PlansModule,
     UsageModule,
   ],
   controllers: [AdminSettingsController, AdminAuditController, AdminAccountsController, AdminPlansController, AdminPricesController],
-  providers: [PlatformSettingsService, AdminAccountsService, AdminPricesService],
-  exports: [PlatformSettingsService],
+  providers: [AdminAccountsService, AdminPricesService],
 })
 export class AdminModule {}

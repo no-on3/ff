@@ -82,7 +82,9 @@ run('price books and pricing (L2, P-30)', () => {
 
       await expect(query(`UPDATE price_books SET prices = '{}' WHERE id = $1`, [first.id])).rejects.toThrow(message);
       await expect(query('DELETE FROM price_books WHERE id = $1', [first.id])).rejects.toThrow(message);
-      await expect(query('TRUNCATE price_books')).rejects.toThrow('price_books is append-only: TRUNCATE refused');
+      // The hourly sums name their book (P-32), so the foreign key refuses first; with CASCADE, the triggers do.
+      await expect(query('TRUNCATE price_books')).rejects.toThrow('cannot truncate a table referenced in a foreign key constraint');
+      await expect(query('TRUNCATE price_books CASCADE')).rejects.toThrow(/is append-only: TRUNCATE refused/);
       await expect(addBook('2026-10-15T00:00:00Z', {})).rejects.toThrow('A price book starts in the future, not on 2026-10-15 00:00:00+00');
     });
 

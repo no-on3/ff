@@ -2,6 +2,7 @@ import React from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import type { AccountStatus } from '../services/api';
 import { useSession } from '../session/session';
+import BalanceBadge from './BalanceBadge';
 
 const STATUS_NOTE: Record<AccountStatus, string> = {
   pending: ' (waiting for approval)',
@@ -16,7 +17,7 @@ const NEW_ACCOUNT = 'new';
 const linkClass = ({ isActive }: { isActive: boolean }) =>
   `py-1 border-b-2 ${isActive ? 'border-blue-600 text-gray-900' : 'border-transparent text-gray-600 hover:text-gray-900'}`;
 
-/** The console's header: its pages, the account switcher, and who is logged in. */
+/** The console's header: its pages, the account's balance (P-32), the account switcher, and who is logged in. */
 const NavBar: React.FC = () => {
   const { me, account, login, switchAccount } = useSession();
   const navigate = useNavigate();
@@ -56,6 +57,7 @@ const NavBar: React.FC = () => {
           </div>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-3 text-sm">
+          {account && <BalanceBadge />}
           {me.accounts.length > 0 && (
             <label className="flex items-center gap-2">
               <span className="text-gray-500">Account</span>

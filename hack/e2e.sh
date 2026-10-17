@@ -13,7 +13,9 @@
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
 # Then GET /usage (P-22) against the raw records, as JSON and as CSV, priced with
-# the first price book (P-30).
+# the first price book (P-30). Then the hourly rating (P-32): every hour settled
+# since the first book rated as the backend started, in shadow mode, the balance,
+# and the reconciliation.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -296,5 +298,21 @@ check "the free tier covers the month: usage, the free tier taking it all off, a
   "$(jq -r '.estimate | "\((.usage | tonumber) + (.freeTier | tonumber) == 0) \(.total)"' <<<"$usage")"
 check "and the CSV has each function's cost" true \
   "$(tr -d '\r' <<<"$csv" | grep -q "^$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" && echo true || echo false)"
+
+echo "== the hourly rating (P-32)"
+# As it started, the backend rated every hour since the first book that had settled: ended 33 minutes ago at least.
+balance="$(http GET /billing/balance)"
+rated_until="$(jq -r .ratedUntil <<<"$balance")"
+settled="$(date -u -d "@$(( ($(date -u +%s) - 33 * 60) / 3600 * 3600 ))" +%Y-%m-%dT%H:%M:%S.000Z)"
+previous="$(date -u -d "@$(( ($(date -u +%s) - 33 * 60) / 3600 * 3600 - 3600 ))" +%Y-%m-%dT%H:%M:%S.000Z)"
+check "the balance: nothing charged, in shadow mode, rated up to the last hour settled (or the one before, if one just settled)" "200 0.000 TND true 0.000 true" \
+  "$(status) $(jq -r '"\(.balance) \(.currency) \(.shadowMode) \(.charged)"' <<<"$balance") $([ "$rated_until" = "$settled" ] || [ "$rated_until" = "$previous" ] && echo true || echo false)"
+check "every hour from the first book on rated, once, none skipped, in shadow mode" "t t t t" \
+  "$(q "SELECT count(*) = count(DISTINCT hour), count(*) = extract(epoch FROM max(hour) - min(hour)) / 3600 + 1,
+               min(hour) = (SELECT min(valid_from) FROM price_books), bool_and(shadow) FROM rating_runs")"
+check "no transaction moved the balance: no debit in shadow mode" "200 0" "$(http GET /billing/transactions >/dev/null; status) $(jq '.transactions | length' "$work/body")"
+reconciliation="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s billing:reconcile 2>&1)" || true
+check "the reconciliation runs against the database: nobody used anything in the hours rated" "No account used anything." \
+  "$(tail -1 <<<"$reconciliation")"
 
 echo "e2e: $passed checks passed"

@@ -116,7 +116,8 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 8. usage records (P-20): one per invocation, with the invocation's ID as the runtime's request ID, for a success, an error, a timeout and a cold start; then the backend is killed during a call, restarted, and marks the call `LOST`, unbilled, within about a minute;
 9. capacity samples (P-21): the warm function sampled each minute, and `npm run capacity:report` showing the account's day;
 10. the usage API (P-22): `GET /usage` against the raw records, the deleted function's usage, CSV, an empty month, a malformed one;
-11. usage priced (P-30): the month in TND with the first price book, a function's cost from the book's prices in SQL, the free tier covering the month, the CSV's costs, and no estimate before the first book.
+11. usage priced (P-30): the month in TND with the first price book, a function's cost from the book's prices in SQL, the free tier covering the month, the CSV's costs, and no estimate before the first book;
+12. the hourly rating (P-32): every hour from the first book rated as the backend started, once and in order, in shadow mode; the balance and the transactions, nothing debited; `npm run billing:reconcile` against the stack's database.
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
 

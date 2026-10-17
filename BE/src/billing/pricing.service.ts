@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThan, Repository } from 'typeorm';
+import { LessThan, LessThanOrEqual, Repository } from 'typeorm';
 import { Currency } from './currency.entity';
 import { PriceBook } from './price-book.entity';
 import { BookPrices, bookPrices } from './price-book';
 import { BookSegment, FunctionUsage, MonthEstimate, rateMonth } from './rating';
+import { BILLED_CALL, SAMPLE_SUMS, callSums } from './usage-sql';
 
 /** A month by the UTC calendar: its first instant and the next month's. */
 export function monthBounds(month: string): { from: Date; to: Date } {
@@ -33,7 +34,7 @@ interface UsageRow {
 
 interface CapacityRow {
   functionId: string;
-  provisionedMbMs: string;
+  provisionedTimeMbMs: string;
   reservedMbMs: string;
 }
 
@@ -57,13 +58,26 @@ export class PricingService {
     return atStart ? [atStart, ...valid] : valid;
   }
 
+  /** The book valid at an instant: the latest to start at or before it; null before the first. */
+  bookAt(instant: Date): Promise<PriceBook | null> {
+    return this.books.findOne({ where: { validFrom: LessThanOrEqual(instant) }, order: { validFrom: 'DESC' } });
+  }
+
   /**
    * An account's month (YYYY-MM, UTC), priced; null when no book covers any
    * of it. `books` prices it instead of the stored books, in time order: a
-   * draft, for a preview (P-73).
+   * draft, for a preview (P-73). `until` ends it early: the month so far, as
+   * the hourly rating has rated it (P-32).
    */
-  async estimate(accountId: string, month: string, books?: Array<Pick<PriceBook, 'id' | 'currency' | 'validFrom' | 'prices'>>): Promise<AccountEstimate | null> {
-    const { from, to } = monthBounds(month);
+  async estimate(
+    accountId: string,
+    month: string,
+    books?: Array<Pick<PriceBook, 'id' | 'currency' | 'validFrom' | 'prices'>>,
+    until?: Date,
+  ): Promise<AccountEstimate | null> {
+    const bounds = monthBounds(month);
+    const from = bounds.from;
+    const to = until && until < bounds.to ? until : bounds.to;
     books ??= await this.booksFor(from, to);
     if (books.length === 0) return null;
     const currencies = new Set(books.map((book) => book.currency));
@@ -107,20 +121,14 @@ export class PricingService {
    */
   private async usage(accountId: string, start: Date, end: Date, book: BookPrices): Promise<FunctionUsage[]> {
     const calls = await this.books.manager.query<UsageRow[]>(
-      `SELECT "function_id" AS "functionId",
-              count(*) FILTER (WHERE "min_instances" = 0) AS "onDemandRequests",
-              coalesce(sum(GREATEST("billed_ms", $4)::bigint * "memory_mb") FILTER (WHERE "min_instances" = 0), 0) AS "onDemandMbMs",
-              count(*) FILTER (WHERE "min_instances" > 0) AS "provisionedRequests",
-              coalesce(sum(GREATEST("billed_ms", $4)::bigint * "memory_mb") FILTER (WHERE "min_instances" > 0), 0) AS "provisionedMbMs"
+      `SELECT "function_id" AS "functionId", ${callSums('$4')}
          FROM "usage_records"
-        WHERE "account_id" = $1 AND "started_at" >= $2 AND "started_at" < $3 AND "status" IN ('success', 'error', 'timeout')
+        WHERE "account_id" = $1 AND "started_at" >= $2 AND "started_at" < $3 AND ${BILLED_CALL}
         GROUP BY "function_id"`,
       [accountId, start, end, book.minimumBilledMs],
     );
     const samples = await this.books.manager.query<CapacityRow[]>(
-      `SELECT "function_id" AS "functionId",
-              sum(LEAST("instances", "min_instances")::bigint * "memory_mb" * 60000) AS "provisionedMbMs",
-              sum(GREATEST("instances" - "min_instances", 0)::bigint * "memory_mb" * 60000) AS "reservedMbMs"
+      `SELECT "function_id" AS "functionId", ${SAMPLE_SUMS}
          FROM "capacity_samples"
         WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3
         GROUP BY "function_id"`,
@@ -140,7 +148,7 @@ export class PricingService {
         provisioned: { requests: BigInt(row.provisionedRequests), mbMs: BigInt(row.provisionedMbMs) },
       });
     }
-    for (const row of samples) Object.assign(of(row.functionId), { provisionedMbMs: BigInt(row.provisionedMbMs), reservedMbMs: BigInt(row.reservedMbMs) });
+    for (const row of samples) Object.assign(of(row.functionId), { provisionedMbMs: BigInt(row.provisionedTimeMbMs), reservedMbMs: BigInt(row.reservedMbMs) });
     return [...usage.values()];
   }
 }

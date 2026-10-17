@@ -38,16 +38,18 @@ export class PreviewAccountView {
   @ApiProperty({ example: '000000000001' }) accountId: string;
   @ApiProperty({ example: 'Tunis Labs' }) name: string;
   @ApiProperty({ nullable: true, type: String, example: '8.222', description: 'At the books valid then; null where none was' }) current: string | null;
+  @ApiProperty({ nullable: true, type: String, example: '8.222', description: "The month's hourly charges (P-32), debited or in shadow mode only rated; null before the month was rated" })
+  charged: string | null;
   @ApiProperty({ example: '9.104', description: 'At the draft, for the whole month' }) draft: string;
 }
 
-/** Last month, priced with the draft, next to what the books valid then give. Nothing was charged yet (P-31). */
+/** Last month, priced with the draft, next to what the books valid then give and what was charged (P-32). */
 export class PriceBookPreviewView {
   @ApiProperty({ example: '2026-10', description: 'Last month, by the UTC calendar' }) month: string;
   @ApiProperty({ example: 'TND' }) currency: string;
   @ApiProperty({ type: [PreviewAccountView], description: 'Each account that used something in the month' }) accounts: PreviewAccountView[];
-  @ApiProperty({ example: { current: '8.222', draft: '9.104' }, description: 'All of them: the exact sums, rounded once' })
-  totals: { current: string; draft: string };
+  @ApiProperty({ example: { current: '8.222', charged: '8.222', draft: '9.104' }, description: 'All of them: the exact sums, rounded once; charged null before the month was rated' })
+  totals: { current: string; charged: string | null; draft: string };
 }
 
 /** A plan's ID, as plans name them: "beta". */

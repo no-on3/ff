@@ -1,6 +1,6 @@
 # FF console
 
-The web console for FF. Users log in or sign up through Keycloak, create their account, and wait for its approval. Then they list, create, edit and invoke functions, change their instance limits, and view their metrics. They read the month's usage. Owners rename the account, set its tax ID, and manage its members and API keys. It is a React app built with Vite, and it uses Redux Toolkit, MUI, Tailwind, and `react-oidc-context`.
+The web console for FF. Users log in or sign up through Keycloak, create their account, and wait for its approval. Then they list, create, edit and invoke functions, change their instance limits, and view their metrics. They read the month's usage, and the account's balance on every page. Owners rename the account, set its tax ID, and manage its members and API keys. It is a React app built with Vite, and it uses Redux Toolkit, MUI, Tailwind, and `react-oidc-context`.
 
 ```bash
 npm install
@@ -32,6 +32,7 @@ They are built into the bundle, so a production build needs its own values. The 
 - **The plan's limits** (P-15): `GET /me` gives each account's plan. The create, edit and scaling forms take their maximums from it, and the account page lists every limit (`src/lib/plans.ts`).
 - **Members** (`src/components/Members.tsx`, P-16): owners invite people by e-mail with a role, change roles, remove members and cancel invitations. The pages show each role only what it may do (`can()` in `src/lib/session.ts`): a viewer gets no button to create, change or invoke functions.
 - **Invocation statuses** (`src/services/api.ts`, P-20): the history shows each of the API's, which `src/contract.test.ts` checks against the backend's list: `THROTTLED` (no instance was free in time) in amber and `LOST` (the backend stopped during the call, so the answer is unknown) in grey, neither billed, with the reason under the call.
+- **Balance** (`src/components/BalanceBadge.tsx`, P-32): in the header of every page, from `GET /billing/balance`, read again at each page and account change. During the billing trial (shadow mode, D9) a "Billing trial" badge says usage is rated and not charged yet; its title gives this month's charges so far and the last hour rated. Every role sees it.
 - **Usage** (`src/components/Usage.tsx`, P-22, P-30): this month and last month by the UTC calendar, from `GET /usage`: requests billed, billed duration and GB-seconds, in total and per function, the calls not billed apart, a link to each function still there, and the month as CSV. With the estimated cost at FF's prices: each function's before the free tier, then the free tier and the total, as the API rounded them to the millime. Every role sees it.
 - **API keys** (`src/components/ApiKeys.tsx`): owners create a key with a name, scopes and an expiry, see it once, and revoke it. The list shows each key by its prefix, `ffk_<id>_…`.
 

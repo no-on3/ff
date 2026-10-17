@@ -5,11 +5,12 @@ import scopesSource from '../../BE/src/api-keys/api-key-format.ts?raw';
 import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
 import invocationSource from '../../BE/src/functions/entities/function-invocation.entity.ts?raw';
 import usageDtoSource from '../../BE/src/usage/usage.dto.ts?raw';
+import billingDtoSource from '../../BE/src/billing/billing.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
-import { INVOCATION_STATUSES, SCOPES, USAGE_AMOUNTS, USAGE_ESTIMATE_FIELDS } from './services/api';
+import { BALANCE_FIELDS, INVOCATION_STATUSES, SCOPES, USAGE_AMOUNTS, USAGE_ESTIMATE_FIELDS } from './services/api';
 
 // What the console shares with the API and the development realm, read from
 // their files: a console on another port than the realm and the API allow
@@ -103,6 +104,15 @@ describe("the usage of a month's estimated cost (P-30)", () => {
 
     expect(backendFields).toEqual([...USAGE_ESTIMATE_FIELDS]);
     expect(functionView.slice(0, functionView.indexOf('\n}'))).toMatch(/^ {2}cost: string \| null;$/m);
+  });
+});
+
+describe("the account's balance (P-32)", () => {
+  it("has the API's fields, so the header reads each one that is there", () => {
+    const body = billingDtoSource.slice(billingDtoSource.indexOf('export class BalanceView {'));
+    const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
+
+    expect(backendFields).toEqual([...BALANCE_FIELDS]);
   });
 });
 

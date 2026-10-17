@@ -30,6 +30,8 @@ import { PlatformSettingsService } from './admin/platform-settings.service';
 import { UsageController } from './usage/usage.controller';
 import { PlansService } from './plans/plans.service';
 import { PricingService } from './billing/pricing.service';
+import { BillingController } from './billing/billing.controller';
+import { BillingService } from './billing/billing.service';
 import { UsageService } from './usage/usage.service';
 
 const ACCOUNT = '000000000001';
@@ -61,6 +63,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
         AdminAccountsController,
         AdminPlansController,
         AdminPricesController,
+        BillingController,
       ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
@@ -80,6 +83,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
         { provide: AdminAccountsService, useValue: succeeding(AdminAccountsService) },
         { provide: PlansService, useValue: succeeding(PlansService, { list: async () => [] }) },
         { provide: AdminPricesService, useValue: succeeding(AdminPricesService, { list: async () => [] }) },
+        { provide: BillingService, useValue: succeeding(BillingService) },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -116,7 +120,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions']));
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
   });
 

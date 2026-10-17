@@ -40,6 +40,7 @@ const API_KEYS = migrationNames.find((name) => name.startsWith('ApiKeys')) as st
 const AUDIT_LOG = migrationNames.find((name) => name.startsWith('AuditLog')) as string;
 const USAGE_RECORDS = migrationNames.find((name) => name.startsWith('UsageRecords')) as string;
 const PRICE_BOOKS = migrationNames.find((name) => name.startsWith('PriceBooks')) as string;
+const LEDGER = migrationNames.find((name) => name.startsWith('Ledger')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -241,6 +242,34 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it('the rating migration reverts with charges present; applied again, it refuses a price book that starts within an hour, naming it (P-32)', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const hour = `date_trunc('hour', now())`;
+      await dataSource.query(`INSERT INTO rating_runs (hour, accounts, shadow) VALUES (${hour}, 1, true)`);
+      await dataSource.query(
+        `INSERT INTO usage_hourly (account_id, hour, function_id, price_book_id, on_demand_requests, on_demand_mb_ms, provisioned_requests, provisioned_mb_ms, provisioned_time_mb_ms, reserved_mb_ms)
+         VALUES ($1, ${hour}, gen_random_uuid(), (SELECT id FROM price_books LIMIT 1), 1, 128, 0, 0, 0, 0)`,
+        [ACCOUNT],
+      );
+      await dataSource.query(`INSERT INTO usage_charges (account_id, hour, currency, amount_minor, month_to_date_minor, shadow) VALUES ($1, ${hour}, 'TND', 0, 0, true)`, [ACCOUNT]);
+
+      await migrateDownTo(dataSource, LEDGER);
+
+      const tables = await dataSource.query(`SELECT to_regclass('usage_hourly') AS h, to_regclass('usage_charges') AS c, to_regclass('rating_runs') AS r`);
+      expect(tables).toEqual([{ h: null, c: null, r: null }]);
+      const [{ id }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T10:30:00Z', '{}', 'test') RETURNING id`);
+      await expect(dataSource.runMigrations({ transaction: 'each' })).rejects.toThrow(
+        `Price books must start at a whole hour, UTC, for the hourly rating (P-32), and these don't: ${id} (2099-01-01T10:30:00.000Z).`,
+      );
+
+      await dataSource.query(`DELETE FROM price_books WHERE id = $1`, [id]); // it hasn't started
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it('the ledger migration reverts with entries present, though its tables refuse every change but an insert (P-31)', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -306,6 +335,9 @@ run('database schema (L2, real PostgreSQL)', () => {
         'plans',
         'platform_settings',
         'price_books',
+        'rating_runs',
+        'usage_charges',
+        'usage_hourly',
         'usage_records',
         'users',
       ]);

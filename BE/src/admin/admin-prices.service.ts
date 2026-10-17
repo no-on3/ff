@@ -5,6 +5,7 @@ import { Account } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { Currency } from '../billing/currency.entity';
 import { Decimal } from '../billing/decimal';
+import { formatMinor } from '../billing/money';
 import { PriceBook } from '../billing/price-book.entity';
 import { PriceDocument, priceDocumentProblems } from '../billing/price-book';
 import { PricingService, monthBounds } from '../billing/pricing.service';
@@ -106,6 +107,14 @@ export class AdminPricesService {
     const accounts = accountIds.length ? await this.accounts.find({ where: { id: In(accountIds) }, select: { id: true, name: true } }) : [];
     const names = new Map(accounts.map((account) => [account.id, account.name]));
     const { exponent } = await this.currencies.findOneByOrFail({ code: draft.currency });
+    // What the hourly rating charged each account (P-32), debited or in shadow mode; none before it rated the month.
+    const { from, to } = monthBounds(month);
+    const chargedRows = await this.books.manager.query<Array<{ account_id: string; charged: string }>>(
+      `SELECT "account_id", sum("amount_minor")::text AS "charged" FROM "usage_charges"
+        WHERE "hour" >= $1 AND "hour" < $2 AND "currency" = $3 GROUP BY "account_id"`,
+      [from, to, draft.currency],
+    );
+    const charged = new Map(chargedRows.map((row) => [row.account_id, BigInt(row.charged)]));
     let current = Decimal.ZERO;
     let drafted = Decimal.ZERO;
     const rows = [];
@@ -118,10 +127,17 @@ export class AdminPricesService {
         accountId,
         name: names.get(accountId) ?? '',
         current: atCurrent ? atCurrent.total.toFixed(exponent) : null,
+        charged: charged.has(accountId) ? formatMinor(charged.get(accountId) as bigint, exponent) : null,
         draft: atDraft.total.toFixed(exponent),
       });
     }
-    return { month, currency: draft.currency, accounts: rows, totals: { current: current.toFixed(exponent), draft: drafted.toFixed(exponent) } };
+    const chargedTotal = [...charged.values()].reduce((sum, minor) => sum + minor, 0n);
+    return {
+      month,
+      currency: draft.currency,
+      accounts: rows,
+      totals: { current: current.toFixed(exponent), charged: charged.size ? formatMinor(chargedTotal, exponent) : null, draft: drafted.toFixed(exponent) },
+    };
   }
 
   /** The document as a book, or 400 with each problem; its currency must be one FF has. */

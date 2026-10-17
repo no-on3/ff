@@ -1,12 +1,7 @@
-import { Check, Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, ValueTransformer } from 'typeorm';
+import { Check, Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
+import { bigintColumn } from '../../database/bigint-column';
 import { LedgerAccount } from './ledger-account.entity';
 import { LedgerTransaction } from './ledger-transaction.entity';
-
-/** PostgreSQL's bigint, which the driver reads as a string, as a JavaScript bigint: never a number. */
-export const bigintColumn: ValueTransformer = {
-  to: (value: bigint | null | undefined) => (value === null || value === undefined ? value : value.toString()),
-  from: (value: string | null) => (value === null ? null : BigInt(value)),
-};
 
 /**
  * One line of a ledger transaction (P-31): an amount in the currency's minor

@@ -342,8 +342,9 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
           {preview && (
             <div className="space-y-2" aria-label="Preview">
               <h3 className="font-semibold">
-                {preview.month} (UTC) at this book, next to the books valid then. Nothing is charged yet.
+                {preview.month} (UTC) at this book, next to the books valid then and what was charged.
               </h3>
+              <p className="text-sm text-gray-600">Charged: the hourly charges of the month, debited, or in shadow mode only rated; – before the month was rated.</p>
               {preview.accounts.length === 0 ? (
                 <EmptyState>No account used anything in {preview.month}.</EmptyState>
               ) : (
@@ -353,6 +354,7 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
                       <tr>
                         <th className="px-4 py-2 font-medium">Account</th>
                         <th className="px-4 py-2 text-right font-medium">At the books then</th>
+                        <th className="px-4 py-2 text-right font-medium">Charged</th>
                         <th className="px-4 py-2 text-right font-medium">At this book</th>
                       </tr>
                     </thead>
@@ -363,12 +365,14 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
                             {account.name} <span className="font-mono text-xs text-gray-500">{account.accountId}</span>
                           </td>
                           <td className="px-4 py-2 text-right font-mono">{account.current ?? '–'}</td>
+                          <td className="px-4 py-2 text-right font-mono">{account.charged ?? '–'}</td>
                           <td className="px-4 py-2 text-right font-mono">{account.draft}</td>
                         </tr>
                       ))}
                       <tr className="border-t border-gray-200 font-semibold">
                         <td className="px-4 py-2">All accounts ({preview.currency})</td>
                         <td className="px-4 py-2 text-right font-mono">{preview.totals.current}</td>
+                        <td className="px-4 py-2 text-right font-mono">{preview.totals.charged ?? '–'}</td>
                         <td className="px-4 py-2 text-right font-mono">{preview.totals.draft}</td>
                       </tr>
                     </tbody>

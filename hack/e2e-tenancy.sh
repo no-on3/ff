@@ -115,6 +115,19 @@ mail_to() {
   id="$(curl -sS "$mailpit/api/v1/search?query=to:$1" | jq -r '.messages[0].ID // empty')"
   [ -z "$id" ] || curl -sS "$mailpit/api/v1/message/$id" | jq -r '.Subject + "\n" + .Text' | tr -d '\r'
 }
+# grant <account> <millimes> <key>: promotional credit, written as one balanced ledger transaction
+# (P-31; P-74 will grant it from the admin dashboard).
+grant() {
+  "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -v ON_ERROR_STOP=1 -qc "
+    INSERT INTO ledger_accounts (account_id, type, currency) VALUES ('$1', 'wallet', 'TND') ON CONFLICT DO NOTHING;
+    INSERT INTO ledger_accounts (type, currency) VALUES ('promotional_credit', 'TND') ON CONFLICT DO NOTHING;
+    INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('promo', '$3');
+    INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
+      SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN $2 ELSE -$2 END
+        FROM ledger_transactions t, ledger_accounts a
+       WHERE t.idempotency_key = '$3' AND a.currency = 'TND'
+         AND (a.account_id = '$1' OR (a.account_id IS NULL AND a.type = 'promotional_credit'));" >/dev/null
+}
 # approve <account...>: the operator approves each one, as the admin dashboard does (P-71).
 approve() {
   local account
@@ -222,6 +235,10 @@ no_operator="400 Development mode has no operator: the admin dashboard needs FF_
 not_admin_client="403 The admin routes take a token issued to the admin dashboard (ff-admin)"
 
 echo "== development mode, account B, on every route (${#routes[@]})"
+grant "$account_a" 3000 "promo:l5-a"
+balance_a="$(as_a GET /billing/balance)"
+check "A reads its balance: 3.000 TND of credit (P-32)" "200 3.000 TND" "$(status) $(jq -r '"\(.balance) \(.currency)"' <<<"$balance_a")"
+check "and the credit among its transactions" "promo 3.000" "$(as_a GET /billing/transactions | jq -r '.transactions[] | "\(.kind) \(.amount)"')"
 own=""
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
@@ -266,6 +283,14 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       usage_b="$(as_b GET /usage)"
       check "$route: B reads its own usage, which never counts A's function" "200 0" \
         "$(status) $(jq --arg id "$id" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_b")"
+      ;;
+    "GET /billing/balance")
+      balance_b="$(as_b GET /billing/balance)"
+      check "$route: B reads its own balance, none of A's credit" "200 0.000" "$(status) $(jq -r .balance <<<"$balance_b")"
+      ;;
+    "GET /billing/transactions")
+      transactions_b="$(as_b GET /billing/transactions)"
+      check "$route: B lists none of A's transactions" "200 0" "$(status) $(jq '.transactions | length' <<<"$transactions_b")"
       ;;
     *" /members"*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
@@ -354,6 +379,7 @@ before_1="$(snapshot as_user_1 "$fn_1")"
 name_1="$(as_user_1 GET "/accounts/$account_1" | jq -r .name)"
 members_1="$(as_user_1 GET /members | jq -c '{members: [.members[].email], invitations: [.invitations[].email]}')"
 
+grant "$account_1" 5000 "promo:l5-1"
 echo "== account 2, on account 1's function and account, on every route (${#routes[@]})"
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
@@ -424,6 +450,14 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2's usage never counts account 1's function" "200 0" \
         "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_2")"
       ;;
+    "GET /billing/balance")
+      balance_2="$(as_user_2 GET /billing/balance)"
+      check "$route: account 2's balance has none of account 1's credit" "200 0.000" "$(status) $(jq -r .balance <<<"$balance_2")"
+      ;;
+    "GET /billing/transactions")
+      transactions_2="$(as_user_2 GET /billing/transactions)"
+      check "$route: account 2 lists none of account 1's transactions" "200 0" "$(status) $(jq '.transactions | length' <<<"$transactions_2")"
+      ;;
     *" /admin/"*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: a customer's token is not the admin dashboard's" "$not_admin_client" "$(status) $(message)"
@@ -457,11 +491,15 @@ with_token "$key_1" PUT "/functions/$fn_1" '{"name": "renamed"}' >/dev/null
 check "but can't change one without functions:write" "403 This API key lacks the scope functions:write" "$(status) $(message)"
 with_token "$key_1" GET /usage >/dev/null
 check "nor read usage without usage:read (P-22)" "403 This API key lacks the scope usage:read" "$(status) $(message)"
+with_token "$key_1" GET /billing/balance >/dev/null
+check "nor the balance (P-32)" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 key_usage="$(as_user_2 POST /api-keys '{"name": "l5 usage", "scopes": ["usage:read"]}' | jq -r .key)"
 check "account 2 makes a key with usage:read only" 201 "$(status)"
 usage_key="$(with_token "$key_usage" GET /usage)"
 check "which reads its own account's usage, never account 1's" "200 0" \
   "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_key")"
+balance_key="$(with_token "$key_usage" GET /billing/balance)"
+check "and its own account's balance, without account 1's credit (P-32)" "200 0.000" "$(status) $(jq -r .balance <<<"$balance_key")"
 for path in /me /api-keys /members /audit-log; do
   with_token "$key_1" GET "$path" >/dev/null
   check "a key can't call GET $path, which takes a user's token" \
@@ -550,19 +588,12 @@ page_1="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
 check "its page: the owner, the function and its last call, this month's usage, and how it became active" \
   "200 $user_1 l5-one true true pending,active" \
   "$(status) $(jq -r '"\(.members[0].email) \(.functions[0].name) \(.functions[0].lastInvokedAt != null) \(.usage.totals.requests > 0) \([.statusHistory[].status] | join(","))"' <<<"$page_1")"
-# 7.000 TND of credit for account 2 alone, as one balanced ledger transaction (P-31; P-74 will grant it).
-"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -v ON_ERROR_STOP=1 -qc "
-  INSERT INTO ledger_accounts (account_id, type, currency) VALUES ('$account_2', 'wallet', 'TND');
-  INSERT INTO ledger_accounts (type, currency) VALUES ('promotional_credit', 'TND') ON CONFLICT DO NOTHING;
-  INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('promo', 'promo:l5');
-  INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
-    SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN 7000 ELSE -7000 END
-      FROM ledger_transactions t, ledger_accounts a
-     WHERE t.idempotency_key = 'promo:l5' AND (a.account_id = '$account_2' OR (a.type = 'promotional_credit' AND a.currency = 'TND'));" >/dev/null
-balance_1="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
-check "account 1's page has no balance: the credit is account 2's (P-31)" "200 []" "$(status) $(jq -c .balances <<<"$balance_1")"
-balance_2="$(with_token "$operator_token" GET "/admin/accounts/$account_2")"
-check "account 2's page has it, as a string to the millime" '200 [{"currency":"TND","balance":"7.000"}]' "$(status) $(jq -c .balances <<<"$balance_2")"
+# 7.000 TND for account 2, which account 1's 5.000 must not join (P-31).
+grant "$account_2" 7000 "promo:l5-2"
+page_balance_1="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
+check "account 1's page has its own balance, 5.000 TND (P-31)" '200 [{"currency":"TND","balance":"5.000"}]' "$(status) $(jq -c .balances <<<"$page_balance_1")"
+page_balance_2="$(with_token "$operator_token" GET "/admin/accounts/$account_2")"
+check "and account 2's page its own, 7.000 TND, as a string to the millime" '200 [{"currency":"TND","balance":"7.000"}]' "$(status) $(jq -c .balances <<<"$page_balance_2")"
 with_token "$operator_token" POST "/admin/accounts/$account_1/suspend" '{"reason": "l5: abuse report"}' >/dev/null
 check "the operator suspends account 1" 200 "$(status)"
 check "its function is scaled to zero at once" 0 \

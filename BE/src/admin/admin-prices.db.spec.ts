@@ -139,7 +139,7 @@ run('price books and plans, for operators (L2, P-73)', () => {
     expect((await prices.list(new Date(`${Y + 1}-06-01T00:00:00Z`))).map((book) => book.status)).toEqual(['past', 'active']);
   });
 
-  it("previews a draft on last month: each account at the draft, next to the books valid then, and the totals", async () => {
+  it("previews a draft on last month: each account at the draft, next to the books valid then and what was charged, and the totals", async () => {
     const [big, small] = [await account(), await account()];
     // 20,000,000 GB-s: well past the free tier's 400,000.
     await query(
@@ -148,18 +148,26 @@ run('price books and plans, for operators (L2, P-73)', () => {
               (gen_random_uuid(), '${Y}-01-15T10:00:00Z', '${Y}-01-15T10:00:00Z', $2, gen_random_uuid(), 'small', 'nodejs', 128, 1, 100, 'success')`,
       [big, small],
     );
+    // What the hourly rating charged big (P-32): two hours of January; an hour of December and a charge in euros are not January's TND.
+    await query(`INSERT INTO currencies (code, exponent) VALUES ('EUR', 2) ON CONFLICT DO NOTHING`);
+    await query(
+      `INSERT INTO usage_charges (account_id, hour, currency, amount_minor, month_to_date_minor, shadow)
+       VALUES ($1, '${Y}-01-15T10:00:00Z', 'TND', 900000, 900000, true), ($1, '${Y}-01-15T11:00:00Z', 'TND', 82615, 982615, true),
+              ($1, '${Y - 1}-12-31T23:00:00Z', 'TND', 5000, 5000, true), ($1, '${Y}-01-16T00:00:00Z', 'EUR', 5, 5, true)`,
+      [big],
+    );
 
     const preview = await prices.preview(DOUBLED, NOW);
 
-    // 19,600,000 billed GB-s at the first book's 0.0000501334336, then at twice that.
+    // 19,600,000 billed GB-s at the first book's 0.0000501334336, then at twice that; small was never rated.
     expect(preview).toEqual({
       month: `${Y}-01`,
       currency: 'TND',
       accounts: [
-        { accountId: big, name: expect.any(String), current: '982.615', draft: '1965.231' },
-        { accountId: small, name: expect.any(String), current: '0.000', draft: '0.000' },
+        { accountId: big, name: expect.any(String), current: '982.615', charged: '982.615', draft: '1965.231' },
+        { accountId: small, name: expect.any(String), current: '0.000', charged: null, draft: '0.000' },
       ],
-      totals: { current: '982.615', draft: '1965.231' },
+      totals: { current: '982.615', charged: '982.615', draft: '1965.231' },
     });
     expect(await db.dataSource.getRepository(PriceBook).count()).toBe(2); // nothing saved
   });
