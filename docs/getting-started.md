@@ -336,7 +336,18 @@ curl -s "$FF/audit-log?limit=20&before=<next>" -H "$AUTH"   # the next page, old
 | `timeout` | the function's timeout |
 | `throttled` (no instance free in time), `platform_error` (the cold start failed, the pod was unreachable), `lost` | nothing |
 
-The cold start, when the call had to start an instance, is recorded in `init_ms` and never billed. Until the usage page (P-22), read the records in SQL:
+The cold start, when the call had to start an instance, is recorded in `init_ms` and never billed.
+
+**The month's usage.** `GET /usage` adds the records up for a month by the UTC calendar: per function and in total, the requests billed, the billed duration, the GB-seconds, and the calls not billed. Every member of the account may read it, viewers included, and an API key with `usage:read`. The console's "Usage" page shows this month and last month, and downloads the CSV:
+
+```bash
+curl -s "$FF/usage" | jq '{month, totals}'                                # this month
+curl -s "$FF/usage?month=2026-09" | jq -c '.functions[] | {functionName, requests, gbSeconds}'
+curl -s "$FF/usage?month=2026-09" -H 'Accept: text/csv'                  # the same, for a spreadsheet
+# {"month": "2026-10", "totals": {"requests": 4, "billedMs": 3016, "gbSeconds": "0.752", "throttled": 0, "platformErrors": 0, "lost": 1}}
+```
+
+`gbSeconds` is billed duration × memory, counting 1,024 MB as 1 GB, as an exact decimal string, as AWS's Cost Explorer gives its amounts. The totals are the records' own sums, never the functions' rounded figures added up. A function deleted since keeps its usage, marked `"deleted": true`. Costs appear once prices exist (P-30). To read the raw records:
 
 ```bash
 docker compose exec -T postgres psql -U postgres -d serverless_platform \

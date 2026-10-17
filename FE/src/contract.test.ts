@@ -4,11 +4,12 @@ import backendEnvExample from '../../BE/.env.example?raw';
 import scopesSource from '../../BE/src/api-keys/api-key-format.ts?raw';
 import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
 import invocationSource from '../../BE/src/functions/entities/function-invocation.entity.ts?raw';
+import usageDtoSource from '../../BE/src/usage/usage.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
-import { INVOCATION_STATUSES, SCOPES } from './services/api';
+import { INVOCATION_STATUSES, SCOPES, USAGE_AMOUNTS } from './services/api';
 
 // What the console shares with the API and the development realm, read from
 // their files: a console on another port than the realm and the API allow
@@ -81,6 +82,15 @@ describe("an invocation's status", () => {
 
     expect(backendStatuses).toContain('LOST');
     expect(backendStatuses).toEqual([...INVOCATION_STATUSES]);
+  });
+});
+
+describe('the usage of a month (P-22)', () => {
+  it("has the API's amounts, so the page shows each one and reads none that isn't there", () => {
+    const body = usageDtoSource.slice(usageDtoSource.indexOf('export class UsageAmountsView {'));
+    const backendAmounts = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
+
+    expect(backendAmounts).toEqual([...USAGE_AMOUNTS]);
   });
 });
 

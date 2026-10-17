@@ -398,7 +398,7 @@
         <tbody>
           <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
           <tr><td>Invocations: input, output, status, duration, memory, error</td><td>PostgreSQL <code>function_invocations</code></td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST)</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
-          <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td>the capacity report; then the usage page (P-22) and billing (P-32)</td></tr>
+          <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td><code>GET /usage</code> and the console's Usage page; the capacity report; then billing (P-32)</td></tr>
           <tr><td>Capacity: each function's ready instances, a minute at a time, with its memory and <code>minInstances</code></td><td>PostgreSQL <code>capacity_samples</code>, a partition per month (UTC); never changed or deleted</td><td>the capacity sample, 5 s into every minute</td><td><code>npm run capacity:report</code>; then metrics (P-50), billing of <code>minInstances</code> (P-32) and the admin overview (P-75)</td></tr>
           <tr><td>Per-minute metrics: request and error counts, p50/p95/p99, averages, instances</td><td>PostgreSQL <code>function_metrics</code></td><td>the metrics tick, every 60 s</td><td>the console (<code>GET /metrics/:id</code>)</td></tr>
           <tr><td>An archive copy of the code</td><td>S3 bucket <code>functions</code>, key <code>&lt;id&gt;/code.ts</code> or <code>code.py</code></td><td>create, update</td><td>nothing yet: the cluster gets the code from the ConfigMap</td></tr>
@@ -511,6 +511,7 @@
           <tr><td>Every Kubernetes object</td><td><code>BE/src/orchestrator/kubernetes/manifests.ts</code>, <code>naming.ts</code></td></tr>
           <tr><td>Metrics, autoscaling, scale to zero</td><td><code>BE/src/metrics/metrics.service.ts</code>, <code>scaling.ts</code></td></tr>
           <tr><td>Usage records: what is billed, lost calls, monthly partitions</td><td><code>BE/src/usage/usage.ts</code>, <code>usage.service.ts</code>, and the migration <code>…-UsageRecords.ts</code></td></tr>
+          <tr><td>The month's usage: <code>GET /usage</code>, its CSV, and the console's page</td><td><code>BE/src/usage/usage.controller.ts</code>, <code>usage.service.ts</code> <code>monthly()</code>, <code>usage-csv.ts</code>, <code>FE/src/components/Usage.tsx</code></td></tr>
           <tr><td>Capacity samples and the capacity report</td><td><code>BE/src/usage/capacity.service.ts</code>, <code>capacity-report.ts</code>, <code>BE/scripts/capacity-report.ts</code>, and the migration <code>…-CapacitySamples.ts</code></td></tr>
           <tr><td>S3 archive</td><td><code>BE/src/minio-client/minio-client.service.ts</code></td></tr>
           <tr><td>Configuration and its defaults</td><td><code>BE/src/config/configuration.ts</code>, <code>BE/.env</code></td></tr>
@@ -1065,6 +1066,28 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'GET /metrics/' + FN + '?start=2026-10-16T13:00:00Z&end=2026-10-16T15:00:00Z HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · metrics rows', title: 'The metrics', text: 'One row per minute that had invocations, oldest first.', code: 'metrics.service.ts getMetrics()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: [{ functionId: FN, timestamp: '2026-10-16T14:03:00.004Z', requestCount: 3, errorCount: 0, responseTimeP50: 41, responseTimeP95: 55, responseTimeP99: 55, memoryUsage: 98, activeInstances: 1, maxConcurrency: 1, '…': '…' }] } },
+    ],
+  },
+  {
+    id: 'usage', title: 'Read the month\'s usage', lanes: ['user', 'api', 'db'],
+    summary: 'GET /usage adds up a month of usage records, by the UTC calendar: per function and in total, from one query, so the totals are the records\' own sums. Every member reads it, and an API key with usage:read.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '5 rows', 'PostgreSQL.usage_records': '5 rows this month' }),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /usage?month=2026-10', title: 'You ask for a month',
+        text: 'YYYY-MM, this month without it; anything else gets 400. The console asks for this month and last month.', code: 'usage/usage.controller.ts get()',
+        msg: { kind: 'http', first: 'GET /usage?month=2026-10 HTTP/1.1', headers: { host: 'localhost:3000', accept: 'application/json' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT … GROUP BY GROUPING SETS', title: 'One query: each function, and the total',
+        text: 'The account\'s records from the month\'s first instant to the next month\'s, in UTC. The grouping sets give a row per function and a row for all of them from the same read, so the totals are never the functions\' figures added up after rounding. GB-seconds stay exact: whole MB-ms over 1,024,000 always has a finite decimal form. A function deleted since has no row in functions, so it shows as deleted.',
+        code: 'usage/usage.service.ts monthly()',
+        msg: { kind: 'sql', text: "SELECT GROUPING(u.\"function_id\") = 1 AS \"total\", u.\"function_id\",\n       (array_agg(u.\"function_name\" ORDER BY u.\"started_at\" DESC))[1] AS \"function_name\",\n       bool_and(f.\"id\" IS NULL) AS \"deleted\",\n       count(*) FILTER (WHERE u.\"status\" IN ('success', 'error', 'timeout')) AS \"requests\",\n       sum(u.\"billed_ms\") AS \"billed_ms\",\n       trim_scale(sum(u.\"billed_ms\"::numeric * u.\"memory_mb\") / 1024000) AS \"gb_seconds\", …\n  FROM \"usage_records\" u LEFT JOIN \"functions\" f ON f.\"id\" = u.\"function_id\" AND f.\"account_id\" = u.\"account_id\"\n WHERE u.\"account_id\" = '000000000001'\n   AND u.\"started_at\" >= '2026-10-01 00:00:00+00' AND u.\"started_at\" < '2026-11-01 00:00:00+00'\n GROUP BY GROUPING SETS ((u.\"function_id\"), ());" } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · functions and totals', title: 'The month, as JSON',
+        text: 'Requests billed are successes, errors and timeouts (D7); throttled, failed and lost calls come apart, unbilled. gbSeconds is a string, as AWS\'s Cost Explorer gives its amounts, so no float rounds it. Costs come with the price book (P-30).',
+        code: 'usage/usage.controller.ts get()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { month: '2026-10', functions: [{ functionId: FN, functionName: 'hello', deleted: false, requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1 }], totals: { requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1 } } } },
+      { from: 'user', to: 'api', kind: 'req', label: 'Accept: text/csv', title: 'Or as CSV, for a spreadsheet',
+        text: 'The same query, written as a download: a line per function, no total line for a spreadsheet to count twice. A function name a spreadsheet would run as a formula (=, +, -, @) gets a leading apostrophe.',
+        code: 'usage/usage-csv.ts usageCsv()',
+        msg: [{ kind: 'http', first: 'GET /usage?month=2026-10 HTTP/1.1', headers: { accept: 'text/csv' } }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="ff-usage-000000000001-2026-10.csv"' }, body: 'function_id,function_name,deleted,requests,billed_ms,gb_seconds,throttled,platform_errors,lost\r\n' + FN + ',hello,false,4,3016,0.752,0,0,1' }] },
     ],
   },
   {

@@ -143,6 +143,8 @@ check "A creates a function" "201 ACTIVE" "$(status) $(jq -r .status <<<"$create
 id="$(jq -r .id <<<"$created")"
 as_a POST "/functions/$id/invoke" '{"input":{"name":"A"}}' >/dev/null
 check "A invokes it" 201 "$(status)"
+check "A's usage counts the call (P-22)" "1" \
+  "$(as_a GET /usage | jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | .requests')"
 # snapshot <caller> <function ID>: what another account's calls must not change.
 snapshot() {
   local caller=$1 fn=$2
@@ -244,6 +246,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       log_b="$(as_b GET /audit-log)"
       check "$route: B reads its own log, which never names A's function" "200 0" \
         "$(status) $(jq --arg id "function:$id" '[.entries[] | select(.resource == $id)] | length' <<<"$log_b")"
+      ;;
+    "GET /usage")
+      usage_b="$(as_b GET /usage)"
+      check "$route: B reads its own usage, which never counts A's function" "200 0" \
+        "$(status) $(jq --arg id "$id" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_b")"
       ;;
     *" /members"*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
@@ -387,6 +394,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
         "$(status) $(jq --arg f "function:$fn_1" --arg k "api_key:$key_1_id" --arg i "invitation:$invitation_1" \
           '[.entries[] | select(.resource == $f or .resource == $k or .resource == $i)] | length' <<<"$log_2")"
       ;;
+    "GET /usage")
+      usage_2="$(as_user_2 GET /usage)"
+      check "$route: account 2's usage never counts account 1's function" "200 0" \
+        "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_2")"
+      ;;
     "DELETE /members/invitations/{id}")
       as_user_2 DELETE "/members/invitations/$invitation_1" >/dev/null
       check "$route: account 2 can't cancel account 1's invitation" "404 Invitation $invitation_1 not found" "$(status) $(message)"
@@ -414,6 +426,13 @@ with_token "$key_1" POST "/functions/$fn_1/invoke" '{"input":{"name":"key"}}' >/
 check "and invokes them" 201 "$(status)"
 with_token "$key_1" PUT "/functions/$fn_1" '{"name": "renamed"}' >/dev/null
 check "but can't change one without functions:write" "403 This API key lacks the scope functions:write" "$(status) $(message)"
+with_token "$key_1" GET /usage >/dev/null
+check "nor read usage without usage:read (P-22)" "403 This API key lacks the scope usage:read" "$(status) $(message)"
+key_usage="$(as_user_2 POST /api-keys '{"name": "l5 usage", "scopes": ["usage:read"]}' | jq -r .key)"
+check "account 2 makes a key with usage:read only" 201 "$(status)"
+usage_key="$(with_token "$key_usage" GET /usage)"
+check "which reads its own account's usage, never account 1's" "200 0" \
+  "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_key")"
 for path in /me /api-keys /members /audit-log; do
   with_token "$key_1" GET "$path" >/dev/null
   check "a key can't call GET $path, which takes a user's token" \
@@ -443,6 +462,9 @@ check "user 2 joins on the next call: account 1 is in GET /me, as a viewer" "vie
 as_member() { with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: $account_1"; }
 listed="$(as_member GET /functions | jq --arg id "$fn_1" 'map(select(.id == $id)) | length')"
 check "as a viewer, user 2 reads account 1's functions" "200 1" "$(status) $listed"
+usage_1="$(as_member GET /usage)"
+check "and its usage (P-22)" "200 true" \
+  "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id) | .requests > 0] | any' <<<"$usage_1")"
 as_member POST "/functions/$fn_1/invoke" '{"input":{}}' >/dev/null
 check "but can't invoke them" "403 The viewer role can't do this" "$(status) $(message)"
 user_2_id="$(with_token "$token_2" GET /me | jq -r .user.id)"

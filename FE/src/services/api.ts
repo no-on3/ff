@@ -143,6 +143,42 @@ export const functionsApi = {
     api.get<InvocationPage>(`/functions/${id}/invocations`, { params: { limit } }),
 };
 
+/**
+ * What GET /usage counts for a function and for the account (P-22), as D7 bills
+ * it: requests billed (successes, errors and timeouts), billed duration in ms,
+ * GB-seconds, and the calls not billed: throttled, platform errors, lost.
+ * contract.test.ts checks these names against the API's.
+ */
+export const USAGE_AMOUNTS = ['requests', 'billedMs', 'gbSeconds', 'throttled', 'platformErrors', 'lost'] as const;
+/** GB-seconds come as an exact decimal string; the rest are whole numbers. */
+export type UsageAmounts = Record<Exclude<(typeof USAGE_AMOUNTS)[number], 'gbSeconds'>, number> & { gbSeconds: string };
+
+export interface FunctionUsage extends UsageAmounts {
+  functionId: string;
+  /** Its name in its latest call of the month. */
+  functionName: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+}
+
+/** GET /usage: one month by the UTC calendar. */
+export interface MonthlyUsage {
+  /** YYYY-MM */
+  month: string;
+  /** Each function with calls in the month, the most GB-seconds first. */
+  functions: FunctionUsage[];
+  totals: UsageAmounts;
+}
+
+export const usageApi = {
+  /** `month`: YYYY-MM, by the UTC calendar. */
+  getMonth: (month: string) => api.get<MonthlyUsage>('/usage', { params: { month } }),
+
+  /** The same month as CSV, for a spreadsheet. */
+  getMonthCsv: (month: string) =>
+    api.get<string>('/usage', { params: { month }, headers: { Accept: 'text/csv' }, responseType: 'text' }),
+};
+
 // Metrics API endpoints
 export const getMetrics = async (functionId: string, start: Date, end: Date) => {
   const response = await api.get(`/metrics/${functionId}`, {

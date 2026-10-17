@@ -10,6 +10,7 @@ import Members from '../components/Members';
 import NavBar from '../components/NavBar';
 import Onboarding from '../components/Onboarding';
 import PendingApproval from '../components/PendingApproval';
+import Usage from '../components/Usage';
 import { config } from '../config';
 import { accountView, chooseAccount, loadErrorMessage, rememberAccount, rememberedAccount } from '../lib/session';
 import { Me, MeAccount, accountsApi, setApiAccount } from '../services/api';
@@ -40,6 +41,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
               <Route path="/functions" element={<FunctionList />} />
               <Route path="/functions/new" element={<CreateFunction />} />
               <Route path="/functions/:id" element={<FunctionDetail />} />
+              <Route path="/usage" element={<Usage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </>
           ) : (

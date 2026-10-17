@@ -18,6 +18,8 @@ import { FunctionsService } from './functions/functions.service';
 import { HealthController } from './health/health.controller';
 import { MetricsController } from './metrics/metrics.controller';
 import { MetricsService } from './metrics/metrics.service';
+import { UsageController } from './usage/usage.controller';
+import { UsageService } from './usage/usage.service';
 
 const ACCOUNT = '000000000001';
 const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
@@ -36,13 +38,14 @@ describe('the OpenAPI document (L1, P-08)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [FunctionsController, MetricsController, HealthController, AccountsController, ApiKeysController],
+      controllers: [FunctionsController, MetricsController, HealthController, AccountsController, ApiKeysController, UsageController],
       providers: [
         // The caller owns the function, so the ownership checks pass.
         { provide: FunctionsService, useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }) }) },
         { provide: MetricsService, useValue: succeeding(MetricsService) },
         { provide: AccountsService, useValue: succeeding(AccountsService) },
         { provide: ApiKeysService, useValue: succeeding(ApiKeysService) },
+        { provide: UsageService, useValue: succeeding(UsageService) },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -78,7 +81,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage']));
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
   });
 

@@ -33,9 +33,12 @@ const NavBar: React.FC = () => {
           FF console
         </Link>
         {account && (
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
             <NavLink to="/functions" className={linkClass}>
               Functions
+            </NavLink>
+            <NavLink to="/usage" className={linkClass}>
+              Usage
             </NavLink>
             <NavLink to="/account" end className={linkClass}>
               Account

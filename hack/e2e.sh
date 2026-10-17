@@ -12,6 +12,7 @@
 # given the invocation's ID, and a call lost when the backend is killed during
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
+# Then GET /usage (P-22) against the raw records, as JSON and as CSV.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -256,5 +257,29 @@ check "a sample a minute of the warm function: its instances, memory, account an
 report="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s capacity:report -- --days 1 2>&1)"
 check "the capacity report shows the account's day: capacity reserved, and capacity billed" true \
   "$(awk -v account="$tenant" '$2 == account && $3 != "0.000" && $5 != "0.000" { found = 1 } END { print found ? "true" : "false" }' <<<"$report")"
+
+echo "== usage API (P-22)"
+month="$(date -u +%Y-%m)"
+billed="status IN ('success', 'error', 'timeout')"
+usage="$(http GET /usage)"
+check "GET /usage answers this month, by the UTC calendar" "200 $month" "$(status) $(jq -r .month <<<"$usage")"
+check "the meter function: requests billed, the lost call apart, billed duration and GB-s, exactly as its records" \
+  "$(q "SELECT count(*) FILTER (WHERE $billed), count(*) FILTER (WHERE status = 'lost'), sum(billed_ms),
+               trim_scale(sum(billed_ms::numeric * memory_mb) / 1024000) FROM usage_records WHERE function_id = '$meter_id'")" \
+  "$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | "\(.requests) \(.lost) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
+check "the account's totals are its records' own sums" \
+  "$(q "SELECT count(*) FILTER (WHERE $billed), sum(billed_ms), trim_scale(sum(billed_ms::numeric * memory_mb) / 1024000)
+          FROM usage_records WHERE account_id = '$tenant' AND started_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'")" \
+  "$(jq -r '.totals | "\(.requests) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
+check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 1" \
+  "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
+csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
+check "as CSV: a download, its header, and the meter function's line" \
+  "text/csv; charset=utf-8|function_id,function_name,deleted,requests,billed_ms,gb_seconds,throttled,platform_errors,lost|true" \
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)"
+empty="$(http GET '/usage?month=2001-01')"
+check "a month without calls is empty" "200 0 0" "$(status) $(jq -r '"\(.functions | length) \(.totals.requests)"' <<<"$empty")"
+http GET '/usage?month=2026-13' >/dev/null
+check "a month that is not YYYY-MM is refused" "400 month must be a month as YYYY-MM, such as 2026-10" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 
 echo "e2e: $passed checks passed"
