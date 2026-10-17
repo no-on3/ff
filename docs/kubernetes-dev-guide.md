@@ -172,6 +172,49 @@ Then, once for the cluster, run `kubectl apply -f deploy/k8s/optional/runtimecla
 - The Python runtime's memory budget relies on `RLIMIT_DATA`, which gVisor does not enforce (verified). Under gVisor, a function that outgrows its memory meets the sandbox's limit instead.
 - The 10 s cold start without gVisor comes from the 100m CPU limit, which slows every start-up step roughly tenfold. See the migration plan, K-13.
 
+## The log pipeline
+
+Optional in development. Fluent Bit reads every function container's log on the node, and VictoriaLogs keeps the lines for 31 days ([ADR 0005](adr/0005-log-pipeline.md), client-readiness plan P-42). Until the logs API reads it (P-43), `GET /functions/:id/logs` reads the pods.
+
+```bash
+hack/k8s/logging-up.sh                  # install it (or: hack/k8s/cluster-up.sh --logging), about 30 s
+hack/k8s/test-logging-filter.sh         # L1: the collector's configuration and Lua filter, in its image; Docker only
+hack/k8s/test-it.sh log-pipeline        # L3: what functions print reaches the store, limited (about 2 min)
+hack/k8s/logging-down.sh                # remove it, with every stored line and the delete key
+```
+
+Running `logging-up.sh` again changes nothing. kubectl still reports the StatefulSet `configured`, because the API server fills in defaults in its volume template; VictoriaLogs isn't restarted.
+
+What it installs is in [`deploy/k8s/README.md`](../deploy/k8s/README.md#logging): VictoriaLogs in `ff-system` with its volume, Fluent Bit in `ff-logging` on every node, and NetworkPolicies that let only Fluent Bit and the backend's pods reach the store.
+
+**Each line** keeps its namespace (the account), its function ID, its pod, its stream (`stdout` or `stderr`), and the request ID of its call: the lines from its pod's `START` line to its `REPORT`. The runtimes write a call's output before its `END` (P-42 part 1), so every line the handler writes before it returns has its call. The namespace and the function ID are the stream fields, which every query names. They come from the pod's metadata, or, when the collector can't get it, from the log file's name and the pod's name (`fn-<function ID>-…`).
+
+**The limit:** each account's namespace keeps 2,000 lines and 1 MiB a second, counted by the lines' own time, so a backlog read after a restart keeps each second's budget. Past it, lines are dropped. Once that second is two seconds past, the store gets one line per function, with `stream` `ff`, saying how many:
+
+```
+FF dropped 23412 of this function's log lines written at 2026-10-17 21:30:05 UTC: its account wrote more than 2000 lines, or 1048576 bytes, in that second.
+```
+
+2,000 lines let an account at the beta plan's 100 calls a second write 17 lines of its own per call, besides `START`, `END` and `REPORT`; 1 MiB stops a loop of long lines that the line count alone would let through. `FF_LOG_LINES_PER_SECOND` and `FF_LOG_BYTES_PER_SECOND` in `deploy/k8s/logging/30-fluent-bit.yaml` change them.
+
+**A long line** is cut at 16,384 bytes, at the start of a character, and ends with ` …[truncated]`.
+
+**Querying it** with LogsQL, in development:
+
+```bash
+source hack/k8s/env.sh
+kubectl -n ff-system port-forward svc/victoria-logs 9428:9428 &
+curl -s http://127.0.0.1:9428/select/logsql/query --data-urlencode 'query={namespace="ff-t-…"} request_id:="<invocation id>"'
+curl -s http://127.0.0.1:9428/select/logsql/query --data-urlencode 'query={namespace="ff-t-…", function_id="<function id>"} _time:15m'
+```
+
+The L3 suite (`log-pipeline.it.spec.ts`, run where the pipeline is installed) deploys functions in two throw-away accounts and checks:
+- a Node.js call's lines (stdout and stderr) and a Python call's, with their namespace, function, pod, stream and request ID, all queryable within 5 s;
+- a call printing 30,000 lines: at most 2,000 of them stored per second, every other one counted in a notice, so that stored and counted add up to the call's 30,003 lines; and another account calling meanwhile keeps all its lines;
+- a 120,000-byte line of euro signs, cut to 5,461 of them;
+- the store refusing a function pod and an unlabelled pod in `ff-system`, and accepting one labelled as the backend;
+- the collector's permissions: pods and namespaces read, nothing else.
+
 ## Credentials
 
 Everything lives in `hack/.kube/` (git-ignored, mode 0700, files 0600):
@@ -200,4 +243,5 @@ See [`deploy/k8s/README.md`](../deploy/k8s/README.md). In short:
 | `Unauthorized` from the backend after a day | The token expired: run `hack/k8s/mint-token.sh`. |
 | System pods stuck in `ContainerCreating` | Images are still being pulled inside the node; `kubectl -n kube-system get events` shows progress. |
 | `hack/e2e.sh`: `FAIL backend answers on …` with an empty backend log | The backend was still loading its modules. On a spinning disk with a cold page cache that alone took 23 s. The script waits up to 180 s; raise it with `FF_E2E_BACKEND_START_SECONDS`. |
+| Fluent Bit logs `no upstream connections available to victoria-logs…` right after `logging-up.sh` | It started before VictoriaLogs was ready. It retries each chunk (10 times, for an hour or two in all), and the chunks wait on the node's disk: nothing is lost. |
 | Function pods in `ImagePullBackOff` for `ff-runtime-*` | kubelet's image GC deleted the imported image; it has no registry to re-pull from. GC runs when the disk passes the high threshold, which this cluster raises from 85% to 95% (`FF_IMAGE_GC_HIGH_THRESHOLD`). Re-import with `hack/k8s/load-images.sh`; `hack/k8s/test-it.sh` does this automatically. |

@@ -1,0 +1,81 @@
+# Fluent Bit 5.1.3 (2026-10-01) on every node, function pods' nodes included whatever their taints. It runs as
+# root because the node's container logs are root's, mode 0640, but with no capability, a read-only root
+# filesystem and /var/log read-only. Its offsets and buffer are in /var/lib/ff-logging on the node.
+# FF_LOG_LINES_PER_SECOND and FF_LOG_BYTES_PER_SECOND are each namespace's budget, per second of the lines'
+# own time: 2,000 lines lets an account at the beta plan's 100 calls a second write 3 runtime lines and 17
+# of its own per call; 1 MiB stops a loop of long lines that the line count alone would let through.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: ff-logging
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: ff
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluent-bit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fluent-bit
+        app.kubernetes.io/part-of: ff
+    spec:
+      serviceAccountName: fluent-bit
+      tolerations:
+        - operator: Exists
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:5.1.3
+          args: [-c, /fluent-bit/etc/ff/fluent-bit.yaml]
+          env:
+            - name: FF_LOG_LINES_PER_SECOND
+              value: "2000"
+            - name: FF_LOG_BYTES_PER_SECOND
+              value: "1048576"
+          ports:
+            - name: http
+              containerPort: 2020
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/ff
+              readOnly: true
+            - name: var-log
+              mountPath: /var/log
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/ff-logging/fluent-bit
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit
+        - name: var-log
+          hostPath:
+            path: /var/log
+            type: Directory
+        - name: state
+          hostPath:
+            path: /var/lib/ff-logging/fluent-bit
+            type: DirectoryOrCreate

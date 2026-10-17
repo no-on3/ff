@@ -1,0 +1,36 @@
+# The collector reads pods' and namespaces' metadata, for the labels it adds (the function's ID), and nothing
+# else: no Secrets, no ConfigMaps, no logs through the API (it reads the node's files), no writes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: ff-logging
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: ff
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ff-logging-fluent-bit
+  labels:
+    app.kubernetes.io/part-of: ff
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ff-logging-fluent-bit
+  labels:
+    app.kubernetes.io/part-of: ff
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ff-logging-fluent-bit
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: ff-logging

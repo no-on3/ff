@@ -17,6 +17,29 @@
 | `dev/kustomization.yaml` | | `base/` plus the file below |
 | `dev/10-clusterrole-dev.yaml` | ClusterRole + ClusterRoleBinding `ff-controller-dev-proxy` | `services/proxy` (get, create): in development the backend runs outside the cluster and invokes functions through the API server (`K8S_INVOKE_MODE=proxy`). Production runs it inside the cluster, calling the Services directly, so `base/` doesn't grant this |
 
+## Logging
+
+`logging/` is the log pipeline (client-readiness plan P-42, [ADR 0005](../../docs/adr/0005-log-pipeline.md)): Fluent Bit on every node reads the function containers' logs and writes them to VictoriaLogs, which only the collector and the backend reach. Apply it after `base/`, once the Secret with the store's delete key exists:
+
+```bash
+kubectl apply -k deploy/k8s/base
+kubectl -n ff-system create secret generic victoria-logs-delete-key --from-file=key=./delete-key   # 32 random bytes, hex; the backend needs it too (P-45)
+kubectl apply -k deploy/k8s/logging
+```
+
+In development, `hack/k8s/logging-up.sh` does both, with a random key, and `hack/k8s/logging-down.sh` removes the pipeline and its data.
+
+| File | Object | Purpose |
+|---|---|---|
+| `logging/00-namespace.yaml` | Namespace `ff-logging` | The collector's. Pod Security `privileged`, because reading the node's `/var/log` takes hostPath volumes, which every other level forbids; the pod is locked down by its own settings instead |
+| `logging/10-victoria-logs.yaml` | Service and StatefulSet `victoria-logs` in `ff-system` | VictoriaLogs v1.53.0: 31 days, and at most 8 GiB of its 10 GiB volume, the oldest days going first. `/delete/*` needs the key, read from the mounted Secret, so it is on no command line. Non-root, read-only root, no capabilities, no API token |
+| `logging/20-fluent-bit-rbac.yaml` | ServiceAccount `fluent-bit`, ClusterRole and ClusterRoleBinding `ff-logging-fluent-bit` | get, list and watch pods and namespaces: the labels it adds |
+| `logging/30-fluent-bit.yaml` | DaemonSet `fluent-bit` | Fluent Bit 5.1.3 on every node, any taint. Root, as the node's container logs are root's (mode 0640), but no capabilities, read-only root and `/var/log`. Its offsets and buffer are in `/var/lib/ff-logging` on the node. The limit's figures are its environment |
+| `logging/40-network-policies.yaml` | NetworkPolicies `victoria-logs` (`ff-system`) and `default-deny-ingress` (`ff-logging`) | Only Fluent Bit's pods and the backend's (`app.kubernetes.io/name: ff-backend`) reach the store; nobody reaches the collector |
+| `logging/fluent-bit/` | ConfigMap `fluent-bit-<hash>` | `fluent-bit.yaml` (the pipeline) and `ff.lua` (each line's fields and call, the limit, the cut). The hash rolls the DaemonSet when they change. `hack/k8s/test-logging-filter.sh` tests both |
+
+**The collector's permissions,** checked by the log pipeline's L3 suite: it may get, list and watch pods and namespaces, and nothing else: no Secrets, no ConfigMaps, no `pods/log`, no writes, no nodes.
+
 ## Optional
 
 | File | Object | Purpose |

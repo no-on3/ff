@@ -314,6 +314,19 @@ describe('timeouts and crashes recycle the worker', () => {
     await rt.stop();
   });
 
+  it("logs a timeout before the call's END, as the Python runtime does", async () => {
+    const rt = await startRuntime('async-timeout', { FUNCTION_TIMEOUT: '300' });
+    await readyz(rt, 200);
+
+    await invoke(rt, {}, { 'x-ff-request-id': 'req-slow' });
+
+    const [line] = logLines(rt, 'task timed out; restarting worker');
+    assert.deepEqual([line?.requestId, line?.timeoutMs], ['req-slow', 300]);
+    const stdout = rt.stdout();
+    assert.ok(stdout.indexOf('"task timed out') < stdout.indexOf('END RequestId: req-slow'), stdout);
+    await rt.stop();
+  });
+
   it('stops a CPU-bound infinite loop, keeps probes responsive, and recovers', async () => {
     const rt = await startRuntime('busy-loop', { FUNCTION_TIMEOUT: '700' });
     await readyz(rt, 200);

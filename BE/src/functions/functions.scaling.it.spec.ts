@@ -8,6 +8,7 @@
 import { ConfigService } from '@nestjs/config';
 import { randomInt } from 'node:crypto';
 import * as path from 'node:path';
+import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { MetricsService } from '../metrics/metrics.service';
 import { KubeClient, paths } from '../orchestrator/kubernetes/kube-client';
 import { KubernetesOrchestrator } from '../orchestrator/kubernetes/kubernetes.orchestrator';
@@ -46,7 +47,12 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
   const orchestrator = new KubernetesOrchestrator(s, client);
   const account = String(randomInt(1e12)).padStart(12, '0');
   const ns = accountNamespace(s.namespacePrefix, account);
-  const functions = new MemoryRepository<Function>(FUNCTION_DEFAULTS);
+  // Their account is active, as the database's relation would load it: the minute's tick scales only an active
+  // account's functions (P-71), so without it the function never steps down.
+  const functions = new MemoryRepository<Function>({
+    ...FUNCTION_DEFAULTS,
+    account: { id: account, status: AccountStatus.ACTIVE } as Account,
+  });
   const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
   const metrics = new MetricsService(new MemoryRepository() as never, functions as never, orchestrator, onePlan());
   const service = new FunctionsService(

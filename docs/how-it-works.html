@@ -1306,7 +1306,7 @@ const SCENARIOS = [
   },
   {
     id: 'logs', title: 'Read a function\'s logs', lanes: ['user', 'api', 'db', 'k8s', 'pod'],
-    summary: 'GET /functions/:id/logs gives the function\'s newest lines without cluster access (P-40): the backend reads each running instance\'s container log through the Kubernetes API, merges the lines by time, and gives each one the call it belongs to. The lines live with the pods until the log store keeps them (P-42).',
+    summary: 'GET /functions/:id/logs gives the function\'s newest lines without cluster access (P-40): the backend reads each running instance\'s container log through the Kubernetes API, merges the lines by time, and gives each one the call it belongs to. The lines live with the pods. Where the log pipeline is installed (P-42), Fluent Bit also copies every line, with its call, into VictoriaLogs, which keeps it 31 days; this API reads the store from P-43 on.',
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/logs?tail=200', title: 'You ask for the logs',
         text: 'The newest 200 lines by default, 1,000 at most, and only the last sinceSeconds when given. Every member of the account may read them, and an API key with logs:read.',

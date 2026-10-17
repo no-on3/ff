@@ -82,8 +82,8 @@ Each measurement is the last of several runs: the earlier ones found the five th
   - the `kubernetes` filter for the pod's labels;
   - one Lua filter for the tenant, the function and the request ID, the per-namespace limit, and the cut;
   - the `http` output to VictoriaLogs' `/insert/jsonline`.
-- **The limit:** each namespace keeps a number of lines per second of the lines' own time, 200 in the spike. P-42 sets the production figure, and writes one line per namespace and second saying how many lines were dropped, so that the owner can see it.
-- **The cut** counts bytes, as LuaJIT has no UTF-8 library. P-42 backs it off to a character boundary.
+- **The limit:** each namespace keeps a number of lines per second of the lines' own time, 200 in the spike. P-42 sets the production figure, and writes one line per namespace and second saying how many lines were dropped, so that the owner can see it. **As built in P-42:** 2,000 lines and 1 MiB a second; the notices are per function and second, since every query names a function.
+- **The cut** counts bytes, as LuaJIT has no UTF-8 library. P-42 backs it off to a character boundary. **Done in P-42.**
 - **Times:** Fluent Bit writes them to the microsecond (Kubernetes has nanoseconds). Two lines of one pod in the same microsecond may come back in either order.
 - **Vector** remains possible. It would need `max_merged_line_bytes` with `truncate`, the same Lua limit (not `throttle`), and the memory to match.
 
@@ -105,9 +105,9 @@ Each measurement is the last of several runs: the earlier ones found the five th
 ## Consequences
 - **P-42:**
   - the Node.js runtime's ordering change, with a test that checks a call's last line comes before its `END` (done first);
-  - the manifests in `deploy/k8s/logging/`: VictoriaLogs as a StatefulSet with a volume, Fluent Bit as a DaemonSet with read-only access to pods' and namespaces' metadata, and the NetworkPolicies;
-  - the limit's production figure, the line counting what was dropped, and the cut on a character boundary;
-  - L3 tests: a `print` arrives with its function ID and request ID, and a namespace printing in a loop is limited without affecting another.
+  - the manifests in `deploy/k8s/logging/`: VictoriaLogs as a StatefulSet with a volume, Fluent Bit as a DaemonSet with read-only access to pods' and namespaces' metadata, and the NetworkPolicies (done; Fluent Bit in a namespace of its own, `ff-logging`, as hostPath volumes need Pod Security `privileged`);
+  - the limit's production figure, the line counting what was dropped, and the cut on a character boundary (done);
+  - L3 tests: a `print` arrives with its function ID and request ID, and a namespace printing in a loop is limited without affecting another (done, with the NetworkPolicies and the collector's permissions checked too).
 - **P-43:**
   - the API keeps P-40's shape and reads VictoriaLogs instead of the pods;
   - `start` is bounded by the plan's retention;

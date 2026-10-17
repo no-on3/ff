@@ -14,5 +14,12 @@ if kubectl get runtimeclass gvisor >/dev/null 2>&1; then
 else
   echo "no gvisor RuntimeClass: the sandboxed case is skipped (hack/k8s/gvisor-up.sh installs it)"
 fi
+# The log pipeline's suite runs where the pipeline is installed (hack/k8s/logging-up.sh).
+if kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1; then
+  export K8S_IT_LOGGING=1
+  echo "log pipeline found: its suite runs"
+else
+  echo "no log pipeline: its suite is skipped (hack/k8s/logging-up.sh installs it)"
+fi
 cd "$FF_REPO_ROOT/BE"
 npm run test:it -- "$@"

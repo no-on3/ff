@@ -108,7 +108,7 @@ An error thrown by the handler is also logged, before `END`, as one JSON line, t
 {"time":"…","level":"error","msg":"function error","requestId":"…","errorType":"TypeError","errorMessage":"bad input","stackTrace":["at handler (/var/task/function.ts:2:9)"]}
 ```
 
-The stack trace points at the lines of the TypeScript source (source maps are on), and leaves out the runtime's own frames and Node's internals. Platform events (start, initialization, timeouts, restarts) are one-line JSON too. **Environment variables are never logged.**
+The stack trace points at the lines of the TypeScript source (source maps are on), and leaves out the runtime's own frames and Node's internals. Platform events (start, initialization, timeouts, restarts) are one-line JSON too. A call's own events, a timeout (`task timed out; restarting worker`) or a crash, come before its `END`, as in the Python runtime, so the logs give them its request ID. **Environment variables are never logged.**
 
 **A call's output comes before its `END`.** The log collector gives each line the request ID of the call between its pod's `START` and `REPORT` lines ([ADR 0005](../../docs/adr/0005-log-pipeline.md)), and so does `GET /functions/:id/logs`, so a line written after `END` would have none. A worker thread's output reaches the process asynchronously, so the main thread forwards it itself:
 - **The end of a call's output is marked.** When the handler settles, the worker writes an end-of-call marker to its stdout and to its stderr, through the streams' own `write`, so code that replaced `process.stdout.write` changes nothing. The main thread takes the markers out of what it forwards. It writes `END` and `REPORT` once both markers have come, and only then answers the call and starts the next one.
@@ -133,12 +133,13 @@ Protocol v2 (2026-10-17, client-readiness plan P-04; the order of the logs, P-42
 | A reload that fails after a crash | pod unready for good | the runtime exits, and Kubernetes restarts it |
 | A call waiting for its turn | waited as long as the queue took | waits at most `FF_MAX_QUEUE_WAIT_MS`, one timeout by default, then gets 429 |
 | A call's output | could reach the log after its `END`: the worker's last `console.log` line did for every call measured in P-41 | before its `END`, which waits a second at most for it (see [Logs](#logs)) |
+| A timeout's log line | after the call's `REPORT` | before its `END`, as in the Python runtime |
 
 ## Developing and testing
 
 ```bash
 cd runtimes/nodejs
 npm install
-npm test                       # L1: 36 protocol tests on real processes and 4 for the output relay, ~20 s, no Docker
+npm test                       # L1: 37 protocol tests on real processes and 4 for the output relay, ~20 s, no Docker
 test/container-smoke.sh        # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```

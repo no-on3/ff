@@ -341,8 +341,9 @@ function finish(inv: Invocation): void {
 
 function onTimeout(inv: Invocation): void {
   if (current !== inv) return;
-  finish(inv);
+  // Before END, as the Python runtime writes it: the log store tags a call's lines up to its REPORT.
   log({ level: 'error', msg: 'task timed out; restarting worker', requestId: inv.requestId, timeoutMs });
+  finish(inv);
   respondError(inv, 504, {
     errorType: 'Sandbox.Timedout',
     errorMessage: `Task timed out after ${(timeoutMs / 1000).toFixed(2)} seconds`,

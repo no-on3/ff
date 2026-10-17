@@ -3,8 +3,18 @@
 # development manifests (deploy/k8s/dev: the production base plus the Service
 # proxy a backend outside the cluster needs) and mints ff-controller credentials.
 # Safe to re-run: an existing cluster is reused.
+#   hack/k8s/cluster-up.sh [--logging]
+# --logging installs the log pipeline too (hack/k8s/logging-up.sh).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+
+logging=false
+for arg in "$@"; do
+  case "$arg" in
+    --logging) logging=true ;;
+    *) echo "usage: $0 [--logging]" >&2; exit 2 ;;
+  esac
+done
 
 # A k3s node needs ~1 GB; keep headroom for the backend and function pods.
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
@@ -35,4 +45,5 @@ fi
 kubectl wait --for=condition=Ready node --all --timeout=120s
 kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/dev"
 "$FF_REPO_ROOT/hack/k8s/mint-token.sh"
+if $logging; then "$FF_REPO_ROOT/hack/k8s/logging-up.sh"; fi
 echo "cluster $FF_CLUSTER_NAME is ready (admin kubeconfig: $KUBECONFIG)"

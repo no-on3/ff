@@ -1,0 +1,11 @@
+# The log collector's namespace. A node-level collector reads the node's /var/log through hostPath volumes,
+# which every Pod Security level but `privileged` forbids, so it can't run in ff-system (`restricted`). The
+# DaemonSet locks its pod down itself: read-only mounts and root filesystem, no capabilities.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ff-logging
+  labels:
+    app.kubernetes.io/part-of: ff
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
