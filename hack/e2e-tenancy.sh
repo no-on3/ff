@@ -174,6 +174,7 @@ path_for() {
   local template=$1 method=$2 path name params=()
   case $template in
     /accounts/* | /admin/accounts/*) path="${template//\{id\}/$4}" ;;
+    /admin/plans/*) path="${template//\{id\}/beta}" ;;
     /api-keys/*) path="${template//\{id\}/${5:-0123456789ab}}" ;;
     *) path="${template//\{id\}/$3}" ;;
   esac
@@ -206,6 +207,10 @@ body_for() {
     "PUT /admin/accounts/{id}/plan") echo '{"planId": "beta", "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/egress") echo '{"internetEgress": true, "reason": "l5 tries"}' ;;
     "POST /admin/accounts/"*) echo '{"reason": "l5 tries"}' ;;
+    "POST /admin/plans") echo '{"id": "l5-tries", "name": "L5 tries", "limits": {}, "reason": "l5 tries"}' ;;
+    "PUT /admin/plans/{id}") echo '{"limits": {}, "reason": "l5 tries"}' ;;
+    "POST /admin/price-books") echo '{"validFrom": "2030-01-01T00:00:00Z", "document": {}, "reason": "l5 tries"}' ;;
+    "POST /admin/price-books/preview") echo '{"document": {}}' ;;
     "PATCH /members/{userId}") echo '{"role": "viewer"}' ;;
     POST* | PUT* | PATCH*) echo '{}' ;;
   esac
@@ -566,8 +571,10 @@ with_token "$operator_token" POST "/admin/accounts/$account_1/reactivate" '{"rea
 check "the operator reactivates it" 200 "$(status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"again"}}' >/dev/null
 check "and its function answers again, from a cold start" 201 "$(status)"
-"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc \
-  "INSERT INTO plans (id, name, limits) SELECT 'l5-large', 'L5 large', jsonb_set(limits, '{quota}', '{\"pods\": 30, \"cpu\": \"12\", \"memory\": \"12Gi\"}') FROM plans WHERE id = 'beta'" >/dev/null
+beta_limits="$(with_token "$operator_token" GET /admin/plans | jq -c '.[] | select(.id == "beta") | .limits')"
+with_token "$operator_token" POST /admin/plans \
+  "$(jq -cn --argjson limits "$beta_limits" '{id: "l5-large", name: "L5 large", limits: ($limits | .quota = {pods: 30, cpu: "12", memory: "12Gi"}), reason: "l5: a plan with room"}')" >/dev/null
+check "the operator creates a plan with more room (P-73)" 201 "$(status)"
 moved="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/plan" '{"planId": "l5-large", "reason": "l5: needs more room"}')"
 check "the operator moves account 1 to a larger plan, and its quota follows at once" "200 l5-large 30 12 12Gi" \
   "$(status) $(jq -r .account.planId <<<"$moved") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
@@ -575,6 +582,29 @@ with_token "$operator_token" PUT "/admin/accounts/$account_1/plan" '{"planId": "
 check "a plan that doesn't exist is refused" "404 Plan imaginary not found" "$(status) $(message)"
 egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '{"internetEgress": true, "reason": "l5: calls a payment API"}')"
 check "internet egress is turned on for account 1" "200 true" "$(status) $(jq -r .account.internetEgress <<<"$egress")"
+plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
+  "$(jq -cn --argjson limits "$beta_limits" '{limits: ($limits | .quota = {pods: 32, cpu: "16", memory: "16Gi"}), reason: "l5: pilots need more"}')")"
+check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
+  "$(status) $(jq -r '"\(.quota.applied) \(.quota.failed)"' <<<"$plan_change") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
+
+echo "== the operator's price books (P-73)"
+books="$(with_token "$operator_token" GET /admin/price-books)"
+check "the first price book is active: AWS's prices at the BCT's rate" "200 1 active aws-lambda 3.0080" \
+  "$(status) $(jq -r '"\(length) \(.[0].status) \(.[0].document.source.kind) \(.[0].document.source.usdRate)"' <<<"$books")"
+first_book="$(jq -c '.[0].document' <<<"$books")"
+starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
+created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
+check "the operator adds a book for next year: scheduled, made by the operator" "201 scheduled true" \
+  "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"
+with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: ($doc | .prices.requestsPerMillion = "1"), reason: "l5 tries"}')" >/dev/null
+check "a book that says AWS's prices, but isn't them, is refused" "400 prices.requestsPerMillion: must be 0.20 × 3.0080 = 0.6016" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+preview="$(with_token "$operator_token" POST /admin/price-books/preview "$(jq -cn --argjson doc "$first_book" '{document: $doc}')")"
+check "the operator previews it on last month, with no reason asked, as it changes nothing" "200 $(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m) TND" \
+  "$(status) $(jq -r '"\(.month) \(.currency)"' <<<"$preview")"
+with_token "$operator_token" DELETE "/admin/price-books/$(jq -r '.[0].id' <<<"$books")" '{"reason": "l5 tries"}' >/dev/null
+check "the active book is never removed" 409 "$(status)"
+with_token "$operator_token" DELETE "/admin/price-books/$(jq -r .id <<<"$created")" '{"reason": "l5: not yet"}' >/dev/null
+check "a scheduled one is" "200 1" "$(status) $(with_token "$operator_token" GET /admin/price-books | jq length)"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
   "200 account.approve account.suspend account.reactivate account.plan account.egress" \
@@ -585,7 +615,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 7 account.approve,account.egress,account.plan,account.reactivate,account.suspend,settings.update" \
+  "200 11 account.approve,account.egress,account.plan,account.reactivate,account.suspend,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

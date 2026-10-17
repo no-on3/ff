@@ -14,6 +14,15 @@ export const IS_ADMIN = 'ff:admin';
  */
 export const AdminRoutes = () => SetMetadata(IS_ADMIN, true);
 
+export const CHANGES_NOTHING = 'ff:admin-changes-nothing';
+
+/**
+ * Marks an admin route whose POST changes nothing, such as a preview that
+ * takes a draft in its body (P-73): it needs no reason. Every other write
+ * does, and is still for operators only.
+ */
+export const ChangesNothing = () => SetMetadata(CHANGES_NOTHING, true);
+
 /** The operator calling an admin route. */
 export interface Operator {
   /** Keycloak's user ID. */

@@ -1,4 +1,6 @@
+import { LIMIT_FIELDS, quotaLabel } from './plans';
 import { SETTINGS, describeSetting } from './settings';
+import { whenUtc } from './time';
 import { TableQuery, pageParams } from './table';
 
 /**
@@ -12,8 +14,12 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'account.suspend', label: 'Account suspended' },
   { value: 'account.reactivate', label: 'Account reactivated' },
   { value: 'account.close', label: 'Account closed' },
-  { value: 'account.plan', label: 'Plan changed' },
+  { value: 'account.plan', label: 'Account moved to a plan' },
   { value: 'account.egress', label: 'Internet egress changed' },
+  { value: 'plan.create', label: 'Plan created' },
+  { value: 'plan.update', label: 'Plan changed' },
+  { value: 'price_book.create', label: 'Price book created' },
+  { value: 'price_book.delete', label: 'Price book removed' },
   { value: 'settings.update', label: 'Settings changed' },
 ];
 
@@ -70,13 +76,20 @@ const ACCOUNT_FIELDS: Record<string, { label: string; value?: (value: unknown) =
   internetEgress: { label: 'Internet egress', value: (value) => (value === true ? 'on' : value === false ? 'off' : shown(value)) },
 };
 
+/** A plan's limits by name (P-73); its quota in one line. A plan's name changes too. */
+const PLAN_FIELDS: Record<string, { label: string; value?: (value: unknown) => string }> = {
+  ...Object.fromEntries(LIMIT_FIELDS.filter(({ path }) => path.length === 1).map(({ path, label }) => [path[0], { label }])),
+  quota: { label: 'Quota', value: (value) => (value && typeof value === 'object' ? quotaLabel(value as Parameters<typeof quotaLabel>[0]) : shown(value)) },
+  name: { label: 'Name' },
+};
+
 /**
  * One change, from → to: a setting by its label, as the Settings page shows
  * it; an account's status, plan or egress by name; anything else as the API
  * names it.
  */
 function describeChange(name: string, { from, to }: { from: unknown; to: unknown }): string {
-  const field = ACCOUNT_FIELDS[name];
+  const field = ACCOUNT_FIELDS[name] ?? PLAN_FIELDS[name];
   if (field) return `${field.label}: ${(field.value ?? shown)(from)} → ${(field.value ?? shown)(to)}`;
   const setting = SETTINGS.find((known) => known.key === name);
   if (!setting) return `${name}: ${shown(from)} → ${shown(to)}`;
@@ -93,6 +106,8 @@ export function describeAction(entry: Pick<OperatorAction, 'details' | 'resource
       .map(([name, change]) => describeChange(name, change))
       .join('; ');
   }
+  // A price book, by when it starts (P-73).
+  if (typeof entry.details?.validFrom === 'string') return `Book from ${whenUtc(entry.details.validFrom)}`;
   return entry.resource ?? '';
 }
 

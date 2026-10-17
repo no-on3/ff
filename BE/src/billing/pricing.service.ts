@@ -57,10 +57,14 @@ export class PricingService {
     return atStart ? [atStart, ...valid] : valid;
   }
 
-  /** An account's month (YYYY-MM, UTC), priced; null when no book covers any of it. */
-  async estimate(accountId: string, month: string): Promise<AccountEstimate | null> {
+  /**
+   * An account's month (YYYY-MM, UTC), priced; null when no book covers any
+   * of it. `books` prices it instead of the stored books, in time order: a
+   * draft, for a preview (P-73).
+   */
+  async estimate(accountId: string, month: string, books?: Array<Pick<PriceBook, 'id' | 'currency' | 'validFrom' | 'prices'>>): Promise<AccountEstimate | null> {
     const { from, to } = monthBounds(month);
-    const books = await this.booksFor(from, to);
+    books ??= await this.booksFor(from, to);
     if (books.length === 0) return null;
     const currencies = new Set(books.map((book) => book.currency));
     if (currencies.size > 1) throw new Error(`The price books of ${month} are in several currencies: ${[...currencies].join(', ')}`);
@@ -81,6 +85,18 @@ export class PricingService {
       pricedFrom,
       books: books.map(({ id, validFrom }) => ({ id, validFrom })),
     };
+  }
+
+  /** The accounts that used something in the month: a call, or an instance sampled. */
+  async accountsWithUsage(month: string): Promise<string[]> {
+    const { from, to } = monthBounds(month);
+    const rows = await this.books.manager.query<Array<{ account_id: string }>>(
+      `SELECT "account_id" FROM "usage_records" WHERE "started_at" >= $1 AND "started_at" < $2
+       UNION SELECT "account_id" FROM "capacity_samples" WHERE "minute" >= $1 AND "minute" < $2
+       ORDER BY 1`,
+      [from, to],
+    );
+    return rows.map((row) => row.account_id);
   }
 
   /**

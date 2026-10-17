@@ -64,15 +64,33 @@ describe('describeAction', () => {
     expect(describeAction(entry({ action: 'account.approve', details: { changes } }))).toBe('Status: pending → active; Plan: beta → large; Internet egress: off → on');
   });
 
+  it("reads a plan's change by each limit's name, its quota in one line (P-73)", () => {
+    const changes = {
+      name: { from: 'Team', to: 'Teams' },
+      functions: { from: 25, to: 50 },
+      quota: { from: { pods: 20, cpu: '8', memory: '8Gi' }, to: { pods: 40, cpu: '16', memory: '16Gi' } },
+    };
+
+    expect(describeAction(entry({ action: 'plan.update', details: { reason: 'r', changes } }))).toBe(
+      'Name: Team → Teams; Functions per account: 25 → 50; Quota: 20 instances, 8 CPU, 8Gi → 40 instances, 16 CPU, 16Gi',
+    );
+  });
+
+  it('reads a price book by when it starts (P-73)', () => {
+    const created = entry({ action: 'price_book.create', resource: 'price_book:0c9e', details: { reason: 'r', validFrom: '2026-11-01T00:00:00.000Z' } });
+
+    expect(describeAction(created)).toBe('Book from 2026-11-01 00:00:00 UTC');
+  });
+
   it('names any other change as the API does: none for no value, JSON for one with parts', () => {
     const changes = {
       reviewer: { from: 'sami', to: 'amira' },
       taxId: { from: null, to: '1234567A' },
-      quota: { from: { pods: 10, memory: '2Gi' }, to: { pods: 20, memory: '4Gi' } },
+      window: { from: { days: 10, hours: 2 }, to: { days: 20, hours: 4 } },
     };
 
-    expect(describeAction(entry({ action: 'plan.update', details: { changes } }))).toBe(
-      'reviewer: sami → amira; taxId: none → 1234567A; quota: {"pods":10,"memory":"2Gi"} → {"pods":20,"memory":"4Gi"}',
+    expect(describeAction(entry({ action: 'invoice.update', details: { changes } }))).toBe(
+      'reviewer: sami → amira; taxId: none → 1234567A; window: {"days":10,"hours":2} → {"days":20,"hours":4}',
     );
   });
 

@@ -6,11 +6,16 @@ import settingsSource from '../../BE/src/admin/platform-settings.ts?raw';
 import auditSource from '../../BE/src/audit/audit.service.ts?raw';
 import accountEntitySource from '../../BE/src/accounts/entities/account.entity.ts?raw';
 import statusChangesSource from '../../BE/src/admin/account-status-changes.ts?raw';
+import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
+import priceBookSource from '../../BE/src/billing/price-book.ts?raw';
+import priceBooksMigration from '../../BE/src/migrations/1792235773406-PriceBooks.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
 import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
 import { OPERATOR_ACTIONS } from './lib/audit';
+import { LIMIT_FIELDS } from './lib/plans';
+import { SKUS, multiplyDecimals } from './lib/prices';
 import { REASON_LENGTH } from './lib/reason';
 import { SETTINGS } from './lib/settings';
 
@@ -108,6 +113,40 @@ describe('the account statuses and their changes (P-71)', () => {
 
     expect(Object.keys(backendChanges)).toHaveLength(5);
     expect(appChanges).toEqual(backendChanges);
+  });
+});
+
+describe("the plans' limits and the price books' SKUs (P-73)", () => {
+  /** The keys of a zod strictObject's body, two spaces in, from the backend's source. */
+  const keysOf = (source: string, start: string, end: string) => {
+    const body = source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+    return [...body.matchAll(/^ {2,4}(\w+): /gm)].map((match) => match[1]);
+  };
+
+  it("are the backend's limits, the quota's three included", () => {
+    const limits = keysOf(planLimitsSource, 'export const planLimitsSchema', '\n});');
+    const app = LIMIT_FIELDS.map(({ path }) => path[0]).filter((key, index, all) => all.indexOf(key) === index);
+    const quota = /quota: z\.strictObject\(\{ (\w+): \w+, (\w+): \w+, (\w+): \w+ \}\)/.exec(planLimitsSource)?.slice(1);
+
+    expect(app).toEqual(limits.filter((key) => key !== 'pods' && key !== 'cpu' && key !== 'memory'));
+    expect(LIMIT_FIELDS.filter(({ path }) => path[0] === 'quota').map(({ path }) => path[1])).toEqual(quota);
+  });
+
+  it("are the backend's SKUs, in its order", () => {
+    const prices = priceBookSource.slice(priceBookSource.indexOf('  prices: z.strictObject({'));
+    const skus = [...prices.slice(0, prices.indexOf('\n  }),')).matchAll(/^ {4}(\w+): /gm)].map((match) => match[1]);
+
+    expect(skus).toEqual([...SKUS]);
+  });
+
+  it("price the first book's TND as the migration has them: its US$ prices times its rate", () => {
+    const usd = priceBooksMigration.slice(priceBooksMigration.indexOf('usdPrices: {'), priceBooksMigration.indexOf("usdRate: '"));
+    const tnd = priceBooksMigration.slice(priceBooksMigration.indexOf('  prices: {'), priceBooksMigration.indexOf('minimumBilledMs'));
+    const numbers = (text: string) => [...text.matchAll(/(?:price|requestsPerMillion|provisionedGbSecond|provisionedDurationGbSecond): '([\d.]+)'/g)].map((match) => match[1]);
+    const rate = /usdRate: '([\d.]+)'/.exec(priceBooksMigration)?.[1] as string;
+
+    expect(numbers(usd)).toHaveLength(6);
+    expect(numbers(usd).map((price) => multiplyDecimals(price, rate))).toEqual(numbers(tnd));
   });
 });
 

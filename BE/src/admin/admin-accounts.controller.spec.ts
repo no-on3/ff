@@ -8,7 +8,8 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { PlansService } from '../plans/plans.service';
-import { AdminAccountsController, AdminPlansController } from './admin-accounts.controller';
+import { AdminAccountsController } from './admin-accounts.controller';
+import { AdminPlansController } from './admin-plans.controller';
 import { AdminAccountsService } from './admin-accounts.service';
 import { IS_ADMIN } from './operator';
 

@@ -1,8 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AuditPageView, AuditQuery } from '../audit/audit.dto';
-import { PlanSummary } from '../plans/plan.dto';
-import { PlansService } from '../plans/plans.service';
 import { StatusChange } from './account-status-changes';
 import { AccountIdParam, AdminAccountPageView, AdminAccountView, AdminAccountsQuery, AdminEgressDto, AdminPlanDto } from './admin-accounts.dto';
 import { AdminAccountsService } from './admin-accounts.service';
@@ -99,20 +97,5 @@ export class AdminAccountsController {
 
   private change(id: string, change: StatusChange, body: AdminChange): Promise<AdminAccountView> {
     return this.accounts.changeStatus(id, change, body.reason);
-  }
-}
-
-/** The plans an account can be moved to (P-71); P-73 edits them. */
-@ApiTags('admin')
-@AdminRoutes()
-@Controller('admin/plans')
-export class AdminPlansController {
-  constructor(private readonly plans: PlansService) {}
-
-  @Get()
-  @ApiOperation({ summary: 'Every plan, with its limits (operators only)' })
-  @ApiResponse({ status: 200, type: [PlanSummary] })
-  list(): Promise<PlanSummary[]> {
-    return this.plans.list();
   }
 }

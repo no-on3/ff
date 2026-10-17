@@ -18,7 +18,7 @@ import { requestIdOf } from '../common/request-context';
 import { IS_PUBLIC } from './public.decorator';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from './route-rules';
 import { Identity, InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
-import { ADMIN_CLIENT, IS_ADMIN, OPERATOR_ROLE, REASON_LENGTH, RequestWithOperator, validReason } from '../admin/operator';
+import { ADMIN_CLIENT, CHANGES_NOTHING, IS_ADMIN, OPERATOR_ROLE, REASON_LENGTH, RequestWithOperator, validReason } from '../admin/operator';
 
 type GuardedRequest = RequestWithPrincipal &
   RequestWithOperator & { user?: User; ip?: string; requestId?: string; method?: string; body?: unknown };
@@ -76,7 +76,7 @@ export class AuthGuard implements CanActivate {
 
     const request = context.switchToHttp().getRequest<GuardedRequest>();
     if (this.reflector.getAllAndOverride<boolean>(IS_ADMIN, targets)) {
-      await this.authenticateOperator(request);
+      await this.authenticateOperator(request, this.reflector.getAllAndOverride<boolean>(CHANGES_NOTHING, targets) === true);
       return true;
     }
     if (this.config.get<string>('auth.mode') === 'dev') {
@@ -137,7 +137,7 @@ export class AuthGuard implements CanActivate {
    * dashboard; never an API key or development mode. A change needs a reason,
    * which the audit log keeps with it; asked for only once the caller is known.
    */
-  private async authenticateOperator(request: GuardedRequest): Promise<void> {
+  private async authenticateOperator(request: GuardedRequest, changesNothing: boolean): Promise<void> {
     if (this.config.get<string>('auth.mode') === 'dev') {
       throw new BadRequestException("Development mode has no operator: the admin dashboard needs FF_AUTH_MODE=oidc and an operator's login");
     }
@@ -149,7 +149,7 @@ export class AuthGuard implements CanActivate {
     }
     if (!identity.realmRoles?.includes(OPERATOR_ROLE)) throw new ForbiddenException("The admin routes are for FF's operators");
     request.operator = { id: identity.userId, email: identity.email ?? identity.userId, ...(identity.name ? { name: identity.name } : {}) };
-    if (!READS.has(request.method ?? 'GET') && !validReason((request.body as { reason?: unknown } | undefined)?.reason)) {
+    if (!changesNothing && !READS.has(request.method ?? 'GET') && !validReason((request.body as { reason?: unknown } | undefined)?.reason)) {
       throw new BadRequestException(
         `Every admin change needs a reason: send reason, ${REASON_LENGTH.min} to ${REASON_LENGTH.max} characters, in the body`,
       );

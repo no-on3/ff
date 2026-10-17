@@ -87,3 +87,45 @@ export function bookPrices(book: { id: string; validFrom: Date; prices: unknown 
     monthlyPlanFee: Decimal.parse(prices.monthlyPlanFee),
   };
 }
+
+/** AWS's US$ prices, as a book that says it comes from them records them (P-30, P-73). */
+const usdPricesSchema = z.strictObject({
+  requestsPerMillion: decimal,
+  gbSecond: z.array(z.strictObject({ upToGbSeconds: z.number().int().positive().nullable(), price: decimal })).min(1),
+  provisionedGbSecond: decimal,
+  provisionedDurationGbSecond: decimal,
+});
+
+/**
+ * Why a book that says its prices are AWS's US$ prices times a rate
+ * (source.kind "aws-lambda") isn't exactly that, SKU by SKU; none for a book
+ * that says nothing of the kind. D8's knobs and the free tier are FF's own.
+ */
+export function awsPriceProblems(document: PriceDocument): string[] {
+  if (document.source.kind !== 'aws-lambda') return [];
+  const usd = usdPricesSchema.safeParse(document.source.usdPrices);
+  if (!usd.success || document.source.usdRate === undefined) return ['source: an aws-lambda book records usdPrices and usdRate'];
+  const rate = Decimal.parse(document.source.usdRate);
+  const problems: string[] = [];
+  const expect = (sku: string, price: string, usdPrice: string) => {
+    const expected = Decimal.parse(usdPrice).times(rate);
+    if (Decimal.parse(price).compare(expected) !== 0) problems.push(`prices.${sku}: must be ${usdPrice} × ${document.source.usdRate} = ${expected.toString()}`);
+  };
+  const { prices } = document;
+  expect('requestsPerMillion', prices.requestsPerMillion, usd.data.requestsPerMillion);
+  if (usd.data.gbSecond.length !== prices.gbSecond.length || usd.data.gbSecond.some((tier, index) => tier.upToGbSeconds !== prices.gbSecond[index].upToGbSeconds)) {
+    problems.push('prices.gbSecond: must have the tiers of source.usdPrices.gbSecond');
+  } else {
+    usd.data.gbSecond.forEach((tier, index) => expect(`gbSecond.${index}.price`, prices.gbSecond[index].price, tier.price));
+  }
+  expect('provisionedGbSecond', prices.provisionedGbSecond, usd.data.provisionedGbSecond);
+  expect('provisionedDurationGbSecond', prices.provisionedDurationGbSecond, usd.data.provisionedDurationGbSecond);
+  return problems;
+}
+
+/** A book's problems, each "path: why": the schema's, then AWS's prices. Empty when it fits. */
+export function priceDocumentProblems(value: unknown): string[] {
+  const parsed = priceDocumentSchema.safeParse(value);
+  if (!parsed.success) return parsed.error.issues.map((issue) => `${issue.path.join('.') || 'document'}: ${issue.message}`);
+  return awsPriceProblems(parsed.data);
+}

@@ -14,7 +14,7 @@ import { AccountChoice, AccountsService } from '../accounts/accounts.service';
 import { MembersService } from '../accounts/members.service';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { ApiKeysService } from '../api-keys/api-keys.service';
-import { AdminRoutes, CurrentOperator, Operator } from '../admin/operator';
+import { AdminRoutes, ChangesNothing, CurrentOperator, Operator } from '../admin/operator';
 import { ApiExceptionFilter } from '../common/api-exception.filter';
 import { AuthGuard } from './auth.guard';
 import { Principal } from './principal';
@@ -72,6 +72,13 @@ class AdminProbeController {
   @Put('settings')
   change(@CurrentOperator() operator: Operator, @Body() body: { reason?: string }) {
     return { changedBy: operator.id, reason: body.reason };
+  }
+
+  /** Like a price book's preview (P-73): a POST for its body, which changes nothing. */
+  @Post('settings/preview')
+  @ChangesNothing()
+  preview(@CurrentOperator() operator: Operator) {
+    return { previewedBy: operator.id };
   }
 }
 
@@ -326,6 +333,19 @@ describe('the global guard and token checks (L1, P-11)', () => {
 
       const res = await admin(OPERATOR, 'PUT', { reason: 'Pilot customers asked for it' });
       expect([res.status, await res.json()]).toEqual([200, { changedBy: 'kc-user-1', reason: 'Pilot customers asked for it' }]);
+    });
+
+    it('take no reason for a route that changes nothing, such as a preview: still for operators only (P-73)', async () => {
+      const preview = async (claims: JWTPayload) =>
+        fetch(`${baseUrl}/admin/settings/preview`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${await token(claims)}`, 'content-type': 'application/json' },
+          body: '{}',
+        });
+
+      const res = await preview(OPERATOR);
+      expect([res.status, await res.json()]).toEqual([201, { previewedBy: 'kc-user-1' }]);
+      expect(await refusal(await preview({ azp: 'ff-admin' }))).toEqual([403, "The admin routes are for FF's operators"]);
     });
 
     it("keep a token issued to the admin dashboard off the customer routes, before any user is created", async () => {

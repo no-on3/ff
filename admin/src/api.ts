@@ -1,8 +1,10 @@
 import axios from 'axios';
 import type { ApiAuth } from './auth/oidc';
 import { DEFAULT_API_URL, config } from './config';
-import type { AccountSummary, AccountView, PlanOption, StatusChange } from './lib/accounts';
+import type { AccountSummary, AccountView, StatusChange } from './lib/accounts';
 import type { OperatorAction } from './lib/audit';
+import type { Plan, PlanLimits } from './lib/plans';
+import type { PriceBook, PriceBookPreview, PriceDocument } from './lib/prices';
 import type { PlatformSettings } from './lib/settings';
 
 const api = axios.create({
@@ -87,7 +89,20 @@ export const accountsApi = {
 };
 
 export const plansApi = {
-  list: () => api.get<PlanOption[]>('/admin/plans'),
+  list: () => api.get<Plan[]>('/admin/plans'),
+  create: (plan: Plan, reason: string) => api.post<Plan>('/admin/plans', { ...plan, reason }),
+  /** The new quota goes to every account on the plan: `quota` counts them. */
+  update: (id: string, change: { name?: string; limits: PlanLimits }, reason: string) =>
+    api.put<{ plan: Plan; quota: { applied: number; failed: number } }>(`/admin/plans/${encodeURIComponent(id)}`, { ...change, reason }),
+};
+
+/** The price books (P-73): a new one starts later; one that has started never changes. */
+export const pricesApi = {
+  list: () => api.get<PriceBook[]>('/admin/price-books'),
+  create: (validFrom: string, document: PriceDocument, reason: string) => api.post<PriceBook>('/admin/price-books', { validFrom, document, reason }),
+  /** Last month priced with the draft; nothing is saved, so no reason. */
+  preview: (document: PriceDocument) => api.post<PriceBookPreview>('/admin/price-books/preview', { document }),
+  remove: (id: string, reason: string) => api.delete(`/admin/price-books/${encodeURIComponent(id)}`, { data: { reason } }),
 };
 
 export const settingsApi = {

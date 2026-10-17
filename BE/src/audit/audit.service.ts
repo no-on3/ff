@@ -29,7 +29,11 @@ export type AuditAction =
   | 'member.join'
   | 'member.role'
   | 'member.remove'
-  | 'settings.update';
+  | 'settings.update'
+  | 'price_book.create'
+  | 'price_book.delete'
+  | 'plan.create'
+  | 'plan.update';
 
 export interface AuditEvent {
   /** null for an action on no account. */

@@ -441,6 +441,17 @@ curl -s -X PUT $FF/admin/accounts/$ACCOUNT/egress -H "Authorization: Bearer $OP"
 curl -s "$FF/admin/accounts/$ACCOUNT/audit-log?limit=20" -H "Authorization: Bearer $OP" | jq -c '.entries[] | {at, actorLabel, action}'
 ```
 
+**Prices** (P-73). The dashboard's Prices page lists the price books: past, active and scheduled. A new book starts from the active one, at AWS's US$ prices times a rate, or at TND prices as you set them, with the free tier and D8's knobs (a minimum billed duration, a price for idle instance time, a monthly fee). It starts at a whole hour, UTC, from the next one on, and prices what happens until a later one starts. "Try it on last month" prices last month with the draft, per account, next to the books valid then, and saves nothing. A book that says it is AWS's prices times a rate must be exactly that: the API names each price that isn't. A scheduled book can be removed; one that has started never changes.
+
+```bash
+curl -s $FF/admin/price-books -H "Authorization: Bearer $OP" | jq -c '.[] | {status, validFrom, kind: .document.source.kind, rate: .document.source.usdRate}'
+BOOK=$(curl -s $FF/admin/price-books -H "Authorization: Bearer $OP" | jq -c '.[] | select(.status == "active") | .document')
+curl -s -X POST $FF/admin/price-books/preview -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d "$(jq -cn --argjson doc "$BOOK" '{document: ($doc | .prices.monthlyPlanFee = "5.000")}')" | jq '.totals'   # no reason: it saves nothing
+curl -s -X POST $FF/admin/price-books -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d "$(jq -cn --argjson doc "$BOOK" '{validFrom: "2027-01-01T00:00:00Z", document: $doc, reason: "Same prices next year"}')" | jq -c '{id, status}'
+```
+
 **Reset Keycloak** with `docker compose --profile auth down -v keycloak`: it deletes Keycloak's users, and imports the realm again at the next start. Keycloak reads `deploy/keycloak/ff-realm.json` only at its first start, so a change to that file needs this reset. Name the service: without it, `down -v` deletes the database and S3 volumes too.
 
 **Plans and limits.** Each account has a plan (D5 of the client-readiness plan); new accounts get `beta`. A plan sets how many functions an account may have, each one's memory, timeout and instances, the quota of the account's namespace (all its functions together), the rate of changes and of invocations, and the idle window before scale to zero. `GET /me` shows each account's plan, and so does the console's account page. The beta plan:
@@ -458,14 +469,15 @@ curl -s "$FF/admin/accounts/$ACCOUNT/audit-log?limit=20" -H "Authorization: Bear
 
 Reads are not rate-limited. A rate is counted per account: a user who has no account yet is counted alone, and a caller without a login by address. The counts live in the backend's memory, so they start again when it restarts.
 
-Until the admin dashboard (P-73), plans change in SQL. The backend reads a plan at most once a minute, so a change applies within a minute; an account's namespace gets its new quota at its next deploy or update:
+Plans change in the admin dashboard's Plans page (P-73), or with the operator's token: a change applies at once, and a new quota goes to every account on the plan. The plan's accounts are moved on their page (P-71):
 
 ```bash
-psql() { docker compose exec -T postgres psql -U postgres -d serverless_platform "$@"; }
-psql -c "SELECT id, name, limits FROM plans"
+curl -s $FF/admin/plans -H "Authorization: Bearer $OP" | jq -c '.[] | {id, name, functions: .limits.functions}'
 # a plan with more room, from the beta plan's limits
-psql -c "INSERT INTO plans (id, name, limits) SELECT 'team', 'Team', limits || '{\"functions\": 100, \"memoryMb\": 2048}' FROM plans WHERE id = 'beta'"
-psql -c "UPDATE accounts SET plan_id = 'team' WHERE id = '$ACCOUNT'"
+curl -s -X POST $FF/admin/plans -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d "$(curl -s $FF/admin/plans -H "Authorization: Bearer $OP" | jq -c '.[] | select(.id == "beta") | {id: "team", name: "Team", limits: (.limits | .functions = 100 | .memoryMb = 2048), reason: "Pilots with a team"}')"
+curl -s -X PUT $FF/admin/accounts/$ACCOUNT/plan -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"planId": "team", "reason": "Pilots with a team"}' | jq -r .account.planId
 ```
 
 The backend checks a plan's limits before using them: a plan that lacks one, or has a wrong one, makes its accounts' requests fail with 500, and the log names the plan and the limit.
@@ -528,6 +540,7 @@ docker compose down -v
 | Keycloak answers `Invalid parameter: redirect_uri` | Your Keycloak still has the realm it imported before the console moved to port 5199 (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows, and sign up again. |
 | The admin dashboard's login answers `Client not found`, or `operator@ff.test` can't log in | Your Keycloak imported the realm before the admin dashboard existed (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows. |
 | 403 `The admin routes take a token issued to the admin dashboard (ff-admin)` | The token came from another client, such as the console's. Log in to the admin dashboard, or get the token through `ff-admin`. |
+| 400 `prices.requestsPerMillion: must be 0.20 × 3.0080 = 0.6016` | A book that says its prices are AWS's US$ prices times a rate has one that isn't: change it, or make the book's source `manual`. |
 | 409 `Account … is active: only a pending account can be approved` | The change doesn't apply to the account's status any more: another operator changed it first. Reload the account's page; its status history says who did what. |
 | 403 `The admin routes are for FF's operators` | The user hasn't the realm role `ff-operator`. Give it in Keycloak's admin console (Users → Role mapping), then log in again. |
 | 400 `Every admin change needs a reason` | Send `reason`, 3 to 500 characters, in the body. |
