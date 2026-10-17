@@ -155,9 +155,11 @@ const dnsSubdomain = {
   test: (v: string) => v.length <= 253 && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/.test(v),
   expected: 'a Kubernetes object name (lowercase letters, digits, "-" and ".")',
 };
+// The admission policy (deploy/k8s/base/40-admission-policy.yaml) only lets the
+// backend manage namespaces with this prefix: any other would make every deploy fail.
 const namespacePrefix = {
-  test: (v: string) => v.length <= 40 && /^[a-z0-9]([a-z0-9-]*[a-z0-9-])?$/.test(v),
-  expected: 'lowercase letters, digits and "-", at most 40 characters',
+  test: (v: string) => v === 'ff-t-',
+  expected: 'ff-t-, the only prefix the admission policy allows (deploy/k8s/base/40-admission-policy.yaml)',
 };
 const imageReference = { test: (v: string) => /^\S+$/.test(v), expected: 'a container image reference' };
 const bucketName = {

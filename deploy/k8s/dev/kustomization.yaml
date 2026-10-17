@@ -1,0 +1,7 @@
+# The development cluster: the production base plus the Service proxy that a
+# backend running outside the cluster needs. hack/k8s/cluster-up.sh applies it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+  - 10-clusterrole-dev.yaml

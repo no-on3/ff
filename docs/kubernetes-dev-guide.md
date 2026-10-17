@@ -38,8 +38,8 @@ kubectl get pods -A
 ## Cluster lifecycle
 
 ```bash
-hack/k8s/cluster-up.sh             # create (or start) the cluster, apply deploy/k8s/base, mint credentials
-hack/k8s/test-rbac.sh              # verify RBAC and the admission policy (25 checks)
+hack/k8s/cluster-up.sh             # create (or start) the cluster, apply deploy/k8s/dev, mint credentials
+hack/k8s/test-rbac.sh              # verify RBAC, the production manifests and the admission policy (31 checks)
 hack/k8s/cluster-down.sh           # delete the cluster and the local credentials
 ```
 

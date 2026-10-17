@@ -48,7 +48,7 @@ describe('resolveKubernetesSettings', () => {
   it.each([
     [{}, 'K8S_API_URL is not set'],
     [{ K8S_API_URL: 'https://x', K8S_INVOKE_MODE: 'teleport' }, 'K8S_INVOKE_MODE must be one of direct, proxy'],
-    [{ K8S_API_URL: 'https://x', K8S_NAMESPACE_PREFIX: 'Bad_Prefix' }, 'K8S_NAMESPACE_PREFIX must be lowercase letters'],
+    [{ K8S_API_URL: 'https://x', K8S_NAMESPACE_PREFIX: 'ff-tenant-' }, 'K8S_NAMESPACE_PREFIX must be ff-t-'],
   ])('rejects invalid configuration %p', (env, message) => {
     expect(() => settingsFor(env)).toThrow(message);
   });

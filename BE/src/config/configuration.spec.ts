@@ -209,7 +209,9 @@ describe('configuration', () => {
       ['K8S_TENANT_QUOTA_CPU', '8 cores', 'K8S_TENANT_QUOTA_CPU must be a Kubernetes quantity such as 8, 500m or 8Gi; got "8 cores"'],
       ['K8S_TENANT_QUOTA_PODS', '0', 'K8S_TENANT_QUOTA_PODS must be a whole number above 0; got "0"'],
       ['K8S_RUNTIME_CLASS', 'G_Visor', 'K8S_RUNTIME_CLASS must be a Kubernetes object name'],
-      ['K8S_NAMESPACE_PREFIX', 'FF_', 'K8S_NAMESPACE_PREFIX must be lowercase letters, digits and "-"'],
+      ['K8S_NAMESPACE_PREFIX', 'FF_', 'K8S_NAMESPACE_PREFIX must be ff-t-, the only prefix the admission policy allows'],
+      // A valid name, but the admission policy would refuse every namespace the backend creates.
+      ['K8S_NAMESPACE_PREFIX', 'ff-u-', 'K8S_NAMESPACE_PREFIX must be ff-t-, the only prefix the admission policy allows'],
       ['K8S_API_URL', '127.0.0.1:6550', 'K8S_API_URL must be an http:// or https:// URL; got "127.0.0.1:6550"'],
       ['FF_OIDC_ISSUER', 'login.ff.example', 'FF_OIDC_ISSUER must be an http:// or https:// URL'],
       ['MINIO_BUCKET_NAME', 'Functions_Bucket', 'MINIO_BUCKET_NAME must be an S3 bucket name'],

@@ -443,7 +443,7 @@
     <div class="grid2">
       <div class="layer">
         <div class="ttl">Kubernetes API: RBAC and an admission policy</div>
-        <div class="txt">The backend's ServiceAccount <code>ff-system/ff-controller</code> may manage only the objects functions need: no Secrets, no exec into pods, no changes to RBAC. The admission policy <code>ff-controller-scope</code> confines its writes to namespaces named <code>ff-t-*</code> and labelled <code>app.kubernetes.io/managed-by=ff-controller</code>.</div>
+        <div class="txt">The backend's ServiceAccount <code>ff-system/ff-controller</code> may manage only the objects functions need: no Secrets, no exec into pods, no changes to RBAC. The admission policy <code>ff-controller-scope</code> confines its writes, and its calls through a Service's proxy, to namespaces named <code>ff-t-*</code> and labelled <code>app.kubernetes.io/managed-by=ff-controller</code>. Only the development setup grants that proxy: in production the backend runs inside the cluster and calls the Services directly. Reads are cluster-wide, which the beta accepts under rules listed in <code>deploy/k8s/README.md</code>.</div>
         <div class="layer">
           <div class="ttl">Tenant namespace <code>ff-t-…</code></div>
           <div class="txt">Pod Security <code>restricted</code>. A ResourceQuota (20 pods, 8 CPU, 8 Gi, 60 ConfigMaps, 30 Services), a LimitRange, and the NetworkPolicy <code>ff-default-deny</code>: ingress only from <code>ff-system</code>; egress only to DNS and to public addresses, never to private ranges, cluster addresses, or metadata endpoints.</div>
@@ -499,7 +499,7 @@
           <tr><td>S3 archive</td><td><code>BE/src/minio-client/minio-client.service.ts</code></td></tr>
           <tr><td>Configuration and its defaults</td><td><code>BE/src/config/configuration.ts</code>, <code>BE/.env</code></td></tr>
           <tr><td>Runtimes</td><td><code>runtimes/nodejs/src/</code>, <code>runtimes/python/ff_runtime/</code></td></tr>
-          <tr><td>Cluster RBAC and admission policy</td><td><code>deploy/k8s/base/</code></td></tr>
+          <tr><td>Cluster RBAC and admission policy</td><td><code>deploy/k8s/base/</code>, and <code>deploy/k8s/dev/</code> for development</td></tr>
           <tr><td>Dashboard</td><td><code>FE/src/components/</code>, <code>FE/src/services/api.ts</code></td></tr>
         </tbody>
       </table>
@@ -1044,7 +1044,7 @@ const ARCH_INFO = {
   api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL, archives code in S3, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep.', 'BE/src/functions · BE/src/metrics · BE/src/orchestrator'],
   db: ['PostgreSQL', 'Three tables: functions, function_invocations, and function_metrics. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
   s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds an archive copy of each function\'s code. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
-  k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages.', 'deploy/k8s/base'],
+  k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
   ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
   guard: ['Guardrails', 'A ResourceQuota caps the tenant (20 pods, 8 CPU, 8 Gi, 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from ff-system, and lets pods reach only DNS and public addresses.', 'manifests.ts'],
   configmap: ['Code ConfigMap', 'fn-<id>-<hash>: immutable, one per code version, mounted read-only at /var/task. The current and the previous version are kept.', 'manifests.ts codeConfigMapManifest()'],

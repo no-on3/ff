@@ -1,7 +1,9 @@
-# What the FF backend may do. RBAC cannot scope by namespace label, so these
-# rules are cluster-wide; the ff-controller-scope ValidatingAdmissionPolicy
-# (40-admission-policy.yaml) restricts every write to FF-managed ff-t-*
-# tenant namespaces. Deliberately absent: secrets, pods create/exec/attach,
+# What the FF backend may do in production. RBAC cannot scope by namespace
+# label, so these rules are cluster-wide; the ff-controller-scope
+# ValidatingAdmissionPolicy (40-admission-policy.yaml) restricts every write to
+# FF-managed ff-t-* tenant namespaces. Reads stay cluster-wide: README.md says
+# what that exposes, and why the beta accepts it. Deliberately absent: secrets,
+# pods create/exec/attach, services/proxy (development only: deploy/k8s/dev),
 # roles and bindings, nodes, and any escalate/bind/impersonate verbs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -25,10 +27,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  # Development only: invoking function pods through the API server proxy.
-  - apiGroups: [""]
-    resources: ["services/proxy"]
-    verbs: ["get", "create"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]

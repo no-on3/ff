@@ -1,6 +1,7 @@
 # Narrows the ff-controller's cluster-wide RBAC to tenant namespaces.
-# Every create/update/delete made by the ff-controller ServiceAccount must
-# target either:
+# Every create/update/delete made by the ff-controller ServiceAccount, and
+# every call through a Service's proxy (which only the development overlay
+# grants), must target either:
 #   - a Namespace named ff-t-* labelled app.kubernetes.io/managed-by=ff-controller, or
 #   - a namespaced object inside such a namespace.
 # Anything else (kube-system, default, ff-system, unlabelled namespaces) is
@@ -28,6 +29,11 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["networkpolicies"]
+      # Proxy calls reach admission as CONNECT. Only deploy/k8s/dev grants them.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CONNECT"]
+        resources: ["services/proxy"]
   matchConditions:
     - name: only-ff-controller
       expression: "request.userInfo.username == 'system:serviceaccount:ff-system:ff-controller'"

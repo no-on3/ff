@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Creates the resource-capped FF dev cluster (k3d/k3s), installs the base
-# manifests (deploy/k8s/base) and mints ff-controller credentials.
+# Creates the resource-capped FF dev cluster (k3d/k3s), installs the
+# development manifests (deploy/k8s/dev: the production base plus the Service
+# proxy a backend outside the cluster needs) and mints ff-controller credentials.
 # Safe to re-run: an existing cluster is reused.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
@@ -32,6 +33,6 @@ fi
 
 (umask 077 && k3d kubeconfig get "$FF_CLUSTER_NAME" >"$KUBECONFIG")
 kubectl wait --for=condition=Ready node --all --timeout=120s
-kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/base"
+kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/dev"
 "$FF_REPO_ROOT/hack/k8s/mint-token.sh"
 echo "cluster $FF_CLUSTER_NAME is ready (admin kubeconfig: $KUBECONFIG)"

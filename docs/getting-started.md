@@ -63,7 +63,7 @@ docker compose up -d --wait
 **5. Create the local Kubernetes cluster.** The script:
 - creates a one-node k3s cluster with k3d;
 - caps it at 2 GB of memory;
-- installs FF's RBAC and admission policy (`deploy/k8s/base`);
+- installs FF's RBAC and admission policy, with the Service proxy that a backend outside the cluster needs (`deploy/k8s/dev`);
 - writes credentials to `hack/.kube/`.
 
 It prints the `K8S_*` settings, which match the defaults in `BE/.env.example`.

@@ -36,7 +36,7 @@ Nomad is no longer used; its development VM was removed.
 | `BE/` | Backend: functions API, metrics, scaling, and the orchestrator (`src/orchestrator/kubernetes`) |
 | `FE/` | Dashboard (React, Vite, Tailwind) |
 | `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol v1 |
-| `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy) and `optional/` (gVisor) |
+| `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
 | `infrastructure/` | SeaweedFS (S3) identities for `docker-compose.yml` |
 | `docs/` | The [getting-started guide](docs/getting-started.md), plans, ADRs, and the [Kubernetes dev guide](docs/kubernetes-dev-guide.md) |
