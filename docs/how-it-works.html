@@ -449,7 +449,7 @@
         <div class="txt">The backend's ServiceAccount <code>ff-system/ff-controller</code> may manage only the objects functions need: no Secrets, no exec into pods, no changes to RBAC. The admission policy <code>ff-controller-scope</code> confines its writes, and its calls through a Service's proxy, to namespaces named <code>ff-t-*</code> and labelled <code>app.kubernetes.io/managed-by=ff-controller</code>. Only the development setup grants that proxy: in production the backend runs inside the cluster and calls the Services directly. Reads are cluster-wide, which the beta accepts under rules listed in <code>deploy/k8s/README.md</code>.</div>
         <div class="layer">
           <div class="ttl">Tenant namespace <code>ff-t-…</code></div>
-          <div class="txt">Pod Security <code>restricted</code>. A ResourceQuota (20 pods, 8 CPU, 8 Gi, 60 ConfigMaps, 30 Services), a LimitRange, and the NetworkPolicy <code>ff-default-deny</code>: ingress only from <code>ff-system</code>; egress only to DNS and to public addresses, never to private ranges, cluster addresses, or metadata endpoints.</div>
+          <div class="txt">Pod Security <code>restricted</code>. A ResourceQuota sized by the account's plan (beta: 20 pods, 8 CPU, 8 Gi), with 60 ConfigMaps and 30 Services, a LimitRange, and the NetworkPolicy <code>ff-default-deny</code>: ingress only from <code>ff-system</code>; egress only to DNS and to public addresses, never to private ranges, cluster addresses, or metadata endpoints.</div>
           <div class="layer">
             <div class="ttl">Pod</div>
             <div class="txt">Runs as uid 10001 with a read-only root filesystem, every capability dropped, no privilege escalation, seccomp <code>RuntimeDefault</code>, and no ServiceAccount token. The memory limit is the function's memory, and the CPU is proportional to it. Only <code>/tmp</code> is writable (512 Mi).</div>
@@ -468,9 +468,11 @@
         <table class="ref">
           <thead><tr><th>Limit</th><th>Value</th></tr></thead>
           <tbody>
-            <tr><td>Memory</td><td>128–1024 MB through the API; the container limit equals it</td></tr>
+            <tr><td>Memory</td><td>From 128 MB up to the plan's <code>memoryMb</code> (1,024 MB on beta); the container limit equals it</td></tr>
             <tr><td>CPU</td><td><code>max(100m, memory ÷ 1769 MB × 1000m)</code>, Lambda's ratio: 128 MB → 100m, 1024 MB → 579m</td></tr>
-            <tr><td>Timeout</td><td>1–300 s</td></tr>
+            <tr><td>Timeout</td><td>From 1 s up to the plan's <code>timeoutSeconds</code> (300 s on beta)</td></tr>
+            <tr><td>Functions per account</td><td>The plan's <code>functions</code> (25 on beta), counted while the account is locked, so two creates at once can't both take the last one</td></tr>
+            <tr><td>Request rates, per account</td><td>The plan's changes a minute and invocations a second (60 and 100 on beta), counted apart; reads are free. Beyond: 429 <code>TooManyRequestsException</code>, with <code>Retry-After</code></td></tr>
             <tr><td>Code</td><td>About 100 KB per API request today (the JSON body limit); 900 KiB fit in a ConfigMap</td></tr>
             <tr><td>Invocation input</td><td>About 100 KB per API request today; the runtime accepts 6 MB</td></tr>
             <tr><td>Result</td><td>6 MB</td></tr>
@@ -478,8 +480,8 @@
             <tr><td>Backend wait for an answer</td><td>One timeout of waiting for a free instance, plus the timeout, plus 2 s; then the invocation is <code>TIMEOUT</code></td></tr>
             <tr><td>Wait for create or update</td><td>90 s (<code>FF_READY_TIMEOUT_SECONDS</code>)</td></tr>
             <tr><td>Wait for a cold start</td><td>90 s (<code>K8S_READY_TIMEOUT_SECONDS</code>)</td></tr>
-            <tr><td>Scale to zero</td><td>After 900 s without invocations (<code>FF_SCALE_TO_ZERO_IDLE_SECONDS</code>)</td></tr>
-            <tr><td>Instances</td><td>min 0, max 3 by default; <code>PUT /functions/:id/scaling-config</code> sets them, min 0–10 and max 1–10</td></tr>
+            <tr><td>Scale to zero</td><td>After the plan's idle window without invocations (<code>idleSeconds</code>, 900 s on beta)</td></tr>
+            <tr><td>Instances</td><td>min 0, max 3 by default; <code>PUT /functions/:id/scaling-config</code> sets them, both up to the plan's <code>instancesPerFunction</code> (10 on beta)</td></tr>
           </tbody>
         </table>
       </div>
@@ -633,7 +635,7 @@ const SCENARIOS = [
         code: 'FE/src/components/CreateFunction.tsx · BE/src/functions/functions.controller.ts',
         msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'hello', runtime: 'nodejs', code: CODE_TS, memory: 128, timeout: 5 } } },
       { from: 'api', to: 'api', kind: 'int', label: 'validate · resolve the tenant', title: 'Validation and the tenant',
-        text: 'The ValidationPipe rejects unknown fields and checks the limits: memory 128–1024 MB, timeout 1–300 s, runtime nodejs or python. In OIDC mode, the global guard first checks the caller: an API key (ffk_…), which acts for its own account within its scopes, or an access token: its signature against the Keycloak realm\'s published keys, an asymmetric algorithm, the issuer, the ff-api audience, the expiry, and a verified e-mail address (401 or 403 otherwise). The guard then finds the user (created on the first call) and the account the request acts for: the user\'s only account, or the one an X-FF-Account header names (400 to choose among several, 403 without any, 404 for one the user isn\'t a member of). Writing needs the owner or developer role, and deploying or invoking an account that was approved: a new one waits for approval. In development (FF_AUTH_MODE=dev), the caller is the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names, created the first time. Without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID.',
+        text: 'The ValidationPipe rejects unknown fields and checks what any function may be: memory 128–10,240 MB, timeout 1–900 s, runtime nodejs or python. The account\'s plan then sets lower limits (beta: 1,024 MB, 300 s, 25 functions), and a request beyond them gets 400 naming the plan\'s limit; changes beyond the plan\'s rate, 60 a minute on beta, get 429 TooManyRequestsException with Retry-After. In OIDC mode, the global guard first checks the caller: an API key (ffk_…), which acts for its own account within its scopes, or an access token: its signature against the Keycloak realm\'s published keys, an asymmetric algorithm, the issuer, the ff-api audience, the expiry, and a verified e-mail address (401 or 403 otherwise). The guard then finds the user (created on the first call) and the account the request acts for: the user\'s only account, or the one an X-FF-Account header names (400 to choose among several, 403 without any, 404 for one the user isn\'t a member of). Writing needs the owner or developer role, and deploying or invoking an account that was approved: a new one waits for approval. In development (FF_AUTH_MODE=dev), the caller is the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names, created the first time. Without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID.',
         code: 'BE/src/main.ts · BE/src/auth/auth.guard.ts · token-verifier.ts · principal.ts · BE/src/common/request-context.ts' },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
         text: 'The row gets its UUID, the tenant ID, and the defaults: minInstances 0, maxInstances 3, scaleToZero true.',
@@ -971,7 +973,7 @@ const SCENARIOS = [
         text: 'ACTIVE functions with scaleToZero true and minInstances 0, which are the defaults of every function today.', code: 'metrics.service.ts sweepIdleFunctions()',
         msg: { kind: 'sql', text: "SELECT … FROM \"functions\"\n WHERE \"status\" = 'ACTIVE' AND \"scale_to_zero\" = true AND \"min_instances\" = 0;" } },
       { from: 'api', to: 'api', kind: 'int', label: 'idle for 900 s?', title: 'How long has it been idle?',
-        text: 'Its last activity is the latest of three times: its last invocation seen by this process, the process start, and the function\'s updatedAt. Here that was 15 minutes ago, the FF_SCALE_TO_ZERO_IDLE_SECONDS default.', code: 'metrics.service.ts sweepIdleFunctions() · scaling.ts shouldScaleToZero()' },
+        text: 'Its last activity is the latest of three times: its last invocation seen by this process, the process start, and the function\'s updatedAt. Here that was 15 minutes ago: the idle window of the account\'s plan (idleSeconds, 900 s on beta).', code: 'metrics.service.ts sweepIdleFunctions() · scaling.ts shouldScaleToZero()' },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment · readyReplicas 1', title: 'It is running, so it can be scaled down', text: 'A function that is already at zero is left alone.', code: 'kubernetes.orchestrator.ts readyInstances()',
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { status: { readyReplicas: 1, '…': '…' }, '…': '…' } }] },
       { from: 'api', to: 'k8s', kind: 'req', label: 'PATCH …/scale → 0', title: 'Scale to zero', text: 'The backend logs "Scaled idle function <id> to zero (no invocations for 900 s)".', code: 'kubernetes.orchestrator.ts scale() · kube-client.ts scaleDeployment()', hl: ['deployment'],
@@ -1107,7 +1109,7 @@ const ARCH_INFO = {
   s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds an archive copy of each function\'s code. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
   k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
   ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
-  guard: ['Guardrails', 'A ResourceQuota caps the tenant (20 pods, 8 CPU, 8 Gi, 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from ff-system, and lets pods reach only DNS and public addresses.', 'manifests.ts'],
+  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from ff-system, and lets pods reach only DNS and public addresses.', 'manifests.ts'],
   configmap: ['Code ConfigMap', 'fn-<id>-<hash>: immutable, one per code version, mounted read-only at /var/task. The current and the previous version are kept.', 'manifests.ts codeConfigMapManifest()'],
   service: ['Service', 'fn-<id>: ClusterIP, port http (8080). Invocations reach the ready pods through it.', 'manifests.ts serviceManifest()'],
   deployment: ['Deployment', 'fn-<id>: the runtime image, environment, resources, probes, security context, and volumes. Its replica count changes with autoscaling, the idle sweep, and cold starts.', 'manifests.ts deploymentManifest()'],

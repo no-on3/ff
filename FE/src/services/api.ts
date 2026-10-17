@@ -150,6 +150,31 @@ export const getMetrics = async (functionId: string, start: Date, end: Date) => 
 export type AccountStatus = 'pending' | 'active' | 'rejected' | 'suspended' | 'closed';
 export type Role = 'owner' | 'developer' | 'viewer';
 
+/** What a plan allows (D5): GET /me gives each account's. */
+export interface PlanLimits {
+  functions: number;
+  /** The most memory one function may have, in MB. */
+  memoryMb: number;
+  /** The longest timeout one function may have, in seconds. */
+  timeoutSeconds: number;
+  instancesPerFunction: number;
+  /** All the account's functions together. */
+  quota: { pods: number; cpu: string; memory: string };
+  writesPerMinute: number;
+  invokesPerSecond: number;
+  logRetentionDays: number;
+  historyRetentionDays: number;
+  /** Seconds without a call before a function scales to zero. */
+  idleSeconds: number;
+  internetEgress: boolean;
+}
+
+export interface Plan {
+  id: string;
+  name: string;
+  limits: PlanLimits;
+}
+
 /** One of the user's accounts, in GET /me. */
 export interface MeAccount {
   /** 12 digits. */
@@ -158,6 +183,8 @@ export interface MeAccount {
   status: AccountStatus;
   /** The user's role in it. */
   role: Role;
+  /** Its plan, whose limits the API applies. */
+  plan: Plan;
 }
 
 /** GET /me: the logged-in user and their accounts. */

@@ -45,6 +45,18 @@ export class MemoryRepository<T extends { id?: string }> {
       .map((row) => ({ ...row }));
   }
 
+  /** Enough of TypeORM's EntityManager for FunctionsService's create transaction: one process, so no locks. */
+  get manager() {
+    return {
+      transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> =>
+        work({
+          query: async () => [],
+          countBy: async (_target: unknown, where: Partial<T>) => (await this.find({ where })).length,
+          save: async (_target: unknown, entity: T) => this.save(entity),
+        }),
+    };
+  }
+
   async remove(entity: T): Promise<T> {
     this.rows.delete(entity.id as string);
     return entity;

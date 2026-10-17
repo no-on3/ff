@@ -6,6 +6,7 @@
  */
 import { Reflector } from '@nestjs/core';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
+import { INVOCATION } from '../plans/rate-limits';
 import { FunctionsController } from './functions.controller';
 
 const reflector = new Reflector();
@@ -38,4 +39,13 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
       expect(rules(handler)).toEqual({ roles: 'anyone', activeAccount: false, scope: 'functions:read' });
     },
   );
+
+  it("counts only invoke against the plan's invocation rate; every other change counts against its rate of changes (P-15)", () => {
+    const handlers = Object.getOwnPropertyNames(FunctionsController.prototype).filter((name) => name !== 'constructor');
+    const invocations = handlers.filter((name) =>
+      reflector.get<boolean>(INVOCATION, FunctionsController.prototype[name as keyof FunctionsController]),
+    );
+
+    expect(invocations).toEqual(['invoke']);
+  });
 });

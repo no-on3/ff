@@ -1,10 +1,10 @@
 import { Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, Repository } from 'typeorm';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
 import { describeError } from '../common/describe-error';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { PlansService } from '../plans/plans.service';
 import { ConcurrencyTracker } from './concurrency';
 import { FunctionMetrics } from './entities/function-metrics.entity';
 import { burstTarget, decideReplicas, shouldScaleToZero } from './scaling';
@@ -47,7 +47,7 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Function)
     private functionRepository: Repository<Function>,
     @Inject(ORCHESTRATOR) private orchestrator: Orchestrator,
-    private configService: ConfigService,
+    private plans: PlansService,
   ) {}
 
   onModuleInit() {
@@ -182,14 +182,17 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  /** Scales eligible functions (scaleToZero, minInstances 0) to zero after the idle period. */
+  /** Scales eligible functions (scaleToZero, minInstances 0) to zero after their account's plan's idle window (D5). */
   async sweepIdleFunctions(nowMs = Date.now()): Promise<void> {
-    const idleSeconds = this.configService.get<number>('scaling.scaleToZeroIdleSeconds', 900);
     const candidates = await this.functionRepository.find({
       where: { status: FunctionStatus.ACTIVE, scaleToZero: true, minInstances: 0 },
     });
+    if (candidates.length === 0) return;
+    const plans = await this.plans.forAccounts(candidates.map((function_) => function_.accountId));
 
     for (const function_ of candidates) {
+      const idleSeconds = plans.get(function_.accountId)?.limits.idleSeconds;
+      if (idleSeconds === undefined) continue; // no account (it can't happen: a foreign key): leave it running
       if (this.concurrency.current(function_.id) > 0) continue; // a call is running
       // Without a recorded invocation (e.g. after a restart), count from boot or the last change.
       const lastActivityMs = Math.max(

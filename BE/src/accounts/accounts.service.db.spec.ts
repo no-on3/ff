@@ -11,9 +11,13 @@ import { ConfigService } from '@nestjs/config';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { Mail, MailService } from '../mail/mail.service';
+import { Orchestrator } from '../orchestrator/orchestrator.types';
+import { PlansService } from '../plans/plans.service';
+import { BETA_LIMITS } from '../plans/test-fixtures';
 import { AccountsService } from './accounts.service';
 import { Account, AccountStatus } from './entities/account.entity';
 import { Membership } from './entities/membership.entity';
+import { Plan } from './entities/plan.entity';
 import { User } from './entities/user.entity';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
@@ -32,7 +36,8 @@ run('accounts, users and memberships (L2, P-12)', () => {
     const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
     const config = { getOrThrow: () => ({ operatorEmail, adminUrl: 'https://admin.ff.example' }) } as unknown as ConfigService;
     const ds = db.dataSource;
-    service = new AccountsService(ds.getRepository(Account), ds.getRepository(User), ds.getRepository(Membership), ds, mail, config);
+    const plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), {} as Orchestrator);
+    service = new AccountsService(ds.getRepository(Account), ds.getRepository(User), ds.getRepository(Membership), ds, mail, config, plans);
   });
 
   afterAll(async () => {
@@ -133,7 +138,7 @@ run('accounts, users and memberships (L2, P-12)', () => {
 
     it("acts for the user's only account, with its status and the user's role", async () => {
       expect(await service.choose(user, undefined)).toEqual({
-        principal: { accountId: active, accountStatus: 'active', userId: user.id, role: 'owner' },
+        principal: { accountId: active, accountStatus: 'active', planId: 'beta', userId: user.id, role: 'owner' },
       });
     });
 
@@ -179,13 +184,13 @@ run('accounts, users and memberships (L2, P-12)', () => {
       await expect(service.update(owner, id, { taxId: null })).resolves.toMatchObject({ name: 'Renamed', taxId: null });
     });
 
-    it("lists the user's accounts and roles in GET /me", async () => {
+    it("lists the user's accounts, roles and plans in GET /me: the beta plan with the limits of P-15's migration", async () => {
       const user = await service.userFor(identity(12));
       const { id } = await service.create(user, { name: 'Mine' });
 
       expect(await service.me(user)).toEqual({
         user: { id: user.id, email: 'user12@example.tn', name: 'User 12', locale: 'fr-TN' },
-        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner' }],
+        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS } }],
       });
     });
   });

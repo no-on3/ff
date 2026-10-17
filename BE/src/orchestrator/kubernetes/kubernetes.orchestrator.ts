@@ -7,7 +7,7 @@ import {
   FunctionTimeoutError,
   OrchestratorError,
 } from '../orchestrator.errors';
-import { FunctionWorkload, InvokeResult, Orchestrator } from '../orchestrator.types';
+import { FunctionWorkload, InvokeResult, Orchestrator, TenantLimits } from '../orchestrator.types';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
 import {
@@ -87,17 +87,25 @@ export class KubernetesOrchestrator implements Orchestrator {
     return accountNamespace(this.settings.namespacePrefix, fn.accountId);
   }
 
-  async deploy(fn: FunctionWorkload): Promise<void> {
-    await this.apply(fn);
+  async deploy(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
+    await this.apply(fn, tenant);
   }
 
-  async update(fn: FunctionWorkload): Promise<void> {
-    await this.apply(fn);
+  async update(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
+    await this.apply(fn, tenant);
   }
 
-  private async ensureTenant(fn: FunctionWorkload, ns: string): Promise<void> {
+  async applyTenantLimits(accountId: string, tenant: TenantLimits): Promise<void> {
+    const ns = accountNamespace(this.settings.namespacePrefix, accountId);
+    // Before its first function, an account has no namespace: that function's deploy applies the plan.
+    if (!(await this.api.get(paths.namespace(ns)))) return;
+    await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, tenant.quota));
+  }
+
+  /** The account's namespace and guardrails, with its plan's quota (D5): written again on every deploy and update. */
+  private async ensureTenant(fn: FunctionWorkload, ns: string, tenant: TenantLimits): Promise<void> {
     await this.api.apply(paths.namespace(ns), namespaceManifest(ns, fn.accountId));
-    await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, this.settings));
+    await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, tenant.quota));
     await this.api.apply(paths.core(ns, 'limitranges', TENANT_LIMITS_NAME), limitRangeManifest(ns));
     await this.api.apply(
       paths.networking(ns, 'networkpolicies', TENANT_NETWORK_POLICY_NAME),
@@ -105,14 +113,14 @@ export class KubernetesOrchestrator implements Orchestrator {
     );
   }
 
-  private async apply(fn: FunctionWorkload): Promise<void> {
+  private async apply(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const hash = codeHash(fn.runtime, fn.code);
     const configMap = codeConfigMapName(fn.id, hash);
     const configMapManifest = codeConfigMapManifest(fn, ns, configMap, hash); // validates size first
 
-    await this.ensureTenant(fn, ns);
+    await this.ensureTenant(fn, ns, tenant);
     await this.api.apply(paths.core(ns, 'configmaps', configMap), configMapManifest);
     await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
 

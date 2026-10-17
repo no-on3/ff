@@ -1,7 +1,9 @@
 import { NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
+import { PlanView } from '../plans/plan-limits';
+import { PlansService } from '../plans/plans.service';
+import { plan } from '../plans/test-fixtures';
 import { MetricsService } from './metrics.service';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -30,8 +32,12 @@ describe('MetricsService', () => {
   let service: MetricsService;
   /** The Deployment's replicas, as the fake orchestrator keeps them. */
   let replicas: number;
+  /** Each account's plan; an account not listed has the beta plan. */
+  let plans: Map<string, PlanView>;
+  let forAccounts: jest.Mock;
 
-  const create = (idleSeconds = 900) => {
+  const create = () => {
+    plans = new Map();
     replicas = 1;
     orchestrator = {
       deploy: jest.fn(),
@@ -47,10 +53,8 @@ describe('MetricsService', () => {
     } as any;
     functionRepository = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]), exists: jest.fn() };
     metricsRepository = { save: jest.fn(), find: jest.fn() };
-    const config = {
-      get: jest.fn((key: string, fallback?: unknown) => (key === 'scaling.scaleToZeroIdleSeconds' ? idleSeconds : fallback)),
-    } as unknown as ConfigService;
-    service = new MetricsService(metricsRepository as any, functionRepository as any, orchestrator, config);
+    forAccounts = jest.fn(async (ids: string[]) => new Map(ids.map((id) => [id, plans.get(id) ?? plan()])));
+    service = new MetricsService(metricsRepository as any, functionRepository as any, orchestrator, { forAccounts } as unknown as PlansService);
   };
   /** Lets the scale-up that invocationStarted launches in the background finish. */
   const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -240,6 +244,26 @@ describe('MetricsService', () => {
       await service.sweepIdleFunctions(Date.now() + 1_000); // the backend just started
 
       expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    it("uses each account's plan: idle for 61 s scales a function on a 60 s plan to zero, not one on the beta plan's 900 s (P-15)", async () => {
+      plans.set('000000000060', plan({ idleSeconds: 60 }, 'quick', 'Quick'));
+      functionRepository.find.mockResolvedValue([
+        fn({ id: 'quick', accountId: '000000000060' }),
+        fn({ id: 'beta', accountId: '000000000900' }),
+      ]);
+
+      await service.sweepIdleFunctions(Date.now() + 61_000); // the backend started just now: its last sight of either
+
+      expect(orchestrator.scale.mock.calls.map(([f, n]) => `${f.id}→${n}`)).toEqual(['quick→0']);
+      expect(forAccounts).toHaveBeenCalledTimes(1); // one query for every candidate's plan
+      expect(forAccounts).toHaveBeenCalledWith(['000000000060', '000000000900']);
+    });
+
+    it('asks for no plan when no function is a candidate', async () => {
+      await service.sweepIdleFunctions(now + 3_600_000);
+
+      expect(forAccounts).not.toHaveBeenCalled();
     });
 
     it('keeps sweeping other functions when one scale call fails', async () => {

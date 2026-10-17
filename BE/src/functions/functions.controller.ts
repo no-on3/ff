@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query }
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
+import { Invocation } from '../plans/rate-limits';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
@@ -72,6 +73,7 @@ export class FunctionsController {
   }
 
   @Post(':id/invoke')
+  @Invocation() // the plan's invocation rate, not its rate of changes (D5)
   @RequireScope('functions:invoke')
   @RequireRole(...WRITERS)
   @RequireActiveAccount()

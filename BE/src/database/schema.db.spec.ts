@@ -13,6 +13,7 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { MIGRATIONS } from '../migrations';
+import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
 
@@ -33,6 +34,7 @@ async function migrateDownTo(dataSource: DataSource, name: string): Promise<void
 }
 const BASELINE = migrationNames[0];
 const SCALING_MODEL = migrationNames.find((name) => name.startsWith('ScalingModel')) as string;
+const API_KEYS = migrationNames.find((name) => name.startsWith('ApiKeys')) as string;
 
 interface ColumnRow {
   table_name: string;
@@ -137,6 +139,31 @@ run('database schema (L2, real PostgreSQL)', () => {
       await expect(dataSource.runMigrations({ transaction: 'each' })).rejects.toThrow(/not 12-digit account IDs/);
       expect(await dataSource.query(`SELECT to_regclass('plans') AS plans`)).toEqual([{ plans: null }]);
       expect(await dataSource.query(`SELECT count(*)::int AS n FROM functions WHERE user_id = '1'`)).toEqual([{ n: 1 }]);
+    });
+  });
+
+  it('the plan-limits migration gives the beta plan its limits and invocations THROTTLED, and reverts with one present (P-15)', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await dataSource.query(`SELECT name, limits FROM plans WHERE id = 'beta'`)).toEqual([{ name: 'Beta', limits: BETA_LIMITS }]);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('f', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      const throttled = () =>
+        dataSource.query(`INSERT INTO function_invocations (function_id, input, status) VALUES ($1, '{}', 'THROTTLED')`, [id]);
+      await throttled();
+
+      await migrateDownTo(dataSource, API_KEYS);
+
+      expect(await dataSource.query(`SELECT status FROM function_invocations`)).toEqual([{ status: 'ERROR' }]);
+      expect(await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`)).toEqual([{ limits: {} }]);
+      await expect(throttled()).rejects.toThrow(/invalid input value for enum/);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+      await throttled();
     });
   });
 

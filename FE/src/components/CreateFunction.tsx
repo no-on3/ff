@@ -3,12 +3,14 @@ import { useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import { apiErrorMessage } from '../lib/functions';
 import { NewFunction, Runtime } from '../services/api';
+import { useSession } from '../session/session';
 import { createFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
 
 const CreateFunction: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
+  const plan = useSession().account!.plan; // the function pages show only for an account
 
   const [formData, setFormData] = useState<NewFunction>({
     name: '',
@@ -90,28 +92,38 @@ const CreateFunction: React.FC = () => {
 
         <div>
           <label className="block text-sm font-medium text-gray-700">
-            Memory
+            Memory (MB)
           </label>
           <input
             type="number"
+            min={128}
+            max={plan.limits.memoryMb}
             value={formData.memory}
             onChange={(e) => setFormData({ ...formData, memory: parseInt(e.target.value) })}
             className="input mt-1"
             required
           />
+          <p className="mt-1 text-sm text-gray-500">
+            128 to {plan.limits.memoryMb} MB on the {plan.name} plan.
+          </p>
         </div>
 
         <div>
           <label className="block text-sm font-medium text-gray-700">
-            Timeout
+            Timeout (s)
           </label>
           <input
             type="number"
+            min={1}
+            max={plan.limits.timeoutSeconds}
             value={formData.timeout}
             onChange={(e) => setFormData({ ...formData, timeout: parseInt(e.target.value) })}
             className="input mt-1"
             required
           />
+          <p className="mt-1 text-sm text-gray-500">
+            1 to {plan.limits.timeoutSeconds} s on the {plan.name} plan.
+          </p>
         </div>
 
         <div className="flex gap-4">

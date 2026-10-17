@@ -13,6 +13,9 @@ import {
   OrchestratorError,
 } from '../orchestrator/orchestrator.errors';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { PlanView } from '../plans/plan-limits';
+import { PlansService } from '../plans/plans.service';
+import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
@@ -34,6 +37,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const invocationsRepo = { create: jest.fn(), save: jest.fn(), findAndCount: jest.fn() };
   const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
   const metrics = { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() };
+  /** The account's plan, and how many functions it has: the transaction that saves a new one counts them. */
+  let accountPlan: PlanView;
+  let existingFunctions: number;
+  const plans = { forAccount: jest.fn() };
+  const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn() };
+  const TENANT = { quota: BETA_LIMITS.quota };
 
   const activeFunction = (): Function =>
     ({
@@ -64,6 +73,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       entity.id ??= 'fn-1';
       return entity;
     });
+    accountPlan = plan();
+    existingFunctions = 0;
+    plans.forAccount.mockImplementation(async () => accountPlan);
+    transaction.countBy.mockImplementation(async () => existingFunctions);
+    transaction.save.mockImplementation(async (_target, entity) => functionsRepo.save(entity));
+    Object.assign(functionsRepo, { manager: { transaction: jest.fn(async (work) => work(transaction)) } });
     invocationsRepo.create.mockImplementation((dto) => ({ ...dto, createdAt: new Date() }));
     invocationsRepo.save.mockImplementation(async (entity) => entity);
     orchestrator = {
@@ -75,6 +90,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       scale: jest.fn(),
       readyInstances: jest.fn(),
       desiredInstances: jest.fn(),
+      applyTenantLimits: jest.fn(),
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -87,6 +103,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         // Return each key's default, as ConfigService does without overrides.
         { provide: ConfigService, useValue: { get: jest.fn((_key: string, fallback?: unknown) => fallback) } },
         { provide: MetricsService, useValue: metrics },
+        { provide: PlansService, useValue: plans },
       ],
     }).compile();
     service = moduleRef.get(FunctionsService);
@@ -99,7 +116,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       const result = await service.create('user-42', dto);
 
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'x');
-      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1', accountId: 'user-42' }));
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1', accountId: 'user-42' }), TENANT);
       expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 90_000);
       expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ACTIVE]);
       expect(result.status).toBe(FunctionStatus.ACTIVE);
@@ -168,7 +185,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const result = await service.update('user-1', 'fn-1', { code: 'v2' });
 
-      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: 'v2' }));
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: 'v2' }), TENANT);
       expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ code: 'v2' }), 90_000);
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'v2');
       // The copy in object storage is written only once the new version is live.
@@ -187,7 +204,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await service.update('user-1', 'fn-1', change);
 
-      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining(change));
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining(change), TENANT);
     });
 
     it('moves the archived copy when the runtime changes', async () => {
@@ -226,7 +243,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const result = await service.update('user-1', 'fn-1', change);
 
-      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: activeFunction().code }));
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: activeFunction().code }), TENANT);
       expect(orchestrator.waitUntilReady).toHaveBeenCalled();
       expect(result.status).toBe(FunctionStatus.ACTIVE);
     });
@@ -434,7 +451,13 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         status: HttpStatus.TOO_MANY_REQUESTS,
         message: 'TooManyRequestsException: Rate exceeded: no instance was free within 5.00 seconds',
       });
-      expect(invocationsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ status: InvocationStatus.ERROR }));
+      // Not an ERROR: the function didn't run, and D7 doesn't bill it.
+      expect(invocationsRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          status: InvocationStatus.THROTTLED,
+          error: 'TooManyRequestsException: Rate exceeded: no instance was free within 5.00 seconds',
+        }),
+      );
     });
 
     it('rejects functions that are not ACTIVE without calling the orchestrator', async () => {
@@ -507,6 +530,101 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await expect(service.updateScalingConfig('user-1', 'fn-1', { maxInstances: 2 })).resolves.toMatchObject({ maxInstances: 2 });
       expect(functionsRepo.save).toHaveBeenCalled();
+    });
+  });
+
+  describe("the account's plan (P-15, D5)", () => {
+    const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
+    const nothingHappened = () => {
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(orchestrator.scale).not.toHaveBeenCalled();
+    };
+
+    it('refuses a function larger than the plan allows, naming its limits, before saving anything', async () => {
+      const failure = await service.create('user-1', { ...dto, memory: 2048, timeout: 600 }).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(BadRequestException);
+      expect((failure as BadRequestException).getResponse()).toMatchObject({
+        message: ['memory must be at most 1024 MB on the Beta plan', 'timeout must be at most 300 s on the Beta plan'],
+      });
+      nothingHappened();
+    });
+
+    it("lets another plan's larger limits through: they are the plan's, not the code's", async () => {
+      accountPlan = plan({ memoryMb: 2048, timeoutSeconds: 900 }, 'pro', 'Pro');
+
+      await expect(service.create('user-1', { ...dto, memory: 2048, timeout: 900 })).resolves.toMatchObject({ status: FunctionStatus.ACTIVE });
+    });
+
+    it("refuses a function beyond the plan's number, counted while the account is locked", async () => {
+      existingFunctions = 25;
+
+      await expect(service.create('user-1', dto)).rejects.toThrow(
+        new BadRequestException('The Beta plan allows 25 functions per account: delete one first'),
+      );
+      expect(transaction.query).toHaveBeenCalledWith('SELECT 1 FROM "accounts" WHERE "id" = $1 FOR NO KEY UPDATE', ['user-1']);
+      expect(transaction.countBy).toHaveBeenCalledWith(Function, { accountId: 'user-1' });
+      expect(transaction.query.mock.invocationCallOrder[0]).toBeLessThan(transaction.countBy.mock.invocationCallOrder[0]);
+      nothingHappened();
+    });
+
+    it('says "1 function" for a plan that allows one', async () => {
+      accountPlan = plan({ functions: 1 }, 'solo', 'Solo');
+      existingFunctions = 1;
+
+      await expect(service.create('user-1', dto)).rejects.toThrow('The Solo plan allows 1 function per account: delete one first');
+    });
+
+    it("saves the plan's last function in the same transaction as the count", async () => {
+      existingFunctions = 24;
+
+      await service.create('user-1', dto);
+
+      expect(transaction.save).toHaveBeenCalledWith(Function, expect.objectContaining({ accountId: 'user-1' }));
+      expect(savedStatuses[0]).toBe(FunctionStatus.CREATING); // saved by the transaction, before the deploy
+      expect(orchestrator.deploy).toHaveBeenCalled();
+    });
+
+    it('refuses an update above the plan, and rolls nothing out', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      const failure = await service.update('user-1', 'fn-1', { memory: 4096 }).catch((error: unknown) => error);
+
+      expect((failure as BadRequestException).getResponse()).toMatchObject({ message: ['memory must be at most 1024 MB on the Beta plan'] });
+      nothingHappened();
+    });
+
+    it('keeps what an older, larger plan gave a function: only the values that change are checked', async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), memory: 2048, maxInstances: 20 });
+
+      await expect(service.update('user-1', 'fn-1', { code: 'v2', memory: 2048 })).resolves.toMatchObject({ code: 'v2', memory: 2048 });
+      await expect(service.updateScalingConfig('user-1', 'fn-1', { minInstances: 1 })).resolves.toMatchObject({ maxInstances: 20 });
+    });
+
+    it('refuses instance limits above the plan, naming its limit', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      const failure = await service.updateScalingConfig('user-1', 'fn-1', { minInstances: 11, maxInstances: 12 }).catch((e: unknown) => e);
+
+      expect((failure as BadRequestException).getResponse()).toMatchObject({
+        message: ['minInstances must be at most 10 on the Beta plan', 'maxInstances must be at most 10 on the Beta plan'],
+      });
+      nothingHappened();
+    });
+
+    it("rolls a failed update back within the same plan's quota", async () => {
+      accountPlan = plan({ quota: { pods: 7, cpu: '2', memory: '3Gi' } });
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Error', 'boom'));
+
+      await service.update('user-1', 'fn-1', { code: 'broken' }).catch(() => undefined);
+
+      expect(orchestrator.update.mock.calls.map(([, tenant]) => tenant)).toEqual([
+        { quota: { pods: 7, cpu: '2', memory: '3Gi' } },
+        { quota: { pods: 7, cpu: '2', memory: '3Gi' } },
+      ]);
     });
   });
 

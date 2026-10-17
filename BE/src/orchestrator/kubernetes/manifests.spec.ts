@@ -186,8 +186,8 @@ describe('Kubernetes manifests', () => {
     });
   });
 
-  it('sizes the tenant ResourceQuota from the settings', () => {
-    const quota: any = resourceQuotaManifest('ff-t-abc', settings({ tenantQuota: { pods: '5', cpu: '2', memory: '4Gi' } }));
+  it("sizes the tenant ResourceQuota from the account's plan, with pods as a quantity string", () => {
+    const quota: any = resourceQuotaManifest('ff-t-abc', { pods: 5, cpu: '2', memory: '4Gi' });
 
     expect(quota.spec.hard).toMatchObject({
       pods: '5',

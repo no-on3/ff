@@ -64,6 +64,7 @@ run('API keys (L2, P-13)', () => {
     await expect(service.authenticate(key)).resolves.toEqual({
       accountId,
       accountStatus: 'active',
+      planId: 'beta',
       keyId: id,
       userId: owner.id,
       role: 'owner',

@@ -14,7 +14,6 @@ export interface KubernetesSettings {
   readyTimeoutSeconds: number;
   egressInternet: boolean;
   ingressAllowCidrs: string[];
-  tenantQuota: { pods: string; cpu: string; memory: string };
 }
 
 /**

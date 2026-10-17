@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsISO31661Alpha2, IsOptional, IsString, Length, MaxLength } from 'class-validator';
 import { Role } from '../../auth/principal';
+import { PlanSummary } from '../../plans/plan.dto';
 import { AccountStatus } from '../entities/account.entity';
 
 /** POST /accounts: a new account, whose creator becomes its owner. */
@@ -69,6 +70,7 @@ class MeAccount {
   @ApiProperty() name: string;
   @ApiProperty({ enum: AccountStatus }) status: AccountStatus;
   @ApiProperty({ enum: ['owner', 'developer', 'viewer'] }) role: Role;
+  @ApiProperty({ type: PlanSummary, description: "The account's plan and its limits (D5)" }) plan: PlanSummary;
 }
 
 /** GET /me: the user, and the accounts they belong to (D4). */

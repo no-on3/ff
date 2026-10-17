@@ -3,7 +3,13 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { Principal, resolvePrincipal } from './principal';
 
 describe('resolvePrincipal (P-10, P-12)', () => {
-  const principal: Principal = { accountId: '123456789012', accountStatus: AccountStatus.ACTIVE, userId: 'u-7', role: 'developer' };
+  const principal: Principal = {
+    accountId: '123456789012',
+    accountStatus: AccountStatus.ACTIVE,
+    planId: 'beta',
+    userId: 'u-7',
+    role: 'developer',
+  };
 
   it('is the principal that the guard resolved', () => {
     expect(resolvePrincipal({ headers: {}, principal })).toBe(principal);

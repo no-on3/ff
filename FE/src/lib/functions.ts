@@ -1,4 +1,4 @@
-import type { Function, FunctionUpdate, ScalingLimits } from '../services/api';
+import type { Function, FunctionUpdate, PlanLimits, ScalingLimits } from '../services/api';
 
 /** The fields the console's edit form changes. */
 export type EditableFields = Pick<Function, 'name' | 'code' | 'memory' | 'timeout'>;
@@ -57,17 +57,18 @@ export function formatDuration(ms: number | null | undefined): string {
   return typeof ms === 'number' && ms > 0 ? `${ms.toFixed(2)} ms` : 'N/A';
 }
 
-/** The API's limit until plans exist (client-readiness plan, P-15). */
-export const MAX_INSTANCES_PER_FUNCTION = 10;
-
-/** Why the API would refuse these limits, or null: the same rules, checked before sending. */
-export function scalingLimitsError({ minInstances, maxInstances }: ScalingLimits): string | null {
-  const limit = MAX_INSTANCES_PER_FUNCTION;
+/** Why the API would refuse these limits, or null: the same rules, and the account's plan's maximum (P-15). */
+export function scalingLimitsError(
+  { minInstances, maxInstances }: ScalingLimits,
+  plan: { name: string; limits: Pick<PlanLimits, 'instancesPerFunction'> },
+): string | null {
+  const limit = plan.limits.instancesPerFunction;
+  const onPlan = `on the ${plan.name} plan`;
   if (!Number.isInteger(minInstances) || minInstances < 0 || minInstances > limit) {
-    return `Minimum instances must be a whole number from 0 to ${limit}`;
+    return `Minimum instances must be a whole number from 0 to ${limit} ${onPlan}`;
   }
   if (!Number.isInteger(maxInstances) || maxInstances < 1 || maxInstances > limit) {
-    return `Maximum instances must be a whole number from 1 to ${limit}`;
+    return `Maximum instances must be a whole number from 1 to ${limit} ${onPlan}`;
   }
   if (minInstances > maxInstances) return "Minimum instances can't be more than maximum instances";
   return null;

@@ -20,6 +20,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
   - non-root, read-only images that install nothing at start.
 - **Optional gVisor sandbox** for untrusted code: `K8S_RUNTIME_CLASS=gvisor`. See the [dev guide](docs/kubernetes-dev-guide.md#sandboxing-with-gvisor).
 - **Accounts and login:** users sign up and log in through Keycloak (`docker compose --profile auth` starts the development realm), in the console or with tokens. They create accounts that wait for your approval, and act for one account per request. Owners make API keys for scripts and CI, limited to scopes. Another account's functions answer 404 on every route (`hack/e2e-tenancy.sh`). Development acts as one account (`FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, or another one named by `X-FF-Dev-Account`), which production refuses.
+- **Plans:** each account's plan sets its limits: how many functions, each one's memory, timeout and instances, its namespace's quota, and its rates of changes and invocations, which answer 429 with `Retry-After` beyond them. One plan, `beta`, to start; plans change in SQL until the admin dashboard (client-readiness plan, P-73).
 - **Console:** a React + Vite web app in `FE/`: login and sign-up, the new account's onboarding and approval, account settings, API keys, and the function pages.
 
 **Not implemented yet**, despite what older documents say:
@@ -71,7 +72,7 @@ curl -s -X POST localhost:3000/functions/<id>/invoke -H 'content-type: applicati
 # → {"status": "COMPLETED", "output": {"message": "Hello FF"}, "duration": 0.48, …}
 ```
 
-For Python, use `"runtime": "python"` and code such as `"def handler(event, context):\n    return {\"message\": \"Hello \" + event[\"body\"].get(\"name\", \"world\")}\n"`. Creating a function returns once it is running (`"status": "ACTIVE"`). The memory range is 128–1024 MB and the timeout 1–300 s.
+For Python, use `"runtime": "python"` and code such as `"def handler(event, context):\n    return {\"message\": \"Hello \" + event[\"body\"].get(\"name\", \"world\")}\n"`. Creating a function returns once it is running (`"status": "ACTIVE"`). On the beta plan, the memory range is 128–1024 MB and the timeout 1–300 s: each account's plan sets its limits and rates ("Plans and limits" in [Getting started](docs/getting-started.md)).
 
 To start the console: `cd FE && npm install && npm run dev`. It runs on http://localhost:5199 and calls the API on localhost:3000, which allows that origin (`CORS_ORIGIN`). Without a login, it acts as the backend's development account. With `VITE_OIDC_AUTHORITY` set (`FE/.env.example`), users log in through Keycloak, sign up, create their account, and manage API keys: see "Log in with Keycloak" in [Getting started](docs/getting-started.md). The metrics charts get a new source in the client-readiness plan (P-50).
 

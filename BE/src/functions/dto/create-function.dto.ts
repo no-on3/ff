@@ -1,5 +1,6 @@
 import { IsString, IsEnum, IsNumber, IsOptional, Min, Max } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { PLATFORM_LIMITS } from '../../plans/plan-limits';
 import { Runtime } from '../entities/function.entity';
 
 export class CreateFunctionDto {
@@ -15,16 +16,24 @@ export class CreateFunctionDto {
   @IsString()
   code: string;
 
-  @ApiProperty({ description: 'Memory allocation in MB', minimum: 128, maximum: 1024 })
+  @ApiProperty({
+    description: "Memory allocation in MB. The account's plan sets a lower maximum: 1,024 MB on the beta plan",
+    minimum: 128,
+    maximum: PLATFORM_LIMITS.memoryMb,
+  })
   @IsNumber()
   @Min(128)
-  @Max(1024)
+  @Max(PLATFORM_LIMITS.memoryMb)
   memory: number;
 
-  @ApiProperty({ description: 'Function timeout in seconds', minimum: 1, maximum: 300 })
+  @ApiProperty({
+    description: "Function timeout in seconds. The account's plan sets a lower maximum: 300 s on the beta plan",
+    minimum: 1,
+    maximum: PLATFORM_LIMITS.timeoutSeconds,
+  })
   @IsNumber()
   @Min(1)
-  @Max(300)
+  @Max(PLATFORM_LIMITS.timeoutSeconds)
   timeout: number;
 
   @ApiPropertyOptional({ description: 'Additional metadata', type: 'object', additionalProperties: true })

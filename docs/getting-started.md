@@ -204,9 +204,10 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 **What a function can be, today:**
 - one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
 - up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
-- 128–1024 MB of memory;
-- a timeout of 1–300 s;
-- up to 3 instances by default, and 10 at most (`maxInstances`); `minInstances` from 0 to 10 keeps instances running when idle.
+- within the account's plan: on the beta plan, 25 functions, each with 128–1024 MB of memory and a timeout of 1–300 s;
+- up to 3 instances by default, and at most the plan's `instancesPerFunction` (10 on the beta plan) with `maxInstances`; `minInstances` from 0 up to the same limit keeps instances running when idle.
+
+A request beyond the plan gets 400 with the plan's limit, for example `memory must be at most 1024 MB on the Beta plan`. "Plans and limits" in section 5 lists them all.
 
 The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runtimes/nodejs/README.md) and [Python](../runtimes/python/README.md) runtime READMEs describe `event`, `context`, and the error names.
 
@@ -242,7 +243,7 @@ curl -s -i -X POST localhost:18080/invoke -H 'content-type: application/json' -d
 kill $!                                                  # stop the port-forward
 ```
 
-**See a cold start.** Idle functions are scaled to zero after 15 minutes (`FF_SCALE_TO_ZERO_IDLE_SECONDS`). To skip the wait, scale one down yourself. The next invocation starts it again, which takes about 7–10 s at the smallest size, and the backend logs `Cold start: scaling <id> from zero`.
+**See a cold start.** Idle functions are scaled to zero after the plan's idle window: 15 minutes on the beta plan (`idleSeconds`). To skip the wait, scale one down yourself. The next invocation starts it again, which takes about 7–10 s at the smallest size, and the backend logs `Cold start: scaling <id> from zero`.
 
 ```bash
 kubectl -n "$NS" scale deploy/fn-$ID --replicas=0
@@ -315,6 +316,33 @@ The console keeps its tokens in the tab's session storage, and renews the 5-minu
 
 **Reset Keycloak** with `docker compose --profile auth down -v keycloak`: it deletes Keycloak's users, and imports the realm again at the next start. Keycloak reads `deploy/keycloak/ff-realm.json` only at its first start, so a change to that file needs this reset. Name the service: without it, `down -v` deletes the database and S3 volumes too.
 
+**Plans and limits.** Each account has a plan (D5 of the client-readiness plan); new accounts get `beta`. A plan sets how many functions an account may have, each one's memory, timeout and instances, the quota of the account's namespace (all its functions together), the rate of changes and of invocations, and the idle window before scale to zero. `GET /me` shows each account's plan, and so does the console's account page. The beta plan:
+
+| Limit | Beta | Over it |
+|---|---|---|
+| Functions per account | 25 | 400 `The Beta plan allows 25 functions per account: delete one first` |
+| Memory, timeout per function | 1,024 MB, 300 s | 400 `memory must be at most 1024 MB on the Beta plan` |
+| Instances per function | 10 | 400 `maxInstances must be at most 10 on the Beta plan` |
+| Namespace quota | 20 pods, 8 CPU, 8 GiB | a rollout that doesn't fit: `exceeded quota` |
+| Changes (create, update, delete, scaling, keys, accounts) | 60 a minute | 429 `TooManyRequestsException: Rate exceeded…`, with `Retry-After` |
+| Invocations | 100 a second | 429, the same, counted apart from changes |
+| Idle before scale to zero | 15 minutes | |
+| History, logs kept | 30 days, 14 days | kept for now: P-45 and P-43 apply them |
+
+Reads are not rate-limited. A rate is counted per account: a user who has no account yet is counted alone, and a caller without a login by address. The counts live in the backend's memory, so they start again when it restarts.
+
+Until the admin dashboard (P-73), plans change in SQL. The backend reads a plan at most once a minute, so a change applies within a minute; an account's namespace gets its new quota at its next deploy or update:
+
+```bash
+psql() { docker compose exec -T postgres psql -U postgres -d serverless_platform "$@"; }
+psql -c "SELECT id, name, limits FROM plans"
+# a plan with more room, from the beta plan's limits
+psql -c "INSERT INTO plans (id, name, limits) SELECT 'team', 'Team', limits || '{\"functions\": 100, \"memoryMb\": 2048}' FROM plans WHERE id = 'beta'"
+psql -c "UPDATE accounts SET plan_id = 'team' WHERE id = '$ACCOUNT'"
+```
+
+The backend checks a plan's limits before using them: a plan that lacks one, or has a wrong one, makes its accounts' requests fail with 500, and the log names the plan and the limit.
+
 **Change the database schema.** Change the entity, then let TypeORM write the migration, read it, and register it:
 
 ```bash
@@ -371,7 +399,9 @@ docker compose down -v
 | The console says `Can't reach the API at …` | The backend isn't running at `VITE_API_URL`, or its `CORS_ORIGIN` doesn't include http://localhost:5199. A `BE/.env` from before 2026-10-17 says 5173: take the line from `BE/.env.example`. |
 | The console says `The API asks for a login, but this console has none` | The backend runs in OIDC mode, and the console without a login. Set `VITE_OIDC_AUTHORITY` in `FE/.env.local` and restart `npm run dev`, or set `FF_AUTH_MODE=dev` in `BE/.env`. |
 | Keycloak answers `Invalid parameter: redirect_uri` | Your Keycloak still has the realm it imported before the console moved to port 5199 (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows, and sign up again. |
-| `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. |
+| `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. With `FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read` or `K8S_TENANT_QUOTA_… is no longer read`, remove those lines: the account's plan sets them now. |
+| 400 `… must be at most … on the Beta plan`, or `The Beta plan allows 25 functions per account` | The request goes beyond the account's plan. Ask for less, or move the account to a larger plan ("Plans and limits" in section 5). |
+| 429 `TooManyRequestsException: Rate exceeded: the Beta plan allows …` | The account made more changes or invocations than its plan allows. Wait for the seconds in `Retry-After`. |
 | Every API call returns 401 | `FF_AUTH_MODE` isn't `dev`, and the call has no valid token. Use the development values from `BE/.env.example`, or send a token: see "Log in with Keycloak" in section 5. |
 | 401 `The token was issued by another issuer` | `FF_OIDC_ISSUER` must be exactly the token's `iss`, `http://localhost:8180/realms/ff` for the local Keycloak, including `localhost`. |
 | 403 `This user has no account yet: create one with POST /accounts` | The token is valid, but the user has no account to act for: create one, as "Log in with Keycloak" in section 5 shows. |

@@ -6,7 +6,9 @@
 # build, as a deploy step would. Scenario: create → invoke → history → update →
 # invoke → delete, with checks on the Kubernetes side and in object storage (the
 # code archive, read through SeaweedFS's filer), then the same lifecycle
-# for a Python function. Removes its compose project (including its volumes),
+# for a Python function. Then plans (P-15): an account on a small plan, its
+# limits, its namespace's quota and its rate limits, which don't touch other
+# accounts. Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
 # gVisor (hack/k8s/gvisor-up.sh installs it).
@@ -73,7 +75,10 @@ check "scaling limits can be changed" "200 0 2 true" \
 http PUT "/functions/$id/scaling-config" '{"minInstances": 3}' >/dev/null
 check "minInstances above maxInstances is refused" 400 "$(status)"
 http PUT "/functions/$id/scaling-config" '{"maxInstances": 11}' >/dev/null
-check "maxInstances above the limit is refused" 400 "$(status)"
+check "maxInstances above the plan's limit is refused, naming it" "400 maxInstances must be at most 10 on the Beta plan" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+check "the namespace's quota is the beta plan's" "20 8 8Gi" \
+  "$(kubectl -n "$tenant_ns" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
 
 invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"e2e"}}')"
 check "invoke returns 201" 201 "$(status)"
@@ -120,5 +125,47 @@ check "handler output is returned, with the Lambda context" "Hello Python 128" \
   "$(jq -r '"\(.output.message) \(.output.memory)"' <<<"$invoked")"
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
+
+echo "== plans and rate limits (P-15)"
+# A small plan, assigned in SQL as the admin dashboard will (P-73), to an account
+# that development mode creates on its first call.
+small="$(random_account)"
+e2e_namespaces+=("$(tenant_namespace "$small")")
+# as_small <method> <path> [body] [curl option...]
+as_small() {
+  local method=$1 path=$2 body=${3:-}
+  shift $(($# < 3 ? $# : 3))
+  http_at "$api" "$method" "$path" "$body" -H "X-FF-Dev-Account: $small" "$@"
+}
+sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
+as_small GET /functions >/dev/null
+sql "INSERT INTO plans (id, name, limits) SELECT 'e2e-small', 'E2E small', limits || '{\"functions\": 1, \"memoryMb\": 512, \"writesPerMinute\": 5, \"invokesPerSecond\": 2, \"quota\": {\"pods\": 5, \"cpu\": \"2\", \"memory\": \"2Gi\"}}' FROM plans WHERE id = 'beta'"
+sql "UPDATE accounts SET plan_id = 'e2e-small' WHERE id = '$small'"
+small_fn() { jq -n --arg code "$v1" --argjson memory "$2" '{name: $ARGS.positional[0], runtime: "nodejs", code: $code, memory: $memory, timeout: 5}' --args "$1"; }
+as_small POST /functions "$(small_fn e2e-big 1024)" >/dev/null # change 1
+check "memory above the plan is refused, naming its limit" "400 memory must be at most 512 MB on the E2E small plan" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+created="$(as_small POST /functions "$(small_fn e2e-small 128)")" # change 2
+check "the plan's one function is created" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
+small_id="$(jq -r .id <<<"$created")"
+check "its namespace has the plan's quota" "5 2 2Gi" \
+  "$(kubectl -n "$(tenant_namespace "$small")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
+as_small POST /functions "$(small_fn e2e-second 128)" >/dev/null # change 3
+check "a second function is refused" "400 The E2E small plan allows 1 function per account: delete one first" "$(status) $(jq -r .message "$work/body")"
+as_small PUT "/functions/$small_id/scaling-config" '{"maxInstances": 1}' >/dev/null # change 4
+as_small PUT "/functions/$small_id" '{"name": "e2e-renamed"}' >/dev/null # change 5
+check "changes within the plan's rate pass" 200 "$(status)"
+as_small PUT "/functions/$small_id" '{"name": "e2e-again"}' -D "$work/headers" >/dev/null # change 6
+retry_after="$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "retry-after" {print $2}')"
+check "the sixth change in a minute gets 429, with Retry-After" "429 true" "$(status) $([ "${retry_after:-0}" -gt 0 ] && echo true || echo false)"
+check "and Lambda's error name, and the plan's limit" "TooManyRequestsException: Rate exceeded: the E2E small plan allows 5 changes per minute" \
+  "$(jq -r .message "$work/body" | sed 's/\. Retry after.*//')"
+as_small GET "/functions/$small_id" >/dev/null
+check "reads still pass" 200 "$(status)"
+codes=""
+for _ in 1 2 3; do as_small POST "/functions/$small_id/invoke" '{"input":{}}' >/dev/null; codes="$codes $(status)"; done
+check "invocations have their own rate: two a second, then 429" " 201 201 429" "$codes"
+http PUT "/functions/$small_id/scaling-config" '{"maxInstances": 1}' >/dev/null
+check "another account, from the same address, isn't slowed: its own count, and its function isn't found" 404 "$(status)"
 
 echo "e2e: $passed checks passed"

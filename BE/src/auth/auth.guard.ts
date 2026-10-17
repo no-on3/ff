@@ -94,7 +94,7 @@ export class AuthGuard implements CanActivate {
     }
     const accountId = named ?? this.config.getOrThrow<string>('auth.devAccountId');
     const account = await this.accounts.developmentAccount(accountId);
-    request.principal = { accountId, accountStatus: account.status, userId: 'dev', role: 'owner' };
+    request.principal = { accountId, accountStatus: account.status, planId: account.planId, userId: 'dev', role: 'owner' };
   }
 
   private async authenticate(request: GuardedRequest): Promise<void> {

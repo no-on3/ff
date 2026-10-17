@@ -24,6 +24,12 @@ export interface FunctionWorkload {
   maxInstances: number;
 }
 
+/** What a scheduler applies to an account as a whole: its plan's quota (D5). */
+export interface TenantLimits {
+  /** All the account's functions together. */
+  quota: { pods: number; cpu: string; memory: string };
+}
+
 export interface InvokeResult {
   /** The value returned by the function handler. */
   output: unknown;
@@ -32,14 +38,20 @@ export interface InvokeResult {
 }
 
 export interface Orchestrator {
-  /** Create or replace everything needed to run the function, with at least one instance. Idempotent. */
-  deploy(fn: FunctionWorkload): Promise<void>;
+  /**
+   * Create or replace everything needed to run the function, with at least one
+   * instance, and its account's limits. Idempotent.
+   */
+  deploy(fn: FunctionWorkload, tenant: TenantLimits): Promise<void>;
   /**
    * Roll out new code or configuration for an existing function, with at least
    * one instance even if it was scaled to zero, so that waitUntilReady checks a
    * real instance. Applying a previous version again is how an update is undone.
+   * The account's limits are applied again too.
    */
-  update(fn: FunctionWorkload): Promise<void>;
+  update(fn: FunctionWorkload, tenant: TenantLimits): Promise<void>;
+  /** Apply an account's new limits at once, after a plan change. Nothing to do before its first function. */
+  applyTenantLimits(accountId: string, tenant: TenantLimits): Promise<void>;
   /** Delete every scheduler resource of the function. */
   remove(fn: FunctionWorkload): Promise<void>;
   /**

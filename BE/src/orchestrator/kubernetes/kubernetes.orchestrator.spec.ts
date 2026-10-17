@@ -8,9 +8,9 @@ import {
 } from '../orchestrator.errors';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
-import { MAX_CODE_BYTES } from './manifests';
+import { MAX_CODE_BYTES, TENANT_QUOTA_NAME } from './manifests';
 import { functionResourceName, accountNamespace } from './naming';
-import { settings, workload } from './test-fixtures';
+import { settings, tenant, workload } from './test-fixtures';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const rolledOut = (replicas: number) => ({
@@ -83,7 +83,7 @@ describe('KubernetesOrchestrator', () => {
 
   describe('deploy', () => {
     it('applies tenant guardrails first, then code, Service and Deployment', async () => {
-      await orchestrator.deploy(fn);
+      await orchestrator.deploy(fn, tenant());
 
       expect(api.applied.map((a) => a.manifest.kind)).toEqual([
         'Namespace',
@@ -98,27 +98,64 @@ describe('KubernetesOrchestrator', () => {
       expect(api.applied.every((a) => a.manifest.metadata.namespace === ns || a.manifest.kind === 'Namespace')).toBe(true);
     });
 
+    it("sizes the namespace's quota from the account's plan (D5)", async () => {
+      await orchestrator.deploy(fn, tenant({ pods: 7, cpu: '2', memory: '3Gi' }));
+
+      const quota = api.applied.find((a) => a.manifest.kind === 'ResourceQuota')!;
+      expect(quota.path).toBe(`/api/v1/namespaces/${ns}/resourcequotas/${TENANT_QUOTA_NAME}`);
+      expect(quota.manifest.spec.hard).toMatchObject({
+        pods: '7',
+        'requests.cpu': '2',
+        'limits.cpu': '2',
+        'requests.memory': '3Gi',
+        'limits.memory': '3Gi',
+      });
+    });
+
     it('starts new functions with max(1, minInstances) replicas', async () => {
-      await orchestrator.deploy(workload({ minInstances: 0 }));
-      await orchestrator.deploy(workload({ minInstances: 2 }));
+      await orchestrator.deploy(workload({ minInstances: 0 }), tenant());
+      await orchestrator.deploy(workload({ minInstances: 2 }), tenant());
 
       const replicas = api.applied.filter((a) => a.manifest.kind === 'Deployment').map((a) => a.manifest.spec.replicas);
       expect(replicas).toEqual([1, 2]);
     });
 
     it('rejects oversized code before touching the cluster', async () => {
-      await expect(orchestrator.deploy(workload({ code: 'x'.repeat(MAX_CODE_BYTES + 1) }))).rejects.toBeInstanceOf(
+      await expect(orchestrator.deploy(workload({ code: 'x'.repeat(MAX_CODE_BYTES + 1) }), tenant())).rejects.toBeInstanceOf(
         CodeTooLargeError,
       );
       expect(api.applied).toHaveLength(0);
     });
   });
 
+  describe('applyTenantLimits: a plan change', () => {
+    it("rewrites the quota of the account's namespace at once, and nothing else", async () => {
+      api.objects.set(`/api/v1/namespaces/${ns}`, { metadata: { name: ns } });
+
+      await orchestrator.applyTenantLimits(fn.accountId, tenant({ pods: 40, cpu: '16', memory: '16Gi' }));
+
+      expect(api.applied.map((a) => a.path)).toEqual([`/api/v1/namespaces/${ns}/resourcequotas/${TENANT_QUOTA_NAME}`]);
+      expect(api.applied[0].manifest.spec.hard).toMatchObject({ pods: '40', 'limits.cpu': '16', 'limits.memory': '16Gi' });
+    });
+
+    it("leaves an account without a namespace alone: its first function's deploy applies the plan", async () => {
+      await orchestrator.applyTenantLimits(fn.accountId, tenant({ pods: 40 }));
+
+      expect(api.applied).toEqual([]);
+    });
+  });
+
   describe('update', () => {
+    it("writes the plan's quota again, so a plan change reaches the namespace with the next update", async () => {
+      await orchestrator.update(fn, tenant({ pods: 9 }));
+
+      expect(api.applied.find((a) => a.manifest.kind === 'ResourceQuota')!.manifest.spec.hard.pods).toBe('9');
+    });
+
     it('keeps the current replica count, never going below minInstances', async () => {
       api.objects.set(deploymentPath, rolledOut(4));
-      await orchestrator.update(fn);
-      await orchestrator.update(workload({ minInstances: 6 }));
+      await orchestrator.update(fn, tenant());
+      await orchestrator.update(workload({ minInstances: 6 }), tenant());
 
       const replicas = api.applied.filter((a) => a.manifest.kind === 'Deployment').map((a) => a.manifest.spec.replicas);
       expect(replicas).toEqual([4, 6]);
@@ -127,7 +164,7 @@ describe('KubernetesOrchestrator', () => {
     it('runs at least one replica for a function scaled to zero, so the wait checks a real pod', async () => {
       api.objects.set(deploymentPath, rolledOut(0));
 
-      await orchestrator.update(fn);
+      await orchestrator.update(fn, tenant());
 
       const deployment = api.applied.find((a) => a.manifest.kind === 'Deployment')!.manifest;
       expect(deployment.spec.replicas).toBe(1);
@@ -135,7 +172,7 @@ describe('KubernetesOrchestrator', () => {
 
     it('garbage-collects code ConfigMaps older than the current and previous versions', async () => {
       const cm = (n: string, ts: string) => ({ metadata: { name: n, creationTimestamp: ts } });
-      await orchestrator.update(fn);
+      await orchestrator.update(fn, tenant());
       const current = api.applied.find((a) => a.manifest.kind === 'ConfigMap')!.manifest.metadata.name;
       api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [
         cm(current, '2026-10-16T10:00:00Z'),
@@ -145,7 +182,7 @@ describe('KubernetesOrchestrator', () => {
       ]);
       api.deleted = [];
 
-      await orchestrator.update(fn);
+      await orchestrator.update(fn, tenant());
 
       expect(api.deleted).toEqual([
         `/api/v1/namespaces/${ns}/configmaps/older`,
@@ -323,7 +360,7 @@ describe('KubernetesOrchestrator', () => {
 
   it('refuses a replica count that is not a number, rather than sending null (which means zero)', async () => {
     await expect(orchestrator.scale(fn, Number.NaN)).rejects.toThrow('Invalid replica count NaN');
-    await expect(orchestrator.update(workload({ minInstances: undefined as unknown as number }))).rejects.toThrow(
+    await expect(orchestrator.update(workload({ minInstances: undefined as unknown as number }), tenant())).rejects.toThrow(
       'Invalid minInstances undefined',
     );
     expect(api.scaled).toEqual([]);

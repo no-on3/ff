@@ -16,6 +16,8 @@ export enum InvocationStatus {
   TIMEOUT = 'TIMEOUT',
   RUNNING = 'RUNNING',
   COMPLETED = 'COMPLETED',
+  /** No instance could take the call in time: the runtime answered 429 (P-15). Not billed (D7). */
+  THROTTLED = 'THROTTLED',
 }
 
 @Entity('function_invocations')

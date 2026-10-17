@@ -1,6 +1,6 @@
 // Shared fixtures for the Kubernetes driver specs (not part of the build output's runtime paths).
 import { Runtime } from '../../functions/entities/function.entity';
-import { FunctionWorkload } from '../orchestrator.types';
+import { FunctionWorkload, TenantLimits } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
 
 export const settings = (overrides: Partial<KubernetesSettings> = {}): KubernetesSettings => ({
@@ -15,8 +15,12 @@ export const settings = (overrides: Partial<KubernetesSettings> = {}): Kubernete
   readyTimeoutSeconds: 5,
   egressInternet: true,
   ingressAllowCidrs: [],
-  tenantQuota: { pods: '20', cpu: '8', memory: '8Gi' },
   ...overrides,
+});
+
+/** An account's limits as the beta plan sets them (D5). */
+export const tenant = (quota: Partial<TenantLimits['quota']> = {}): TenantLimits => ({
+  quota: { pods: 20, cpu: '8', memory: '8Gi', ...quota },
 });
 
 export const workload = (overrides: Partial<FunctionWorkload> = {}): FunctionWorkload => ({

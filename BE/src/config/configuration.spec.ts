@@ -53,7 +53,6 @@ describe('configuration', () => {
       },
       minio: { endPoint: 'localhost', port: 9003, useSSL: false, bucketName: 'functions' },
       orchestrator: { driver: 'kubernetes', readyTimeoutSeconds: 90 },
-      scaling: { scaleToZeroIdleSeconds: 900 },
       kubernetes: {
         apiUrl: '',
         tokenFile: '/var/run/secrets/kubernetes.io/serviceaccount/token',
@@ -66,7 +65,6 @@ describe('configuration', () => {
         readyTimeoutSeconds: 90,
         egressInternet: true,
         ingressAllowCidrs: [],
-        tenantQuota: { pods: '20', cpu: '8', memory: '8Gi' },
       },
     });
   });
@@ -87,8 +85,7 @@ describe('configuration', () => {
       K8S_INGRESS_ALLOW_CIDRS: '10.42.0.0/16, fd00::/8',
       K8S_INVOKE_MODE: 'direct',
       K8S_RUNTIME_CLASS: '',
-      K8S_TENANT_QUOTA_CPU: '500m',
-      FF_SCALE_TO_ZERO_IDLE_SECONDS: '',
+      FF_SCALE_TO_ZERO_IDLE_SECONDS: '', // empty: as if unset, so not refused
     });
 
     expect(config.port).toBe(4100);
@@ -101,9 +98,7 @@ describe('configuration', () => {
       ingressAllowCidrs: ['10.42.0.0/16', 'fd00::/8'],
       invokeMode: 'direct',
       runtimeClass: '',
-      tenantQuota: { cpu: '500m' },
     });
-    expect(config.scaling.scaleToZeroIdleSeconds).toBe(900);
   });
 
   it('accepts a complete production configuration: oidc, no query logging, the given origins', () => {
@@ -222,6 +217,15 @@ describe('configuration', () => {
       ]);
     });
 
+    it.each([
+      ['FF_SCALE_TO_ZERO_IDLE_SECONDS', '900', "FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read: each account's plan sets its idle window (plans.limits.idleSeconds); remove it"],
+      ['K8S_TENANT_QUOTA_PODS', '20', "K8S_TENANT_QUOTA_PODS is no longer read: each account's plan sets its quota (plans.limits.quota); remove it"],
+      ['K8S_TENANT_QUOTA_CPU', '8', "K8S_TENANT_QUOTA_CPU is no longer read: each account's plan sets its quota (plans.limits.quota); remove it"],
+      ['K8S_TENANT_QUOTA_MEMORY', '8Gi', "K8S_TENANT_QUOTA_MEMORY is no longer read: each account's plan sets its quota (plans.limits.quota); remove it"],
+    ])("explains that each account's plan replaced %s (P-15), rather than ignoring it", (name, value, expected) => {
+      expect(problems({ ...dev, [name]: value })).toEqual([expected]);
+    });
+
     it('accepts oidc outside production with a plain http issuer (a local Keycloak)', () => {
       const config = configuration({ FF_OIDC_ISSUER: 'http://localhost:8180/realms/ff', FF_OIDC_AUDIENCE: 'ff-api' });
 
@@ -239,8 +243,6 @@ describe('configuration', () => {
       ['ORCHESTRATOR', 'nomad', 'ORCHESTRATOR must be one of kubernetes; got "nomad"'],
       ['K8S_IMAGE_PULL_POLICY', 'Sometimes', 'K8S_IMAGE_PULL_POLICY must be one of IfNotPresent, Always, Never; got "Sometimes"'],
       ['K8S_INVOKE_MODE', 'tunnel', 'K8S_INVOKE_MODE must be one of direct, proxy; got "tunnel"'],
-      ['K8S_TENANT_QUOTA_CPU', '8 cores', 'K8S_TENANT_QUOTA_CPU must be a Kubernetes quantity such as 8, 500m or 8Gi; got "8 cores"'],
-      ['K8S_TENANT_QUOTA_PODS', '0', 'K8S_TENANT_QUOTA_PODS must be a whole number above 0; got "0"'],
       ['K8S_RUNTIME_CLASS', 'G_Visor', 'K8S_RUNTIME_CLASS must be a Kubernetes object name'],
       ['K8S_NAMESPACE_PREFIX', 'FF_', 'K8S_NAMESPACE_PREFIX must be ff-t-, the only prefix the admission policy allows'],
       // A valid name, but the admission policy would refuse every namespace the backend creates.
@@ -255,9 +257,9 @@ describe('configuration', () => {
     });
 
     it('lists every bad variable at once', () => {
-      const found = problems({ ...dev, DB_PORT: 'x', MINIO_USE_SSL: 'maybe', K8S_TENANT_QUOTA_MEMORY: 'lots' });
+      const found = problems({ ...dev, DB_PORT: 'x', MINIO_USE_SSL: 'maybe', K8S_IMAGE_PULL_POLICY: 'Sometimes' });
 
-      expect(found.map((problem) => problem.split(' ')[0])).toEqual(['DB_PORT', 'MINIO_USE_SSL', 'K8S_TENANT_QUOTA_MEMORY']);
+      expect(found.map((problem) => problem.split(' ')[0])).toEqual(['DB_PORT', 'MINIO_USE_SSL', 'K8S_IMAGE_PULL_POLICY']);
     });
 
     it('says how many problems there are, one per line', () => {

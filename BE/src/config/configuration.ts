@@ -151,11 +151,6 @@ const cidr = {
   },
   expected: 'CIDR blocks such as 10.42.0.0/16',
 };
-const quantity = {
-  test: (v: string) => /^\d+(\.\d+)?(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$/.test(v),
-  expected: 'a Kubernetes quantity such as 8, 500m or 8Gi',
-};
-const wholeNumber = { test: (v: string) => /^[1-9]\d*$/.test(v), expected: 'a whole number above 0' };
 const dnsSubdomain = {
   test: (v: string) => v.length <= 253 && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/.test(v),
   expected: 'a Kubernetes object name (lowercase letters, digits, "-" and ".")',
@@ -217,7 +212,7 @@ const appShape = {
 
   ORCHESTRATOR: oneOf(['kubernetes'], 'kubernetes'),
   FF_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
-  FF_SCALE_TO_ZERO_IDLE_SECONDS: integer(900, 1, 7 * 24 * 3600),
+  FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
   K8S_TOKEN_FILE: text(`${IN_CLUSTER_SECRETS}/token`),
@@ -231,9 +226,9 @@ const appShape = {
   K8S_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
   K8S_EGRESS_INTERNET: flag(true),
   K8S_INGRESS_ALLOW_CIDRS: list(cidr),
-  K8S_TENANT_QUOTA_PODS: text('20', wholeNumber),
-  K8S_TENANT_QUOTA_CPU: text('8', quantity),
-  K8S_TENANT_QUOTA_MEMORY: text('8Gi', quantity),
+  K8S_TENANT_QUOTA_PODS: optionalText(),
+  K8S_TENANT_QUOTA_CPU: optionalText(),
+  K8S_TENANT_QUOTA_MEMORY: optionalText(),
 
   FF_SMTP_URL: optionalSecretUrl(smtpUrl),
   FF_MAIL_FROM: text('FF <no-reply@ff.localhost>', mailbox),
@@ -245,7 +240,13 @@ const databaseSchema = z.object(databaseShape);
 const appSchema = z.object(appShape);
 
 /** Variables that are still recognized only to explain what replaced them. */
-export const OBSOLETE_VARIABLES = ['FF_DEV_USER_ID'];
+export const OBSOLETE_VARIABLES = [
+  'FF_DEV_USER_ID',
+  'FF_SCALE_TO_ZERO_IDLE_SECONDS',
+  'K8S_TENANT_QUOTA_PODS',
+  'K8S_TENANT_QUOTA_CPU',
+  'K8S_TENANT_QUOTA_MEMORY',
+];
 /** Every variable the backend reads. */
 export const VARIABLES = Object.keys(appShape).filter((name) => !OBSOLETE_VARIABLES.includes(name));
 type DatabaseEnv = z.infer<typeof databaseSchema>;
@@ -270,6 +271,13 @@ function appRules(env: AppEnv): string[] {
     problems.push(
       'FF_DEV_USER_ID is no longer read: set FF_AUTH_MODE=dev and FF_DEV_ACCOUNT_ID (12 digits) instead, as in BE/.env.example',
     );
+  }
+  // Since P-15 (2026-10-17), each account's plan sets these (D5).
+  if (env.FF_SCALE_TO_ZERO_IDLE_SECONDS !== undefined) {
+    problems.push("FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read: each account's plan sets its idle window (plans.limits.idleSeconds); remove it");
+  }
+  for (const name of ['K8S_TENANT_QUOTA_PODS', 'K8S_TENANT_QUOTA_CPU', 'K8S_TENANT_QUOTA_MEMORY'] as const) {
+    if (env[name] !== undefined) problems.push(`${name} is no longer read: each account's plan sets its quota (plans.limits.quota); remove it`);
   }
   if (env.FF_AUTH_MODE === 'dev') {
     if (production) problems.push('FF_AUTH_MODE=dev is for development only, and is refused when NODE_ENV=production');
@@ -393,10 +401,6 @@ export default function configuration(env: Env = process.env) {
       // How long create/update wait for a function to become ready.
       readyTimeoutSeconds: parsed.FF_READY_TIMEOUT_SECONDS,
     },
-    scaling: {
-      // Idle time before a function with scaleToZero and minInstances 0 is scaled to zero.
-      scaleToZeroIdleSeconds: parsed.FF_SCALE_TO_ZERO_IDLE_SECONDS,
-    },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.
       smtpUrl: parsed.FF_SMTP_URL ?? '',
@@ -424,11 +428,6 @@ export default function configuration(env: Env = process.env) {
       readyTimeoutSeconds: parsed.K8S_READY_TIMEOUT_SECONDS,
       egressInternet: parsed.K8S_EGRESS_INTERNET,
       ingressAllowCidrs: parsed.K8S_INGRESS_ALLOW_CIDRS,
-      tenantQuota: {
-        pods: parsed.K8S_TENANT_QUOTA_PODS,
-        cpu: parsed.K8S_TENANT_QUOTA_CPU,
-        memory: parsed.K8S_TENANT_QUOTA_MEMORY,
-      },
     },
   };
 }

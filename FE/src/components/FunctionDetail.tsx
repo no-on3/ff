@@ -11,6 +11,7 @@ import {
   parseInvokeInput,
 } from '../lib/functions';
 import { Function, FunctionInvocation, functionsApi } from '../services/api';
+import { useSession } from '../session/session';
 import { updateFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
 import { MetricsDashboard } from './MetricsDashboard';
@@ -30,6 +31,7 @@ const statusStyle = (status: string) => STATUS_STYLES[status] ?? 'bg-red-100 tex
 const FunctionDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const plan = useSession().account!.plan; // the function pages show only for an account
   const dispatch = useDispatch<AppDispatch>();
 
   const [func, setFunc] = useState<Function | null>(null);
@@ -185,7 +187,7 @@ const FunctionDetail: React.FC = () => {
                 <input
                   type="number"
                   min={128}
-                  max={1024}
+                  max={Math.max(plan.limits.memoryMb, func.memory)}
                   value={form.memory}
                   onChange={(e) => setForm({ ...form, memory: Number(e.target.value) })}
                   className="input mt-1"
@@ -196,13 +198,16 @@ const FunctionDetail: React.FC = () => {
                 <input
                   type="number"
                   min={1}
-                  max={300}
+                  max={Math.max(plan.limits.timeoutSeconds, func.timeout)}
                   value={form.timeout}
                   onChange={(e) => setForm({ ...form, timeout: Number(e.target.value) })}
                   className="input mt-1"
                 />
               </div>
             </div>
+            <p className="text-sm text-gray-500">
+              The {plan.name} plan allows up to {plan.limits.memoryMb} MB and {plan.limits.timeoutSeconds} s per function.
+            </p>
 
             <button type="submit" className="btn btn-primary" disabled={saving}>
               {saving ? 'Updating… (waits until the new version is live)' : 'Update Function'}

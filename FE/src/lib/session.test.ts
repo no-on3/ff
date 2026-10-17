@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MeAccount } from '../services/api';
+import { BETA_PLAN } from '../test-fixtures';
 import {
   accountView,
   chooseAccount,
@@ -12,7 +13,13 @@ import {
   returnPath,
 } from './session';
 
-const account = (id: string, status: MeAccount['status'] = 'active'): MeAccount => ({ id, name: `Account ${id}`, status, role: 'owner' });
+const account = (id: string, status: MeAccount['status'] = 'active'): MeAccount => ({
+  id,
+  name: `Account ${id}`,
+  status,
+  role: 'owner',
+  plan: BETA_PLAN,
+});
 
 describe('requestHeaders', () => {
   it("sends the user's token and the account the console acts for", () => {

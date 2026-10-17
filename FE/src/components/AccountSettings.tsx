@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { accountUpdateBody, formatWhen } from '../lib/accounts';
 import { apiErrorMessage } from '../lib/functions';
+import { planLimitRows } from '../lib/plans';
 import { Account, accountsApi } from '../services/api';
 import { useSession } from '../session/session';
 
@@ -100,7 +101,7 @@ const AccountSettings: React.FC = () => {
               <Field label="ID">{account.id}</Field>
               <Field label="Status">{STATUS_TEXT[account.status]}</Field>
               <Field label="Your role">{account.role}</Field>
-              <Field label="Plan">{account.planId}</Field>
+              <Field label="Plan">{chosen.plan.name}</Field>
               <Field label="Country">{account.country}</Field>
               <Field label="Internet access for functions">{account.internetEgress ? 'Yes' : 'No'}</Field>
               <Field label="Created">{formatWhen(account.createdAt)}</Field>
@@ -110,6 +111,17 @@ const AccountSettings: React.FC = () => {
                 <Field label="What you plan to build">{account.useCase}</Field>
               </dl>
             )}
+          </div>
+          <div className="card mb-6">
+            <h2 className="text-lg font-semibold mb-1">The {chosen.plan.name} plan</h2>
+            <p className="mb-4 text-sm text-gray-500">What this account may use. The API refuses what goes beyond, and says which limit.</p>
+            <dl className="grid gap-4 sm:grid-cols-3">
+              {planLimitRows(chosen.plan).map(([label, value]) => (
+                <Field key={label} label={label}>
+                  {value}
+                </Field>
+              ))}
+            </dl>
           </div>
           <form onSubmit={handleSubmit} className="card space-y-4">
             <h2 className="text-lg font-semibold">Details</h2>

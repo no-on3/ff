@@ -15,6 +15,7 @@ import { accountNamespace } from '../orchestrator/kubernetes/naming';
 import { settings } from '../orchestrator/kubernetes/test-fixtures';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
+import { onePlan } from '../plans/test-fixtures';
 import { FUNCTION_DEFAULTS, MemoryRepository, eventually } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' ? describe : describe.skip;
@@ -45,7 +46,7 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
   const ns = accountNamespace(s.namespacePrefix, account);
   const functions = new MemoryRepository<Function>(FUNCTION_DEFAULTS);
   const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
-  const metrics = new MetricsService(new MemoryRepository() as never, functions as never, orchestrator, config);
+  const metrics = new MetricsService(new MemoryRepository() as never, functions as never, orchestrator, onePlan());
   const service = new FunctionsService(
     functions as never,
     new MemoryRepository() as never,
@@ -53,6 +54,7 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
     orchestrator,
     config,
     metrics,
+    onePlan(),
   );
 
   afterAll(async () => {

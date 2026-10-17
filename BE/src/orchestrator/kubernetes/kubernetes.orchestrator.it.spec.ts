@@ -11,7 +11,8 @@ import { FunctionLoadError, OrchestratorError } from '../orchestrator.errors';
 import { KubeClient, paths } from './kube-client';
 import { KubernetesOrchestrator } from './kubernetes.orchestrator';
 import { LABELS, functionResourceName, accountNamespace } from './naming';
-import { settings, workload } from './test-fixtures';
+import { TENANT_QUOTA_NAME } from './manifests';
+import { settings, tenant as limits, workload } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' ? describe : describe.skip;
 // Set by hack/k8s/test-it.sh when the gvisor RuntimeClass exists (hack/k8s/gvisor-up.sh).
@@ -128,7 +129,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   });
 
   it('deploys a function and serves invocations through the API server proxy', async () => {
-    await orchestrator.deploy(fn);
+    await orchestrator.deploy(fn, limits());
     await orchestrator.waitUntilReady(fn, 90_000);
 
     const result = await orchestrator.invoke(fn, { name: 'Kubernetes' });
@@ -138,9 +139,21 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     expect(result.memoryUsedMb).toBeGreaterThan(0);
   });
 
+  it("sizes the account namespace's quota from its plan, and a plan change rewrites it at once (P-15)", async () => {
+    const hard = async () =>
+      (await client.get<{ spec: { hard: Record<string, string> } }>(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME)))?.spec.hard;
+    expect(await hard()).toMatchObject({ pods: '20', 'requests.cpu': '8', 'limits.cpu': '8', 'limits.memory': '8Gi' });
+
+    await orchestrator.applyTenantLimits(tenant, limits({ pods: 30, cpu: '12', memory: '12Gi' }));
+    expect(await hard()).toMatchObject({ pods: '30', 'requests.cpu': '12', 'requests.memory': '12Gi', 'limits.memory': '12Gi' });
+
+    await orchestrator.applyTenantLimits(tenant, limits()); // back to the beta plan's, for the next tests
+    expect(await hard()).toMatchObject({ pods: '20' });
+  });
+
   it('rolls out new code with zero downtime semantics', async () => {
     fn.code = greeter(2);
-    await orchestrator.update(fn);
+    await orchestrator.update(fn, limits());
     await orchestrator.waitUntilReady(fn, 90_000);
 
     expect((await orchestrator.invoke(fn, {})).output).toEqual({ version: 2, message: 'Hello world' });
@@ -158,7 +171,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
 
   it('enforces the tenant NetworkPolicy: DNS allowed, cluster-internal addresses blocked', async () => {
     fn.code = networkProbe;
-    await orchestrator.update(fn);
+    await orchestrator.update(fn, limits());
     await orchestrator.waitUntilReady(fn, 90_000);
 
     const { output } = await orchestrator.invoke(fn, {});
@@ -169,7 +182,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   it("reports the function's own load error, from its runtime's log, instead of hanging (P-10)", async () => {
     const broken = workload({ id: randomUUID(), accountId: tenant, name: 'it-broken', code: 'throw new Error("boom at init");', timeout: 3 });
     try {
-      await orchestrator.deploy(broken);
+      await orchestrator.deploy(broken, limits());
       const failure = await orchestrator.waitUntilReady(broken, 25_000).catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(FunctionLoadError);
       expect(failure).toMatchObject({ errorType: 'Runtime.ImportModuleError', message: 'Error: boom at init' });
@@ -181,7 +194,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   it('runs a Python function with the Lambda handler signature and error names', async () => {
     const py = workload({ id: randomUUID(), accountId: tenant, name: 'it-python', runtime: Runtime.PYTHON, code: pythonGreeter, memory: 128, timeout: 5 });
     try {
-      await orchestrator.deploy(py);
+      await orchestrator.deploy(py, limits());
       await orchestrator.waitUntilReady(py, 90_000);
 
       const result = await orchestrator.invoke(py, { name: 'Python' });
@@ -201,7 +214,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     // the whole container killed, so the runtime must stop the worker first.
     const hog = workload({ id: randomUUID(), accountId: tenant, name: 'it-python-hog', runtime: Runtime.PYTHON, code: pythonHog, memory: 128, timeout: 10 });
     try {
-      await orchestrator.deploy(hog);
+      await orchestrator.deploy(hog, limits());
       await orchestrator.waitUntilReady(hog, 90_000);
 
       const failure = await orchestrator.invoke(hog, { hog: true }).catch((error: unknown) => error);
@@ -219,7 +232,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
   it('runs a Node.js function in /var/task, where a relative path finds the files next to its code', async () => {
     const reader = workload({ id: randomUUID(), accountId: tenant, name: 'it-cwd', code: readsItsOwnCode, memory: 128, timeout: 5 });
     try {
-      await orchestrator.deploy(reader);
+      await orchestrator.deploy(reader, limits());
       await orchestrator.waitUntilReady(reader, 90_000);
 
       expect((await orchestrator.invoke(reader, {})).output).toEqual({ cwd: '/var/task', readsItself: true });
@@ -233,7 +246,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     // longer than 10 s, and the invocation timed out first (P-04).
     const hog = workload({ id: randomUUID(), accountId: tenant, name: 'it-node-hog', code: nodeHog, memory: 128, timeout: 30 });
     try {
-      await orchestrator.deploy(hog);
+      await orchestrator.deploy(hog, limits());
       await orchestrator.waitUntilReady(hog, 90_000);
 
       const failure = await orchestrator.invoke(hog, { hog: true }).catch((error: unknown) => error);
@@ -257,7 +270,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
       workload({ id: randomUUID(), accountId: tenant, name: 'it-sandbox-network', code: networkProbe, memory: 128, timeout: 10 }),
     ];
     try {
-      for (const f of fns) await sandboxed.deploy(f);
+      for (const f of fns) await sandboxed.deploy(f, limits());
       for (const f of fns) await sandboxed.waitUntilReady(f, 90_000);
       const outputs: unknown[] = [];
       for (const f of fns) outputs.push((await sandboxed.invoke(f, {})).output);
@@ -276,7 +289,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     const misconfigured = new KubernetesOrchestrator({ ...s, runtimeClass: 'ff-missing' }, client);
     const lost = workload({ id: randomUUID(), accountId: tenant, name: 'it-no-runtimeclass', code: greeter(1), timeout: 3 });
     try {
-      await misconfigured.deploy(lost);
+      await misconfigured.deploy(lost, limits());
       const failure = misconfigured.waitUntilReady(lost, 15_000);
       // A platform failure: the details are for the server log (D4).
       await expect(failure).rejects.toBeInstanceOf(OrchestratorError);

@@ -18,6 +18,8 @@ export interface Principal {
   accountId: string;
   /** Only an active account deploys and invokes: a new one waits for approval (P-12). */
   accountStatus: AccountStatus;
+  /** The account's plan, whose limits apply to the request (D5). */
+  planId: string;
   /** The user acting, when a token is used ("dev" in development mode). */
   userId?: string;
   /** The API key acting, when one is used (D3). */

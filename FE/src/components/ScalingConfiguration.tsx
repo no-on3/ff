@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, TextField, Typography } from '@mui/material';
-import { MAX_INSTANCES_PER_FUNCTION, apiErrorMessage, scalingLimitsError } from '../lib/functions';
+import { apiErrorMessage, scalingLimitsError } from '../lib/functions';
 import { ScalingConfig, ScalingLimits, getScalingConfig, updateScalingConfig } from '../services/api';
+import { useSession } from '../session/session';
 
 interface ScalingConfigurationProps {
   functionId: string;
@@ -13,6 +14,8 @@ interface ScalingConfigurationProps {
  * maximum, and goes back to zero when idle unless a minimum is set.
  */
 export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ functionId }) => {
+  const plan = useSession().account!.plan; // the function pages show only for an account
+  const maxInstances = plan.limits.instancesPerFunction;
   const [config, setConfig] = useState<ScalingConfig | null>(null);
   const [form, setForm] = useState<ScalingLimits | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +35,7 @@ export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ func
     event.preventDefault();
     if (!form) return;
     setSaved(false);
-    const invalid = scalingLimitsError(form);
+    const invalid = scalingLimitsError(form, plan);
     if (invalid) {
       setError(invalid);
       return;
@@ -86,7 +89,7 @@ export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ func
                 value={form.minInstances}
                 onChange={field('minInstances')}
                 sx={{ minWidth: 220 }}
-                slotProps={{ htmlInput: { min: 0, max: MAX_INSTANCES_PER_FUNCTION, step: 1 } }}
+                slotProps={{ htmlInput: { min: 0, max: maxInstances, step: 1 } }}
                 helperText={form.minInstances > 0 ? 'Kept running even when idle' : 'Scales to zero when idle'}
               />
               <TextField
@@ -95,8 +98,8 @@ export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ func
                 value={form.maxInstances}
                 onChange={field('maxInstances')}
                 sx={{ minWidth: 220 }}
-                slotProps={{ htmlInput: { min: 1, max: MAX_INSTANCES_PER_FUNCTION, step: 1 } }}
-                helperText={`At most ${MAX_INSTANCES_PER_FUNCTION}`}
+                slotProps={{ htmlInput: { min: 1, max: maxInstances, step: 1 } }}
+                helperText={`At most ${maxInstances} on the ${plan.name} plan`}
               />
             </Box>
             <Button type="submit" variant="contained" disabled={saving} sx={{ mt: 2 }}>

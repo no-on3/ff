@@ -6,13 +6,13 @@ import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { ACCOUNT_ID, Principal } from '../auth/principal';
 import { Identity } from '../auth/token-verifier';
 import { MailService } from '../mail/mail.service';
+import { DEFAULT_PLAN } from '../plans/plan-limits';
+import { PlansService } from '../plans/plans.service';
 import { AccountView, CreateAccountDto, MeView, UpdateAccountDto } from './dto/account.dto';
 import { Account, AccountStatus } from './entities/account.entity';
 import { Membership } from './entities/membership.entity';
 import { User } from './entities/user.entity';
 
-/** The plan every new account starts on (D5). */
-export const DEFAULT_PLAN = 'beta';
 
 /** Who a request acts for, or why it can't act for any account. */
 export type AccountChoice = { principal: Principal } | { problem: BadRequestException | ForbiddenException | NotFoundException };
@@ -38,6 +38,7 @@ export class AccountsService {
     private readonly dataSource: DataSource,
     private readonly mail: MailService,
     private readonly config: ConfigService,
+    private readonly plans: PlansService,
   ) {}
 
   /** The user of a valid token: found by its subject, or created on the first call. */
@@ -74,6 +75,7 @@ export class AccountsService {
     const principal = (membership: Membership): Principal => ({
       accountId: membership.accountId,
       accountStatus: (membership.account as Account).status,
+      planId: (membership.account as Account).planId,
       userId: user.id,
       role: membership.role,
     });
@@ -111,19 +113,18 @@ export class AccountsService {
       relations: { account: true },
       order: { createdAt: 'ASC' },
     });
-    return {
-      user: { id: user.id, email: user.email, name: user.name, locale: user.locale },
-      accounts: memberships.map(({ account, role }) => {
-        const { id, name, status } = account as Account;
-        return { id, name, status, role };
-      }),
-    };
+    const accounts = [];
+    for (const { account, role } of memberships) {
+      const { id, name, status, planId } = account as Account;
+      accounts.push({ id, name, status, role, plan: await this.plans.get(planId) });
+    }
+    return { user: { id: user.id, email: user.email, name: user.name, locale: user.locale }, accounts };
   }
 
   /** GET /me in development mode: its account, as owner. */
   async developmentMe(principal: Principal): Promise<MeView> {
-    const { id, name, status } = await this.developmentAccount(principal.accountId);
-    return { user: null, accounts: [{ id, name, status, role: 'owner' }] };
+    const { id, name, status, planId } = await this.developmentAccount(principal.accountId);
+    return { user: null, accounts: [{ id, name, status, role: 'owner', plan: await this.plans.get(planId) }] };
   }
 
   /**

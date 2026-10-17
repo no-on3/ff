@@ -66,6 +66,7 @@ const apiKeys = {
     return {
       accountId: '123456789012',
       accountStatus: AccountStatus.ACTIVE,
+      planId: 'beta',
       keyId: '0123456789ab',
       userId: 'creator',
       role: 'owner',
@@ -87,7 +88,7 @@ const accounts = {
   },
   async developmentAccount(id: string) {
     this.developmentAccounts.push(id);
-    return { id, status: this.developmentStatus };
+    return { id, status: this.developmentStatus, planId: 'beta' };
   },
 };
 
@@ -127,7 +128,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
   let baseUrl: string;
   let mode: 'oidc' | 'dev' = 'oidc';
   const asMember = (role: Principal['role'], accountStatus = AccountStatus.ACTIVE): AccountChoice => ({
-    principal: { accountId: '123456789012', accountStatus, userId: 'user-of-kc-user-1', role },
+    principal: { accountId: '123456789012', accountStatus, planId: 'beta', userId: 'user-of-kc-user-1', role },
   });
 
   /** A token as Keycloak would issue it, with `claims` changed. */
@@ -377,7 +378,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
       const res = await get('/functions');
 
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ accountId: '000000000001', accountStatus: 'active', userId: 'dev', role: 'owner' });
+      expect(await res.json()).toEqual({ accountId: '000000000001', accountStatus: 'active', planId: 'beta', userId: 'dev', role: 'owner' });
       expect(accounts.developmentAccounts).toEqual(['000000000001']);
     });
 

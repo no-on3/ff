@@ -85,6 +85,7 @@ export class ApiKeysService {
     return {
       accountId: key.accountId,
       accountStatus: (key.account as Account).status,
+      planId: (key.account as Account).planId,
       keyId: key.id,
       userId: key.createdBy,
       role: membership.role,

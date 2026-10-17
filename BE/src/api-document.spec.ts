@@ -48,7 +48,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
     app = moduleRef.createNestApplication({ logger: false });
     // The caller, where the authentication guard (P-11) will put it.
     app.use((req: { principal?: Principal; user?: object }, _res: unknown, next: () => void) => {
-      req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, role: 'owner' };
+      req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'owner' };
       req.user = { id: 'u-1', email: 'amira@example.tn' };
       next();
     });

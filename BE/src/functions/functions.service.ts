@@ -5,8 +5,10 @@ import { Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { describeError } from '../common/describe-error';
-import { CodeTooLargeError, FunctionTimeoutError } from '../orchestrator/orchestrator.errors';
-import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { CodeTooLargeError, FunctionThrottledError, FunctionTimeoutError } from '../orchestrator/orchestrator.errors';
+import { ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
+import { PlanView } from '../plans/plan-limits';
+import { PlansService, tenantLimits } from '../plans/plans.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
@@ -21,6 +23,37 @@ const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout'] as const;
 /** A message without its final period, to continue it with another sentence. */
 const clause = (message: string): string => message.replace(/\.\s*$/, '');
 
+/** The values a request sets that the account's plan limits (D5). */
+type Sized = Partial<Pick<Function, 'memory' | 'timeout' | 'minInstances' | 'maxInstances'>>;
+
+/**
+ * What the account's plan refuses in these values, each naming the plan's limit.
+ * Only values that change are checked: a function keeps what an older, larger
+ * plan gave it until it is changed.
+ */
+export function planProblems(plan: PlanView, change: Sized, current: Sized = {}): string[] {
+  const { limits, name } = plan;
+  const changes = (field: keyof Sized) => change[field] !== undefined && change[field] !== current[field];
+  const problems: string[] = [];
+  if (changes('memory') && (change.memory as number) > limits.memoryMb) {
+    problems.push(`memory must be at most ${limits.memoryMb} MB on the ${name} plan`);
+  }
+  if (changes('timeout') && (change.timeout as number) > limits.timeoutSeconds) {
+    problems.push(`timeout must be at most ${limits.timeoutSeconds} s on the ${name} plan`);
+  }
+  for (const field of ['minInstances', 'maxInstances'] as const) {
+    if (changes(field) && (change[field] as number) > limits.instancesPerFunction) {
+      problems.push(`${field} must be at most ${limits.instancesPerFunction} on the ${name} plan`);
+    }
+  }
+  return problems;
+}
+
+function refuseOverPlan(plan: PlanView, change: Sized, current?: Sized): void {
+  const problems = planProblems(plan, change, current);
+  if (problems.length) throw new BadRequestException(problems);
+}
+
 /**
  * The function lifecycle (client-readiness plan, P-03). A function's record and
  * its Deployment always describe the same version:
@@ -31,7 +64,8 @@ const clause = (message: string): string => message.replace(/\.\s*$/, '');
  *   keeps the attempt and its diagnosis instead. A success makes it ACTIVE.
  *
  * Every method acts for one account (P-10, D4): it takes the account ID, every
- * query includes it, and another account's function is not found. Failures
+ * query includes it, and another account's function is not found. The account's
+ * plan limits what it may create and change (P-15, D5). Failures
  * show the function's own errors as they are, and platform failures as a
  * generic message with the request ID (failures.ts).
  */
@@ -48,6 +82,7 @@ export class FunctionsService {
     @Inject(ORCHESTRATOR) private orchestrator: Orchestrator,
     private configService: ConfigService,
     private metricsService: MetricsService,
+    private plans: PlansService,
   ) {}
 
   private readyTimeoutMs(): number {
@@ -55,18 +90,20 @@ export class FunctionsService {
   }
 
   async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<Function> {
+    const plan = await this.plans.forAccount(accountId);
+    refuseOverPlan(plan, createFunctionDto);
     const function_ = this.functionsRepository.create({
       ...createFunctionDto,
       accountId,
       status: FunctionStatus.CREATING,
     });
 
-    const savedFunction = await this.functionsRepository.save(function_);
+    const savedFunction = await this.insertWithinPlan(plan, function_);
     try {
       // Archive the code in object storage (the cluster gets it via an immutable ConfigMap).
       await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
 
-      await this.orchestrator.deploy(savedFunction);
+      await this.orchestrator.deploy(savedFunction, tenantLimits(plan.limits));
       // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
       await this.orchestrator.waitUntilReady(savedFunction, this.readyTimeoutMs());
 
@@ -83,6 +120,23 @@ export class FunctionsService {
       if (!(error instanceof CodeTooLargeError)) await this.releaseInstances(savedFunction);
       throw failureResponse(error, failure);
     }
+  }
+
+  /**
+   * Saves a new function, unless its account has as many as its plan allows. The
+   * account's row stays locked while counting, so that two creates at once can't
+   * both take the last place.
+   */
+  private insertWithinPlan(plan: PlanView, function_: Function): Promise<Function> {
+    return this.functionsRepository.manager.transaction(async (manager) => {
+      await manager.query('SELECT 1 FROM "accounts" WHERE "id" = $1 FOR NO KEY UPDATE', [function_.accountId]);
+      const count = await manager.countBy(Function, { accountId: function_.accountId });
+      if (count >= plan.limits.functions) {
+        const allowed = plan.limits.functions === 1 ? '1 function' : `${plan.limits.functions} functions`;
+        throw new BadRequestException(`The ${plan.name} plan allows ${allowed} per account: delete one first`);
+      }
+      return manager.save(Function, function_);
+    });
   }
 
   async findAll(accountId: string): Promise<Function[]> {
@@ -103,6 +157,9 @@ export class FunctionsService {
 
   async update(accountId: string, id: string, updateFunctionDto: UpdateFunctionDto): Promise<Function> {
     const function_ = await this.findOne(accountId, id);
+    const plan = await this.plans.forAccount(accountId);
+    refuseOverPlan(plan, updateFunctionDto, function_);
+    const tenant = tenantLimits(plan.limits);
     const updated = { ...function_, ...updateFunctionDto };
     const changesVersion = ROLLOUT_FIELDS.some(
       (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
@@ -117,13 +174,13 @@ export class FunctionsService {
     }
 
     try {
-      await this.orchestrator.update(updated);
+      await this.orchestrator.update(updated, tenant);
       // The old version keeps serving during the rollout; record the change only once it's live.
       await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
     } catch (error) {
       if (error instanceof CodeTooLargeError) throw new BadRequestException(error.message); // nothing was applied
       if (repairing) return this.keepFailedAttempt(function_, updateFunctionDto, error);
-      return this.rollBack(function_, error);
+      return this.rollBack(function_, error, tenant);
     }
 
     const previousCodePath = this.codePath(function_);
@@ -138,11 +195,11 @@ export class FunctionsService {
    * the Deployment matches the record, and answer with the diagnosis. If that
    * fails too, the function is ERROR, with both messages.
    */
-  private async rollBack(previous: Function, error: unknown): Promise<never> {
+  private async rollBack(previous: Function, error: unknown, tenant: TenantLimits): Promise<never> {
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
-      await this.orchestrator.update(previous);
+      await this.orchestrator.update(previous, tenant);
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {
       previous.status = FunctionStatus.ERROR;
@@ -251,7 +308,12 @@ export class FunctionsService {
       this.metricsService.recordMetric(id, duration, 0, true);
 
       invocation.duration = duration;
-      invocation.status = error instanceof FunctionTimeoutError ? InvocationStatus.TIMEOUT : InvocationStatus.ERROR;
+      invocation.status =
+        error instanceof FunctionTimeoutError
+          ? InvocationStatus.TIMEOUT
+          : error instanceof FunctionThrottledError
+            ? InvocationStatus.THROTTLED // no instance could take it: not billed (D7)
+            : InvocationStatus.ERROR;
       // The history is the account's to read: a platform failure is generic there too (D4).
       invocation.error = callersFailure(error) ?? platformFailure(this.logger, 'The invocation', error);
       await this.invocationsRepository.save(invocation);
@@ -277,6 +339,7 @@ export class FunctionsService {
    */
   async updateScalingConfig(accountId: string, id: string, changes: UpdateScalingConfigDto): Promise<ScalingConfig> {
     const function_ = await this.findOne(accountId, id);
+    refuseOverPlan(await this.plans.forAccount(accountId), changes, function_);
     const minInstances = changes.minInstances ?? function_.minInstances;
     const maxInstances = changes.maxInstances ?? function_.maxInstances;
     if (minInstances > maxInstances) {

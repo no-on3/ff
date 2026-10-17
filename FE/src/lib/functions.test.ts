@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Function } from '../services/api';
+import { BETA_PLAN } from '../test-fixtures';
 import { apiErrorMessage, changedFields, formatDuration, formatMemory, parseInvokeInput, scalingLimitsError } from './functions';
 
 const stored: Function = {
@@ -98,17 +99,24 @@ describe('formatting', () => {
 
 describe('scalingLimitsError', () => {
   it('accepts limits the API accepts', () => {
-    expect(scalingLimitsError({ minInstances: 0, maxInstances: 3 })).toBeNull();
-    expect(scalingLimitsError({ minInstances: 10, maxInstances: 10 })).toBeNull();
+    expect(scalingLimitsError({ minInstances: 0, maxInstances: 3 }, BETA_PLAN)).toBeNull();
+    expect(scalingLimitsError({ minInstances: 10, maxInstances: 10 }, BETA_PLAN)).toBeNull();
   });
 
   it.each([
-    [{ minInstances: -1, maxInstances: 3 }, 'Minimum instances must be a whole number from 0 to 10'],
-    [{ minInstances: 1.5, maxInstances: 3 }, 'Minimum instances must be a whole number from 0 to 10'],
-    [{ minInstances: 0, maxInstances: 0 }, 'Maximum instances must be a whole number from 1 to 10'],
-    [{ minInstances: 0, maxInstances: 11 }, 'Maximum instances must be a whole number from 1 to 10'],
+    [{ minInstances: -1, maxInstances: 3 }, 'Minimum instances must be a whole number from 0 to 10 on the Beta plan'],
+    [{ minInstances: 1.5, maxInstances: 3 }, 'Minimum instances must be a whole number from 0 to 10 on the Beta plan'],
+    [{ minInstances: 0, maxInstances: 0 }, 'Maximum instances must be a whole number from 1 to 10 on the Beta plan'],
+    [{ minInstances: 0, maxInstances: 11 }, 'Maximum instances must be a whole number from 1 to 10 on the Beta plan'],
     [{ minInstances: 4, maxInstances: 3 }, "Minimum instances can't be more than maximum instances"],
   ])('refuses %o', (limits, message) => {
-    expect(scalingLimitsError(limits)).toBe(message);
+    expect(scalingLimitsError(limits, BETA_PLAN)).toBe(message);
+  });
+
+  it("takes the maximum from the account's plan, as the API does (P-15)", () => {
+    const pro = { name: 'Pro', limits: { instancesPerFunction: 20 } };
+
+    expect(scalingLimitsError({ minInstances: 0, maxInstances: 15 }, pro)).toBeNull();
+    expect(scalingLimitsError({ minInstances: 0, maxInstances: 21 }, pro)).toBe('Maximum instances must be a whole number from 1 to 20 on the Pro plan');
   });
 });

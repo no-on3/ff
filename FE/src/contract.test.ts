@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import corsSource from '../../BE/src/config/configuration.ts?raw';
 import backendEnvExample from '../../BE/.env.example?raw';
 import scopesSource from '../../BE/src/api-keys/api-key-format.ts?raw';
+import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
+import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { SCOPES } from './services/api';
 
 // What the console shares with the API and the development realm, read from
@@ -68,5 +70,15 @@ describe('API key scopes', () => {
     const backendScopes = /export const SCOPES = \[([^\]]*)\] as const/.exec(scopesSource)?.[1].match(/'[^']+'/g)?.map((s) => s.slice(1, -1));
 
     expect(backendScopes).toEqual([...SCOPES]);
+  });
+});
+
+describe("a plan's limits", () => {
+  it("have the API's names, so the console shows each one and reads none that isn't there", () => {
+    const schema = planLimitsSource.slice(planLimitsSource.indexOf('export const planLimitsSchema'));
+    const body = schema.slice(schema.indexOf('{') + 1, schema.indexOf('\n});'));
+    const backendKeys = [...body.matchAll(/^ {2}(\w+):/gm)].map((match) => match[1]);
+
+    expect(backendKeys).toEqual([...PLAN_LIMIT_KEYS]);
   });
 });

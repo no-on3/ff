@@ -4,7 +4,7 @@
  */
 import { Runtime } from '../../functions/entities/function.entity';
 import { CodeTooLargeError } from '../orchestrator.errors';
-import { FunctionWorkload } from '../orchestrator.types';
+import { FunctionWorkload, TenantLimits } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
 import { ANNOTATIONS, LABELS, MANAGED_BY, accountHash, functionResourceName } from './naming';
 
@@ -85,15 +85,16 @@ export function namespaceManifest(name: string, accountId: string): K8sObject {
   };
 }
 
-export function resourceQuotaManifest(namespace: string, settings: KubernetesSettings): K8sObject {
-  const { pods, cpu, memory } = settings.tenantQuota;
+/** The account's quota: its plan's, for all its functions together (D5). */
+export function resourceQuotaManifest(namespace: string, quota: TenantLimits['quota']): K8sObject {
+  const { pods, cpu, memory } = quota;
   return {
     apiVersion: 'v1',
     kind: 'ResourceQuota',
     metadata: { name: TENANT_QUOTA_NAME, namespace, labels: managedLabels() },
     spec: {
       hard: {
-        pods,
+        pods: String(pods),
         'requests.cpu': cpu,
         'limits.cpu': cpu,
         'requests.memory': memory,
