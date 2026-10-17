@@ -7,6 +7,7 @@ import { Invitations1792220311930 } from './1792220311930-Invitations';
 import { AuditLog1792221758532 } from './1792221758532-AuditLog';
 import { UsageRecords1792222975039 } from './1792222975039-UsageRecords';
 import { CapacitySamples1792226697538 } from './1792226697538-CapacitySamples';
+import { PlatformSettings1792229526506 } from './1792229526506-PlatformSettings';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -23,4 +24,5 @@ export const MIGRATIONS: Array<new () => object> = [
   AuditLog1792221758532,
   UsageRecords1792222975039,
   CapacitySamples1792226697538,
+  PlatformSettings1792229526506,
 ];

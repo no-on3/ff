@@ -48,9 +48,10 @@ describe("the console's address", () => {
     expect(consoleClient.webOrigins).toContain(origin); // the token request is a cross-origin call
   });
 
-  it("is the backend's CORS origin in development, by default and in BE/.env.example", () => {
+  it("is one of the backend's CORS origins in development, by default and in BE/.env.example", () => {
     expect(corsSource).toContain(`const DEV_CORS_ORIGIN = '${origin}';`);
-    expect(backendEnvExample).toMatch(new RegExp(`^CORS_ORIGIN=${origin}$`, 'm'));
+    // Next to the admin dashboard's (P-70).
+    expect(backendEnvExample).toMatch(new RegExp(`^CORS_ORIGIN=(.*,)?${origin}(,.*)?$`, 'm'));
   });
 });
 

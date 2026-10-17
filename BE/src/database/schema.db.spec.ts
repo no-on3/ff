@@ -279,6 +279,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'memberships',
         'migrations',
         'plans',
+        'platform_settings',
         'usage_records',
         'users',
       ]);

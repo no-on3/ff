@@ -34,6 +34,8 @@ export const DEVELOPMENT_CREDENTIALS = {
 } as const;
 
 const DEV_CORS_ORIGIN = 'http://localhost:5199';
+/** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
+const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
 const DEV_CONSOLE_URL = 'http://localhost:5199';
 const IN_CLUSTER_SECRETS = '/var/run/secrets/kubernetes.io/serviceaccount';
@@ -235,7 +237,7 @@ const appShape = {
   FF_SMTP_URL: optionalSecretUrl(smtpUrl),
   FF_MAIL_FROM: text('FF <no-reply@ff.localhost>', mailbox),
   FF_OPERATOR_EMAIL: optionalText(emailAddress),
-  FF_ADMIN_URL: text('http://localhost:5174', httpUrl),
+  FF_ADMIN_URL: text(DEV_ADMIN_URL, httpUrl),
   FF_CONSOLE_URL: text(DEV_CONSOLE_URL, httpUrl),
 };
 
@@ -301,7 +303,7 @@ function appRules(env: AppEnv): string[] {
       }
     }
     if (env.CORS_ORIGIN.length === 0) {
-      problems.push("CORS_ORIGIN must be set to the console's origin when NODE_ENV=production");
+      problems.push("CORS_ORIGIN must be set to the console's and the admin dashboard's origins when NODE_ENV=production");
     }
     // The beta's sign-ups wait for your approval (P-12): their e-mails must reach you.
     if (!env.FF_SMTP_URL) problems.push('FF_SMTP_URL is required when NODE_ENV=production, so that e-mails are sent');
@@ -382,7 +384,7 @@ export default function configuration(env: Env = process.env) {
     nodeEnv: parsed.NODE_ENV,
     port: parsed.PORT,
     cors: {
-      origins: parsed.CORS_ORIGIN.length > 0 ? parsed.CORS_ORIGIN : production ? [] : [DEV_CORS_ORIGIN],
+      origins: parsed.CORS_ORIGIN.length > 0 ? parsed.CORS_ORIGIN : production ? [] : [DEV_CORS_ORIGIN, DEV_ADMIN_URL],
     },
     auth: {
       mode: parsed.FF_AUTH_MODE,

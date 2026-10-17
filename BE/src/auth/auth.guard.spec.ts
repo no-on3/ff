@@ -3,7 +3,7 @@
  * through a real HTTP server, with tokens signed locally and the keys served
  * by a fake OpenID issuer.
  */
-import { Controller, ForbiddenException, Get, INestApplication, Logger, Post, Req, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, INestApplication, Logger, Post, Put, Req, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
@@ -14,6 +14,7 @@ import { AccountChoice, AccountsService } from '../accounts/accounts.service';
 import { MembersService } from '../accounts/members.service';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { ApiKeysService } from '../api-keys/api-keys.service';
+import { AdminRoutes, CurrentOperator, Operator } from '../admin/operator';
 import { ApiExceptionFilter } from '../common/api-exception.filter';
 import { AuthGuard } from './auth.guard';
 import { Principal } from './principal';
@@ -56,6 +57,21 @@ class ProbeController {
   @RequireActiveAccount()
   deploy(@Principal() principal: Principal) {
     return { deployedFor: principal.accountId };
+  }
+}
+
+/** Like the admin dashboard's routes (P-70): an operator reads, and changes with a reason. */
+@AdminRoutes()
+@Controller('admin')
+class AdminProbeController {
+  @Get('settings')
+  read(@CurrentOperator() operator: Operator) {
+    return operator;
+  }
+
+  @Put('settings')
+  change(@CurrentOperator() operator: Operator, @Body() body: { reason?: string }) {
+    return { changedBy: operator.id, reason: body.reason };
   }
 }
 
@@ -157,7 +173,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
       getOrThrow: (path: string) => (path === 'auth.devAccountId' ? '000000000001' : { issuer: issuerUrl(), audience: AUDIENCE }),
     };
     const moduleRef = await Test.createTestingModule({
-      controllers: [ProbeController],
+      controllers: [ProbeController, AdminProbeController],
       providers: [
         TokenVerifier,
         { provide: ConfigService, useValue: config },
@@ -248,6 +264,76 @@ describe('the global guard and token checks (L1, P-11)', () => {
 
       expect(res.status).toBe(403);
       expect(await res.json()).toMatchObject({ message: "API keys can't call this route: it takes a user's token" });
+    });
+  });
+
+  describe("the admin dashboard's routes (P-70, D12)", () => {
+    const OPERATOR = { azp: 'ff-admin', realm_access: { roles: ['ff-operator', 'offline_access'] } };
+    const admin = async (claims: JWTPayload, method = 'GET', body?: unknown) =>
+      fetch(`${baseUrl}/admin/settings`, {
+        method,
+        headers: { authorization: `Bearer ${await token(claims)}`, 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const refusal = async (res: Response) => [res.status, ((await res.json()) as { message: string }).message];
+
+    it("let an operator in, with a token issued to the admin dashboard, and never act for an account", async () => {
+      const res = await admin(OPERATOR);
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: 'kc-user-1', email: 'amira@example.tn' });
+      expect(calls).toEqual([]); // no user created, no invitation joined, no account chosen
+    });
+
+    it("refuse an operator's console token: only ff-admin's tokens reach them", async () => {
+      expect(await refusal(await admin({ ...OPERATOR, azp: 'ff-console' }))).toEqual([
+        403,
+        'The admin routes take a token issued to the admin dashboard (ff-admin)',
+      ]);
+    });
+
+    it("refuse a customer, with a console token or one issued to ff-admin", async () => {
+      expect(await refusal(await admin({ azp: 'ff-console' }))).toEqual([403, 'The admin routes take a token issued to the admin dashboard (ff-admin)']);
+      expect(await refusal(await admin({ azp: 'ff-admin' }))).toEqual([403, "The admin routes are for FF's operators"]);
+      expect(await refusal(await admin({ azp: 'ff-admin', realm_access: { roles: ['ff-operators'] } }))).toEqual([
+        403,
+        "The admin routes are for FF's operators",
+      ]);
+    });
+
+    it('refuse API keys, development mode, and callers without a valid token', async () => {
+      const withKey = await fetch(`${baseUrl}/admin/settings`, { headers: { authorization: `Bearer ${KEY}` } });
+      expect(await refusal(withKey)).toEqual([403, "API keys can't call the admin routes"]);
+      expect((await get('/admin/settings')).status).toBe(401);
+      expect((await get('/admin/settings', `Bearer ${(await token(OPERATOR)).slice(0, -4)}AAAA`)).status).toBe(401);
+      expect(await refusal(await admin({ ...OPERATOR, email_verified: false }))).toEqual([403, 'Verify your e-mail address first']);
+
+      mode = 'dev';
+      expect(await refusal(await get('/admin/settings'))).toEqual([
+        400,
+        "Development mode has no operator: the admin dashboard needs FF_AUTH_MODE=oidc and an operator's login",
+      ]);
+      expect(accounts.developmentAccounts).toEqual([]);
+    });
+
+    it('take a reason with every change, asked for only once the operator is known', async () => {
+      const missing = 'Every admin change needs a reason: send reason, 3 to 500 characters, in the body';
+      expect(await refusal(await admin(OPERATOR, 'PUT', {}))).toEqual([400, missing]);
+      expect(await refusal(await admin(OPERATOR, 'PUT', { reason: ' ok ' }))).toEqual([400, missing]);
+      expect(await refusal(await admin(OPERATOR, 'PUT', { reason: 7 }))).toEqual([400, missing]);
+      expect(await refusal(await admin(OPERATOR, 'PUT', { reason: 'x'.repeat(501) }))).toEqual([400, missing]);
+      expect((await admin({ azp: 'ff-admin' }, 'PUT', {})).status).toBe(403); // a customer learns nothing of the rule
+
+      const res = await admin(OPERATOR, 'PUT', { reason: 'Pilot customers asked for it' });
+      expect([res.status, await res.json()]).toEqual([200, { changedBy: 'kc-user-1', reason: 'Pilot customers asked for it' }]);
+    });
+
+    it("keep a token issued to the admin dashboard off the customer routes, before any user is created", async () => {
+      expect(await refusal(await get('/functions', `Bearer ${await token(OPERATOR)}`))).toEqual([
+        403,
+        "This token was issued to the admin dashboard: the customer routes take the console's",
+      ]);
+      expect(calls).toEqual([]);
     });
   });
 

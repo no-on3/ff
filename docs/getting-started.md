@@ -375,6 +375,26 @@ One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bil
 
 The console keeps its tokens in the tab's session storage, and renews the 5-minute access token with the refresh token before it expires. "Log out" ends the Keycloak session too. When that session ends another way (30 minutes without a renewal, as after the laptop slept, or a logout in another tab), the next call gets 401, and the console asks you to log in again.
 
+**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for the platform's settings now, and accounts, approvals and the operator audit log as they land. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
+
+```bash
+cd admin && cp .env.example .env.local && npm install && npm run dev
+```
+
+The development realm has one operator, `operator@ff.test`, password `operator-dev-1`, with the realm role `ff-operator`. At its first login, Keycloak asks it to set up a one-time password: scan the QR code with an authenticator app (FreeOTP, Google Authenticator, …), then enter a code. Every later login asks for a code. Customers who log in there are told they aren't operators.
+
+Every change in the dashboard is confirmed with a reason, which the audit log keeps with the operator's name: `operator:<id>`. The backend's `/admin` routes take only an operator's token issued to `ff-admin`; a console token, even an operator's, gets 403, and so do API keys. Development mode has no operator: those routes answer 400 there. In the other direction, a token issued to `ff-admin` calls no customer route.
+
+```bash
+OP=$(curl -s -X POST $KC/realms/ff/protocol/openid-connect/token -d grant_type=password -d client_id=ff-admin \
+  -d username=operator@ff.test -d password=operator-dev-1 | jq -r .access_token)   # the development realm only
+curl -s $FF/admin/settings -H "Authorization: Bearer $OP" | jq -c .settings
+curl -s -X PUT $FF/admin/settings -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"settings": {"gracePeriodHours": 48}, "reason": "Pilot customers asked for more time"}' | jq -c .settings
+```
+
+The password grant works only in the development realm, for scripts and tests; production's realm turns it off for `ff-admin` (P-60). **The settings** are values that tasks to come read: shadow billing (P-32), the negative buffer and grace period (P-33), the low-balance e-mails (P-33), the invoice reminder (P-36) and the large-credit threshold (P-74). Each is its default until changed. Amounts are in TND with three decimals, as strings.
+
 **Reset Keycloak** with `docker compose --profile auth down -v keycloak`: it deletes Keycloak's users, and imports the realm again at the next start. Keycloak reads `deploy/keycloak/ff-realm.json` only at its first start, so a change to that file needs this reset. Name the service: without it, `down -v` deletes the database and S3 volumes too.
 
 **Plans and limits.** Each account has a plan (D5 of the client-readiness plan); new accounts get `beta`. A plan sets how many functions an account may have, each one's memory, timeout and instances, the quota of the account's namespace (all its functions together), the rate of changes and of invocations, and the idle window before scale to zero. `GET /me` shows each account's plan, and so does the console's account page. The beta plan:
@@ -460,6 +480,10 @@ docker compose down -v
 | The console says `Can't reach the API at …` | The backend isn't running at `VITE_API_URL`, or its `CORS_ORIGIN` doesn't include http://localhost:5199. A `BE/.env` from before 2026-10-17 says 5173: take the line from `BE/.env.example`. |
 | The console says `The API asks for a login, but this console has none` | The backend runs in OIDC mode, and the console without a login. Set `VITE_OIDC_AUTHORITY` in `FE/.env.local` and restart `npm run dev`, or set `FF_AUTH_MODE=dev` in `BE/.env`. |
 | Keycloak answers `Invalid parameter: redirect_uri` | Your Keycloak still has the realm it imported before the console moved to port 5199 (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows, and sign up again. |
+| The admin dashboard's login answers `Client not found`, or `operator@ff.test` can't log in | Your Keycloak imported the realm before the admin dashboard existed (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows. |
+| 403 `The admin routes take a token issued to the admin dashboard (ff-admin)` | The token came from another client, such as the console's. Log in to the admin dashboard, or get the token through `ff-admin`. |
+| 403 `The admin routes are for FF's operators` | The user hasn't the realm role `ff-operator`. Give it in Keycloak's admin console (Users → Role mapping), then log in again. |
+| 400 `Every admin change needs a reason` | Send `reason`, 3 to 500 characters, in the body. |
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. With `FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read` or `K8S_TENANT_QUOTA_… is no longer read`, remove those lines: the account's plan sets them now. |
 | 400 `… must be at most … on the Beta plan`, or `The Beta plan allows 25 functions per account` | The request goes beyond the account's plan. Ask for less, or move the account to a larger plan ("Plans and limits" in section 5). |
 | 400 `An account needs an owner: make another member owner first` | Make another member owner, then change or remove the first one. |

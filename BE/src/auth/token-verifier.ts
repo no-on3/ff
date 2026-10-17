@@ -9,6 +9,10 @@ export interface Identity {
   email?: string;
   /** The user's full name, as Keycloak's profile has it. */
   name?: string;
+  /** The client the token was issued to (azp): ff-console, ff-admin, … (D12). */
+  clientId?: string;
+  /** The user's realm roles, such as ff-operator (D12). */
+  realmRoles?: string[];
 }
 
 /** Asymmetric algorithms only: "none" and the HMAC ones (HS*) are refused (ADR 0004). */
@@ -84,10 +88,13 @@ export class TokenVerifier {
     }
     if (typeof payload.sub !== 'string' || payload.sub === '') throw new InvalidTokenError('The token has no valid subject');
     if (payload.email_verified !== true) throw new UnverifiedEmailError('Verify your e-mail address first');
+    const roles = (payload.realm_access as { roles?: unknown } | undefined)?.roles;
     return {
       userId: payload.sub,
       email: typeof payload.email === 'string' ? payload.email : undefined,
       name: typeof payload.name === 'string' ? payload.name : undefined,
+      clientId: typeof payload.azp === 'string' ? payload.azp : undefined,
+      realmRoles: Array.isArray(roles) ? roles.filter((role): role is string => typeof role === 'string') : undefined,
     };
   }
 

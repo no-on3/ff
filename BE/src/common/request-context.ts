@@ -16,7 +16,7 @@ interface WithRequestId {
 
 /** Who makes a request, as the audit log names them (P-17). */
 export interface Actor {
-  /** user:<id>, key:<id>, dev, or system. */
+  /** user:<id>, key:<id>, operator:<id>, dev, or system. */
   id: string;
   /** The user's e-mail, or the key's name. */
   label: string;
@@ -26,6 +26,8 @@ export interface Actor {
 interface WithCaller extends WithRequestId {
   principal?: { keyId?: string; keyName?: string; userId?: string };
   user?: { id: string; email: string };
+  /** An operator, on the admin dashboard's routes (P-70). */
+  operator?: { id: string; email: string };
   ip?: string;
 }
 
@@ -48,9 +50,10 @@ export function currentRequest(): RequestContext | undefined {
   return storage.getStore();
 }
 
-/** The caller of a request, as the audit log names them: an API key, a user, or development mode. */
+/** The caller of a request, as the audit log names them: an operator, an API key, a user, or development mode. */
 export function actorOf(request: WithCaller): Actor | undefined {
-  const { principal, user } = request;
+  const { principal, user, operator } = request;
+  if (operator) return { id: `operator:${operator.id}`, label: operator.email };
   if (principal?.keyId) return { id: `key:${principal.keyId}`, label: `API key "${principal.keyName ?? principal.keyId}"` };
   if (user) return { id: `user:${user.id}`, label: user.email };
   if (principal?.userId === 'dev') return { id: 'dev', label: 'development mode' };

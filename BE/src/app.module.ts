@@ -4,6 +4,7 @@ import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR, Reflector } from '@nestjs/core'
 import { ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountsModule } from './accounts/accounts.module';
+import { AdminModule } from './admin/admin.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthGuard } from './auth/auth.guard';
@@ -38,6 +39,7 @@ import { RateLimitGuard, rateLimitOptions } from './plans/rate-limits';
       useFactory: (plans: PlansService, reflector: Reflector) => rateLimitOptions(plans, reflector),
     }),
     AccountsModule,
+    AdminModule,
     ApiKeysModule,
     AuditModule,
     FunctionsModule,

@@ -31,11 +31,16 @@ export function rateLimitOf(method: string, invocation: boolean): RateLimitName 
   return CHANGES.has(method.toUpperCase()) ? 'writes' : null;
 }
 
-type RateLimitedRequest = RequestWithPrincipal & { method: string; ip?: string; user?: { id: string } };
+type RateLimitedRequest = RequestWithPrincipal & { method: string; ip?: string; user?: { id: string }; operator?: { id: string } };
 
-/** Whose count a request adds to: its account's; before the user has one, the user's; without a login, its address's. */
+/**
+ * Whose count a request adds to: its account's; before the user has one, the
+ * user's; an operator's own on the admin routes (P-70); without a login, its
+ * address's.
+ */
 export function rateLimitTracker(request: RateLimitedRequest): string {
   if (request.principal) return `account:${request.principal.accountId}`;
+  if (request.operator) return `operator:${request.operator.id}`;
   if (request.user) return `user:${request.user.id}`;
   return `ip:${request.ip ?? 'unknown'}`;
 }

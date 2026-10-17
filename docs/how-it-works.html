@@ -383,7 +383,7 @@
 <section id="data">
   <div class="wrap">
     <h2>Data model</h2>
-    <p class="lead">These tables hold everything the backend knows: functions with their invocations and metrics; accounts, with their plans, users, memberships, invitations and API keys (P-12 to P-16); and tables written once and never changed, which a trigger guards: the audit log (P-17), the usage records (P-20) and the capacity samples (P-21). A function belongs to an account, and its invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). Its usage records and capacity samples have no foreign key, so they outlive it, and both tables have a partition per month. A user belongs to accounts through memberships, each with a role. The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>account_id</code> is <code>accountId</code>).</p>
+    <p class="lead">These tables hold everything the backend knows: functions with their invocations and metrics; accounts, with their plans, users, memberships, invitations and API keys (P-12 to P-16); and tables written once and never changed, which a trigger guards: the audit log (P-17), the usage records (P-20) and the capacity samples (P-21). A function belongs to an account, and its invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). Its usage records and capacity samples have no foreign key, so they outlive it, and both tables have a partition per month. The platform's settings, which operators change from the admin dashboard, are in <code>platform_settings</code> (P-70). A user belongs to accounts through memberships, each with a role. The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>account_id</code> is <code>accountId</code>).</p>
     <div class="card pad scrollx"><div id="erDiagram" class="capped"></div></div>
     <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set.</p>
     <h3>Lifecycles</h3>
@@ -399,6 +399,7 @@
           <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
           <tr><td>Invocations: input, output, status, duration, memory, error</td><td>PostgreSQL <code>function_invocations</code></td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST)</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
           <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td><code>GET /usage</code> and the console's Usage page; the capacity report; then billing (P-32)</td></tr>
+          <tr><td>The platform's settings: shadow billing, the negative buffer and grace period, low-balance e-mails, the invoice reminder, the large-credit threshold</td><td>PostgreSQL <code>platform_settings</code>; a setting without a row has its default (<code>BE/src/admin/platform-settings.ts</code>)</td><td>the admin dashboard, with a reason, through <code>PUT /admin/settings</code></td><td>the tasks that use them: P-32, P-33, P-36, P-74</td></tr>
           <tr><td>Capacity: each function's ready instances, a minute at a time, with its memory and <code>minInstances</code></td><td>PostgreSQL <code>capacity_samples</code>, a partition per month (UTC); never changed or deleted</td><td>the capacity sample, 5 s into every minute</td><td><code>npm run capacity:report</code>; then metrics (P-50), billing of <code>minInstances</code> (P-32) and the admin overview (P-75)</td></tr>
           <tr><td>Per-minute metrics: request and error counts, p50/p95/p99, averages, instances</td><td>PostgreSQL <code>function_metrics</code></td><td>the metrics tick, every 60 s</td><td>the console (<code>GET /metrics/:id</code>)</td></tr>
           <tr><td>An archive copy of the code</td><td>S3 bucket <code>functions</code>, key <code>&lt;id&gt;/code.ts</code> or <code>code.py</code></td><td>create, update</td><td>nothing yet: the cluster gets the code from the ConfigMap</td></tr>
@@ -504,6 +505,7 @@
           <tr><td>Token checks, the global guard</td><td><code>BE/src/auth/auth.guard.ts</code>, <code>token-verifier.ts</code></td></tr>
           <tr><td>The caller of a request, and its account</td><td><code>BE/src/auth/principal.ts</code></td></tr>
           <tr><td>API keys</td><td><code>BE/src/api-keys/</code></td></tr>
+          <tr><td>The admin dashboard: its routes, the operator check, the platform's settings, and the app</td><td><code>BE/src/admin/</code>, <code>BE/src/auth/auth.guard.ts</code> <code>authenticateOperator()</code>, <code>admin/src/</code></td></tr>
           <tr><td>The development realm (Keycloak)</td><td><code>deploy/keycloak/ff-realm.json</code></td></tr>
           <tr><td>Request IDs, and error answers</td><td><code>BE/src/common/request-context.ts</code>, <code>api-exception.filter.ts</code></td></tr>
           <tr><td>Which errors the caller sees</td><td><code>BE/src/functions/failures.ts</code></td></tr>
@@ -1177,8 +1179,8 @@ const SCENARIOS = [
 ];
 
 const ARCH_INFO = {
-  user: ['You', 'The console (React, on :5199), Swagger UI on /api, or curl. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · docs/getting-started.md'],
-  idp: ['Keycloak', 'Logs users in and signs them up, for the realm ff (development: localhost:8180). The console gets its tokens from it with the authorization code flow and PKCE; the backend checks each access token against the realm\'s public keys, which it fetches once and caches.', 'deploy/keycloak/ff-realm.json · FE/src/auth/oidc.ts · BE/src/auth/token-verifier.ts'],
+  user: ['You', 'The console (React, on :5199), Swagger UI on /api, or curl; as FF\'s operator, the admin dashboard (admin/, on :5198), whose /admin routes take only an operator\'s token issued to ff-admin. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · admin/src · docs/getting-started.md'],
+  idp: ['Keycloak', 'Logs users in and signs them up, for the realm ff (development: localhost:8180). Users with the realm role ff-operator also give a one-time password (P-70). The console gets its tokens from it with the authorization code flow and PKCE; the backend checks each access token against the realm\'s public keys, which it fetches once and caches.', 'deploy/keycloak/ff-realm.json · FE/src/auth/oidc.ts · BE/src/auth/token-verifier.ts'],
   api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL, archives code in S3, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, and its CapacityService samples every function\'s ready instances 5 s into every minute.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator'],
   db: ['PostgreSQL', 'The records: accounts, their plans, users and memberships, invitations and API keys; functions, with their invocations and metrics; and tables written once and never changed: the audit log, the usage records and the capacity samples, the last two with a partition per month. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
   s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds an archive copy of each function\'s code. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
@@ -1665,7 +1667,7 @@ function initSimulator() {
 
 /* ---------- data diagrams ---------- */
 function erDiagram() {
-  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16), and the audit log (P-17); row 3: usage records (P-20), API keys (P-13) and capacity samples (P-21).
+  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16), and the audit log (P-17); row 3: usage records (P-20), API keys (P-13) and capacity samples (P-21); row 4: the platform's settings (P-70).
   const tables = [
     { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · …'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
     { name: 'functions', x: 350, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['account_id', 'char(12) · FK, indexed'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
@@ -1678,17 +1680,19 @@ function erDiagram() {
     { name: 'usage_records', x: 16, row: 3, cols: [['request_id', 'uuid · PK: the invocation', 'pk'], ['started_at', 'timestamptz · PK, by month', 'pk'], ['account_id', 'char(12), no FK'], ['function_id', 'uuid, no FK'], ['function_name', 'text, as invoked'], ['runtime', 'text, as invoked'], ['memory_mb', 'int, as invoked'], ['duration_ms', 'numeric(12,3)'], ['billed_ms', 'int (D7)'], ['init_ms', 'int, null: cold start'], ['status', 'success · error · lost · …'], ['ended_at', 'timestamptz · append-only']] },
     { name: 'api_keys', x: 350, row: 3, cols: [['id', 'text · PK, the key\'s ID', 'pk'], ['account_id', 'char(12) · FK, cascade'], ['created_by', 'uuid · FK → users'], ['name', 'text'], ['secret_sha256', 'bytea'], ['scopes', 'text[]'], ['expires_at', 'timestamptz, null'], ['last_used_at', 'timestamptz, null'], ['revoked_at', 'timestamptz, null'], ['created_at', 'timestamptz']] },
     { name: 'capacity_samples', x: 684, row: 3, cols: [['function_id', 'uuid · PK, no FK', 'pk'], ['minute', 'timestamptz · PK, by month', 'pk'], ['account_id', 'char(12), no FK, indexed'], ['instances', 'int, ready'], ['min_instances', 'int: provisioned (D8)'], ['memory_mb', 'int · append-only']] },
+    { name: 'platform_settings', x: 684, row: 4, cols: [['key', 'text · PK', 'pk'], ['value', 'jsonb: else its default']] },
     { name: 'users', x: 684, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['oidc_sub', "text · unique, Keycloak's ID"], ['email', 'text'], ['name', 'text, null'], ['locale', "text = 'fr-TN'"], ['created_at', 'timestamptz']] },
   ];
   const RH = 21, W = 300, TOP = 10, HEAD = 30, GAP = 34;
   const height = (t) => HEAD + RH * t.cols.length + 6;
   // Each row starts below the tallest table of the row above.
   const rowTop = [TOP];
-  for (let r = 1; r <= 3; r++) rowTop[r] = rowTop[r - 1] + Math.max.apply(null, tables.filter((t) => t.row === r - 1).map(height)) + GAP;
+  const lastRow = Math.max.apply(null, tables.map((t) => t.row));
+  for (let r = 1; r <= lastRow; r++) rowTop[r] = rowTop[r - 1] + Math.max.apply(null, tables.filter((t) => t.row === r - 1).map(height)) + GAP;
   const top = (t) => rowTop[t.row];
   const byName = (name) => tables.find((t) => t.name === name);
   const colY = (name, col) => { const t = byName(name); return top(t) + HEAD + RH * t.cols.findIndex((c) => c[0] === col) + 11; };
-  const bottom = rowTop[3] + Math.max.apply(null, tables.filter((t) => t.row === 3).map(height));
+  const bottom = rowTop[lastRow] + Math.max.apply(null, tables.filter((t) => t.row === lastRow).map(height));
   let s = '<svg class="diagram" viewBox="0 0 1000 ' + (bottom + 16) + '" role="img" aria-label="The tables and their columns">';
   tables.forEach((t) => {
     const y0 = top(t);

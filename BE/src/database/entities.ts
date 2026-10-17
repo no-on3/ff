@@ -10,9 +10,10 @@ import { Function } from '../functions/entities/function.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { CapacitySample } from '../usage/capacity-sample.entity';
+import { PlatformSetting } from '../admin/platform-setting.entity';
 
 /**
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionInvocation, FunctionMetrics, UsageRecord, CapacitySample];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionInvocation, FunctionMetrics, UsageRecord, CapacitySample, PlatformSetting];

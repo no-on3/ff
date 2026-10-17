@@ -27,10 +27,12 @@ class ProbeController {
   }
 }
 
-/** The callers the real guard leaves on requests: an API key, a user's token, development mode. */
+/** The callers the real guard leaves on requests: an API key, a user's token, development mode, an operator. */
 class StandInGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<{ headers: Record<string, string>; principal?: object; user?: object }>();
+    const request = context
+      .switchToHttp()
+      .getRequest<{ headers: Record<string, string>; principal?: object; user?: object; operator?: object }>();
     const as = request.headers['x-as'];
     if (as === 'key') request.principal = { accountId: '123456789012', keyId: '0123456789ab', keyName: 'CI deploys', userId: 'u-1' };
     if (as === 'user') {
@@ -38,6 +40,7 @@ class StandInGuard implements CanActivate {
       request.user = { id: 'u-1', email: 'amira@ff.test' };
     }
     if (as === 'dev') request.principal = { accountId: '123456789012', userId: 'dev' };
+    if (as === 'operator') request.operator = { id: 'kc-op-1', email: 'operator@ff.test' }; // an admin route (P-70)
     return true;
   }
 }
@@ -96,6 +99,12 @@ describe('the audit log (L1, P-17)', () => {
     const { row } = await recordAs('key');
 
     expect(row).toMatchObject({ actor: 'key:0123456789ab', actorLabel: 'API key "CI deploys"' });
+  });
+
+  it("names an operator by ID and e-mail, on the admin dashboard's routes (P-70)", async () => {
+    const { row } = await recordAs('operator');
+
+    expect(row).toMatchObject({ actor: 'operator:kc-op-1', actorLabel: 'operator@ff.test' });
   });
 
   it('names development mode as such', async () => {

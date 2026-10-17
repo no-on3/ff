@@ -101,11 +101,14 @@ keycloak_register() {
   curl -sS -c "$jar" -b "$jar" -o /dev/null -w '%{redirect_url}' -X POST "$(form_action "$work/password.html")" \
     --data-urlencode password-new=l5-password-1 --data-urlencode password-confirm=l5-password-1
 }
-# keycloak_token <client> <e-mail>: an access token, through the password grant.
+# keycloak_token <client> <e-mail> [password]: an access token, through the password grant.
 keycloak_token() {
   curl -sS -X POST "$keycloak/realms/ff/protocol/openid-connect/token" \
-    -d grant_type=password -d "client_id=$1" -d "username=$2" -d password=l5-password-1 -d scope=openid | jq -r .access_token
+    -d grant_type=password -d "client_id=$1" -d "username=$2" -d "password=${3:-l5-password-1}" -d scope=openid | jq -r .access_token
 }
+# The development realm's operator (P-70), whose password the realm file sets.
+operator_email=operator@ff.test
+operator_password=operator-dev-1
 # mail_to <address>: the text of the newest e-mail to that address in Mailpit (lines end without \r).
 mail_to() {
   local id
@@ -130,7 +133,7 @@ e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" PORT="${api##*
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
-  FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5174
+  FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 
 echo "== account A's function"
@@ -198,6 +201,7 @@ body_for() {
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "POST /api-keys") echo '{"name": "l5", "scopes": ["functions:read"]}' ;;
     "POST /members") echo '{"email": "l5-invitee@ff.test", "role": "viewer"}' ;;
+    "PUT /admin/settings") echo '{"settings": {"gracePeriodHours": 1}, "reason": "l5 tries"}' ;;
     "PATCH /members/{userId}") echo '{"role": "viewer"}' ;;
     POST* | PUT* | PATCH*) echo '{}' ;;
   esac
@@ -205,6 +209,8 @@ body_for() {
 needs_user="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage accounts"
 needs_user_for_keys="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage API keys"
 needs_user_for_members="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage members"
+no_operator="400 Development mode has no operator: the admin dashboard needs FF_AUTH_MODE=oidc and an operator's login"
+not_admin_client="403 The admin routes take a token issued to the admin dashboard (ff-admin)"
 
 echo "== development mode, account B, on every route (${#routes[@]})"
 own=""
@@ -256,6 +262,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: needs a logged-in user" "$needs_user_for_members" "$(status) $(message)"
       ;;
+    *" /admin/"*)
+      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: development mode has no operator" "$no_operator" "$(status) $(message)"
+      ;;
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
@@ -302,7 +312,7 @@ account_1="$(as_user_1 POST /accounts '{"name": "L5 one", "useCase": "isolation 
 check "user 1 creates an account: pending, and its owner" "201 pending owner" \
   "$(status) $(as_user_1 GET "/accounts/$account_1" | jq -r '"\(.status) \(.role)"')"
 check "you get an e-mail to approve it" true \
-  "$(mail_to "$operator" | grep -q "($account_1)" && mail_to "$operator" | grep -q 'http://localhost:5174/accounts?status=pending' && echo true || echo false)"
+  "$(mail_to "$operator" | grep -q "($account_1)" && mail_to "$operator" | grep -q 'http://localhost:5198/accounts?status=pending' && echo true || echo false)"
 as_user_1 POST /accounts '{"name": "L5 again"}' >/dev/null
 check "one account at a time waits for approval" "400 You already have an account waiting for approval" "$(status) $(message)"
 as_user_1 POST /functions "$(function_body l5-one)" >/dev/null
@@ -399,6 +409,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2's usage never counts account 1's function" "200 0" \
         "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_2")"
       ;;
+    *" /admin/"*)
+      as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: a customer's token is not the admin dashboard's" "$not_admin_client" "$(status) $(message)"
+      ;;
     "DELETE /members/invitations/{id}")
       as_user_2 DELETE "/members/invitations/$invitation_1" >/dev/null
       check "$route: account 2 can't cancel account 1's invitation" "404 Invitation $invitation_1 not found" "$(status) $(message)"
@@ -437,6 +451,11 @@ for path in /me /api-keys /members /audit-log; do
   with_token "$key_1" GET "$path" >/dev/null
   check "a key can't call GET $path, which takes a user's token" \
     "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
+done
+for route in "${routes[@]}"; do
+  case $route in *" /admin/"*) ;; *) continue ;; esac
+  with_token "$key_1" "${route%% *}" "${route#* }" "$(body_for "${route%% *}" "${route#* }")" >/dev/null
+  check "a key can't call $route (P-70)" "403 API keys can't call the admin routes" "$(status) $(message)"
 done
 for route in "${routes[@]}"; do
   method="${route%% *}"
@@ -492,6 +511,28 @@ check "with the address and the request's ID" true \
   "$(jq '[.entries[] | (.ip != null and (.requestId | test("^[0-9a-f-]{36}$")))] | all' <<<"$log_1")"
 as_user_1 GET '/audit-log?limit=0' >/dev/null
 check "a page of nothing is refused" "400 limit must not be less than 1" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+
+echo "== the admin routes (P-70): FF's operator"
+operator_token="$(keycloak_token ff-admin "$operator_email" "$operator_password")"
+settings="$(with_token "$operator_token" GET /admin/settings)"
+check "the operator reads the settings, through the admin dashboard's client" "200 true 24" \
+  "$(status) $(jq -r '"\(.settings.billingShadowMode) \(.settings.gracePeriodHours)"' <<<"$settings")"
+with_token "$operator_token" PUT /admin/settings '{"settings": {"gracePeriodHours": 48}}' >/dev/null
+check "a change without a reason is refused" \
+  "400 Every admin change needs a reason: send reason, 3 to 500 characters, in the body" "$(status) $(message)"
+changed="$(with_token "$operator_token" PUT /admin/settings '{"settings": {"gracePeriodHours": 48}, "reason": "l5: pilot customers asked"}')"
+check "with a reason, it is made" "200 48" "$(status) $(jq -r .settings.gracePeriodHours <<<"$changed")"
+check "and the audit log keeps who, why, and what it replaced" "operator@ff.test|l5: pilot customers asked|24|48" \
+  "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F '|' -c \
+    "SELECT actor_label, details->>'reason', details->'changes'->'gracePeriodHours'->>'from', details->'changes'->'gracePeriodHours'->>'to'
+       FROM audit_log WHERE action = 'settings.update' AND actor LIKE 'operator:%'")"
+with_token "$(keycloak_token ff-e2e "$operator_email" "$operator_password")" GET /admin/settings >/dev/null
+check "the operator's token from another client is refused" "$not_admin_client" "$(status) $(message)"
+with_token "$operator_token" GET /me >/dev/null
+check "and the admin dashboard's token calls no customer route" \
+  "403 This token was issued to the admin dashboard: the customer routes take the console's" "$(status) $(message)"
+with_token "$(keycloak_token ff-admin "$user_1")" GET /admin/settings >/dev/null
+check "a customer logged in through ff-admin is not an operator" "403 The admin routes are for FF's operators" "$(status) $(message)"
 
 with_token "${token_1%?????}AAAAA" GET /functions >/dev/null
 check "a tampered token: 401" "401 The token is invalid" "$(status) $(message)"

@@ -41,7 +41,7 @@ describe('configuration', () => {
     expect(config).toMatchObject({
       nodeEnv: 'development',
       port: 3000,
-      cors: { origins: ['http://localhost:5199'] },
+      cors: { origins: ['http://localhost:5199', 'http://localhost:5198'] },
       auth: { mode: 'dev', devAccountId: '000000000001', oidc: undefined },
       database: {
         host: 'localhost',
@@ -143,7 +143,7 @@ describe('configuration', () => {
       ['a missing Keycloak issuer', { FF_OIDC_ISSUER: undefined }, 'FF_OIDC_ISSUER is required when FF_AUTH_MODE is oidc'],
       ['a missing Keycloak audience', { FF_OIDC_AUDIENCE: '' }, 'FF_OIDC_AUDIENCE is required when FF_AUTH_MODE is oidc'],
       ['an issuer without TLS', { FF_OIDC_ISSUER: 'http://login.ff.example/realms/ff' }, 'FF_OIDC_ISSUER must be an https:// URL'],
-      ['a missing console origin for CORS', { CORS_ORIGIN: undefined }, "CORS_ORIGIN must be set to the console's origin"],
+      ['a missing console origin for CORS', { CORS_ORIGIN: undefined }, "CORS_ORIGIN must be set to the console's and the admin dashboard's origins"],
       ['no SMTP server, so no e-mail would leave (P-12)', { FF_SMTP_URL: undefined }, 'FF_SMTP_URL is required when NODE_ENV=production'],
       ['nobody to approve new accounts (P-12)', { FF_OPERATOR_EMAIL: '' }, 'FF_OPERATOR_EMAIL is required when NODE_ENV=production'],
       ['invitations linking to a development console (P-16)', { FF_CONSOLE_URL: undefined }, 'FF_CONSOLE_URL must be set when NODE_ENV=production'],
@@ -175,7 +175,7 @@ describe('configuration', () => {
         smtpUrl: '',
         from: 'FF <no-reply@ff.localhost>',
         operatorEmail: '',
-        adminUrl: 'http://localhost:5174',
+        adminUrl: 'http://localhost:5198',
         consoleUrl: 'http://localhost:5199',
       });
       expect(configuration({ ...dev, FF_ADMIN_URL: 'https://admin.ff.example/', FF_SMTP_URL: 'smtp://localhost:51025' }).mail).toMatchObject({

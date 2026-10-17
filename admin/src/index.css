@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+/* The page's defaults, in the base layer, so the component classes and the utilities win over them. */
+@layer base {
+  :root {
+    font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    color-scheme: light;
+    @apply text-gray-900 bg-gray-100;
+  }
+  body {
+    @apply m-0 min-h-screen;
+  }
+  button:not(:disabled) {
+    @apply cursor-pointer;
+  }
+  button:disabled {
+    @apply cursor-not-allowed opacity-60;
+  }
+  button:focus-visible {
+    @apply outline-none ring-2 ring-blue-600;
+  }
+}
+
+/* The console's classes (FE/src/index.css), so pages look alike and components can move between the apps. */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md px-4 py-2 font-medium transition-colors duration-200;
+  }
+  .btn-primary {
+    @apply bg-blue-600 text-white hover:bg-blue-700;
+  }
+  .btn-secondary {
+    @apply bg-gray-200 text-gray-800 hover:bg-gray-300;
+  }
+  .card {
+    @apply rounded-lg bg-white p-6 shadow-md;
+  }
+  .input {
+    @apply w-full rounded-md border border-gray-300 bg-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500;
+  }
+}

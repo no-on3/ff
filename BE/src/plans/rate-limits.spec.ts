@@ -39,10 +39,13 @@ class ProbeController {
   }
 }
 
-/** Where the AuthGuard would put the caller: here, from the x-account and x-plan headers. */
+/** Where the AuthGuard would put the caller: here, from the x-account and x-plan headers, or x-operator on an admin route. */
 class StandInAuthGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<RequestWithPrincipal & { headers: Record<string, string> }>();
+    const request = context
+      .switchToHttp()
+      .getRequest<RequestWithPrincipal & { headers: Record<string, string>; operator?: { id: string; email: string } }>();
+    if (request.headers['x-operator']) request.operator = { id: request.headers['x-operator'], email: 'operator@ff.test' };
     const accountId = request.headers['x-account'];
     if (accountId) {
       request.principal = { accountId, planId: request.headers['x-plan'] ?? 'beta', accountStatus: AccountStatus.ACTIVE, role: 'owner' };
@@ -146,6 +149,13 @@ describe('rate limits per account (L1, P-15)', () => {
     const anonymous = () => call('POST', '/probe');
 
     expect(await statuses([anonymous, anonymous, anonymous, anonymous, anonymous, anonymous])).toEqual([201, 201, 201, 201, 201, 429]);
+  });
+
+  it('counts each operator apart, though they call from the same address as others, on the plan new accounts get (P-70)', async () => {
+    const asOperator = (id: string) => () => fetch(`${baseUrl}/probe`, { method: 'POST', headers: { 'x-operator': id } });
+
+    expect(await statuses(Array.from({ length: 6 }, () => asOperator('op-1')))).toEqual([201, 201, 201, 201, 201, 429]);
+    expect(await statuses([asOperator('op-2')])).toEqual([201]);
   });
 });
 

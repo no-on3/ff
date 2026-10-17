@@ -21,7 +21,8 @@ export type AuditAction =
   | 'member.invitation_cancel'
   | 'member.join'
   | 'member.role'
-  | 'member.remove';
+  | 'member.remove'
+  | 'settings.update';
 
 export interface AuditEvent {
   /** null for an action on no account. */

@@ -18,6 +18,8 @@ import { FunctionsService } from './functions/functions.service';
 import { HealthController } from './health/health.controller';
 import { MetricsController } from './metrics/metrics.controller';
 import { MetricsService } from './metrics/metrics.service';
+import { AdminSettingsController } from './admin/admin-settings.controller';
+import { PlatformSettingsService } from './admin/platform-settings.service';
 import { UsageController } from './usage/usage.controller';
 import { UsageService } from './usage/usage.service';
 
@@ -38,7 +40,15 @@ describe('the OpenAPI document (L1, P-08)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [FunctionsController, MetricsController, HealthController, AccountsController, ApiKeysController, UsageController],
+      controllers: [
+        FunctionsController,
+        MetricsController,
+        HealthController,
+        AccountsController,
+        ApiKeysController,
+        UsageController,
+        AdminSettingsController,
+      ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
         { provide: FunctionsService, useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }) }) },
@@ -46,13 +56,15 @@ describe('the OpenAPI document (L1, P-08)', () => {
         { provide: AccountsService, useValue: succeeding(AccountsService) },
         { provide: ApiKeysService, useValue: succeeding(ApiKeysService) },
         { provide: UsageService, useValue: succeeding(UsageService) },
+        { provide: PlatformSettingsService, useValue: succeeding(PlatformSettingsService) },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     // The caller, where the authentication guard (P-11) will put it.
-    app.use((req: { principal?: Principal; user?: object }, _res: unknown, next: () => void) => {
+    app.use((req: { principal?: Principal; user?: object; operator?: object }, _res: unknown, next: () => void) => {
       req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'owner' };
       req.user = { id: 'u-1', email: 'amira@example.tn' };
+      req.operator = { id: 'kc-op-1', email: 'operator@ff.test' }; // for the admin routes (P-70)
       next();
     });
     document = apiDocument(app);
@@ -81,7 +93,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings']));
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
   });
 
