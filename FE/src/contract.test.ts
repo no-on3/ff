@@ -9,6 +9,7 @@ import billingDtoSource from '../../BE/src/billing/billing.dto.ts?raw';
 import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw';
 import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
+import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
@@ -19,6 +20,9 @@ import {
   CREDIT_STATE_FIELDS,
   INVOCATION_STATUSES,
   INVOICE_FIELDS,
+  LOGS_PAGE_FIELDS,
+  LOGS_QUERY_PARAMS,
+  LOG_LINE_FIELDS,
   PRO_FORMAS_PAGE_FIELDS,
   PRO_FORMA_FIELDS,
   PRO_FORMA_PARTY_FIELDS,
@@ -164,6 +168,20 @@ describe('a pro-forma (P-35)', () => {
     expect(dtoFields(paymentsDtoSource, 'export class ProFormasPage {')).toEqual([...PRO_FORMAS_PAGE_FIELDS]);
     const limits = /export const CREDIT_LIMITS = \{ min: ([\d_]+)n, max: ([\d_]+)n \};/.exec(proFormaSource);
     expect(limits?.slice(1).map((limit) => Number(limit.replace(/_/g, '')))).toEqual([CREDIT_LIMITS.min, CREDIT_LIMITS.max]);
+  });
+});
+
+describe("a function's logs (P-43, P-44)", () => {
+  it("have the API's fields, so the logs tab shows each one there is", () => {
+    expect(dtoFields(logsDtoSource, 'export class FunctionLogLineView {')).toEqual([...LOG_LINE_FIELDS]);
+    expect(dtoFields(logsDtoSource, 'export class FunctionLogsView {')).toEqual([...LOGS_PAGE_FIELDS]);
+  });
+
+  it('are asked for with parameters the API takes', () => {
+    const query = logsDtoSource.slice(logsDtoSource.indexOf('export class FunctionLogsQuery {'));
+    const params = [...query.slice(0, query.indexOf('\n}')).matchAll(/^ {2}(\w+)\?: /gm)].map((match) => match[1]);
+
+    expect(params).toEqual(expect.arrayContaining([...LOGS_QUERY_PARAMS]));
   });
 });
 

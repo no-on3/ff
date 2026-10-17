@@ -143,6 +143,69 @@ export const functionsApi = {
     api.get<InvocationPage>(`/functions/${id}/invocations`, { params: { limit } }),
 };
 
+/** A line of a function's log (P-43). contract.test.ts checks these names against the API's. */
+export const LOG_LINE_FIELDS = ['time', 'instance', 'requestId', 'stream', 'message'] as const;
+export interface FunctionLogLine {
+  /** RFC 3339, UTC, nine decimals. */
+  time: string;
+  /** The instance that wrote it; null on the log store's notice of dropped lines. */
+  instance: string | null;
+  /** The invocation whose line it is, from its START to its REPORT. */
+  requestId: string | null;
+  /** `ff` is the log store's notice that the account's limit dropped lines. */
+  stream: 'stdout' | 'stderr' | 'ff' | null;
+  message: string;
+}
+
+export const LOGS_PAGE_FIELDS = ['lines', 'next'] as const;
+/** A page of lines, oldest first; `next` is the cursor to the older ones. */
+export interface FunctionLogsPage {
+  lines: FunctionLogLine[];
+  next: string | null;
+}
+
+/** What GET /functions/:id/logs accepts that the console sends (P-43). */
+export const LOGS_QUERY_PARAMS = ['limit', 'sinceSeconds', 'q', 'requestId', 'cursor'] as const;
+export type LogsQuery = Partial<Record<'limit' | 'sinceSeconds', number> & Record<'q' | 'requestId' | 'cursor', string>>;
+
+/** The live tail's failure before any event: the API's status and message. */
+export class LogStreamError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export const logsApi = {
+  page: (functionId: string, query: LogsQuery) => api.get<FunctionLogsPage>(`/functions/${functionId}/logs`, { params: query }),
+
+  /**
+   * The live tail (P-43): Server-Sent Events, read with fetch, since a browser's
+   * EventSource can't send the token. Gives each chunk of text as it comes, until
+   * the stream ends or `signal` aborts it; rejects with LogStreamError when the API
+   * refuses it, as 404 for a function that isn't the account's.
+   */
+  async stream(functionId: string, filter: Pick<LogsQuery, 'q' | 'requestId'>, signal: AbortSignal, onText: (text: string) => void): Promise<void> {
+    const search = new URLSearchParams(Object.entries(filter).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1] !== ''));
+    const headers = { Accept: 'text/event-stream', ...requestHeaders(await auth.accessToken(), accountId) };
+    const res = await fetch(`${config.apiUrl}/functions/${functionId}/logs/stream${search.size ? `?${search}` : ''}`, { headers, signal });
+    if (!res.ok || !res.body) {
+      const body = (await res.json().catch(() => ({}))) as { message?: unknown };
+      const message = Array.isArray(body.message) ? body.message.join('; ') : typeof body.message === 'string' ? body.message : `HTTP ${res.status}`;
+      if (res.status === 401) auth.onUnauthorized(message);
+      throw new LogStreamError(res.status, message);
+    }
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      onText(value);
+    }
+  },
+};
+
 /**
  * What GET /usage counts for a function and for the account (P-22), as D7 bills
  * it: requests billed (successes, errors and timeouts), billed duration in ms,

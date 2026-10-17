@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useDispatch } from 'react-redux';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Tabs, Tab, Box } from '@mui/material';
 import {
   EditableFields,
@@ -15,11 +15,16 @@ import { can } from '../lib/session';
 import { useSession } from '../session/session';
 import { updateFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
+import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
+import { FunctionLogs } from './FunctionLogs';
 import { MetricsDashboard } from './MetricsDashboard';
 import { ScalingConfiguration } from './ScalingConfiguration';
 
 /** How many invocations the history shows, newest first. */
 const HISTORY_PAGE = 20;
+
+/** The page's tabs, by their name in the address (`?tab=logs`), so that a link opens one. */
+const TABS = ['overview', 'invocations', 'logs', 'metrics', 'scaling'] as const;
 
 const GREEN = 'bg-green-100 text-green-800';
 const BLUE = 'bg-blue-100 text-blue-800';
@@ -56,7 +61,10 @@ const FunctionDetail: React.FC = () => {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [invoking, setInvoking] = useState(false);
   const [invokeError, setInvokeError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState(0);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = Math.max(0, TABS.indexOf(searchParams.get('tab') as (typeof TABS)[number]));
+  const logsFilter = useMemo(() => filterFromSearch(searchParams), [searchParams]);
+  const showLogs = (filter: LogsFilter) => setSearchParams(searchForFilter(filter));
 
   const loadHistory = useCallback(async () => {
     const page = (await functionsApi.getFunctionInvocations(id!, HISTORY_PAGE)).data;
@@ -125,7 +133,7 @@ const FunctionDetail: React.FC = () => {
   };
 
   const handleTabChange = (_event: React.SyntheticEvent, newValue: number) => {
-    setActiveTab(newValue);
+    setSearchParams(newValue === 0 ? {} : { tab: TABS[newValue] });
   };
 
   if (loading) {
@@ -145,6 +153,7 @@ const FunctionDetail: React.FC = () => {
       <Tabs value={activeTab} onChange={handleTabChange}>
         <Tab label="Overview" />
         <Tab label="Invocations" />
+        <Tab label="Logs" />
         <Tab label="Metrics" />
         <Tab label="Scaling" />
       </Tabs>
@@ -265,8 +274,13 @@ const FunctionDetail: React.FC = () => {
                 <div key={invocation.id} className="card">
                   <div className="flex justify-between items-start mb-4">
                     <span className="text-sm text-gray-500">{new Date(invocation.createdAt).toLocaleString()}</span>
-                    <span className={`px-2 py-1 rounded-full text-sm ${INVOCATION_STYLES[invocation.status] ?? RED}`}>
-                      {invocation.status}
+                    <span className="flex items-center gap-3">
+                      <Link to={`?${searchForFilter({ range: 'all', q: '', requestId: invocation.id }).toString()}`} className="text-sm">
+                        Logs
+                      </Link>
+                      <span className={`px-2 py-1 rounded-full text-sm ${INVOCATION_STYLES[invocation.status] ?? RED}`}>
+                        {invocation.status}
+                      </span>
                     </span>
                   </div>
 
@@ -324,11 +338,17 @@ const FunctionDetail: React.FC = () => {
 
       {activeTab === 2 && (
         <Box p={3}>
-          <MetricsDashboard functionId={id!} />
+          <FunctionLogs functionId={id!} filter={logsFilter} onFilterChange={showLogs} />
         </Box>
       )}
 
       {activeTab === 3 && (
+        <Box p={3}>
+          <MetricsDashboard functionId={id!} />
+        </Box>
+      )}
+
+      {activeTab === 4 && (
         <Box p={3}>
           <ScalingConfiguration functionId={id!} />
         </Box>
