@@ -6,6 +6,7 @@
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
+import { DataSource } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
@@ -20,6 +21,18 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const migrationNames = MIGRATIONS.map((migration) => (new migration() as { name: string }).name);
 /** A development account: functions belong to accounts since P-12. */
 const ACCOUNT = '000000000001';
+
+/** Undoes migrations, newest first, until `name` is the newest one applied: later migrations don't change where a test starts. */
+async function migrateDownTo(dataSource: DataSource, name: string): Promise<void> {
+  for (;;) {
+    const [newest] = await dataSource.query('SELECT name FROM migrations ORDER BY id DESC LIMIT 1');
+    if (!newest) throw new Error(`${name} is not applied`);
+    if (newest.name === name) return;
+    await dataSource.undoLastMigration({ transaction: 'each' });
+  }
+}
+const BASELINE = migrationNames[0];
+const SCALING_MODEL = migrationNames.find((name) => name.startsWith('ScalingModel')) as string;
 
 interface ColumnRow {
   table_name: string;
@@ -45,8 +58,7 @@ run('database schema (L2, real PostgreSQL)', () => {
   it('the scaling-model migration keeps existing rows, and reverts with rows present (P-06)', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      await dataSource.undoLastMigration({ transaction: 'each' }); // accounts (P-12)
-      await dataSource.undoLastMigration({ transaction: 'each' }); // back to the baseline
+      await migrateDownTo(dataSource, BASELINE);
       const [{ id }] = await dataSource.query(
         `INSERT INTO functions (name, user_id, runtime, code, memory, timeout, status)
          VALUES ('before', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
@@ -77,8 +89,7 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(await dataSource.query('SELECT count(*)::int AS n FROM function_invocations')).toEqual([{ n: 1 }]);
 
       // The way back works with rows in every table, and so does the way forward again.
-      await dataSource.undoLastMigration({ transaction: 'each' }); // accounts
-      await dataSource.undoLastMigration({ transaction: 'each' });
+      await migrateDownTo(dataSource, BASELINE);
       expect(await dataSource.query('SELECT cpu, target_concurrency FROM functions WHERE id = $1', [id])).toEqual([
         { cpu: 100, target_concurrency: 100 },
       ]);
@@ -90,7 +101,7 @@ run('database schema (L2, real PostgreSQL)', () => {
   it('the accounts migration makes each tenant an active account, keeps its functions, and reverts with rows present (P-12)', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      await dataSource.undoLastMigration({ transaction: 'each' }); // before the accounts
+      await migrateDownTo(dataSource, SCALING_MODEL); // before the accounts
       const insert = (tenant: string) =>
         dataSource.query(
           `INSERT INTO functions (name, user_id, runtime, code, memory, timeout, status)
@@ -114,7 +125,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('x', '999999999999', 'nodejs', 'x', 128, 5)`),
       ).rejects.toThrow(/foreign key/);
 
-      await dataSource.undoLastMigration({ transaction: 'each' });
+      await migrateDownTo(dataSource, SCALING_MODEL);
       expect(await dataSource.query(`SELECT user_id, count(*)::int AS n FROM functions GROUP BY 1 ORDER BY 1`)).toEqual([
         { user_id: '000000000001', n: 2 },
         { user_id: '000000000002', n: 1 },
@@ -160,6 +171,7 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       expect(tables).toEqual([
         'accounts',
+        'api_keys',
         'function_invocations',
         'function_metrics',
         'functions',

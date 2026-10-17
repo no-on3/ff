@@ -9,11 +9,12 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { AccountsService } from '../accounts/accounts.service';
+import { ApiKeysService } from '../api-keys/api-keys.service';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { User } from '../accounts/entities/user.entity';
 import { ACCOUNT_HEADER, ACCOUNT_ID, DEV_ACCOUNT_HEADER, RequestWithPrincipal, resolvePrincipal, Role } from './principal';
 import { IS_PUBLIC } from './public.decorator';
-import { ACTIVE_ACCOUNT, ROLES } from './route-rules';
+import { ACTIVE_ACCOUNT, ROLES, SCOPE } from './route-rules';
 import { InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
 
 type GuardedRequest = RequestWithPrincipal & { user?: User };
@@ -38,11 +39,13 @@ const STATUS_MESSAGES: Record<Exclude<AccountStatus, AccountStatus.ACTIVE>, stri
  * - A @Public() route passes.
  * - Development mode acts as the owner of FF_DEV_ACCOUNT_ID, or of the account
  *   that X-FF-Dev-Account names, created the first time.
- * - Otherwise the request needs a valid access token (P-11). Its user is found,
- *   or created on the first call, and the account chosen from the user's
- *   memberships and X-FF-Account (P-12); when that fails, @Principal() says why.
- * Then the route's rules apply: who may call it (@RequireRole), and whether the
- * account must be active (@RequireActiveAccount).
+ * - Otherwise the request needs a valid access token (P-11) or API key (P-13).
+ *   A token's user is found, or created on the first call, and the account
+ *   chosen from the user's memberships and X-FF-Account (P-12); when that
+ *   fails, @Principal() says why. A key acts for its own account.
+ * Then the route's rules apply: who may call it (@RequireRole), whether the
+ * account must be active (@RequireActiveAccount), and for a key, the scope it
+ * needs (@RequireScope); a route without one takes no key.
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -50,6 +53,7 @@ export class AuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly verifier: TokenVerifier,
     private readonly accounts: AccountsService,
+    private readonly apiKeys: ApiKeysService,
     private readonly config: ConfigService,
   ) {}
 
@@ -62,6 +66,13 @@ export class AuthGuard implements CanActivate {
       await this.actAsDevelopmentAccount(request);
     } else {
       await this.authenticate(request);
+    }
+
+    const key = request.principal?.keyId ? request.principal : undefined;
+    if (key) {
+      const scope = this.reflector.getAllAndOverride<string | undefined>(SCOPE, targets);
+      if (!scope) throw new ForbiddenException("API keys can't call this route: it takes a user's token");
+      if (!key.scopes?.includes(scope)) throw new ForbiddenException(`This API key lacks the scope ${scope}`);
     }
 
     const roles = this.reflector.getAllAndOverride<Role[] | undefined>(ROLES, targets);
@@ -88,7 +99,10 @@ export class AuthGuard implements CanActivate {
 
   private async authenticate(request: GuardedRequest): Promise<void> {
     const token = bearerToken(request.headers.authorization);
-    if (token.startsWith('ffk_')) throw new UnauthorizedException('API keys are not accepted yet');
+    if (token.startsWith('ffk_')) {
+      request.principal = await this.apiKeys.authenticate(token); // 401 with the reason when it can't act
+      return;
+    }
     try {
       request.identity = await this.verifier.verify(token);
     } catch (error) {

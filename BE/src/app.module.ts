@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountsModule } from './accounts/accounts.module';
+import { ApiKeysModule } from './api-keys/api-keys.module';
 import { AuthGuard } from './auth/auth.guard';
 import { TokenVerifier } from './auth/token-verifier';
 import { ApiExceptionFilter } from './common/api-exception.filter';
@@ -26,6 +27,7 @@ import { MinioClientModule } from './minio-client/minio-client.module';
         dataSourceOptions(configService.getOrThrow<DatabaseSettings>('database')),
     }),
     AccountsModule,
+    ApiKeysModule,
     FunctionsModule,
     MinioClientModule,
   ],

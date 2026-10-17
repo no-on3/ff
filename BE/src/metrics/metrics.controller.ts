@@ -1,5 +1,6 @@
 import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
 import { Principal } from '../auth/principal';
+import { RequireScope } from '../auth/route-rules';
 import { MetricsQuery } from './dto/metrics-query.dto';
 import { MetricsService } from './metrics.service';
 
@@ -9,6 +10,7 @@ export class MetricsController {
   constructor(private readonly metricsService: MetricsService) {}
 
   @Get(':functionId')
+  @RequireScope('metrics:read')
   async getFunctionMetrics(
     @Param('functionId', ParseUUIDPipe) functionId: string,
     @Query() period: MetricsQuery,

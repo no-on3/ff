@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
-import { RequireActiveAccount, RequireRole, WRITERS } from '../auth/route-rules';
+import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
@@ -23,6 +23,7 @@ export class FunctionsController {
   constructor(private readonly functionsService: FunctionsService) {}
 
   @Post()
+  @RequireScope('functions:write')
   @RequireRole(...WRITERS)
   @RequireActiveAccount()
   @ApiOperation({ summary: 'Create a new function' })
@@ -32,6 +33,7 @@ export class FunctionsController {
   }
 
   @Get()
+  @RequireScope('functions:read')
   @ApiOperation({ summary: "List the account's functions" })
   @ApiResponse({ status: 200, description: 'List of functions', type: [Function] })
   async findAll(@Principal() principal: Principal): Promise<Function[]> {
@@ -39,6 +41,7 @@ export class FunctionsController {
   }
 
   @Get(':id')
+  @RequireScope('functions:read')
   @ApiOperation({ summary: 'Get a function by ID' })
   @ApiResponse({ status: 200, description: 'Function details', type: Function })
   async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<Function> {
@@ -46,6 +49,7 @@ export class FunctionsController {
   }
 
   @Put(':id')
+  @RequireScope('functions:write')
   @RequireRole(...WRITERS)
   @RequireActiveAccount()
   @ApiOperation({ summary: 'Update a function' })
@@ -59,6 +63,7 @@ export class FunctionsController {
   }
 
   @Delete(':id')
+  @RequireScope('functions:write')
   @RequireRole(...WRITERS)
   @ApiOperation({ summary: 'Delete a function' })
   @ApiResponse({ status: 200, description: 'Function deleted successfully' })
@@ -67,6 +72,7 @@ export class FunctionsController {
   }
 
   @Post(':id/invoke')
+  @RequireScope('functions:invoke')
   @RequireRole(...WRITERS)
   @RequireActiveAccount()
   @ApiOperation({ summary: 'Invoke a function' })
@@ -80,6 +86,7 @@ export class FunctionsController {
   }
 
   @Get(':id/invocations')
+  @RequireScope('functions:read')
   @ApiOperation({ summary: 'Get function invocations, newest first' })
   @ApiResponse({ status: 200, description: 'List of function invocations', type: [FunctionInvocation] })
   async getInvocations(
@@ -91,6 +98,7 @@ export class FunctionsController {
   }
 
   @Get(':id/scaling-config')
+  @RequireScope('functions:read')
   @ApiOperation({ summary: 'Get function scaling configuration' })
   @ApiResponse({ status: 200, description: 'Scaling configuration details', type: ScalingConfig })
   async getScalingConfig(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<ScalingConfig> {
@@ -98,6 +106,7 @@ export class FunctionsController {
   }
 
   @Put(':id/scaling-config')
+  @RequireScope('functions:write')
   @RequireRole(...WRITERS)
   @RequireActiveAccount()
   @ApiOperation({ summary: 'Change how many instances a function may have' })

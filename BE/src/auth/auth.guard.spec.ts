@@ -3,7 +3,7 @@
  * through a real HTTP server, with tokens signed locally and the keys served
  * by a fake OpenID issuer.
  */
-import { Controller, ForbiddenException, Get, INestApplication, Logger, Post, Req } from '@nestjs/common';
+import { Controller, ForbiddenException, Get, INestApplication, Logger, Post, Req, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
@@ -12,11 +12,12 @@ import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
 import { AccountChoice, AccountsService } from '../accounts/accounts.service';
 import { AccountStatus } from '../accounts/entities/account.entity';
+import { ApiKeysService } from '../api-keys/api-keys.service';
 import { ApiExceptionFilter } from '../common/api-exception.filter';
 import { AuthGuard } from './auth.guard';
 import { Principal } from './principal';
 import { Public } from './public.decorator';
-import { RequireActiveAccount, RequireRole, WRITERS } from './route-rules';
+import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from './route-rules';
 import { Identity, InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
 
 const AUDIENCE = 'ff-api';
@@ -36,18 +37,42 @@ class ProbeController {
   }
 
   @Get('functions')
+  @RequireScope('functions:read')
   functions(@Principal() principal: Principal) {
+    return principal;
+  }
+
+  /** Like GET /me: a user's token only. */
+  @Get('me')
+  me(@Principal() principal: Principal) {
     return principal;
   }
 
   /** Like POST /functions: writers only, and an active account. */
   @Post('functions')
+  @RequireScope('functions:write')
   @RequireRole(...WRITERS)
   @RequireActiveAccount()
   deploy(@Principal() principal: Principal) {
     return { deployedFor: principal.accountId };
   }
 }
+
+/** The keys service, as the guard sees it: one valid key, which reads functions. */
+const KEY = `ffk_0123456789ab_${'s'.repeat(43)}`;
+const apiKeys = {
+  async authenticate(value: string): Promise<Principal> {
+    if (value !== KEY) throw new UnauthorizedException('The API key is invalid');
+    return {
+      accountId: '123456789012',
+      accountStatus: AccountStatus.ACTIVE,
+      keyId: '0123456789ab',
+      userId: 'creator',
+      role: 'owner',
+      scopes: ['functions:read'],
+    };
+  },
+};
 
 /** The accounts service, as the guard sees it: what each user's request acts for. */
 const accounts = {
@@ -131,6 +156,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
         TokenVerifier,
         { provide: ConfigService, useValue: config },
         { provide: AccountsService, useValue: accounts },
+        { provide: ApiKeysService, useValue: apiKeys },
         { provide: APP_GUARD, useClass: AuthGuard },
         { provide: APP_FILTER, useClass: ApiExceptionFilter },
       ],
@@ -185,6 +211,31 @@ describe('the global guard and token checks (L1, P-11)', () => {
     expect(await res.json()).toMatchObject({ accountId: '123456789012', role: 'developer', userId: 'user-of-kc-user-1' });
   });
 
+  describe('API keys (P-13)', () => {
+    const withKey = (path: string, method = 'GET') => fetch(`${baseUrl}${path}`, { method, headers: { authorization: `Bearer ${KEY}` } });
+
+    it('act for their own account, with their scopes', async () => {
+      const res = await withKey('/functions');
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ accountId: '123456789012', keyId: '0123456789ab', scopes: ['functions:read'] });
+    });
+
+    it('need the scope that the route names', async () => {
+      const res = await withKey('/functions', 'POST');
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ message: 'This API key lacks the scope functions:write' });
+    });
+
+    it("can't call a route that names no scope: accounts and keys take a user's token", async () => {
+      const res = await withKey('/me');
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ message: "API keys can't call this route: it takes a user's token" });
+    });
+  });
+
   describe("the route's rules (P-12)", () => {
     const deploy = async () =>
       fetch(`${baseUrl}/functions`, { method: 'POST', headers: { authorization: `Bearer ${await token()}` } });
@@ -230,7 +281,7 @@ describe('the global guard and token checks (L1, P-11)', () => {
     ['no Authorization header', undefined, 'Authentication required'],
     ['another scheme', 'Basic YWRtaW46YWRtaW4=', 'Authentication required: send "Authorization: Bearer <token>"'],
     ['a bearer without a token', 'Bearer ', 'Authentication required: send "Authorization: Bearer <token>"'],
-    ['an API key, before P-13', `Bearer ffk_0123456789ab_${'a'.repeat(43)}`, 'API keys are not accepted yet'],
+    ['an API key that is not valid', `Bearer ffk_0123456789ab_${'a'.repeat(43)}`, 'The API key is invalid'],
   ])('answers 401 to %s, saying how to authenticate', async (_label, authorization, message) => {
     const res = await get('/identity', authorization);
 

@@ -22,7 +22,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Dashboard:** a React + Vite frontend in `FE/`.
 
 **Not implemented yet**, despite what older documents say:
-- **Accounts work through the API; the console has no login yet** (client-readiness plan, P-14). Users log in through Keycloak (`docker compose --profile auth` starts the development realm), create accounts that wait for your approval, and act for one account per request. Another account's functions answer 404 on every route (`hack/e2e-tenancy.sh`). Approving accounts takes SQL until the admin dashboard (P-71). Development acts as one account (`FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, or another one named by `X-FF-Dev-Account`), which production refuses.
+- **Accounts work through the API; the console has no login yet** (client-readiness plan, P-14). Users log in through Keycloak (`docker compose --profile auth` starts the development realm), create accounts that wait for your approval, and act for one account per request. Owners make API keys for scripts and CI, limited to scopes. Another account's functions answer 404 on every route (`hack/e2e-tenancy.sh`). Approving accounts takes SQL until the admin dashboard (P-71). Development acts as one account (`FF_AUTH_MODE=dev` with `FF_DEV_ACCOUNT_ID`, or another one named by `X-FF-Dev-Account`), which production refuses.
 - Billing and payments: no Stripe or local gateways yet; see the market plan.
 - Custom domains and function versioning.
 - Multi-file packages with dependencies, which need the zip pipeline (parent plan R-02).

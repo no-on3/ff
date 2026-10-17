@@ -9,6 +9,8 @@ import { Test } from '@nestjs/testing';
 import { AccountStatus } from './accounts/entities/account.entity';
 import { AccountsController } from './accounts/accounts.controller';
 import { AccountsService } from './accounts/accounts.service';
+import { ApiKeysController } from './api-keys/api-keys.controller';
+import { ApiKeysService } from './api-keys/api-keys.service';
 import { apiDocument } from './api-document';
 import { Principal } from './auth/principal';
 import { FunctionsController } from './functions/functions.controller';
@@ -34,12 +36,13 @@ describe('the OpenAPI document (L1, P-08)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [FunctionsController, MetricsController, HealthController, AccountsController],
+      controllers: [FunctionsController, MetricsController, HealthController, AccountsController, ApiKeysController],
       providers: [
         // The caller owns the function, so the ownership checks pass.
         { provide: FunctionsService, useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }) }) },
         { provide: MetricsService, useValue: succeeding(MetricsService) },
         { provide: AccountsService, useValue: succeeding(AccountsService) },
+        { provide: ApiKeysService, useValue: succeeding(ApiKeysService) },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -64,8 +67,9 @@ describe('the OpenAPI document (L1, P-08)', () => {
 
     const checked: Array<{ route: string; documented: string[]; answered: number }> = [];
     for (const { method, path, operation } of routes) {
-      // Account routes take an account ID; the others a function ID.
-      const res = await fetch(baseUrl + path.replace(/\{\w+\}/g, path.startsWith('/accounts/') ? ACCOUNT : ID), {
+      // Account routes take an account ID, key routes a key ID, and the others a function ID.
+      const param = path.startsWith('/accounts/') ? ACCOUNT : path.startsWith('/api-keys/') ? '0123456789ab' : ID;
+      const res = await fetch(baseUrl + path.replace(/\{\w+\}/g, param), {
         method: method.toUpperCase(),
         headers: { 'content-type': 'application/json' },
         body: method === 'get' || method === 'delete' ? undefined : '{}',

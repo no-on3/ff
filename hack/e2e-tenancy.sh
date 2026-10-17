@@ -16,6 +16,8 @@
 #     account 1 deploys a function. Account 2 then calls every route on account 1's
 #     function and account: 404 each time, and nothing changes. A tampered token,
 #     and one meant for another API, get 401.
+#   - API keys (P-13): account 1's key reads and invokes (L4), within its scopes,
+#     and stops when revoked; account 2's key gets 404 on account 1's function.
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
 # compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
@@ -157,10 +159,14 @@ mapfile -t routes < <(jq -r '.paths | to_entries[] | .key as $path | .value | to
   | select(.key | IN("get", "put", "post", "delete", "patch")) | "\(.key | ascii_upcase) \($path)"' <<<"$document")
 [ "${#routes[@]}" -gt 0 ] || fail "the OpenAPI document lists no routes"
 
-# path_for <template> <method> <function ID> <account ID>: the path, with its required query parameters filled in.
+# path_for <template> <method> <function ID> <account ID> [key ID]: the path, with its required query parameters filled in.
 path_for() {
   local template=$1 method=$2 path name params=()
-  if [[ $template == /accounts/* ]]; then path="${template//\{id\}/$4}"; else path="${template//\{id\}/$3}"; fi
+  case $template in
+    /accounts/*) path="${template//\{id\}/$4}" ;;
+    /api-keys/*) path="${template//\{id\}/${5:-0123456789ab}}" ;;
+    *) path="${template//\{id\}/$3}" ;;
+  esac
   path="${path//\{functionId\}/$3}"
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
@@ -183,10 +189,12 @@ body_for() {
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
+    "POST /api-keys") echo '{"name": "l5", "scopes": ["functions:read"]}' ;;
     POST* | PUT* | PATCH*) echo '{}' ;;
   esac
 }
 needs_user="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage accounts"
+needs_user_for_keys="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage API keys"
 
 echo "== development mode, account B, on every route (${#routes[@]})"
 own=""
@@ -219,6 +227,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "POST /accounts" | "GET /accounts/{id}" | "PATCH /accounts/{id}")
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: needs a logged-in user" "$needs_user" "$(status) $(message)"
+      ;;
+    "GET /api-keys" | "POST /api-keys" | "DELETE /api-keys/{id}")
+      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: needs a logged-in user" "$needs_user_for_keys" "$(status) $(message)"
       ;;
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
@@ -283,6 +295,9 @@ check "approved, account 1 deploys a function" "201 ACTIVE $account_1" \
 fn_1="$(jq -r .id <<<"$created")"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"one"}}' >/dev/null
 check "and invokes it" 201 "$(status)"
+key_1="$(as_user_1 POST /api-keys '{"name": "l5 reader", "scopes": ["functions:read", "functions:invoke"]}' | jq -r .key)"
+check "account 1's owner creates an API key, shown once" "201 true" "$(status) $([[ $key_1 =~ ^ffk_[0-9a-f]{12}_ ]] && echo true || echo false)"
+key_1_id="$(cut -d_ -f2 <<<"$key_1")"
 before_1="$(snapshot as_user_1 "$fn_1")"
 name_1="$(as_user_1 GET "/accounts/$account_1" | jq -r .name)"
 
@@ -319,6 +334,18 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: account 1 is not found for user 2" "404 Account $account_1 not found" "$(status) $(message)"
       ;;
+    "GET /api-keys")
+      check "$route: account 2 doesn't see account 1's key" 0 \
+        "$(as_user_2 GET /api-keys | jq --arg id "$key_1_id" 'map(select(.id == $id)) | length')"
+      ;;
+    "POST /api-keys")
+      key_2="$(as_user_2 POST /api-keys '{"name": "l5 two", "scopes": ["functions:read", "functions:write", "functions:invoke", "metrics:read"]}' | jq -r .key)"
+      check "$route: account 2 makes its own key" 201 "$(status)"
+      ;;
+    "DELETE /api-keys/{id}")
+      as_user_2 DELETE "/api-keys/$key_1_id" >/dev/null
+      check "$route: account 2 can't revoke account 1's key" "404 API key $key_1_id not found" "$(status) $(message)"
+      ;;
     *'{'*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
@@ -333,6 +360,32 @@ check "naming account 1 in X-FF-Account: 404" "404 Account $account_1 not found"
 with_token "$token_2" GET /functions >/dev/null
 check "user 2, now in two accounts, must name one" \
   "400 This user belongs to several accounts: name one in the X-FF-Account header" "$(status) $(message)"
+echo "== API keys"
+listed="$(with_token "$key_1" GET /functions | jq --arg id "$fn_1" 'map(select(.id == $id)) | length')"
+check "account 1's key lists its account's functions" "200 1" "$(status) $listed"
+with_token "$key_1" POST "/functions/$fn_1/invoke" '{"input":{"name":"key"}}' >/dev/null
+check "and invokes them" 201 "$(status)"
+with_token "$key_1" PUT "/functions/$fn_1" '{"name": "renamed"}' >/dev/null
+check "but can't change one without functions:write" "403 This API key lacks the scope functions:write" "$(status) $(message)"
+for path in /me /api-keys; do
+  with_token "$key_1" GET "$path" >/dev/null
+  check "a key can't call GET $path, which takes a user's token" \
+    "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
+done
+for route in "${routes[@]}"; do
+  method="${route%% *}"
+  template="${route#* }"
+  case $template in /functions/* | /metrics/*) ;; *) continue ;; esac
+  with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
+  check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
+done
+as_user_1 DELETE "/api-keys/$key_1_id" >/dev/null
+check "account 1 revokes its key" 200 "$(status)"
+with_token "$key_1" GET /functions >/dev/null
+check "which stops working at once" "401 The API key was revoked" "$(status) $(message)"
+check "account 1's function was invoked once more, by its key, and is otherwise unchanged" \
+  "$(jq -c '.invocations += 1' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
+
 with_token "${token_1%?????}AAAAA" GET /functions >/dev/null
 check "a tampered token: 401" "401 The token is invalid" "$(status) $(message)"
 with_token "$(keycloak_token admin-cli "$user_1")" GET /functions >/dev/null

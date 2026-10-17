@@ -292,7 +292,19 @@ docker compose exec -T postgres psql -U postgres -d serverless_platform -c "UPDA
 curl -s $FF/functions -H "$AUTH"                         # now acts for that account
 ```
 
-A user who belongs to several accounts names one with `-H "X-FF-Account: <id>"`. `docker compose --profile auth down -v` resets Keycloak.
+A user who belongs to several accounts names one with `-H "X-FF-Account: <id>"`.
+
+For scripts, CI and the CLI, an owner makes an **API key** instead: it acts for its account, only with the scopes it was given (`functions:read`, `functions:write`, `functions:invoke`, `metrics:read`, and later `logs:read` and `usage:read`). The whole key is shown once:
+
+```bash
+KEY=$(curl -s -X POST $FF/api-keys -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"name": "my laptop", "scopes": ["functions:read", "functions:write", "functions:invoke"]}' | jq -r .key)
+curl -s $FF/functions -H "Authorization: Bearer $KEY"      # every functions route then works with the key
+curl -s $FF/api-keys -H "$AUTH" | jq -c '.[] | {id, name, lastUsedAt}'
+curl -s -X DELETE $FF/api-keys/${KEY:4:12} -H "$AUTH"      # revoked: it stops working at once
+```
+
+A key never does more than its creator's role allows, checked on every request: it stops when its creator leaves the account. An account has at most 20 keys; `expiresAt` (ISO 8601) makes one expire. Keys can't manage accounts or keys. `docker compose --profile auth down -v` resets Keycloak.
 
 **Change the database schema.** Change the entity, then let TypeORM write the migration, read it, and register it:
 
@@ -353,6 +365,8 @@ docker compose down -v
 | 403 `This user has no account yet: create one with POST /accounts` | The token is valid, but the user has no account to act for: create one, as "Log in with Keycloak" in section 5 shows. |
 | 403 `Your account is waiting for approval` | A new account can't deploy or invoke until it is approved. Until the admin dashboard exists, approve it in the database (section 5). |
 | 400 `This user belongs to several accounts` | Name one: `-H "X-FF-Account: <account ID>"`. `GET /me` lists them. |
+| 403 `This API key lacks the scope …` | The key wasn't given that scope. Make one that has it; scopes can't be added to a key. |
+| 401 `The API key was revoked`, or `has expired` | Make a new key. |
 | `migration:run` stops with `tenants that are not 12-digit account IDs` | Functions from before 2026-10-17 can't move to accounts. Reset the database once, as shown after step 7. |
 | A function you can see in the dashboard answers 404 to `curl` | The two act as different accounts: `curl` sent `X-FF-Dev-Account`, or the backend runs with another `FF_DEV_ACCOUNT_ID` than when the function was created. |
 | An answer is 500 with `… failed because of an internal error (request <id>)` | A failure of the platform, not of your function. The backend's log has the details: search it for the request ID, which every answer also carries in `x-ff-request-id`. |
