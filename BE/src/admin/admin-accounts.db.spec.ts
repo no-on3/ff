@@ -3,7 +3,7 @@
  * real PostgreSQL server, in a scratch database that is dropped after: the
  * list and its pages, search and filters; the account page; each status
  * change with its audit entry, its e-mails and what it does to the functions;
- * two operators at once; the plan and internet egress.
+ * two operators at once; the plan and internet egress; the balance (P-31).
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -16,6 +16,9 @@ import { User } from '../accounts/entities/user.entity';
 import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import type { Role } from '../auth/principal';
+import { LedgerAccountType } from '../billing/ledger/ledger-account.entity';
+import { LedgerTransactionKind } from '../billing/ledger/ledger-transaction.entity';
+import { LedgerService } from '../billing/ledger/ledger.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
@@ -36,6 +39,7 @@ run('accounts, for operators (L2, P-71)', () => {
   let db: ScratchDatabase;
   let service: AdminAccountsService;
   let plans: PlansService;
+  let ledger: LedgerService;
   const sent: Mail[] = [];
   /** [function ID, replicas] of each scale call. */
   const scaled: Array<[string, number]> = [];
@@ -104,6 +108,7 @@ run('accounts, for operators (L2, P-71)', () => {
     const config = { get: (_key: string, fallback?: unknown) => fallback, getOrThrow: () => ({ consoleUrl: CONSOLE }) } as unknown as ConfigService;
     const usage = new UsageService(ds.getRepository(UsageRecord), ds, config);
     const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
+    ledger = new LedgerService(ds);
     service = new AdminAccountsService(
       ds.getRepository(Account),
       ds.getRepository(Membership),
@@ -113,6 +118,7 @@ run('accounts, for operators (L2, P-71)', () => {
       audit,
       plans,
       usage,
+      ledger,
       mail,
       config,
     );
@@ -204,6 +210,29 @@ run('accounts, for operators (L2, P-71)', () => {
       ['pending', 'page-owner@ff.test', null],
       ['active', 'operator@ff.test', 'Use case checked'],
     ]);
+    expect(page.balances).toEqual([]);
+  });
+
+  it("gives the account's balance with its currency's decimals: none before its first entry, a debt below zero, another account's apart (P-31)", async () => {
+    const id = await account({ status: AccountStatus.ACTIVE });
+    const other = await account({ status: AccountStatus.ACTIVE });
+    expect((await service.detail(id)).balances).toEqual([]);
+
+    await ledger.grantCredit({ accountId: id, currency: 'TND', amountMinor: 12500n, kind: LedgerTransactionKind.PROMO, idempotencyKey: `promo:${id}` });
+    await ledger.grantCredit({ accountId: other, currency: 'TND', amountMinor: 1000n, kind: LedgerTransactionKind.PROMO, idempotencyKey: `promo:${other}` });
+    expect((await service.detail(id)).balances).toEqual([{ currency: 'TND', balance: '12.500' }]);
+
+    await ledger.post({
+      kind: LedgerTransactionKind.USAGE,
+      idempotencyKey: `usage:${id}:2026-10-17T10`,
+      currency: 'TND',
+      entries: [
+        { account: { wallet: id }, amountMinor: -12750n },
+        { account: { ff: LedgerAccountType.REVENUE }, amountMinor: 12750n },
+      ],
+    });
+    expect((await service.detail(id)).balances).toEqual([{ currency: 'TND', balance: '-0.250' }]);
+    expect((await service.detail(other)).balances).toEqual([{ currency: 'TND', balance: '1.000' }]);
   });
 
   describe('the status changes', () => {

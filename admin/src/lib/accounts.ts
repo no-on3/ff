@@ -106,6 +106,8 @@ export interface AccountView {
   members: Array<AccountPerson & { userId: string; role: 'owner' | 'developer' | 'viewer'; joinedAt: string }>;
   functions: Array<{ id: string; name: string; runtime: string; memory: number; status: string; minInstances: number; lastInvokedAt: string | null }>;
   usage: { month: string; totals: UsageTotals };
+  /** Each wallet's balance (P-31), with its currency's decimals; none before the account's first credit or debit. */
+  balances: Array<{ currency: string; balance: string }>;
   statusHistory: Array<{ at: string; action: string; status: AccountStatus; by: string; reason: string | null }>;
 }
 

@@ -13,9 +13,12 @@ import { CapacitySample } from '../usage/capacity-sample.entity';
 import { PlatformSetting } from '../admin/platform-setting.entity';
 import { Currency } from '../billing/currency.entity';
 import { PriceBook } from '../billing/price-book.entity';
+import { LedgerAccount } from '../billing/ledger/ledger-account.entity';
+import { LedgerEntry } from '../billing/ledger/ledger-entry.entity';
+import { LedgerTransaction } from '../billing/ledger/ledger-transaction.entity';
 
 /**
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionInvocation, FunctionMetrics, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionInvocation, FunctionMetrics, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry];

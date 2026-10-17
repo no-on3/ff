@@ -93,6 +93,11 @@ export class Decimal {
     return new Decimal(this.units < 0n ? -kept : kept, places);
   }
 
+  /** Rounded to `places` decimals as round() does, as a whole count of 10^-places: 8.2218 at 3 places is 8222n. */
+  unitsAt(places: number): bigint {
+    return this.round(places).units;
+  }
+
   /** The exact value, without trailing zeros: "0.75", "-3", "0". */
   toString(): string {
     const text = this.format(this.units, this.scale);

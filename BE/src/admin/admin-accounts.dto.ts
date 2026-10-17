@@ -129,11 +129,19 @@ export class AdminAccountUsageView {
   @ApiProperty({ type: UsageAmountsView }) totals: UsageAmountsView;
 }
 
+/** A wallet's balance (P-31): money is a string with the currency's decimals, never a JSON number. */
+export class AdminBalanceView {
+  @ApiProperty({ example: 'TND' }) currency: string;
+  @ApiProperty({ example: '50.000', description: "Credit left, with the currency's decimals; below zero, a debt" }) balance: string;
+}
+
 /** GET /admin/accounts/:id, and the answer to every change: the account page. */
 export class AdminAccountView {
   @ApiProperty({ type: AdminAccountSummaryView }) account: AdminAccountSummaryView;
   @ApiProperty({ type: [AdminMemberView] }) members: AdminMemberView[];
   @ApiProperty({ type: [AdminFunctionView] }) functions: AdminFunctionView[];
   @ApiProperty({ type: AdminAccountUsageView }) usage: AdminAccountUsageView;
+  @ApiProperty({ type: [AdminBalanceView], description: "Each wallet's balance (P-31); none before the account's first credit or debit" })
+  balances: AdminBalanceView[];
   @ApiProperty({ type: [AdminStatusEventView], description: 'Oldest first' }) statusHistory: AdminStatusEventView[];
 }

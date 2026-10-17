@@ -8,6 +8,8 @@
 import 'dotenv/config';
 import { DataSource } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
+import { LedgerTransactionKind } from '../billing/ledger/ledger-transaction.entity';
+import { LedgerService } from '../billing/ledger/ledger.service';
 import { databaseConfiguration } from '../config/configuration';
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
@@ -37,6 +39,7 @@ const SCALING_MODEL = migrationNames.find((name) => name.startsWith('ScalingMode
 const API_KEYS = migrationNames.find((name) => name.startsWith('ApiKeys')) as string;
 const AUDIT_LOG = migrationNames.find((name) => name.startsWith('AuditLog')) as string;
 const USAGE_RECORDS = migrationNames.find((name) => name.startsWith('UsageRecords')) as string;
+const PRICE_BOOKS = migrationNames.find((name) => name.startsWith('PriceBooks')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -214,8 +217,8 @@ run('database schema (L2, real PostgreSQL)', () => {
   it("the capacity-samples migration replaces P-20's partition function, and reverts with samples present (P-21)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      // P-30's price book guard too, which reverting PriceBooks removes.
-      expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_month_partition', 'ff_guard_price_book', 'ff_refuse_change']);
+      // P-30's price book guard and P-31's ledger check too, which reverting their migrations removes.
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_refuse_change']);
       expect(await partitionsOf(dataSource, 'capacity_samples')).toEqual([
         { relname: monthPartition('capacity_samples', 0) },
         { relname: monthPartition('capacity_samples', 1) },
@@ -234,7 +237,24 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_refuse_change']);
+    });
+  });
+
+  it('the ledger migration reverts with entries present, though its tables refuse every change but an insert (P-31)', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await new LedgerService(dataSource).grantCredit({ accountId: ACCOUNT, currency: 'TND', amountMinor: 5000n, kind: LedgerTransactionKind.PROMO, idempotencyKey: 'promo:1' });
+
+      await migrateDownTo(dataSource, PRICE_BOOKS);
+
+      const tables = await dataSource.query(`SELECT to_regclass('ledger_accounts') AS a, to_regclass('ledger_transactions') AS t, to_regclass('ledger_entries') AS e`);
+      expect(tables).toEqual([{ a: null, t: null, e: null }]);
       expect(await ffFunctions(dataSource)).toEqual(['ff_ensure_month_partition', 'ff_guard_price_book', 'ff_refuse_change']);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });
 
@@ -278,6 +298,9 @@ run('database schema (L2, real PostgreSQL)', () => {
         'function_metrics',
         'functions',
         'invitations',
+        'ledger_accounts',
+        'ledger_entries',
+        'ledger_transactions',
         'memberships',
         'migrations',
         'plans',
@@ -293,7 +316,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

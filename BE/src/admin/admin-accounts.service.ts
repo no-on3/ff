@@ -6,6 +6,8 @@ import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditPage, AuditService } from '../audit/audit.service';
+import { LedgerService } from '../billing/ledger/ledger.service';
+import { formatMinor } from '../billing/money';
 import { describeError } from '../common/describe-error';
 import { likeLiteral } from '../common/like';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
@@ -90,6 +92,7 @@ export class AdminAccountsService {
     private readonly audit: AuditService,
     private readonly plans: PlansService,
     private readonly usage: UsageService,
+    private readonly ledger: LedgerService,
     private readonly mail: MailService,
     private readonly config: ConfigService,
   ) {}
@@ -152,6 +155,7 @@ export class AdminAccountsService {
         lastInvokedAt: lastInvoked.get(functionId) ?? null,
       })),
       usage: { month, totals },
+      balances: (await this.ledger.balances(id)).map(({ currency, exponent, balanceMinor }) => ({ currency, balance: formatMinor(balanceMinor, exponent) })),
       statusHistory: (await this.audit.statusHistory(id)).map(statusEvent),
     };
   }

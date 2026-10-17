@@ -8,6 +8,7 @@ import StatusBadge from '../components/StatusBadge';
 import { AccountView, PlanOption, STATUS_CHANGES, StatusChange, changedNotice, changesFor, isAccountId, ownersSee } from '../lib/accounts';
 import { actionLabel, describeAction } from '../lib/audit';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
+import { balanceNote, formatMoney } from '../lib/money';
 import { currentCursor, firstPage, nextPage, pageNumber, previousPage } from '../lib/table';
 import { whenUtc } from '../lib/time';
 
@@ -284,6 +285,22 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
             </div>
           ))}
         </dl>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Balance</h2>
+        {view.balances.length === 0 ? (
+          <EmptyState>No credit or debit yet.</EmptyState>
+        ) : (
+          <dl className="card grid gap-3 sm:grid-cols-3">
+            {view.balances.map(({ currency, balance }) => (
+              <div key={currency}>
+                <dt className="text-sm text-gray-600">{balanceNote(balance)}</dt>
+                <dd className="m-0 text-lg font-semibold">{formatMoney(balance, currency)}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
       </section>
 
       <section className="space-y-3">

@@ -359,7 +359,7 @@ docker compose exec -T postgres psql -U postgres -d serverless_platform \
 
 The table has a partition per month, by the UTC calendar (`usage_records_2026_10`, …). The backend creates this month's and the next two at startup and then daily, so a month is never missing.
 
-**Prices** (P-30, D8 of the client-readiness plan). FF charges what AWS Lambda charges, in TND, with the same free tier: 1 million requests and 400,000 GB-s per account and month. Prices live in price books, as data: the first is AWS's US East list at the BCT's rate of 14 October 2026, 3.0080 TND per US$, valid from 1 October 2026. A new book starts in the future, and a book that has started never changes, so past usage keeps its prices. `GET /usage` estimates the month's cost with the books valid during it: each function's cost before the free tier, then the free tier, the duration tiers past 6 billion GB-s, any monthly fee, and the total, each rounded to the millime. A function with `minInstances` above zero pays for those instances while they are ready, and for its calls at the provisioned price, without the free tier. Nothing is charged yet: prepaid credit comes with P-31 to P-34.
+**Prices** (P-30, D8 of the client-readiness plan). FF charges what AWS Lambda charges, in TND, with the same free tier: 1 million requests and 400,000 GB-s per account and month. Prices live in price books, as data: the first is AWS's US East list at the BCT's rate of 14 October 2026, 3.0080 TND per US$, valid from 1 October 2026. A new book starts in the future, and a book that has started never changes, so past usage keeps its prices. `GET /usage` estimates the month's cost with the books valid during it: each function's cost before the free tier, then the free tier, the duration tiers past 6 billion GB-s, any monthly fee, and the total, each rounded to the millime. A function with `minInstances` above zero pays for those instances while they are ready, and for its calls at the provisioned price, without the free tier. Nothing is charged yet: the ledger that holds the credit is below (P-31); debits come with P-32, top-ups with P-34.
 
 ```bash
 curl -s "$FF/usage" | jq '.estimate'
@@ -367,6 +367,19 @@ curl -s "$FF/usage" | jq '.estimate'
 curl -s "$FF/usage" | jq -c '.functions[] | {functionName, gbSeconds, cost}'
 docker compose exec -T postgres psql -U postgres -d serverless_platform -c "SELECT valid_from, prices->'source'->>'usdRate' AS rate FROM price_books"
 ```
+
+**Credit and the ledger** (P-31, D9). Money lives in a double-entry ledger in PostgreSQL. Each movement is a transaction of entries in whole millimes, each added to an account's balance, and they sum to zero: a top-up of 50.000 TND of credit is +50.000 on the account's wallet, +9.500 of VAT that FF owes, and −59.500 that the payment provider holds for FF. An account's balance is the sum of its wallet's entries, and the admin dashboard's account page shows it; below zero, it is usage the credit didn't cover. Each transaction has an idempotency key (`usage:<account>:<hour>`, `konnect:<payment>`), so a retry never writes it twice. The database checks each transaction's sum when it commits, and nothing in the ledger is ever changed or deleted: a correction is another transaction. Nothing moves money yet: credit grants come with the admin dashboard (P-74), usage debits with P-32, top-ups with P-34. To read the balances:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d serverless_platform -c "
+  SELECT a.account_id, a.currency, sum(e.amount_minor) AS balance_in_millimes
+    FROM ledger_accounts a JOIN ledger_entries e ON e.ledger_account_id = a.id
+   WHERE a.type = 'wallet' GROUP BY 1, 2"
+curl -s $FF/admin/accounts/$ACCOUNT -H "Authorization: Bearer $OP" | jq -c .balances    # with an operator's token: below
+# [{"currency":"TND","balance":"50.000"}]
+```
+
+Amounts are `bigint` from the database to the API, never a JavaScript number, and the API writes them as strings with every decimal of the currency.
 
 **Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known.
 
@@ -416,7 +429,7 @@ curl -s "$FF/admin/audit-log?action=settings.update&limit=5" -H "Authorization: 
 curl -s "$FF/admin/audit-log?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z" -H "Authorization: Bearer $OP" -H 'Accept: text/csv'
 ```
 
-**Accounts and approvals** (P-71). The dashboard opens on **Approvals**: the accounts waiting for your approval, with who signed up and what they plan to build; the new-account e-mail links there. **Accounts** lists every account, newest first, searched by ID, name or a member's e-mail, and filtered by status and plan. An account's page shows its owners and members, its functions with their last call, this month's usage, its status history and its whole audit log, and makes the changes. Each change takes a reason, which the account's audit log keeps, and sends each owner an e-mail:
+**Accounts and approvals** (P-71). The dashboard opens on **Approvals**: the accounts waiting for your approval, with who signed up and what they plan to build; the new-account e-mail links there. **Accounts** lists every account, newest first, searched by ID, name or a member's e-mail, and filtered by status and plan. An account's page shows its owners and members, its functions with their last call, this month's usage, its balance (P-31), its status history and its whole audit log, and makes the changes. Each change takes a reason, which the account's audit log keeps, and sends each owner an e-mail:
 
 | Change | From | Then |
 |---|---|---|
@@ -431,7 +444,7 @@ The e-mail of a rejection, a suspension or a closure gives your reason. A change
 ```bash
 curl -s "$FF/admin/accounts?status=pending" -H "Authorization: Bearer $OP" | jq -c '.accounts[] | {id, name, useCase, owners: [.owners[].email]}'
 curl -s "$FF/admin/accounts?q=amira" -H "Authorization: Bearer $OP" | jq -c '.accounts[] | {id, name, status, planId}'
-curl -s $FF/admin/accounts/$ACCOUNT -H "Authorization: Bearer $OP" | jq '{status: .account.status, functions: [.functions[].name], requests: .usage.totals.requests, history: [.statusHistory[] | "\(.status) by \(.by)"]}'
+curl -s $FF/admin/accounts/$ACCOUNT -H "Authorization: Bearer $OP" | jq '{status: .account.status, balances, functions: [.functions[].name], requests: .usage.totals.requests, history: [.statusHistory[] | "\(.status) by \(.by)"]}'
 curl -s -X POST $FF/admin/accounts/$ACCOUNT/suspend -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
   -d '{"reason": "Abuse report: mining cryptocurrency"}' | jq -r .account.status        # also /approve, /reject, /reactivate, /close
 curl -s -X PUT $FF/admin/accounts/$ACCOUNT/plan -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
@@ -541,6 +554,9 @@ docker compose down -v
 | The admin dashboard's login answers `Client not found`, or `operator@ff.test` can't log in | Your Keycloak imported the realm before the admin dashboard existed (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows. |
 | 403 `The admin routes take a token issued to the admin dashboard (ff-admin)` | The token came from another client, such as the console's. Log in to the admin dashboard, or get the token through `ff-admin`. |
 | 400 `prices.requestsPerMillion: must be 0.20 × 3.0080 = 0.6016` | A book that says its prices are AWS's US$ prices times a rate has one that isn't: change it, or make the book's source `manual`. |
+| `Ledger transaction … does not sum to zero`, or `… has fewer than two entries` | Something wrote the ledger around `LedgerService.post()`, such as SQL by hand. The database checks each transaction when it commits, so nothing of it was written. Write a whole transaction, balanced, in one database transaction, or post it through the service. |
+| `ledger_entries is append-only: UPDATE refused` (or `DELETE`, `TRUNCATE`; the same for `ledger_transactions` and `ledger_accounts`) | The ledger is never changed. Post a correcting transaction instead: the movement the other way. |
+| 409 `The ledger key … was posted before, with other entries` | A movement reused another's idempotency key: the first stands, and nothing was written. A retry must post the same entries. |
 | 409 `Account … is active: only a pending account can be approved` | The change doesn't apply to the account's status any more: another operator changed it first. Reload the account's page; its status history says who did what. |
 | 403 `The admin routes are for FF's operators` | The user hasn't the realm role `ff-operator`. Give it in Keycloak's admin console (Users → Role mapping), then log in again. |
 | 400 `Every admin change needs a reason` | Send `reason`, 3 to 500 characters, in the body. |

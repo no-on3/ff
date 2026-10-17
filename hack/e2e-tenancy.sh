@@ -550,6 +550,19 @@ page_1="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
 check "its page: the owner, the function and its last call, this month's usage, and how it became active" \
   "200 $user_1 l5-one true true pending,active" \
   "$(status) $(jq -r '"\(.members[0].email) \(.functions[0].name) \(.functions[0].lastInvokedAt != null) \(.usage.totals.requests > 0) \([.statusHistory[].status] | join(","))"' <<<"$page_1")"
+# 7.000 TND of credit for account 2 alone, as one balanced ledger transaction (P-31; P-74 will grant it).
+"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -v ON_ERROR_STOP=1 -qc "
+  INSERT INTO ledger_accounts (account_id, type, currency) VALUES ('$account_2', 'wallet', 'TND');
+  INSERT INTO ledger_accounts (type, currency) VALUES ('promotional_credit', 'TND') ON CONFLICT DO NOTHING;
+  INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('promo', 'promo:l5');
+  INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
+    SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN 7000 ELSE -7000 END
+      FROM ledger_transactions t, ledger_accounts a
+     WHERE t.idempotency_key = 'promo:l5' AND (a.account_id = '$account_2' OR (a.type = 'promotional_credit' AND a.currency = 'TND'));" >/dev/null
+balance_1="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
+check "account 1's page has no balance: the credit is account 2's (P-31)" "200 []" "$(status) $(jq -c .balances <<<"$balance_1")"
+balance_2="$(with_token "$operator_token" GET "/admin/accounts/$account_2")"
+check "account 2's page has it, as a string to the millime" '200 [{"currency":"TND","balance":"7.000"}]' "$(status) $(jq -c .balances <<<"$balance_2")"
 with_token "$operator_token" POST "/admin/accounts/$account_1/suspend" '{"reason": "l5: abuse report"}' >/dev/null
 check "the operator suspends account 1" 200 "$(status)"
 check "its function is scaled to zero at once" 0 \
