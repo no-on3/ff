@@ -57,7 +57,7 @@ describe('CORS for the console (L1, P-14)', () => {
     const res = await fetch(`${baseUrl}/probe`, { headers: { origin: CONSOLE } });
 
     expect(res.headers.get('access-control-allow-origin')).toBe(CONSOLE);
-    expect(res.headers.get('access-control-expose-headers')).toBe('x-ff-request-id');
+    expect(res.headers.get('access-control-expose-headers')).toBe('x-ff-request-id,x-ff-truncated');
     expect(res.headers.get('x-ff-request-id')).toBeTruthy();
   });
 

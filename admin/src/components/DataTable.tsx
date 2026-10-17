@@ -15,6 +15,8 @@ export interface Filter {
   /** A choice; or free text when there are none. */
   options?: Array<{ value: string; label: string }>;
   placeholder?: string;
+  /** A date picker rather than text. */
+  type?: 'text' | 'date';
 }
 
 /**
@@ -92,6 +94,7 @@ function DataTable<Row>({
               ) : (
                 <input
                   className="input"
+                  type={filter.type ?? 'text'}
                   placeholder={filter.placeholder}
                   value={query.filters[filter.name]}
                   onChange={(e) => setQuery({ ...query, filters: { ...query.filters, [filter.name]: e.target.value } })}

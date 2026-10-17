@@ -41,6 +41,24 @@ export interface AuditEvent {
 /** The actor of what FF does on its own: timers, jobs. */
 export const SYSTEM: Actor = { id: 'system', label: 'FF' };
 
+/** Which operator actions GET /admin/audit-log lists (P-76): every given part must match. */
+export interface OperatorActionFilter {
+  /** Part of the operator's e-mail, in any case. */
+  operator?: string;
+  accountId?: string;
+  action?: string;
+  /** From this instant, included. */
+  from?: Date;
+  /** Until this instant, excluded. */
+  to?: Date;
+}
+
+/** The actor of every operator action: operator:<Keycloak ID> (P-70). */
+export const OPERATOR_ACTOR = 'operator:';
+
+/** Text to match as itself in LIKE: its wildcards and the escape character escaped. */
+const literal = (text: string) => text.replace(/[\\%_]/g, (character) => `\\${character}`);
+
 export interface AuditPage {
   entries: AuditEntry[];
   /** The `before` of the next page, older; null on the last one. */
@@ -87,6 +105,31 @@ export class AuditService {
     } catch (error) {
       this.logger.error(`Could not record ${event.action} on ${event.resource ?? `account ${event.accountId}`}: ${describeError(error)}`);
     }
+  }
+
+  /** GET /admin/audit-log (P-76): the operators' actions, newest first, a page at a time. */
+  async operatorActions(filter: OperatorActionFilter, { limit, before }: { limit: number; before?: string }): Promise<AuditPage> {
+    const query = this.operatorQuery(filter).orderBy('entry.id', 'DESC').take(limit + 1);
+    if (before) query.andWhere('entry.id < :before', { before });
+    const entries = await query.getMany();
+    const more = entries.length > limit;
+    return { entries: entries.slice(0, limit), next: more ? entries[limit - 1].id : null };
+  }
+
+  /** The same actions for an export: the newest `cap` of them, and whether there were more. */
+  async operatorActionsForExport(filter: OperatorActionFilter, cap: number): Promise<{ entries: AuditEntry[]; truncated: boolean }> {
+    const entries = await this.operatorQuery(filter).orderBy('entry.id', 'DESC').take(cap + 1).getMany();
+    return { entries: entries.slice(0, cap), truncated: entries.length > cap };
+  }
+
+  private operatorQuery(filter: OperatorActionFilter) {
+    const query = this.entries.createQueryBuilder('entry').where('entry.actor LIKE :actor', { actor: `${OPERATOR_ACTOR}%` });
+    if (filter.operator) query.andWhere(`entry.actorLabel ILIKE :operator ESCAPE '\\'`, { operator: `%${literal(filter.operator)}%` });
+    if (filter.accountId) query.andWhere('entry.accountId = :accountId', { accountId: filter.accountId });
+    if (filter.action) query.andWhere('entry.action = :action', { action: filter.action });
+    if (filter.from) query.andWhere('entry.at >= :from', { from: filter.from });
+    if (filter.to) query.andWhere('entry.at < :to', { to: filter.to });
+    return query;
   }
 
   /** GET /audit-log: an account's entries, newest first, a page at a time. */

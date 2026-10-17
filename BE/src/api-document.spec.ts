@@ -18,7 +18,9 @@ import { FunctionsService } from './functions/functions.service';
 import { HealthController } from './health/health.controller';
 import { MetricsController } from './metrics/metrics.controller';
 import { MetricsService } from './metrics/metrics.service';
+import { AdminAuditController } from './admin/admin-audit.controller';
 import { AdminSettingsController } from './admin/admin-settings.controller';
+import { AuditService } from './audit/audit.service';
 import { PlatformSettingsService } from './admin/platform-settings.service';
 import { UsageController } from './usage/usage.controller';
 import { UsageService } from './usage/usage.service';
@@ -48,6 +50,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
         ApiKeysController,
         UsageController,
         AdminSettingsController,
+        AdminAuditController,
       ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
@@ -57,6 +60,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
         { provide: ApiKeysService, useValue: succeeding(ApiKeysService) },
         { provide: UsageService, useValue: succeeding(UsageService) },
         { provide: PlatformSettingsService, useValue: succeeding(PlatformSettingsService) },
+        { provide: AuditService, useValue: succeeding(AuditService, { operatorActions: async () => ({ entries: [], next: null }) }) },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -93,7 +97,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log']));
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
   });
 

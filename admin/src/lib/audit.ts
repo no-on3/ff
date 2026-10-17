@@ -1,0 +1,86 @@
+import { SETTINGS, describeSetting } from './settings';
+import { TableQuery, pageParams } from './table';
+
+/**
+ * What operators do, as the audit log names it (P-70, P-76), with what the
+ * dashboard calls each. contract.test.ts checks each against the API's
+ * actions; P-71 and the tasks after it add theirs.
+ */
+export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [{ value: 'settings.update', label: 'Settings changed' }];
+
+/** One operator action, as GET /admin/audit-log gives it. */
+export interface OperatorAction {
+  id: string;
+  at: string;
+  operator: { id: string; email: string };
+  action: string;
+  accountId: string | null;
+  resource: string | null;
+  reason: string | null;
+  details: Record<string, unknown> | null;
+  ip: string | null;
+  requestId: string | null;
+}
+
+/** The day after a YYYY-MM-DD date: a filter's "to" day is included. */
+function nextDay(date: string): string {
+  const day = new Date(`${date}T00:00:00Z`);
+  day.setUTCDate(day.getUTCDate() + 1);
+  return day.toISOString().slice(0, 10);
+}
+
+/**
+ * The page's query parameters: the filters set, with the "from" and "to"
+ * days (UTC) as instants, "to" included, then the page.
+ */
+export function auditParams(query: TableQuery, before: string | null): Record<string, string> {
+  const { from, to, ...rest } = query.filters;
+  const params = pageParams({ search: '', filters: rest }, before);
+  if (from) params.from = `${from}T00:00:00Z`;
+  if (to) params.to = `${nextDay(to)}T00:00:00Z`;
+  return params;
+}
+
+/** The filters without the page, for the CSV: it holds the newest of everything that matches. */
+export function exportParams(query: TableQuery): Record<string, string> {
+  const params = auditParams(query, null);
+  delete params.limit;
+  return params;
+}
+
+/** A value of a change the page knows nothing about: none, as JSON when it has parts, else as it is. */
+const shown = (value: unknown): string => {
+  if (value === null || value === undefined) return 'none';
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
+};
+
+/** One change, from → to: a setting by its label, as the Settings page shows it; anything else as the API names it. */
+function describeChange(name: string, { from, to }: { from: unknown; to: unknown }): string {
+  const setting = SETTINGS.find((known) => known.key === name);
+  if (!setting) return `${name}: ${shown(from)} → ${shown(to)}`;
+  // An old entry may hold a value of another shape: shown as it is, never a broken page.
+  const value = (v: unknown) => (setting.kind === 'percents' && !Array.isArray(v) ? shown(v) : describeSetting(setting.kind, v));
+  return `${setting.label}: ${value(from)} → ${value(to)}`;
+}
+
+/** What an action did, to read: each change's from → to, else what it was on. */
+export function describeAction(entry: OperatorAction): string {
+  const changes = entry.details?.changes as Record<string, { from: unknown; to: unknown }> | undefined;
+  if (changes) {
+    return Object.entries(changes)
+      .map(([name, change]) => describeChange(name, change))
+      .join('; ');
+  }
+  return entry.resource ?? '';
+}
+
+/** When it happened, in UTC like the filters and the CSV: "2026-10-17 10:13:11 UTC". */
+export function whenUtc(at: string): string {
+  const iso = new Date(at).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
+}
+
+export const actionLabel = (action: string): string => OPERATOR_ACTIONS.find((known) => known.value === action)?.label ?? action;
+
+/** The export's file name, as the API names the download. */
+export const auditCsvName = (today: Date) => `ff-operator-audit-${today.toISOString().slice(0, 10)}.csv`;

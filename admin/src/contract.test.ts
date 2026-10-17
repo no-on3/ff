@@ -3,9 +3,11 @@ import configurationSource from '../../BE/src/config/configuration.ts?raw';
 import backendEnvExample from '../../BE/.env.example?raw';
 import operatorSource from '../../BE/src/admin/operator.ts?raw';
 import settingsSource from '../../BE/src/admin/platform-settings.ts?raw';
+import auditSource from '../../BE/src/audit/audit.service.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
+import { OPERATOR_ACTIONS } from './lib/audit';
 import { REASON_LENGTH } from './lib/reason';
 import { SETTINGS } from './lib/settings';
 
@@ -70,6 +72,15 @@ describe("the development realm's ff-admin client and ff-operator role", () => {
       ['auth-otp-form', 'REQUIRED'],
     ]);
     expect(condition.config).toEqual({ condUserRole: constant('OPERATOR_ROLE'), negate: 'false' });
+  });
+});
+
+describe('the operator actions the audit log page names (P-76)', () => {
+  it("are actions the API records", () => {
+    const union = auditSource.slice(auditSource.indexOf('export type AuditAction ='), auditSource.indexOf(';', auditSource.indexOf('export type AuditAction =')));
+    const backendActions = [...union.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map((match) => match[1]);
+
+    expect(backendActions).toEqual(expect.arrayContaining(OPERATOR_ACTIONS.map((action) => action.value)));
   });
 });
 

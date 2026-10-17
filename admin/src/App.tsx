@@ -8,6 +8,7 @@ import Layout from './components/Layout';
 import LoginPage from './components/LoginPage';
 import { ErrorState } from './components/States';
 import { config } from './config';
+import AuditLog from './pages/AuditLog';
 import Settings from './pages/Settings';
 
 // One login per page load, set up before the first request.
@@ -51,6 +52,7 @@ function LoginGate() {
       <Layout email={email} onLogOut={() => void auth.signoutRedirect()}>
         <Routes>
           <Route path="/settings" element={<Settings email={email} />} />
+          <Route path="/audit-log" element={<AuditLog email={email} />} />
           <Route path="*" element={<Navigate to="/settings" replace />} />
         </Routes>
       </Layout>

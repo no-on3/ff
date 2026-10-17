@@ -375,7 +375,7 @@ One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bil
 
 The console keeps its tokens in the tab's session storage, and renews the 5-minute access token with the refresh token before it expires. "Log out" ends the Keycloak session too. When that session ends another way (30 minutes without a renewal, as after the laptop slept, or a logout in another tab), the next call gets 401, and the console asks you to log in again.
 
-**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for the platform's settings now, and accounts, approvals and the operator audit log as they land. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
+**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for the platform's settings and the operator audit log now, and accounts and approvals as they land. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
 
 ```bash
 cd admin && cp .env.example .env.local && npm install && npm run dev
@@ -394,6 +394,15 @@ curl -s -X PUT $FF/admin/settings -H "Authorization: Bearer $OP" -H 'content-typ
 ```
 
 The password grant works only in the development realm, for scripts and tests; production's realm turns it off for `ff-admin` (P-60). **The settings** are values that tasks to come read: shadow billing (P-32), the negative buffer and grace period (P-33), the low-balance e-mails (P-33), the invoice reminder (P-36) and the large-credit threshold (P-74). Each is its default until changed. Amounts are in TND with three decimals, as strings.
+
+**The operator audit log** (P-76): the dashboard's "Audit log" page lists what operators did, newest first: when (in UTC), who, the action, the account, what changed, and why. `GET /admin/audit-log` gives the same, 50 entries a page (`limit`, at most 100; pass `next` as `before` for the next page, older), filtered by part of the operator's e-mail in any case (`operator`), the account (`accountId`), the action (`action`) and a time range (`from` included, `to` excluded, ISO 8601). With `Accept: text/csv` it gives the newest 10,000 entries that match, and the header `X-FF-Truncated: true` when more matched: narrow the filters for the rest. Only operators' actions are in it; customers' are in each account's own log, above.
+
+```bash
+curl -s "$FF/admin/audit-log?action=settings.update&limit=5" -H "Authorization: Bearer $OP" \
+  | jq -c '.entries[] | {at, operator: .operator.email, action, reason}'
+# {"at":"2026-10-17T10:00:00.000Z","operator":"operator@ff.test","action":"settings.update","reason":"Pilot customers asked for more time"}
+curl -s "$FF/admin/audit-log?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z" -H "Authorization: Bearer $OP" -H 'Accept: text/csv'
+```
 
 **Reset Keycloak** with `docker compose --profile auth down -v keycloak`: it deletes Keycloak's users, and imports the realm again at the next start. Keycloak reads `deploy/keycloak/ff-realm.json` only at its first start, so a change to that file needs this reset. Name the service: without it, `down -v` deletes the database and S3 volumes too.
 

@@ -27,8 +27,9 @@ Vite reads them when it starts or builds, from the environment or from `.env.loc
 - **Login** (`src/App.tsx`, `src/auth/oidc.ts`): the authorization code flow with PKCE, through the client `ff-admin`. Keycloak asks users with the realm role `ff-operator` for a one-time password; an operator sets one up at their first login. Tokens stay in the tab's session storage, and the access token is renewed before it expires.
 - **The backend** (`BE/src/admin/`): every route under `/admin` takes only an operator's token issued to `ff-admin`: a customer's token, an operator's console token, an API key or development mode is refused. Every change carries a `reason`, which the audit log keeps with the operator's name.
 - **What it shows:**
+  - **Audit log** (P-76): what operators did, newest first: when (in UTC, like the filters and the CSV), who, the action, the account, what changed (a setting by its name, from → to, as the Settings page's dialog says it) and the reason. Filter by part of an operator's e-mail, account, action, and a range of UTC days (both included). "Download as CSV" saves the newest 10,000 entries that match, with the same filters; when more matched, the page says so, and narrower filters give the rest.
   - **Settings** (P-70): billing and platform values, each change confirmed with a reason, from → to.
-  - Accounts and approvals (P-71) and the operator audit log (P-76) come next.
+  - Accounts and approvals (P-71) come next.
 - **Shared pieces** (`src/components/`): the reason dialog every change goes through, a table with filters, search and pages (`DataTable`, `src/lib/table.ts`), and the loading, error and empty states.
 
-`src/contract.test.ts` checks what the app shares with the realm and the backend: the client and its addresses, the role and its one-time password, the port, the settings' names and the reason's length.
+`src/contract.test.ts` checks what the app shares with the realm and the backend: the client and its addresses, the role and its one-time password, the port, the settings' names, the reason's length, and the actions the audit log page names (`OPERATOR_ACTIONS` in `src/lib/audit.ts`: each task that adds an operator action adds it there too).

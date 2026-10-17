@@ -526,6 +526,16 @@ check "and the audit log keeps who, why, and what it replaced" "operator@ff.test
   "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F '|' -c \
     "SELECT actor_label, details->>'reason', details->'changes'->'gracePeriodHours'->>'from', details->'changes'->'gracePeriodHours'->>'to'
        FROM audit_log WHERE action = 'settings.update' AND actor LIKE 'operator:%'")"
+actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
+check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
+  "200 operator@ff.test settings.update 24 48 l5: pilot customers asked" \
+  "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
+all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
+check "and, unfiltered, none of the customers' many actions: only the operator's" "200 1 settings.update" \
+  "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
+csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
+check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \
+  "$(status) $(head -1 <<<"$csv" | tr -d '\r') $(grep -q ',operator@ff.test,settings.update,,settings,l5: pilot customers asked,' <<<"$csv" && echo true || echo false)"
 with_token "$(keycloak_token ff-e2e "$operator_email" "$operator_password")" GET /admin/settings >/dev/null
 check "the operator's token from another client is refused" "$not_admin_client" "$(status) $(message)"
 with_token "$operator_token" GET /me >/dev/null
