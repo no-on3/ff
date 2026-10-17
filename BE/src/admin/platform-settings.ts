@@ -3,6 +3,14 @@ import { z } from 'zod';
 /** A sum of dinars, with the three places of the millime: "5.000". */
 const dinars = z.string().regex(/^\d{1,9}\.\d{3}$/, 'must be an amount in TND with three decimals, such as 5.000');
 
+/** Shares of the last credit for the low-balance e-mails (P-33), in percent: from the largest to the smallest, each once, five at most. */
+export const lowBalancePercentsSchema = z
+  .array(z.number().int().min(0).max(100))
+  .max(5)
+  .refine((percents) => percents.every((percent, index) => index === 0 || percent < percents[index - 1]), {
+    message: 'must go from the largest share to the smallest, each once',
+  });
+
 /**
  * The settings FF's operators change from the admin dashboard rather than in
  * environment variables (D12): kept in platform_settings, each change in the
@@ -16,13 +24,8 @@ export const platformSettingsSchema = z.strictObject({
   negativeBuffer: dinars,
   /** D9, P-33: hours after the buffer runs out before invokes answer 402. */
   gracePeriodHours: z.number().int().min(0).max(720),
-  /** P-33: the low-balance e-mails, at these shares of the last top-up, for owners who set none. Largest first. */
-  lowBalancePercents: z
-    .array(z.number().int().min(0).max(100))
-    .max(5)
-    .refine((percents) => percents.every((percent, index) => index === 0 || percent < percents[index - 1]), {
-      message: 'must go from the largest share to the smallest, each once',
-    }),
+  /** P-33: the low-balance e-mails, at these shares of the last credit, for owners who set none. Largest first. */
+  lowBalancePercents: lowBalancePercentsSchema,
   /** D9, P-36: the day of the month by which the monthly invoices are issued; a reminder after it. */
   invoiceReminderDay: z.number().int().min(1).max(28),
   /** D12, P-74: a credit grant above this, in TND, needs a second confirmation. */

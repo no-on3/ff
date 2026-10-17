@@ -59,6 +59,7 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
     onePlan(),
     recordingAudit().audit,
     recordingUsage().usage,
+    { admit: async () => undefined } as never, // D9's balance check (P-33): every call admitted
   );
 
   afterAll(async () => {

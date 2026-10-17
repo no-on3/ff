@@ -46,6 +46,13 @@ export class Account {
   @Column({ type: 'text', nullable: true })
   useCase: string | null;
 
+  /**
+   * P-33: the low-balance e-mails, at these shares of the last credit, as the
+   * owners set them, largest first; null for the platform's (lowBalancePercents).
+   */
+  @Column({ type: 'int', array: true, nullable: true })
+  lowBalancePercents: number[] | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

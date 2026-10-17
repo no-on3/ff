@@ -140,6 +140,7 @@ run('plans (L2, P-15)', () => {
       plans,
       audit,
       {} as never, // creates only: no usage
+      {} as never, // creates only: no balance check
     );
     const create = (name: string) => functions.create(id, { name, runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 });
     await create('first');

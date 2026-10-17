@@ -3,7 +3,10 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import AccountRejected from '../components/AccountRejected';
 import AccountSettings from '../components/AccountSettings';
 import ApiKeys from '../components/ApiKeys';
+import BalanceProvider from '../components/BalanceProvider';
+import Billing from '../components/Billing';
 import CreateFunction from '../components/CreateFunction';
+import CreditBanner from '../components/CreditBanner';
 import FunctionDetail from '../components/FunctionDetail';
 import FunctionList from '../components/FunctionList';
 import Members from '../components/Members';
@@ -29,6 +32,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
           <div className="container mx-auto px-4 py-2">{banner}</div>
         </div>
       )}
+      <CreditBanner />
       <main className="py-6">
         <Routes>
           <Route path="/accounts/new" element={<Onboarding />} />
@@ -42,6 +46,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
               <Route path="/functions/new" element={<CreateFunction />} />
               <Route path="/functions/:id" element={<FunctionDetail />} />
               <Route path="/usage" element={<Usage />} />
+              <Route path="/billing" element={<Billing />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </>
           ) : (
@@ -115,10 +120,12 @@ const Console: React.FC<{ login: Login | null }> = ({ login }) => {
   return (
     <SessionContext.Provider value={session}>
       <BrowserRouter>
-        <div className="min-h-screen bg-gray-50">
-          <NavBar />
-          <AccountRoutes account={session.account} />
-        </div>
+        <BalanceProvider>
+          <div className="min-h-screen bg-gray-50">
+            <NavBar />
+            <AccountRoutes account={session.account} />
+          </div>
+        </BalanceProvider>
       </BrowserRouter>
     </SessionContext.Provider>
   );

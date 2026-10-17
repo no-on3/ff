@@ -63,6 +63,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     onePlan(),
     recordingAudit().audit,
     usage.usage,
+    { admit: async () => undefined } as never, // D9's balance check (P-33): every call admitted
   );
   const spec = (name: string, code: string) => ({ name, runtime: Runtime.NODEJS, code, memory: 128, timeout: 3 });
 

@@ -118,6 +118,7 @@ run('usage records (L2, P-20)', () => {
       {} as never, // no plans: invocations only
       { record: async () => undefined } as never,
       usage,
+      { admit: async () => undefined } as never, // D9's balance check (P-33): every call admitted
     );
   });
 

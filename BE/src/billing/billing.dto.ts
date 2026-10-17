@@ -1,11 +1,20 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Matches, Max, Min } from 'class-validator';
+import { IsArray, IsInt, IsOptional, Matches, Max, Min, ValidateIf } from 'class-validator';
 import { LedgerTransactionKind } from './ledger/ledger-transaction.entity';
 
 export const MAX_TRANSACTIONS_PAGE = 100;
 /** A page's `next`: the last transaction's creation, to the microsecond, UTC, and its ID. */
 export const TRANSACTIONS_CURSOR = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6})_([0-9a-f-]{36})$/;
+
+/** D9's balance check (P-33): whether invokes go on, and until when. */
+export class CreditStateView {
+  @ApiProperty({ enum: ['ok', 'grace', 'stopped'], description: 'ok: above the buffer, or shadow mode; grace: below it, invokes still go; stopped: invokes answer 402' })
+  state: 'ok' | 'grace' | 'stopped';
+  @ApiProperty({ example: '1.000', description: 'How far below zero the balance may go before the grace period starts' }) buffer: string;
+  @ApiProperty({ nullable: true, type: String, description: 'When the balance fell below the buffer; null while it is above' }) belowBufferSince: Date | null;
+  @ApiProperty({ nullable: true, type: String, description: 'When invokes stop, or stopped: the grace period\'s end' }) invokesStopAt: Date | null;
+}
 
 /** GET /billing/balance (P-32): money is a string with every decimal of its currency, never a JSON number. */
 export class BalanceView {
@@ -16,6 +25,26 @@ export class BalanceView {
   @ApiProperty({ example: '1.234', description: "This month's hourly charges added up: debited, or in shadow mode only rated" }) charged: string;
   @ApiProperty({ nullable: true, type: String, example: '2026-10-17T10:00:00.000Z', description: 'The end of the last hour rated: later usage is not charged yet' })
   ratedUntil: Date | null;
+  @ApiProperty({ type: CreditStateView, description: 'Whether invokes go on (P-33)' }) credit: CreditStateView;
+}
+
+/** GET and PUT /billing/alerts (P-33): when the owners get a low-balance e-mail. */
+export class AlertsView {
+  @ApiProperty({ nullable: true, type: [Number], example: [50, 20, 0], description: "The account's own shares of the last credit, largest first; null for FF's" })
+  lowBalancePercents: number[] | null;
+  @ApiProperty({ type: [Number], example: [50, 20, 0], description: "FF's shares, for an account that sets none" }) defaultPercents: number[];
+}
+
+export class AlertsDto {
+  @ApiProperty({
+    nullable: true,
+    type: [Number],
+    example: [80, 20, 0],
+    description: 'Shares of the last credit, in percent, from the largest to the smallest, each once, five at most; [] for none; null for FF\'s',
+  })
+  @ValidateIf((dto: AlertsDto) => dto.lowBalancePercents !== null)
+  @IsArray({ message: 'lowBalancePercents must be a list of shares in percent, or null' })
+  lowBalancePercents: number[] | null;
 }
 
 export class BillingTransactionView {

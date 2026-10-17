@@ -13,6 +13,7 @@ import { AuditService } from '../audit/audit.service';
 import { UsageStatus } from '../usage/usage-record.entity';
 import { failureStatus, usageRecord } from '../usage/usage';
 import { UsageService } from '../usage/usage.service';
+import { CreditService } from '../billing/credit.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
@@ -90,6 +91,7 @@ export class FunctionsService {
     private plans: PlansService,
     private audit: AuditService,
     private usage: UsageService,
+    private credit: CreditService,
   ) {}
 
   private readyTimeoutMs(): number {
@@ -313,6 +315,8 @@ export class FunctionsService {
     if (function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
     }
+    // D9: 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
+    await this.credit.admit(accountId);
 
     const invocation = this.invocationsRepository.create({
       functionId: id,

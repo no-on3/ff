@@ -11,6 +11,7 @@ import { PlatformSettings1792229526506 } from './1792229526506-PlatformSettings'
 import { PriceBooks1792235773406 } from './1792235773406-PriceBooks';
 import { Ledger1792239798928 } from './1792239798928-Ledger';
 import { Rating1792241835410 } from './1792241835410-Rating';
+import { CreditControls1792244277487 } from './1792244277487-CreditControls';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -31,4 +32,5 @@ export const MIGRATIONS: Array<new () => object> = [
   PriceBooks1792235773406,
   Ledger1792239798928,
   Rating1792241835410,
+  CreditControls1792244277487,
 ];

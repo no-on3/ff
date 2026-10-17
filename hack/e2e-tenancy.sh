@@ -143,8 +143,9 @@ e2e_cluster
 echo "== backends"
 e2e_build
 e2e_migrate "${e2e_base_env[@]}"
+# Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
 e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" PORT="${api##*:}" \
-  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
+  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT"
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198
@@ -225,6 +226,7 @@ body_for() {
     "POST /admin/price-books") echo '{"validFrom": "2030-01-01T00:00:00Z", "document": {}, "reason": "l5 tries"}' ;;
     "POST /admin/price-books/preview") echo '{"document": {}}' ;;
     "PATCH /members/{userId}") echo '{"role": "viewer"}' ;;
+    "PUT /billing/alerts") echo '{"lowBalancePercents": [80, 20]}' ;;
     POST* | PUT* | PATCH*) echo '{}' ;;
   esac
 }
@@ -291,6 +293,16 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /billing/transactions")
       transactions_b="$(as_b GET /billing/transactions)"
       check "$route: B lists none of A's transactions" "200 0" "$(status) $(jq '.transactions | length' <<<"$transactions_b")"
+      ;;
+    "GET /billing/alerts")
+      alerts_b="$(as_b GET /billing/alerts)"
+      check "$route: B reads its own shares, FF's (P-33)" "200 null" "$(status) $(jq -c .lowBalancePercents <<<"$alerts_b")"
+      ;;
+    "PUT /billing/alerts")
+      as_b PUT /billing/alerts '{"lowBalancePercents": [80, 20]}' >/dev/null
+      check "$route: B sets its own shares (P-33)" 200 "$(status)"
+      alerts_a="$(as_a GET /billing/alerts)"
+      check "  ... which are not A's" "200 null" "$(status) $(jq -c .lowBalancePercents <<<"$alerts_a")"
       ;;
     *" /members"*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
@@ -458,6 +470,16 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       transactions_2="$(as_user_2 GET /billing/transactions)"
       check "$route: account 2 lists none of account 1's transactions" "200 0" "$(status) $(jq '.transactions | length' <<<"$transactions_2")"
       ;;
+    "GET /billing/alerts")
+      alerts_2="$(as_user_2 GET /billing/alerts)"
+      check "$route: account 2's shares are its own (P-33)" "200 null" "$(status) $(jq -c .lowBalancePercents <<<"$alerts_2")"
+      ;;
+    "PUT /billing/alerts")
+      as_user_2 PUT /billing/alerts '{"lowBalancePercents": [90]}' >/dev/null
+      check "$route: user 2 sets account 2's shares (P-33)" 200 "$(status)"
+      alerts_1="$(as_user_1 GET /billing/alerts)"
+      check "  ... and account 1 keeps FF's" "200 null" "$(status) $(jq -c .lowBalancePercents <<<"$alerts_1")"
+      ;;
     *" /admin/"*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: a customer's token is not the admin dashboard's" "$not_admin_client" "$(status) $(message)"
@@ -500,6 +522,10 @@ check "which reads its own account's usage, never account 1's" "200 0" \
   "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_key")"
 balance_key="$(with_token "$key_usage" GET /billing/balance)"
 check "and its own account's balance, without account 1's credit (P-32)" "200 0.000" "$(status) $(jq -r .balance <<<"$balance_key")"
+alerts_key="$(with_token "$key_usage" GET /billing/alerts)"
+check "and its low-balance shares (P-33)" "200 [90]" "$(status) $(jq -c .lowBalancePercents <<<"$alerts_key")"
+with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
+check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 for path in /me /api-keys /members /audit-log; do
   with_token "$key_1" GET "$path" >/dev/null
   check "a key can't call GET $path, which takes a user's token" \
@@ -539,6 +565,8 @@ check "and its usage (P-22)" "200 true" \
   "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id) | .requests > 0] | any' <<<"$usage_1")"
 as_member POST "/functions/$fn_1/invoke" '{"input":{}}' >/dev/null
 check "but can't invoke them" "403 The viewer role can't do this" "$(status) $(message)"
+as_member PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
+check "nor set the low-balance e-mails (P-33)" "403 The viewer role can't do this" "$(status) $(message)"
 user_2_id="$(with_token "$token_2" GET /me | jq -r .user.id)"
 as_user_1 PATCH "/members/$user_2_id" '{"role": "developer"}' >/dev/null
 check "the owner makes user 2 a developer" 200 "$(status)"
@@ -546,6 +574,8 @@ as_member POST "/functions/$fn_1/invoke" '{"input":{}}' >/dev/null
 check "who now invokes" 201 "$(status)"
 as_member GET /members >/dev/null
 check "but doesn't manage members" "403 The developer role can't do this" "$(status) $(message)"
+as_member PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
+check "nor the low-balance e-mails, which are the owners' (P-33)" "403 The developer role can't do this" "$(status) $(message)"
 as_user_1 DELETE "/members/$user_1_id" >/dev/null
 check "the last owner can't leave" "400 An account needs an owner: make another member owner first" "$(status) $(message)"
 as_user_1 DELETE "/members/$user_2_id" >/dev/null
@@ -594,6 +624,17 @@ page_balance_1="$(with_token "$operator_token" GET "/admin/accounts/$account_1")
 check "account 1's page has its own balance, 5.000 TND (P-31)" '200 [{"currency":"TND","balance":"5.000"}]' "$(status) $(jq -c .balances <<<"$page_balance_1")"
 page_balance_2="$(with_token "$operator_token" GET "/admin/accounts/$account_2")"
 check "and account 2's page its own, 7.000 TND, as a string to the millime" '200 [{"currency":"TND","balance":"7.000"}]' "$(status) $(jq -c .balances <<<"$page_balance_2")"
+# 3.000 TND of usage on account 1's 5.000: 40% left, past 50% of the last credit (P-33).
+"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -v ON_ERROR_STOP=1 -qc "
+  INSERT INTO ledger_accounts (type, currency) VALUES ('revenue', 'TND') ON CONFLICT DO NOTHING;
+  WITH t AS (INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('usage', 'usage:l5-1') RETURNING id)
+  INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
+  SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN -3000 ELSE 3000 END FROM t, ledger_accounts a
+   WHERE a.currency = 'TND' AND (a.account_id = '$account_1' OR (a.account_id IS NULL AND a.type = 'revenue'));" >/dev/null
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^Your FF credit' && break; sleep 0.5; done
+check "account 1's owner gets the low-balance e-mail, through the ledger's NOTIFY (P-33)" \
+  "Your FF credit is down to 50%: $(as_user_1 GET "/accounts/$account_1" | jq -r .name)|2.000 TND" \
+  "$(mail_to "$user_1" | head -1)|$(mail_to "$user_1" | sed -n 2p | grep -o '[0-9.]* TND' | head -1)"
 with_token "$operator_token" POST "/admin/accounts/$account_1/suspend" '{"reason": "l5: abuse report"}' >/dev/null
 check "the operator suspends account 1" 200 "$(status)"
 check "its function is scaled to zero at once" 0 \

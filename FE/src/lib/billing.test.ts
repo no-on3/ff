@@ -1,8 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import type { Balance } from '../services/api';
-import { balanceLabel, trialNote } from './billing';
+import { balanceLabel, creditBanner, invokesLabel, parsePercents, percentsText, transactionLabel, trialNote } from './billing';
 
-const BALANCE: Balance = { currency: 'TND', balance: '12500.000', shadowMode: true, month: '2026-10', charged: '1.234', ratedUntil: '2026-10-17T10:00:00.000Z' };
+const BALANCE: Balance = {
+  currency: 'TND',
+  balance: '12500.000',
+  shadowMode: true,
+  month: '2026-10',
+  charged: '1.234',
+  ratedUntil: '2026-10-17T10:00:00.000Z',
+  credit: { state: 'ok', buffer: '1.000', belowBufferSince: null, invokesStopAt: null },
+};
+const GRACE: Balance = {
+  ...BALANCE,
+  balance: '-2.345',
+  shadowMode: false,
+  credit: { state: 'grace', buffer: '1.000', belowBufferSince: '2026-10-17T10:33:00.000Z', invokesStopAt: '2026-10-18T10:33:00.000Z' },
+};
+const STOPPED: Balance = { ...GRACE, credit: { ...GRACE.credit, state: 'stopped' } };
 
 describe("the header's balance (P-32)", () => {
   it('writes the balance with its currency, thousands apart, a debt with its sign', () => {
@@ -23,5 +38,50 @@ describe("the header's balance (P-32)", () => {
 
   it('says nothing once usage is charged', () => {
     expect(trialNote({ ...BALANCE, shadowMode: false })).toBeNull();
+  });
+});
+
+describe('the balance check, as the console tells it (P-33)', () => {
+  it('shows no banner while invokes go on, a warning with their end in the grace period, an alert once they stopped', () => {
+    expect(creditBanner(BALANCE)).toBeNull();
+    expect(creditBanner({ ...GRACE, credit: { ...GRACE.credit, state: 'ok', invokesStopAt: null } })).toBeNull();
+    expect(creditBanner(GRACE)).toEqual({
+      tone: 'warning',
+      text: 'Your balance is -2.345 TND, below the -1.000 TND FF allows: invokes stop on 18 Oct, 10:33 UTC unless you add credit.',
+    });
+    expect(creditBanner(STOPPED)).toEqual({
+      tone: 'danger',
+      text: 'Invokes are stopped: your balance is -2.345 TND, below -1.000 TND. Add credit to invoke again; reads, logs and deploys go on.',
+    });
+  });
+
+  it('says on the Billing page whether invokes go on', () => {
+    expect(invokesLabel(BALANCE)).toBe('Going on: nothing is charged during the billing trial');
+    expect(invokesLabel({ ...BALANCE, shadowMode: false })).toBe('Going on, down to -1.000 TND');
+    expect(invokesLabel(GRACE)).toBe('Stop on 18 Oct, 10:33 UTC');
+    expect(invokesLabel(STOPPED)).toBe('Stopped since 18 Oct, 10:33 UTC');
+  });
+
+  it('names a usage debit by its hour, and a credit by its kind', () => {
+    expect(transactionLabel({ kind: 'usage', occurredAt: '2026-10-17T10:00:00.000Z' })).toBe('Usage, 17 Oct, 10:00–11:00 UTC');
+    expect(transactionLabel({ kind: 'usage', occurredAt: '2026-10-31T23:00:00.000Z' })).toBe('Usage, 31 Oct, 23:00–00:00 UTC');
+    expect(['promo', 'adjustment', 'topup', 'mystery'].map((kind) => transactionLabel({ kind, occurredAt: '2026-10-17T10:00:00.000Z' }))).toEqual([
+      'Credit from FF',
+      'Correction',
+      'Top-up',
+      'mystery',
+    ]);
+  });
+
+  it('reads the shares an owner types, as the API takes them, or says what is wrong', () => {
+    expect(parsePercents('80, 20, 0')).toEqual({ percents: [80, 20, 0] });
+    expect(parsePercents(' 50 ,')).toEqual({ percents: [50] });
+    expect(parsePercents('')).toEqual({ percents: [] });
+    expect(parsePercents('20, 80')).toEqual({ problem: 'From the largest share to the smallest, each once' });
+    expect(parsePercents('50, 50')).toEqual({ problem: 'From the largest share to the smallest, each once' });
+    expect(parsePercents('101')).toEqual({ problem: 'Each share is a whole percent from 0 to 100, such as 50, 20, 0' });
+    expect(parsePercents('12.5')).toEqual({ problem: 'Each share is a whole percent from 0 to 100, such as 50, 20, 0' });
+    expect(parsePercents('90, 70, 50, 30, 10, 0')).toEqual({ problem: 'Five shares at most' });
+    expect(percentsText([50, 20, 0])).toBe('50, 20, 0');
   });
 });

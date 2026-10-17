@@ -15,7 +15,8 @@
 # Then GET /usage (P-22) against the raw records, as JSON and as CSV, priced with
 # the first price book (P-30). Then the hourly rating (P-32): every hour settled
 # since the first book rated as the backend started, in shadow mode, the balance,
-# and the reconciliation.
+# and the reconciliation. Then the balance check (P-33): a wallet run below zero,
+# invokes refused with 402, a top-up, and invokes accepted again at once.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -314,5 +315,31 @@ check "no transaction moved the balance: no debit in shadow mode" "200 0" "$(htt
 reconciliation="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s billing:reconcile 2>&1)" || true
 check "the reconciliation runs against the database: nobody used anything in the hours rated" "No account used anything." \
   "$(tail -1 <<<"$reconciliation")"
+
+echo "== the balance check (P-33)"
+# As an operator sets them in the admin dashboard (P-70); e2e has no operator, so SQL. No buffer, no grace period.
+sql "INSERT INTO platform_settings (key, value) VALUES ('billingShadowMode', 'false'), ('negativeBuffer', '\"0.000\"'), ('gracePeriodHours', '0')"
+# move <account> <millimes> <kind> <FF's account> <key>: a balanced ledger transaction, as the rating (usage) or a payment (topup) writes it.
+move() {
+  sql "INSERT INTO ledger_accounts (account_id, type, currency) VALUES ('$1', 'wallet', 'TND') ON CONFLICT DO NOTHING;
+       INSERT INTO ledger_accounts (type, currency) VALUES ('$4', 'TND') ON CONFLICT DO NOTHING;
+       WITH t AS (INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('$3', '$5') RETURNING id)
+       INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
+       SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN $2 ELSE -($2) END FROM t, ledger_accounts a
+        WHERE a.currency = 'TND' AND (a.account_id = '$1' OR (a.account_id IS NULL AND a.type = '$4'))"
+}
+move "$tenant" -500 usage revenue "e2e:usage"
+invocations="$(q "SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'")"
+http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
+check "a wallet run below zero, with no buffer and no grace period: invokes answer 402" "402 InsufficientCreditException" \
+  "$(status) $(jq -r .message "$work/body" | cut -d: -f1)"
+check "and the refused call left no invocation" "$invocations" "$(q "SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'")"
+check "the balance says invokes stopped" "200 -0.500 stopped" "$(http GET /billing/balance >/dev/null; status) $(jq -r '"\(.balance) \(.credit.state)"' "$work/body")"
+http GET "/functions/$meter_id" >/dev/null
+check "reads go on" 200 "$(status)"
+move "$tenant" 1000 topup provider_clearing "e2e:topup"
+http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
+check "a top-up lets them in again at once: the ledger's NOTIFY refreshed the backend's cached balance" 201 "$(status)"
+sql "DELETE FROM platform_settings WHERE key IN ('billingShadowMode', 'negativeBuffer', 'gracePeriodHours')"
 
 echo "e2e: $passed checks passed"

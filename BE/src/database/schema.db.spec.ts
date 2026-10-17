@@ -41,6 +41,7 @@ const AUDIT_LOG = migrationNames.find((name) => name.startsWith('AuditLog')) as 
 const USAGE_RECORDS = migrationNames.find((name) => name.startsWith('UsageRecords')) as string;
 const PRICE_BOOKS = migrationNames.find((name) => name.startsWith('PriceBooks')) as string;
 const LEDGER = migrationNames.find((name) => name.startsWith('Ledger')) as string;
+const RATING = migrationNames.find((name) => name.startsWith('Rating')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -218,8 +219,8 @@ run('database schema (L2, real PostgreSQL)', () => {
   it("the capacity-samples migration replaces P-20's partition function, and reverts with samples present (P-21)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      // P-30's price book guard and P-31's ledger check too, which reverting their migrations removes.
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_refuse_change']);
+      // P-30's price book guard, P-31's ledger check and P-33's NOTIFY too, which reverting their migrations removes.
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_notify_ledger', 'ff_refuse_change']);
       expect(await partitionsOf(dataSource, 'capacity_samples')).toEqual([
         { relname: monthPartition('capacity_samples', 0) },
         { relname: monthPartition('capacity_samples', 1) },
@@ -238,7 +239,27 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_notify_ledger', 'ff_refuse_change']);
+    });
+  });
+
+  it("the credit-controls migration reverts with e-mails sent and an owner's shares, and the ledger stops notifying (P-33)", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id, low_balance_percents) VALUES ($1, 'A', 'active', 'beta', '{80,20}')`, [ACCOUNT]);
+      const posted = await new LedgerService(dataSource).grantCredit({ accountId: ACCOUNT, currency: 'TND', amountMinor: 5000n, kind: LedgerTransactionKind.PROMO, idempotencyKey: 'promo:1' });
+      await dataSource.query(`INSERT INTO low_balance_notices (account_id, credit_transaction_id, percent, balance_minor) VALUES ($1, $2, 80, 4000)`, [ACCOUNT, posted.transaction.id]);
+
+      await migrateDownTo(dataSource, RATING);
+
+      const left = await dataSource.query(
+        `SELECT to_regclass('low_balance_notices') AS t, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'accounts' AND column_name = 'low_balance_percents') AS c`,
+      );
+      expect(left).toEqual([{ t: null, c: 0 }]);
       expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_refuse_change']);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });
 
@@ -330,6 +351,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'ledger_accounts',
         'ledger_entries',
         'ledger_transactions',
+        'low_balance_notices',
         'memberships',
         'migrations',
         'plans',

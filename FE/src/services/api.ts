@@ -209,7 +209,18 @@ export const usageApi = {
  * Money is a string with every decimal of its currency, never a JSON number.
  * contract.test.ts checks these names against the API's.
  */
-export const BALANCE_FIELDS = ['currency', 'balance', 'shadowMode', 'month', 'charged', 'ratedUntil'] as const;
+export const BALANCE_FIELDS = ['currency', 'balance', 'shadowMode', 'month', 'charged', 'ratedUntil', 'credit'] as const;
+/** D9's balance check (P-33): whether invokes go on. contract.test.ts checks these names against the API's. */
+export const CREDIT_STATE_FIELDS = ['state', 'buffer', 'belowBufferSince', 'invokesStopAt'] as const;
+export interface CreditState {
+  /** ok: above the buffer, or the billing trial; grace: below it, invokes still go; stopped: invokes answer 402. */
+  state: 'ok' | 'grace' | 'stopped';
+  /** How far below zero the balance may go, with the currency's decimals: "1.000". */
+  buffer: string;
+  belowBufferSince: string | null;
+  /** When invokes stop, or stopped. */
+  invokesStopAt: string | null;
+}
 export interface Balance {
   currency: string;
   /** The credit left; below zero, usage the credit didn't cover. */
@@ -222,10 +233,34 @@ export interface Balance {
   charged: string;
   /** The end of the last hour rated; usage after it isn't charged yet. */
   ratedUntil: string | null;
+  credit: CreditState;
+}
+
+/** What moved the balance (P-32): a usage debit's hour, a credit. */
+export interface BillingTransaction {
+  id: string;
+  kind: string;
+  occurredAt: string;
+  createdAt: string;
+  /** What it moved the balance by: a debit is below zero. */
+  amount: string;
+  currency: string;
+}
+
+/** When the owners get a low-balance e-mail (P-33): the account's shares of the last credit, or FF's. */
+export interface Alerts {
+  lowBalancePercents: number[] | null;
+  defaultPercents: number[];
 }
 
 export const billingApi = {
   getBalance: () => api.get<Balance>('/billing/balance'),
+  /** Newest first; `before` is the previous page's `next`. */
+  getTransactions: (before?: string, limit = 20) =>
+    api.get<{ transactions: BillingTransaction[]; next: string | null }>('/billing/transactions', { params: { limit, before } }),
+  getAlerts: () => api.get<Alerts>('/billing/alerts'),
+  /** An owner's shares, or null for FF's. */
+  setAlerts: (lowBalancePercents: number[] | null) => api.put<Alerts>('/billing/alerts', { lowBalancePercents }),
 };
 
 // Metrics API endpoints

@@ -41,6 +41,9 @@ const NavBar: React.FC = () => {
             <NavLink to="/usage" className={linkClass}>
               Usage
             </NavLink>
+            <NavLink to="/billing" className={linkClass}>
+              Billing
+            </NavLink>
             <NavLink to="/account" end className={linkClass}>
               Account
             </NavLink>

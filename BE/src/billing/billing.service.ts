@@ -1,12 +1,20 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { isDeepStrictEqual } from 'node:util';
 import { DataSource } from 'typeorm';
+import { z } from 'zod';
+import { Account } from '../accounts/entities/account.entity';
+import { lowBalancePercentsSchema, settingProblems } from '../admin/platform-settings';
 import { PlatformSettingsService } from '../admin/platform-settings.service';
-import { BalanceView, BillingTransactionsPage, TRANSACTIONS_CURSOR } from './billing.dto';
+import { AuditService } from '../audit/audit.service';
+import { AlertsView, BalanceView, BillingTransactionsPage, TRANSACTIONS_CURSOR } from './billing.dto';
+import { billingCurrency } from './billing-currency';
+import { CreditService } from './credit.service';
 import { LedgerTransactionKind } from './ledger/ledger-transaction.entity';
-import { LedgerService } from './ledger/ledger.service';
 import { formatMinor } from './money';
 import { monthBounds } from './pricing.service';
 import { HOUR_MS } from './rating-hours';
+
+const alertsSchema = z.strictObject({ lowBalancePercents: lowBalancePercentsSchema.nullable() });
 
 interface TransactionRow {
   id: string;
@@ -28,18 +36,14 @@ interface TransactionRow {
 export class BillingService {
   constructor(
     private readonly dataSource: DataSource,
-    private readonly ledger: LedgerService,
+    private readonly credit: CreditService,
     private readonly settings: PlatformSettingsService,
+    private readonly audit: AuditService,
   ) {}
 
-  /** The balance, in the currency of the prices: the book valid now, or the first to come. */
+  /** The balance, in the currency of the prices (the book valid now, or the first to come), and whether invokes go on (P-33). */
   async balance(accountId: string, now = new Date()): Promise<BalanceView> {
-    const [prices] = await this.dataSource.query<Array<{ currency: string; exponent: number }>>(
-      `SELECT b."currency", c."exponent" FROM "price_books" b JOIN "currencies" c ON c."code" = b."currency"
-        ORDER BY b."valid_from" <= $1 DESC, CASE WHEN b."valid_from" <= $1 THEN b."valid_from" END DESC, b."valid_from" LIMIT 1`,
-      [now],
-    );
-    if (!prices) throw new Error('No price book: the PriceBooks migration loads the first');
+    const prices = await billingCurrency(this.dataSource.manager, now);
     const month = now.toISOString().slice(0, 7);
     const { from, to } = monthBounds(month);
     const [{ charged, latest }] = await this.dataSource.query<Array<{ charged: string; latest: Date | null }>>(
@@ -48,14 +52,46 @@ export class BillingService {
               (SELECT max("hour") FROM "rating_runs") AS "latest"`,
       [accountId, prices.currency, from, to],
     );
+    const { standing, policy, decision } = await this.credit.view(accountId, now);
     return {
       currency: prices.currency,
-      balance: formatMinor(await this.ledger.balance(accountId, prices.currency), prices.exponent),
-      shadowMode: (await this.settings.get()).billingShadowMode,
+      balance: formatMinor(standing.balanceMinor, prices.exponent),
+      shadowMode: policy.shadow,
       month,
       charged: formatMinor(BigInt(charged), prices.exponent),
       ratedUntil: latest ? new Date(latest.getTime() + HOUR_MS) : null,
+      credit: {
+        state: decision.state,
+        buffer: formatMinor(policy.bufferMinor, prices.exponent),
+        belowBufferSince: policy.shadow ? null : standing.belowBufferSince,
+        invokesStopAt: decision.invokesStopAt,
+      },
     };
+  }
+
+  /** When the owners get a low-balance e-mail: the account's shares, or FF's. */
+  async alerts(accountId: string): Promise<AlertsView> {
+    const account = await this.dataSource.getRepository(Account).findOneBy({ id: accountId });
+    if (!account) throw new NotFoundException(`Account ${accountId} not found`);
+    return { lowBalancePercents: account.lowBalancePercents, defaultPercents: (await this.settings.get()).lowBalancePercents };
+  }
+
+  /** An owner's shares for the low-balance e-mails, or null for FF's again: in the account's audit log, from → to. */
+  async setAlerts(accountId: string, body: unknown): Promise<AlertsView> {
+    const parsed = alertsSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(settingProblems(parsed.error));
+    const to = parsed.data.lowBalancePercents;
+    await this.dataSource.transaction(async (manager) => {
+      const account = await manager.findOne(Account, { where: { id: accountId }, lock: { mode: 'pessimistic_write' } });
+      if (!account) throw new NotFoundException(`Account ${accountId} not found`);
+      if (isDeepStrictEqual(account.lowBalancePercents, to)) return;
+      await manager.update(Account, { id: accountId }, { lowBalancePercents: to });
+      await this.audit.record(
+        { accountId, action: 'billing.alerts', resource: `account:${accountId}`, details: { changes: { lowBalancePercents: { from: account.lowBalancePercents, to } } } },
+        manager,
+      );
+    });
+    return this.alerts(accountId);
   }
 
   /** What moved the account's balance, newest first, a page at a time: each transaction with what it moved the wallet by. */

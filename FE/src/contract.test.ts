@@ -10,7 +10,7 @@ import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
-import { BALANCE_FIELDS, INVOCATION_STATUSES, SCOPES, USAGE_AMOUNTS, USAGE_ESTIMATE_FIELDS } from './services/api';
+import { BALANCE_FIELDS, CREDIT_STATE_FIELDS, INVOCATION_STATUSES, SCOPES, USAGE_AMOUNTS, USAGE_ESTIMATE_FIELDS } from './services/api';
 
 // What the console shares with the API and the development realm, read from
 // their files: a console on another port than the realm and the API allow
@@ -113,6 +113,13 @@ describe("the account's balance (P-32)", () => {
     const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
 
     expect(backendFields).toEqual([...BALANCE_FIELDS]);
+  });
+
+  it("has the API's credit state (P-33), so the banner and the Billing page read each field there is", () => {
+    const body = billingDtoSource.slice(billingDtoSource.indexOf('export class CreditStateView {'));
+    const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
+
+    expect(backendFields).toEqual([...CREDIT_STATE_FIELDS]);
   });
 });
 

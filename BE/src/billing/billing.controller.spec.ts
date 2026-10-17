@@ -1,8 +1,9 @@
 /**
- * L1: GET /billing/balance and GET /billing/transactions (client-readiness
- * plan, P-32) through HTTP, with the validation main.ts sets up: who may call
- * them, the account they read, and the page they take. Their SQL runs
- * against PostgreSQL in hourly-rating.db.spec.ts.
+ * L1: GET /billing/balance, GET /billing/transactions (client-readiness
+ * plan, P-32) and GET, PUT /billing/alerts (P-33) through HTTP, with the
+ * validation main.ts sets up: who may call them, the account they read, and
+ * what they take. Their SQL runs against PostgreSQL in hourly-rating.db.spec.ts
+ * and credit.db.spec.ts.
  */
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -14,7 +15,16 @@ import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
 
 const ACCOUNT = '000000000001';
-const BALANCE = { currency: 'TND', balance: '-0.250', shadowMode: false, month: '2026-10', charged: '12.750', ratedUntil: new Date('2026-10-17T10:00:00Z') };
+const BALANCE = {
+  currency: 'TND',
+  balance: '-0.250',
+  shadowMode: false,
+  month: '2026-10',
+  charged: '12.750',
+  ratedUntil: new Date('2026-10-17T10:00:00Z'),
+  credit: { state: 'ok', buffer: '1.000', belowBufferSince: null, invokesStopAt: null },
+};
+const ALERTS = { lowBalancePercents: [80, 20], defaultPercents: [50, 20, 0] };
 const PAGE = {
   transactions: [
     { id: 'tx-1', kind: 'usage', occurredAt: new Date('2026-10-17T09:00:00Z'), createdAt: new Date('2026-10-17T10:33:05Z'), amount: '-0.750', currency: 'TND' },
@@ -27,11 +37,13 @@ describe('GET /billing/balance and /billing/transactions (L1, P-32)', () => {
   let baseUrl: string;
   const balance = jest.fn(async () => BALANCE);
   const transactions = jest.fn(async () => PAGE);
+  const alerts = jest.fn(async () => ALERTS);
+  const setAlerts = jest.fn(async (_accountId: string, _body: unknown) => ALERTS);
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [BillingController],
-      providers: [{ provide: BillingService, useValue: { balance, transactions } }],
+      providers: [{ provide: BillingService, useValue: { balance, transactions, alerts, setAlerts } }],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
@@ -53,11 +65,45 @@ describe('GET /billing/balance and /billing/transactions (L1, P-32)', () => {
     }
   });
 
+  it('lets every member read the low-balance e-mails, and a usage:read key; only an owner, with a user\'s token, set them (P-33)', () => {
+    const reflector = new Reflector();
+    const read = BillingController.prototype.alerts;
+    const write = BillingController.prototype.setAlerts;
+
+    expect([reflector.get(ROLES, read), reflector.get(SCOPE, read)]).toEqual([undefined, 'usage:read']);
+    expect([reflector.get(ROLES, write), reflector.get(SCOPE, write)]).toEqual([['owner'], undefined]); // no scope: no API key
+  });
+
+  it("answers the account's shares and FF's, and passes an owner's to the service", async () => {
+    expect(await (await fetch(`${baseUrl}/billing/alerts`)).json()).toEqual(ALERTS);
+    const res = await fetch(`${baseUrl}/billing/alerts`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ lowBalancePercents: [80, 20] }) });
+    await fetch(`${baseUrl}/billing/alerts`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ lowBalancePercents: null }) });
+
+    expect(res.status).toBe(200);
+    expect(alerts).toHaveBeenCalledWith(ACCOUNT);
+    expect(setAlerts.mock.calls.map(([accountId, body]) => [accountId, { ...(body as object) }])).toEqual([
+      [ACCOUNT, { lowBalancePercents: [80, 20] }],
+      [ACCOUNT, { lowBalancePercents: null }],
+    ]);
+  });
+
+  it('refuses a body without shares, or with another field', async () => {
+    const put = async (body: unknown) => {
+      const res = await fetch(`${baseUrl}/billing/alerts`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      return [res.status, (await res.json()).message];
+    };
+
+    expect(await put({})).toEqual([400, ['lowBalancePercents must be a list of shares in percent, or null']]);
+    expect(await put({ lowBalancePercents: 50 })).toEqual([400, ['lowBalancePercents must be a list of shares in percent, or null']]);
+    expect(await put({ lowBalancePercents: [50], accountId: '000000000002' })).toEqual([400, ['property accountId should not exist']]);
+    expect(setAlerts).not.toHaveBeenCalled();
+  });
+
   it("answers the caller's account's balance, money as strings", async () => {
     const res = await fetch(`${baseUrl}/billing/balance`);
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ...BALANCE, ratedUntil: '2026-10-17T10:00:00.000Z' });
+    expect(await res.json()).toEqual(JSON.parse(JSON.stringify(BALANCE)));
     expect(balance).toHaveBeenCalledWith(ACCOUNT);
   });
 

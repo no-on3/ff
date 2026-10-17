@@ -17,6 +17,8 @@ import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
 import { UsageService } from '../usage/usage.service';
+import { CreditService } from '../billing/credit.service';
+import { InsufficientCreditException } from '../billing/credit-policy';
 import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
@@ -48,6 +50,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const TENANT = { quota: BETA_LIMITS.quota };
   const audit = { record: jest.fn() };
   const usage = { record: jest.fn() };
+  /** D9's balance check (P-33): every account may invoke unless a test says otherwise. */
+  const credit = { admit: jest.fn(async (_accountId: string) => undefined) };
   /** The transaction that ends an invocation: it locks the row, saves the final state, then writes the usage record (D6). */
   const ending = { findOne: jest.fn(), save: jest.fn() };
 
@@ -117,6 +121,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { provide: PlansService, useValue: plans },
         { provide: AuditService, useValue: audit },
         { provide: UsageService, useValue: usage },
+        { provide: CreditService, useValue: credit },
       ],
     }).compile();
     service = moduleRef.get(FunctionsService);
@@ -356,6 +361,22 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   });
 
   describe('invoke', () => {
+    it("refuses with 402 when the account's credit has run out (P-33), before anything is recorded or run", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const refusal = new InsufficientCreditException(
+        { currency: 'TND', exponent: 3, balanceMinor: -2345n, belowBufferSince: new Date('2026-10-17T10:33:00Z') },
+        { bufferMinor: 1000n, graceMs: 24 * 3_600_000, shadow: false },
+        { state: 'stopped', invokesStopAt: new Date('2026-10-18T10:33:00Z') },
+      );
+      credit.admit.mockRejectedValueOnce(refusal);
+
+      await expect(service.invoke('user-1', 'fn-1', {})).rejects.toBe(refusal);
+
+      expect(credit.admit).toHaveBeenCalledWith('user-1');
+      expect([invocationsRepo.save.mock.calls.length, orchestrator.invoke.mock.calls.length, usage.record.mock.calls.length]).toEqual([0, 0, 0]);
+      expect(refusal.getStatus()).toBe(HttpStatus.PAYMENT_REQUIRED);
+    });
+
     it('stores output, runtime-reported duration and memory on a COMPLETED invocation', async () => {
       const fn = activeFunction();
       functionsRepo.findOne.mockResolvedValue(fn);

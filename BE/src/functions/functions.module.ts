@@ -5,6 +5,7 @@ import { MinioClientModule } from '../minio-client/minio-client.module';
 import { OrchestratorModule } from '../orchestrator/orchestrator.module';
 import { PlansModule } from '../plans/plans.module';
 import { AuditModule } from '../audit/audit.module';
+import { BillingModule } from '../billing/billing.module';
 import { UsageModule } from '../usage/usage.module';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
@@ -20,6 +21,7 @@ import { FunctionsService } from './functions.service';
     PlansModule,
     AuditModule,
     UsageModule,
+    BillingModule,
   ],
   controllers: [FunctionsController],
   providers: [FunctionsService],

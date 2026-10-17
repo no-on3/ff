@@ -1,30 +1,14 @@
-import React, { useEffect, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import React from 'react';
 import { balanceLabel, trialNote } from '../lib/billing';
-import { Balance, billingApi } from '../services/api';
-import { useSession } from '../session/session';
+import { useBalance } from '../session/balance';
 
 /**
- * The account's balance, on every page (P-32): read again at each page and
- * account change, as usage is charged every hour. During the billing trial
- * (D9) a badge says so; its title gives what was rated this month.
+ * The account's balance, on every page (P-32), as the balance context reads
+ * it at each page. During the billing trial (D9) a badge says so; its title
+ * gives what was rated this month.
  */
 const BalanceBadge: React.FC = () => {
-  const { account } = useSession();
-  const { pathname } = useLocation();
-  const [balance, setBalance] = useState<Balance | null>(null);
-
-  useEffect(() => {
-    let current = true;
-    billingApi
-      .getBalance()
-      .then((res) => current && setBalance(res.data))
-      .catch(() => current && setBalance(null)); // the header stays quiet; the page says what failed
-    return () => {
-      current = false;
-    };
-  }, [account?.id, pathname]);
-
+  const { balance } = useBalance();
   if (!balance) return null;
   const note = trialNote(balance);
   const negative = balance.balance.startsWith('-');

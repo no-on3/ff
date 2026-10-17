@@ -15,12 +15,16 @@ import { randomUUID } from 'node:crypto';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { DEFAULT_SETTINGS } from '../admin/platform-settings';
 import { PlatformSettingsService } from '../admin/platform-settings.service';
+import { AuditEntry } from '../audit/audit-entry.entity';
+import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { createScratchDatabase } from '../database/scratch-database';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { BillingService } from './billing.service';
+import { CreditService } from './credit.service';
 import { Currency } from './currency.entity';
 import { HourlyRatingService } from './hourly-rating.service';
+import { LedgerEvents } from './ledger/ledger-events';
 import { LedgerService } from './ledger/ledger.service';
 import { PriceBook } from './price-book.entity';
 import { PriceDocument } from './price-book';
@@ -58,7 +62,7 @@ async function ratingWorld() {
     ledger,
     rating: newRating(),
     newRating,
-    billing: new BillingService(ds, ledger, settings),
+    billing: new BillingService(ds, new CreditService(ds, settings, new LedgerEvents(ds)), settings, new AuditService(ds.getRepository(AuditEntry))),
     query,
     async account(): Promise<string> {
       const id = String(600000000000 + ++n);
