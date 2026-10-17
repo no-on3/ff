@@ -4,7 +4,8 @@
 #   + the k3d dev cluster + the backend (built, started on a free port).
 # The backend first refuses the new database, then the migrations run from the
 # build, as a deploy step would. Scenario: create → invoke → history → update →
-# invoke → delete, with checks on the Kubernetes side, then the same lifecycle
+# invoke → delete, with checks on the Kubernetes side and in object storage (the
+# code archive, read through SeaweedFS's filer), then the same lifecycle
 # for a Python function. Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -67,6 +68,8 @@ http() {
   cat "$work/body"
 }
 status() { cat "$work/status"; }
+# archived <path>: an object of the "functions" bucket, read through SeaweedFS's filer inside the s3 container.
+archived() { "${compose[@]}" exec -T s3 wget -qO- "http://127.0.0.1:8888/buckets/functions/$1" 2>/dev/null || true; }
 
 echo "== resources"
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3500}" "$FF_REPO_ROOT/hack/check-resources.sh"
@@ -132,6 +135,7 @@ created="$(http POST /functions "$(jq -n --arg code "$v1" '{name: "e2e-hello", r
 check "create returns 201" 201 "$(status)"
 check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
 id="$(jq -r .id <<<"$created")"
+check "its code is archived in object storage" "$v1" "$(archived "$id/code.ts")"
 check "its Deployment runs in the tenant namespace" "fn-$id" \
   "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.metadata.name}' 2>/dev/null)"
 if [ -n "${K8S_RUNTIME_CLASS:-}" ]; then
@@ -161,6 +165,7 @@ http PUT "/functions/$id" "$(jq -n --arg code "$v2" '{code: $code}')" >/dev/null
 check "update returns 200" 200 "$(status)"
 check "the new code is live after the update" 2 \
   "$(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.version)"
+check "the archive holds the new code" "$v2" "$(archived "$id/code.ts")"
 
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
@@ -173,6 +178,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 check "its Deployment is removed from the cluster" true "$gone"
+check "its archive is removed from object storage" "" "$(archived "$id/code.ts")"
 http GET "/functions/$id" >/dev/null
 check "the function record is gone" 404 "$(status)"
 

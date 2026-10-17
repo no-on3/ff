@@ -85,7 +85,7 @@ To start the dashboard: `cd FE && npm install && npm run dev`. It runs on http:/
 | L2 images | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities |
 | L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor), and the function lifecycle (repair, rollback, updates at zero, a runtime that never answers) |
 | RBAC | `hack/k8s/test-rbac.sh` | What the backend's ServiceAccount may and may not do |
-| L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes |
+| L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes, and the code archive in object storage |
 
 ## Documentation
 
