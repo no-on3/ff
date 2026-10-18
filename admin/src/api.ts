@@ -10,6 +10,7 @@ import { REASON_HEADER } from './lib/reason';
 import type { Plan, PlanLimits } from './lib/plans';
 import type { PriceBook, PriceBookPreview, PriceDocument } from './lib/prices';
 import type { PlatformSettings } from './lib/settings';
+import type { CallData, FunctionPage, LogLine, SearchResults } from './lib/support';
 
 const api = axios.create({
   baseURL: 'apiUrl' in config ? config.apiUrl : DEFAULT_API_URL,
@@ -92,6 +93,21 @@ export const accountsApi = {
   egress: (id: string, internetEgress: boolean, reason: string) => api.put<AccountView>(`${accountPath(id)}/egress`, { internetEgress, reason }),
   /** Credit FF gives (P-74): the grant, and the account page after it. */
   grant: (id: string, request: GrantRequest) => api.post<{ grant: Grant; account: AccountView }>(`${accountPath(id)}/credits`, request),
+};
+
+const functionPath = (id: string) => `/admin/functions/${encodeURIComponent(id)}`;
+
+/**
+ * Support: the search and a function's page. The code, a call's data and the
+ * logs come only for a reason, recorded in the account's audit log.
+ */
+export const supportApi = {
+  search: (q: string) => api.get<SearchResults>('/admin/search', { params: { q } }),
+  functionPage: (id: string) => api.get<FunctionPage>(functionPath(id)),
+  code: (id: string, reason: string) => api.post<{ runtime: string; code: string }>(`${functionPath(id)}/code`, { reason }),
+  call: (id: string, callId: string, reason: string) => api.post<CallData>(`${functionPath(id)}/invocations/${encodeURIComponent(callId)}`, { reason }),
+  logs: (id: string, reason: string, request: { sinceSeconds?: number; requestId?: string; cursor?: string }) =>
+    api.post<{ lines: LogLine[]; next: string | null }>(`${functionPath(id)}/logs`, { reason, ...request }),
 };
 
 export const plansApi = {

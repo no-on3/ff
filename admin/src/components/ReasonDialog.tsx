@@ -14,7 +14,9 @@ const ReasonDialog: React.FC<{
   confirmLabel: string;
   onConfirm: (reason: string) => Promise<void>;
   onCancel: () => void;
-}> = ({ title, children, confirmLabel, onConfirm, onCancel }) => {
+  /** The button's words while it works: a change saves, a look opens. */
+  busyLabel?: string;
+}> = ({ title, children, confirmLabel, onConfirm, onCancel, busyLabel = 'Saving…' }) => {
   const [reason, setReason] = useState('');
   const [touched, setTouched] = useState(false);
   const [sending, setSending] = useState(false);
@@ -69,7 +71,7 @@ const ReasonDialog: React.FC<{
             Cancel
           </button>
           <button type="submit" className="btn btn-primary" disabled={sending}>
-            {sending ? 'Saving…' : confirmLabel}
+            {sending ? busyLabel : confirmLabel}
           </button>
         </div>
       </form>

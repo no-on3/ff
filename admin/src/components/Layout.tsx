@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link, NavLink, useLocation } from 'react-router-dom';
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 
 const linkClass = ({ isActive }: { isActive: boolean }) =>
   `py-1 border-b-2 ${isActive ? 'border-white text-white' : 'border-transparent text-slate-300 hover:text-white'}`;
@@ -8,6 +8,7 @@ const linkClass = ({ isActive }: { isActive: boolean }) =>
 const Layout: React.FC<{ email: string | undefined; onLogOut: () => void; children: React.ReactNode }> = ({ email, onLogOut, children }) => {
   // The approvals queue is the accounts list with ?status=pending: one path, two links.
   const { pathname, search } = useLocation();
+  const navigate = useNavigate();
   const approvals = pathname === '/accounts' && new URLSearchParams(search).get('status') === 'pending';
   return (
     <>
@@ -40,7 +41,18 @@ const Layout: React.FC<{ email: string | undefined; onLogOut: () => void; childr
               Settings
             </NavLink>
           </div>
-          <div className="ml-auto flex flex-wrap items-center gap-3 text-sm">
+          <form
+            role="search"
+            className="ml-auto"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const q = String(new FormData(event.currentTarget).get('q') ?? '').trim();
+              if (q) navigate(`/search?q=${encodeURIComponent(q)}`);
+            }}
+          >
+            <input name="q" aria-label="Search accounts, functions and calls" placeholder="ID, name, e-mail or request ID" maxLength={200} className="input w-64 text-sm text-gray-900" />
+          </form>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
             <span className="text-slate-300">{email}</span>
             <button type="button" className="btn btn-secondary" onClick={onLogOut}>
               Log out

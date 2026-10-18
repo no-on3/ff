@@ -28,6 +28,9 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'price_book.create', label: 'Price book created' },
   { value: 'price_book.delete', label: 'Price book removed' },
   { value: 'settings.update', label: 'Settings changed' },
+  { value: 'support.view_code', label: 'Code viewed' },
+  { value: 'support.view_invocation', label: "A call's data viewed" },
+  { value: 'support.view_logs', label: 'Logs viewed' },
 ];
 
 /** What FF does on its own, as an account's audit log names it, with what the dashboard calls each. */

@@ -16,6 +16,7 @@ import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw
 import invoiceEntitySource from '../../BE/src/billing/invoices/invoice.entity.ts?raw';
 import adminAccountsDtoSource from '../../BE/src/admin/admin-accounts.dto.ts?raw';
 import adminCreditsDtoSource from '../../BE/src/admin/admin-credits.dto.ts?raw';
+import adminSupportDtoSource from '../../BE/src/admin/admin-support.dto.ts?raw';
 import creditGrantsSource from '../../BE/src/admin/credit-grants.ts?raw';
 import ledgerTransactionSource from '../../BE/src/billing/ledger/ledger-transaction.entity.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
@@ -23,6 +24,7 @@ import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
 import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
 import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
+import { CALL_FIELDS, CALL_HIT_FIELDS, FUNCTION_HIT_FIELDS } from './lib/support';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
 import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
@@ -244,5 +246,13 @@ describe('the platform settings and the reason', () => {
 
     expect(SETTINGS.map((s) => s.key)).toEqual(keys);
     expect(operatorSource).toContain(`export const REASON_LENGTH = { min: ${REASON_LENGTH.min}, max: ${REASON_LENGTH.max} } as const;`);
+  });
+});
+
+describe('support', () => {
+  it("has the API's fields: a function and a call found, and a call without its data", () => {
+    expect(fieldsOf(adminSupportDtoSource, 'export class AdminFunctionHitView {')).toEqual([...FUNCTION_HIT_FIELDS]);
+    expect(fieldsOf(adminSupportDtoSource, 'export class AdminCallHitView {')).toEqual([...CALL_HIT_FIELDS]);
+    expect(fieldsOf(adminSupportDtoSource, 'export class AdminCallView {')).toEqual([...CALL_FIELDS]);
   });
 });

@@ -4,6 +4,7 @@ import { AccountAuditEntry, accountsApi, invoicesApi, paymentsApi, plansApi } fr
 import DataTable, { Column } from '../components/DataTable';
 import GrantDialog from '../components/GrantDialog';
 import ReasonDialog from '../components/ReasonDialog';
+import { Fact, Table } from '../components/Facts';
 import { EmptyState, ErrorState, Loading } from '../components/States';
 import StatusBadge from '../components/StatusBadge';
 import { AccountView, PlanOption, STATUS_CHANGES, StatusChange, changedNotice, changesFor, dataDeletion, isAccountId, ownersSee } from '../lib/accounts';
@@ -27,39 +28,6 @@ const AUDIT_COLUMNS: Array<Column<AccountAuditEntry>> = [
   { label: 'Reason', cell: (entry) => (typeof entry.details?.reason === 'string' ? entry.details.reason : '') },
 ];
 
-const Fact: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <div className="grid gap-1 sm:grid-cols-[14rem_1fr] sm:gap-6">
-    <dt className="font-medium">{label}</dt>
-    <dd className="m-0 break-words">{children}</dd>
-  </div>
-);
-
-const Table: React.FC<{ head: string[]; rows: React.ReactNode[][] }> = ({ head, rows }) => (
-  <div className="card overflow-x-auto p-0">
-    <table className="w-full text-left text-sm">
-      <thead className="bg-gray-50 text-gray-600">
-        <tr>
-          {head.map((label) => (
-            <th key={label} className="px-4 py-2 font-medium">
-              {label}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((cells, index) => (
-          <tr key={index} className="border-t border-gray-200 align-top">
-            {cells.map((cell, column) => (
-              <td key={column} className="px-4 py-2">
-                {cell}
-              </td>
-            ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  </div>
-);
 
 /** The account's last payments (P-35), with a link to the Payments page, where transfers are recorded. */
 const AccountPayments: React.FC<{ accountId: string }> = ({ accountId }) => {
@@ -361,7 +329,7 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
         ) : (
           <Table
             head={['Name', 'Runtime', 'Memory', 'Status', 'Warm instances', 'Last call']}
-            rows={view.functions.map((f) => [f.name, f.runtime, `${f.memory} MB`, f.status, f.minInstances, f.lastInvokedAt ? whenUtc(f.lastInvokedAt) : 'never'])}
+            rows={view.functions.map((f) => [<Link to={`/functions/${f.id}`} className="text-blue-700 hover:underline">{f.name}</Link>, f.runtime, `${f.memory} MB`, f.status, f.minInstances, f.lastInvokedAt ? whenUtc(f.lastInvokedAt) : 'never'])}
           />
         )}
       </section>

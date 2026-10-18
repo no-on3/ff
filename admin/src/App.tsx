@@ -14,7 +14,9 @@ import AuditLog from './pages/AuditLog';
 import Invoices from './pages/Invoices';
 import Payments from './pages/Payments';
 import Plans from './pages/Plans';
+import FunctionPage from './pages/FunctionPage';
 import Prices from './pages/Prices';
+import Search from './pages/Search';
 import Settings from './pages/Settings';
 
 // One login per page load, set up before the first request.
@@ -85,6 +87,8 @@ function LoginGate() {
           <Route path="/prices" element={<Prices email={email} />} />
           <Route path="/plans" element={<Plans email={email} />} />
           <Route path="/settings" element={<Settings email={email} />} />
+          <Route path="/search" element={<Search email={email} />} />
+          <Route path="/functions/:id" element={<FunctionPage email={email} />} />
           <Route path="/audit-log" element={<AuditLog email={email} />} />
           <Route path="*" element={<Navigate to="/accounts?status=pending" replace />} />
         </Routes>

@@ -153,6 +153,10 @@ describe('labels and names', () => {
     expect([actionLabel('credit.promo'), actionLabel('credit.adjustment')]).toEqual(['Promotional credit granted', 'Credit corrected']);
   });
 
+  it("names an operator's looks at a customer's data", () => {
+    expect(['support.view_code', 'support.view_invocation', 'support.view_logs'].map(actionLabel)).toEqual(['Code viewed', "A call's data viewed", 'Logs viewed']);
+  });
+
   it("names what FF does on its own: a closed account's data deleted once its notice period has passed", () => {
     expect(actionLabel('account.data_delete')).toBe("Account's functions, history and logs deleted");
   });
