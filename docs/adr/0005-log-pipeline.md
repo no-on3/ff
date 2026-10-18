@@ -114,5 +114,8 @@ Each measurement is the last of several runs: the earlier ones found the five th
   - `q` is a quoted phrase;
   - every query has the namespace and the function in it;
   - lines are sorted by time, the microsecond being the finest the store has.
-- **P-45:** closing an account runs the deletion task for its namespace, after the notice period, and checks that it finished (`/delete/active_tasks`).
+- **P-45:** closing an account runs the deletion task for its namespace, after the notice period, and checks that it finished (`/delete/active_tasks`). As built (part 2, the cluster side):
+  - the backend POSTs the filter and the key as a form, for `run_task` and `active_tasks` alike: the key is in no URL, which the API server's proxy, used in development, would log. The store took the key that way, refused a missing or wrong one with 401, and a filter it can't parse with 400, naming no key;
+  - a task of the same filter still running from an earlier attempt is waited for rather than started again; then a query for one line of the namespace must find none;
+  - the key comes from a file, read at each deletion: the mounted Secret (P-60), or `hack/.kube/victoria-logs-delete-key` in development.
 - **The spike's harness** stays in `hack/spikes/p41-logging/`, to measure again before an upgrade of either component.

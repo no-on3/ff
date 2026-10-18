@@ -14,6 +14,8 @@ export interface KubernetesSettings {
   readyTimeoutSeconds: number;
   egressInternet: boolean;
   ingressAllowCidrs: string[];
+  /** The file holding the log store's delete key (P-45): the Secret victoria-logs-delete-key, mounted. */
+  logStoreDeleteKeyFile: string;
 }
 
 /**

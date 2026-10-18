@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { readFile } from 'node:fs/promises';
 import * as http from 'node:http';
 import {
   FunctionLoadError,
@@ -8,11 +9,12 @@ import {
   OrchestratorError,
   withInitMs,
 } from '../orchestrator.errors';
+import { describeError } from '../../common/describe-error';
 import { REQUEST_ID_HEADER } from '../../common/request-context';
 import { FunctionLogLine, FunctionLogsPage, FunctionWorkload, InvokeResult, LogsFilter, LogsQuery, Orchestrator, TenantLimits } from '../orchestrator.types';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
-import { LogStore, pageQuery, quoted, tailQuery, toLine, toPage } from './log-store';
+import { LogStore, namespaceFilter, pageQuery, quoted, tailQuery, toLine, toPage } from './log-store';
 import {
   K8sObject,
   RUNTIME_PORT,
@@ -42,6 +44,10 @@ interface Deployment extends K8sObject {
     conditions?: Array<{ type: string; status: string; message?: string }>;
   };
 }
+
+/** How long closing an account waits for its namespace to go, and for its log lines' deletion (P-45). */
+export const TENANT_REMOVAL_TIMEOUT_MS = 120_000;
+export const LOG_DELETION_TIMEOUT_MS = 120_000;
 
 interface Listed extends K8sObject {
   metadata: K8sObject['metadata'] & { creationTimestamp?: string };
@@ -161,6 +167,60 @@ export class KubernetesOrchestrator implements Orchestrator {
     await this.api.delete(paths.apps(ns, 'deployments', name));
     await this.api.delete(paths.core(ns, 'services', name));
     await this.api.deleteCollection(paths.core(ns, 'configmaps'), `${LABELS.functionId}=${fn.id}`);
+  }
+
+  /**
+   * Deletes the account's namespace, and with it everything left in it: its
+   * quota, limits and network policy, and any function object (P-45). Waits
+   * until the namespace is gone: one being deleted already is only waited for.
+   */
+  async removeTenant(accountId: string, timeoutMs = TENANT_REMOVAL_TIMEOUT_MS): Promise<void> {
+    const ns = accountNamespace(this.settings.namespacePrefix, accountId);
+    const current = await this.api.get<{ status?: { phase?: string } }>(paths.namespace(ns));
+    if (!current) return;
+    if (current.status?.phase !== 'Terminating') await this.api.delete(paths.namespace(ns));
+    const deadline = Date.now() + timeoutMs;
+    while (await this.api.get(paths.namespace(ns))) {
+      if (Date.now() >= deadline) throw new OrchestratorError(`Namespace ${ns} is still being deleted after ${Math.round(timeoutMs / 1000)} s`);
+      await sleep(this.pollIntervalMs);
+    }
+  }
+
+  /**
+   * Deletes every line of the account's namespace from the log store, with the
+   * store's delete key (P-45), then checks that none is left. A deletion of the
+   * same lines still running, from an earlier attempt, is waited for rather
+   * than started again; one still running after `timeoutMs` throws.
+   */
+  async deleteLogs(accountId: string, timeoutMs = LOG_DELETION_TIMEOUT_MS): Promise<void> {
+    const ns = accountNamespace(this.settings.namespacePrefix, accountId);
+    const filter = namespaceFilter(ns);
+    const key = await this.logStoreDeleteKey();
+    const running = (await this.logStore.activeDeletions(key)).find((task) => task.filter === filter);
+    const taskId = running?.task_id ?? (await this.logStore.startDeletion(filter, key));
+    const deadline = Date.now() + timeoutMs;
+    while ((await this.logStore.activeDeletions(key)).some((task) => task.task_id === taskId)) {
+      if (Date.now() >= deadline) {
+        throw new OrchestratorError(`Deleting the log lines of ${ns} is still running after ${Math.round(timeoutMs / 1000)} s (task ${taskId})`);
+      }
+      await sleep(this.pollIntervalMs);
+    }
+    if ((await this.logStore.query(`${filter} | limit 1 | fields _time`)).length > 0) {
+      throw new OrchestratorError(`Log lines of ${ns} are still in the log store after their deletion (task ${taskId})`);
+    }
+  }
+
+  /** The key, read each time from its file, so that a new one needs no restart. */
+  private async logStoreDeleteKey(): Promise<string> {
+    const file = this.settings.logStoreDeleteKeyFile;
+    let key: string;
+    try {
+      key = (await readFile(file, 'utf8')).trim();
+    } catch (error) {
+      throw new OrchestratorError(`The log store's delete key can't be read from ${file}: ${describeError(error)}`);
+    }
+    if (!key) throw new OrchestratorError(`The log store's delete key file ${file} is empty`);
+    return key;
   }
 
   async waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void> {

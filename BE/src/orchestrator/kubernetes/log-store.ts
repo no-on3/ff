@@ -16,6 +16,8 @@ import type { InvokeMode } from './kubernetes.settings';
 export const LOG_STORE = { namespace: 'ff-system', service: 'victoria-logs', port: 9428 } as const;
 const QUERY_PATH = '/select/logsql/query';
 const TAIL_PATH = '/select/logsql/tail';
+const DELETE_PATH = '/delete/run_task';
+const DELETIONS_PATH = '/delete/active_tasks';
 const QUERY_TIMEOUT_MS = 15_000;
 /** The most a direct answer may hold: a page is 1,001 lines of at most 16 KiB and their fields. */
 const MAX_ANSWER_BYTES = 32 * 1024 * 1024;
@@ -29,6 +31,12 @@ export interface StoredLine {
   pod?: string;
   stream?: string;
   request_id?: string;
+}
+
+/** A deletion task the store is still running (P-45), as /delete/active_tasks lists it. */
+export interface DeletionTask {
+  task_id: string;
+  filter?: string;
 }
 
 /** Where a page ended: at this line's time, the `skip` lines at it being given already. */
@@ -68,6 +76,11 @@ function filters(namespace: string, functionId: string, filter: LogsFilter): str
 }
 
 const FIELDS = ' | fields _time, _msg, pod, stream, request_id';
+
+/** Every line of an account's namespace: what closing the account deletes (P-45). */
+export function namespaceFilter(namespace: string): string {
+  return `{namespace=${quoted(namespace)}}`;
+}
 
 /**
  * A page's query: the function's lines in the window, or in its part before
@@ -155,6 +168,47 @@ export class LogStore {
   }
 
   /**
+   * Starts deleting the lines `filter` (LogsQL) matches (P-45): the store's
+   * own task, which answers at once with its ID. The key goes in a form body,
+   * so that it is in no URL, which the API server's proxy and any request log
+   * would see; the store's refusals don't repeat it.
+   */
+  async startDeletion(filter: string, key: string): Promise<string> {
+    const answer = parsed(await this.post(DELETE_PATH, { filter, authKey: key })) as { task_id?: unknown } | null;
+    if (typeof answer?.task_id !== 'string' || !answer.task_id) throw new LogStoreUnavailableError("The log store's answer has no task ID");
+    return answer.task_id;
+  }
+
+  /** The deletion tasks the store is still running. */
+  async activeDeletions(key: string): Promise<DeletionTask[]> {
+    const tasks = parsed(await this.post(DELETIONS_PATH, { authKey: key }));
+    if (!Array.isArray(tasks) || !tasks.every((task) => typeof (task as DeletionTask | null)?.task_id === 'string')) {
+      throw new LogStoreUnavailableError("The log store's list of deletion tasks is not one");
+    }
+    return tasks as DeletionTask[];
+  }
+
+  /** A POST of a form to the store; its answer's text, or LogStoreUnavailableError. */
+  private async post(path: string, form: Record<string, string>): Promise<string> {
+    const body = new URLSearchParams(form).toString();
+    let answer: { status: number; body: string };
+    try {
+      answer =
+        this.mode === 'proxy'
+          ? await this.api.request('POST', paths.serviceProxy(LOG_STORE.namespace, LOG_STORE.service, String(LOG_STORE.port), path), {
+              body,
+              contentType: FORM,
+              timeoutMs: QUERY_TIMEOUT_MS,
+            })
+          : await postText(`${this.directUrl}${path}`, body, QUERY_TIMEOUT_MS);
+    } catch (error) {
+      throw new LogStoreUnavailableError(`The log store did not answer: ${describeError(error)}`);
+    }
+    if (answer.status !== 200) throw new LogStoreUnavailableError(`The log store answered ${answer.status}: ${answer.body.slice(0, 300)}`);
+    return answer.body;
+  }
+
+  /**
    * A live tail: the rows of `logsql` as the store gets them, for as long as
    * `signal` lets it run. The store holds each line back 5 s, by its own time,
    * for those that reach it late. The request goes out on the first read, and
@@ -210,6 +264,37 @@ async function firstBytes(body: Readable, max: number): Promise<string> {
   }
   body.destroy();
   return text.slice(0, max);
+}
+
+const FORM = 'application/x-www-form-urlencoded';
+
+/** JSON, or null when the text isn't: the callers say what they expected. */
+function parsed(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** A form POSTed straight to the store, inside the cluster; its answer as text. */
+function postText(url: string, body: string, timeoutMs: number): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { method: 'POST', headers: { 'content-type': FORM, 'content-length': Buffer.byteLength(body) } }, (res) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > MAX_ANSWER_BYTES) req.destroy(new Error(`answer larger than ${MAX_ANSWER_BYTES} bytes`));
+        else chunks.push(chunk);
+      });
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', reject);
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`no answer within ${timeoutMs} ms`)));
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
 function streamGet(url: string, signal: AbortSignal): Promise<{ status: number; body: Readable }> {

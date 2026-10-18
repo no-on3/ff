@@ -94,6 +94,16 @@ export interface Orchestrator {
   /** Delete every scheduler resource of the function. */
   remove(fn: FunctionWorkload): Promise<void>;
   /**
+   * Delete the account's namespace and everything in it, and wait until it is
+   * gone (P-45, closing an account). Nothing to do when it has none.
+   */
+  removeTenant(accountId: string): Promise<void>;
+  /**
+   * Delete every line of the account's functions from the log store, and check
+   * that none is left (P-45). Doing it again is harmless.
+   */
+  deleteLogs(accountId: string): Promise<void>;
+  /**
    * Resolve once the rollout is complete: every desired instance runs the
    * current version and can serve. Reject with diagnostics on timeout.
    */

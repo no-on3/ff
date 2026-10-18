@@ -9,7 +9,7 @@ import { Readable } from 'node:stream';
 import { InvalidLogCursorError, LogStoreUnavailableError } from '../orchestrator.errors';
 import type { LogsQuery } from '../orchestrator.types';
 import { KubeApi, KubeResponse, RequestOptions } from './kube-client';
-import { LogStore, StoredLine, decodeCursor, encodeCursor, nineDecimals, pageQuery, quoted, tailQuery, toPage } from './log-store';
+import { LogStore, StoredLine, decodeCursor, encodeCursor, namespaceFilter, nineDecimals, pageQuery, quoted, tailQuery, toPage } from './log-store';
 
 const query = (extra: Partial<LogsQuery> = {}): LogsQuery => ({
   start: new Date('2026-10-17T10:00:00Z'),
@@ -157,6 +157,13 @@ describe('toPage', () => {
   });
 });
 
+describe('namespaceFilter (P-45)', () => {
+  it("is every line of the namespace, its name a quoted value", () => {
+    expect(namespaceFilter('ff-t-abc')).toBe('{namespace="ff-t-abc"}');
+    expect(namespaceFilter('ff-t-"} OR {')).toBe('{namespace="ff-t-\\"} OR {"}');
+  });
+});
+
 describe('nineDecimals', () => {
   it.each([
     ['2026-10-17T10:00:00Z', '2026-10-17T10:00:00.000000000Z'],
@@ -210,6 +217,79 @@ describe('LogStore', () => {
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+
+  describe('deletion (P-45)', () => {
+    const KEY = 'k3y-0f-the-store';
+    const form = (options?: RequestOptions) => Object.fromEntries(new URLSearchParams(options?.body ?? ''));
+
+    it("starts a task through the API server's proxy: a POST of a form with the filter and the key, the key in no URL", async () => {
+      const api = new FakeApi(async () => ({ status: 200, headers: {}, body: '{"task_id":"1792323545896215532"}' }));
+
+      await expect(store(api).startDeletion(namespaceFilter('ff-t-abc'), KEY)).resolves.toBe('1792323545896215532');
+
+      const [{ method, path, options }] = api.requests;
+      expect([method, path]).toEqual(['POST', '/api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/delete/run_task']);
+      expect(options?.contentType).toBe('application/x-www-form-urlencoded');
+      expect(form(options)).toEqual({ filter: '{namespace="ff-t-abc"}', authKey: KEY });
+    });
+
+    it('lists the tasks still running the same way, the key in the form', async () => {
+      const tasks = [{ task_id: '17', filter: '{namespace="ff-t-abc"}', start_time: '2026-10-18T11:39:05Z' }];
+      const api = new FakeApi(async () => ({ status: 200, headers: {}, body: JSON.stringify(tasks) }));
+
+      await expect(store(api).activeDeletions(KEY)).resolves.toEqual(tasks);
+
+      const [{ method, path, options }] = api.requests;
+      expect([method, path]).toEqual(['POST', '/api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/delete/active_tasks']);
+      expect(form(options)).toEqual({ authKey: KEY });
+    });
+
+    it("fails with the store's refusal, which names no key: a wrong key's 401, a bad filter's 400; and for an answer that isn't one", async () => {
+      const answering = (status: number, body: string) => store(new FakeApi(async () => ({ status, headers: {}, body })));
+      const failure = (promise: Promise<unknown>) => promise.then(() => undefined, (error: Error) => error);
+
+      const refusals = await Promise.all([
+        failure(answering(401, "The provided authKey doesn't match -deleteAuthKey\n").startDeletion('{namespace="x"}', KEY)),
+        failure(answering(400, 'cannot parse filter [{namespace=]').startDeletion('{namespace=', KEY)),
+        failure(answering(200, '{"status":"ok"}').startDeletion('{namespace="x"}', KEY)),
+        failure(answering(200, '{"task_id":17}').activeDeletions(KEY)),
+        failure(answering(200, 'not json').activeDeletions(KEY)),
+        failure(store(new FakeApi(() => Promise.reject(new Error('connect ECONNREFUSED')))).activeDeletions(KEY)),
+      ]);
+
+      expect(refusals.map((error) => [error?.constructor, error?.message])).toEqual([
+        [LogStoreUnavailableError, "The log store answered 401: The provided authKey doesn't match -deleteAuthKey\n"],
+        [LogStoreUnavailableError, 'The log store answered 400: cannot parse filter [{namespace=]'],
+        [LogStoreUnavailableError, "The log store's answer has no task ID"],
+        [LogStoreUnavailableError, "The log store's list of deletion tasks is not one"],
+        [LogStoreUnavailableError, "The log store's list of deletion tasks is not one"],
+        [LogStoreUnavailableError, 'The log store did not answer: connect ECONNREFUSED'],
+      ]);
+    });
+
+    it('POSTs the form to the Service itself from inside the cluster', async () => {
+      const seen: Array<{ method?: string; url?: string; type?: string; body: string }> = [];
+      const server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+        req.on('end', () => {
+          seen.push({ method: req.method, url: req.url, type: req.headers['content-type'], body });
+          res.end('{"task_id":"9"}');
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      try {
+        const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        await expect(new LogStore('direct', {} as KubeApi, url).startDeletion('{namespace="ff-t-abc"}', KEY)).resolves.toBe('9');
+
+        expect(seen).toEqual([
+          { method: 'POST', url: '/delete/run_task', type: 'application/x-www-form-urlencoded', body: new URLSearchParams({ filter: '{namespace="ff-t-abc"}', authKey: KEY }).toString() },
+        ]);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
   });
 
   describe('tail', () => {

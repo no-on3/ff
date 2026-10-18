@@ -180,9 +180,12 @@ Fluent Bit reads every function container's log on the node, and VictoriaLogs ke
 ```bash
 hack/k8s/logging-up.sh                  # install it on a cluster made without it, about 30 s
 hack/k8s/test-logging-filter.sh         # L1: the collector's configuration and Lua filter, in its image; Docker only
-hack/k8s/test-it.sh log-pipeline        # L3: what functions print reaches the store, limited (about 2 min)
+hack/k8s/test-it.sh log-pipeline        # L3: what functions print reaches the store, limited, and an account's lines deleted (about 2 min)
+hack/k8s/log-store-key.sh               # copy the store's delete key to hack/.kube, for a development backend (logging-up.sh does)
 hack/k8s/logging-down.sh                # remove it, with every stored line and the delete key
 ```
+
+Closing an account deletes its log lines with the store's delete key (P-45). A development backend reads it from `hack/.kube/victoria-logs-delete-key` (`K8S_LOG_STORE_DELETE_KEY_FILE` in `BE/.env`); a cluster made before P-45 gets the file from `hack/k8s/log-store-key.sh`.
 
 Running `logging-up.sh` again changes nothing. kubectl still reports the StatefulSet `configured`, because the API server fills in defaults in its volume template; VictoriaLogs isn't restarted.
 

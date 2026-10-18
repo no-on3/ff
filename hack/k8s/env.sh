@@ -27,3 +27,5 @@ export KUBECONFIG="$FF_KUBE_DIR/$FF_CLUSTER_NAME.kubeconfig"
 export FF_SA_KUBECONFIG="$FF_KUBE_DIR/ff-controller.kubeconfig"
 export FF_SA_TOKEN_FILE="$FF_KUBE_DIR/ff-controller.token"
 export FF_CA_FILE="$FF_KUBE_DIR/ca.crt"
+# The log store's delete key, which the backend uses for a closed account's lines (P-45): hack/k8s/log-store-key.sh writes it.
+export FF_LOG_STORE_DELETE_KEY_FILE="$FF_KUBE_DIR/victoria-logs-delete-key"

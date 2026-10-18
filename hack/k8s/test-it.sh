@@ -17,6 +17,9 @@ fi
 # The log pipeline's suite runs where the pipeline is installed (hack/k8s/logging-up.sh).
 if kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1; then
   export K8S_IT_LOGGING=1
+  # Its last case deletes an account's lines with the store's key (P-45).
+  "$FF_REPO_ROOT/hack/k8s/log-store-key.sh" >/dev/null
+  export K8S_LOG_STORE_DELETE_KEY_FILE="$FF_LOG_STORE_DELETE_KEY_FILE"
   echo "log pipeline found: its suite runs"
 else
   echo "no log pipeline: its suite is skipped (hack/k8s/logging-up.sh installs it)"

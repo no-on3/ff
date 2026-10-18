@@ -252,6 +252,8 @@ const appShape = {
   K8S_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
   K8S_EGRESS_INTERNET: flag(true),
   K8S_INGRESS_ALLOW_CIDRS: list(cidr),
+  // P-45: where the backend finds the log store's delete key; P-60 mounts the Secret here.
+  K8S_LOG_STORE_DELETE_KEY_FILE: text('/etc/ff/victoria-logs-delete-key/key'),
   K8S_TENANT_QUOTA_PODS: optionalText(),
   K8S_TENANT_QUOTA_CPU: optionalText(),
   K8S_TENANT_QUOTA_MEMORY: optionalText(),
@@ -480,6 +482,7 @@ export default function configuration(env: Env = process.env) {
       readyTimeoutSeconds: parsed.K8S_READY_TIMEOUT_SECONDS,
       egressInternet: parsed.K8S_EGRESS_INTERNET,
       ingressAllowCidrs: parsed.K8S_INGRESS_ALLOW_CIDRS,
+      logStoreDeleteKeyFile: parsed.K8S_LOG_STORE_DELETE_KEY_FILE,
     },
   };
 }

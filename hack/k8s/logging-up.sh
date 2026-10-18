@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs FF's log pipeline (deploy/k8s/logging: Fluent Bit and VictoriaLogs, client-readiness plan P-42)
 # on the dev cluster, and waits until it runs. Safe to re-run. The Secret holding VictoriaLogs' delete key
-# is created once, with a random key, and never replaced; hack/k8s/logging-down.sh removes everything.
+# is created once, with a random key, and never replaced; hack/k8s/log-store-key.sh copies it to
+# hack/.kube for a development backend (P-45). hack/k8s/logging-down.sh removes everything.
 #   hack/k8s/logging-up.sh        (or: hack/k8s/cluster-up.sh --logging)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
@@ -18,6 +19,7 @@ fi
 kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/logging"
 kubectl -n ff-system rollout status statefulset/victoria-logs --timeout=180s
 kubectl -n ff-logging rollout status daemonset/fluent-bit --timeout=180s
+"$FF_REPO_ROOT/hack/k8s/log-store-key.sh"
 cat <<'DONE'
 log pipeline ready. To query it:
   kubectl -n ff-system port-forward svc/victoria-logs 9428:9428 &

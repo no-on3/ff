@@ -15,6 +15,7 @@ export const settings = (overrides: Partial<KubernetesSettings> = {}): Kubernete
   readyTimeoutSeconds: 5,
   egressInternet: true,
   ingressAllowCidrs: [],
+  logStoreDeleteKeyFile: '/nonexistent/victoria-logs-delete-key',
   ...overrides,
 });
 

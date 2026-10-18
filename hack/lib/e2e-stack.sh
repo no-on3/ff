@@ -28,7 +28,7 @@ e2e_base_env=(
   MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$FF_S3_PORT" MINIO_USE_SSL=false MINIO_BUCKET_NAME=functions
   MINIO_ACCESS_KEY=ffdevaccesskey MINIO_SECRET_KEY=ffdevsecretkey-local-only
   ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy
-  K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE"
+  K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" K8S_LOG_STORE_DELETE_KEY_FILE="$FF_LOG_STORE_DELETE_KEY_FILE"
   K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
 )
 
@@ -98,6 +98,8 @@ e2e_cluster() {
   "$FF_REPO_ROOT/hack/k8s/mint-token.sh" >/dev/null
   # The logs API and the load errors read the log store (P-43): a cluster made before it gets it now.
   kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/logging-up.sh" >/dev/null
+  # Closing an account deletes its log lines with the store's key (P-45).
+  "$FF_REPO_ROOT/hack/k8s/log-store-key.sh" >/dev/null
   docker image inspect ff-runtime-nodejs:24-v2 >/dev/null 2>&1 ||
     docker build -q -t ff-runtime-nodejs:24-v2 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
   docker image inspect ff-runtime-python:3.13-v2 >/dev/null 2>&1 ||

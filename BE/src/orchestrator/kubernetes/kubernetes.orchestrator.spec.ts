@@ -1,5 +1,8 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import {
   CodeTooLargeError,
@@ -514,6 +517,134 @@ describe('KubernetesOrchestrator', () => {
         expect(initMsOf(error)).toBeGreaterThanOrEqual(50);
         expect(api.requests).toEqual([]);
       });
+    });
+  });
+
+  describe('removeTenant: closing an account (P-45)', () => {
+    const nsPath = `/api/v1/namespaces/${ns}`;
+    /** The namespace answers GET `times` more times once deleted, then is gone. */
+    const goneAfter = (times: number) => {
+      const get = api.get.bind(api);
+      let left = times;
+      api.get = async <T>(path: string): Promise<T | null> => {
+        if (path === nsPath && api.deleted.includes(nsPath) && left-- <= 0) api.objects.delete(nsPath);
+        return get<T>(path);
+      };
+    };
+
+    it("deletes the account's namespace, and returns once it is gone", async () => {
+      api.objects.set(nsPath, { metadata: { name: ns }, status: { phase: 'Active' } });
+      goneAfter(2);
+
+      await orchestrator.removeTenant(fn.accountId);
+
+      expect(api.deleted).toEqual([nsPath]);
+      expect(api.objects.has(nsPath)).toBe(false);
+    });
+
+    it('asks nothing more of an account without a namespace', async () => {
+      await orchestrator.removeTenant(fn.accountId);
+
+      expect(api.deleted).toEqual([]);
+    });
+
+    it('only waits for a namespace being deleted already', async () => {
+      api.objects.set(nsPath, { metadata: { name: ns }, status: { phase: 'Terminating' } });
+      let gets = 0;
+      const get = api.get.bind(api);
+      api.get = async <T>(path: string): Promise<T | null> => {
+        if (path === nsPath && ++gets === 3) api.objects.delete(nsPath);
+        return get<T>(path);
+      };
+
+      await orchestrator.removeTenant(fn.accountId);
+
+      expect(api.deleted).toEqual([]);
+      expect(gets).toBe(3);
+    });
+
+    it('fails when the namespace is still there after the timeout: the next attempt waits again', async () => {
+      api.objects.set(nsPath, { metadata: { name: ns }, status: { phase: 'Active' } });
+
+      await expect(orchestrator.removeTenant(fn.accountId, 20)).rejects.toThrow(new OrchestratorError(`Namespace ${ns} is still being deleted after 0 s`));
+    });
+  });
+
+  describe("deleteLogs: closing an account's log lines (P-45)", () => {
+    const STORE = '/api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/delete/';
+    const FILTER = `{namespace="${ns}"}`;
+    const ok = (body: unknown): KubeResponse => ({ status: 200, headers: {}, body: JSON.stringify(body) });
+    const keyFile = (key: string) => {
+      const file = join(mkdtempSync(join(tmpdir(), 'ff-p45-')), 'key');
+      writeFileSync(file, key);
+      return file;
+    };
+    const asked = () => api.requests.map(({ method, path, options }) => [method, path.replace(STORE, ''), Object.fromEntries(new URLSearchParams(options?.body ?? ''))]);
+
+    beforeEach(() => {
+      orchestrator = new KubernetesOrchestrator(settings({ logStoreDeleteKeyFile: keyFile('the-key\n') }), api, 5);
+      api.storeRows = [];
+    });
+
+    it("deletes the namespace's lines with the key from its file, waits for the task, and checks that none is left", async () => {
+      api.responses = [ok([]), ok({ task_id: 't-1' }), ok([{ task_id: 't-1', filter: FILTER }]), ok([{ task_id: 'other', filter: '{namespace="ff-t-x"}' }])];
+
+      await orchestrator.deleteLogs(fn.accountId);
+
+      expect(asked()).toEqual([
+        ['POST', 'active_tasks', { authKey: 'the-key' }],
+        ['POST', 'run_task', { filter: FILTER, authKey: 'the-key' }],
+        ['POST', 'active_tasks', { authKey: 'the-key' }],
+        ['POST', 'active_tasks', { authKey: 'the-key' }],
+      ]);
+      expect(api.storeQueries).toEqual([`${FILTER} | limit 1 | fields _time`]);
+    });
+
+    it('waits for a deletion of the same lines still running from an earlier attempt, rather than starting another', async () => {
+      api.responses = [ok([{ task_id: 'earlier', filter: FILTER }]), ok([{ task_id: 'earlier', filter: FILTER }]), ok([])];
+
+      await orchestrator.deleteLogs(fn.accountId);
+
+      expect(asked().map(([, path]) => path)).toEqual(['active_tasks', 'active_tasks', 'active_tasks']);
+    });
+
+    it('reads the key again each time, so that a new one needs no restart', async () => {
+      const file = keyFile('first');
+      orchestrator = new KubernetesOrchestrator(settings({ logStoreDeleteKeyFile: file }), api, 5);
+      api.responses = [ok([]), ok({ task_id: 't-1' }), ok([])];
+      await orchestrator.deleteLogs(fn.accountId);
+      writeFileSync(file, 'second');
+      api.responses = [ok([]), ok({ task_id: 't-2' }), ok([])];
+
+      await orchestrator.deleteLogs(fn.accountId);
+
+      expect(asked().map(([, , form]) => (form as Record<string, string>).authKey)).toEqual(['first', 'first', 'first', 'second', 'second', 'second']);
+    });
+
+    it('fails when lines are left after the task, or the task is still running after the timeout: the next attempt tries again', async () => {
+      api.responses = [ok([]), ok({ task_id: 't-1' }), ok([])];
+      api.storeRows = [{ _time: '2026-10-18T10:00:00Z' }];
+      await expect(orchestrator.deleteLogs(fn.accountId)).rejects.toThrow(new OrchestratorError(`Log lines of ${ns} are still in the log store after their deletion (task t-1)`));
+
+      api.responses = [ok([]), ok({ task_id: 't-2' }), ...Array.from({ length: 50 }, () => ok([{ task_id: 't-2', filter: FILTER }]))];
+      await expect(orchestrator.deleteLogs(fn.accountId, 20)).rejects.toThrow(
+        new OrchestratorError(`Deleting the log lines of ${ns} is still running after 0 s (task t-2)`),
+      );
+    });
+
+    it("fails, naming the file, when the key can't be read or is empty, and then asks the store nothing", async () => {
+      const missing = new KubernetesOrchestrator(settings({ logStoreDeleteKeyFile: '/nonexistent/key' }), api, 5);
+      const empty = new KubernetesOrchestrator(settings({ logStoreDeleteKeyFile: keyFile(' \n') }), api, 5);
+
+      await expect(missing.deleteLogs(fn.accountId)).rejects.toThrow(/^The log store's delete key can't be read from \/nonexistent\/key: .*ENOENT/);
+      await expect(empty.deleteLogs(fn.accountId)).rejects.toThrow(/^The log store's delete key file .* is empty$/);
+      expect(api.requests).toEqual([]);
+    });
+
+    it("passes on the store's refusal: a key it doesn't take", async () => {
+      api.responses = [{ status: 401, headers: {}, body: "The provided authKey doesn't match -deleteAuthKey" }];
+
+      await expect(orchestrator.deleteLogs(fn.accountId)).rejects.toThrow(new LogStoreUnavailableError("The log store answered 401: The provided authKey doesn't match -deleteAuthKey"));
     });
   });
 

@@ -103,6 +103,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       deploy: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),
+      removeTenant: jest.fn(),
+      deleteLogs: jest.fn(),
       waitUntilReady: jest.fn(),
       invoke: jest.fn(),
       scale: jest.fn(),

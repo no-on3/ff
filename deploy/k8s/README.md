@@ -29,6 +29,8 @@ kubectl apply -k deploy/k8s/logging
 
 In development, `hack/k8s/cluster-up.sh` does both, through `hack/k8s/logging-up.sh`, with a random key, and `hack/k8s/logging-down.sh` removes the pipeline and its data. The backend reads it for the logs API and for the load error a failed deploy names (P-43).
 
+Closing an account deletes its log lines with the delete key (P-45). The backend reads the key from a file, `K8S_LOG_STORE_DELETE_KEY_FILE`: by default `/etc/ff/victoria-logs-delete-key/key`, where its manifests mount the Secret (P-60). In development, `hack/k8s/log-store-key.sh` copies it to `hack/.kube/victoria-logs-delete-key`, readable by you alone, and `logging-up.sh` runs it. The backend sends the key in a POST's form body, never in a URL: in development its calls go through the API server's proxy, whose request logs would show a URL.
+
 | File | Object | Purpose |
 |---|---|---|
 | `logging/00-namespace.yaml` | Namespace `ff-logging` | The collector's. Pod Security `privileged`, because reading the node's `/var/log` takes hostPath volumes, which every other level forbids; the pod is locked down by its own settings instead |

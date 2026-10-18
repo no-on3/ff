@@ -3,13 +3,17 @@
  * Kubernetes driver print; Fluent Bit collects; VictoriaLogs answers. Runs where the pipeline is installed:
  * hack/k8s/test-it.sh sets K8S_IT_LOGGING when it finds it (hack/k8s/logging-up.sh installs it). Queries go
  * through the API server's Service proxy with the admin kubeconfig, as only the platform may query the store.
+ * The last cases delete an account's lines (P-45) with the store's key, which test-it.sh copies from its Secret.
  *   hack/k8s/test-it.sh log-pipeline
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { Runtime } from '../../functions/entities/function.entity';
+import { LogStoreUnavailableError } from '../orchestrator.errors';
 import type { FunctionLogLine } from '../orchestrator.types';
 import { KubeClient, paths } from './kube-client';
 import { KubernetesOrchestrator } from './kubernetes.orchestrator';
@@ -156,6 +160,7 @@ run('the log pipeline on the dev cluster (L3)', () => {
     caFile: process.env.K8S_CA_FILE ?? path.join(kubeDir, 'ca.crt'),
     invokeMode: 'proxy',
     readyTimeoutSeconds: 90,
+    logStoreDeleteKeyFile: process.env.K8S_LOG_STORE_DELETE_KEY_FILE ?? path.join(kubeDir, 'victoria-logs-delete-key'),
   });
   const client = new KubeClient({ server: s.apiUrl, tokenFile: s.tokenFile, caFile: s.caFile });
   const orchestrator = new KubernetesOrchestrator(s, client);
@@ -349,5 +354,50 @@ run('the log pipeline on the dev cluster (L3)', () => {
     ];
     expect(await Promise.all(allowed.map((a) => can(...a)))).toEqual(allowed.map(() => 'yes'));
     expect(await Promise.all(denied.map((a) => can(...a)))).toEqual(denied.map(() => 'no'));
+  });
+
+  // The last cases, P-45's: closing an account deletes its lines, and the first of them its namespace.
+  it("deletes no line with a key the store doesn't take", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'ff-it-'));
+    writeFileSync(path.join(dir, 'key'), 'not-the-key');
+    const wrongKey = new KubernetesOrchestrator({ ...s, logStoreDeleteKeyFile: path.join(dir, 'key') }, client);
+    const before = await count(`{namespace="${nsB}"}`);
+
+    const refusal = await wrongKey.deleteLogs(tenantB).then(() => undefined, (error: unknown) => error);
+
+    expect(refusal).toBeInstanceOf(LogStoreUnavailableError);
+    expect((refusal as Error).message).toMatch(/^The log store answered 401: /);
+    expect((refusal as Error).message).not.toContain('not-the-key');
+    expect(before).toBeGreaterThan(0);
+    expect(await count(`{namespace="${nsB}"}`)).toBe(before);
+  });
+
+  it("deletes an account's namespace and every line of it, as closing the account does, and leaves another account's (P-45)", async () => {
+    const nonce = word('closing');
+    await orchestrator.invoke(printerA, { nonce, lines: 3 }, `it-log-close-a-${randomUUID()}`);
+    await orchestrator.invoke(printerB, { nonce, lines: 3 }, `it-log-close-b-${randomUUID()}`);
+    await until<boolean>("both accounts' new lines stored", 30_000, async () => {
+      const [a, b] = await Promise.all([count(`{namespace="${nsA}"} "${nonce}"`), count(`{namespace="${nsB}"} "${nonce}"`)]);
+      return a === 3 && b === 3 ? { done: true } : { last: { a, b } };
+    });
+    const [linesOfA, linesOfB] = await Promise.all([count(`{namespace="${nsA}"}`), count(`{namespace="${nsB}"}`)]);
+
+    // Its functions first, then its namespace, so that nothing writes more of its lines; then the lines.
+    for (const fn of [printerA, python]) await orchestrator.remove(fn);
+    const removing = Date.now();
+    await orchestrator.removeTenant(tenantA);
+    const removedMs = Date.now() - removing;
+    const deleting = Date.now();
+    await orchestrator.deleteLogs(tenantA);
+    const deletedMs = Date.now() - deleting;
+
+    expect(await client.get(paths.namespace(nsA))).toBeNull();
+    expect(linesOfA).toBeGreaterThan(30);
+    expect(await count(`{namespace="${nsA}"}`)).toBe(0);
+    expect(await count(`{namespace="${nsB}"}`)).toBe(linesOfB);
+    // Again, as the next attempt after a failure would: nothing left to do, and nothing fails.
+    await orchestrator.removeTenant(tenantA);
+    await orchestrator.deleteLogs(tenantA);
+    console.log(`P-45: the namespace went in ${removedMs} ms; ${linesOfA} lines deleted in ${deletedMs} ms; ${linesOfB} of the other account's kept`);
   });
 });
