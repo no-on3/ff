@@ -47,7 +47,10 @@ export function parseInvokeInput(text: string): ParsedInput {
   return { ok: true, input: value as Record<string, unknown> };
 }
 
-/** What the history says of a value it kept only the start of (P-45). */
+/**
+ * What the history says of a value it kept only the start of: it keeps at most
+ * 64 KiB of each input, output and error, the personal data of the customer's users.
+ */
 export const TRUNCATED_NOTE = 'Truncated: the history keeps the first 64 KiB.';
 
 /**

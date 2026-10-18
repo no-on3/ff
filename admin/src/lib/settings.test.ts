@@ -8,6 +8,7 @@ const CURRENT: PlatformSettings = {
   lowBalancePercents: [50, 20, 0],
   invoiceReminderDay: 3,
   largeCreditThreshold: '100.000',
+  closedAccountDeletionDays: 30,
 };
 
 describe('parseSetting', () => {

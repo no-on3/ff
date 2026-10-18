@@ -30,6 +30,12 @@ export const platformSettingsSchema = z.strictObject({
   invoiceReminderDay: z.number().int().min(1).max(28),
   /** D12, P-74: a credit grant above this, in TND, needs a second confirmation. */
   largeCreditThreshold: dinars,
+  /**
+   * Days between closing an account and deleting its functions, their
+   * invocation history and logs: time for its members to read them. Changing
+   * it doesn't move the date of an account closed already.
+   */
+  closedAccountDeletionDays: z.number().int().min(1).max(365),
 });
 
 export type PlatformSettings = z.infer<typeof platformSettingsSchema>;
@@ -42,6 +48,7 @@ export const DEFAULT_SETTINGS: PlatformSettings = {
   lowBalancePercents: [50, 20, 0],
   invoiceReminderDay: 3,
   largeCreditThreshold: '100.000',
+  closedAccountDeletionDays: 30,
 };
 
 export const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS) as SettingKey[];

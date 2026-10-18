@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ACCOUNT_STATUSES, AccountStatus, STATUS_CHANGES, StatusChange, changedNotice, changesFor, isAccountId, ownersOf, ownersSee, statusLabel } from './accounts';
+import { ACCOUNT_STATUSES, AccountStatus, STATUS_CHANGES, StatusChange, changedNotice, changesFor, dataDeletion, isAccountId, ownersOf, ownersSee, statusLabel } from './accounts';
 
 describe('the status changes an account offers (P-71)', () => {
   it('follow its status: a pending account is approved or rejected, an active one suspended, a suspended one reactivated; any but a closed one closed', () => {
@@ -42,6 +42,23 @@ describe('accounts, to read', () => {
       'a@ff.test, b@ff.test',
       '–',
     ]);
+  });
+
+  it("say when a closed account's data goes, or went, and nothing for an account not closed", () => {
+    const when = (at: string) => `[${at}]`;
+
+    expect(dataDeletion({ dataDeletionDueAt: null, dataDeletedAt: null }, when)).toBeNull();
+    expect(dataDeletion({ dataDeletionDueAt: '2026-11-17T10:32:00Z', dataDeletedAt: null }, when)).toBe(
+      'Its functions, their history and logs will be deleted on [2026-11-17T10:32:00Z]; until then its members can read them.',
+    );
+    expect(dataDeletion({ dataDeletionDueAt: '2026-11-17T10:32:00Z', dataDeletedAt: '2026-11-17T11:00:04Z' }, when)).toBe(
+      'Its functions, their history and logs were deleted on [2026-11-17T11:00:04Z].',
+    );
+  });
+
+  it("warn, before closing, that the account's data goes after the notice period, and what stays", () => {
+    expect(STATUS_CHANGES.close.effect).toContain('Its functions, their history and logs are deleted once the notice period set in Settings has passed');
+    expect(STATUS_CHANGES.close.effect).toContain('its usage, payments and invoices are kept');
   });
 
   it('take an account ID from the address only when it is one: 12 digits', () => {

@@ -153,6 +153,10 @@ describe('labels and names', () => {
     expect([actionLabel('credit.promo'), actionLabel('credit.adjustment')]).toEqual(['Promotional credit granted', 'Credit corrected']);
   });
 
+  it("names what FF does on its own: a closed account's data deleted once its notice period has passed", () => {
+    expect(actionLabel('account.data_delete')).toBe("Account's functions, history and logs deleted");
+  });
+
   it("names the CSV as the API's Content-Disposition does", () => {
     expect(auditCsvName(new Date('2026-10-17T23:00:00Z'))).toBe('ff-operator-audit-2026-10-17.csv');
   });

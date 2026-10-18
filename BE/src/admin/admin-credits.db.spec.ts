@@ -53,7 +53,9 @@ run('credit grants, for operators (L2, P-74)', () => {
   /** An account, with its members. */
   async function account(fields: Partial<Account> = {}, members: Array<[User, Role]> = []): Promise<string> {
     const id = String(400000000000 + ++n);
-    await db.dataSource.getRepository(Account).save({ id, name: `Account ${n}`, planId: 'beta', status: AccountStatus.ACTIVE, ...fields });
+    // A closed account always has the date its data is deleted, as closing it sets one.
+    const closed = fields.status === AccountStatus.CLOSED ? { dataDeletionDueAt: new Date(Date.now() + 30 * 86_400_000) } : {};
+    await db.dataSource.getRepository(Account).save({ id, name: `Account ${n}`, planId: 'beta', status: AccountStatus.ACTIVE, ...closed, ...fields });
     for (const [member, role] of members) await db.dataSource.getRepository(Membership).save({ accountId: id, userId: member.id, role });
     return id;
   }

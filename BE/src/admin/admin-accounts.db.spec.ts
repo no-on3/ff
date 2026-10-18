@@ -31,10 +31,12 @@ import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PlansService } from '../plans/plans.service';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
-import { AdminAccountsService } from './admin-accounts.service';
+import { AdminAccountsService, utcMinute } from './admin-accounts.service';
 import { AdminCreditsService } from './admin-credits.service';
 import { PlatformSetting } from './platform-setting.entity';
 import { PlatformSettingsService } from './platform-settings.service';
+
+const DAY_MS = 86_400_000;
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const OPERATOR = { id: 'operator:kc-op-1', label: 'operator@ff.test' };
@@ -45,6 +47,7 @@ run('accounts, for operators (L2, P-71)', () => {
   let service: AdminAccountsService;
   let plans: PlansService;
   let ledger: LedgerService;
+  let settings: PlatformSettingsService;
   const sent: Mail[] = [];
   /** [function ID, replicas] of each scale call. */
   const scaled: Array<[string, number]> = [];
@@ -114,7 +117,7 @@ run('accounts, for operators (L2, P-71)', () => {
     const usage = new UsageService(ds.getRepository(UsageRecord), ds, config);
     const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
     ledger = new LedgerService(ds);
-    const settings = new PlatformSettingsService(ds.getRepository(PlatformSetting), audit);
+    settings = new PlatformSettingsService(ds.getRepository(PlatformSetting), audit);
     const credits = new AdminCreditsService(ds, ledger, new CreditService(ds, settings, new LedgerEvents(ds)), settings, audit, mail, config);
     service = new AdminAccountsService(
       ds.getRepository(Account),
@@ -128,6 +131,7 @@ run('accounts, for operators (L2, P-71)', () => {
       mail,
       config,
       credits,
+      settings,
     );
   });
 
@@ -351,13 +355,53 @@ run('accounts, for operators (L2, P-71)', () => {
       expect([await statusOf(id), await entriesOf(id), scaled, sent]).toEqual(['active', [], [], []]);
     });
 
-    it('close an account from any status but closed, its functions scaled to zero', async () => {
-      const id = await account({ status: AccountStatus.REJECTED });
+    it("close an account from any status but closed: its functions scaled to zero, its data due for deletion after the settings' notice period, which the e-mail and the audit entry give", async () => {
+      const id = await account({ status: AccountStatus.REJECTED }, [[await user('closing@ff.test'), 'owner']]);
       const left = await fn(id);
+      const before = Date.now();
 
-      await service.changeStatus(id, 'close', 'Owner asked');
+      const page = await service.changeStatus(id, 'close', 'Owner asked');
+
       expect([await statusOf(id), scaled]).toEqual(['closed', [[left.id, 0]]]);
+      const due = page.account.dataDeletionDueAt as Date;
+      expect(due.getTime() - before).toBeGreaterThanOrEqual(30 * DAY_MS);
+      expect(due.getTime() - before).toBeLessThan(30 * DAY_MS + 60_000);
+      expect(page.account.dataDeletedAt).toBeNull();
+      expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([['closing@ff.test', `Your FF account is closed: Account ${n - 1}`]]);
+      expect(sent[0].text).toContain(`Its functions, their invocation history and their logs will be deleted on ${utcMinute(due)}.`);
+      const entry = (await entriesOf(id)).find((e) => e.action === 'account.close');
+      expect(entry?.details).toEqual({ reason: 'Owner asked', changes: { status: { from: 'rejected', to: 'closed' } }, dataDeletionDueAt: due.toISOString() });
+
       await expect(service.changeStatus(id, 'close', 'Owner asked')).rejects.toThrow(new ConflictException(`Account ${id} is already closed`));
+      expect((await service.detail(id)).account.dataDeletionDueAt).toEqual(due);
+    });
+
+    it('give an account closed after the notice period changed the new one, and keep the date of one closed before', async () => {
+      const first = await account({ status: AccountStatus.ACTIVE });
+      const firstDue = (await service.changeStatus(first, 'close', 'Owner asked')).account.dataDeletionDueAt as Date;
+      await settings.update({ closedAccountDeletionDays: 7 }, 'A shorter notice');
+      try {
+        const second = await account({ status: AccountStatus.SUSPENDED });
+        const before = Date.now();
+
+        const secondDue = (await service.changeStatus(second, 'close', 'Unpaid')).account.dataDeletionDueAt as Date;
+
+        expect(secondDue.getTime() - before).toBeGreaterThanOrEqual(7 * DAY_MS);
+        expect(secondDue.getTime() - before).toBeLessThan(7 * DAY_MS + 60_000);
+        expect((await service.detail(first)).account.dataDeletionDueAt).toEqual(firstDue);
+      } finally {
+        await settings.update({ closedAccountDeletionDays: 30 }, 'Back to the default');
+      }
+    });
+
+    it('give no other change a deletion date, and refuse one on an account that is not closed', async () => {
+      const id = await account({ status: AccountStatus.ACTIVE });
+      await service.changeStatus(id, 'suspend', 'Unpaid');
+      await service.changeStatus(id, 'reactivate', 'Paid');
+
+      expect((await service.detail(id)).account.dataDeletionDueAt).toBeNull();
+      await expect(query(`UPDATE accounts SET data_deletion_due_at = now() WHERE id = $1`, [id])).rejects.toThrow(/violates check constraint/);
+      await expect(query(`UPDATE accounts SET status = 'closed' WHERE id = $1`, [id])).rejects.toThrow(/violates check constraint/);
     });
 
     it('take two operators at once one after the other: one changes the account, the other is told it is no longer pending', async () => {

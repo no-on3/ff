@@ -47,10 +47,25 @@ const BANNERS: Partial<Record<AccountStatus, string>> = {
   closed: 'This account is closed: you can read and delete its functions, but not create, change or invoke them.',
 };
 
-export function accountView(account: MeAccount | null): { page: AccountPage; banner?: string } {
+/** A time as the browser's locale writes it. */
+const localTime = (at: string) => new Date(at).toLocaleString();
+
+/**
+ * A closed account's data is deleted once the notice period its closure set
+ * has passed: the banner says when, so that its members read what they need
+ * before then, or when it was done.
+ */
+function closedBanner(account: MeAccount, when: (at: string) => string): string {
+  if (account.dataDeletedAt) return `This account is closed, and its functions, their history and logs were deleted on ${when(account.dataDeletedAt)}.`;
+  const deletion = account.dataDeletionDueAt ? ` Its functions, their history and logs will be deleted on ${when(account.dataDeletionDueAt)}.` : '';
+  return `${BANNERS.closed}${deletion}`;
+}
+
+export function accountView(account: MeAccount | null, when: (at: string) => string = localTime): { page: AccountPage; banner?: string } {
   if (!account) return { page: 'onboarding' };
   if (account.status === 'pending') return { page: 'pending' };
   if (account.status === 'rejected') return { page: 'rejected' };
+  if (account.status === 'closed') return { page: 'console', banner: closedBanner(account, when) };
   return { page: 'console', banner: BANNERS[account.status] };
 }
 

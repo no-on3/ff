@@ -17,6 +17,8 @@ export type AuditAction =
   | 'account.suspend'
   | 'account.reactivate'
   | 'account.close'
+  // FF deleted a closed account's functions, their history and logs, once its notice period had passed.
+  | 'account.data_delete'
   | 'account.egress'
   | 'function.create'
   | 'function.update'

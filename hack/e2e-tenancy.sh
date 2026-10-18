@@ -169,9 +169,11 @@ e2e_migrate "${e2e_base_env[@]}"
 # Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
 e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" PORT="${api##*:}" \
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT"
+# Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
-  FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198
+  FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
+  FF_RETENTION_INTERVAL_SECONDS=5
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 
 echo "== account A's function"
@@ -1071,5 +1073,50 @@ with_token "$(keycloak_token admin-cli "$user_1")" GET /functions >/dev/null
 check "a token meant for another API (Keycloak's admin-cli client): 401" \
   "401 The token is not meant for this API" "$(status) $(message)"
 check "A's function, history and limits are still unchanged" "$before" "$(snapshot as_a "$id")"
+
+echo "== closing an account: its functions, their history and logs deleted once its notice period has passed"
+# Last, as it deletes account 1's data. By now it has a function, calls, log lines, usage, payments and invoices.
+sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
+# How many lines the log store keeps of a namespace, over all it keeps.
+store_lines() {
+  kubectl get --raw "/api/v1/namespaces/ff-system/services/victoria-logs:http/proxy/select/logsql/query?query=$(jq -rn --arg q "{namespace=\"$1\"} | stats count() as n" '$q | @uri')" |
+    jq -r '.n // "0"'
+}
+ns_1="$(tenant_namespace "$account_1")"
+kept_1="$(sql "SELECT (SELECT count(*) FROM usage_records WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM payments WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM invoices WHERE account_id = '$account_1')")"
+check "account 1 has usage records, payments and invoices, its function's code, namespace and log lines" "true true true" \
+  "$(awk '{ print ($1 > 0) && ($2 > 0) && ($3 > 0) ? "true" : "false" }' <<<"$kept_1") $([ -n "$(archived "$fn_1/code.ts")" ] && echo true || echo false) $(kubectl get namespace "$ns_1" >/dev/null 2>&1 && [ "$(store_lines "$ns_1")" -gt 0 ] && echo true || echo false)"
+closed="$(with_token "$operator_token" POST "/admin/accounts/$account_1/close" '{"reason": "l5: the customer left"}')"
+check "the operator closes account 1: its data is due for deletion in the 30 days the settings give" "200 closed 30 null" \
+  "$(status) $(jq -r '"\(.account.status) \(((.account.dataDeletionDueAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) - now) / 86400 | round) \(.account.dataDeletedAt)"' <<<"$closed")"
+due_1="$(jq -r .account.dataDeletionDueAt <<<"$closed")"
+check "the owner's e-mail says when, and what is kept" "Your FF account is closed: L5 one true true" \
+  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep -q "^Its functions, their invocation history and their logs will be deleted on ${due_1:0:10} at ${due_1:11:5} UTC\." && echo true || echo false) $(mail_to "$user_1" | grep -q '^Its usage, payments and invoices are kept' && echo true || echo false)"
+check "and so does GET /me, for the console's banner" "$due_1" "$(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .dataDeletionDueAt')"
+as_user_1 GET "/functions/$fn_1" >/dev/null
+check "until then, its members still read its functions" 200 "$(status)"
+# The notice period passes.
+sql "UPDATE accounts SET data_deletion_due_at = now() WHERE id = '$account_1'" >/dev/null
+deleted=""
+for _ in $(seq 1 90); do
+  deleted="$(with_token "$operator_token" GET "/admin/accounts/$account_1" | jq -r '.account.dataDeletedAt // empty')"
+  [ -n "$deleted" ] && break
+  sleep 1
+done
+check "the job deletes its data within seconds of its date: the account's page says when" true "$([ -n "$deleted" ] && echo true || echo false)"
+listed_1="$(as_user_1 GET /functions | jq -c .)"
+listed_status="$(status)"
+as_user_1 GET "/functions/$fn_1" >/dev/null
+check "its functions are gone, with their history; the account itself stays, readable" "200 [] 404 0" \
+  "$listed_status $listed_1 $(status) $(sql "SELECT count(*) FROM function_invocations WHERE function_id = '$fn_1'")"
+check "its namespace is gone from the cluster, its code from object storage, and its lines from the log store" "false empty 0" \
+  "$(kubectl get namespace "$ns_1" >/dev/null 2>&1 && echo true || echo false) $([ -z "$(archived "$fn_1/code.ts")" ] && echo empty || echo kept) $(store_lines "$ns_1")"
+check "its usage records, payments and invoices are kept, as the law requires" "$kept_1" \
+  "$(sql "SELECT (SELECT count(*) FROM usage_records WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM payments WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM invoices WHERE account_id = '$account_1')")"
+check "its owner reads in its audit log what FF deleted, as FF" "function.delete:function:$fn_1:FF account.data_delete:account:$account_1:FF" \
+  "$(as_user_1 GET '/audit-log?limit=5' | jq -r '[.entries[] | select(.action == "function.delete" or .action == "account.data_delete") | "\(.action):\(.resource):\(.actorLabel)"] | reverse | join(" ")')"
+check "and GET /me says when it was done" "$deleted" "$(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .dataDeletedAt')"
+check "another account's function and namespace are untouched" "true $before" \
+  "$(kubectl get namespace "$(tenant_namespace "$account_a")" >/dev/null 2>&1 && echo true || echo false) $(snapshot as_a "$id")"
 
 echo "$E2E_NAME: $passed checks passed"

@@ -56,7 +56,8 @@ export const STATUS_CHANGES: Record<StatusChange, StatusChangeInfo> = {
     to: 'closed',
     label: 'Close',
     done: 'Closed',
-    effect: "Its functions stop, and it can't deploy or invoke again: closing is final.",
+    effect:
+      "Its functions stop, and it can't deploy or invoke again: closing is final. Its functions, their history and logs are deleted once the notice period set in Settings has passed; its usage, payments and invoices are kept.",
     stops: true,
   },
 };
@@ -90,7 +91,18 @@ export interface AccountSummary {
   useCase: string | null;
   internetEgress: boolean;
   createdAt: string;
+  /** When a closed account's functions, their history and logs are deleted; null unless closed. */
+  dataDeletionDueAt: string | null;
+  /** When they were deleted; null until then. */
+  dataDeletedAt: string | null;
   owners: AccountPerson[];
+}
+
+/** What the account page says of a closed account's data: when it goes, or when it went. Nothing for an account not closed. */
+export function dataDeletion(account: Pick<AccountSummary, 'dataDeletionDueAt' | 'dataDeletedAt'>, when: (at: string) => string): string | null {
+  if (account.dataDeletedAt) return `Its functions, their history and logs were deleted on ${when(account.dataDeletedAt)}.`;
+  if (account.dataDeletionDueAt) return `Its functions, their history and logs will be deleted on ${when(account.dataDeletionDueAt)}; until then its members can read them.`;
+  return null;
 }
 
 export interface UsageTotals {

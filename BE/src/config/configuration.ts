@@ -238,6 +238,8 @@ const appShape = {
 
   ORCHESTRATOR: oneOf(['kubernetes'], 'kubernetes'),
   FF_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
+  // How often the job that deletes old invocation history and closed accounts' data runs; tests shorten it.
+  FF_RETENTION_INTERVAL_SECONDS: integer(3600, 5, 86400),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
@@ -442,6 +444,10 @@ export default function configuration(env: Env = process.env) {
       driver: parsed.ORCHESTRATOR,
       // How long create/update wait for a function to become ready.
       readyTimeoutSeconds: parsed.FF_READY_TIMEOUT_SECONDS,
+    },
+    // What FF keeps only for a while: how often the job that deletes it runs.
+    retention: {
+      intervalSeconds: parsed.FF_RETENTION_INTERVAL_SECONDS,
     },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.

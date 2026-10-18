@@ -117,16 +117,16 @@ export class AccountsService {
     });
     const accounts = [];
     for (const { account, role } of memberships) {
-      const { id, name, status, planId } = account as Account;
-      accounts.push({ id, name, status, role, plan: await this.plans.get(planId) });
+      const { id, name, status, planId, dataDeletionDueAt, dataDeletedAt } = account as Account;
+      accounts.push({ id, name, status, role, plan: await this.plans.get(planId), dataDeletionDueAt, dataDeletedAt });
     }
     return { user: { id: user.id, email: user.email, name: user.name, locale: user.locale }, accounts };
   }
 
   /** GET /me in development mode: its account, as owner. */
   async developmentMe(principal: Principal): Promise<MeView> {
-    const { id, name, status, planId } = await this.developmentAccount(principal.accountId);
-    return { user: null, accounts: [{ id, name, status, role: 'owner', plan: await this.plans.get(planId) }] };
+    const { id, name, status, planId, dataDeletionDueAt, dataDeletedAt } = await this.developmentAccount(principal.accountId);
+    return { user: null, accounts: [{ id, name, status, role: 'owner', plan: await this.plans.get(planId), dataDeletionDueAt, dataDeletedAt }] };
   }
 
   /**

@@ -508,7 +508,7 @@ curl -s -X PUT $FF/admin/settings -H "Authorization: Bearer $OP" -H 'content-typ
   -d '{"settings": {"gracePeriodHours": 48}, "reason": "Pilot customers asked for more time"}' | jq -c .settings
 ```
 
-The password grant works only in the development realm, for scripts and tests; production's realm turns it off for `ff-admin` (P-60). **The settings** are values the tasks read: shadow billing, which the hourly rating reads each hour (P-32, above), the negative buffer and grace period (P-33), the low-balance e-mails (P-33), the invoice reminder (P-36) and the large-credit threshold (P-74). Each is its default until changed. Amounts are in TND with three decimals, as strings.
+The password grant works only in the development realm, for scripts and tests; production's realm turns it off for `ff-admin` (P-60). **The settings** are values the tasks read: shadow billing, which the hourly rating reads each hour (P-32, above), the negative buffer and grace period (P-33), the low-balance e-mails (P-33), the invoice reminder (P-36), the large-credit threshold (P-74), and how many days a closed account's data is kept before it is deleted. Each is its default until changed. Amounts are in TND with three decimals, as strings.
 
 **Payments** (P-35): the dashboard's Payments page lists the pro-formas owners asked for, newest first, with what each one is waiting for. To record a transfer from the bank statement:
 1. Find its pro-forma by the reference in the transfer's label, typed in any case, with or without dashes. You can also filter by status or account.
@@ -559,9 +559,16 @@ curl -s "$FF/admin/audit-log?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z" 
 | Reject | pending | rejected: it never deploys |
 | Suspend | active | suspended: its functions scale to zero at once (a call under way finishes first), and it can't deploy or invoke. Nothing is deleted |
 | Reactivate | suspended | active: functions with warm instances (`minInstances`) get them back; the others start at their next call |
-| Close | any but closed | closed, for good: its functions scale to zero. P-45 will delete what it holds after a notice period |
+| Close | any but closed | closed, for good: its functions scale to zero, and its data is deleted once the notice period has passed (below) |
 
-The e-mail of a rejection, a suspension or a closure gives your reason. A change that doesn't apply to the account's status answers 409. Once a minute, the backend scales back to zero any function of a suspended or closed account that started anyway, such as with a call already under way. Moving an account to another plan applies the plan's quota to its namespace at once. Internet egress is recorded per account; until P-62 writes it into the account's NetworkPolicy, `K8S_EGRESS_INTERNET` decides for every account.
+The e-mail of a rejection, a suspension or a closure gives your reason. A change that doesn't apply to the account's status answers 409.
+
+**Closing an account deletes its data, after a notice.** Closing sets the date: now plus the notice period in the settings, `closedAccountDeletionDays`, 30 days by default. The owners' e-mail gives it, to the minute in UTC, and so do the account page, `GET /me` and the console's banner; until then, the members still read the account's functions, history and logs. Once the date has passed, a job deletes each function, with its code in object storage and its invocation history, then the account's namespace, then its lines in the log store, and checks that none is left. The account's audit log then shows each deletion as FF's. Its usage records, payments, invoices and audit log stay: the law requires keeping them. The job runs at the backend's start and every hour (`FF_RETENTION_INTERVAL_SECONDS`), with the purge of old invocation history; a step that fails is logged, and the next run does it again. Changing the notice period doesn't move the date of an account closed already.
+
+```bash
+curl -s $FF/admin/accounts/$ACCOUNT -H "Authorization: Bearer $OP" | jq -c '.account | {status, dataDeletionDueAt, dataDeletedAt}'
+# {"status":"closed","dataDeletionDueAt":"2026-11-17T10:32:45.123Z","dataDeletedAt":null}
+``` Once a minute, the backend scales back to zero any function of a suspended or closed account that started anyway, such as with a call already under way. Moving an account to another plan applies the plan's quota to its namespace at once. Internet egress is recorded per account; until P-62 writes it into the account's NetworkPolicy, `K8S_EGRESS_INTERNET` decides for every account.
 
 ```bash
 curl -s "$FF/admin/accounts?status=pending" -H "Authorization: Bearer $OP" | jq -c '.accounts[] | {id, name, useCase, owners: [.owners[].email]}'

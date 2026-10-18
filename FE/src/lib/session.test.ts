@@ -20,6 +20,8 @@ const account = (id: string, status: MeAccount['status'] = 'active'): MeAccount 
   status,
   role: 'owner',
   plan: BETA_PLAN,
+  dataDeletionDueAt: null,
+  dataDeletedAt: null,
 });
 
 describe('requestHeaders', () => {
@@ -101,6 +103,18 @@ describe('accountView', () => {
       expect(view.page).toBe('console');
       expect(view.banner).toMatch(new RegExp(`^This account is ${status}: you can read and delete its functions, but not create, change or invoke them\\.$`));
     }
+  });
+
+  it("tells a closed account's members when its data is deleted, and once it was, when", () => {
+    const when = (at: string) => `[${at}]`;
+    const closed = account('100000000001', 'closed');
+
+    expect(accountView({ ...closed, dataDeletionDueAt: '2026-11-17T10:32:00Z' }, when).banner).toBe(
+      'This account is closed: you can read and delete its functions, but not create, change or invoke them. Its functions, their history and logs will be deleted on [2026-11-17T10:32:00Z].',
+    );
+    expect(accountView({ ...closed, dataDeletionDueAt: '2026-11-17T10:32:00Z', dataDeletedAt: '2026-11-17T11:00:04Z' }, when).banner).toBe(
+      'This account is closed, and its functions, their history and logs were deleted on [2026-11-17T11:00:04Z].',
+    );
   });
 });
 

@@ -89,6 +89,9 @@ export class AdminAccountSummaryView {
   @ApiProperty({ nullable: true, type: String, description: 'What they plan to build, from sign-up' }) useCase: string | null;
   @ApiProperty({ description: 'Whether its functions may reach the internet (D5)' }) internetEgress: boolean;
   @ApiProperty() createdAt: Date;
+  @ApiProperty({ nullable: true, type: Date, description: "When a closed account's functions, their invocation history and logs are deleted: its closure plus the notice period set then. Null unless the account is closed" })
+  dataDeletionDueAt: Date | null;
+  @ApiProperty({ nullable: true, type: Date, description: 'When they were deleted; null until then' }) dataDeletedAt: Date | null;
   @ApiProperty({ type: [AccountPersonView] }) owners: AccountPersonView[];
 }
 

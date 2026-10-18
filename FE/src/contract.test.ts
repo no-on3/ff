@@ -10,6 +10,7 @@ import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw
 import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
+import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
@@ -20,6 +21,7 @@ import {
   CREDIT_STATE_FIELDS,
   INVOCATION_FIELDS,
   INVOCATION_STATUSES,
+  ME_ACCOUNT_FIELDS,
   INVOICE_FIELDS,
   LOGS_PAGE_FIELDS,
   LOGS_QUERY_PARAMS,
@@ -108,7 +110,13 @@ describe("an invocation's status", () => {
   });
 });
 
-describe('an invocation (P-45)', () => {
+describe('an account in GET /me', () => {
+  it("has the API's fields, the dates a closed account's data is deleted among them, so the console reads each one there is", () => {
+    expect(dtoFields(accountDtoSource, 'class MeAccount {')).toEqual([...ME_ACCOUNT_FIELDS]);
+  });
+});
+
+describe('an invocation', () => {
   it("has the API's fields, so the history reads each one there is, the truncation flags among them", () => {
     const body = invocationSource.slice(invocationSource.indexOf('export class FunctionInvocation {'));
     const fields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1]);

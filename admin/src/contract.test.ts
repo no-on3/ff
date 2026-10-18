@@ -22,7 +22,7 @@ import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
 import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
-import { OPERATOR_ACTIONS } from './lib/audit';
+import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
 import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
@@ -107,6 +107,13 @@ describe('the operator actions the audit log page names (P-76)', () => {
     const backendActions = [...union.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map((match) => match[1]);
 
     expect(backendActions).toEqual(expect.arrayContaining(OPERATOR_ACTIONS.map((action) => action.value)));
+  });
+
+  it("and what FF does on its own, which an account's audit log shows, are actions the API records too", () => {
+    const union = auditSource.slice(auditSource.indexOf('export type AuditAction ='), auditSource.indexOf(';', auditSource.indexOf('export type AuditAction =')));
+    const backendActions = [...union.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map((match) => match[1]);
+
+    expect(backendActions).toEqual(expect.arrayContaining(FF_ACTIONS.map((action) => action.value)));
   });
 });
 

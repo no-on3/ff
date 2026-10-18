@@ -6,6 +6,7 @@ export interface PlatformSettings {
   lowBalancePercents: number[];
   invoiceReminderDay: number;
   largeCreditThreshold: string;
+  closedAccountDeletionDays: number;
 }
 export type SettingKey = keyof PlatformSettings;
 
@@ -27,6 +28,13 @@ export const SETTINGS: SettingInfo[] = [
   { key: 'lowBalancePercents', label: 'Low-balance e-mails', kind: 'percents', unit: '% of the last top-up, largest first', help: 'For owners who set none (from P-33).' },
   { key: 'invoiceReminderDay', label: 'Invoice reminder', kind: 'whole', unit: 'day of the month, 1 to 28', help: 'A reminder when the monthly invoices aren’t issued by then (D9; from P-36).' },
   { key: 'largeCreditThreshold', label: 'Large credit', kind: 'dinars', unit: 'TND', help: 'A credit grant above this needs a second confirmation (D12; from P-74).' },
+  {
+    key: 'closedAccountDeletionDays',
+    label: 'Notice before deleting a closed account',
+    kind: 'whole',
+    unit: 'days, 1 to 365',
+    help: "Days between closing an account and deleting its functions, their history and logs: time for its members to read them. An account closed already keeps its date.",
+  },
 ];
 
 /** A setting as its input shows it. */

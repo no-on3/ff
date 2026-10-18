@@ -47,6 +47,7 @@ const BANK_TRANSFERS = migrationNames.find((name) => name.startsWith('BankTransf
 const INVOICES = migrationNames.find((name) => name.startsWith('Invoices')) as string;
 const CANCELLED_PRO_FORMAS = migrationNames.find((name) => name.startsWith('CancelledProFormas')) as string;
 const INVOCATION_HISTORY = migrationNames.find((name) => name.startsWith('InvocationHistory')) as string;
+const CLOSED_ACCOUNT_DELETION = migrationNames.find((name) => name.startsWith('ClosedAccountDeletion')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -335,6 +336,36 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'function_invocations' AND column_name LIKE '%truncated'`)).toEqual([]);
       expect(await dataSource.query(`SELECT output #>> '{}' AS output FROM function_invocations ORDER BY created_at`)).toEqual([{ output: 'x'.repeat(100000) }, { output: '{"rows":[1,2' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it('the closed-account-deletion migration gives an account closed before it the whole default notice from now, one not closed none, and reverts with a deletion recorded', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, INVOCATION_HISTORY);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ('000000000001', 'Open', 'active', 'beta'), ('000000000002', 'Shut', 'closed', 'beta')`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CLOSED_ACCOUNT_DELETION);
+
+      const rows = await dataSource.query<Array<{ id: string; days: string | null; deleted: Date | null }>>(
+        `SELECT id, round(extract(epoch FROM data_deletion_due_at - now()) / 86400)::text AS days, data_deleted_at AS deleted FROM accounts ORDER BY id`,
+      );
+      expect(rows).toEqual([
+        { id: '000000000001', days: null, deleted: null },
+        { id: '000000000002', days: '30', deleted: null },
+      ]);
+      await dataSource.query(`UPDATE accounts SET data_deleted_at = now() WHERE id = '000000000002'`);
+
+      await migrateDownTo(dataSource, INVOCATION_HISTORY);
+
+      expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'accounts' AND column_name LIKE 'data_%'`)).toEqual([]);
+      expect(await dataSource.query(`SELECT id, status FROM accounts ORDER BY id`)).toEqual([
+        { id: '000000000001', status: 'active' },
+        { id: '000000000002', status: 'closed' },
+      ]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

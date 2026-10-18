@@ -6,7 +6,7 @@ import GrantDialog from '../components/GrantDialog';
 import ReasonDialog from '../components/ReasonDialog';
 import { EmptyState, ErrorState, Loading } from '../components/States';
 import StatusBadge from '../components/StatusBadge';
-import { AccountView, PlanOption, STATUS_CHANGES, StatusChange, changedNotice, changesFor, isAccountId, ownersSee } from '../lib/accounts';
+import { AccountView, PlanOption, STATUS_CHANGES, StatusChange, changedNotice, changesFor, dataDeletion, isAccountId, ownersSee } from '../lib/accounts';
 import { actionLabel, describeAction } from '../lib/audit';
 import { GrantRequest, chargesLabel, creditStateLabel, grantNotice } from '../lib/credits';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
@@ -304,6 +304,7 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
           <Fact label="Country">{account.country}</Fact>
           <Fact label="Tax ID">{account.taxId ?? '–'}</Fact>
           <Fact label="Created">{whenUtc(account.createdAt)}</Fact>
+          {dataDeletion(account, whenUtc) && <Fact label="Its data">{dataDeletion(account, whenUtc)}</Fact>}
           <Fact label="Plan">
             <span className="flex flex-wrap items-center gap-2">
               <select aria-label="Plan" className="input max-w-xs" value={planChoice} onChange={(e) => setPlanChoice(e.target.value)}>

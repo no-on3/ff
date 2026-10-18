@@ -15,6 +15,7 @@ describe('the platform settings (P-70, D12)', () => {
       'lowBalancePercents',
       'invoiceReminderDay',
       'largeCreditThreshold',
+      'closedAccountDeletionDays',
     ]);
   });
 
@@ -22,6 +23,7 @@ describe('the platform settings (P-70, D12)', () => {
     expect(problems({ gracePeriodHours: 48 })).toEqual([]);
     expect(problems({ negativeBuffer: '12.500', largeCreditThreshold: '0.000' })).toEqual([]);
     expect(problems({})).toEqual([]);
+    expect([problems({ closedAccountDeletionDays: 1 }), problems({ closedAccountDeletionDays: 365 })]).toEqual([[], []]);
   });
 
   it.each([
@@ -34,6 +36,9 @@ describe('the platform settings (P-70, D12)', () => {
     [{ lowBalancePercents: [20, 50] }, 'lowBalancePercents: must go from the largest share to the smallest, each once'],
     [{ lowBalancePercents: [50, 50] }, 'lowBalancePercents: must go from the largest share to the smallest, each once'],
     [{ lowBalancePercents: [101] }, 'lowBalancePercents.0: Too big: expected number to be <=100'],
+    [{ closedAccountDeletionDays: 0 }, 'closedAccountDeletionDays: Too small: expected number to be >=1'],
+    [{ closedAccountDeletionDays: 366 }, 'closedAccountDeletionDays: Too big: expected number to be <=365'],
+    [{ closedAccountDeletionDays: 7.5 }, 'closedAccountDeletionDays: Invalid input: expected int, received number'],
     [{ invoicePrefix: 'FF' }, 'Unrecognized key: "invoicePrefix"'],
   ])('refuse %j, naming the setting: %s', (change, problem) => {
     expect(problems(change)).toEqual([problem]);

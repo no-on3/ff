@@ -71,6 +71,9 @@ class MeAccount {
   @ApiProperty({ enum: AccountStatus }) status: AccountStatus;
   @ApiProperty({ enum: ['owner', 'developer', 'viewer'] }) role: Role;
   @ApiProperty({ type: PlanSummary, description: "The account's plan and its limits (D5)" }) plan: PlanSummary;
+  @ApiProperty({ nullable: true, type: Date, description: "When a closed account's functions, their invocation history and logs are deleted: its closure plus the notice period set then. Null unless the account is closed" })
+  dataDeletionDueAt: Date | null;
+  @ApiProperty({ nullable: true, type: Date, description: 'When they were deleted; null until then' }) dataDeletedAt: Date | null;
 }
 
 /** GET /me: the user, and the accounts they belong to (D4). */

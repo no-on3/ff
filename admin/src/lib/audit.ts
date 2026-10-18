@@ -30,6 +30,11 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'settings.update', label: 'Settings changed' },
 ];
 
+/** What FF does on its own, as an account's audit log names it, with what the dashboard calls each. */
+export const FF_ACTIONS: Array<{ value: string; label: string }> = [
+  { value: 'account.data_delete', label: "Account's functions, history and logs deleted" },
+];
+
 /** One operator action, as GET /admin/audit-log gives it. */
 export interface OperatorAction {
   id: string;
@@ -152,7 +157,7 @@ export function describeAction(entry: Pick<OperatorAction, 'action' | 'details' 
   return entry.resource ?? '';
 }
 
-export const actionLabel = (action: string): string => OPERATOR_ACTIONS.find((known) => known.value === action)?.label ?? action;
+export const actionLabel = (action: string): string => [...OPERATOR_ACTIONS, ...FF_ACTIONS].find((known) => known.value === action)?.label ?? action;
 
 /** The export's file name, as the API names the download. */
 export const auditCsvName = (today: Date) => `ff-operator-audit-${today.toISOString().slice(0, 10)}.csv`;

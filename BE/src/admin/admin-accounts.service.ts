@@ -16,6 +16,7 @@ import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
 import { UsageService } from '../usage/usage.service';
 import { AdminCreditsService } from './admin-credits.service';
+import { PlatformSettingsService } from './platform-settings.service';
 import { STATUS_CHANGES, StatusChange, statusChangeProblem, stopsFunctions } from './account-status-changes';
 import {
   ACCOUNTS_CURSOR,
@@ -37,9 +38,14 @@ export interface AccountsFilter {
 const person = (membership: Membership): AccountPersonView => ({ email: membership.user?.email ?? '', name: membership.user?.name ?? null });
 
 function summary(account: Account, owners: AccountPersonView[]): AdminAccountSummaryView {
-  const { id, name, status, planId, country, taxId, useCase, internetEgress, createdAt } = account;
-  return { id, name, status, planId, country: country.trim(), taxId, useCase, internetEgress, createdAt, owners };
+  const { id, name, status, planId, country, taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt } = account;
+  return { id, name, status, planId, country: country.trim(), taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt, owners };
 }
+
+const DAY_MS = 86_400_000;
+
+/** A time, to the minute, as e-mails write it: "2026-11-17 at 10:32 UTC". */
+export const utcMinute = (at: Date): string => `${at.toISOString().slice(0, 16).replace('T', ' at ')} UTC`;
 
 /** A status the account went through, from its audit entry: its creation, or an operator's change. */
 function statusEvent(entry: AuditEntry): AdminStatusEventView {
@@ -58,8 +64,21 @@ function statusEvent(entry: AuditEntry): AdminStatusEventView {
  * (P-71). A refusal, a suspension and a closure say why: the owners also
  * read the reason in their audit log.
  */
-export function ownerMail(account: Pick<Account, 'id' | 'name'>, change: StatusChange, reason: string, consoleUrl: string): Omit<Mail, 'to'> {
+export function ownerMail(
+  account: Pick<Account, 'id' | 'name' | 'dataDeletionDueAt'>,
+  change: StatusChange,
+  reason: string,
+  consoleUrl: string,
+): Omit<Mail, 'to'> {
   const which = `Your account "${account.name}" (${account.id})`;
+  // A closed account's data is deleted once its notice period has passed; until then its members can still read it.
+  const deletion = account.dataDeletionDueAt
+    ? [
+        '',
+        `Its functions, their invocation history and their logs will be deleted on ${utcMinute(account.dataDeletionDueAt)}. Until then, its members can read them in the console: ${consoleUrl}`,
+        'Its usage, payments and invoices are kept, as the law requires.',
+      ]
+    : [];
   const lines: Record<StatusChange, [string, string[]]> = {
     approve: ['is approved', [`${which} is approved: you can deploy and invoke functions now.`, '', `The console: ${consoleUrl}`]],
     reject: ['was not approved', [`${which} was not approved.`, `Why: ${reason}`]],
@@ -68,7 +87,7 @@ export function ownerMail(account: Pick<Account, 'id' | 'name'>, change: StatusC
       [`${which} is suspended: its functions are stopped, and can't be deployed or invoked until it is reactivated. Nothing is deleted.`, `Why: ${reason}`],
     ],
     reactivate: ['is active again', [`${which} is active again: you can deploy and invoke functions.`, '', `The console: ${consoleUrl}`]],
-    close: ['is closed', [`${which} is closed: its functions are stopped, and can't be deployed or invoked.`, `Why: ${reason}`]],
+    close: ['is closed', [`${which} is closed: its functions are stopped, and can't be deployed or invoked.`, `Why: ${reason}`, ...deletion]],
   };
   const [what, text] = lines[change];
   return { subject: `Your FF account ${what}: ${account.name}`, text: text.join('\n') };
@@ -95,6 +114,7 @@ export class AdminAccountsService {
     private readonly mail: MailService,
     private readonly config: ConfigService,
     private readonly credits: AdminCreditsService,
+    private readonly settings: PlatformSettingsService,
   ) {}
 
   /** GET /admin/accounts: newest first, a page at a time, each with its owners. */
@@ -175,22 +195,25 @@ export class AdminAccountsService {
    */
   async changeStatus(id: string, change: StatusChange, reason: string): Promise<AdminAccountView> {
     const rule = STATUS_CHANGES[change];
+    // Closing sets the day the account's data is deleted, by the notice period set at that moment; the owners' e-mail gives it.
+    const noticeDays = rule.to === AccountStatus.CLOSED ? (await this.settings.get()).closedAccountDeletionDays : undefined;
     const account = await this.accounts.manager.transaction(async (manager) => {
       const current = await manager.findOne(Account, { where: { id }, lock: { mode: 'pessimistic_write' } });
       if (!current) throw new NotFoundException(`Account ${id} not found`);
       const problem = statusChangeProblem(change, id, current.status);
       if (problem) throw new ConflictException(problem);
-      await manager.update(Account, { id }, { status: rule.to });
+      const dataDeletionDueAt = noticeDays === undefined ? null : new Date(Date.now() + noticeDays * DAY_MS);
+      await manager.update(Account, { id }, dataDeletionDueAt ? { status: rule.to, dataDeletionDueAt } : { status: rule.to });
       await this.audit.record(
         {
           accountId: id,
           action: `account.${change}`,
           resource: `account:${id}`,
-          details: { reason, changes: { status: { from: current.status, to: rule.to } } },
+          details: { reason, changes: { status: { from: current.status, to: rule.to } }, ...(dataDeletionDueAt ? { dataDeletionDueAt } : {}) },
         },
         manager,
       );
-      return current;
+      return { ...current, status: rule.to, dataDeletionDueAt: dataDeletionDueAt ?? current.dataDeletionDueAt };
     });
     if (stopsFunctions(rule.to)) await this.scaleFunctions(id, () => 0, `its account is ${rule.to}`);
     // Warm instances come back; the other functions start at their next call.

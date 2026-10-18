@@ -193,8 +193,21 @@ run('accounts, users and memberships (L2, P-12)', () => {
 
       expect(await service.me(user)).toEqual({
         user: { id: user.id, email: 'user12@example.tn', name: 'User 12', locale: 'fr-TN' },
-        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS } }],
+        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, dataDeletionDueAt: null, dataDeletedAt: null }],
       });
+    });
+
+    it("gives a closed account's members, in GET /me, when its data is deleted, and once done, when it was", async () => {
+      const user = await service.userFor(identity(13));
+      const { id } = await service.create(user, { name: 'Leaving' });
+      const due = new Date('2026-11-17T10:32:45.123Z');
+      await db.dataSource.query(`UPDATE accounts SET status = 'closed', data_deletion_due_at = $2 WHERE id = $1`, [id, due]);
+      expect((await service.me(user)).accounts).toMatchObject([{ id, status: 'closed', dataDeletionDueAt: due, dataDeletedAt: null }]);
+
+      const done = new Date('2026-11-17T11:00:04.000Z');
+      await db.dataSource.query(`UPDATE accounts SET data_deleted_at = $2 WHERE id = $1`, [id, done]);
+
+      expect((await service.me(user)).accounts).toMatchObject([{ id, dataDeletionDueAt: due, dataDeletedAt: done }]);
     });
   });
 

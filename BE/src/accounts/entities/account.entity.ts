@@ -13,6 +13,9 @@ export enum AccountStatus {
 /** The tenant (D1): functions, members, keys and bills belong to an account. */
 @Entity('accounts')
 @Check(`"status" IN ('pending', 'active', 'rejected', 'suspended', 'closed')`)
+// A closed account, and only a closed one, has a date for deleting its data; one whose data was deleted had that date.
+@Check(`("status" = 'closed') = ("data_deletion_due_at" IS NOT NULL)`)
+@Check(`"data_deleted_at" IS NULL OR "data_deletion_due_at" IS NOT NULL`)
 export class Account {
   /** 12 random digits, the AWS-shaped format of ADR 0004. */
   @PrimaryColumn({ type: 'char', length: 12 })
@@ -52,6 +55,18 @@ export class Account {
    */
   @Column({ type: 'int', array: true, nullable: true })
   lowBalancePercents: number[] | null;
+
+  /**
+   * When a closed account's functions, their invocation history and logs are
+   * deleted: its closure plus the notice period of that moment (a platform
+   * setting), which the owners' e-mail gives them. Null unless closed.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  dataDeletionDueAt: Date | null;
+
+  /** When they were deleted; null until then. */
+  @Column({ type: 'timestamptz', nullable: true })
+  dataDeletedAt: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

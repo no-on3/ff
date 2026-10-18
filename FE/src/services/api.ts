@@ -121,7 +121,7 @@ export interface FunctionInvocation {
   /** MB: the runtime's peak memory. */
   memoryUsed?: number | null;
   error?: string | null;
-  /** The history kept only the first 64 KiB of the input (P-45). The invoke's own answer has it whole. */
+  /** The history kept only the first 64 KiB of the input, to keep little of the customer's users' data. The invoke's own answer has it whole. */
   inputTruncated: boolean;
   /** The same, for the output. */
   outputTruncated: boolean;
@@ -483,6 +483,9 @@ export interface Plan {
 }
 
 /** One of the user's accounts, in GET /me. */
+/** An account's fields in GET /me, as the API's DTO names them: contract.test.ts checks them against it. */
+export const ME_ACCOUNT_FIELDS = ['id', 'name', 'status', 'role', 'plan', 'dataDeletionDueAt', 'dataDeletedAt'] as const satisfies ReadonlyArray<keyof MeAccount>;
+
 export interface MeAccount {
   /** 12 digits. */
   id: string;
@@ -492,7 +495,15 @@ export interface MeAccount {
   role: Role;
   /** Its plan, whose limits the API applies. */
   plan: Plan;
+  /** When a closed account's functions, their history and logs are deleted; null unless closed. */
+  dataDeletionDueAt: string | null;
+  /** When they were deleted; null until then. */
+  dataDeletedAt: string | null;
 }
+// A field missing from ME_ACCOUNT_FIELDS stops the build.
+type UnlistedMeAccountField = Exclude<keyof MeAccount, (typeof ME_ACCOUNT_FIELDS)[number]>;
+const everyMeAccountFieldListed: [UnlistedMeAccountField] extends [never] ? true : never = true;
+void everyMeAccountFieldListed;
 
 /** GET /me: the logged-in user and their accounts. */
 export interface Me {
