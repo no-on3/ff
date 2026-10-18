@@ -153,6 +153,13 @@ export class AdminAccountsService {
     };
   }
 
+  /** An account as the list shows it, with its owners: for the pages that name an account, such as a function's. */
+  async summaryOf(id: string): Promise<AdminAccountSummaryView> {
+    const account = await this.accounts.findOne({ where: { id } });
+    if (!account) throw new NotFoundException(`Account ${id} not found`);
+    return summary(account, (await this.ownersOf([id])).get(id) ?? []);
+  }
+
   /** GET /admin/accounts/:id: the account page. */
   async detail(id: string): Promise<AdminAccountView> {
     const account = await this.accounts.findOne({ where: { id } });

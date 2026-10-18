@@ -219,12 +219,14 @@ path_for() {
   esac
   path="${path//\{functionId\}/$3}"
   path="${path//\{userId\}/$missing}"
+  path="${path//\{invocationId\}/$missing}"
   path="${path//\{month\}/$(date -u +%Y-%m)}"
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
     case $name in
       start) params+=("start=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)") ;;
       end) params+=("end=$(date -u +%Y-%m-%dT%H:%M:%SZ)") ;;
+      q) params+=("q=l5") ;;
       *) fail "$method $template: no value for its required query parameter $name" ;;
     esac
   done < <(jq -r --arg path "$template" --arg method "${method,,}" \
@@ -855,6 +857,28 @@ plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
   "$(status) $(jq -r '"\(.quota.applied) \(.quota.failed)"' <<<"$plan_change") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
 
+echo "== support: finding what a customer asks about, and its data only for a reason"
+found="$(with_token "$operator_token" GET "/admin/search?q=$logged_id")"
+check "the operator finds a call by its request ID: its function and account, in the history" "200 $fn_1 $account_1 true" \
+  "$(status) $(jq -r '.calls[0] | "\(.functionId) \(.accountId) \(.inHistory)"' <<<"$found")"
+found="$(with_token "$operator_token" GET "/admin/search?q=$user_1")"
+check "and an account by its owner's e-mail" "200 $account_1" "$(status) $(jq -r '[.accounts[].id] | join(" ")' <<<"$found")"
+page="$(with_token "$operator_token" GET "/admin/functions/$fn_1")"
+check "the function's page: its account and its recent calls, none of what went in or out" "200 $account_1 true false" \
+  "$(status) $(jq -r --arg id "$logged_id" '"\(.account.id) \([.recentCalls[].id] | index($id) != null) \(tostring | contains("\"logs\""))"' <<<"$page")"
+with_token "$operator_token" POST "/admin/functions/$fn_1/invocations/$logged_id" '{}' >/dev/null
+check "a call's data needs a reason" 400 "$(status)"
+look="$(with_token "$operator_token" POST "/admin/functions/$fn_1/invocations/$logged_id" '{"reason": "l5: the customer asked about this call"}')"
+check "given one, the call's input and output" "200 logs" "$(status) $(jq -r .input.name <<<"$look")"
+look="$(with_token "$operator_token" POST "/admin/functions/$fn_1/code" '{"reason": "l5: checking the handler"}')"
+check "the function's code, for a reason" "200 true" "$(status) $(jq -r '.code | contains("handler")' <<<"$look")"
+look="$(with_token "$operator_token" POST "/admin/functions/$fn_1/logs" "$(jq -cn --arg id "$logged_id" '{reason: "l5: its lines", requestId: $id, sinceSeconds: 3600}')")"
+check "its call's log lines, for a reason" "200 true" "$(status) $(jq '.lines | length >= 3' <<<"$look")"
+looks="$(as_user_1 GET '/audit-log?limit=3')"
+check "its owner reads each look in the account's audit log, as FF's, with the reason" \
+  "support.view_logs:FF:l5: its lines support.view_code:FF:l5: checking the handler support.view_invocation:FF:l5: the customer asked about this call" \
+  "$(jq -r '[.entries[] | "\(.action):\(.actorLabel):\(.details.reason)"] | join(" ")' <<<"$looks")"
+
 echo "== the operator's price books (P-73)"
 books="$(with_token "$operator_token" GET /admin/price-books)"
 check "the first price book is active: AWS's prices at the BCT's rate" "200 1 active aws-lambda 3.0080" \
@@ -1046,7 +1070,7 @@ check "and the grants, as FF's, with their reasons (P-74)" "credit.promo:FF:l5: 
   "$(jq -r '[.entries[] | select(.action | startswith("credit.")) | "\(.action):\(.actorLabel):\(.details.reason)"] | reverse | join("|")' <<<"$log_invoices")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -1054,7 +1078,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 21 account.approve,account.egress,account.plan,account.reactivate,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update" \
+  "200 24 account.approve,account.egress,account.plan,account.reactivate,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

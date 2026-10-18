@@ -19,6 +19,10 @@ export type AuditAction =
   | 'account.close'
   // FF deleted a closed account's functions, their history and logs, once its notice period had passed.
   | 'account.data_delete'
+  // An operator looked at a customer's data, for a reason: a function's code, a call's input and output, its logs.
+  | 'support.view_code'
+  | 'support.view_invocation'
+  | 'support.view_logs'
   | 'account.egress'
   | 'function.create'
   | 'function.update'

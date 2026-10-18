@@ -6,7 +6,9 @@ import { Currency } from '../billing/currency.entity';
 import { PriceBook } from '../billing/price-book.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { AuditModule } from '../audit/audit.module';
+import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
+import { FunctionsModule } from '../functions/functions.module';
 import { MailModule } from '../mail/mail.module';
 import { OrchestratorModule } from '../orchestrator/orchestrator.module';
 import { PlansModule } from '../plans/plans.module';
@@ -21,22 +23,25 @@ import { AdminPlansController } from './admin-plans.controller';
 import { AdminPricesController } from './admin-prices.controller';
 import { AdminPricesService } from './admin-prices.service';
 import { AdminSettingsController } from './admin-settings.controller';
+import { AdminSupportController } from './admin-support.controller';
+import { AdminSupportService } from './admin-support.service';
 import { PlatformSettingsModule } from './platform-settings.module';
 
 /** The admin dashboard's routes, under /admin, for FF's operators only (P-70, D12). */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Account, Membership, Function, PriceBook, Currency]),
+    TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, PriceBook, Currency]),
     AuditModule,
     BillingModule,
+    FunctionsModule,
     PlatformSettingsModule,
     MailModule,
     OrchestratorModule,
     PlansModule,
     UsageModule,
   ],
-  controllers: [AdminSettingsController, AdminAuditController, AdminAccountsController, AdminPlansController, AdminPricesController, AdminPaymentsController, AdminInvoicesController],
-  providers: [AdminAccountsService, AdminCreditsService, AdminPricesService],
+  controllers: [AdminSettingsController, AdminAuditController, AdminAccountsController, AdminPlansController, AdminPricesController, AdminPaymentsController, AdminInvoicesController, AdminSupportController],
+  providers: [AdminAccountsService, AdminCreditsService, AdminPricesService, AdminSupportService],
 })
 export class AdminModule implements NestModule {
   /** A withholding certificate comes as the request's body (P-35). */

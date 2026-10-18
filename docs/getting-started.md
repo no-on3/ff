@@ -583,6 +583,15 @@ curl -s -X PUT $FF/admin/accounts/$ACCOUNT/egress -H "Authorization: Bearer $OP"
 curl -s "$FF/admin/accounts/$ACCOUNT/audit-log?limit=20" -H "Authorization: Bearer $OP" | jq -c '.entries[] | {at, actorLabel, action}'
 ```
 
+**Support.** One search finds what a customer asks about: an account by its ID, its name or a member's e-mail, a function by its ID or a part of its name, and a call by its request ID, the ID in the customer's error message or logs. A call the history no longer keeps is still found by its usage record. A function's page has its settings, its account, and its recent calls and failures, each with its status, duration and error type, but not what went in or out. What a call sent and got back (with its whole error message), the code and the logs are the customer's data: they come only for a reason, and each look goes to the account's audit log, where its owners read it as FF's, with that reason. A look that can't be recorded gives nothing.
+
+```bash
+curl -s "$FF/admin/search?q=$REQUEST_ID" -H "Authorization: Bearer $OP" | jq -c '.calls[] | {functionId, accountId, status, inHistory}'
+curl -s $FF/admin/functions/$ID -H "Authorization: Bearer $OP" | jq -c '{account: .account.id, errors: [.recentErrors[] | {status, errorType}]}'
+curl -s -X POST $FF/admin/functions/$ID/invocations/$REQUEST_ID -H "Authorization: Bearer $OP" -H 'content-type: application/json' \
+  -d '{"reason": "Ticket 42: why this call failed"}' | jq -c '{input, output, error}'   # also /code, and /logs with the logs route's fields
+```
+
 **Credit from FF** (P-74). The account page's Credit section has the balance, read as it is now; whether invokes go on, with the negative buffer and grace period (P-33); and this month's charges, debited apart from those only rated in shadow mode. "Grant credit" gives:
 - **Promotional credit**, which only adds.
 - **A correction**, either way: credit added, or taken away. A correction takes the credit left at most, so the balance stays at 0 or above. To leave a debt on purpose, tick "It may leave a debt" (`allowDebt`).
