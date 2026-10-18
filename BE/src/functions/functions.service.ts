@@ -40,6 +40,7 @@ import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-conf
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
 import { callersFailure, failureResponse, platformFailure } from './failures';
+import { keptJson, keptText } from './history';
 import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
 
@@ -339,9 +340,13 @@ export class FunctionsService {
     // D9: 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
     await this.credit.admit(accountId);
 
+    const payload = input || {};
+    // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
+    const keptInput = keptJson(payload);
     const invocation = this.invocationsRepository.create({
       functionId: id,
-      input: input || {},
+      input: keptInput.value,
+      inputTruncated: keptInput.truncated,
       status: InvocationStatus.RUNNING,
     });
 
@@ -352,7 +357,7 @@ export class FunctionsService {
     const startTime = Date.now();
     try {
       // The invocation's ID is the request's: the runtime logs it, and the usage record is keyed by it (D6).
-      const result = await this.orchestrator.invoke(function_, input || {}, invocation.id);
+      const result = await this.orchestrator.invoke(function_, payload, invocation.id);
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
@@ -361,14 +366,17 @@ export class FunctionsService {
       // Update invocation with results and metrics. Duration is the execution
       // time reported by the runtime (the basis for metering), else end-to-end
       // without the cold start, which isn't billed (D7).
-      invocation.output = result.output;
+      const keptOutput = keptJson(result.output);
+      invocation.output = keptOutput.value;
+      invocation.outputTruncated = keptOutput.truncated;
       invocation.duration = result.durationMs ?? Math.max(0, duration - (result.initMs ?? 0));
       invocation.memoryUsed = result.memoryUsedMb;
       invocation.status = InvocationStatus.COMPLETED;
       // Should this fail, the catch below ends the call as a platform failure, unbilled: its outcome couldn't be kept.
       await this.finish(function_, invocation, UsageStatus.SUCCESS, result.initMs);
 
-      return invocation;
+      // The answer: the invocation as kept, with the input and output whole.
+      return Object.assign(invocation, { input: payload, output: result.output });
     } catch (error) {
       const duration = Date.now() - startTime;
       this.metricsService.recordMetric(id, duration, 0, true);
@@ -384,9 +392,12 @@ export class FunctionsService {
             ? InvocationStatus.THROTTLED // no instance could take it: not billed (D7)
             : InvocationStatus.ERROR;
       // The history is the account's to read: a platform failure is generic there too (D4).
-      invocation.error = callersFailure(error) ?? platformFailure(this.logger, 'The invocation', error);
+      const visible = callersFailure(error) ?? platformFailure(this.logger, 'The invocation', error);
+      const keptError = keptText(visible);
+      invocation.error = keptError.value;
+      invocation.errorTruncated = keptError.truncated;
       await this.finish(function_, invocation, failureStatus(error), initMsOf(error));
-      throw failureResponse(error, invocation.error);
+      throw failureResponse(error, visible);
     } finally {
       this.metricsService.invocationFinished(function_);
     }

@@ -6,7 +6,6 @@ import { Currency } from '../billing/currency.entity';
 import { PriceBook } from '../billing/price-book.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { AuditModule } from '../audit/audit.module';
-import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
 import { MailModule } from '../mail/mail.module';
 import { OrchestratorModule } from '../orchestrator/orchestrator.module';
@@ -27,7 +26,7 @@ import { PlatformSettingsModule } from './platform-settings.module';
 /** The admin dashboard's routes, under /admin, for FF's operators only (P-70, D12). */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, PriceBook, Currency]),
+    TypeOrmModule.forFeature([Account, Membership, Function, PriceBook, Currency]),
     AuditModule,
     BillingModule,
     PlatformSettingsModule,

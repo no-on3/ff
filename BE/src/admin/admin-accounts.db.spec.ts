@@ -24,7 +24,6 @@ import { CreditService } from '../billing/credit.service';
 import { LedgerEvents } from '../billing/ledger/ledger-events';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
-import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { Mail, MailService } from '../mail/mail.service';
 import { FunctionWorkload, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
@@ -121,7 +120,6 @@ run('accounts, for operators (L2, P-71)', () => {
       ds.getRepository(Account),
       ds.getRepository(Membership),
       ds.getRepository(Function),
-      ds.getRepository(FunctionInvocation),
       orchestrator,
       audit,
       plans,
@@ -187,33 +185,42 @@ run('accounts, for operators (L2, P-71)', () => {
     });
   });
 
-  it("gives the account page: owners and members, functions with their last call, this month's usage, the status history", async () => {
+  it("gives the account page: owners and members, functions with their last call from the usage records, this month's usage, the status history", async () => {
     const owner = await user('page-owner@ff.test', 'Page Owner');
     const developer = await user('page-dev@ff.test');
     const id = await account({ name: 'Page', taxId: '1234567A', useCase: 'invoices' }, [[owner, 'owner'], [developer, 'developer']]);
     await db.dataSource.getRepository(AuditEntry).save({ accountId: id, actor: `user:${owner.id}`, actorLabel: owner.email, action: 'account.create', resource: `account:${id}` });
     await service.changeStatus(id, 'approve', 'Use case checked');
     const used = await fn(id, { name: 'used' });
+    const quiet = await fn(id, { name: 'quiet' });
     await fn(id, { name: 'never-called', minInstances: 1 });
-    for (const secondsAgo of [120, 60]) {
+    const call = async (functionId: string, name: string, secondsAgo: number, billedMs: number) => {
+      await query(`SELECT ff_ensure_month_partition('usage_records', date_trunc('month', (now() - make_interval(secs => $1)) AT TIME ZONE 'UTC')::date)`, [secondsAgo]);
       await query(
-        `INSERT INTO function_invocations (function_id, input, status, created_at, updated_at) VALUES ($1, '{}', 'COMPLETED', now() - make_interval(secs => $2), now())`,
-        [used.id, secondsAgo],
+        `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb, duration_ms, billed_ms, status)
+         VALUES (gen_random_uuid(), now() - make_interval(secs => $4), now() - make_interval(secs => $4), $1, $2, $3, 'nodejs', 128, $5::numeric, $5::int, 'success')`,
+        [id, functionId, name, secondsAgo, billedMs],
       );
-    }
-    await query(`SELECT ff_ensure_month_partition('usage_records', date_trunc('month', now())::date)`);
-    await query(
-      `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb, duration_ms, billed_ms, status)
-       VALUES (gen_random_uuid(), now(), now(), $1, $2, 'used', 'nodejs', 128, 100, 100, 'success')`,
-      [id, used.id],
-    );
-    const [{ newest }] = await query<Array<{ newest: Date }>>('SELECT max(created_at) AS newest FROM function_invocations WHERE function_id = $1', [used.id]);
+    };
+    await call(used.id, 'used', 0, 100);
+    // Called 50 and 40 days ago, in earlier months: the history's retention cleared their invocations, their usage records stay (P-45).
+    await call(quiet.id, 'quiet', 50 * 86_400, 7);
+    await call(quiet.id, 'quiet', 40 * 86_400, 7);
+    const lastCall = async (functionId: string) =>
+      (await query<Array<{ at: Date }>>('SELECT max(started_at) AS at FROM usage_records WHERE function_id = $1', [functionId]))[0].at;
 
     const page = await service.detail(id);
 
     expect(page.account).toMatchObject({ id, name: 'Page', status: 'active', taxId: '1234567A', useCase: 'invoices', owners: [{ email: 'page-owner@ff.test', name: 'Page Owner' }] });
     expect(page.members.map((m) => [m.email, m.role])).toEqual([['page-owner@ff.test', 'owner'], ['page-dev@ff.test', 'developer']]);
-    expect(page.functions.map((f) => [f.name, f.minInstances, f.lastInvokedAt])).toEqual([['used', 0, newest], ['never-called', 1, null]]);
+    expect(page.functions.map((f) => [f.name, f.minInstances, f.lastInvokedAt])).toEqual([
+      ['used', 0, await lastCall(used.id)],
+      ['quiet', 0, await lastCall(quiet.id)],
+      ['never-called', 1, null],
+    ]);
+    const quietLast = page.functions[1].lastInvokedAt?.getTime() ?? 0;
+    expect(Date.now() - quietLast).toBeGreaterThan(39 * 86_400_000); // the newer of its two calls, 40 days ago
+    expect(Date.now() - quietLast).toBeLessThan(41 * 86_400_000);
     expect(page.usage).toMatchObject({ month: new Date().toISOString().slice(0, 7), totals: { requests: 1, billedMs: 100 } });
     expect(page.statusHistory.map((e) => [e.status, e.by, e.reason])).toEqual([
       ['pending', 'page-owner@ff.test', null],

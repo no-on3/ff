@@ -10,7 +10,6 @@ import { LedgerService } from '../billing/ledger/ledger.service';
 import { formatMinor } from '../billing/money';
 import { describeError } from '../common/describe-error';
 import { likeLiteral } from '../common/like';
-import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
 import { Mail, MailService } from '../mail/mail.service';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
@@ -88,7 +87,6 @@ export class AdminAccountsService {
     @InjectRepository(Account) private readonly accounts: Repository<Account>,
     @InjectRepository(Membership) private readonly memberships: Repository<Membership>,
     @InjectRepository(Function) private readonly functions: Repository<Function>,
-    @InjectRepository(FunctionInvocation) private readonly invocations: Repository<FunctionInvocation>,
     @Inject(ORCHESTRATOR) private readonly orchestrator: Orchestrator,
     private readonly audit: AuditService,
     private readonly plans: PlansService,
@@ -141,7 +139,7 @@ export class AdminAccountsService {
     if (!account) throw new NotFoundException(`Account ${id} not found`);
     const memberships = await this.memberships.find({ where: { accountId: id }, relations: { user: true }, order: { createdAt: 'ASC' } });
     const functions = await this.functions.find({ where: { accountId: id }, order: { createdAt: 'ASC' } });
-    const lastInvoked = await this.lastInvocations(functions.map((function_) => function_.id));
+    const lastInvoked = await this.usage.lastCalls(functions.map((function_) => function_.id));
     const month = new Date().toISOString().slice(0, 7);
     const { totals } = await this.usage.monthly(id, month);
     return {
@@ -241,19 +239,6 @@ export class AdminAccountsService {
     });
     for (const row of rows) owners.set(row.accountId, [...(owners.get(row.accountId) ?? []), person(row)]);
     return owners;
-  }
-
-  /** Each function's newest invocation, in one query. */
-  private async lastInvocations(functionIds: string[]): Promise<Map<string, Date>> {
-    if (functionIds.length === 0) return new Map();
-    const rows = await this.invocations
-      .createQueryBuilder('invocation')
-      .select('invocation.functionId', 'functionId')
-      .addSelect('max(invocation.createdAt)', 'at')
-      .where('invocation.functionId IN (:...functionIds)', { functionIds })
-      .groupBy('invocation.functionId')
-      .getRawMany<{ functionId: string; at: Date }>();
-    return new Map(rows.map((row) => [row.functionId, row.at]));
   }
 
   /**

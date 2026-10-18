@@ -98,6 +98,20 @@ history="$(http GET "/functions/$id/invocations")"
 check "history lists the invocation" 1 "$(jq -r .total <<<"$history")"
 check "a duration was recorded" true "$(jq -r '.invocations[0].duration > 0' <<<"$history")"
 
+# P-45: the history keeps up to 64 KiB of an input and an output, while the answer has them whole; NUL is kept as U+FFFD.
+long="$(head -c 80000 /dev/zero | tr '\0' x)"
+big="$(http POST "/functions/$id/invoke" "$(jq -cn --arg name "$long" '{input: {name: $name}}')")"
+check "an input and an output over 64 KiB are answered whole, and flagged as cut in the history (P-45)" "201 80000 80006 true true" \
+  "$(status) $(jq -r '"\(.input.name | length) \(.output.message | length) \(.inputTruncated) \(.outputTruncated)"' <<<"$big")"
+kept="$(http GET "/functions/$id/invocations?limit=1" | jq -c '.invocations[0]')"
+check "the history keeps the first 64 KiB of each, the start of its JSON text" "true true 65536 65536 true true" \
+  "$(jq -r '"\(.inputTruncated) \(.outputTruncated) \(.input | utf8bytelength) \(.output | utf8bytelength) \(.input | startswith("{\"name\":\"xxx")) \(.output | startswith("{\"version\":1,\"message\":\"Hello xxx"))"' <<<"$kept")"
+nul="$(http POST "/functions/$id/invoke" '{"input":{"name":"a\u0000b"}}')"
+check "a NUL in the input reaches the function, and comes back in the answer (P-45)" "201 true" \
+  "$(status) $(jq -r '.output.message == "Hello a\u0000b"' <<<"$nul")"
+check "the history keeps it as U+FFFD, which PostgreSQL can store" true \
+  "$(http GET "/functions/$id/invocations?limit=1" | jq -r '.invocations[0] | .input.name == "a\ufffdb" and .output.message == "Hello a\ufffdb" and .inputTruncated == false')"
+
 v2="${v1//version: 1/version: 2}"
 http PUT "/functions/$id" "$(jq -n --arg code "$v2" '{code: $code}')" >/dev/null
 check "update returns 200" 200 "$(status)"

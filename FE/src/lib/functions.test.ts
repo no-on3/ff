@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Function } from '../services/api';
 import { BETA_PLAN } from '../test-fixtures';
-import { apiErrorMessage, changedFields, formatDuration, formatMemory, parseInvokeInput, scalingLimitsError } from './functions';
+import { apiErrorMessage, changedFields, formatDuration, formatMemory, historyText, parseInvokeInput, scalingLimitsError } from './functions';
 
 const stored: Function = {
   id: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
@@ -81,6 +81,19 @@ describe('parseInvokeInput', () => {
 
   it('refuses text that is not JSON', () => {
     expect(parseInvokeInput('{name: x}')).toEqual({ ok: false, error: 'The input is not valid JSON' });
+  });
+});
+
+describe('historyText (P-45)', () => {
+  it('shows a value the history kept whole as its JSON, indented, a string in quotes', () => {
+    expect(historyText({ name: 'FF', n: 1 }, false)).toBe('{\n  "name": "FF",\n  "n": 1\n}');
+    expect(historyText('hello', false)).toBe('"hello"');
+    expect(historyText(null, false)).toBe('null');
+    expect(historyText(undefined, false)).toBe('');
+  });
+
+  it('shows the start of the JSON text the history kept of a longer one as it is', () => {
+    expect(historyText('{"rows":[{"i":0},{"i":1},{"i', true)).toBe('{"rows":[{"i":0},{"i":1},{"i');
   });
 });
 

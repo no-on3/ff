@@ -4,10 +4,12 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Tabs, Tab, Box } from '@mui/material';
 import {
   EditableFields,
+  TRUNCATED_NOTE,
   apiErrorMessage,
   changedFields,
   formatDuration,
   formatMemory,
+  historyText,
   parseInvokeInput,
 } from '../lib/functions';
 import { Function, FunctionInvocation, InvocationStatus, functionsApi } from '../services/api';
@@ -269,6 +271,10 @@ const FunctionDetail: React.FC = () => {
                 <span className="text-sm font-normal text-gray-500"> (the latest {invocations.length} of {total})</span>
               )}
             </h2>
+            <p className="text-sm text-gray-500 -mt-2 mb-4">
+              Each call is kept for your plan&apos;s history retention (<Link to="/account">Account</Link>), with up to 64 KiB of its input, output
+              and error.
+            </p>
             <div className="space-y-4">
               {invocations.map((invocation) => (
                 <div key={invocation.id} className="card">
@@ -288,11 +294,13 @@ const FunctionDetail: React.FC = () => {
                     <div className="space-y-2">
                       <div>
                         <h3 className="text-sm font-medium text-gray-700">Input:</h3>
-                        <pre className="bg-gray-50 p-2 rounded mt-1 text-sm">{JSON.stringify(invocation.input, null, 2)}</pre>
+                        <pre className="bg-gray-50 p-2 rounded mt-1 text-sm max-h-64 overflow-auto whitespace-pre-wrap break-all">{historyText(invocation.input, invocation.inputTruncated)}</pre>
+                        {invocation.inputTruncated && <p className="text-xs text-gray-500 mt-1">{TRUNCATED_NOTE}</p>}
                       </div>
                       <div>
                         <h3 className="text-sm font-medium text-gray-700">Output:</h3>
-                        <pre className="bg-gray-50 p-2 rounded mt-1 text-sm">{JSON.stringify(invocation.output, null, 2)}</pre>
+                        <pre className="bg-gray-50 p-2 rounded mt-1 text-sm max-h-64 overflow-auto whitespace-pre-wrap break-all">{historyText(invocation.output, invocation.outputTruncated)}</pre>
+                        {invocation.outputTruncated && <p className="text-xs text-gray-500 mt-1">{TRUNCATED_NOTE}</p>}
                       </div>
                     </div>
 
@@ -322,14 +330,15 @@ const FunctionDetail: React.FC = () => {
                   {invocation.error && (
                     <div className="mt-2">
                       <h3 className="text-sm font-medium text-red-700">Error:</h3>
-                      <pre className="bg-red-50 text-red-700 p-2 rounded mt-1 text-sm">{invocation.error}</pre>
+                      <pre className="bg-red-50 text-red-700 p-2 rounded mt-1 text-sm max-h-64 overflow-auto whitespace-pre-wrap break-all">{invocation.error}</pre>
+                      {invocation.errorTruncated && <p className="text-xs text-gray-500 mt-1">{TRUNCATED_NOTE}</p>}
                     </div>
                   )}
                 </div>
               ))}
 
               {invocations.length === 0 && (
-                <div className="text-center text-gray-500">No invocations yet. Try invoking the function!</div>
+                <div className="text-center text-gray-500">No invocations in the history. Try invoking the function!</div>
               )}
             </div>
           </div>

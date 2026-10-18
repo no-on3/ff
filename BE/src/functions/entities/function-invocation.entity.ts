@@ -38,10 +38,11 @@ export class FunctionInvocation {
   @JoinColumn({ name: 'function_id' })
   function: Function;
 
+  /** The caller's input, a JSON object; in the history, the start of its JSON text when inputTruncated (P-45). */
   @Column({ type: 'jsonb', nullable: true })
-  input: Record<string, unknown>;
+  input: unknown;
 
-  /** Whatever the handler returned: any JSON value. */
+  /** Whatever the handler returned: any JSON value; in the history, the start of its JSON text when outputTruncated (P-45). */
   @Column({ type: 'jsonb', nullable: true })
   output: unknown;
 
@@ -59,6 +60,21 @@ export class FunctionInvocation {
 
   @Column({ nullable: true })
   error?: string;
+
+  /**
+   * P-45: the history kept only the first 64 KiB of the input's compact JSON
+   * text, as a string (history.ts). The invoke's own answer has it whole.
+   */
+  @Column({ default: false })
+  inputTruncated: boolean;
+
+  /** P-45: the same, for the output. */
+  @Column({ default: false })
+  outputTruncated: boolean;
+
+  /** P-45: the history kept only the first 64 KiB of the error. */
+  @Column({ default: false })
+  errorTruncated: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

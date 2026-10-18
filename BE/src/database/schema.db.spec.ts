@@ -46,6 +46,7 @@ const CREDIT_CONTROLS = migrationNames.find((name) => name.startsWith('CreditCon
 const BANK_TRANSFERS = migrationNames.find((name) => name.startsWith('BankTransfers')) as string;
 const INVOICES = migrationNames.find((name) => name.startsWith('Invoices')) as string;
 const CANCELLED_PRO_FORMAS = migrationNames.find((name) => name.startsWith('CancelledProFormas')) as string;
+const INVOCATION_HISTORY = migrationNames.find((name) => name.startsWith('InvocationHistory')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -305,6 +306,37 @@ run('database schema (L2, real PostgreSQL)', () => {
         await fresh.runMigrations({ transaction: 'each' });
         expect(await schemaDrift(fresh)).toEqual([]);
       });
+    });
+  });
+
+  it('the invocation-history migration marks no invocation already kept as truncated, and reverts with a truncated one present, its value kept (P-45)', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CANCELLED_PRO_FORMAS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('f', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      // Kept before P-45: an output of 100 KB, whole.
+      await dataSource.query(`INSERT INTO function_invocations (function_id, input, output, status) VALUES ($1, '{}', to_jsonb(repeat('x', 100000)), 'COMPLETED')`, [id]);
+      const flags = `SELECT input_truncated, output_truncated, error_truncated, octet_length(output #>> '{}') AS bytes FROM function_invocations ORDER BY created_at`;
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, INVOCATION_HISTORY);
+
+      expect(await dataSource.query(flags)).toEqual([{ input_truncated: false, output_truncated: false, error_truncated: false, bytes: 100000 }]);
+      await dataSource.query(
+        `INSERT INTO function_invocations (function_id, input, output, status, output_truncated) VALUES ($1, '{}', to_jsonb('{"rows":[1,2'::text), 'COMPLETED', true)`,
+        [id],
+      );
+
+      await migrateDownTo(dataSource, CANCELLED_PRO_FORMAS);
+
+      expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'function_invocations' AND column_name LIKE '%truncated'`)).toEqual([]);
+      expect(await dataSource.query(`SELECT output #>> '{}' AS output FROM function_invocations ORDER BY created_at`)).toEqual([{ output: 'x'.repeat(100000) }, { output: '{"rows":[1,2' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });
 

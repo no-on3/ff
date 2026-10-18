@@ -18,6 +18,7 @@ import { PLAN_LIMIT_KEYS } from './lib/plans';
 import {
   BALANCE_FIELDS,
   CREDIT_STATE_FIELDS,
+  INVOCATION_FIELDS,
   INVOCATION_STATUSES,
   INVOICE_FIELDS,
   LOGS_PAGE_FIELDS,
@@ -104,6 +105,17 @@ describe("an invocation's status", () => {
 
     expect(backendStatuses).toContain('LOST');
     expect(backendStatuses).toEqual([...INVOCATION_STATUSES]);
+  });
+});
+
+describe('an invocation (P-45)', () => {
+  it("has the API's fields, so the history reads each one there is, the truncation flags among them", () => {
+    const body = invocationSource.slice(invocationSource.indexOf('export class FunctionInvocation {'));
+    const fields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1]);
+
+    // `function` is the relation, which the API never loads into an invocation it returns.
+    expect(fields.filter((field) => field !== 'function')).toEqual([...INVOCATION_FIELDS]);
+    expect(INVOCATION_FIELDS).toEqual(expect.arrayContaining(['inputTruncated', 'outputTruncated', 'errorTruncated']));
   });
 });
 

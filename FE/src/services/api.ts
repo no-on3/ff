@@ -90,11 +90,30 @@ export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' 
 export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'COMPLETED', 'THROTTLED', 'LOST'] as const;
 export type InvocationStatus = (typeof INVOCATION_STATUSES)[number];
 
+/** An invocation's fields, as the API's entity names them: contract.test.ts checks them against it. */
+export const INVOCATION_FIELDS = [
+  'id',
+  'functionId',
+  'input',
+  'output',
+  'status',
+  'duration',
+  'memoryUsed',
+  'error',
+  'inputTruncated',
+  'outputTruncated',
+  'errorTruncated',
+  'createdAt',
+  'updatedAt',
+] as const satisfies ReadonlyArray<keyof FunctionInvocation>;
+
 /** An invocation, as the API returns it: from POST /functions/:id/invoke, and in the history. */
 export interface FunctionInvocation {
   id: string;
   functionId: string;
+  /** In the history, the start of its JSON text, as a string, when inputTruncated. */
   input: unknown;
+  /** In the history, the start of its JSON text, as a string, when outputTruncated. */
   output: unknown;
   status: InvocationStatus;
   /** Milliseconds, as the runtime measured it. */
@@ -102,9 +121,19 @@ export interface FunctionInvocation {
   /** MB: the runtime's peak memory. */
   memoryUsed?: number | null;
   error?: string | null;
+  /** The history kept only the first 64 KiB of the input (P-45). The invoke's own answer has it whole. */
+  inputTruncated: boolean;
+  /** The same, for the output. */
+  outputTruncated: boolean;
+  /** The history kept only the first 64 KiB of the error. */
+  errorTruncated: boolean;
   createdAt: string;
   updatedAt: string;
 }
+// A field missing from INVOCATION_FIELDS stops the build.
+type UnlistedInvocationField = Exclude<keyof FunctionInvocation, (typeof INVOCATION_FIELDS)[number]>;
+const everyInvocationFieldListed: [UnlistedInvocationField] extends [never] ? true : never = true;
+void everyInvocationFieldListed;
 
 /** One page of GET /functions/:id/invocations, newest first. */
 export interface InvocationPage {

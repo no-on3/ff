@@ -183,6 +183,13 @@ curl -s "$FF/functions/$ID/invocations?limit=5" | jq '{total, invocations: [.inv
 curl -s "$FF/functions/$ID/scaling-config" | jq -c .
 ```
 
+**The invocation history** keeps each call for the account's plan's `historyRetentionDays`, 30 days on beta: a job deletes older calls every hour, while their usage records stay for billing. It keeps at most 64 KiB of each input, output and error. Of a longer one, it keeps the start of its JSON text, as a string, and sets `inputTruncated`, `outputTruncated` or `errorTruncated`; the invoke's own answer has the input and output whole. A character PostgreSQL can't store, NUL or a lone surrogate (half of an emoji, from a string cut in two), is kept as U+FFFD; the function gets it as sent.
+
+```bash
+curl -s "$FF/functions/$ID/invocations?limit=1" | jq -c '.invocations[0] | {status, inputTruncated, outputTruncated, errorTruncated}'
+# {"status":"COMPLETED","inputTruncated":false,"outputTruncated":false,"errorTruncated":false}
+```
+
 **Scaling.** Each instance serves one call at a time, as on Lambda. Calls that arrive together get more instances at once, one per call in flight, up to `maxInstances`. Each quiet minute takes one instance away, and 15 idle minutes take the function to zero, unless `minInstances` is above 0. A call waits at most one timeout for a free instance. Change the limits like this:
 
 ```bash
@@ -611,7 +618,7 @@ curl -s -X POST $FF/admin/price-books -H "Authorization: Bearer $OP" -H 'content
 | Changes (create, update, delete, scaling, keys, accounts) | 60 a minute | 429 `TooManyRequestsException: Rate exceeded…`, with `Retry-After` |
 | Invocations | 100 a second | 429, the same, counted apart from changes |
 | Idle before scale to zero | 15 minutes | |
-| History, logs kept | 30 days, 14 days | kept for now: P-45 and P-43 apply them |
+| History, logs kept | 30 days, 14 days | older calls deleted within the hour (P-45); older lines not shown (P-43), and gone from the log store after its 31 days |
 
 Reads are not rate-limited. A rate is counted per account: a user who has no account yet is counted alone, and a caller without a login by address. The counts live in the backend's memory, so they start again when it restarts.
 

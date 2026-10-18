@@ -113,7 +113,7 @@ export class AdminFunctionView {
   @ApiProperty({ example: 128, description: 'MB' }) memory: number;
   @ApiProperty({ example: 'ACTIVE' }) status: string;
   @ApiProperty({ example: 0, description: 'Instances kept warm' }) minInstances: number;
-  @ApiProperty({ nullable: true, type: Date, description: 'Its newest invocation, if any' }) lastInvokedAt: Date | null;
+  @ApiProperty({ nullable: true, type: Date, description: 'Its newest call, from its usage records, which outlive the invocation history (P-45); null if none' }) lastInvokedAt: Date | null;
 }
 
 /** One status the account went through: its creation, or an operator's change. */

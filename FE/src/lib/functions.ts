@@ -47,6 +47,18 @@ export function parseInvokeInput(text: string): ParsedInput {
   return { ok: true, input: value as Record<string, unknown> };
 }
 
+/** What the history says of a value it kept only the start of (P-45). */
+export const TRUNCATED_NOTE = 'Truncated: the history keeps the first 64 KiB.';
+
+/**
+ * An input or output as the history shows it: its JSON, indented; or, when
+ * the history kept only the start of its JSON text, that start as it is.
+ */
+export function historyText(value: unknown, truncated: boolean): string {
+  if (truncated && typeof value === 'string') return value;
+  return JSON.stringify(value, null, 2) ?? '';
+}
+
 /** The API reports memory in MB already: "98 MB", or "N/A" when the runtime reported nothing. */
 export function formatMemory(mb: number | null | undefined): string {
   return typeof mb === 'number' && mb > 0 ? `${Math.round(mb)} MB` : 'N/A';

@@ -179,6 +179,21 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
     return { month, functions, totals: amounts(total as UsageRow) };
   }
 
+  /**
+   * Each function's newest call, by its usage record's start: the records
+   * outlive the invocation history, which the plan's retention clears (P-45).
+   * A call still running has no record yet. One query, an index lookup each.
+   */
+  async lastCalls(functionIds: string[]): Promise<Map<string, Date>> {
+    if (functionIds.length === 0) return new Map();
+    const rows = await this.records.manager.query<Array<{ id: string; at: Date | null }>>(
+      `SELECT f."id", (SELECT max(u."started_at") FROM "usage_records" u WHERE u."function_id" = f."id") AS "at"
+         FROM unnest($1::uuid[]) AS f("id")`,
+      [functionIds],
+    );
+    return new Map(rows.flatMap((row): Array<[string, Date]> => (row.at ? [[row.id, row.at]] : [])));
+  }
+
   /** The names of the account's functions among these IDs; a function deleted since has none. */
   async functionNames(accountId: string, functionIds: string[]): Promise<Map<string, string>> {
     if (functionIds.length === 0) return new Map();

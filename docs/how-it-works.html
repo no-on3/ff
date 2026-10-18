@@ -400,7 +400,7 @@
         <thead><tr><th>Data</th><th>Stored in</th><th>Written by</th><th>Read by</th></tr></thead>
         <tbody>
           <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
-          <tr><td>Invocations: input, output, status, duration, memory, error</td><td>PostgreSQL <code>function_invocations</code></td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST)</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
+          <tr><td>Invocations: input, output and error, up to 64 KiB each, flagged when cut; status, duration, memory</td><td>PostgreSQL <code>function_invocations</code>, kept for the plan's history retention (P-45)</td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST); the hourly purge deletes what is past the retention</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
           <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td><code>GET /usage</code> and the console's Usage page; the capacity report; the hourly rating (P-32)</td></tr>
           <tr><td>The platform's settings: shadow billing, the negative buffer and grace period, low-balance e-mails, the invoice reminder, the large-credit threshold</td><td>PostgreSQL <code>platform_settings</code>; a setting without a row has its default (<code>BE/src/admin/platform-settings.ts</code>)</td><td>the admin dashboard, with a reason, through <code>PUT /admin/settings</code></td><td>the tasks that use them: P-32, P-33, P-36, P-74</td></tr>
           <tr><td>Prices: AWS Lambda's SKUs in TND, the free tier, and where they come from (AWS's US$ prices, the BCT's rate)</td><td>PostgreSQL <code>price_books</code>, each valid from its start until the next one's, and <code>currencies</code>; a book that has started is never changed</td><td>the migration <code>…-PriceBooks.ts</code> (the first book); operators (P-73)</td><td><code>GET /usage</code>'s estimate (<code>PricingService</code>); the hourly rating (P-32)</td></tr>
@@ -525,6 +525,7 @@
           <tr><td>Kubernetes driver</td><td><code>BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts</code>, <code>kube-client.ts</code>, <code>kubernetes.settings.ts</code></td></tr>
           <tr><td>Every Kubernetes object</td><td><code>BE/src/orchestrator/kubernetes/manifests.ts</code>, <code>naming.ts</code></td></tr>
           <tr><td>Metrics, autoscaling, scale to zero</td><td><code>BE/src/metrics/metrics.service.ts</code>, <code>scaling.ts</code></td></tr>
+          <tr><td>The invocation history: what it keeps of each call, and its hourly purge</td><td><code>BE/src/functions/history.ts</code>, <code>BE/src/retention/retention.service.ts</code>, and the migration <code>…-InvocationHistory.ts</code></td></tr>
           <tr><td>Usage records: what is billed, lost calls, monthly partitions</td><td><code>BE/src/usage/usage.ts</code>, <code>usage.service.ts</code>, and the migration <code>…-UsageRecords.ts</code></td></tr>
           <tr><td>The month's usage: <code>GET /usage</code>, its CSV, and the console's page</td><td><code>BE/src/usage/usage.controller.ts</code>, <code>usage.service.ts</code> <code>monthly()</code>, <code>usage-csv.ts</code>, <code>FE/src/components/Usage.tsx</code></td></tr>
           <tr><td>Price books and plans, for operators: a new book and its preview, plan limits applied at once</td><td><code>BE/src/admin/admin-prices.service.ts</code>, <code>admin-plans.controller.ts</code>, <code>BE/src/plans/plans.service.ts</code> <code>update()</code>, <code>admin/src/pages/Prices.tsx</code>, <code>Plans.tsx</code></td></tr>
@@ -759,9 +760,9 @@ const SCENARIOS = [
         text: 'D9\'s rule, with the platform settings (P-33): in shadow mode nothing is refused. Otherwise the balance may go down to the negative buffer (1.000 TND), then for the grace period (24 hours); after that, invokes answer 402 InsufficientCreditException until credit comes, and nothing of the call is recorded. The balance is cached per account, and dropped when the ledger NOTIFYs a write to the wallet, from any backend.',
         code: 'billing/credit.service.ts admit() · credit-policy.ts creditDecision()' },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'The invocation is recorded as RUNNING',
-        text: 'The record exists before the call, so a timeout or a crash still leaves a trace. The backend starts its clock after this insert.',
-        code: 'functions.service.ts invoke()',
-        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"function_id\", \"input\", \"status\", …)\nVALUES ('" + FN + "', '{\"name\":\"Tunis\"}', 'RUNNING', …)\nRETURNING \"id\";   -- " + INV },
+        text: 'The record exists before the call, so a timeout or a crash still leaves a trace. The backend starts its clock after this insert. The history keeps up to 64 KiB of the input (P-45): of a longer one, the start of its JSON text, with input_truncated set, while the function gets it whole.',
+        code: 'functions.service.ts invoke() · history.ts keptJson()',
+        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"function_id\", \"input\", \"input_truncated\", \"status\", …)\nVALUES ('" + FN + "', '{\"name\":\"Tunis\"}', false, 'RUNNING', …)\nRETURNING \"id\";   -- " + INV },
         set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment · readyReplicas 1', title: 'Is an instance ready?',
         text: 'The backend asks before every invocation. readyReplicas is 1, so the call goes straight to the pod; with 0 this would be a cold start, as the next scenario shows.',
@@ -806,14 +807,14 @@ const SCENARIOS = [
         text: 'The end-to-end time measured by the backend, the memory, and the outcome go into this function\'s current one-minute window, which becomes a metrics row at the next tick; see "Metrics, autoscaling, and history".',
         code: 'BE/src/metrics/metrics.service.ts recordMetric()' },
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE invocation · INSERT usage record', title: 'The invocation is COMPLETED, and metered',
-        text: 'One transaction saves the output, the runtime\'s duration and the memory, and writes the call\'s usage record (D6): what the price depends on, as the function is now, and the billed duration, the runtime\'s rounded up to the millisecond (D7). It locks the invocation first, as the lost-call reaper does. The record is never changed or deleted: the table refuses it.',
+        text: 'One transaction saves the output (up to 64 KiB of it, as for the input), the runtime\'s duration and the memory, and writes the call\'s usage record (D6): what the price depends on, as the function is now, and the billed duration, the runtime\'s rounded up to the millisecond (D7). It locks the invocation first, as the lost-call reaper does. The record is never changed or deleted: the table refuses it.',
         code: 'functions.service.ts finish() · usage/usage.ts usageRecord()',
-        msg: { kind: 'sql', text: "BEGIN;\nSELECT … FROM \"function_invocations\" WHERE \"id\" = '" + INV + "' FOR UPDATE;   -- still RUNNING\nUPDATE \"function_invocations\"\n   SET \"status\" = 'COMPLETED', \"output\" = '{\"message\":\"Hello Tunis\",…}', \"duration\" = 1.09, \"memory_used\" = 98\n WHERE \"id\" = '" + INV + "';\nINSERT INTO \"usage_records\" (\"request_id\", \"started_at\", \"account_id\", \"function_id\", \"function_name\", \"runtime\",\n       \"memory_mb\", \"duration_ms\", \"billed_ms\", \"init_ms\", \"status\", \"ended_at\")\nVALUES ('" + INV + "', '2026-10-16 14:02:10.212+00', '000000000001', '" + FN + "', 'hello', 'nodejs',\n       128, 1.090, 2, NULL, 'success', '2026-10-16 14:02:10.251+00')\nON CONFLICT DO NOTHING;   -- written once\nCOMMIT;" },
+        msg: { kind: 'sql', text: "BEGIN;\nSELECT … FROM \"function_invocations\" WHERE \"id\" = '" + INV + "' FOR UPDATE;   -- still RUNNING\nUPDATE \"function_invocations\"\n   SET \"status\" = 'COMPLETED', \"output\" = '{\"message\":\"Hello Tunis\",…}', \"output_truncated\" = false,\n       \"duration\" = 1.09, \"memory_used\" = 98\n WHERE \"id\" = '" + INV + "';\nINSERT INTO \"usage_records\" (\"request_id\", \"started_at\", \"account_id\", \"function_id\", \"function_name\", \"runtime\",\n       \"memory_mb\", \"duration_ms\", \"billed_ms\", \"init_ms\", \"status\", \"ended_at\")\nVALUES ('" + INV + "', '2026-10-16 14:02:10.212+00', '000000000001', '" + FN + "', 'hello', 'nodejs',\n       128, 1.090, 2, NULL, 'success', '2026-10-16 14:02:10.251+00')\nON CONFLICT DO NOTHING;   -- written once\nCOMMIT;" },
         set: { 'PostgreSQL.function_invocations': 'COMPLETED · 1.09 ms · 98 MB', 'PostgreSQL.usage_records': 'success · 128 MB · billed 2 ms' } },
       { from: 'api', to: 'user', kind: 'res', label: '201 · the invocation', title: 'You get the result',
-        text: 'The response is the invocation record; output holds what your handler returned.',
+        text: 'The response is the invocation record; output holds what your handler returned, whole, even when the history keeps only the start of it (outputTruncated).',
         code: 'functions.controller.ts invoke()',
-        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { functionId: FN, input: { name: 'Tunis' }, status: 'COMPLETED', output: { message: 'Hello Tunis', requestId: REQ }, memoryUsed: 98, error: null, id: INV, duration: 1.09, createdAt: '2026-10-16T14:02:10.212Z', updatedAt: '2026-10-16T14:02:10.251Z' } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { functionId: FN, input: { name: 'Tunis' }, status: 'COMPLETED', output: { message: 'Hello Tunis', requestId: REQ }, memoryUsed: 98, error: null, inputTruncated: false, outputTruncated: false, errorTruncated: false, id: INV, duration: 1.09, createdAt: '2026-10-16T14:02:10.212Z', updatedAt: '2026-10-16T14:02:10.251Z' } } },
     ],
   },
   {
@@ -957,7 +958,7 @@ const SCENARIOS = [
       { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/invocations', title: 'You look at the history', text: 'The newest invocation first.', code: 'functions.controller.ts getInvocations()',
         msg: { kind: 'http', first: 'GET /functions/' + FN + '/invocations?limit=1 HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · LOST', title: 'It says what happened', text: 'The console shows LOST in grey, with the reason.', code: 'functions.service.ts getInvocations()',
-        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { invocations: [{ id: INV, functionId: FN, input: { name: 'Bizerte' }, output: null, status: 'LOST', duration: 0, memoryUsed: null, error: 'Lost: the backend restarted during the call, so its answer is unknown. It isn\'t billed.', createdAt: '2026-10-16T14:06:00.120Z', updatedAt: '2026-10-16T14:08:30.004Z' }], total: 1 } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { invocations: [{ id: INV, functionId: FN, input: { name: 'Bizerte' }, output: null, status: 'LOST', duration: 0, memoryUsed: null, error: 'Lost: the backend restarted during the call, so its answer is unknown. It isn\'t billed.', inputTruncated: false, outputTruncated: false, errorTruncated: false, createdAt: '2026-10-16T14:06:00.120Z', updatedAt: '2026-10-16T14:08:30.004Z' }], total: 1 } } },
     ],
   },
   {
@@ -1120,6 +1121,34 @@ const SCENARIOS = [
         text: 'The same query, written as a download: a line per function, no total line for a spreadsheet to count twice. A function name a spreadsheet would run as a formula (=, +, -, @) gets a leading apostrophe.',
         code: 'usage/usage-csv.ts usageCsv()',
         msg: [{ kind: 'http', first: 'GET /usage?month=2026-10 HTTP/1.1', headers: { accept: 'text/csv' } }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="ff-usage-000000000001-2026-10.csv"' }, body: 'function_id,function_name,deleted,requests,billed_ms,gb_seconds,throttled,platform_errors,lost,cost\r\n' + FN + ',hello,false,4,3016,0.752,0,0,1,0.000' }] },
+    ],
+  },
+  {
+    id: 'retention', title: 'Purge the invocation history', lanes: ['user', 'api', 'db'],
+    summary: 'The history holds the input and output of the customer\'s own users: personal data (P-45). At start and every hour, the backend deletes the calls older than each account\'s plan\'s history retention, 30 days on beta. Their usage records stay: they are what is billed.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '40 rows, 12 older than 30 days', 'PostgreSQL.usage_records': '40 rows' }),
+    steps: [
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT plans', title: 'Each plan\'s retention',
+        text: 'Each plan\'s limits, checked as every reader of them checks them. A plan whose limits can\'t be read keeps its accounts\' history, and the purge logs it.',
+        code: 'retention/retention.service.ts purgeHistory()', t: '⏱ at start, then every hour',
+        msg: { kind: 'sql', text: "SELECT \"id\", \"name\", \"limits\" FROM \"plans\" ORDER BY \"id\";   -- beta: historyRetentionDays 30" } },
+      { from: 'api', to: 'db', kind: 'req', label: 'DELETE … LIMIT 1000 · 12 rows', title: 'The calls past 30 days go',
+        text: 'For the plan\'s accounts, each function\'s oldest calls first, through the history\'s (function_id, created_at) index: the work grows with what is deleted, not with the history. Days are 24 hours, by the database\'s clock. A call still RUNNING is the lost-call reaper\'s, whatever its age. 1,000 at a time, until a statement deletes fewer, so that no transaction holds many locks.',
+        code: 'retention/retention.service.ts purgeHistory()',
+        msg: { kind: 'sql', text: "DELETE FROM \"function_invocations\" WHERE \"id\" IN (\n  SELECT old.\"id\" FROM \"accounts\" a\n    JOIN \"functions\" f ON f.\"account_id\" = a.\"id\"\n    CROSS JOIN LATERAL (\n      SELECT i.\"id\" FROM \"function_invocations\" i\n       WHERE i.\"function_id\" = f.\"id\" AND i.\"status\" <> 'RUNNING'\n         AND i.\"created_at\" < now() - make_interval(secs => 2592000)\n       ORDER BY i.\"created_at\" LIMIT 1000) old\n   WHERE a.\"plan_id\" = 'beta'\n   LIMIT 1000);   -- DELETE 12" },
+        set: { 'PostgreSQL.function_invocations': '28 rows, none older than 30 days' } },
+      { from: 'api', to: 'api', kind: 'int', label: 'log: Deleted 12 invocation(s)', title: 'Said once, in the server log',
+        text: 'Nothing is logged when nothing was past its retention. A purge still running when the next hour comes isn\'t started again.',
+        code: 'retention/retention.service.ts purgeInBackground()',
+        msg: { kind: 'log', lines: ['[RetentionService] Deleted 12 invocation(s) past their plan\'s history retention'] } },
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /functions/:id/invocations', title: 'You look at the history',
+        text: 'The calls of the last 30 days, newest first. The console says under the history\'s title how long calls are kept, and the account page gives the plan\'s days.',
+        code: 'functions.controller.ts getInvocations()',
+        msg: { kind: 'http', first: 'GET /functions/' + FN + '/invocations?limit=20 HTTP/1.1', headers: { host: 'localhost:3000' } } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · 28 calls', title: 'What is left',
+        text: 'Each with up to 64 KiB of its input, output and error. The usage page still counts the deleted calls, and the admin page\'s last call reads usage records, which outlive the history.',
+        code: 'functions.service.ts getInvocations()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { invocations: ['… the 20 newest'], total: 28 } } },
     ],
   },
   {
@@ -2003,7 +2032,7 @@ function initSimulator() {
 function erDiagram() {
   // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16), and the audit log (P-17); row 3: usage records (P-20), API keys (P-13) and capacity samples (P-21); row 4: price books and currencies (P-30), and the platform's settings (P-70); row 5: the ledger (P-31); row 6: the hourly rating (P-32); row 7: payments (P-35) and the low-balance e-mails (P-33); rows 8 and 9: invoices (P-36).
   const tables = [
-    { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · …'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · …'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['input_truncated', 'bool = false'], ['output_truncated', 'bool = false'], ['error_truncated', 'bool = false'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
     { name: 'functions', x: 350, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar'], ['account_id', 'char(12) · FK, indexed'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
     { name: 'function_metrics', x: 684, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['request_count', 'int'], ['error_count', 'int'], ['response_time_p50', 'float, ms'], ['response_time_p95', 'float, ms'], ['response_time_p99', 'float, ms'], ['memory_usage', 'float, MB'], ['active_instances', 'int'], ['max_concurrency', 'int, calls at once'], ['created_at', 'timestamptz']] },
     { name: 'plans', x: 16, row: 1, cols: [['id', 'text · PK, "beta"', 'pk'], ['name', 'text'], ['limits', 'jsonb (P-15)']] },
