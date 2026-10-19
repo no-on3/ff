@@ -9,6 +9,7 @@ import {
   ThrottlerStorage,
 } from '@nestjs/throttler';
 import { RequestWithPrincipal } from '../auth/principal';
+import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { DEFAULT_PLAN, PlanView } from './plan-limits';
 import { PlansService } from './plans.service';
 
@@ -86,6 +87,7 @@ export class RateLimitGuard extends ThrottlerGuard {
     @InjectThrottlerStorage() storage: ThrottlerStorage,
     reflector: Reflector,
     private readonly plans: PlansService,
+    private readonly refused: RefusedInvocationsService,
   ) {
     super(options, storage, reflector);
   }
@@ -94,6 +96,9 @@ export class RateLimitGuard extends ThrottlerGuard {
     const { req, res } = this.getRequestResponse(context);
     const name = detail.key.slice(0, detail.key.indexOf(':')) as RateLimitName;
     const plan = await planOf(this.plans, req as RateLimitedRequest);
+    // A refused invocation reached no function and has no usage record: the Throttles metric counts it here.
+    const principal = (req as RateLimitedRequest).principal;
+    if (name === 'invokes' && principal) this.refused.count(principal.accountId, (req as { params?: { id?: string } }).params?.id);
     this.setResponseHeader(res, 'Retry-After', detail.timeToBlockExpire);
     throw new HttpException(
       {

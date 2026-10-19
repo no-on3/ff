@@ -152,7 +152,8 @@ const FunctionDetail: React.FC = () => {
 
   return (
     <div className="container mx-auto px-4 py-8">
-      <Tabs value={activeTab} onChange={handleTabChange}>
+      {/* On a phone the tabs don't fit: the bar scrolls by touch. Scroll buttons would appear after the open tab is scrolled into view, and hide it. */}
+      <Tabs value={activeTab} onChange={handleTabChange} variant="scrollable" scrollButtons={false}>
         <Tab label="Overview" />
         <Tab label="Invocations" />
         <Tab label="Logs" />

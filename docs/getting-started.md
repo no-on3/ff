@@ -190,6 +190,24 @@ curl -s "$FF/functions/$ID/invocations?limit=1" | jq -c '.invocations[0] | {stat
 # {"status":"COMPLETED","inputTruncated":false,"outputTruncated":false,"errorTruncated":false}
 ```
 
+**Metrics.** `GET /functions/<id>/metrics` gives a function's figures, a point per period, under the names CloudWatch gives Lambda's:
+- `Invocations`: every call that reached the function, failed or not;
+- `Errors`: its errors and timeouts, and the calls FF failed or lost;
+- `Throttles`: the calls refused, because no instance was free in time or the plan's rate limit was reached;
+- `ColdStarts`: the calls that waited for an instance to load the code;
+- `Duration`: the `Average`, `Maximum`, `p50`, `p95` and `p99` in milliseconds, `null` in a period without a measured call;
+- `Instances`: the `Maximum` ready in one minute of the period, and the `Average` over its minutes.
+
+`GET /metrics` gives the same for the whole account, deleted functions included. Both are worked out from the usage records the bill is made of, so they agree with it, and with the history. `period` is 60 (the default), 300 or 3600 seconds. `start` and `end` are RFC 3339 times, rounded out to whole periods of UTC time; by default the window starts 60 periods before now. An answer has at most 1,440 points: a longer window answers 400 and says so. An API key needs the `metrics:read` scope.
+
+```bash
+curl -s "$FF/functions/$PY/metrics?period=300" \
+  | jq -c '{period, points: (.timestamps | length), calls: (.metrics.Invocations | add), errors: (.metrics.Errors | add), slowest: ([.metrics.Duration.Maximum[] | values] | max)}'
+# {"period":300,"points":61,"calls":2,"errors":1,"slowest":103.4}
+curl -s "$FF/metrics?period=3600&start=$(date -u -d '-1 day' +%FT%TZ)" | jq -c '.metrics | {calls: (.Invocations | add), throttles: (.Throttles | add)}'
+# {"calls":4,"throttles":0}
+```
+
 **Scaling.** Each instance serves one call at a time, as on Lambda. Calls that arrive together get more instances at once, one per call in flight, up to `maxInstances`. Each quiet minute takes one instance away, and 15 idle minutes take the function to zero, unless `minInstances` is above 0. A call waits at most one timeout for a free instance. Change the limits like this:
 
 ```bash

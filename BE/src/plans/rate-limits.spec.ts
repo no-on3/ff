@@ -13,6 +13,7 @@ import { RequestWithPrincipal } from '../auth/principal';
 import { PlanView } from './plan-limits';
 import { PlansService } from './plans.service';
 import { Invocation, RateLimitGuard, rateLimitOf, rateLimitOptions } from './rate-limits';
+import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { plan } from './test-fixtures';
 
 @Controller('probe')
@@ -59,6 +60,8 @@ const PLANS: Record<string, PlanView> = {
   tight: plan({ writesPerMinute: 3, invokesPerSecond: 2 }, 'tight', 'Tight'),
 };
 const plans = { get: async (id: string) => PLANS[id] } as unknown as PlansService;
+/** What the Throttles metric is told of each refused invocation. */
+const refusedCount = { count: jest.fn() };
 
 @Module({ providers: [{ provide: PlansService, useValue: plans }], exports: [PlansService] })
 class FakePlansModule {}
@@ -81,6 +84,7 @@ describe('rate limits per account (L1, P-15)', () => {
       providers: [
         { provide: APP_GUARD, useClass: StandInAuthGuard },
         { provide: APP_GUARD, useClass: RateLimitGuard },
+        { provide: RefusedInvocationsService, useValue: refusedCount },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -108,6 +112,7 @@ describe('rate limits per account (L1, P-15)', () => {
     const refused = await call('POST', '/probe', 'a1', 'tight');
 
     expect(refused.status).toBe(429);
+    expect(refusedCount.count).not.toHaveBeenCalled(); // a refused change reached no function: no Throttles
     const retryAfter = Number(refused.headers.get('retry-after'));
     expect(retryAfter).toBeGreaterThan(55);
     expect(retryAfter).toBeLessThanOrEqual(60);
@@ -127,6 +132,11 @@ describe('rate limits per account (L1, P-15)', () => {
 
     expect(await statuses([invoke, invoke, invoke])).toEqual([201, 201, 429]);
     const refused = await invoke();
+    // Each refused invocation, for its account and the function the path names: the Throttles metric counts them.
+    expect(refusedCount.count.mock.calls).toEqual([
+      ['a1', 'f'],
+      ['a1', 'f'],
+    ]);
     expect(((await refused.json()) as { message: string }).message).toMatch(
       /^TooManyRequestsException: Rate exceeded: the Tight plan allows 2 invocations per second\. Retry after 1 s\.$/,
     );

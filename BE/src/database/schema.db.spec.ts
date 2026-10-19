@@ -524,6 +524,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'plans',
         'platform_settings',
         'price_books',
+        'rate_limited_invocations',
         'rating_runs',
         'tax_rates',
         'usage_charges',

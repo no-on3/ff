@@ -11,6 +11,7 @@ import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
+import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
@@ -22,6 +23,7 @@ import {
   INVOCATION_FIELDS,
   INVOCATION_STATUSES,
   ME_ACCOUNT_FIELDS,
+  METRIC_NAMES,
   INVOICE_FIELDS,
   LOGS_PAGE_FIELDS,
   LOGS_QUERY_PARAMS,
@@ -107,6 +109,12 @@ describe("an invocation's status", () => {
 
     expect(backendStatuses).toContain('LOST');
     expect(backendStatuses).toEqual([...INVOCATION_STATUSES]);
+  });
+});
+
+describe('the metrics', () => {
+  it("are the API's series, named as CloudWatch names Lambda's", () => {
+    expect(dtoFields(metricsDtoSource, 'class MetricSeries {')).toEqual([...METRIC_NAMES]);
   });
 });
 

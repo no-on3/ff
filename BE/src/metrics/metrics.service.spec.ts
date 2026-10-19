@@ -1,4 +1,3 @@
-import { NotFoundException } from '@nestjs/common';
 import { In } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
@@ -333,25 +332,6 @@ describe('MetricsService', () => {
       await service.tick();
 
       expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 0);
-    });
-  });
-
-  describe("a function's metrics (P-10)", () => {
-    const period = { start: new Date('2026-10-17T00:00:00Z'), end: new Date('2026-10-17T01:00:00Z') };
-
-    it('are read for the account that owns the function', async () => {
-      functionRepository.exists.mockResolvedValue(true);
-      metricsRepository.find.mockResolvedValue([{ functionId: 'fn-1', invocations: 3 }]);
-
-      await expect(service.getMetrics('000000000001', 'fn-1', period)).resolves.toEqual([{ functionId: 'fn-1', invocations: 3 }]);
-      expect(functionRepository.exists).toHaveBeenCalledWith({ where: { id: 'fn-1', accountId: '000000000001' } });
-    });
-
-    it("answer another account with 404, without reading them", async () => {
-      functionRepository.exists.mockResolvedValue(false);
-
-      await expect(service.getMetrics('000000000002', 'fn-1', period)).rejects.toBeInstanceOf(NotFoundException);
-      expect(metricsRepository.find).not.toHaveBeenCalled();
     });
   });
 });

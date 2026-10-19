@@ -319,6 +319,13 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B reads its own usage, which never counts A's function" "200 0" \
         "$(status) $(jq --arg id "$id" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_b")"
       ;;
+    "GET /metrics")
+      # A's function was called in the last hour; B called nothing.
+      metrics_b="$(as_b GET /metrics)"
+      metrics_status="$(status)"
+      check "$route: B reads its own metrics, which never count A's calls" "200 0 true" \
+        "$metrics_status $(jq -r '[.metrics.Invocations[]] | add' <<<"$metrics_b") $(as_a GET /metrics | jq '[.metrics.Invocations[]] | add > 0')"
+      ;;
     "GET /billing/balance")
       balance_b="$(as_b GET /billing/balance)"
       check "$route: B reads its own balance, none of A's credit" "200 0.000" "$(status) $(jq -r .balance <<<"$balance_b")"
@@ -532,6 +539,12 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2's usage never counts account 1's function" "200 0" \
         "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_2")"
       ;;
+    "GET /metrics")
+      metrics_2="$(as_user_2 GET /metrics)"
+      metrics_status="$(status)"
+      check "$route: account 2's metrics never count account 1's calls" "200 0 true" \
+        "$metrics_status $(jq -r '[.metrics.Invocations[]] | add' <<<"$metrics_2") $(as_user_1 GET /metrics | jq '[.metrics.Invocations[]] | add > 0')"
+      ;;
     "GET /billing/balance")
       balance_2="$(as_user_2 GET /billing/balance)"
       check "$route: account 2's balance has none of account 1's credit" "200 0.000" "$(status) $(jq -r .balance <<<"$balance_2")"
@@ -654,7 +667,7 @@ done
 for route in "${routes[@]}"; do
   method="${route%% *}"
   template="${route#* }"
-  case $template in /functions/* | /metrics/*) ;; *) continue ;; esac
+  case $template in /functions/*) ;; *) continue ;; esac
   with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
   check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
@@ -856,6 +869,17 @@ plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
   "$(jq -cn --argjson limits "$beta_limits" '{limits: ($limits | .quota = {pods: 32, cpu: "16", memory: "16Gi"}), reason: "l5: pilots need more"}')")"
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
   "$(status) $(jq -r '"\(.quota.applied) \(.quota.failed)"' <<<"$plan_change") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
+
+echo "== metrics, from the usage records the bill is made of"
+since="$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)"
+metrics_1="$(as_user_1 GET "/functions/$fn_1/metrics?period=3600&start=$since")"
+metrics_status="$(status)"
+recorded_1="$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c \
+  "SELECT count(*) FROM usage_records WHERE function_id = '$fn_1' AND status <> 'throttled' AND started_at >= date_trunc('hour', '$since'::timestamptz)")"
+check "the function's Invocations, by the hour, are its usage records' calls, exactly" "200 $recorded_1 true" \
+  "$metrics_status $(jq -r '[.metrics.Invocations[]] | add' <<<"$metrics_1") $(jq '[.metrics.Duration.p50[] | select(. != null)] | length > 0' <<<"$metrics_1")"
+as_user_1 GET "/functions/$fn_1/metrics?period=60&start=2026-01-01T00:00:00Z" >/dev/null
+check "a window of more points than an answer gives is refused, saying why" 400 "$(status)"
 
 echo "== support: finding what a customer asks about, and its data only for a reason"
 found="$(with_token "$operator_token" GET "/admin/search?q=$logged_id")"

@@ -1,0 +1,114 @@
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import { InstancesRow, MetricsView, MetricsWindow, PeriodRow, metricsView } from './customer-metrics';
+
+/** A call that ran: measured by the runtime, and so in the duration's statistics. */
+const RAN = "('success', 'error', 'timeout')";
+/** A call that failed: by the function's fault, the platform's, or lost when the backend stopped. */
+const FAILED = "('error', 'timeout', 'platform_error', 'lost')";
+
+interface Scope {
+  /** The SQL that picks the scope's rows of a table aliased `t`, with its parameters from $4. */
+  where: string;
+  parameters: unknown[];
+}
+
+/**
+ * The metrics of a function, or of a whole account, from its usage records,
+ * its rate-limited invocations and its capacity samples (customer-metrics.ts).
+ */
+@Injectable()
+export class CustomerMetricsService {
+  constructor(private readonly dataSource: DataSource) {}
+
+  /** A function's, for its own account only: another account's function is not found. */
+  async forFunction(accountId: string, functionId: string, window: MetricsWindow): Promise<MetricsView> {
+    const found = await this.dataSource.query<unknown[]>('SELECT 1 FROM "functions" WHERE "id" = $1 AND "account_id" = $2', [functionId, accountId]);
+    if (found.length === 0) throw new NotFoundException(`Function with ID ${functionId} not found`);
+    return this.metrics(window, { where: 't."account_id" = $4 AND t."function_id" = $5', parameters: [accountId, functionId] });
+  }
+
+  /** The account's, all its functions together, those deleted since included. */
+  forAccount(accountId: string, window: MetricsWindow): Promise<MetricsView> {
+    return this.metrics(window, { where: 't."account_id" = $4', parameters: [accountId] });
+  }
+
+  private async metrics(window: MetricsWindow, scope: Scope): Promise<MetricsView> {
+    const [rows, refused, instances] = await Promise.all([this.calls(window, scope), this.refused(window, scope), this.instances(window, scope)]);
+    const throttled = new Map(refused.map((row) => [row.bucket, row.count]));
+    const seen = new Set(rows.map((row) => row.bucket));
+    const merged = rows.map((row) => ({ ...row, throttles: row.throttles + (throttled.get(row.bucket) ?? 0) }));
+    for (const [bucket, count] of throttled) if (!seen.has(bucket)) merged.push(emptyRow(bucket, count));
+    return metricsView(window, merged, instances);
+  }
+
+  private async calls(window: MetricsWindow, scope: Scope): Promise<PeriodRow[]> {
+    const rows = await this.dataSource.query<
+      Array<{ bucket: string; invocations: string; errors: string; throttles: string; cold_starts: string; average: string | null; maximum: string | null; percentiles: number[] | null }>
+    >(
+      `SELECT floor(extract(epoch FROM t."started_at") / $3)::bigint * $3 AS "bucket",
+              count(*) FILTER (WHERE t."status" <> 'throttled') AS "invocations",
+              count(*) FILTER (WHERE t."status" IN ${FAILED}) AS "errors",
+              count(*) FILTER (WHERE t."status" = 'throttled') AS "throttles",
+              count(*) FILTER (WHERE t."init_ms" IS NOT NULL) AS "cold_starts",
+              avg(t."duration_ms") FILTER (WHERE t."status" IN ${RAN}) AS "average",
+              max(t."duration_ms") FILTER (WHERE t."status" IN ${RAN}) AS "maximum",
+              percentile_cont(ARRAY[0.5, 0.95, 0.99]) WITHIN GROUP (ORDER BY t."duration_ms") FILTER (WHERE t."status" IN ${RAN}) AS "percentiles"
+         FROM "usage_records" t
+        WHERE t."started_at" >= $1 AND t."started_at" < $2 AND ${scope.where}
+        GROUP BY 1`,
+      [window.start, window.end, window.period, ...scope.parameters],
+    );
+    return rows.map((row) => ({
+      bucket: Number(row.bucket),
+      invocations: Number(row.invocations),
+      errors: Number(row.errors),
+      throttles: Number(row.throttles),
+      coldStarts: Number(row.cold_starts),
+      durationAverage: row.average === null ? null : Number(row.average),
+      durationMaximum: row.maximum === null ? null : Number(row.maximum),
+      durationP50: row.percentiles?.[0] ?? null,
+      durationP95: row.percentiles?.[1] ?? null,
+      durationP99: row.percentiles?.[2] ?? null,
+    }));
+  }
+
+  /** Calls the account's rate limit refused: no usage record has them. */
+  private async refused(window: MetricsWindow, scope: Scope): Promise<Array<{ bucket: number; count: number }>> {
+    const rows = await this.dataSource.query<Array<{ bucket: string; count: string }>>(
+      `SELECT floor(extract(epoch FROM t."minute") / $3)::bigint * $3 AS "bucket", sum(t."count") AS "count"
+         FROM "rate_limited_invocations" t
+        WHERE t."minute" >= $1 AND t."minute" < $2 AND ${scope.where}
+        GROUP BY 1`,
+      [window.start, window.end, window.period, ...scope.parameters],
+    );
+    return rows.map((row) => ({ bucket: Number(row.bucket), count: Number(row.count) }));
+  }
+
+  /** Each minute's ready instances, the scope's functions added up, then per period: its most, and its sum over its minutes. */
+  private async instances(window: MetricsWindow, scope: Scope): Promise<InstancesRow[]> {
+    const rows = await this.dataSource.query<Array<{ bucket: string; maximum: string; minute_sum: string }>>(
+      `SELECT floor(extract(epoch FROM m."minute") / $3)::bigint * $3 AS "bucket", max(m."instances") AS "maximum", sum(m."instances") AS "minute_sum"
+         FROM (SELECT t."minute", sum(t."instances") AS "instances"
+                 FROM "capacity_samples" t
+                WHERE t."minute" >= $1 AND t."minute" < $2 AND ${scope.where}
+                GROUP BY t."minute") m
+        GROUP BY 1`,
+      [window.start, window.end, window.period, ...scope.parameters],
+    );
+    return rows.map((row) => ({ bucket: Number(row.bucket), maximum: Number(row.maximum), minuteSum: Number(row.minute_sum) }));
+  }
+}
+
+const emptyRow = (bucket: number, throttles: number): PeriodRow => ({
+  bucket,
+  invocations: 0,
+  errors: 0,
+  throttles,
+  coldStarts: 0,
+  durationAverage: null,
+  durationMaximum: null,
+  durationP50: null,
+  durationP95: null,
+  durationP99: null,
+});

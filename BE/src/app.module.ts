@@ -15,6 +15,7 @@ import configuration, { DatabaseSettings } from './config/configuration';
 import { dataSourceOptions } from './database/database.options';
 import { FunctionsModule } from './functions/functions.module';
 import { HealthController } from './health/health.controller';
+import { MetricsModule } from './metrics/metrics.module';
 import { MinioClientModule } from './minio-client/minio-client.module';
 import { PlansModule } from './plans/plans.module';
 import { PlansService } from './plans/plans.service';
@@ -44,6 +45,7 @@ import { RetentionModule } from './retention/retention.module';
     ApiKeysModule,
     AuditModule,
     FunctionsModule,
+    MetricsModule,
     MinioClientModule,
     PlansModule,
     RetentionModule,

@@ -443,15 +443,35 @@ export const billingApi = {
   getStatementPdf: (month: string) => api.get<Blob>(`/billing/statements/${encodeURIComponent(month)}/pdf`, { responseType: 'blob' }),
 };
 
-// Metrics API endpoints
-export const getMetrics = async (functionId: string, start: Date, end: Date) => {
-  const response = await api.get(`/metrics/${functionId}`, {
-    params: {
-      start: start.toISOString(),
-      end: end.toISOString(),
-    },
-  });
-  return response.data;
+/** A metrics answer's series names, as the API's DTO names them, after CloudWatch's: contract.test.ts checks them. */
+export const METRIC_NAMES = ['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances'] as const;
+
+/** GET /functions/:id/metrics and GET /metrics: a point per period of the window, oldest first. */
+export interface Metrics {
+  /** Seconds per point. */
+  period: number;
+  start: string;
+  /** Excluded. */
+  end: string;
+  /** Each period's start. */
+  timestamps: string[];
+  metrics: {
+    /** Calls that reached the function, failed or not. */
+    Invocations: number[];
+    /** Its errors and timeouts, FF's failures, and calls lost when the backend stopped. */
+    Errors: number[];
+    /** Calls refused: no instance free in time, or the account's rate limit. */
+    Throttles: number[];
+    ColdStarts: number[];
+    /** Milliseconds; null for a period without a measured call. */
+    Duration: { Average: Array<number | null>; Maximum: Array<number | null>; p50: Array<number | null>; p95: Array<number | null>; p99: Array<number | null> };
+    Instances: { Maximum: number[]; Average: number[] };
+  };
+}
+
+export const metricsApi = {
+  forFunction: (id: string, params: { period: number; start?: string; end?: string }) => api.get<Metrics>(`/functions/${id}/metrics`, { params }),
+  forAccount: (params: { period: number; start?: string; end?: string }) => api.get<Metrics>('/metrics', { params }),
 };
 
 export type AccountStatus = 'pending' | 'active' | 'rejected' | 'suspended' | 'closed';
