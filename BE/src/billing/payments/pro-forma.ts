@@ -1,4 +1,6 @@
 import { randomInt } from 'node:crypto';
+import { frenchMoney } from '../../common/french';
+import type { Language } from '../../mail/language';
 import type { Mail } from '../../mail/mail.service';
 import { Decimal } from '../decimal';
 import { formatMinor } from '../money';
@@ -64,7 +66,18 @@ export interface TransferFacts {
 }
 
 /** The owners' e-mail when a transfer is recorded: the credit added, and the withheld share's, when the certificate comes. */
-export function transferMail(facts: TransferFacts): Omit<Mail, 'to'> {
+export function transferMail(facts: TransferFacts, language: Language): Omit<Mail, 'to'> {
+  if (language === 'fr') {
+    const money = (minor: bigint) => frenchMoney(minor, facts.exponent, facts.currency);
+    const lines = [
+      `Nous avons reçu votre virement de ${money(facts.receivedMinor)} pour la facture pro forma ${facts.reference} : un crédit de ${money(facts.creditMinor - facts.withheldMinor)} a été ajouté à votre compte « ${facts.account.name} » (${facts.account.id}).`,
+    ];
+    if (facts.withheldMinor > 0n) {
+      lines.push('', `${money(facts.withheldMinor)} ont été retenus à la source : ils seront ajoutés à votre crédit dès que nous recevrons le certificat de retenue.`);
+    }
+    lines.push('', `Votre solde : ${facts.consoleUrl}/billing`);
+    return { subject: `Votre virement est arrivé : ${facts.account.name}`, text: lines.join('\n') };
+  }
   const money = (minor: bigint) => `${formatMinor(minor, facts.exponent)} ${facts.currency}`;
   const lines = [
     `We received your transfer of ${money(facts.receivedMinor)} for the pro-forma ${facts.reference}: ${money(facts.creditMinor - facts.withheldMinor)} of credit was added to your account "${facts.account.name}" (${facts.account.id}).`,
@@ -88,7 +101,20 @@ export interface CancelFacts {
 }
 
 /** The owners' e-mail when an operator cancels a pending pro-forma: don't pay it, and why; a transfer already sent is still credited. */
-export function cancelMail(facts: CancelFacts): Omit<Mail, 'to'> {
+export function cancelMail(facts: CancelFacts, language: Language): Omit<Mail, 'to'> {
+  if (language === 'fr') {
+    return {
+      subject: `Votre facture pro forma ${facts.reference} est annulée : ${facts.account.name}`,
+      text: [
+        `FF a annulé la facture pro forma ${facts.reference}, de ${frenchMoney(facts.totalMinor, facts.exponent, facts.currency)}, de votre compte « ${facts.account.name} » (${facts.account.id}) : ne la réglez pas.`,
+        `Motif : ${facts.reason}`,
+        '',
+        'Un virement déjà en route pour elle sera tout de même crédité à son arrivée.',
+        '',
+        `Demandez une autre facture pro forma sur la page Billing de la console : ${facts.consoleUrl}/billing`,
+      ].join('\n'),
+    };
+  }
   const total = `${formatMinor(facts.totalMinor, facts.exponent)} ${facts.currency}`;
   return {
     subject: `Your pro-forma ${facts.reference} was cancelled: ${facts.account.name}`,
@@ -104,7 +130,17 @@ export function cancelMail(facts: CancelFacts): Omit<Mail, 'to'> {
 }
 
 /** The owners' e-mail when the withholding certificate is added: the withheld share is credited. */
-export function withholdingMail(facts: TransferFacts): Omit<Mail, 'to'> {
+export function withholdingMail(facts: TransferFacts, language: Language): Omit<Mail, 'to'> {
+  if (language === 'fr') {
+    return {
+      subject: `La retenue à la source a été ajoutée : ${facts.account.name}`,
+      text: [
+        `Nous avons reçu le certificat de retenue à la source de votre virement pour la facture pro forma ${facts.reference} : les ${frenchMoney(facts.withheldMinor, facts.exponent, facts.currency)} retenus à la source ont été ajoutés au crédit de votre compte « ${facts.account.name} » (${facts.account.id}).`,
+        '',
+        `Votre solde : ${facts.consoleUrl}/billing`,
+      ].join('\n'),
+    };
+  }
   const money = (minor: bigint) => `${formatMinor(minor, facts.exponent)} ${facts.currency}`;
   return {
     subject: `The share withheld at source was added: ${facts.account.name}`,

@@ -22,7 +22,7 @@ import { ScratchDatabase, createScratchDatabase } from '../database/scratch-data
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
-import { MailService } from '../mail/mail.service';
+import { capturingMail } from '../mail/capturing-mail';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
 import { UsageRecord } from '../usage/usage-record.entity';
@@ -97,7 +97,7 @@ run('support, for operators (L2)', () => {
     jest.spyOn(audit, 'record').mockImplementation((event, manager) => record({ actor: OPERATOR, ...event }, manager));
     const orchestrator = {} as Orchestrator;
     const config = { get: (_key: string, fallback?: unknown) => fallback, getOrThrow: () => ({ consoleUrl: 'https://console.ff.example' }) } as unknown as ConfigService;
-    const mail = { send: async () => true } as unknown as MailService;
+    const mail = capturingMail([]);
     const plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), orchestrator, audit);
     const ledger = new LedgerService(ds);
     const settings = new PlatformSettingsService(ds.getRepository(PlatformSetting), audit);

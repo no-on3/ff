@@ -9,7 +9,7 @@ import { Identity } from '../auth/token-verifier';
 import { MailService } from '../mail/mail.service';
 import { DEFAULT_PLAN } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
-import { AccountView, CreateAccountDto, MeView, UpdateAccountDto } from './dto/account.dto';
+import { AccountView, CreateAccountDto, MeView, UpdateAccountDto, UpdateMeDto } from './dto/account.dto';
 import { Account, AccountStatus } from './entities/account.entity';
 import { Membership } from './entities/membership.entity';
 import { User } from './entities/user.entity';
@@ -121,6 +121,12 @@ export class AccountsService {
       accounts.push({ id, name, status, role, plan: await this.plans.get(planId), dataDeletionDueAt, dataDeletedAt });
     }
     return { user: { id: user.id, email: user.email, name: user.name, locale: user.locale }, accounts };
+  }
+
+  /** PATCH /me: the user's own settings; then GET /me's answer. */
+  async updateMe(user: User, dto: UpdateMeDto): Promise<MeView> {
+    await this.users.update({ id: user.id }, { locale: dto.locale });
+    return this.me({ ...user, locale: dto.locale });
   }
 
   /** GET /me in development mode: its account, as owner. */

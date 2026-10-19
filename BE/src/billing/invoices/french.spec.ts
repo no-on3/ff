@@ -3,7 +3,7 @@
  * documents are dated and numbered (client-readiness plan, P-36).
  */
 import { lastDay, previousMonth, tunisDay } from '../tunisia';
-import { frenchDay, frenchDecimal, frenchMoney, frenchMonth, frenchPercent, groupDigits } from './french';
+import { frenchDay, frenchDecimal, frenchMoney, frenchMonth, frenchPercent, groupDigits } from '../../common/french';
 import { invoiceNumber, pdfKey } from './invoice-number';
 
 const NBSP = String.fromCharCode(0xa0);

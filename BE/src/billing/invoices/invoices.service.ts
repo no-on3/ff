@@ -7,6 +7,7 @@ import { Membership } from '../../accounts/entities/membership.entity';
 import { AuditService } from '../../audit/audit.service';
 import { describeError } from '../../common/describe-error';
 import { currentRequest } from '../../common/request-context';
+import { Language, recipientsOf } from '../../mail/language';
 import { Mail, MailService } from '../../mail/mail.service';
 import { MinioClientService } from '../../minio-client/minio-client.service';
 import { billingCurrency } from '../billing-currency';
@@ -20,7 +21,7 @@ import { bookPrices } from '../price-book';
 import { monthBounds, PricingService } from '../pricing.service';
 import { stampDutyOn } from '../tax-rates';
 import { lastDay, MONTH, previousMonth, tunisDay } from '../tunisia';
-import { frenchDay } from './french';
+import { frenchDay } from '../../common/french';
 import { InvoiceLine } from './invoice-line.entity';
 import { invoiceNumber, pdfKey } from './invoice-number';
 import { Buyer, DocumentLine, InvoiceDocument, renderInvoicePdf, renderStatementPdf, Seller } from './invoice-pdf';
@@ -227,7 +228,7 @@ export class InvoicesService {
       );
       return { invoice, exponent: draft.exponent, account };
     });
-    await this.tellOwners(issued.account, (consoleUrl) => invoiceMail({ account: issued.account, invoice: issued.invoice, exponent: issued.exponent, consoleUrl }));
+    await this.tellOwners(issued.account, (consoleUrl, language) => invoiceMail({ account: issued.account, invoice: issued.invoice, exponent: issued.exponent, consoleUrl }, language));
     return this.adminView(issued.invoice, issued.exponent);
   }
 
@@ -318,8 +319,8 @@ export class InvoicesService {
       );
       return { note, invoice, exponent, account };
     });
-    await this.tellOwners(issued.account, (consoleUrl) =>
-      creditNoteMail({ account: issued.account, note: issued.note, corrects: issued.invoice.number, exponent: issued.exponent, consoleUrl }),
+    await this.tellOwners(issued.account, (consoleUrl, language) =>
+      creditNoteMail({ account: issued.account, note: issued.note, corrects: issued.invoice.number, exponent: issued.exponent, consoleUrl }, language),
     );
     return this.adminView({ ...issued.note, corrects: issued.invoice }, issued.exponent);
   }
@@ -538,12 +539,11 @@ export class InvoicesService {
   }
 
   /** E-mails each owner, after the change has committed; a failure is logged, never the request's. */
-  private async tellOwners(account: Account, mail: (consoleUrl: string) => Omit<Mail, 'to'>): Promise<void> {
+  private async tellOwners(account: Account, mail: (consoleUrl: string, language: Language) => Omit<Mail, 'to'>): Promise<void> {
     try {
       const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
-      const message = mail(consoleUrl);
       const owners = await this.dataSource.getRepository(Membership).find({ where: { accountId: account.id, role: 'owner' }, relations: { user: true } });
-      for (const owner of owners) if (owner.user?.email) await this.mail.send({ to: owner.user.email, ...message });
+      await this.mail.sendEach(recipientsOf(owners), (language) => mail(consoleUrl, language));
     } catch (error) {
       this.logger.error(`Could not tell the owners of ${account.id} about an invoice: ${describeError(error)}`);
     }

@@ -6,6 +6,7 @@ import { Membership } from '../../accounts/entities/membership.entity';
 import { AuditService } from '../../audit/audit.service';
 import { currentRequest } from '../../common/request-context';
 import { describeError } from '../../common/describe-error';
+import { Language, recipientsOf } from '../../mail/language';
 import { Mail, MailService } from '../../mail/mail.service';
 import { MinioClientService } from '../../minio-client/minio-client.service';
 import { billingCurrency } from '../billing-currency';
@@ -225,7 +226,7 @@ export class PaymentsService {
       );
       return { payment: { ...found, ...changes }, exponent };
     });
-    await this.tellOwners(payment, (account, consoleUrl) => transferMail(transferFacts(payment, exponent, account, consoleUrl)));
+    await this.tellOwners(payment, (account, consoleUrl, language) => transferMail(transferFacts(payment, exponent, account, consoleUrl), language));
     return this.adminView(payment, exponent);
   }
 
@@ -243,8 +244,8 @@ export class PaymentsService {
   async cancelPayment(id: string, reason: string, now = new Date()): Promise<AdminPaymentView> {
     const { payment, exponent, cancelled } = await this.cancel(id, null, reason, now);
     if (cancelled) {
-      await this.tellOwners(payment, (account, consoleUrl) =>
-        cancelMail({ account, reference: payment.reference, totalMinor: payment.totalMinor, exponent, currency: payment.currency, reason, consoleUrl }),
+      await this.tellOwners(payment, (account, consoleUrl, language) =>
+        cancelMail({ account, reference: payment.reference, totalMinor: payment.totalMinor, exponent, currency: payment.currency, reason, consoleUrl }, language),
       );
     }
     return this.adminView(payment, exponent);
@@ -317,7 +318,7 @@ export class PaymentsService {
       );
       return { payment: { ...found, ...changes }, exponent };
     });
-    await this.tellOwners(payment, (account, consoleUrl) => withholdingMail(transferFacts(payment, exponent, account, consoleUrl)));
+    await this.tellOwners(payment, (account, consoleUrl, language) => withholdingMail(transferFacts(payment, exponent, account, consoleUrl), language));
     return this.adminView(payment, exponent);
   }
 
@@ -346,13 +347,12 @@ export class PaymentsService {
   }
 
   /** E-mails each owner, after the change has committed; a failure is logged, never the request's. */
-  private async tellOwners(payment: Payment, mail: (account: Account, consoleUrl: string) => Omit<Mail, 'to'>): Promise<void> {
+  private async tellOwners(payment: Payment, mail: (account: Account, consoleUrl: string, language: Language) => Omit<Mail, 'to'>): Promise<void> {
     try {
       const account = await this.dataSource.getRepository(Account).findOneByOrFail({ id: payment.accountId });
       const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
-      const message = mail(account, consoleUrl);
       const owners = await this.dataSource.getRepository(Membership).find({ where: { accountId: payment.accountId, role: 'owner' }, relations: { user: true } });
-      for (const owner of owners) if (owner.user?.email) await this.mail.send({ to: owner.user.email, ...message });
+      await this.mail.sendEach(recipientsOf(owners), (language) => mail(account, consoleUrl, language));
     } catch (error) {
       this.logger.error(`Could not tell the owners of ${payment.accountId} about ${payment.reference}: ${describeError(error)}`);
     }

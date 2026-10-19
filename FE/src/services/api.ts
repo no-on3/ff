@@ -525,6 +525,13 @@ type UnlistedMeAccountField = Exclude<keyof MeAccount, (typeof ME_ACCOUNT_FIELDS
 const everyMeAccountFieldListed: [UnlistedMeAccountField] extends [never] ? true : never = true;
 void everyMeAccountFieldListed;
 
+/** The languages of the e-mails FF sends a user, as PATCH /me takes them: French at first. */
+export const EMAIL_LANGUAGES = [
+  { locale: 'fr-TN', label: 'Français' },
+  { locale: 'en', label: 'English' },
+] as const;
+export type Locale = (typeof EMAIL_LANGUAGES)[number]['locale'];
+
 /** GET /me: the logged-in user and their accounts. */
 export interface Me {
   /** null when the API runs in development mode, which acts without a user. */
@@ -631,6 +638,9 @@ export const membersApi = {
 
 export const accountsApi = {
   me: () => api.get<Me>('/me'),
+
+  /** The user's own settings, for all their accounts: the language of their e-mails. */
+  updateMe: (data: { locale: Locale }) => api.patch<Me>('/me', data),
 
   /** The new account is pending, and its creator its owner. */
   createAccount: (data: NewAccount) => api.post<Account>('/accounts', data),

@@ -9,8 +9,10 @@ import { AuditPage, AuditService } from '../audit/audit.service';
 import { LedgerService } from '../billing/ledger/ledger.service';
 import { formatMinor } from '../billing/money';
 import { describeError } from '../common/describe-error';
+import { frenchTime } from '../common/french';
 import { likeLiteral } from '../common/like';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
+import { Language, recipientsOf } from '../mail/language';
 import { Mail, MailService } from '../mail/mail.service';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
@@ -60,16 +62,18 @@ function statusEvent(entry: AuditEntry): AdminStatusEventView {
 }
 
 /**
- * The e-mail an account's owners get when an operator changes its status
- * (P-71). A refusal, a suspension and a closure say why: the owners also
- * read the reason in their audit log.
+ * The e-mail an account's owners get when an operator changes its status, in
+ * their language. A refusal, a suspension and a closure say why: the owners
+ * also read the reason in their audit log.
  */
 export function ownerMail(
   account: Pick<Account, 'id' | 'name' | 'dataDeletionDueAt'>,
   change: StatusChange,
   reason: string,
   consoleUrl: string,
+  language: Language,
 ): Omit<Mail, 'to'> {
+  if (language === 'fr') return frenchOwnerMail(account, change, reason, consoleUrl);
   const which = `Your account "${account.name}" (${account.id})`;
   // A closed account's data is deleted once its notice period has passed; until then its members can still read it.
   const deletion = account.dataDeletionDueAt
@@ -91,6 +95,32 @@ export function ownerMail(
   };
   const [what, text] = lines[change];
   return { subject: `Your FF account ${what}: ${account.name}`, text: text.join('\n') };
+}
+
+function frenchOwnerMail(account: Pick<Account, 'id' | 'name' | 'dataDeletionDueAt'>, change: StatusChange, reason: string, consoleUrl: string): Omit<Mail, 'to'> {
+  const which = `Votre compte « ${account.name} » (${account.id})`;
+  const deletion = account.dataDeletionDueAt
+    ? [
+        '',
+        `Ses fonctions, l'historique de leurs invocations et leurs journaux seront supprimés le ${frenchTime(account.dataDeletionDueAt)}. D'ici là, ses membres peuvent les consulter dans la console : ${consoleUrl}`,
+        'Sa consommation, ses paiements et ses factures sont conservés, comme la loi l\'exige.',
+      ]
+    : [];
+  const lines: Record<StatusChange, [string, string[]]> = {
+    approve: ['est approuvé', [`${which} est approuvé : vous pouvez déployer et invoquer des fonctions dès maintenant.`, '', `La console : ${consoleUrl}`]],
+    reject: ["n'a pas été approuvé", [`${which} n'a pas été approuvé.`, `Motif : ${reason}`]],
+    suspend: [
+      'est suspendu',
+      [
+        `${which} est suspendu : ses fonctions sont arrêtées, et ne peuvent être ni déployées ni invoquées jusqu'à sa réactivation. Rien n'est supprimé.`,
+        `Motif : ${reason}`,
+      ],
+    ],
+    reactivate: ['est de nouveau actif', [`${which} est de nouveau actif : vous pouvez déployer et invoquer des fonctions.`, '', `La console : ${consoleUrl}`]],
+    close: ['est fermé', [`${which} est fermé : ses fonctions sont arrêtées, et ne peuvent être ni déployées ni invoquées.`, `Motif : ${reason}`, ...deletion]],
+  };
+  const [what, text] = lines[change];
+  return { subject: `Votre compte FF ${what} : ${account.name}`, text: text.join('\n') };
 }
 
 /**
@@ -296,7 +326,6 @@ export class AdminAccountsService {
   private async tellOwners(account: Account, change: StatusChange, reason: string): Promise<void> {
     const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
     const owners = await this.memberships.find({ where: { accountId: account.id, role: 'owner' }, relations: { user: true } });
-    const mail = ownerMail(account, change, reason, consoleUrl);
-    for (const owner of owners) if (owner.user?.email) await this.mail.send({ to: owner.user.email, ...mail });
+    await this.mail.sendEach(recipientsOf(owners), (language) => ownerMail(account, change, reason, consoleUrl, language));
   }
 }

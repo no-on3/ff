@@ -1,5 +1,5 @@
 import * as PDFDocument from 'pdfkit';
-import { frenchDay, frenchDecimal, frenchMoney, frenchMonth, frenchPercent, groupDigits } from './french';
+import { frenchDay, frenchDecimal, frenchMoney, frenchMonth, frenchPercent, groupDigits } from '../../common/french';
 import { Statement } from './statement';
 
 /** Who sells, as the configuration names FF (P-35's FF_SELLER_*). */

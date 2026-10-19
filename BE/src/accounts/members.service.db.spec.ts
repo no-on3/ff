@@ -11,7 +11,8 @@ import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
-import { Mail, MailService } from '../mail/mail.service';
+import { Mail } from '../mail/mail.service';
+import { capturingMail } from '../mail/capturing-mail';
 import { Account, AccountStatus } from './entities/account.entity';
 import { Invitation } from './entities/invitation.entity';
 import { Membership } from './entities/membership.entity';
@@ -29,8 +30,9 @@ run('members and invitations (L2, P-16)', () => {
   const NOW = new Date('2026-10-17T10:00:00Z');
   const DAY = 24 * 60 * 60 * 1000;
 
-  const user = (email = `user${++n}@example.tn`) =>
-    db.dataSource.getRepository(User).save({ oidcSub: `kc-${++n}`, email, name: null });
+  /** A user; in English unless said otherwise, as most of the e-mails these tests read. */
+  const user = (email = `user${++n}@example.tn`, locale = 'en') =>
+    db.dataSource.getRepository(User).save({ oidcSub: `kc-${++n}`, email, name: null, locale });
   /** An active account, with `owner` as its owner. */
   async function account(owner: User): Promise<string> {
     const id = String(300000000000 + ++n);
@@ -45,7 +47,7 @@ run('members and invitations (L2, P-16)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
+    const mail = capturingMail(sent);
     const config = { getOrThrow: () => ({ consoleUrl: 'https://console.ff.example' }) } as unknown as ConfigService;
     const ds = db.dataSource;
     audit = new AuditService(ds.getRepository(AuditEntry));
@@ -77,6 +79,23 @@ run('members and invitations (L2, P-16)', () => {
         text: expect.stringContaining('Log in to the FF console with this address before 2026-10-24 to join: https://console.ff.example'),
       },
     ]);
+  });
+
+  it("e-mails an invitation in the invitee's language when they have a login, else in the inviter's", async () => {
+    const french = await user('french-owner@example.tn', 'fr-TN');
+    await user('Known@Example.TN', 'en');
+    const id = await account(french);
+    const { name } = await db.dataSource.getRepository(Account).findOneByOrFail({ id });
+
+    await members.invite(id, french, { email: 'stranger@example.tn', role: 'viewer' }, NOW);
+    await members.invite(id, french, { email: 'known@example.tn', role: 'viewer' }, NOW);
+
+    expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([
+      ['stranger@example.tn', `french-owner@example.tn vous invite sur le compte FF « ${name} »`],
+      // Their login's address in other capitals is still theirs.
+      ['known@example.tn', `french-owner@example.tn invited you to the FF account "${name}"`],
+    ]);
+    expect(sent[0].text).toContain('avant le 24 octobre 2026');
   });
 
   it('renews an open invitation when the same address is invited again, with the new role', async () => {

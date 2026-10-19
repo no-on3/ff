@@ -15,7 +15,9 @@
 #     e-mail in Mailpit) and can't deploy. Approved by SQL, as P-71's routes will,
 #     account 1 deploys a function. Account 2 then calls every route on account 1's
 #     function and account: 404 each time, and nothing changes. A tampered token,
-#     and one meant for another API, get 401.
+#     and one meant for another API, get 401. User 1 chooses English for their
+#     e-mails, user 2 keeps French: each approval, and user 2's invitation, come
+#     in the reader's language.
 #   - API keys (P-13): account 1's key reads and invokes (L4), within its scopes,
 #     and stops when revoked; account 2's key gets 404 on account 1's function.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
@@ -243,6 +245,7 @@ body_for() {
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
+    "PATCH /me") echo '{"locale": "fr-TN"}' ;;
     "POST /api-keys") echo '{"name": "l5", "scopes": ["functions:read"]}' ;;
     "POST /members") echo '{"email": "l5-invitee@ff.test", "role": "viewer"}' ;;
     "PUT /admin/settings") echo '{"settings": {"gracePeriodHours": 1}, "reason": "l5 tries"}' ;;
@@ -301,7 +304,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /me")
       check "$route: B sees its own account only" "[\"$account_b\"]" "$(as_b GET /me | jq -c '[.accounts[].id]')"
       ;;
-    "POST /accounts" | "GET /accounts/{id}" | "PATCH /accounts/{id}")
+    "POST /accounts" | "GET /accounts/{id}" | "PATCH /accounts/{id}" | "PATCH /me")
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: needs a logged-in user" "$needs_user" "$(status) $(message)"
       ;;
@@ -423,6 +426,11 @@ as_user_2() { with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${accou
 me_1="$(as_user_1 GET /me)"
 check "the backend creates user 1 on the first call, with no account" "200 $user_1 []" \
   "$(status) $(jq -r '"\(.user.email) \(.accounts)"' <<<"$me_1")"
+as_user_1 PATCH /me '{"locale": "de"}' >/dev/null
+check "a user's e-mails are in French or in English" "400 locale must be one of fr-TN, en" "$(status) $(jq -r '.message[0]' "$work/body")"
+as_user_1 PATCH /me '{"locale": "en"}' >/dev/null
+check "user 1 chooses English for their e-mails, which are in French at first" "fr-TN 200 en" \
+  "$(jq -r .user.locale <<<"$me_1") $(status) $(as_user_1 GET /me | jq -r .user.locale)"
 as_user_1 GET /functions >/dev/null
 check "without an account, account routes say how to make one" \
   "403 This user has no account yet: create one with POST /accounts" "$(status) $(message)"
@@ -446,6 +454,7 @@ check "both wait in the operator's approvals queue, with who signed up and what 
 approve "$account_1" "$account_2"
 check "the operator approves them, and the owner gets an e-mail that says so" "active Your FF account is approved: L5 one" \
   "$(as_user_1 GET "/accounts/$account_1" | jq -r .status) $(mail_to "$user_1" | head -1)"
+check "user 2, whose e-mails are in French, gets theirs in French" "Votre compte FF est approuvé : L5 two" "$(mail_to "$user_2" | head -1)"
 
 created="$(as_user_1 POST /functions "$(function_body l5-one)")"
 check "approved, account 1 deploys a function" "201 ACTIVE $account_1" \
@@ -491,6 +500,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       ;;
     "GET /me")
       check "$route: user 2 sees their own account only" "[\"$account_2\"]" "$(as_user_2 GET /me | jq -c '[.accounts[].id]')"
+      ;;
+    "PATCH /me")
+      as_user_2 PATCH /me "$(body_for PATCH /me)" >/dev/null
+      check "$route: user 2 changes their own e-mails' language, never user 1's" "200 fr-TN en" \
+        "$(status) $(as_user_2 GET /me | jq -r .user.locale) $(as_user_1 GET /me | jq -r .user.locale)"
       ;;
     "POST /accounts")
       second="$(as_user_2 POST /accounts "$(body_for POST /accounts)" | jq -r .id)"
@@ -683,6 +697,7 @@ as_user_1 POST /members "$(jq -cn --arg email "$user_2" '{email: $email, role: "
 check "account 1's owner invites user 2's address as a viewer" 201 "$(status)"
 check "user 2 gets an e-mail with the console's address" true \
   "$(mail_to "$user_2" | grep -q 'http://localhost:5199' && echo true || echo false)"
+check "in user 2's language, French, though user 1's is English" "$user_1 vous invite sur le compte FF « L5 one »" "$(mail_to "$user_2" | head -1)"
 check "user 2 joins on the next call: account 1 is in GET /me, as a viewer" "viewer" \
   "$(with_token "$token_2" GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .role')"
 as_member() { with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: $account_1"; }

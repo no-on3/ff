@@ -197,6 +197,16 @@ run('accounts, users and memberships (L2, P-12)', () => {
       });
     });
 
+    it("changes the language of a user's e-mails in PATCH /me, theirs only, for all their accounts, and keeps it", async () => {
+      const user = await service.userFor(identity(13));
+      await service.userFor(identity(14));
+
+      expect((await service.updateMe(user, { locale: 'en' })).user).toEqual({ id: user.id, email: 'user13@example.tn', name: 'User 13', locale: 'en' });
+      expect([(await service.userFor(identity(13))).locale, (await service.userFor(identity(14))).locale]).toEqual(['en', 'fr-TN']);
+      expect((await service.updateMe(user, { locale: 'fr-TN' })).user?.locale).toBe('fr-TN');
+      expect((await service.userFor(identity(13))).locale).toBe('fr-TN');
+    });
+
     it("gives a closed account's members, in GET /me, when its data is deleted, and once done, when it was", async () => {
       const user = await service.userFor(identity(13));
       const { id } = await service.create(user, { name: 'Leaving' });

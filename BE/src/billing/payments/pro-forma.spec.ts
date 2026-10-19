@@ -56,7 +56,7 @@ describe('pro-formas and bank transfers (L1, P-35)', () => {
       consoleUrl: 'https://console.ff.example',
     };
 
-    expect(transferMail(facts)).toEqual({
+    expect(transferMail(facts, 'en')).toEqual({
       subject: 'Your transfer was received: Tunis Labs',
       text: [
         'We received your transfer of 58.608 TND for the pro-forma FF-7KQ2-9MXA: 49.108 TND of credit was added to your account "Tunis Labs" (000000000001).',
@@ -66,8 +66,8 @@ describe('pro-formas and bank transfers (L1, P-35)', () => {
         'Your balance: https://console.ff.example/billing',
       ].join('\n'),
     });
-    expect(transferMail({ ...facts, receivedMinor: 59500n, withheldMinor: 0n }).text).not.toContain('withheld');
-    expect(withholdingMail(facts)).toEqual({
+    expect(transferMail({ ...facts, receivedMinor: 59500n, withheldMinor: 0n }, 'en').text).not.toContain('withheld');
+    expect(withholdingMail(facts, 'en')).toEqual({
       subject: 'The share withheld at source was added: Tunis Labs',
       text: [
         'We received the withholding certificate for your transfer for the pro-forma FF-7KQ2-9MXA: the 0.892 TND withheld at source was added to the credit of your account "Tunis Labs" (000000000001).',
@@ -87,7 +87,7 @@ describe('pro-formas and bank transfers (L1, P-35)', () => {
         currency: 'TND',
         reason: 'Asked for twice by mistake',
         consoleUrl: 'https://console.ff.example',
-      }),
+      }, 'en'),
     ).toEqual({
       subject: 'Your pro-forma FF-7KQ2-9MXA was cancelled: Tunis Labs',
       text: [
@@ -97,6 +97,59 @@ describe('pro-formas and bank transfers (L1, P-35)', () => {
         'A transfer for it that is already on its way is still credited when it arrives.',
         '',
         'Ask for another pro-forma on the Billing page: https://console.ff.example/billing',
+      ].join('\n'),
+    });
+  });
+});
+
+describe("the owners' e-mails about payments, in French", () => {
+  const NB = ' ';
+  const facts = {
+    account: { id: '000000000001', name: 'Tunis Labs' },
+    reference: 'FF-7KQ2-9MXA',
+    creditMinor: 50000n,
+    receivedMinor: 58608n,
+    withheldMinor: 892n,
+    exponent: 3,
+    currency: 'TND',
+    consoleUrl: 'https://console.ff.example',
+  };
+
+  it('tell the owners a transfer was received, the credit added, and the share withheld until its certificate comes', () => {
+    expect(transferMail(facts, 'fr')).toEqual({
+      subject: 'Votre virement est arrivé : Tunis Labs',
+      text: [
+        `Nous avons reçu votre virement de 58,608${NB}TND pour la facture pro forma FF-7KQ2-9MXA : un crédit de 49,108${NB}TND a été ajouté à votre compte « Tunis Labs » (000000000001).`,
+        '',
+        `0,892${NB}TND ont été retenus à la source : ils seront ajoutés à votre crédit dès que nous recevrons le certificat de retenue.`,
+        '',
+        'Votre solde : https://console.ff.example/billing',
+      ].join('\n'),
+    });
+    expect(transferMail({ ...facts, receivedMinor: 59500n, withheldMinor: 0n }, 'fr').text).not.toContain('retenu');
+  });
+
+  it('tell the owners the share withheld was added', () => {
+    expect(withholdingMail(facts, 'fr')).toEqual({
+      subject: 'La retenue à la source a été ajoutée : Tunis Labs',
+      text: [
+        `Nous avons reçu le certificat de retenue à la source de votre virement pour la facture pro forma FF-7KQ2-9MXA : les 0,892${NB}TND retenus à la source ont été ajoutés au crédit de votre compte « Tunis Labs » (000000000001).`,
+        '',
+        'Votre solde : https://console.ff.example/billing',
+      ].join('\n'),
+    });
+  });
+
+  it("tell the owners a pro-forma an operator cancelled: don't pay it, why, and that a transfer already sent still counts", () => {
+    expect(cancelMail({ ...facts, totalMinor: 59500n, reason: 'Demandée deux fois par erreur' }, 'fr')).toEqual({
+      subject: 'Votre facture pro forma FF-7KQ2-9MXA est annulée : Tunis Labs',
+      text: [
+        `FF a annulé la facture pro forma FF-7KQ2-9MXA, de 59,500${NB}TND, de votre compte « Tunis Labs » (000000000001) : ne la réglez pas.`,
+        'Motif : Demandée deux fois par erreur',
+        '',
+        'Un virement déjà en route pour elle sera tout de même crédité à son arrivée.',
+        '',
+        'Demandez une autre facture pro forma sur la page Billing de la console : https://console.ff.example/billing',
       ].join('\n'),
     });
   });

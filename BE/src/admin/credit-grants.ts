@@ -1,5 +1,7 @@
 import { LedgerTransactionKind } from '../billing/ledger/ledger-transaction.entity';
 import { formatMinor } from '../billing/money';
+import { frenchMoney } from '../common/french';
+import type { Language } from '../mail/language';
 import type { Mail } from '../mail/mail.service';
 
 /** What an operator grants (P-74): promotional credit, which only adds, or a correction, either way. */
@@ -61,7 +63,8 @@ export interface GrantFacts {
 }
 
 /** The e-mail each owner gets for a grant: what moved, why, and the balance. Like the reason in their audit log, it hides nothing of the operator's words. */
-export function grantMail(facts: GrantFacts): Omit<Mail, 'to'> {
+export function grantMail(facts: GrantFacts, language: Language): Omit<Mail, 'to'> {
+  if (language === 'fr') return frenchGrantMail(facts);
   const money = (minor: bigint) => `${formatMinor(minor, facts.exponent)} ${facts.currency}`;
   const which = `your account "${facts.account.name}" (${facts.account.id})`;
   const promotion = facts.kind === LedgerTransactionKind.PROMO;
@@ -73,5 +76,20 @@ export function grantMail(facts: GrantFacts): Omit<Mail, 'to'> {
   return {
     subject: promotion ? `FF added credit to your account: ${facts.account.name}` : `FF corrected your credit: ${facts.account.name}`,
     text: [first, `Why: ${facts.reason}`, `The balance is now ${money(facts.balanceMinor)}.`, '', `Your balance, and what moved it: ${facts.consoleUrl}/billing`].join('\n'),
+  };
+}
+
+function frenchGrantMail(facts: GrantFacts): Omit<Mail, 'to'> {
+  const money = (minor: bigint) => frenchMoney(minor, facts.exponent, facts.currency);
+  const which = `votre compte « ${facts.account.name} » (${facts.account.id})`;
+  const promotion = facts.kind === LedgerTransactionKind.PROMO;
+  const first = promotion
+    ? `FF a ajouté ${money(facts.amountMinor)} de crédit à ${which}.`
+    : facts.amountMinor > 0n
+      ? `FF a corrigé le crédit de ${which} : ${money(facts.amountMinor)} ajoutés.`
+      : `FF a corrigé le crédit de ${which} : ${money(-facts.amountMinor)} retirés.`;
+  return {
+    subject: promotion ? `FF a ajouté du crédit à votre compte : ${facts.account.name}` : `FF a corrigé votre crédit : ${facts.account.name}`,
+    text: [first, `Motif : ${facts.reason}`, `Le solde est maintenant de ${money(facts.balanceMinor)}.`, '', `Votre solde, et ce qui l'a fait bouger : ${facts.consoleUrl}/billing`].join('\n'),
   };
 }

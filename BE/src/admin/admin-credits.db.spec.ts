@@ -49,7 +49,8 @@ run('credit grants, for operators (L2, P-74)', () => {
   let n = 0;
 
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
-  const user = (name: string) => db.dataSource.getRepository(User).save({ oidcSub: `kc-${name}-${++n}`, email: `${name}-${n}@ff.test`, name: null });
+  // In English, as the e-mails these tests read.
+  const user = (name: string) => db.dataSource.getRepository(User).save({ oidcSub: `kc-${name}-${++n}`, email: `${name}-${n}@ff.test`, name: null, locale: 'en' });
   /** An account, with its members. */
   async function account(fields: Partial<Account> = {}, members: Array<[User, Role]> = []): Promise<string> {
     const id = String(400000000000 + ++n);
@@ -97,12 +98,12 @@ run('credit grants, for operators (L2, P-74)', () => {
     ledger = new LedgerService(ds);
     deaf = new CreditService(ds, settings, new LedgerEvents(ds));
     const config = { getOrThrow: () => ({ consoleUrl: CONSOLE }) } as unknown as ConfigService;
-    const mail = {
+    const mail = Object.assign(Object.create(MailService.prototype) as MailService, {
       send: async (message: Mail) => {
         if (failMail) throw new Error('the mail server is down');
         return sent.push(message) > 0;
       },
-    } as unknown as MailService;
+    });
     service = new AdminCreditsService(ds, ledger, deaf, settings, audit, mail, config);
   });
 
@@ -228,6 +229,7 @@ run('credit grants, for operators (L2, P-74)', () => {
   describe('a correction', () => {
     it('takes the credit left at most: beyond it, refused with the balance named, writing nothing', async () => {
       const owner = await user('owner');
+      await db.dataSource.query(`UPDATE "users" SET "locale" = 'fr-TN' WHERE "email" = $1`, [owner.email]); // and this owner's e-mails in French
       const id = await account({ name: 'Floor' }, [[owner, 'owner']]);
       await service.grant(id, grantOf({ amount: '10' }));
       sent.length = 0;
@@ -244,8 +246,8 @@ run('credit grants, for operators (L2, P-74)', () => {
         action: 'credit.adjustment',
         details: { reason: 'Transfer recorded twice', kind: 'adjustment', currency: 'TND', amount: '-10.000', balance: '0.000' },
       });
-      expect(sent.map((mail) => mail.subject)).toEqual(['FF corrected your credit: Floor']);
-      expect(sent[0].text).toContain(': 10.000 TND taken away.');
+      expect(sent.map((mail) => mail.subject)).toEqual(['FF a corrigé votre crédit : Floor']);
+      expect(sent[0].text).toContain(': 10,000\u00a0TND retirés.');
     });
 
     it('leaves a debt only when asked, which the ledger and the audit entry say', async () => {

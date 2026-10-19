@@ -20,7 +20,8 @@ import { AuditService } from '../../audit/audit.service';
 import { withRequestContext } from '../../common/request-context';
 import { databaseConfiguration } from '../../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../../database/scratch-database';
-import { Mail, MailService } from '../../mail/mail.service';
+import { Mail } from '../../mail/mail.service';
+import { capturingMail } from '../../mail/capturing-mail';
 import { MinioClientService } from '../../minio-client/minio-client.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { PaymentStatus } from './payment.entity';
@@ -48,7 +49,8 @@ run('bank transfers (L2, P-35)', () => {
     const id = String(800000000000 + ++n);
     await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE, taxId: '7654321/B/A/M/000' });
     for (const [email, role] of [...owners.map((e) => [e, 'owner'] as const), ...developers.map((e) => [e, 'developer'] as const)]) {
-      const user = await db.dataSource.getRepository(User).save({ oidcSub: `kc-${email}`, email, name: null });
+      // In English, as the e-mails these tests read; each in its own language is checked in language.spec.ts.
+      const user = await db.dataSource.getRepository(User).save({ oidcSub: `kc-${email}`, email, name: null, locale: 'en' });
       await db.dataSource.getRepository(Membership).save({ accountId: id, userId: user.id, role });
     }
     return id;
@@ -68,7 +70,7 @@ run('bank transfers (L2, P-35)', () => {
     await db.dataSource.runMigrations({ transaction: 'each' });
     const ds = db.dataSource;
     ledger = new LedgerService(ds);
-    const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
+    const mail = capturingMail(sent);
     const storage = {
       putDocument: async (key: string, body: Buffer, contentType: string) => void documents.set(key, { body, contentType }),
       getDocument: async (key: string) => documents.get(key) as { body: Buffer; contentType: string },
@@ -173,6 +175,7 @@ run('bank transfers (L2, P-35)', () => {
 
     it('net of a share withheld at source: the credit less that share now, the share with the certificate, against the tax FF claims', async () => {
       const a = await account('Net', ['net-owner@ff.test'], ['net-developer@ff.test']);
+      await db.dataSource.query(`UPDATE "users" SET "locale" = 'fr-TN' WHERE "email" = $1`, ['net-owner@ff.test']); // and this owner's e-mails in French
       const proForma = await payments.requestProForma(a, '50.000');
 
       await payments.recordTransfer(transfer(proForma.reference, '58.608', '0.892'), 'Statement, 1.5% withheld');
@@ -183,7 +186,7 @@ run('bank transfers (L2, P-35)', () => {
         ['provider_clearing', -58608],
       ]);
       expect(await ledger.balance(a, 'TND')).toBe(49108n);
-      expect(sent[0].text).toContain('0.892 TND was withheld at source: it is added to your credit when we receive the withholding certificate.');
+      expect(sent[0].text).toContain('0,892\u00a0TND ont été retenus à la source : ils seront ajoutés à votre crédit dès que nous recevrons le certificat de retenue.');
 
       const added = await as(OPERATOR, () => payments.attachCertificate(proForma.id, PDF, 'application/pdf', 'Certificate from the tax platform'));
 
@@ -198,7 +201,7 @@ run('bank transfers (L2, P-35)', () => {
         action: 'payment.withholding',
         details: { reason: 'Certificate from the tax platform', reference: proForma.reference, currency: 'TND', withheld: '0.892', certificate: { type: 'application/pdf', bytes: PDF.length } },
       });
-      expect(sent.map((mail) => mail.subject)).toEqual(['Your transfer was received: Net', 'The share withheld at source was added: Net']);
+      expect(sent.map((mail) => mail.subject)).toEqual(['Votre virement est arrivé : Net', 'La retenue à la source a été ajoutée : Net']);
       const kept = await payments.certificate(proForma.id);
       expect([kept.body.equals(PDF), kept.contentType, kept.reference]).toEqual([true, 'application/pdf', proForma.reference]);
 

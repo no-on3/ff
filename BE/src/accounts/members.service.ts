@@ -6,6 +6,7 @@ import { AuditService } from '../audit/audit.service';
 import { Role } from '../auth/principal';
 import { MailService } from '../mail/mail.service';
 import { InvitationView, InviteMemberDto, MemberView, MembersView } from './dto/member.dto';
+import { invitationMail } from './invitation-mail';
 import { Account } from './entities/account.entity';
 import { Invitation } from './entities/invitation.entity';
 import { Membership } from './entities/membership.entity';
@@ -94,21 +95,17 @@ export class MembersService {
     return invitationView(invitation, now);
   }
 
+  /** The invitation's e-mail, in the language of the invitee when they already have a login, else in the inviter's. */
   private async sendInvitation(invitation: Invitation, inviter: User): Promise<void> {
     const account = await this.accounts.findOneByOrFail({ id: invitation.accountId });
     const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
-    await this.mail.send({
-      to: invitation.email,
-      subject: `${inviter.email} invited you to the FF account "${account.name}"`,
-      text: [
-        `${inviter.name ?? inviter.email} invited you to join the FF account "${account.name}" as ${invitation.role}.`,
-        '',
-        `Log in to the FF console with this address before ${invitation.expiresAt.toISOString().slice(0, 10)} to join: ${consoleUrl}`,
-        'Without a login yet, sign up there with this address.',
-        '',
-        "If you didn't expect this e-mail, ignore it: nothing happens until you log in.",
-      ].join('\n'),
-    });
+    const [invitee] = await this.dataSource.query<Array<{ locale: string }>>(
+      `SELECT "locale" FROM "users" WHERE lower("email") = $1 ORDER BY "created_at" DESC LIMIT 1`,
+      [invitation.email],
+    );
+    await this.mail.sendEach([{ email: invitation.email, locale: invitee?.locale ?? inviter.locale }], (language) =>
+      invitationMail({ inviter, account, role: invitation.role, expiresAt: invitation.expiresAt, consoleUrl }, language),
+    );
   }
 
   /** DELETE /members/invitations/:id: an invitation nobody has accepted yet. */

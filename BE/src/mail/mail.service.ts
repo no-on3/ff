@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport, Transporter } from 'nodemailer';
 import { describeError } from '../common/describe-error';
+import { Language, Recipient, languageOf } from './language';
 
 export interface Mail {
   to: string;
@@ -24,6 +25,23 @@ export class MailService {
     const { smtpUrl, from } = config.getOrThrow<{ smtpUrl: string; from: string }>('mail');
     this.from = from;
     this.transport = transport ?? (smtpUrl ? createTransport(smtpUrl) : undefined);
+  }
+
+  /**
+   * The same e-mail to each recipient in their own language, composed once per
+   * language. A recipient without an address is skipped. True when every one
+   * was taken by the SMTP server.
+   */
+  async sendEach(recipients: Recipient[], compose: (language: Language) => Omit<Mail, 'to'>): Promise<boolean> {
+    const composed = new Map<Language, Omit<Mail, 'to'>>();
+    let sent = true;
+    for (const { email, locale } of recipients) {
+      if (!email) continue;
+      const language = languageOf(locale);
+      if (!composed.has(language)) composed.set(language, compose(language));
+      sent = (await this.send({ to: email, ...(composed.get(language) as Omit<Mail, 'to'>) })) && sent;
+    }
+    return sent;
   }
 
   /** True once the SMTP server took the e-mail. */

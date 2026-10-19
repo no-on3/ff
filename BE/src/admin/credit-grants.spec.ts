@@ -83,7 +83,7 @@ describe('credit grants (L1, P-74)', () => {
     };
 
     it('says what a promotion added, why, and the balance', () => {
-      expect(grantMail({ ...facts, kind: PROMO, amountMinor: 25_000n, balanceMinor: 37_500n })).toEqual({
+      expect(grantMail({ ...facts, kind: PROMO, amountMinor: 25_000n, balanceMinor: 37_500n }, 'en')).toEqual({
         subject: 'FF added credit to your account: Tunis Labs',
         text: [
           'FF added 25.000 TND of credit to your account "Tunis Labs" (000000000042).',
@@ -96,8 +96,8 @@ describe('credit grants (L1, P-74)', () => {
     });
 
     it('says a correction added credit, or took it away', () => {
-      const added = grantMail({ ...facts, kind: ADJUSTMENT, amountMinor: 1_500n, balanceMinor: 1_250n, reason: 'Hours billed twice on 2026-10-14' });
-      const taken = grantMail({ ...facts, kind: ADJUSTMENT, amountMinor: -2_000n, balanceMinor: -750n, reason: 'Transfer recorded twice' });
+      const added = grantMail({ ...facts, kind: ADJUSTMENT, amountMinor: 1_500n, balanceMinor: 1_250n, reason: 'Hours billed twice on 2026-10-14' }, 'en');
+      const taken = grantMail({ ...facts, kind: ADJUSTMENT, amountMinor: -2_000n, balanceMinor: -750n, reason: 'Transfer recorded twice' }, 'en');
 
       expect([added.subject, added.text.split('\n').slice(0, 3)]).toEqual([
         'FF corrected your credit: Tunis Labs',
@@ -110,3 +110,40 @@ describe('credit grants (L1, P-74)', () => {
     });
   });
 });
+
+describe("the owners' e-mail about a grant, in French", () => {
+  const NB = ' ';
+  const facts = {
+    account: { id: '000000000042', name: 'Tunis Labs' },
+    currency: 'TND',
+    exponent: 3,
+    reason: 'Crédit de bienvenue pour le pilote',
+    consoleUrl: 'https://console.ff.example',
+  };
+
+  it('says what a promotion added, why, and the balance', () => {
+    expect(grantMail({ ...facts, kind: PROMO, amountMinor: 25_000n, balanceMinor: 37_500n }, 'fr')).toEqual({
+      subject: 'FF a ajouté du crédit à votre compte : Tunis Labs',
+      text: [
+        `FF a ajouté 25,000${NB}TND de crédit à votre compte « Tunis Labs » (000000000042).`,
+        'Motif : Crédit de bienvenue pour le pilote',
+        `Le solde est maintenant de 37,500${NB}TND.`,
+        '',
+        "Votre solde, et ce qui l'a fait bouger : https://console.ff.example/billing",
+      ].join('\n'),
+    });
+  });
+
+  it('says a correction added credit, or took it away', () => {
+    const added = grantMail({ ...facts, kind: ADJUSTMENT, amountMinor: 1_500n, balanceMinor: 1_250n }, 'fr');
+    const taken = grantMail({ ...facts, kind: ADJUSTMENT, amountMinor: -2_000n, balanceMinor: -750n }, 'fr');
+
+    expect([added.subject, added.text.split('\n')[0], taken.text.split('\n')[0], taken.text.split('\n')[2]]).toEqual([
+      'FF a corrigé votre crédit : Tunis Labs',
+      `FF a corrigé le crédit de votre compte « Tunis Labs » (000000000042) : 1,500${NB}TND ajoutés.`,
+      `FF a corrigé le crédit de votre compte « Tunis Labs » (000000000042) : 2,000${NB}TND retirés.`,
+      `Le solde est maintenant de -0,750${NB}TND.`,
+    ]);
+  });
+});
+

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsISO31661Alpha2, IsOptional, IsString, Length, MaxLength } from 'class-validator';
+import { IsIn, IsISO31661Alpha2, IsOptional, IsString, Length, MaxLength } from 'class-validator';
 import { Role } from '../../auth/principal';
+import { LOCALES, Locale } from '../../mail/language';
 import { PlanSummary } from '../../plans/plan.dto';
 import { AccountStatus } from '../entities/account.entity';
 
@@ -62,7 +63,14 @@ class MeUser {
   @ApiProperty() id: string;
   @ApiProperty() email: string;
   @ApiProperty({ nullable: true, type: String }) name: string | null;
-  @ApiProperty() locale: string;
+  @ApiProperty({ enum: LOCALES, description: 'The language of the e-mails FF sends this user: French (fr-TN), as at first, or English (en)' }) locale: string;
+}
+
+/** PATCH /me: the logged-in user's own settings, for all their accounts. */
+export class UpdateMeDto {
+  @ApiProperty({ enum: LOCALES, description: 'The language of the e-mails FF sends you: French (fr-TN) or English (en)' })
+  @IsIn([...LOCALES], { message: `locale must be one of ${LOCALES.join(', ')}` })
+  locale: Locale;
 }
 
 class MeAccount {

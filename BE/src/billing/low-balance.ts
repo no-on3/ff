@@ -1,3 +1,5 @@
+import { frenchDate, frenchMoney, frenchPercent } from '../common/french';
+import type { Language } from '../mail/language';
 import type { Mail } from '../mail/mail.service';
 import type { CreditPolicy } from './credit-policy';
 import { formatMinor } from './money';
@@ -24,8 +26,9 @@ export interface LowBalanceFacts {
   consoleUrl: string;
 }
 
-/** The e-mail each owner gets when the balance reaches a share of the last credit. */
-export function lowBalanceMail(facts: LowBalanceFacts): Omit<Mail, 'to'> {
+/** The e-mail each owner gets when the balance reaches a share of the last credit, in their language. */
+export function lowBalanceMail(facts: LowBalanceFacts, language: Language): Omit<Mail, 'to'> {
+  if (language === 'fr') return frenchLowBalanceMail(facts);
   const money = (minor: bigint) => `${formatMinor(minor, facts.exponent)} ${facts.currency}`;
   const which = `your account "${facts.account.name}" (${facts.account.id})`;
   const credit = `${money(facts.creditMinor)} on ${facts.creditAt.toISOString().slice(0, 10)}`;
@@ -41,6 +44,29 @@ export function lowBalanceMail(facts: LowBalanceFacts): Omit<Mail, 'to'> {
       `Add credit before invokes stop: they go on down to ${money(-facts.policy.bufferMinor)}, then for ${facts.policy.graceMs / 3_600_000} hours more. Reads, logs and deploys always go on.`,
       '',
       `Your balance, and when these e-mails come: ${facts.consoleUrl}/billing`,
+    ].join('\n'),
+  };
+}
+
+function frenchLowBalanceMail(facts: LowBalanceFacts): Omit<Mail, 'to'> {
+  const money = (minor: bigint) => frenchMoney(minor, facts.exponent, facts.currency);
+  const which = `votre compte « ${facts.account.name} » (${facts.account.id})`;
+  const credit = `${money(facts.creditMinor)} le ${frenchDate(facts.creditAt)}`;
+  const first =
+    facts.percent === 0
+      ? `Le solde de ${which} est de ${money(facts.balanceMinor)} : votre dernier crédit, ${credit}, est épuisé.`
+      : `Le solde de ${which} est de ${money(facts.balanceMinor)} : ${frenchPercent(facts.percent)} ou moins de votre dernier crédit, ${credit}.`;
+  return {
+    subject:
+      facts.percent === 0
+        ? `Votre crédit FF est épuisé : ${facts.account.name}`
+        : `Votre crédit FF est descendu à ${frenchPercent(facts.percent)} : ${facts.account.name}`,
+    text: [
+      first,
+      '',
+      `Ajoutez du crédit avant que les invocations s'arrêtent : elles continuent jusqu'à un solde de ${money(-facts.policy.bufferMinor)}, puis pendant ${facts.policy.graceMs / 3_600_000} heures encore. Les lectures, les journaux et les déploiements continuent toujours.`,
+      '',
+      `Votre solde, et quand ces e-mails arrivent : ${facts.consoleUrl}/billing`,
     ].join('\n'),
   };
 }

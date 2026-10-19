@@ -43,7 +43,7 @@ describe('the low-balance e-mails (L1, P-33)', () => {
       exponent: 3,
       policy: POLICY,
       consoleUrl: 'https://console.ff.example',
-    });
+    }, 'en');
 
     expect(mail).toEqual({
       subject: 'Your FF credit is down to 20%: Tunis Labs',
@@ -68,9 +68,43 @@ describe('the low-balance e-mails (L1, P-33)', () => {
       exponent: 3,
       policy: POLICY,
       consoleUrl: 'https://console.ff.example',
-    });
+    }, 'en');
 
     expect(mail.subject).toBe('Your FF credit has run out: Tunis Labs');
     expect(mail.text.split('\n')[0]).toBe('The balance of your account "Tunis Labs" (000000000001) is -0.120 TND: your last credit, 50.000 TND on 2026-10-17, is used up.');
+  });
+});
+
+describe('the low-balance e-mails, in French', () => {
+  const NB = ' ';
+  const facts = {
+    account: { id: '000000000001', name: 'Tunis Labs' },
+    balanceMinor: 9800n,
+    creditMinor: CREDIT,
+    creditAt: new Date('2026-10-17T10:00:00Z'),
+    currency: 'TND',
+    exponent: 3,
+    policy: POLICY,
+    consoleUrl: 'https://console.ff.example',
+  };
+
+  it('tell the owners the balance, the share of the last credit, and when invokes would stop, as the invoices write amounts and days', () => {
+    expect(lowBalanceMail({ ...facts, percent: 20 }, 'fr')).toEqual({
+      subject: `Votre crédit FF est descendu à 20${NB}% : Tunis Labs`,
+      text: [
+        `Le solde de votre compte « Tunis Labs » (000000000001) est de 9,800${NB}TND : 20${NB}% ou moins de votre dernier crédit, 50,000${NB}TND le 17 octobre 2026.`,
+        '',
+        `Ajoutez du crédit avant que les invocations s'arrêtent : elles continuent jusqu'à un solde de -1,000${NB}TND, puis pendant 24 heures encore. Les lectures, les journaux et les déploiements continuent toujours.`,
+        '',
+        'Votre solde, et quand ces e-mails arrivent : https://console.ff.example/billing',
+      ].join('\n'),
+    });
+  });
+
+  it('say the credit is used up at 0%', () => {
+    const mail = lowBalanceMail({ ...facts, percent: 0, balanceMinor: -120n }, 'fr');
+
+    expect(mail.subject).toBe('Votre crédit FF est épuisé : Tunis Labs');
+    expect(mail.text.split('\n')[0]).toBe(`Le solde de votre compte « Tunis Labs » (000000000001) est de -0,120${NB}TND : votre dernier crédit, 50,000${NB}TND le 17 octobre 2026, est épuisé.`);
   });
 });

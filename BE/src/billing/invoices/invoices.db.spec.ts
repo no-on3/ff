@@ -19,7 +19,8 @@ import { AuditService } from '../../audit/audit.service';
 import { withRequestContext } from '../../common/request-context';
 import { databaseConfiguration } from '../../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../../database/scratch-database';
-import { Mail, MailService } from '../../mail/mail.service';
+import { Mail } from '../../mail/mail.service';
+import { capturingMail } from '../../mail/capturing-mail';
 import { MinioClientService } from '../../minio-client/minio-client.service';
 import { Currency } from '../currency.entity';
 import { LedgerService } from '../ledger/ledger.service';
@@ -58,7 +59,8 @@ run('monthly invoices (L2, P-36)', () => {
     const id = String(700000000000 + ++n);
     await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE, taxId: '7654321/B/A/M/000' });
     for (const [email, role] of [...owners.map((e) => [e, 'owner'] as const), ...developers.map((e) => [e, 'developer'] as const)]) {
-      const user = await db.dataSource.getRepository(User).save({ oidcSub: `kc-${email}`, email, name: null });
+      // In English, as the e-mails these tests read; each in its own language is checked in language.spec.ts.
+      const user = await db.dataSource.getRepository(User).save({ oidcSub: `kc-${email}`, email, name: null, locale: 'en' });
       await db.dataSource.getRepository(Membership).save({ accountId: id, userId: user.id, role });
     }
     return id;
@@ -85,7 +87,7 @@ run('monthly invoices (L2, P-36)', () => {
     await db.dataSource.runMigrations({ transaction: 'each' });
     const ds = db.dataSource;
     ledger = new LedgerService(ds);
-    const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
+    const mail = capturingMail(sent);
     const storage = {
       putDocument: async (key: string, body: Buffer, contentType: string) => void documents.set(key, { body, contentType }),
       getDocument: async (key: string) => documents.get(key) as { body: Buffer; contentType: string },
@@ -277,6 +279,7 @@ run('monthly invoices (L2, P-36)', () => {
 
   it('corrects an invoice with credit notes, numbered apart, never giving back more than it charged, moving no money', async () => {
     const a = await account('Credit Labs', ['owner@credit-labs.test']);
+    await db.dataSource.query(`UPDATE "users" SET "locale" = 'fr-TN' WHERE "email" = $1`, ['owner@credit-labs.test']); // and this owner's e-mails in French
     await paid(a, '50', '2026-10-08', '59.500');
     const invoice = await invoices.issue(a, '2026-10', 'October', NOV_2);
     const balance = await ledger.balance(a, 'TND');
@@ -293,7 +296,7 @@ run('monthly invoices (L2, P-36)', () => {
       expect.arrayContaining(["FACTURE D'AVOIR", `N° ${number}`, `Facture corrigée : ${invoice.number}`, 'Remboursement du crédit non consommé | 20,000 TND | 19 % | 3,800 TND', "Total TTC de l'avoir | 23,800 TND", 'Motif : Unused credit refunded']),
     );
     expect((await audit(a)).at(-1)).toMatchObject({ action: 'invoice.credit_note', details: { reason: 'Unused credit refunded', number, corrects: invoice.number, total: '23.800' } });
-    expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([['owner@credit-labs.test', `A credit note for your invoice ${invoice.number}: Credit Labs`]]);
+    expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([['owner@credit-labs.test', `Un avoir pour votre facture ${invoice.number} : Credit Labs`]]);
 
     const second = await invoices.creditNote(invoice.id, [{ description: 'Correction', amount: '30', vatPercent: 19 }], 'The rest', new Date('2026-11-06T09:00:00Z'));
     expect([second.number, second.total]).toEqual([`AV-2026-${String(firstNote + 1).padStart(6, '0')}`, '35.700']);

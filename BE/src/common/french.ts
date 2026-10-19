@@ -1,7 +1,8 @@
 /**
- * Amounts, dates and numbers as the invoices write them, in French (P-36):
- * "1 234,500 TND", "1er octobre 2026". The no-break space is U+00A0, which the
- * PDF's standard fonts have, unlike the narrow one French typesetting prefers.
+ * Amounts, dates and numbers as the invoices and the e-mails write them, in
+ * French: "1 234,500 TND", "1er octobre 2026". The no-break space is U+00A0,
+ * which the PDF's standard fonts have, unlike the narrow one French
+ * typesetting prefers.
  */
 const NBSP = '\u00a0';
 const MONTHS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
@@ -38,3 +39,9 @@ export function frenchMonth(month: string): string {
 
 /** "19 %": a percent, with French typesetting's space before the sign. */
 export const frenchPercent = (percent: number): string => `${percent}${NBSP}%`;
+
+/** A moment's day, by UTC: "19 octobre 2026". */
+export const frenchDate = (at: Date): string => frenchDay(at.toISOString().slice(0, 10));
+
+/** A moment to the minute, by UTC: "17 novembre 2026 à 10:32 UTC". */
+export const frenchTime = (at: Date): string => `${frenchDate(at)} à ${at.toISOString().slice(11, 16)} UTC`;

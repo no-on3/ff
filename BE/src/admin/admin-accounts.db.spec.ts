@@ -25,7 +25,8 @@ import { LedgerEvents } from '../billing/ledger/ledger-events';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
-import { Mail, MailService } from '../mail/mail.service';
+import { Mail } from '../mail/mail.service';
+import { capturingMail } from '../mail/capturing-mail';
 import { FunctionWorkload, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PlansService } from '../plans/plans.service';
@@ -63,8 +64,9 @@ run('accounts, for operators (L2, P-71)', () => {
   let n = 0;
 
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
-  async function user(email: string, name: string | null = null): Promise<User> {
-    return db.dataSource.getRepository(User).save({ oidcSub: `kc-${email}`, email, name });
+  /** A user; in English unless said otherwise, as most of the e-mails these tests read. */
+  async function user(email: string, name: string | null = null, locale = 'en'): Promise<User> {
+    return db.dataSource.getRepository(User).save({ oidcSub: `kc-${email}`, email, name, locale });
   }
   /** An account, with its members; the first given is its owner. */
   async function account(
@@ -115,7 +117,7 @@ run('accounts, for operators (L2, P-71)', () => {
     plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), orchestrator, audit);
     const config = { get: (_key: string, fallback?: unknown) => fallback, getOrThrow: () => ({ consoleUrl: CONSOLE }) } as unknown as ConfigService;
     const usage = new UsageService(ds.getRepository(UsageRecord), ds, config);
-    const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
+    const mail = capturingMail(sent);
     ledger = new LedgerService(ds);
     settings = new PlatformSettingsService(ds.getRepository(PlatformSetting), audit);
     const credits = new AdminCreditsService(ds, ledger, new CreditService(ds, settings, new LedgerEvents(ds)), settings, audit, mail, config);
@@ -268,10 +270,10 @@ run('accounts, for operators (L2, P-71)', () => {
   });
 
   describe('the status changes', () => {
-    it("approve a pending account: active, with the operator, the reason and from → to in its audit log, and an e-mail to each owner", async () => {
+    it("approve a pending account: active, with the operator, the reason and from → to in its audit log, and an e-mail to each owner in their language", async () => {
       const id = await account({ name: 'To approve' }, [
         [await user('approve-1@ff.test'), 'owner'],
-        [await user('approve-2@ff.test'), 'owner'],
+        [await user('approve-2@ff.test', null, 'fr-TN'), 'owner'],
         [await user('approve-viewer@ff.test'), 'viewer'],
       ]);
 
@@ -289,9 +291,9 @@ run('accounts, for operators (L2, P-71)', () => {
       ]);
       expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([
         ['approve-1@ff.test', 'Your FF account is approved: To approve'],
-        ['approve-2@ff.test', 'Your FF account is approved: To approve'],
+        ['approve-2@ff.test', 'Votre compte FF est approuvé : To approve'],
       ]);
-      expect(sent[0].text).toContain(`The console: ${CONSOLE}`);
+      expect([sent[0].text, sent[1].text]).toEqual([expect.stringContaining(`The console: ${CONSOLE}`), expect.stringContaining(`La console : ${CONSOLE}`)]);
     });
 
     it("refuse a change that doesn't apply with 409, writing and sending nothing", async () => {

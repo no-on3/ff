@@ -5,6 +5,7 @@ import { Account } from '../accounts/entities/account.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { PlatformSettingsService } from '../admin/platform-settings.service';
 import { describeError } from '../common/describe-error';
+import { recipientsOf } from '../mail/language';
 import { MailService } from '../mail/mail.service';
 import { creditPolicy } from './credit-policy';
 import { LedgerEvents } from './ledger/ledger-events';
@@ -80,7 +81,7 @@ export class LowBalanceService implements OnModuleInit, OnModuleDestroy {
     if (recorded.length === 0) return null;
     const percent = Math.min(...recorded.map((row) => row.percent));
     const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
-    const mail = lowBalanceMail({
+    const facts = {
       account,
       percent,
       balanceMinor,
@@ -90,9 +91,9 @@ export class LowBalanceService implements OnModuleInit, OnModuleDestroy {
       exponent: credit.exponent,
       policy: creditPolicy(settings, credit.exponent),
       consoleUrl,
-    });
+    };
     const owners = await this.dataSource.getRepository(Membership).find({ where: { accountId, role: 'owner' }, relations: { user: true } });
-    for (const owner of owners) if (owner.user?.email) await this.mail.send({ to: owner.user.email, ...mail });
+    await this.mail.sendEach(recipientsOf(owners), (language) => lowBalanceMail(facts, language));
     return percent;
   }
 }

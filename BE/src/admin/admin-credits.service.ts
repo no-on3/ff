@@ -12,6 +12,7 @@ import { formatMinor, parseMinor } from '../billing/money';
 import { monthBounds } from '../billing/pricing.service';
 import { HOUR_MS } from '../billing/rating-hours';
 import { describeError } from '../common/describe-error';
+import { recipientsOf } from '../mail/language';
 import { MailService } from '../mail/mail.service';
 import { AdminCreditView } from './admin-accounts.dto';
 import { AdminGrantView } from './admin-credits.dto';
@@ -178,9 +179,8 @@ export class AdminCreditsService {
   private async tellOwners(account: Account, grant: Omit<GrantFacts, 'account' | 'consoleUrl'>): Promise<void> {
     try {
       const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
-      const message = grantMail({ ...grant, account, consoleUrl });
       const owners = await this.dataSource.getRepository(Membership).find({ where: { accountId: account.id, role: 'owner' }, relations: { user: true } });
-      for (const owner of owners) if (owner.user?.email) await this.mail.send({ to: owner.user.email, ...message });
+      await this.mail.sendEach(recipientsOf(owners), (language) => grantMail({ ...grant, account, consoleUrl }, language));
     } catch (error) {
       this.logger.error(`Could not e-mail the owners of account ${account.id} about a grant: ${describeError(error)}`);
     }

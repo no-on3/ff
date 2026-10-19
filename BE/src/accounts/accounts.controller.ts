@@ -3,7 +3,7 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { ACCOUNT_ID, RequestWithPrincipal, resolvePrincipal } from '../auth/principal';
 import { AccountsService } from './accounts.service';
-import { AccountView, CreateAccountDto, MeView, UpdateAccountDto } from './dto/account.dto';
+import { AccountView, CreateAccountDto, MeView, UpdateAccountDto, UpdateMeDto } from './dto/account.dto';
 import { User } from './entities/user.entity';
 
 /** An account ID in a path: 12 digits, else 400. */
@@ -30,6 +30,13 @@ export class AccountsController {
   @ApiResponse({ status: 200, type: MeView })
   async me(@CurrentUser() user: User | undefined, @Req() request: RequestWithPrincipal): Promise<MeView> {
     return user ? this.accounts.me(user) : this.accounts.developmentMe(resolvePrincipal(request));
+  }
+
+  @Patch('me')
+  @ApiOperation({ summary: 'Change your own settings: the language of the e-mails FF sends you, for all your accounts' })
+  @ApiResponse({ status: 200, type: MeView })
+  async updateMe(@CurrentUser() user: User | undefined, @Body() dto: UpdateMeDto): Promise<MeView> {
+    return this.accounts.updateMe(requireUser(user), dto);
   }
 
   @Post('accounts')

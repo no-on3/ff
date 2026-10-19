@@ -20,7 +20,8 @@ import { AuditService } from '../audit/audit.service';
 import type { Role } from '../auth/principal';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
-import { Mail, MailService } from '../mail/mail.service';
+import { Mail } from '../mail/mail.service';
+import { capturingMail } from '../mail/capturing-mail';
 import { BillingService } from './billing.service';
 import { InsufficientCreditException } from './credit-policy';
 import { CreditService } from './credit.service';
@@ -51,7 +52,8 @@ run('the balance check and the low-balance e-mails (L2, P-33)', () => {
     const id = String(700000000000 + ++n);
     await db.dataSource.getRepository(Account).save({ id, name: `Account ${n}`, planId: 'beta', status: AccountStatus.ACTIVE });
     for (const [email, role] of [...owners.map((email): [string, Role] => [email, 'owner']), ...others]) {
-      const user = await db.dataSource.getRepository(User).save({ oidcSub: `kc-${email}`, email, name: null });
+      // In English, as the e-mails these tests read; each in its own language is checked in language.spec.ts.
+      const user = await db.dataSource.getRepository(User).save({ oidcSub: `kc-${email}`, email, name: null, locale: 'en' });
       await db.dataSource.getRepository(Membership).save({ accountId: id, userId: user.id, role });
     }
     return id;
@@ -120,7 +122,7 @@ run('the balance check and the low-balance e-mails (L2, P-33)', () => {
     ledger = new LedgerService(ds);
     events = new LedgerEvents(ds);
     credit = new CreditService(ds, settings, events);
-    const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
+    const mail = capturingMail(sent);
     const config = { getOrThrow: () => ({ consoleUrl: CONSOLE }) } as unknown as ConfigService;
     lowBalance = new LowBalanceService(ds, ledger, settings, mail, events, config);
     billing = new BillingService(ds, credit, settings, audit);
@@ -306,8 +308,9 @@ run('the balance check and the low-balance e-mails (L2, P-33)', () => {
   });
 
   describe('the low-balance e-mails', () => {
-    it("e-mails the owners once per share of the last credit as the balance falls, the lowest share reached when several are", async () => {
+    it("e-mails the owners, each in their language, once per share of the last credit as the balance falls, the lowest share reached when several are", async () => {
       const a = await account(['owner-1@ff.test', 'owner-2@ff.test'], [['dev@ff.test', 'developer']]);
+      await db.dataSource.query(`UPDATE "users" SET "locale" = 'fr-TN' WHERE "email" = $1`, ['owner-2@ff.test']);
       await move(a, 50000n); // the credit: 50.000 TND
 
       await move(a, -24000n); // 26.000: above 50%
@@ -323,11 +326,11 @@ run('the balance check and the low-balance e-mails (L2, P-33)', () => {
       const name = nameOf(a);
       expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([
         ['owner-1@ff.test', `Your FF credit is down to 50%: ${name}`],
-        ['owner-2@ff.test', `Your FF credit is down to 50%: ${name}`],
+        ['owner-2@ff.test', `Votre crédit FF est descendu à 50\u00a0% : ${name}`],
         ['owner-1@ff.test', `Your FF credit is down to 20%: ${name}`],
-        ['owner-2@ff.test', `Your FF credit is down to 20%: ${name}`],
+        ['owner-2@ff.test', `Votre crédit FF est descendu à 20\u00a0% : ${name}`],
         ['owner-1@ff.test', `Your FF credit has run out: ${name}`],
-        ['owner-2@ff.test', `Your FF credit has run out: ${name}`],
+        ['owner-2@ff.test', `Votre crédit FF est épuisé : ${name}`],
       ]); // the developer gets none
       expect(await query(`SELECT percent, balance_minor::int AS balance FROM low_balance_notices WHERE account_id = $1 ORDER BY percent DESC`, [a])).toEqual([
         { percent: 50, balance: 25000 },
@@ -377,7 +380,7 @@ run('the balance check and the low-balance e-mails (L2, P-33)', () => {
       await move(a, 2000n);
       await move(a, -1600n); // 0.400 of 2.000: 50% and 20%
 
-      const other = new LowBalanceService(db.dataSource, ledger, settings, { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService, events, {
+      const other = new LowBalanceService(db.dataSource, ledger, settings, capturingMail(sent), events, {
         getOrThrow: () => ({ consoleUrl: CONSOLE }),
       } as unknown as ConfigService);
       const results = await Promise.all([lowBalance.check(a), other.check(a)]);

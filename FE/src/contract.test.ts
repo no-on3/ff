@@ -12,6 +12,7 @@ import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
 import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
+import languageSource from '../../BE/src/mail/language.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
@@ -20,6 +21,7 @@ import { PLAN_LIMIT_KEYS } from './lib/plans';
 import {
   BALANCE_FIELDS,
   CREDIT_STATE_FIELDS,
+  EMAIL_LANGUAGES,
   INVOCATION_FIELDS,
   INVOCATION_STATUSES,
   ME_ACCOUNT_FIELDS,
@@ -226,5 +228,13 @@ describe("a plan's limits", () => {
     const backendKeys = [...body.matchAll(/^ {2}(\w+):/gm)].map((match) => match[1]);
 
     expect(backendKeys).toEqual([...PLAN_LIMIT_KEYS]);
+  });
+});
+
+describe("the e-mails' languages", () => {
+  it("are the ones PATCH /me takes, French first, as every user's is at first", () => {
+    const backend = /export const LOCALES = \[([^\]]*)\] as const;/.exec(languageSource)?.[1];
+    expect(backend?.split(',').map((locale) => locale.trim().replace(/'/g, ''))).toEqual(EMAIL_LANGUAGES.map((language) => language.locale));
+    expect(accountDtoSource).toContain('@IsIn([...LOCALES]');
   });
 });

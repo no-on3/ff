@@ -4,6 +4,7 @@ import { apiErrorMessage } from '../lib/functions';
 import { planLimitRows } from '../lib/plans';
 import { Account, accountsApi } from '../services/api';
 import { useSession } from '../session/session';
+import EmailLanguage from './EmailLanguage';
 
 const STATUS_TEXT: Record<Account['status'], string> = {
   pending: 'Waiting for approval',
@@ -20,7 +21,7 @@ const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, 
   </div>
 );
 
-/** The chosen account: its details for every member, and the name and tax ID its owners change. */
+/** The chosen account: its details for every member, the name and tax ID its owners change, and the user's own e-mail language. */
 const AccountSettings: React.FC = () => {
   const { account: chosen, login, reload } = useSession();
   const [account, setAccount] = useState<Account | null>(null);
@@ -123,6 +124,7 @@ const AccountSettings: React.FC = () => {
               ))}
             </dl>
           </div>
+          <EmailLanguage />
           <form onSubmit={handleSubmit} className="card space-y-4">
             <h2 className="text-lg font-semibold">Details</h2>
             {!owner && <p className="text-sm text-gray-500">Only the account's owners change these.</p>}

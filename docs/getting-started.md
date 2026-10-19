@@ -351,6 +351,12 @@ curl -s $FF/functions -H "$AUTH"                         # now acts for that acc
 
 A user who belongs to several accounts names one with `-H "X-FF-Account: <id>"`.
 
+**The e-mails' language.** Every e-mail a customer gets, from the approval to an invoice, comes in French, Tunisia's language of business and the invoices', unless its reader chooses English, for all their accounts: on the console's Account page ("Your e-mails"), or so. An e-mail to several owners reaches each in their own language; an invitation goes in the invitee's when they already have a login, else in the inviter's. Your own e-mails, as the operator, stay in English.
+
+```bash
+curl -s -X PATCH $FF/me -H "$AUTH" -H 'content-type: application/json' -d '{"locale": "en"}' | jq -r .user.locale   # "en"; "fr-TN" goes back to French
+```
+
 For scripts, CI and the CLI, an owner makes an **API key** instead: it acts for its account, only with the scopes it was given (`functions:read`, `functions:write`, `functions:invoke`, `metrics:read`, and later `logs:read` and `usage:read`). The whole key is shown once:
 
 ```bash
