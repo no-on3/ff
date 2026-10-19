@@ -171,6 +171,28 @@ run('what FF keeps only for a while (L2)', () => {
   });
   });
 
+  describe("the notification deliveries' purge", () => {
+    it('deletes the deliveries made more than 30 days before now, or before the time given', async () => {
+      const [{ now }] = await query<Array<{ now: Date }>>('SELECT now()');
+      const made = async (daysAgo: number) =>
+        (
+          await query<Array<{ id: string }>>(
+            `INSERT INTO notification_deliveries (account_id, notification_id, kind, channel, target, payload, status, created_at)
+             SELECT id, gen_random_uuid(), 'test', 'webhook', 'https://hooks.example.tn', '{}', 'failed', now() - make_interval(days => $1) FROM accounts LIMIT 1 RETURNING id`,
+            [daysAgo],
+          )
+        )[0].id;
+      const old = await made(31);
+      const recent = await made(29);
+      const left = async () => (await query<Array<{ id: string }>>('SELECT id FROM notification_deliveries WHERE id = ANY($1)', [[old, recent]])).map((row) => row.id);
+
+      expect(await retention.purgeDeliveries()).toBeGreaterThanOrEqual(1);
+      expect(await left()).toEqual([recent]);
+      await retention.purgeDeliveries(new Date(now.getTime() + 2 * DAY * 1000));
+      expect(await left()).toEqual([]);
+    });
+  });
+
   describe("closed accounts' data", () => {
     /** A closed account whose data is due `dueInSeconds` from now (past when negative): a Node.js and a Python function, each called. */
     async function closedAccount(dueInSeconds: number): Promise<{ id: string; functions: Function[] }> {
@@ -195,21 +217,38 @@ run('what FF keeps only for a while (L2)', () => {
     const recordsOf = (accountId: string) => count('SELECT count(*)::int AS n FROM usage_records WHERE account_id = $1', accountId);
     const deletedAt = async (accountId: string) =>
       (await query<Array<{ at: Date | null }>>('SELECT data_deleted_at AS at FROM accounts WHERE id = $1', [accountId]))[0].at;
+    /** A notification delivered to the account, and its webhook secret. */
+    const notified = async (accountId: string) => {
+      await query(
+        `INSERT INTO notification_deliveries (account_id, notification_id, kind, channel, target, payload) VALUES ($1, gen_random_uuid(), 'test', 'webhook', 'https://hooks.example.tn', '{}')`,
+        [accountId],
+      );
+      await query(`INSERT INTO webhook_secrets (account_id, secret) VALUES ($1, 'whsec_x')`, [accountId]);
+    };
+    const notificationsOf = async (accountId: string) => [
+      await count('SELECT count(*)::int AS n FROM notification_deliveries WHERE account_id = $1', accountId),
+      await count('SELECT count(*)::int AS n FROM webhook_secrets WHERE account_id = $1', accountId),
+    ];
     const auditOf = async (accountId: string) =>
       (await query<Array<{ action: string; actor: string; resource: string }>>('SELECT action, actor, resource FROM audit_log WHERE account_id = $1 ORDER BY id', [accountId])).map(
         (row) => `${row.action} ${row.actor} ${row.resource}`,
       );
 
-    it("deletes a closed account's functions, with their code and history, its namespace and its logs once its date has passed, keeps its usage records, and says so once", async () => {
+    it("deletes a closed account's functions, with their code and history, its namespace, its logs and its notifications once its date has passed, keeps its usage records, and says so once", async () => {
       const due = await closedAccount(-MINUTE);
       const later = await closedAccount(DAY);
       const active = await functionOn('beta');
       await invokedAgo(active, DAY);
+      for (const id of [due.id, later.id]) await notified(id);
       const [node, python] = due.functions;
 
       await expect(retention.deleteClosedAccounts()).resolves.toBe(1);
 
       expect([await functionsOf(due.id), await historyOf(due.id), await recordsOf(due.id)]).toEqual([0, 0, 2]);
+      expect([await notificationsOf(due.id), await notificationsOf(later.id)]).toEqual([
+        [0, 0],
+        [1, 1],
+      ]);
       expect(removed).toEqual([node.id, python.id]);
       expect(minio.deleteCode.mock.calls).toEqual([[`${node.id}/code.ts`], [`${python.id}/code.py`]]);
       expect([orchestrator.removeTenant.mock.calls, orchestrator.deleteLogs.mock.calls]).toEqual([[[due.id]], [[due.id]]]);

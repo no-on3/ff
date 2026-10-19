@@ -208,6 +208,19 @@ curl -s "$FF/metrics?period=3600&start=$(date -u -d '-1 day' +%FT%TZ)" | jq -c '
 # {"calls":4,"throttles":0}
 ```
 
+**Notifications.** FF tells an account what happens by e-mail to its owners, each in their language, and by webhooks: a POST of JSON to a URL of yours. The alarms will send theirs this way; for now, send a test. Each webhook is signed with the account's secret, which owners read at `GET /notifications/webhook-secret`: `FF-Signature: t=<Unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, keyed with the secret as written. A receiver checks the signature, that `t` is recent, and drops an `FF-Event-Id` it already has, as [`examples/webhook-receiver.mjs`](../examples/webhook-receiver.mjs) does. It answers 2xx within 5 seconds, or FF tries again 1, 2, 4, 8 and 16 minutes later, then gives up; a redirect is never followed. FF never sends a webhook to a private or reserved address. A receiver on your own machine needs `FF_WEBHOOK_ALLOW_PRIVATE=true` in `BE/.env`, as `.env.example` sets it; production refuses that setting.
+
+```bash
+FF_WEBHOOK_SECRET=$(curl -s "$FF/notifications/webhook-secret" | jq -r .secret) node examples/webhook-receiver.mjs &   # on :8090
+curl -s -X POST "$FF/notifications/test" -H 'content-type: application/json' -d '{"webhookUrl": "http://localhost:8090/ff"}' \
+  | jq -c '[.deliveries[] | {channel, status}]'
+# [{"channel":"webhook","status":"pending"}]
+sleep 11; curl -s "$FF/notifications/deliveries?limit=1" | jq -c '.[0] | {status, attempts, responseStatus}'
+# {"status":"delivered","attempts":1,"responseStatus":204}; the receiver printed the test's body
+```
+
+The body is `{"id", "type", "account", "createdAt", "data"}`; `id` is also the `FF-Event-Id`, the same for each try. `"email": true` sends the test to the owners' e-mail too; development mode's account has no owner, so it answers 400 there. `POST /notifications/webhook-secret/rotate` makes a new secret: for 24 hours after, each webhook carries a `v1` by the old one too, while your receivers change over. Owners read and rotate the secret; owners and developers send tests; every member reads the deliveries, kept 30 days. API keys can't call these routes.
+
 **Scaling.** Each instance serves one call at a time, as on Lambda. Calls that arrive together get more instances at once, one per call in flight, up to `maxInstances`. Each quiet minute takes one instance away, and 15 idle minutes take the function to zero, unless `minInstances` is above 0. A call waits at most one timeout for a free instance. Change the limits like this:
 
 ```bash

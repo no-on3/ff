@@ -27,6 +27,11 @@ export class MailService {
     this.transport = transport ?? (smtpUrl ? createTransport(smtpUrl) : undefined);
   }
 
+  /** Whether e-mails leave at all: false without FF_SMTP_URL, when they are only written to the log. */
+  get sends(): boolean {
+    return this.transport !== undefined;
+  }
+
   /**
    * The same e-mail to each recipient in their own language, composed once per
    * language. A recipient without an address is skipped. True when every one

@@ -240,6 +240,10 @@ const appShape = {
   FF_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
   // How often the job that deletes old invocation history and closed accounts' data runs; tests shorten it.
   FF_RETENTION_INTERVAL_SECONDS: integer(3600, 5, 86400),
+  // How often the backend sends the notifications that are due: e-mails and webhooks; tests shorten it.
+  FF_NOTIFY_INTERVAL_SECONDS: integer(10, 1, 3600),
+  // Lets webhooks reach private addresses, such as a receiver on this machine: for development and tests only.
+  FF_WEBHOOK_ALLOW_PRIVATE: flag(false),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
@@ -346,6 +350,9 @@ function appRules(env: AppEnv): string[] {
     if (!env.FF_OPERATOR_EMAIL) {
       problems.push('FF_OPERATOR_EMAIL is required when NODE_ENV=production: new accounts wait for your approval there');
     }
+    if (env.FF_WEBHOOK_ALLOW_PRIVATE) {
+      problems.push("FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network");
+    }
     for (const name of Object.keys(DEV_SELLER) as Array<keyof typeof DEV_SELLER>) {
       if (env[name] === DEV_SELLER[name]) problems.push(`${name} must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)`);
     }
@@ -448,6 +455,11 @@ export default function configuration(env: Env = process.env) {
     // What FF keeps only for a while: how often the job that deletes it runs.
     retention: {
       intervalSeconds: parsed.FF_RETENTION_INTERVAL_SECONDS,
+    },
+    // Notifications: how often the due ones are sent, and whether a webhook may reach a private address.
+    notifications: {
+      intervalSeconds: parsed.FF_NOTIFY_INTERVAL_SECONDS,
+      allowPrivate: parsed.FF_WEBHOOK_ALLOW_PRIVATE,
     },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.

@@ -18,6 +18,7 @@ import { CancelledProFormas1792259449848 } from './1792259449848-CancelledProFor
 import { InvocationHistory1792282243364 } from './1792282243364-InvocationHistory';
 import { ClosedAccountDeletion1792325241958 } from './1792325241958-ClosedAccountDeletion';
 import { RateLimitedInvocations1792419122035 } from './1792419122035-RateLimitedInvocations';
+import { Notifications1792424270622 } from './1792424270622-Notifications';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -45,4 +46,5 @@ export const MIGRATIONS: Array<new () => object> = [
   InvocationHistory1792282243364,
   ClosedAccountDeletion1792325241958,
   RateLimitedInvocations1792419122035,
+  Notifications1792424270622,
 ];

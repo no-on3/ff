@@ -32,6 +32,11 @@
 #   - Invoices (P-36): the operator issues last month's invoice, its stamp duty
 #     taken from the credit, then a credit note; the owner reads both and the
 #     month's usage statement, as PDFs, and other accounts never do.
+#   - Notifications: an owner sends a test to a local receiver and to the
+#     owners' e-mail; the webhook arrives once, signed with the account's secret
+#     as a receiver checks it, the e-mail in the owner's language; a receiver
+#     that answers 500 gets the delivery again later; after a rotation, both
+#     secrets sign. Each account reads and changes only its own.
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
 # compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
@@ -165,17 +170,42 @@ approve() {
 e2e_dependencies keycloak mailpit
 e2e_cluster
 
+echo "== a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
+receiver_port="$(free_port)"
+receiver="http://127.0.0.1:$receiver_port"
+cat >"$work/receiver.py" <<'PY'
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Receiver(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('content-length', 0))).decode()
+        with open(sys.argv[2], 'a') as out:
+            out.write(json.dumps({'path': self.path, 'headers': {k.lower(): v for k, v in self.headers.items()}, 'body': body}) + '\n')
+        self.send_response(500 if self.path == '/fail' else 204)
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+HTTPServer(('127.0.0.1', int(sys.argv[1])), Receiver).serve_forever()
+PY
+: >"$work/webhooks.jsonl"
+python3 "$work/receiver.py" "$receiver_port" "$work/webhooks.jsonl" &
+e2e_pids+=("$!")
+# webhooks_to <path>: each request the receiver had on that path, a JSON object per line.
+webhooks_to() { jq -c --arg path "$1" 'select(.path == $path)' "$work/webhooks.jsonl"; }
+
 echo "== backends"
 e2e_build
 e2e_migrate "${e2e_base_env[@]}"
 # Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
+# Both send notifications every second, and may reach the receiver on this machine.
+notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
 e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" PORT="${api##*:}" \
-  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT"
+  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
-  FF_RETENTION_INTERVAL_SECONDS=5
+  FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}"
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 
 echo "== account A's function"
@@ -246,6 +276,7 @@ body_for() {
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;
+    "POST /notifications/test") echo "{\"webhookUrl\": \"$receiver/b\"}" ;;
     "POST /api-keys") echo '{"name": "l5", "scopes": ["functions:read"]}' ;;
     "POST /members") echo '{"email": "l5-invitee@ff.test", "role": "viewer"}' ;;
     "PUT /admin/settings") echo '{"settings": {"gracePeriodHours": 1}, "reason": "l5 tries"}' ;;
@@ -277,6 +308,9 @@ proforma_a="$(as_a POST /billing/pro-formas '{"credit": "50"}')"
 check "A asks for a pro-forma: 50.000 TND of credit, 19% VAT on top, a reference to transfer with (P-35)" "201 pending 50.000 9.500 59.500 true" \
   "$(status) $(jq -r '"\(.status) \(.credit) \(.vat) \(.total) \(.reference | test("^FF-[A-HJKMNP-TV-Z2-9]{4}-[A-HJKMNP-TV-Z2-9]{4}$"))"' <<<"$proforma_a")"
 pf_a="$(jq -r .id <<<"$proforma_a")"
+secret_a="$(as_a GET /notifications/webhook-secret | jq -r .secret)"
+as_a POST /notifications/test "{\"webhookUrl\": \"$receiver/a\"}" >/dev/null
+check "A sends itself a test notification, to the receiver" 202 "$(status)"
 own=""
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
@@ -390,6 +424,23 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
+      ;;
+    "GET /notifications/webhook-secret")
+      secret_b="$(as_b GET /notifications/webhook-secret | jq -r .secret)"
+      check "$route: B reads its own signing secret, not A's" "200 true" "$(status) $([ "$secret_b" != "$secret_a" ] && [[ "$secret_b" == whsec_* ]] && echo true || echo false)"
+      ;;
+    "POST /notifications/webhook-secret/rotate")
+      as_b POST /notifications/webhook-secret/rotate >/dev/null
+      check "$route: B rotates its own secret, never A's" "200 $secret_a" "$(status) $(as_a GET /notifications/webhook-secret | jq -r .secret)"
+      ;;
+    "POST /notifications/test")
+      test_b="$(as_b POST /notifications/test "$(body_for POST /notifications/test)" | jq -r .notificationId)"
+      check "$route: B tests its own webhook" 202 "$(status)"
+      check "  ... which A's deliveries don't show" 0 "$(as_a GET /notifications/deliveries | jq --arg id "$test_b" 'map(select(.notificationId == $id)) | length')"
+      ;;
+    "GET /notifications/deliveries")
+      others="$(as_b GET /notifications/deliveries | jq --arg url "$receiver/b" 'map(select(.target != $url)) | length')"
+      check "$route: B lists only its own deliveries, none of A's" "200 0" "$(status) $others"
       ;;
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
@@ -618,6 +669,25 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     *'{'*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
+      ;;
+    "GET /notifications/webhook-secret")
+      secret_2="$(as_user_2 GET /notifications/webhook-secret | jq -r .secret)"
+      check "$route: account 2 reads its own signing secret, not account 1's" "200 true" \
+        "$(status) $([ "$secret_2" != "$(as_user_1 GET /notifications/webhook-secret | jq -r .secret)" ] && echo true || echo false)"
+      ;;
+    "POST /notifications/webhook-secret/rotate")
+      secret_1_before="$(as_user_1 GET /notifications/webhook-secret | jq -r .secret)"
+      as_user_2 POST /notifications/webhook-secret/rotate >/dev/null
+      check "$route: account 2 rotates its own secret, never account 1's" "200 $secret_1_before" "$(status) $(as_user_1 GET /notifications/webhook-secret | jq -r .secret)"
+      ;;
+    "POST /notifications/test")
+      test_2="$(as_user_2 POST /notifications/test "$(body_for POST /notifications/test)" | jq -r .notificationId)"
+      check "$route: account 2 tests its own webhook" 202 "$(status)"
+      check "  ... which account 1's deliveries don't show" 0 "$(as_user_1 GET /notifications/deliveries | jq --arg id "$test_2" 'map(select(.notificationId == $id)) | length')"
+      ;;
+    "GET /notifications/deliveries")
+      others="$(as_user_2 GET /notifications/deliveries | jq --arg url "$receiver/b" 'map(select(.target != $url)) | length')"
+      check "$route: account 2 lists only its own deliveries" "200 0" "$(status) $others"
       ;;
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
@@ -895,6 +965,51 @@ check "the function's Invocations, by the hour, are its usage records' calls, ex
   "$metrics_status $(jq -r '[.metrics.Invocations[]] | add' <<<"$metrics_1") $(jq '[.metrics.Duration.p50[] | select(. != null)] | length > 0' <<<"$metrics_1")"
 as_user_1 GET "/functions/$fn_1/metrics?period=60&start=2026-01-01T00:00:00Z" >/dev/null
 check "a window of more points than an answer gives is refused, saying why" 400 "$(status)"
+
+echo "== notifications: a test to a webhook and the owners' e-mail, signed, delivered, tried again"
+# verify_signature <secret...> < hook: true when the hook carries a valid v1 by each secret given, as a receiver checks it.
+verify_signature() {
+  python3 -c '
+import hashlib, hmac, json, sys
+hook = json.load(sys.stdin)
+fields = [part.split("=", 1) for part in hook["headers"]["ff-signature"].split(",")]
+t = dict(fields)["t"]
+signatures = [value for name, value in fields if name == "v1"]
+body = hook["body"]
+expected = [hmac.new(secret.encode(), f"{t}.{body}".encode(), hashlib.sha256).hexdigest() for secret in sys.argv[1:]]
+print("true" if len(signatures) == len(expected) and all(hmac.compare_digest(a, b) for a, b in zip(signatures, expected)) else "false")
+' "$@"
+}
+# delivery_of <id>: one of account 1's deliveries, as GET /notifications/deliveries gives it.
+delivery_of() { as_user_1 GET /notifications/deliveries | jq -c --arg id "$1" '.[] | select(.id == $id or .notificationId == $id)'; }
+secret_1="$(as_user_1 GET /notifications/webhook-secret | jq -r .secret)"
+tested="$(as_user_1 POST /notifications/test "{\"webhookUrl\": \"$receiver/l5\", \"email\": true}")"
+check "account 1's owner sends a test: accepted, an e-mail and a webhook, pending" "202 email:pending webhook:pending" \
+  "$(status) $(jq -r '[.deliveries[] | "\(.channel):\(.status)"] | sort | join(" ")' <<<"$tested")"
+notification_1="$(jq -r .notificationId <<<"$tested")"
+for _ in $(seq 1 40); do
+  [ "$(delivery_of "$notification_1" | jq -s 'map(select(.status == "delivered")) | length')" = 2 ] && break
+  sleep 0.5
+done
+check "both are delivered within seconds, once each" "delivered delivered 1 1" \
+  "$(delivery_of "$notification_1" | jq -sr 'map(.status) | join(" ")') $(delivery_of "$notification_1" | jq -sr 'map(.attempts) | join(" ")')"
+hook="$(webhooks_to /l5 | head -1)"
+check "the receiver got it once: its FF-Event-Id the notification's, its body account 1's test" "1 $notification_1 test $account_1" \
+  "$(webhooks_to /l5 | wc -l | tr -d ' ') $(jq -r '.headers["ff-event-id"]' <<<"$hook") $(jq -r '.body | fromjson | "\(.type) \(.account)"' <<<"$hook")"
+check "signed with account 1's secret, as a receiver checks it" true "$(verify_signature "$secret_1" <<<"$hook")"
+check "and the owner's e-mail, in their language, English" "A test notification from FF: L5 one" "$(mail_to "$user_1" | head -1)"
+failing="$(as_user_1 POST /notifications/test "{\"webhookUrl\": \"$receiver/fail\"}" | jq -r '.deliveries[0].id')"
+for _ in $(seq 1 40); do [ "$(delivery_of "$failing" | jq -r .lastError)" = "HTTP 500" ] && break; sleep 0.5; done
+check "a receiver that answers 500: the delivery waits a minute for its next try, saying why" "pending 1 HTTP 500 500 true" \
+  "$(delivery_of "$failing" | jq -r '"\(.status) \(.attempts) \(.lastError) \(.responseStatus) \(((.nextAttemptAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) - now) > 20)"')"
+rotated="$(as_user_1 POST /notifications/webhook-secret/rotate)"
+check "the owner rotates the secret: a new one, the old one signing too for a day" "200 true true" \
+  "$(status) $(jq -r --arg old "$secret_1" '.secret != $old' <<<"$rotated") $(jq '((.previousExpiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) - now) > 86000' <<<"$rotated")"
+as_user_1 POST /notifications/test "{\"webhookUrl\": \"$receiver/rotated\"}" >/dev/null
+for _ in $(seq 1 40); do [ -n "$(webhooks_to /rotated)" ] && break; sleep 0.5; done
+check "its webhooks then carry a valid signature by each" true "$(verify_signature "$(jq -r .secret <<<"$rotated")" "$secret_1" <<<"$(webhooks_to /rotated | head -1)")"
+check "the rotation and the tests are in the account's audit log, never a secret" "notification.test webhook_secret.rotate false" \
+  "$(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action | startswith("notification.") or startswith("webhook_secret.")) | .action] | unique | join(" ")') $(as_user_1 GET /audit-log | grep -q whsec_ && echo true || echo false)"
 
 echo "== support: finding what a customer asks about, and its data only for a reason"
 found="$(with_token "$operator_token" GET "/admin/search?q=$logged_id")"

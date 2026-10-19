@@ -136,6 +136,12 @@ describe('configuration', () => {
     expect(configuration(dev).database).not.toHaveProperty('synchronize');
   });
 
+  it("sends notifications every 10 s, never to a private address, unless told otherwise", () => {
+    expect(configuration(production).notifications).toEqual({ intervalSeconds: 10, allowPrivate: false });
+    expect(configuration({ ...production, NODE_ENV: 'development', FF_NOTIFY_INTERVAL_SECONDS: '1', FF_WEBHOOK_ALLOW_PRIVATE: 'true' }).notifications).toEqual({ intervalSeconds: 1, allowPrivate: true });
+    expect(problems({ ...production, FF_NOTIFY_INTERVAL_SECONDS: '0' })).toEqual([expect.stringContaining('FF_NOTIFY_INTERVAL_SECONDS')]);
+  });
+
   describe('production refuses development settings', () => {
     it.each<[string, Env, string]>([
       ['the dev authentication mode', { FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' }, 'FF_AUTH_MODE=dev is for development only'],
@@ -154,6 +160,7 @@ describe('configuration', () => {
       ['invitations linking to a development console (P-16)', { FF_CONSOLE_URL: undefined }, 'FF_CONSOLE_URL must be set when NODE_ENV=production'],
       ['pro-formas naming no real seller (P-35)', { FF_SELLER_NAME: undefined }, 'FF_SELLER_NAME must be set when NODE_ENV=production'],
       ['pro-formas with the example IBAN (P-35)', { FF_BANK_IBAN: 'TN59 1000 6035 1835 9847 8831' }, 'FF_BANK_IBAN must be set when NODE_ENV=production'],
+      ["webhooks allowed into FF's own network", { FF_WEBHOOK_ALLOW_PRIVATE: 'true' }, "FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network"],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 

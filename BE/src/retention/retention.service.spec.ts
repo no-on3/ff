@@ -8,7 +8,7 @@ import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { BETA_LIMITS } from '../plans/test-fixtures';
-import { RetentionService } from './retention.service';
+import { DELIVERY_DAYS, RetentionService } from './retention.service';
 
 const HOUR_MS = 3_600_000;
 
@@ -53,7 +53,9 @@ describe('RetentionService', () => {
       steps.push(`mark ${criteria.id}`);
       return { affected: marked };
     });
-    const manager = { update };
+    // The account's notification deliveries and webhook secret, deleted in the transaction that marks it.
+    const managerQuery = jest.fn(async (sql: string, [accountId]: string[]) => void steps.push(`${/webhook_secrets/.test(sql) ? 'secret' : 'deliveries'} ${accountId}`));
+    const manager = { update, query: managerQuery };
     const dataSource = {
       query,
       getRepository: (entity: unknown) => repositories.get(entity),
@@ -122,6 +124,23 @@ describe('RetentionService', () => {
     });
   });
 
+  describe('the notification deliveries', () => {
+    it(`deletes those older than ${DELIVERY_DAYS} days, before the database's now or the one given, a batch at a time`, async () => {
+      for (const count of [3, 3, 1]) query.mockResolvedValueOnce([[], count]);
+
+      await expect(service.purgeDeliveries(undefined, 3)).resolves.toBe(7);
+      const now = new Date('2026-10-18T10:00:00Z');
+      await expect(service.purgeDeliveries(now)).resolves.toBe(0);
+
+      expect(query.mock.calls.map(([sql, parameters]: [string, unknown[]]) => [/DELETE FROM "notification_deliveries"/.test(sql) && sql.includes('make_interval(days => $2)'), parameters])).toEqual([
+        [true, [null, 30, 3]],
+        [true, [null, 30, 3]],
+        [true, [null, 30, 3]],
+        [true, [now, 30, 1_000]],
+      ]);
+    });
+  });
+
   describe("closed accounts' data", () => {
     it('deletes each function, then the namespace, then the logs, then marks the account and records it once', async () => {
       dueAccounts = [{ id: '300000000001' }];
@@ -134,6 +153,8 @@ describe('RetentionService', () => {
         'function 300000000001/f-2',
         'namespace 300000000001',
         'logs 300000000001',
+        'deliveries 300000000001',
+        'secret 300000000001',
         'mark 300000000001',
         'audit account.data_delete 300000000001',
       ]);
@@ -156,6 +177,8 @@ describe('RetentionService', () => {
         'namespace 300000000001',
         'namespace 300000000002',
         'logs 300000000002',
+        'deliveries 300000000002',
+        'secret 300000000002',
         'mark 300000000002',
         'audit account.data_delete 300000000002',
       ]);
@@ -168,7 +191,8 @@ describe('RetentionService', () => {
 
       await service.deleteClosedAccounts();
 
-      expect(steps).toEqual(['namespace 300000000001', 'logs 300000000001', 'mark 300000000001']);
+      // Deleting its notifications again changes nothing: they went with the first run.
+      expect(steps).toEqual(['namespace 300000000001', 'logs 300000000001', 'deliveries 300000000001', 'secret 300000000001', 'mark 300000000001']);
       expect(audit.record).not.toHaveBeenCalled();
     });
 
@@ -186,18 +210,20 @@ describe('RetentionService', () => {
   });
 
   describe('the timer', () => {
+    /** The purges of a table so far: each run purges the history, then the deliveries. */
+    const purges = (table: string) => query.mock.calls.filter(([sql]: [string]) => sql.includes(`"${table}"`)).length;
     it('runs the purge and then the closed accounts at start and every interval, until the module stops', async () => {
       jest.useFakeTimers({ now: new Date('2026-10-18T10:00:00Z') });
       service.onModuleInit();
       await jest.advanceTimersByTimeAsync(0);
-      expect([query.mock.calls.length, findAccounts.mock.calls.length]).toEqual([1, 1]);
+      expect([purges('function_invocations'), purges('notification_deliveries'), findAccounts.mock.calls.length]).toEqual([1, 1, 1]);
 
       await jest.advanceTimersByTimeAsync(3 * HOUR_MS);
-      expect([query.mock.calls.length, findAccounts.mock.calls.length]).toEqual([4, 4]);
+      expect([purges('function_invocations'), purges('notification_deliveries'), findAccounts.mock.calls.length]).toEqual([4, 4, 4]);
 
       service.onModuleDestroy();
       await jest.advanceTimersByTimeAsync(5 * HOUR_MS);
-      expect([query.mock.calls.length, findAccounts.mock.calls.length]).toEqual([4, 4]);
+      expect([purges('function_invocations'), purges('notification_deliveries'), findAccounts.mock.calls.length]).toEqual([4, 4, 4]);
     });
 
     it('logs a purge that fails, still looks for closed accounts, and runs again at the next interval', async () => {
@@ -207,10 +233,23 @@ describe('RetentionService', () => {
       service.onModuleInit();
       await jest.advanceTimersByTimeAsync(0);
       expect(errors).toHaveBeenCalledWith('Could not purge the invocation history: connection terminated');
-      expect(findAccounts).toHaveBeenCalledTimes(1);
+      expect([purges('notification_deliveries'), findAccounts.mock.calls.length]).toEqual([1, 1]);
 
       await jest.advanceTimersByTimeAsync(HOUR_MS);
-      expect(query).toHaveBeenCalledTimes(2);
+      expect(purges('function_invocations')).toBe(2);
+    });
+
+    it('logs a purge of the deliveries that fails, and still looks for closed accounts', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-18T10:00:00Z') });
+      query.mockImplementation(async (sql: string) => {
+        if (sql.includes('notification_deliveries')) throw new Error('lock timeout');
+        return [[], 0];
+      });
+
+      service.onModuleInit();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(errors).toHaveBeenCalledWith('Could not purge the notification deliveries: lock timeout');
+      expect(findAccounts).toHaveBeenCalledTimes(1);
     });
 
     it('logs a failure to look for closed accounts, and runs again at the next interval', async () => {
@@ -232,11 +271,11 @@ describe('RetentionService', () => {
 
       service.onModuleInit();
       await jest.advanceTimersByTimeAsync(2 * HOUR_MS);
-      expect(query).toHaveBeenCalledTimes(1);
+      expect(purges('function_invocations')).toBe(1);
 
       finish([[], 0]);
       await jest.advanceTimersByTimeAsync(HOUR_MS);
-      expect(query).toHaveBeenCalledTimes(2);
+      expect(purges('function_invocations')).toBe(2);
     });
 
     it('takes its interval from the configuration', async () => {
@@ -252,7 +291,7 @@ describe('RetentionService', () => {
       try {
         fast.onModuleInit();
         await jest.advanceTimersByTimeAsync(15_000);
-        expect(query).toHaveBeenCalledTimes(4); // at start, then at 5, 10 and 15 s
+        expect(purges('function_invocations')).toBe(4); // at start, then at 5, 10 and 15 s
       } finally {
         fast.onModuleDestroy();
       }
