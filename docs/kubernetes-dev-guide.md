@@ -300,6 +300,7 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
    - `/readyz`, and the login's public issuer;
    - the admin app and Keycloak's administration refused, then admitted once this machine's address is allowed;
    - a customer made, signed in, asking for an account; the operator told by e-mail through the cluster's SMTP, then approving;
+   - the backend's token for the cluster's API, read in its pod, lasting an hour;
    - a function deployed and invoked in direct mode, answering from gVisor's kernel, and its logs;
    - the audit log naming the caller's address, not the edge's;
    - an ordinary pod reaching the edge, and not the backend, Keycloak, the console or a function;
@@ -324,7 +325,7 @@ The token is valid for 24 hours. Renew it with `hack/k8s/mint-token.sh`, which a
 ## What the backend may do
 
 See [`deploy/k8s/README.md`](../deploy/k8s/README.md). In short:
-- RBAC grants only what function lifecycle needs: no secrets, no pod exec, no role management.
+- RBAC grants only what function lifecycle needs: no secrets, no pod exec, no role management. Its reads reach across the cluster, so credentials live in Secrets only, and the backend's token in the platform lasts an hour.
 - An admission policy confines every write to `ff-t-*` namespaces labelled `app.kubernetes.io/managed-by=ff-controller`.
 
 ## Troubleshooting

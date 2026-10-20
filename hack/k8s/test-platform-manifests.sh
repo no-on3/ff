@@ -3,7 +3,10 @@
 # without deploying them, in about a minute:
 #   - every pod as Pod Security "restricted" wants it and more: non-root by number, no capability, no privilege
 #     escalation, the runtime's seccomp profile, a read-only root (Keycloak's alone may write, named here),
-#     memory limits, probes, no API token but the backend's;
+#     memory limits, probes, no API token but the backend's, and the backend's asked for an hour, not the year
+#     of the token Kubernetes mounts by default;
+#   - credentials only in Secrets: none in a ConfigMap, an environment value or a command line, whose
+#     contents the backend's token can read across the cluster;
 #   - every workload behind a NetworkPolicy, ff-system denying by default, and every Service selecting pods;
 #   - the backend's settings (backend.env, with the Secret's keys) read by the backend's own configuration:
 #     accepted, but for the seller's and the bank's details, which an overlay must give;
@@ -29,7 +32,8 @@ import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
 # Keycloak's start builds its configuration into its own directories (deploy/k8s/platform/40-keycloak.yaml).
 WRITABLE_ROOT = {'keycloak'}
-# The backend manages the tenants' namespaces with its ServiceAccount's token; nothing else needs one.
+# The backend manages the tenants' namespaces with its ServiceAccount's token; nothing else needs one. The token
+# Kubernetes mounts by default is valid for a year; the backend's is asked for an hour at most, and renewed.
 API_TOKEN = {'ff-backend'}
 problems = []
 for doc in docs:
@@ -42,8 +46,14 @@ for doc in docs:
         problems.append(f'{name}: not non-root by number')
     if context.get('seccompProfile', {}).get('type') != 'RuntimeDefault':
         problems.append(f'{name}: no RuntimeDefault seccomp profile')
-    if (pod.get('automountServiceAccountToken', True) is not False) != (name in API_TOKEN):
-        problems.append(f'{name}: an API token where none is needed, or none where one is')
+    tokens = [source['serviceAccountToken'] for volume in pod.get('volumes', [])
+              for source in volume.get('projected', {}).get('sources', []) if 'serviceAccountToken' in source]
+    if pod.get('automountServiceAccountToken', True) is not False:
+        problems.append(f'{name}: the API token mounted by default, valid for a year')
+    if name not in API_TOKEN and tokens:
+        problems.append(f'{name}: an API token it does not need')
+    if name in API_TOKEN and (len(tokens) != 1 or not 600 <= tokens[0].get('expirationSeconds', 0) <= 3600):
+        problems.append(f'{name}: no API token of an hour at most')
     for container in pod['containers']:
         where = f"{name}/{container['name']}"
         security = container.get('securityContext', {})
@@ -63,8 +73,52 @@ for doc in docs:
 print(len([d for d in docs if d['kind'] in ('Deployment', 'Job', 'CronJob')]))
 for problem in problems: print(problem)
 PY
-check "every workload hardened: non-root, no capability, no escalation, seccomp, read-only root but Keycloak's, limits, probes" \
+check "every workload hardened: non-root, no capability, no escalation, seccomp, read-only root but Keycloak's, limits, probes, the backend's API token an hour long and no other" \
   "7" "$(cat "$work/pods.txt")"
+
+echo "== credentials"
+# The backend's token reads ConfigMaps and pods' specs across the cluster, but no Secret (deploy/k8s/README.md,
+# "Cluster-wide reads"): so a credential goes in a Secret, never in what that token can read.
+python3 - "$work/platform.yaml" >"$work/credentials.txt" <<'PY'
+import json, re, sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+NAME = re.compile(r'PASSWORD|PASSWD|SECRET|TOKEN|PRIVATE|CREDENTIAL|ACCESS_KEY|API_KEY', re.I)
+VALUE = re.compile(r'://[^/\s:@]+:[^/\s@]+@|-----BEGIN [A-Z ]*PRIVATE KEY-----')
+FIELD = re.compile(r'password|secret|clientSecret|privateKey', re.I)
+problems = []
+def look(where, value):
+    if isinstance(value, str) and VALUE.search(value):
+        problems.append(f'{where}: a password in a URL, or a private key')
+def fields(where, node):  # a JSON file's own credentials, but for ${...}, filled in from a Secret at start
+    if isinstance(node, dict):
+        for key, child in node.items():
+            if FIELD.fullmatch(key) and isinstance(child, str) and child and not re.fullmatch(r'\$\{\w+\}', child):
+                problems.append(f'{where}: {key} written in it')
+            fields(where, child)
+    elif isinstance(node, list):
+        for child in node:
+            fields(where, child)
+for doc in docs:
+    name = doc['metadata']['name']
+    if doc['kind'] == 'ConfigMap':
+        for key, value in (doc.get('data') or {}).items():
+            if NAME.search(key):
+                problems.append(f'ConfigMap {name}: {key}')
+            look(f'ConfigMap {name}/{key}', value)
+            if key.endswith('.json'):
+                fields(f'ConfigMap {name}/{key}', json.loads(value))
+    if doc['kind'] in ('Deployment', 'Job', 'CronJob'):
+        pod = (doc['spec']['jobTemplate']['spec'] if doc['kind'] == 'CronJob' else doc['spec'])['template']['spec']
+        for container in pod['containers'] + pod.get('initContainers', []):
+            for variable in container.get('env', []):
+                if 'value' in variable and NAME.search(variable['name']):
+                    problems.append(f"{name}/{container['name']}: {variable['name']} as a value")
+                look(f"{name}/{container['name']} {variable['name']}", variable.get('value'))
+            for argument in container.get('command', []) + container.get('args', []):
+                look(f"{name}/{container['name']}'s command line", argument)
+print('\n'.join(problems) or 'none')
+PY
+check "credentials only in Secrets: none in a ConfigMap, an environment value or a command line" none "$(cat "$work/credentials.txt")"
 
 echo "== who reaches whom"
 python3 - "$work/platform.yaml" >"$work/policies.txt" <<'PY'

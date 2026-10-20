@@ -87,7 +87,7 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 | File | Object | Purpose |
 |---|---|---|
 | `platform/00-namespace-edge.yaml` | Namespace `ff-edge` | The edge's, the only pods the internet reaches. Pod Security `restricted` |
-| `platform/10-backend.yaml` | Service and Deployment `ff-backend` in `ff-system` | One replica, as `ff-controller`; `/readyz` and `/healthz` its probes, its metrics port named `metrics`; user 10001, read-only root, the log store's key mounted for deleting a closed account's lines |
+| `platform/10-backend.yaml` | Service and Deployment `ff-backend` in `ff-system` | One replica, as `ff-controller`, with a token for the cluster's API asked for an hour, not the default year ("Cluster-wide reads", below); `/readyz` and `/healthz` its probes, its metrics port named `metrics`; user 10001, read-only root, the log store's key mounted for deleting a closed account's lines |
 | `platform/15-migrations.yaml` | Job `ff-migrations` | The migrations, from the backend's image and settings; `deploy.sh` runs it first |
 | `platform/20-console.yaml`, `30-admin.yaml` | Services and Deployments `ff-console`, `ff-admin` | The static builds, two replicas each, user 65532, read-only root |
 | `platform/40-keycloak.yaml` | Service and Deployment `keycloak` | Keycloak 26.7.5 with `start`, TLS at the edge, its database outside; the realm imported at its first start. Non-root, no capability; its root is writable, as its start builds its configuration there |
@@ -99,6 +99,8 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 
 `hack/e2e-platform.sh` deploys them on a k3d cluster of its own, with `deploy.sh` and the overlay `hack/k8s/platform-e2e`, and takes a customer's path through the edge (the Kubernetes dev guide, "The platform on a cluster of its own"). `hack/k8s/test-platform-manifests.sh` checks them without deploying:
 - every pod's hardening, and every workload's NetworkPolicy;
+- an API token for the backend alone, asked for an hour at most;
+- credentials in Secrets only: none in a ConfigMap, an environment value or a command line;
 - the backend's settings, read by the backend's own configuration;
 - the realm up to date;
 - the edge's Caddyfile, valid for Caddy;
@@ -167,7 +169,7 @@ The namespace must be named `ff-t-*` and labelled `app.kubernetes.io/managed-by=
 
 The policy also checks calls through a Service's proxy, which reach admission as `CONNECT`: with the development overlay, the backend can proxy into its tenants' Services, and into one more: the log store's, `ff-system/victoria-logs`, by that name and port 9428 only, which the development backend queries this way (P-43). Production grants no proxy at all, so this allows nothing there. The prefix is fixed: the backend's configuration accepts no `K8S_NAMESPACE_PREFIX` but `ff-t-`, since any other would make every deploy fail here.
 
-## Cluster-wide reads (decided for the beta, 2026-10-17)
+## Cluster-wide reads (decided 2026-10-17, reviewed 2026-10-20)
 
 RBAC can't limit reads to `ff-t-*` namespaces, and the admission policy doesn't see reads. So the backend's token can **read across the whole cluster**: namespaces, ConfigMaps, Services, quotas, limit ranges, NetworkPolicies, Deployments and pods. Stolen, it would show:
 - every ConfigMap, in `kube-system` and `ff-system` too;
@@ -178,12 +180,18 @@ It can no longer read containers' logs: `pods/log` went in P-43, when the logs b
 
 It still couldn't read Secrets, run anything inside a pod, or change anything outside the tenant namespaces.
 
-**For the beta, FF accepts this, under four rules:**
+**FF accepts this, under five rules:**
 1. FF has its own cluster, with no unrelated workloads.
-2. Platform components keep credentials in Secrets only: never in ConfigMaps, environment values or command lines, and never in their logs.
-3. Inside the cluster the backend uses its projected ServiceAccount token, which is short-lived and bound to its pod.
-4. `pods/log` went when the log store began to serve logs (client-readiness plan, P-43), and the security review (P-64) reviews this decision.
+2. Platform components keep credentials in Secrets only: never in ConfigMaps, environment values or command lines, and never in their logs. `hack/k8s/test-platform-manifests.sh` checks the platform's manifests for this: no ConfigMap key or environment value named like a credential, no password in a URL, no private key, and no secret written into the realm's JSON (its SMTP password is `${FF_SMTP_PASSWORD}`, filled in from the Secret when Keycloak starts).
+3. Inside the cluster the backend's token is asked for an hour (`deploy/k8s/platform/10-backend.yaml`), bound to its pod, and renewed by the kubelet before it expires; the backend reads the file again every minute. The token Kubernetes mounts by default would be valid for a year: measured on k3s, 31,536,000 s. `hack/e2e-platform.sh` reads it in the backend's pod: 3,600 s.
+4. `pods/log` went when the log store began to serve logs (client-readiness plan, P-43).
+5. A function's pod spec holds no secret: today it has FF's own settings only. When functions get environment variables of their own, as on Lambda, their values go in a Secret in the tenant's namespace, never as plain values in the pod spec, which this token reads.
 
-**The narrower option, for that review:** read permissions per tenant namespace, through a RoleBinding in each one to a ClusterRole `ff-tenant-reader`. RBAC lets a subject create a binding to a role only if it holds the role's permissions or may `bind` that role, so granting `bind` on `ff-tenant-reader` alone, with the admission policy keeping such bindings inside `ff-t-*` namespaces, would let the backend create them without a separate provisioner. It moves the risk into the backend's right to create bindings, so it needs its own review before it replaces the cluster-wide reads.
+**Reviewed by the security review** (client-readiness plan, P-64, 2026-10-20), and kept, for the beta and for GA:
+- What a stolen token shows is the platform's layout (names, images, settings without credentials, the cluster's public CA), and every customer's function code, which the functions' ConfigMaps hold. Rules 2 and 5 keep credentials out of it. The token itself can change nothing outside `ff-t-*` namespaces, which the admission policy enforces.
+- Rule 3 was found untrue as written: the backend used the default token, valid for a year. It now asks for an hour.
+- The narrower option below would hide `kube-system` and `ff-system` from the token, which hold no credentials outside Secrets. To do that, it would give the backend the power to create RoleBindings, a write that is riskier than these reads. And the functions' code stays readable under either option, since the backend must read their namespaces. So it is not taken.
+
+**The narrower option, not taken:** read permissions per tenant namespace, through a RoleBinding in each one to a ClusterRole `ff-tenant-reader`. RBAC lets a subject create a binding to a role only if it holds the role's permissions or may `bind` that role, so granting `bind` on `ff-tenant-reader` alone, with the admission policy keeping such bindings inside `ff-t-*` namespaces, would let the backend create them without a separate provisioner. It moves the risk into the backend's right to create bindings, so it needs its own review before it replaces the cluster-wide reads.
 
 `hack/k8s/test-rbac.sh` checks all of this against a live cluster, both what is allowed and what is denied. For the production manifests, it removes the development overlay's binding, checks that no Service proxy is left, and restores it.

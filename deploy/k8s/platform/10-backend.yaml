@@ -40,6 +40,10 @@ spec:
         app.kubernetes.io/part-of: ff
     spec:
       serviceAccountName: ff-controller
+      # Its token for the cluster's API is asked for an hour, and the kubelet renews it before then; the backend
+      # reads the file again every minute. The token Kubernetes mounts by default would be valid for a year, as long
+      # as the pod lives, in whoever's hands it is.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -97,6 +101,9 @@ spec:
             - name: log-store-key
               mountPath: /etc/ff/victoria-logs-delete-key
               readOnly: true
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
@@ -106,3 +113,15 @@ spec:
           secret:
             secretName: victoria-logs-delete-key
             defaultMode: 0440
+        # Where the backend looks by default (K8S_TOKEN_FILE, K8S_CA_FILE): the token, and the API server's CA.
+        - name: kube-api-access
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt

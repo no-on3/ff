@@ -10,8 +10,8 @@
 # admitted once the operator's address is allowed; the login's issuer; a customer signing in, asking for an
 # account, an operator approving it, the account deploying and invoking a function in direct mode, inside gVisor
 # as production requires (hack/k8s/gvisor-up.sh installs it in the cluster; deploy.sh refuses a sandbox the
-# cluster lacks or no node runs), and reading its logs; the operator's
-# e-mail through the cluster's SMTP; the audit log naming the caller's address, not
+# cluster lacks or no node runs), and reading its logs, the backend's token for the cluster's API lasting an
+# hour; the operator's e-mail through the cluster's SMTP; the audit log naming the caller's address, not
 # the edge's; who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
@@ -32,6 +32,9 @@ cleanup() {
       echo "--- $pod" >&2
       kubectl -n "${pod%%/*}" logs "${pod#*/}" --tail=15 >&2 2>/dev/null || true
     done
+    # A 500 from the API leaves its reason in the backend's log only, and the backend's pod is running.
+    echo "--- the backend's last lines" >&2
+    kubectl -n ff-system logs deployment/ff-backend --tail=40 >&2 2>/dev/null || true
   fi
   k3d cluster delete "$cluster" >/dev/null 2>&1 || true
   rm -f "$FF_KUBE_DIR/$cluster.kubeconfig"
@@ -148,6 +151,13 @@ check "deploy.sh refuses a sandbox the cluster lacks, or no node runs, before de
 check "deploy.sh: the sandbox and a node for it, the migrations first, each run, then every rollout" "true true true" \
   "$(grep -q '^functions run in the RuntimeClass gvisor, on 1 node(s)$' "$work/deploy.log" && echo true || echo false) $(grep -q 'has been executed successfully' "$work/deploy.log" && echo true || echo false) $(grep -q '^platform deployed$' "$work/deploy.log" && echo true || echo false)"
 grep -E 'attempt\(s\) failed' "$work/deploy.log" | sed 's/^/  note: /' || true
+# The backend's token for the cluster's API is asked for an hour (deploy/k8s/platform/10-backend.yaml): the one
+# Kubernetes mounts by default is valid for a year. Read in its pod, from the file the backend reads.
+lifetime="$(kubectl -n ff-system exec deploy/ff-backend -- node -e "
+const token = require('fs').readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token', 'utf8');
+const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url'));
+console.log(claims.exp - claims.iat)")"
+check "the backend's token for the cluster's API, read in its pod, lasts an hour" 3600 "$lifetime"
 
 echo "== the edge"
 kubectl -n ff-edge exec deploy/ff-edge -- cat /data/caddy/pki/authorities/local/root.crt >"$work/root.crt"
