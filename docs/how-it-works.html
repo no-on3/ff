@@ -469,7 +469,7 @@
         <div class="txt">The backend's ServiceAccount <code>ff-system/ff-controller</code> may manage only the objects functions need: no Secrets, no exec into pods, no changes to RBAC. The admission policy <code>ff-controller-scope</code> confines its writes, and its calls through a Service's proxy, to namespaces named <code>ff-t-*</code> and labelled <code>app.kubernetes.io/managed-by=ff-controller</code>. Only the development setup grants that proxy: in production the backend runs inside the cluster and calls the Services directly. Reads are cluster-wide, which the beta accepts under rules listed in <code>deploy/k8s/README.md</code>.</div>
         <div class="layer">
           <div class="ttl">Tenant namespace <code>ff-t-…</code></div>
-          <div class="txt">Pod Security <code>restricted</code>. A ResourceQuota sized by the account's plan (beta: 20 pods, 8 CPU, 8 Gi), with 60 ConfigMaps and 30 Services, a LimitRange, and the NetworkPolicy <code>ff-default-deny</code>: ingress only from the backend's pods in <code>ff-system</code>; egress only to DNS and to public addresses, never to private ranges, cluster addresses, or metadata endpoints.</div>
+          <div class="txt">Pod Security <code>restricted</code>. A ResourceQuota sized by the account's plan (beta: 20 pods, 8 CPU, 8 Gi), with 60 ConfigMaps and 30 Services, a LimitRange, and the NetworkPolicy <code>ff-default-deny</code>: ingress only from the backend's pods in <code>ff-system</code>; egress only to DNS, and to public addresses once you turn the account's internet egress on in the admin dashboard, never to private ranges, cluster addresses, or metadata endpoints. Every deploy, plan change and egress change writes the quota and the policy again, under a lock on the account, so a deploy under way can't put an old value back.</div>
           <div class="layer">
             <div class="ttl">Pod</div>
             <div class="txt">Runs as uid 10001 with a read-only root filesystem, every capability dropped, no privilege escalation, seccomp <code>RuntimeDefault</code>, and no ServiceAccount token. The memory limit is the function's memory, and the CPU is proportional to it. Only <code>/tmp</code> is writable (512 Mi).</div>
@@ -602,10 +602,11 @@ const M_NAMESPACE = { apiVersion: 'v1', kind: 'Namespace', metadata: { name: NS,
 const M_QUOTA = { apiVersion: 'v1', kind: 'ResourceQuota', metadata: { name: 'ff-tenant-quota', namespace: NS, labels: MANAGED }, spec: { hard: { pods: '20', 'requests.cpu': '8', 'limits.cpu': '8', 'requests.memory': '8Gi', 'limits.memory': '8Gi', configmaps: '60', services: '30' } } };
 const M_LIMITS = { apiVersion: 'v1', kind: 'LimitRange', metadata: { name: 'ff-tenant-limits', namespace: NS, labels: MANAGED }, spec: { limits: [{ type: 'Container', default: { cpu: '100m', memory: '128Mi' }, defaultRequest: { cpu: '100m', memory: '128Mi' }, max: { cpu: '6', memory: '10240Mi' } }] } };
 const M_NETPOL = { apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', metadata: { name: 'ff-default-deny', namespace: NS, labels: MANAGED }, spec: { podSelector: {}, policyTypes: ['Ingress', 'Egress'],
-  ingress: [{ from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } } }] }],
+  ingress: [{ from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } }, podSelector: { matchLabels: { 'app.kubernetes.io/name': 'ff-backend' } } }] }],
+  // Only DNS: every account starts with internet egress off. Once you turn it on, a second rule allows
+  // 0.0.0.0/0 except 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 and 127/8.
   egress: [
-    { to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }], ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] },
-    { to: [{ ipBlock: { cidr: '0.0.0.0/0', except: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', '127.0.0.0/8'] } }] }] } };
+    { to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }], ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] }] } };
 const mConfigMap = (hash, code) => ({ apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: cm(FN, hash), namespace: NS, labels: FN_LABELS, annotations: { 'ff.dev/code-sha256': hash } }, immutable: true, data: { 'function.ts': code } });
 const M_SERVICE = { apiVersion: 'v1', kind: 'Service', metadata: { name: fn(FN), namespace: NS, labels: FN_LABELS }, spec: { type: 'ClusterIP', selector: { 'ff.dev/function-id': FN }, ports: [{ name: 'http', port: 8080, targetPort: 'http', protocol: 'TCP' }] } };
 const mDeployment = (hash, replicas) => ({ apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name: fn(FN), namespace: NS, labels: FN_LABELS },
@@ -1725,7 +1726,7 @@ const ARCH_INFO = {
   s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds an archive copy of each function\'s code, the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
   k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
   ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
-  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend's pods in ff-system, and lets pods reach only DNS and public addresses.', 'manifests.ts'],
+  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend\'s pods in ff-system, and lets pods reach only DNS, and public addresses once the account\'s internet egress is on.', 'manifests.ts'],
   configmap: ['Code ConfigMap', 'fn-<id>-<hash>: immutable, one per code version, mounted read-only at /var/task. The current and the previous version are kept.', 'manifests.ts codeConfigMapManifest()'],
   service: ['Service', 'fn-<id>: ClusterIP, port http (8080). Invocations reach the ready pods through it.', 'manifests.ts serviceManifest()'],
   deployment: ['Deployment', 'fn-<id>: the runtime image, environment, resources, probes, security context, and volumes. Its replica count changes with autoscaling, the idle sweep, and cold starts.', 'manifests.ts deploymentManifest()'],
@@ -2367,7 +2368,7 @@ function k8sObjects() {
     arrow('M166,322 L294,322', 'allow', 'allow') + label(230, 314, 'ingress') +
     lines(16, 372, ['In development, calls come', 'through the API server\'s', 'proxy, which k3s lets', 'through (task K-06).']) +
     obj(206, 430, 170, 46, 'kube-dns', 'UDP and TCP 53') +
-    obj(392, 430, 200, 46, 'Public addresses', 'when K8S_EGRESS_INTERNET=true') +
+    obj(392, 430, 200, 46, 'Public addresses', "once the account's egress is on") +
     obj(608, 430, 198, 46, 'Private ranges', 'nodes · API server · metadata') +
     arrow('M330,380 C330,405 291,405 291,428', 'allow', 'allow') +
     arrow('M450,380 C450,405 492,405 492,428', 'allow', 'allow') +

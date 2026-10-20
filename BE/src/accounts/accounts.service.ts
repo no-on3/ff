@@ -95,14 +95,18 @@ export class AccountsService {
     return { problem: new BadRequestException('This user belongs to several accounts: name one in the X-FF-Account header') };
   }
 
-  /** Development mode's account: created, active, the first time it is used (FF_DEV_ACCOUNT_ID, X-FF-Dev-Account). */
+  /**
+   * Development mode's account: created, active, the first time it is used (FF_DEV_ACCOUNT_ID, X-FF-Dev-Account),
+   * with internet egress as its plan has it for new accounts.
+   */
   async developmentAccount(id: string): Promise<Account> {
     const existing = await this.accounts.findOne({ where: { id } });
     if (existing) return existing;
+    const { limits } = await this.plans.get(DEFAULT_PLAN);
     await this.accounts
       .createQueryBuilder()
       .insert()
-      .values({ id, name: `Development account ${id}`, status: AccountStatus.ACTIVE, planId: DEFAULT_PLAN })
+      .values({ id, name: `Development account ${id}`, status: AccountStatus.ACTIVE, planId: DEFAULT_PLAN, internetEgress: limits.internetEgress })
       .orIgnore()
       .execute();
     return this.accounts.findOneOrFail({ where: { id } });
@@ -138,12 +142,15 @@ export class AccountsService {
   /**
    * POST /accounts: a pending account, with its creator as owner, and an e-mail
    * to you to approve it. One account at a time may wait for approval per user.
+   * Its internet egress is its plan's default for new accounts, off on beta: the
+   * operator turns it on for the account.
    */
   async create(user: User, dto: CreateAccountDto): Promise<AccountView> {
     const waiting = await this.memberships.exists({
       where: { userId: user.id, role: 'owner', account: { status: AccountStatus.PENDING } },
     });
     if (waiting) throw new BadRequestException('You already have an account waiting for approval');
+    const { limits } = await this.plans.get(DEFAULT_PLAN);
 
     const account = await this.dataSource.transaction(async (manager) => {
       const created = manager.create(Account, {
@@ -153,6 +160,7 @@ export class AccountsService {
         country: dto.country ?? 'TN',
         taxId: dto.taxId ?? null,
         planId: DEFAULT_PLAN,
+        internetEgress: limits.internetEgress,
         status: AccountStatus.PENDING,
       });
       await manager.save(created);

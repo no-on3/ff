@@ -71,6 +71,7 @@ hack/k8s/test-it.sh functions.lifecycle    # only the suites whose path matches
 - a code rollout;
 - scale to zero and cold start;
 - the tenant network policy (DNS allowed, the API server blocked);
+- internet egress per account: a function can't reach the internet until its account's egress is on, can then, and can't again once it is off, the API server blocked throughout (only where this machine reaches the internet: `test-it.sh` checks first);
 - init-failure diagnostics, and a missing RuntimeClass explained;
 - a Python function (deploy, invoke, and Lambda error names);
 - a Node.js function in `/var/task` that reads a file next to its code through a relative path;
@@ -127,7 +128,9 @@ It checks the Kubernetes side at each step. On exit it removes its compose proje
 
 ## Sandboxing with gVisor
 
-This is optional. With `K8S_RUNTIME_CLASS=gvisor`, every function pod runs in [gVisor](https://gvisor.dev), a user-space kernel that answers the pod's system calls. Tenant code then never talks to the node's kernel directly. This adds a layer on top of the default isolation (non-root, read-only root filesystem, no capabilities, seccomp `RuntimeDefault`, a NetworkPolicy and quota per tenant), for untrusted code. To switch it off, unset the variable. Functions pick up the change at their next deploy or update.
+Optional in development, required in production. With `K8S_RUNTIME_CLASS=gvisor`, every function pod runs in [gVisor](https://gvisor.dev), a user-space kernel that answers the pod's system calls. Tenant code then never talks to the node's kernel directly. This adds a layer on top of the default isolation (non-root, read-only root filesystem, no capabilities, seccomp `RuntimeDefault`, a NetworkPolicy and quota per tenant), for untrusted code. To switch it off in development, unset the variable. Functions pick up the change at their next deploy or update.
+
+With `NODE_ENV=production` the backend refuses to start without `K8S_RUNTIME_CLASS`. Only a cluster that tries the platform's manifests, never with customers' code, may set `K8S_ALLOW_UNSANDBOXED=true` instead. `deploy/k8s/platform/deploy.sh` refuses to deploy when the cluster lacks the RuntimeClass, or a node with the label it schedules on. `hack/e2e-platform.sh` installs gVisor in its own cluster, and checks that the customer's function answers from gVisor's kernel.
 
 ### In the dev cluster
 
@@ -169,11 +172,32 @@ Then, once for the cluster, run `kubectl apply -f deploy/k8s/optional/runtimecla
 |---|---|---|
 | Memory of an idle pod | 48 MiB (Node.js), 21 MiB (Python) | +29 MiB, +36 MiB. The RuntimeClass declares 40 Mi of overhead, so this is not taken from the function's memory. |
 | Idle CPU | 0 | about 2m |
-| Cold start at 128 MB / 100m CPU, pod created to Ready (Node.js) | about 10 s | 12 to 15 s |
+| Cold start at 128 MB / 100m CPU, deploy to Ready (Node.js) | 6 to 8 s | 6 to 11 s (see "Cold starts" below) |
 
 - gVisor reports its own kernel version (4.19.0-gvisor) and implements most, but not all, Linux system calls. Code that inspects kernel features can behave differently.
 - The Python runtime's memory budget relies on `RLIMIT_DATA`, which gVisor does not enforce (verified). Under gVisor, a function that outgrows its memory meets the sandbox's limit instead.
-- The 10 s cold start without gVisor comes from the 100m CPU limit, which slows every start-up step roughly tenfold. See the migration plan, K-13.
+- Cold starts are slow at the smallest size because of the 100m CPU limit, which slows every start-up step roughly tenfold. See the migration plan, K-13.
+
+### Cold starts
+
+`hack/k8s/cold-start-benchmark.sh` deploys functions through the backend's own Kubernetes driver, several at once, and times each one: from the deploy to Ready and to its first answer, and inside the pod from its creation to its container's start, to the runtime listening, to the code loaded. Loading the code must fit in the runtime's start-up limit, 10 s at the smallest sizes. The functions go in a namespace of their own, deleted at the end.
+
+```bash
+hack/k8s/cold-start-benchmark.sh --runtime-class gvisor                    # Node.js, 128 MB, 3 at once, 2 rounds
+hack/k8s/cold-start-benchmark.sh --runtime python --memory 256 --at-once 1 --rounds 5
+K8S_RUNTIME_IMAGE_NODEJS=ff-runtime-nodejs:other hack/k8s/cold-start-benchmark.sh   # another image, against this one
+```
+
+Measured on the dev cluster on 2026-10-20, 128 MB, in seconds:
+
+| | Deploy to Ready | Container started to runtime listening | Listening to code loaded |
+|---|---|---|---|
+| Node.js, runc | 6.1 to 8.2 | 1.3 to 1.9 | 3.2 to 3.5 |
+| Node.js, gVisor | 6.1 to 11.1 | 1.6 to 3.8 | 2.0 to 5.0 |
+| Node.js, gVisor, before the TypeScript code cache | 14.2 to 15.1 | 2.7 to 3.1 | 8.9 to 9.4 |
+| Python, gVisor | 6.1 to 7.1 | 3.8 to 4.0 | 0.9 to 1.0 |
+
+The Node.js image keeps a V8 code cache of the TypeScript compiler, written at its build after a transpile ([runtimes/nodejs](../runtimes/nodejs/README.md#start-up)): compiling the compiler took most of the start-up limit inside gVisor. Deploy to Ready also counts the readiness probe's period and the backend's polling.
 
 ## The log pipeline
 
@@ -266,17 +290,17 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
 
 ## The platform on a cluster of its own
 
-`hack/e2e-platform.sh` is L4 for `deploy/k8s` (client-readiness plan P-60): it deploys FF on a new k3d cluster, `ff-platform-e2e` (3 GB, ports 58443 and 58080 on this machine), from the manifests alone, and takes a customer's path through the edge. It doesn't touch the dev cluster, and removes everything it made on exit; it needs about 5 GB free, and 12 minutes.
+`hack/e2e-platform.sh` is L4 for `deploy/k8s` (client-readiness plan P-60): it deploys FF on a new k3d cluster, `ff-platform-e2e` (3 GB, ports 58443 and 58080 on this machine), from the manifests alone, and takes a customer's path through the edge. It doesn't touch the dev cluster, and removes everything it made on exit; it needs about 5 GB free, and 15 minutes.
 
-1. It builds the four images (`ff-backend`, `ff-console`, `ff-admin`, `ff-edge`, tagged `e2e`) and imports them.
+1. It builds the four images (`ff-backend`, `ff-console`, `ff-admin`, `ff-edge`, tagged `e2e`) and imports them, and installs gVisor in the cluster with `hack/k8s/gvisor-up.sh`, as production requires it for functions.
 2. PostgreSQL, S3 and Mailpit run as containers on the cluster's Docker network, outside it, as in production. Their passwords are made for the run; the backend gets none of development's.
-3. It applies `deploy/k8s/base` and `logging`, then `deploy/k8s/platform/deploy.sh hack/k8s/platform-e2e`. That overlay holds hostnames under `ff.test`, TLS from Caddy's own authority, and the development realm for its test client.
+3. It applies `deploy/k8s/base` and `logging`. `deploy.sh` must first refuse a sandbox the cluster lacks, and one no node is labelled to run; then it runs `deploy/k8s/platform/deploy.sh hack/k8s/platform-e2e`. That overlay holds hostnames under `ff.test`, TLS from Caddy's own authority, and the development realm for its test client.
 4. It checks:
    - TLS and HSTS on the four hostnames, verified against the edge's root, and plain HTTP sent to HTTPS with a 308;
    - `/readyz`, and the login's public issuer;
    - the admin app and Keycloak's administration refused, then admitted once this machine's address is allowed;
    - a customer made, signed in, asking for an account; the operator told by e-mail through the cluster's SMTP, then approving;
-   - a function deployed and invoked in direct mode, and its logs;
+   - a function deployed and invoked in direct mode, answering from gVisor's kernel, and its logs;
    - the audit log naming the caller's address, not the edge's;
    - an ordinary pod reaching the edge, and not the backend, Keycloak, the console or a function;
    - `deploy.sh` run again changing nothing.

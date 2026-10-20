@@ -14,6 +14,13 @@ if kubectl get runtimeclass gvisor >/dev/null 2>&1; then
 else
   echo "no gvisor RuntimeClass: the sandboxed case is skipped (hack/k8s/gvisor-up.sh installs it)"
 fi
+# The internet egress case needs the internet, which the cluster's pods reach through this machine.
+if curl -s -m 5 -o /dev/null https://1.1.1.1; then
+  export K8S_IT_INTERNET=1
+  echo "internet reachable: the egress case runs"
+else
+  echo "no internet: the egress case is skipped"
+fi
 # The log pipeline's suite runs where the pipeline is installed (hack/k8s/logging-up.sh).
 if kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1; then
   export K8S_IT_LOGGING=1

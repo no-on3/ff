@@ -299,8 +299,13 @@ const appShape = {
   K8S_RUNTIME_IMAGE_NODEJS: text('ff-runtime-nodejs:24-v2', imageReference),
   K8S_RUNTIME_IMAGE_PYTHON: text('ff-runtime-python:3.13-v2', imageReference),
   K8S_IMAGE_PULL_POLICY: oneOf(['IfNotPresent', 'Always', 'Never'], 'IfNotPresent'),
+  // The sandbox customers' code runs in (gvisor); production requires one, unless K8S_ALLOW_UNSANDBOXED says otherwise.
   K8S_RUNTIME_CLASS: optionalText(dnsSubdomain),
+  // Production without a sandbox: only for a cluster that tries the platform's manifests, never with customers' code.
+  K8S_ALLOW_UNSANDBOXED: flag(false),
   K8S_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
+  // Each account's own setting decides whether its functions reach the internet (off until the operator turns it
+  // on); false cuts every account off, whatever its setting.
   K8S_EGRESS_INTERNET: flag(true),
   K8S_INGRESS_ALLOW_CIDRS: list(cidr),
   // P-45: where the backend finds the log store's delete key; P-60 mounts the Secret here.
@@ -394,6 +399,12 @@ function appRules(env: AppEnv): string[] {
     }
     if (!env.FF_OPERATOR_EMAIL) {
       problems.push('FF_OPERATOR_EMAIL is required when NODE_ENV=production: new accounts wait for your approval there');
+    }
+    // Customers' code runs in gVisor (deploy/k8s/optional/runtimeclass-gvisor.yaml), not on the node's kernel.
+    if (!env.K8S_RUNTIME_CLASS && !env.K8S_ALLOW_UNSANDBOXED) {
+      problems.push(
+        "K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production; K8S_ALLOW_UNSANDBOXED=true runs them without one, for a cluster that only tries the platform's manifests",
+      );
     }
     if (env.FF_WEBHOOK_ALLOW_PRIVATE) {
       problems.push("FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network");

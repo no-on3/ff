@@ -988,8 +988,17 @@ check "the operator moves account 1 to a larger plan, and its quota follows at o
   "$(status) $(jq -r .account.planId <<<"$moved") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
 with_token "$operator_token" PUT "/admin/accounts/$account_1/plan" '{"planId": "imaginary", "reason": "l5 tries"}' >/dev/null
 check "a plan that doesn't exist is refused" "404 Plan imaginary not found" "$(status) $(message)"
+# Where an account's NetworkPolicy lets its functions go beyond DNS: an address range, and how many ranges it keeps
+# out (FF's own network, the cloud's metadata addresses); "none" when only DNS.
+internet_rule() { # <account>
+  kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
+    jq -r '[.spec.egress[].to[]?.ipBlock | select(.) | "\(.cidr) except \(.except | length)"] | if length == 0 then "none" else join(",") end'
+}
+check "account 1's functions reach nothing beyond DNS, as every account starts" none "$(internet_rule "$account_1")"
 egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '{"internetEgress": true, "reason": "l5: calls a payment API"}')"
-check "internet egress is turned on for account 1" "200 true" "$(status) $(jq -r .account.internetEgress <<<"$egress")"
+check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out" "200 true 0.0.0.0/0 except 6" \
+  "$(status) $(jq -r .account.internetEgress <<<"$egress") $(internet_rule "$account_1")"
+check "and account 2's functions still reach nothing beyond DNS" none "$(internet_rule "$account_2")"
 plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
   "$(jq -cn --argjson limits "$beta_limits" '{limits: ($limits | .quota = {pods: 32, cpu: "16", memory: "16Gi"}), reason: "l5: pilots need more"}')")"
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \

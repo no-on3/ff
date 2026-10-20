@@ -112,16 +112,23 @@ export class KubernetesOrchestrator implements Orchestrator {
     // Before its first function, an account has no namespace: that function's deploy applies the plan.
     if (!(await this.api.get(paths.namespace(ns)))) return;
     await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, tenant.quota));
+    await this.api.apply(
+      paths.networking(ns, 'networkpolicies', TENANT_NETWORK_POLICY_NAME),
+      networkPolicyManifest(ns, this.settings, tenant.internetEgress),
+    );
   }
 
-  /** The account's namespace and guardrails, with its plan's quota (D5): written again on every deploy and update. */
+  /**
+   * The account's namespace and guardrails, with its plan's quota and its internet egress: written again on
+   * every deploy and update.
+   */
   private async ensureTenant(fn: FunctionWorkload, ns: string, tenant: TenantLimits): Promise<void> {
     await this.api.apply(paths.namespace(ns), namespaceManifest(ns, fn.accountId));
     await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, tenant.quota));
     await this.api.apply(paths.core(ns, 'limitranges', TENANT_LIMITS_NAME), limitRangeManifest(ns));
     await this.api.apply(
       paths.networking(ns, 'networkpolicies', TENANT_NETWORK_POLICY_NAME),
-      networkPolicyManifest(ns, this.settings),
+      networkPolicyManifest(ns, this.settings, tenant.internetEgress),
     );
   }
 

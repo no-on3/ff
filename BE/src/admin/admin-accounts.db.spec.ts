@@ -54,12 +54,16 @@ run('accounts, for operators (L2, P-71)', () => {
   const scaled: Array<[string, number]> = [];
   const applied: Array<{ accountId: string; tenant: TenantLimits }> = [];
   let failScaleOf: string | null = null;
+  let failLimitsOf: string | null = null;
   const orchestrator = {
     scale: async (fn: FunctionWorkload, replicas: number) => {
       if (fn.id === failScaleOf) throw new Error('the cluster refused');
       scaled.push([fn.id, replicas]);
     },
-    applyTenantLimits: async (accountId: string, tenant: TenantLimits) => void applied.push({ accountId, tenant }),
+    applyTenantLimits: async (accountId: string, tenant: TenantLimits) => {
+      if (accountId === failLimitsOf) throw new Error('the cluster refused the NetworkPolicy');
+      applied.push({ accountId, tenant });
+    },
   } as unknown as Orchestrator;
   let n = 0;
 
@@ -146,6 +150,7 @@ run('accounts, for operators (L2, P-71)', () => {
     scaled.length = 0;
     applied.length = 0;
     failScaleOf = null;
+    failLimitsOf = null;
   });
 
   describe('the list', () => {
@@ -434,21 +439,39 @@ run('accounts, for operators (L2, P-71)', () => {
     const page = await service.changePlan(id, 'large', 'Needs more room');
 
     expect(page.account.planId).toBe('large');
-    expect(applied).toEqual([{ accountId: id, tenant: { quota: { pods: 60, cpu: '24', memory: '24Gi' } } }]);
+    expect(applied).toEqual([{ accountId: id, tenant: { quota: { pods: 60, cpu: '24', memory: '24Gi' }, internetEgress: false } }]);
     expect((await entriesOf(id)).map((entry) => [entry.action, entry.actor, entry.details])).toEqual([
       ['account.plan', 'operator:kc-op-1', { reason: 'Needs more room', changes: { planId: { from: 'beta', to: 'large' } } }],
     ]);
   });
 
-  it('turns internet egress on, with from → to in the log; the value it has already writes nothing', async () => {
+  it("turns internet egress on and off, with from → to in the log, and writes it into the account's NetworkPolicy at once", async () => {
     const id = await account({ status: AccountStatus.ACTIVE });
 
     expect((await service.setEgress(id, true, 'Calls a payment API')).account.internetEgress).toBe(true);
-    await service.setEgress(id, true, 'Calls a payment API');
+    expect((await service.setEgress(id, false, 'No longer needed')).account.internetEgress).toBe(false);
 
     expect((await entriesOf(id)).map((entry) => [entry.action, entry.details])).toEqual([
       ['account.egress', { reason: 'Calls a payment API', changes: { internetEgress: { from: false, to: true } } }],
+      ['account.egress', { reason: 'No longer needed', changes: { internetEgress: { from: true, to: false } } }],
     ]);
+    expect(applied).toEqual([
+      { accountId: id, tenant: { quota: BETA_LIMITS.quota, internetEgress: true } },
+      { accountId: id, tenant: { quota: BETA_LIMITS.quota, internetEgress: false } },
+    ]);
+  });
+
+  it('changes nothing when the cluster refuses the NetworkPolicy; the value the account has writes nothing, but applies it again', async () => {
+    const id = await account({ status: AccountStatus.ACTIVE });
+
+    failLimitsOf = id;
+    await expect(service.setEgress(id, true, 'Calls a payment API')).rejects.toThrow('the cluster refused the NetworkPolicy');
+    expect([(await service.detail(id)).account.internetEgress, await entriesOf(id)]).toEqual([false, []]);
+    failLimitsOf = null;
+    await service.setEgress(id, false, 'Retry');
+
+    expect(await entriesOf(id)).toEqual([]);
+    expect(applied).toEqual([{ accountId: id, tenant: { quota: BETA_LIMITS.quota, internetEgress: false } }]);
   });
 
   it("pages the account's whole log, operators named", async () => {

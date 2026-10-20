@@ -173,16 +173,20 @@ run('price books and plans, for operators (L2, P-73)', () => {
   });
 
   describe('plans', () => {
-    it("change a plan's limits for the reason, from what to what, apply its new quota to every account on it at once, and read it fresh", async () => {
+    it("change a plan's limits for the reason, from what to what, apply its new quota to every account on it at once, with each one's egress, and read it fresh", async () => {
       await plans.create('team', 'Team', BETA_LIMITS, 'For pilots with a team');
       const [one, two] = [await account('team'), await account('team')];
+      await query('UPDATE accounts SET internet_egress = true WHERE id = $1', [two]);
       await plans.get('team'); // in the cache now
       const quota = { pods: 40, cpu: '16', memory: '16Gi' };
 
       const changed = await plans.update('team', { name: 'Teams', limits: { ...BETA_LIMITS, functions: 50, quota } }, 'Pilots need room');
 
       expect(changed).toEqual({ plan: { id: 'team', name: 'Teams', limits: { ...BETA_LIMITS, functions: 50, quota } }, quota: { applied: 2, failed: 0 } });
-      expect(applied).toEqual([{ accountId: one, tenant: { quota } }, { accountId: two, tenant: { quota } }]);
+      expect(applied).toEqual([
+        { accountId: one, tenant: { quota, internetEgress: false } },
+        { accountId: two, tenant: { quota, internetEgress: true } },
+      ]);
       await expect(plans.get('team')).resolves.toMatchObject({ limits: { functions: 50 } });
       expect((await entries('plan.update')).map((entry) => entry.details)).toEqual([
         {

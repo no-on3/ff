@@ -18,6 +18,8 @@ const run = process.env.K8S_IT === '1' ? describe : describe.skip;
 // Set by hack/k8s/test-it.sh when the gvisor RuntimeClass exists (hack/k8s/gvisor-up.sh).
 const sandboxClass = process.env.K8S_IT_RUNTIME_CLASS;
 const itSandboxed = sandboxClass ? it : it.skip;
+// Set by hack/k8s/test-it.sh when the host reaches the internet, through which the cluster's pods do.
+const itOnline = process.env.K8S_IT_INTERNET === '1' ? it : it.skip;
 const kubeDir = path.resolve(__dirname, '../../../../hack/.kube');
 
 const greeter = (version: number) => `
@@ -73,9 +75,8 @@ interface PodStatus {
   status?: { containerStatuses?: Array<{ restartCount: number }> };
 }
 
-// Checks from inside a function pod which destinations the tenant NetworkPolicy allows.
-const networkProbe = `
-import * as dns from 'node:dns/promises';
+// Whether a TCP connection opens, from inside a function pod.
+const reachable = `
 import * as net from 'node:net';
 
 function reachable(host: string, port: number): Promise<boolean> {
@@ -86,7 +87,12 @@ function reachable(host: string, port: number): Promise<boolean> {
     socket.once('connect', () => done(true));
     socket.once('error', () => done(false));
   });
-}
+}`;
+
+// Checks from inside a function pod which destinations the tenant NetworkPolicy allows.
+const networkProbe = `
+import * as dns from 'node:dns/promises';
+${reachable}
 
 export async function handler() {
   const resolved = await dns.lookup('kube-dns.kube-system.svc.cluster.local').catch(() => null);
@@ -95,6 +101,13 @@ export async function handler() {
     kubeDnsTcp53: resolved ? await reachable(resolved.address, 53) : false,
     apiServer: await reachable('10.43.0.1', 443),
   };
+}`;
+
+// The internet (Cloudflare's resolver, by address: no name to resolve), and FF's own network (the API server).
+const egressProbe = `${reachable}
+
+export async function handler() {
+  return { internet: await reachable('1.1.1.1', 443), apiServer: await reachable('10.43.0.1', 443) };
 }`;
 
 async function eventually(check: () => Promise<boolean>, timeoutMs: number): Promise<void> {
@@ -191,6 +204,28 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     const { output } = await orchestrator.invoke(fn, {});
 
     expect(output).toEqual({ dnsLookup: true, kubeDnsTcp53: true, apiServer: false });
+  });
+
+  // Off for every account until the operator turns it on in the admin dashboard.
+  itOnline("keeps an account's functions off the internet until its egress is on, and off FF's own network either way", async () => {
+    const probe = async () => (await orchestrator.invoke(fn, {})).output as { internet: boolean; apiServer: boolean };
+    fn.code = egressProbe;
+    await orchestrator.update(fn, limits());
+    await orchestrator.waitUntilReady(fn, 90_000);
+    const off = await probe();
+
+    let on = off;
+    await orchestrator.applyTenantLimits(tenant, limits({}, true));
+    await eventually(async () => (on = await probe()).internet, 30_000);
+    let offAgain = on;
+    await orchestrator.applyTenantLimits(tenant, limits());
+    await eventually(async () => !(offAgain = await probe()).internet, 30_000);
+
+    expect([off, on, offAgain]).toEqual([
+      { internet: false, apiServer: false },
+      { internet: true, apiServer: false },
+      { internet: false, apiServer: false },
+    ]);
   });
 
   it("reports the function's own load error, from its runtime's log, instead of hanging (P-10)", async () => {

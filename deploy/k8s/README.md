@@ -55,13 +55,14 @@ PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`
 
 **Before the first deploy:**
 1. Two databases on the PostgreSQL server, `ff` and `keycloak`, each with its user.
-2. DNS for the four hostnames (API, console, admin, login) to the edge's load balancer, ports 80 and 443 open: Let's Encrypt checks them.
-3. An overlay of `platform/` with FF's values:
+2. gVisor on the nodes that run functions, each labelled `ff.dev/gvisor=true`, and `optional/runtimeclass-gvisor.yaml` applied (the Kubernetes dev guide, "On real nodes"). `backend.env` runs every function in it (`K8S_RUNTIME_CLASS=gvisor`): the backend refuses to start in production without a sandbox, and `deploy.sh` to deploy when the cluster lacks the RuntimeClass or a node to run it.
+3. DNS for the four hostnames (API, console, admin, login) to the edge's load balancer, ports 80 and 443 open: Let's Encrypt checks them.
+4. An overlay of `platform/` with FF's values:
    - `backend.env`, merged: the hostnames, the database, S3, the seller's and the bank's details, `FF_TRUST_PROXY` (the cluster's pod network, which only the edge reaches the backend from);
    - `keycloak.env`: the login hostname, its database, the mail server;
    - `edge.env`: the four hostnames, the ACME e-mail, and `FF_ADMIN_ALLOW`, FF's own addresses;
    - `images`: the registry's images and their tags.
-4. The Secrets:
+5. The Secrets:
 
    ```bash
    kubectl -n ff-system create secret generic ff-backend --from-literal=DB_PASSWORD=… --from-literal=MINIO_ACCESS_KEY=… \
@@ -70,7 +71,7 @@ PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`
      --from-literal=KC_BOOTSTRAP_ADMIN_USERNAME=admin --from-literal=KC_BOOTSTRAP_ADMIN_PASSWORD=… --from-literal=FF_SMTP_PASSWORD=…
    ```
 
-Then `deploy/k8s/platform/deploy.sh <overlay>`. It runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
+Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox, runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
 
 **The first operator:**
 1. In Keycloak's admin console (`https://<login>/admin`, from an address `FF_ADMIN_ALLOW` names), as the bootstrap administrator, make the user.
@@ -134,6 +135,8 @@ In development, `hack/k8s/monitoring-up.sh` applies `monitoring/dev` instead, wi
 **The store's permissions:** get, list and watch nodes, and get `nodes/metrics`, cluster-wide; get, list and watch pods in `ff-system`, `ff-logging` and `ff-monitoring` only. kube-state-metrics lists objects cluster-wide, tenants' included, but reads nothing inside them.
 
 ## Optional
+
+Optional in development, required in production (see "Platform").
 
 | File | Object | Purpose |
 |---|---|---|

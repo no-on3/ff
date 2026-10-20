@@ -15,7 +15,7 @@ import { Function, FunctionStatus } from '../functions/entities/function.entity'
 import { Language, recipientsOf } from '../mail/language';
 import { Mail, MailService } from '../mail/mail.service';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
-import { PlansService } from '../plans/plans.service';
+import { PlansService, tenantLimits } from '../plans/plans.service';
 import { UsageService } from '../usage/usage.service';
 import { AdminCreditsService } from './admin-credits.service';
 import { PlatformSettingsService } from './platform-settings.service';
@@ -267,24 +267,30 @@ export class AdminAccountsService {
 
   /**
    * PUT /admin/accounts/:id/egress: whether the account's functions may reach
-   * the internet (D5). Recorded here; P-62 writes it into the tenant's
-   * NetworkPolicy. The value the account has already writes nothing.
+   * the internet, recorded with its audit entry and written into the
+   * account's NetworkPolicy at once, under the account's lock: a deploy under
+   * way can't put the old value back (PlansService.withTenant), and if the
+   * cluster refuses the policy, nothing changes. The value the account has
+   * already writes nothing, but applies the policy again: a retry.
    */
   async setEgress(id: string, internetEgress: boolean, reason: string): Promise<AdminAccountView> {
     await this.accounts.manager.transaction(async (manager) => {
       const current = await manager.findOne(Account, { where: { id }, lock: { mode: 'pessimistic_write' } });
       if (!current) throw new NotFoundException(`Account ${id} not found`);
-      if (current.internetEgress === internetEgress) return;
-      await manager.update(Account, { id }, { internetEgress });
-      await this.audit.record(
-        {
-          accountId: id,
-          action: 'account.egress',
-          resource: `account:${id}`,
-          details: { reason, changes: { internetEgress: { from: current.internetEgress, to: internetEgress } } },
-        },
-        manager,
-      );
+      if (current.internetEgress !== internetEgress) {
+        await manager.update(Account, { id }, { internetEgress });
+        await this.audit.record(
+          {
+            accountId: id,
+            action: 'account.egress',
+            resource: `account:${id}`,
+            details: { reason, changes: { internetEgress: { from: current.internetEgress, to: internetEgress } } },
+          },
+          manager,
+        );
+      }
+      const plan = await this.plans.get(current.planId);
+      await this.orchestrator.applyTenantLimits(id, tenantLimits(plan.limits, internetEgress));
     });
     return this.detail(id);
   }

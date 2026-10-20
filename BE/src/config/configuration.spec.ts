@@ -26,6 +26,7 @@ const production: Env = {
   FF_SELLER_ADDRESS: '1 rue du Lac, 1053 Tunis',
   FF_BANK_NAME: 'Banque de Tunisie',
   FF_BANK_IBAN: 'TN5910006035183598478831',
+  K8S_RUNTIME_CLASS: 'gvisor',
 };
 
 /** The problems a configuration is refused for; fails the test if it is accepted. */
@@ -210,10 +211,18 @@ describe('configuration', () => {
       ['pro-formas naming no real seller (P-35)', { FF_SELLER_NAME: undefined }, 'FF_SELLER_NAME must be set when NODE_ENV=production'],
       ['pro-formas with the example IBAN (P-35)', { FF_BANK_IBAN: 'TN59 1000 6035 1835 9847 8831' }, 'FF_BANK_IBAN must be set when NODE_ENV=production'],
       ["webhooks allowed into FF's own network", { FF_WEBHOOK_ALLOW_PRIVATE: 'true' }, "FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network"],
+      ["customers' code on the node's own kernel, without a sandbox", { K8S_RUNTIME_CLASS: '' }, 'K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production'],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 
       expect(found).toEqual([expect.stringContaining(expected)]);
+    });
+
+    it('runs functions without a sandbox only when told to, for a cluster that tries the manifests; development needs none', () => {
+      expect(configuration({ ...production, K8S_RUNTIME_CLASS: undefined, K8S_ALLOW_UNSANDBOXED: 'true' }).kubernetes.runtimeClass).toBe('');
+      expect(configuration({ ...production, NODE_ENV: 'development', K8S_RUNTIME_CLASS: undefined }).kubernetes.runtimeClass).toBe('');
+      expect(configuration(production).kubernetes.runtimeClass).toBe('gvisor');
+      expect(problems({ ...production, K8S_ALLOW_UNSANDBOXED: 'yes' })).toEqual([expect.stringContaining('K8S_ALLOW_UNSANDBOXED')]);
     });
 
     it('never repeats a refused credential in the message', () => {

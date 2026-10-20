@@ -61,10 +61,15 @@ export interface FunctionLogsPage {
   next: string | null;
 }
 
-/** What a scheduler applies to an account as a whole: its plan's quota (D5). */
+/** What a scheduler applies to an account as a whole: its plan's quota, and whether its functions may reach the internet. */
 export interface TenantLimits {
   /** All the account's functions together. */
   quota: { pods: number; cpu: string; memory: string };
+  /**
+   * The account's own setting, which the operator changes in the admin dashboard (accounts.internet_egress). The
+   * platform's K8S_EGRESS_INTERNET=false still cuts every account off.
+   */
+  internetEgress: boolean;
 }
 
 export interface InvokeResult {
@@ -89,7 +94,10 @@ export interface Orchestrator {
    * The account's limits are applied again too.
    */
   update(fn: FunctionWorkload, tenant: TenantLimits): Promise<void>;
-  /** Apply an account's new limits at once, after a plan change. Nothing to do before its first function. */
+  /**
+   * Apply an account's new limits at once: after a plan change, or internet egress turned on or off. Nothing to
+   * do before its first function.
+   */
   applyTenantLimits(accountId: string, tenant: TenantLimits): Promise<void>;
   /** Delete every scheduler resource of the function. */
   remove(fn: FunctionWorkload): Promise<void>;

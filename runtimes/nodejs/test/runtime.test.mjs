@@ -167,8 +167,20 @@ describe('successful invocations', () => {
     const res = await invoke(rt, { a: 1 });
 
     assert.equal(res.status, 200);
-    assert.deepEqual(res.json, { js: true, echo: { a: 1 } });
+    assert.deepEqual(res.json, { js: true, echo: { a: 1 }, typescriptLoaded: false });
     assert.match(res.headers.get('x-ff-request-id'), /^[0-9a-f-]{36}$/);
+    await rt.stop();
+  });
+
+  // The compiler is about 9 MB of JavaScript, the longest step of a cold start at 0.1 CPU: only a .ts file loads it.
+  it('loads the TypeScript compiler for a .ts handler only', async () => {
+    const rt = await startRuntime('ts-compiler');
+    await readyz(rt, 200);
+
+    const res = await invoke(rt, {});
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, { typescriptLoaded: true });
     await rt.stop();
   });
 

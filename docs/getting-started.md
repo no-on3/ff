@@ -112,7 +112,7 @@ cd FE && npm install && npm run dev
 
 It runs on http://localhost:5199 and calls the API on localhost:3000. Without a login, as here, it acts as the backend's development account: it creates, invokes, and edits functions, shows their invocation history, and changes their instance limits. "Log in with Keycloak" in section 5 adds the login, sign-up, accounts and API keys.
 
-**9. The gVisor sandbox (optional).** This runs every function in gVisor, an extra isolation layer. Restart the backend afterwards.
+**9. The gVisor sandbox (optional here, required in production).** This runs every function in gVisor, an extra isolation layer: customers' code never talks to the node's kernel. In production the backend refuses to start without it. Restart the backend afterwards.
 
 ```bash
 hack/k8s/gvisor-up.sh                                       # about 80 s the first time
@@ -321,7 +321,7 @@ curl -s -i -X POST localhost:18080/invoke -H 'content-type: application/json' -d
 kill $!                                                  # stop the port-forward
 ```
 
-**See a cold start.** Idle functions are scaled to zero after the plan's idle window: 15 minutes on the beta plan (`idleSeconds`). To skip the wait, scale one down yourself. The next invocation starts it again, which takes about 7–10 s at the smallest size, and the backend logs `Cold start: scaling <id> from zero`.
+**See a cold start.** Idle functions are scaled to zero after the plan's idle window: 15 minutes on the beta plan (`idleSeconds`). To skip the wait, scale one down yourself. The next invocation starts it again, which takes about 6–8 s at the smallest size (6–11 s in gVisor), and the backend logs `Cold start: scaling <id> from zero`.
 
 ```bash
 kubectl -n "$NS" scale deploy/fn-$ID --replicas=0
@@ -625,7 +625,7 @@ The e-mail of a rejection, a suspension or a closure gives your reason. A change
 ```bash
 curl -s $FF/admin/accounts/$ACCOUNT -H "Authorization: Bearer $OP" | jq -c '.account | {status, dataDeletionDueAt, dataDeletedAt}'
 # {"status":"closed","dataDeletionDueAt":"2026-11-17T10:32:45.123Z","dataDeletedAt":null}
-``` Once a minute, the backend scales back to zero any function of a suspended or closed account that started anyway, such as with a call already under way. Moving an account to another plan applies the plan's quota to its namespace at once. Internet egress is recorded per account; until P-62 writes it into the account's NetworkPolicy, `K8S_EGRESS_INTERNET` decides for every account.
+``` Once a minute, the backend scales back to zero any function of a suspended or closed account that started anyway, such as with a call already under way. Moving an account to another plan applies the plan's quota to its namespace at once. Internet egress is off for every new account (its plan's default: beta has it off) until you turn it on: the change writes the account's NetworkPolicy at once, and if the cluster refuses it, nothing changes and you get the error, so try again. Private addresses, FF's own network and the cloud's metadata addresses stay out of reach either way. `K8S_EGRESS_INTERNET=false` cuts every account off, whatever its setting.
 
 ```bash
 curl -s "$FF/admin/accounts?status=pending" -H "Authorization: Bearer $OP" | jq -c '.accounts[] | {id, name, useCase, owners: [.owners[].email]}'
@@ -765,7 +765,7 @@ hack/e2e.sh                                              # the whole stack throu
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 1 min
 hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
 hack/k8s/test-platform-manifests.sh                      # deploy/k8s/platform checked without deploying it, about 1 min
-hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 12 min
+hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 15 min
 hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, about 2 min
 ```
 
@@ -822,6 +822,8 @@ docker compose down -v
 | 403 `The admin routes are for FF's operators` | The user hasn't the realm role `ff-operator`. Give it in Keycloak's admin console (Users → Role mapping), then log in again. |
 | 400 `Every admin change needs a reason` | Send `reason`, 3 to 500 characters, in the body. |
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. With `FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read` or `K8S_TENANT_QUOTA_… is no longer read`, remove those lines: the account's plan sets them now. |
+| A function can't reach an outside API: `connect ETIMEDOUT`, or a name that resolves but never answers | Its account's internet egress is off, as every new account's is. Turn it on in the admin dashboard (the account's page), or with `PUT /admin/accounts/:id/egress`. In development mode, without the admin dashboard: `UPDATE accounts SET internet_egress = true WHERE id = '<FF_DEV_ACCOUNT_ID>';` in the database, then change a function's code or create one: every rollout writes the account's NetworkPolicy. |
+| The backend won't start: `K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production` | Production runs customers' code in gVisor. Install it on the nodes, apply `deploy/k8s/optional/runtimeclass-gvisor.yaml`, and set `K8S_RUNTIME_CLASS=gvisor` (the platform's `backend.env` has it). Only a cluster that tries the platform's manifests, without customers, sets `K8S_ALLOW_UNSANDBOXED=true` instead. |
 | 400 `… must be at most … on the Beta plan`, or `The Beta plan allows 25 functions per account` | The request goes beyond the account's plan. Ask for less, or move the account to a larger plan ("Plans and limits" in section 5). |
 | 400 `An account needs an owner: make another member owner first` | Make another member owner, then change or remove the first one. |
 | An invited person doesn't see the account | They must log in with the invited address, within 7 days of the invitation. `GET /members` (or the console's "Members") shows the invitation, and whether it expired; invite again to renew it. |

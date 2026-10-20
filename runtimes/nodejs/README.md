@@ -1,6 +1,6 @@
 # ff-runtime-nodejs (runtime protocol v2)
 
-The image that runs every Node.js function on FF. User code is mounted read-only at `/var/task`, which is also the working directory. Nothing is installed when a function starts: the image already contains the compiled runtime and TypeScript (used to transpile `.ts` files).
+The image that runs every Node.js function on FF. User code is mounted read-only at `/var/task`, which is also the working directory. Nothing is installed when a function starts: the image already contains the compiled runtime, TypeScript (used to transpile `.ts` files), and a code cache of TypeScript (see "Start-up").
 
 | | |
 |---|---|
@@ -23,6 +23,15 @@ main thread (main.ts)                        worker thread (worker.ts)
 User code never runs on the main thread. A CPU-bound infinite loop, a memory blow-up, or `process.exit()` only kills the worker: the main thread answers probes, reports a Lambda-style error, and starts a new worker. This fixes findings H-8 and H-9 of the review (environment dump, no timeout).
 
 If that new worker can't load code that loaded before, the environment is broken, not the code (a reload that times out at 0.1 CPU, for example). The runtime then answers the waiting invocations with the error, logs `function reload failed; exiting so the container restarts`, and exits with status 1, so Kubernetes restarts the container. A failure of the very first load is the code's fault: it stays reported on `/readyz`.
+
+### Start-up
+
+Loading the code must fit in the start-up limit, 10 s (or the function's timeout if longer), as on Lambda. At the smallest size, 128 MB, a pod gets 0.1 CPU, and in gVisor every step is slower. The longest step was TypeScript: compiling the compiler, about 9 MB of JavaScript, then the functions its first transpile runs, took 7 to 10 s of the limit (client-readiness plan, P-62).
+
+- **The image keeps a V8 code cache of TypeScript** (`/opt/ff/typescript.codecache`, `src/typescript-cache.ts`), written at the build after a transpile, so that it holds the transpile's code too. The worker loads TypeScript with it. In gVisor at 0.1 CPU that takes 2.0 to 2.2 s, and the first transpile 0.2 to 0.4 s; a 128 MB function's code now loads in 2 to 5 s.
+- **Only a `.ts` handler loads TypeScript.** A `.js` or `.cjs` one never does.
+- **The cache only speeds things up.** Without it, or if V8 refuses it (made by another Node.js version), TypeScript is compiled as before, only slower. `test/container-smoke.sh` checks that the image's cache is taken in a worker thread.
+- `hack/k8s/cold-start-benchmark.sh` measures it on the dev cluster, any size and RuntimeClass, several functions at once.
 
 ## HTTP protocol
 
@@ -140,6 +149,6 @@ Protocol v2 (2026-10-17, client-readiness plan P-04; the order of the logs, P-42
 ```bash
 cd runtimes/nodejs
 npm install
-npm test                       # L1: 37 protocol tests on real processes and 4 for the output relay, ~20 s, no Docker
+npm test                       # L1: 38 protocol tests on real processes, 4 for the output relay, 3 for the code cache, ~20 s, no Docker
 test/container-smoke.sh        # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```

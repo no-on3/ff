@@ -124,7 +124,12 @@ export function limitRangeManifest(namespace: string): K8sObject {
   };
 }
 
-export function networkPolicyManifest(namespace: string, settings: KubernetesSettings): K8sObject {
+/**
+ * The account's NetworkPolicy. Its functions resolve names, and reach the internet only when the account's own
+ * setting allows it (the operator turns it on) and the platform's K8S_EGRESS_INTERNET doesn't forbid it for
+ * every account. Never FF's own network, nor the cloud's metadata addresses (BLOCKED_EGRESS_CIDRS).
+ */
+export function networkPolicyManifest(namespace: string, settings: KubernetesSettings, internetEgress: boolean): K8sObject {
   // Only the backend calls a function: never the other platform pods in ff-system (Keycloak, the console, the
   // admin app, the log store). A backend outside the cluster calls through the API server's proxy, which comes
   // from the node, as k3s lets through.
@@ -149,7 +154,7 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
       ],
     },
   ];
-  if (settings.egressInternet) {
+  if (settings.egressInternet && internetEgress) {
     egress.push({ to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }] });
   }
   return {

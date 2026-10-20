@@ -19,9 +19,10 @@ export const settings = (overrides: Partial<KubernetesSettings> = {}): Kubernete
   ...overrides,
 });
 
-/** An account's limits as the beta plan sets them (D5). */
-export const tenant = (quota: Partial<TenantLimits['quota']> = {}): TenantLimits => ({
+/** An account's limits as the beta plan sets them, internet egress off unless given. */
+export const tenant = (quota: Partial<TenantLimits['quota']> = {}, internetEgress = false): TenantLimits => ({
   quota: { pods: 20, cpu: '8', memory: '8Gi', ...quota },
+  internetEgress,
 });
 
 export const workload = (overrides: Partial<FunctionWorkload> = {}): FunctionWorkload => ({

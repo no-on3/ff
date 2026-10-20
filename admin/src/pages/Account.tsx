@@ -208,8 +208,11 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
       title: `Turn internet egress ${pending.on ? 'on' : 'off'} for ${account.name}?`,
       body: (
         <p>
-          Internet egress: {account.internetEgress ? 'on' : 'off'} → {pending.on ? 'on' : 'off'}. Recorded for the account; the cluster
-          follows it once egress is set per account (P-62).
+          Internet egress: {account.internetEgress ? 'on' : 'off'} → {pending.on ? 'on' : 'off'}.{' '}
+          {pending.on
+            ? "Its functions can then open connections to the internet, never to FF's own network."
+            : 'Its functions can then open no connection beyond name lookups.'}{' '}
+          The account's network policy changes at once; if the cluster refuses it, nothing changes.
         </p>
       ),
       confirmLabel: pending.on ? 'Turn on' : 'Turn off',

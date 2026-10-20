@@ -45,7 +45,7 @@ metrics_port="$(free_port)"
 install -m 644 "$FF_SA_TOKEN_FILE" "$work/token"
 install -m 644 "$FF_CA_FILE" "$work/ca.crt"
 # What production requires, none of it a development default. S3 and SMTP are never reached: the backend starts
-# without them and reports their errors when it uses them.
+# without them and reports their errors when it uses them. No function is deployed: the sandbox is only named.
 env=(
   -e NODE_ENV=production -e PORT="$port" -e FF_METRICS_PORT="$metrics_port" -e FF_METRICS_HOST=127.0.0.1
   -e DB_HOST=127.0.0.1 -e DB_PORT="$pg_port" -e DB_USERNAME=postgres -e DB_PASSWORD=images-test-password -e DB_NAME=ff
@@ -54,7 +54,7 @@ env=(
   -e FF_SMTP_URL=smtp://127.0.0.1:1 -e FF_CONSOLE_URL=https://console.ff.test -e FF_OPERATOR_EMAIL=operator@ff.test
   -e FF_SELLER_NAME='FF test' -e FF_SELLER_TAX_ID=0000000/A/M/000 -e FF_SELLER_ADDRESS='1 rue du Test, Tunis'
   -e FF_BANK_NAME='Test bank' -e FF_BANK_IBAN='TN20 1400 6006 0100 0000 0001'
-  -e K8S_API_URL="https://127.0.0.1:$FF_API_PORT" -e K8S_INVOKE_MODE=proxy
+  -e K8S_API_URL="https://127.0.0.1:$FF_API_PORT" -e K8S_INVOKE_MODE=proxy -e K8S_RUNTIME_CLASS=gvisor
   -e K8S_TOKEN_FILE=/etc/ff/kube/token -e K8S_CA_FILE=/etc/ff/kube/ca.crt
   -v "$work/token:/etc/ff/kube/token:ro" -v "$work/ca.crt:/etc/ff/kube/ca.crt:ro"
 )

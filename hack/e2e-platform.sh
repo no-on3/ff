@@ -8,10 +8,12 @@
 #     authority, whose root the test then trusts, and the development realm, for its test client.
 # It checks: TLS and HSTS on the four hostnames; the admin app and Keycloak's administration refused, then
 # admitted once the operator's address is allowed; the login's issuer; a customer signing in, asking for an
-# account, an operator approving it, the account deploying and invoking a function in direct mode, and reading
-# its logs; the operator's e-mail through the cluster's SMTP; the audit log naming the caller's address, not
+# account, an operator approving it, the account deploying and invoking a function in direct mode, inside gVisor
+# as production requires (hack/k8s/gvisor-up.sh installs it in the cluster; deploy.sh refuses a sandbox the
+# cluster lacks or no node runs), and reading its logs; the operator's
+# e-mail through the cluster's SMTP; the audit log naming the caller's address, not
 # the edge's; who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
-#   hack/e2e-platform.sh                  (about 12 minutes; removes its cluster and containers on exit)
+#   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 cluster=ff-platform-e2e
@@ -32,6 +34,7 @@ cleanup() {
     done
   fi
   k3d cluster delete "$cluster" >/dev/null 2>&1 || true
+  rm -f "$FF_KUBE_DIR/$cluster.kubeconfig"
   docker rm -f "$prefix-postgres" "$prefix-s3" "$prefix-mailpit" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
@@ -68,6 +71,11 @@ k3d cluster create "$cluster" --image "$FF_K3S_IMAGE" --servers 1 --agents 0 --n
   --port "127.0.0.1:$https_port:443@server:0:direct" --port "127.0.0.1:$http_port:80@server:0:direct" \
   --kubeconfig-update-default=false --kubeconfig-switch-context=false --wait --timeout 180s >/dev/null
 k3d kubeconfig get "$cluster" >"$KUBECONFIG"
+kubectl wait --for=condition=Ready node --all --timeout=120s >/dev/null
+# gVisor, which production requires for functions (backend.env's K8S_RUNTIME_CLASS): gvisor-up.sh reads the
+# cluster's kubeconfig where the dev scripts keep theirs.
+cp "$KUBECONFIG" "$FF_KUBE_DIR/$cluster.kubeconfig"
+FF_CLUSTER_NAME="$cluster" "$FF_REPO_ROOT/hack/k8s/gvisor-up.sh" >/dev/null
 kubectl wait --for=condition=Ready node --all --timeout=120s >/dev/null
 # A cluster in service has its DNS: the migrations' first attempts would otherwise fail on names. k3s makes
 # CoreDNS's Deployment a moment after the node is ready.
@@ -121,10 +129,24 @@ kubectl apply -f "$FF_REPO_ROOT/hack/k8s/platform-e2e/external.yaml" >/dev/null
 endpoints ff-test-postgres postgres 5432 "$(address "$prefix-postgres")"
 endpoints ff-test-s3 s3 8333 "$(address "$prefix-s3")"
 endpoints ff-test-smtp smtp 1025 "$(address "$prefix-mailpit")"
+# deploy.sh refuses, before touching anything, a sandbox the cluster lacks, and one no node is labelled to run.
+mkdir -p "$work/no-sandbox"
+printf 'K8S_RUNTIME_CLASS=ff-missing\n' >"$work/no-sandbox/backend.env"
+printf '%s\n' "resources: [$(realpath --relative-to="$work/no-sandbox" "$FF_REPO_ROOT/hack/k8s/platform-e2e")]" 'configMapGenerator:' \
+  '  - {name: ff-backend, namespace: ff-system, behavior: merge, envs: [backend.env]}' >"$work/no-sandbox/kustomization.yaml"
+missing=0
+"$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$work/no-sandbox" >"$work/refused.log" 2>&1 || missing=$?
+node="$(kubectl get nodes -o name | head -1)"
+kubectl label "$node" ff.dev/gvisor- >/dev/null
+unlabelled=0
+"$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >>"$work/refused.log" 2>&1 || unlabelled=$?
+kubectl label "$node" ff.dev/gvisor=true >/dev/null
+check "deploy.sh refuses a sandbox the cluster lacks, or no node runs, before deploying anything" "1 1 true true false" \
+  "$missing $unlabelled $(grep -q 'RuntimeClass ff-missing, which the cluster lacks' "$work/refused.log" && echo true || echo false) $(grep -q 'no node has the label ff.dev/gvisor=true' "$work/refused.log" && echo true || echo false) $(kubectl -n ff-system get job ff-migrations >/dev/null 2>&1 && echo true || echo false)"
 "$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >"$work/deploy.log" 2>&1 \
   || { tail -30 "$work/deploy.log" >&2; fail "deploy.sh failed"; }
-check "deploy.sh: the migrations first, each run, then every rollout" "true true" \
-  "$(grep -q 'has been executed successfully' "$work/deploy.log" && echo true || echo false) $(grep -q '^platform deployed$' "$work/deploy.log" && echo true || echo false)"
+check "deploy.sh: the sandbox and a node for it, the migrations first, each run, then every rollout" "true true true" \
+  "$(grep -q '^functions run in the RuntimeClass gvisor, on 1 node(s)$' "$work/deploy.log" && echo true || echo false) $(grep -q 'has been executed successfully' "$work/deploy.log" && echo true || echo false) $(grep -q '^platform deployed$' "$work/deploy.log" && echo true || echo false)"
 grep -E 'attempt\(s\) failed' "$work/deploy.log" | sed 's/^/  note: /' || true
 
 echo "== the edge"
@@ -186,11 +208,13 @@ done
 check "the operator is told by e-mail, through the cluster's SMTP" true "$([ -n "$mail" ] && echo true || echo false)"
 as "$operator" "/admin/accounts/$account/approve" -d '{"reason": "e2e: the platform test"}' >/dev/null
 check "the operator approves it" 200 "$(status)"
-code='export async function handler(event: { body: { name?: string } }) { return { message: `Hello ${event.body.name ?? "world"}` }; }'
+code="import * as os from 'node:os';
+export async function handler(event: { body: { name?: string } }) { return { message: \`Hello \${event.body.name ?? 'world'}\`, kernel: os.release() }; }"
 fn="$(as "$token" /functions -d "$(jq -cn --arg code "$code" '{name: "e2e-platform", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
 check "the customer deploys a function" "201 ACTIVE" "$(status) $(jq -r .status "$work/body")"
-check "and invokes it: the backend calls its Service directly" "201 Hello platform" \
-  "$(as "$token" "/functions/$fn/invoke" -d '{"input": {"name": "platform"}}' >/dev/null; status) $(jq -r .output.message "$work/body")"
+# gVisor answers with a kernel of its own, not the node's.
+check "and invokes it: the backend calls its Service directly, the function inside gVisor" "201 Hello platform true" \
+  "$(as "$token" "/functions/$fn/invoke" -d '{"input": {"name": "platform"}}' >/dev/null; status) $(jq -r .output.message "$work/body") $(jq -r '.output.kernel | test("gvisor")' "$work/body")"
 lines=0
 for _ in $(seq 1 40); do
   lines="$(as "$token" "/functions/$fn/logs" -X GET | jq '[.lines[] | select(.message | startswith("REPORT"))] | length')"

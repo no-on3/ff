@@ -27,8 +27,12 @@ run('plans (L2, P-15)', () => {
   let plans: PlansService;
   let audit: AuditService;
   const applied: Array<{ accountId: string; tenant: TenantLimits }> = [];
+  let clusterRefuses = false;
   const orchestrator = {
-    applyTenantLimits: async (accountId: string, tenant: TenantLimits) => void applied.push({ accountId, tenant }),
+    applyTenantLimits: async (accountId: string, tenant: TenantLimits) => {
+      if (clusterRefuses) throw new Error('the cluster refused');
+      applied.push({ accountId, tenant });
+    },
     deploy: async () => undefined,
     waitUntilReady: async () => undefined,
   } as unknown as Orchestrator;
@@ -57,6 +61,7 @@ run('plans (L2, P-15)', () => {
 
   beforeEach(() => {
     applied.length = 0;
+    clusterRefuses = false;
   });
 
   it("reads the beta plan's limits as the migration wrote them", async () => {
@@ -103,7 +108,7 @@ run('plans (L2, P-15)', () => {
     await expect(plans.assign(id, 'large', 'Pilot needs more room')).resolves.toMatchObject({ id: 'large', name: 'Large' });
 
     expect(await planOf(id)).toBe('large');
-    expect(applied).toEqual([{ accountId: id, tenant: { quota: { pods: 60, cpu: '24', memory: '24Gi' } } }]);
+    expect(applied).toEqual([{ accountId: id, tenant: { quota: { pods: 60, cpu: '24', memory: '24Gi' }, internetEgress: false } }]);
     expect((await planEntries(id)).map((entry) => entry.details)).toEqual([
       { reason: 'Pilot needs more room', changes: { planId: { from: 'beta', to: 'large' } } },
     ]);
@@ -115,7 +120,49 @@ run('plans (L2, P-15)', () => {
     await plans.assign(id, 'beta', 'The quota did not apply');
 
     expect(await planEntries(id)).toEqual([]);
-    expect(applied).toEqual([{ accountId: id, tenant: { quota: BETA_LIMITS.quota } }]);
+    expect(applied).toEqual([{ accountId: id, tenant: { quota: BETA_LIMITS.quota, internetEgress: false } }]);
+  });
+
+  it("applies the account's own internet egress with the plan's quota, and changes nothing when the cluster refuses", async () => {
+    await addPlan('roomy', { ...BETA_LIMITS, quota: { pods: 30, cpu: '12', memory: '12Gi' } });
+    const id = await account();
+    await db.dataSource.query('UPDATE accounts SET internet_egress = true WHERE id = $1', [id]);
+
+    clusterRefuses = true;
+    await expect(plans.assign(id, 'roomy', 'More room')).rejects.toThrow('the cluster refused');
+    expect([await planOf(id), await planEntries(id)]).toEqual(['beta', []]);
+    clusterRefuses = false;
+    await plans.assign(id, 'roomy', 'More room');
+
+    expect(await planOf(id)).toBe('roomy');
+    expect(applied).toEqual([{ accountId: id, tenant: { quota: { pods: 30, cpu: '12', memory: '12Gi' }, internetEgress: true } }]);
+  });
+
+  // A deploy reads the account's limits and writes its namespace a moment later: an operator's change in between,
+  // applied first, would be undone by the deploy's write.
+  it("makes an operator's change wait for a write of the namespace under way, so that write can't put the old limits back", async () => {
+    await addPlan('wide', { ...BETA_LIMITS, quota: { pods: 50, cpu: '20', memory: '20Gi' } });
+    const id = await account();
+    let writing!: () => void;
+    let finish!: () => void;
+    const started = new Promise<void>((resolve) => (writing = resolve));
+    const gate = new Promise<void>((resolve) => (finish = resolve));
+    const write = plans.withTenant(id, async (tenant) => {
+      writing();
+      await gate;
+      applied.push({ accountId: id, tenant });
+    });
+    await started;
+
+    const change = plans.assign(id, 'wide', 'Pilot needs more room');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(applied).toEqual([]); // the change waits for the account
+    finish();
+    await Promise.all([write, change]);
+
+    expect(applied.map((entry) => entry.tenant.quota.pods)).toEqual([BETA_LIMITS.quota.pods, 50]);
+    await plans.withTenant(id, async (tenant) => void applied.push({ accountId: id, tenant }));
+    expect(applied[2].tenant.quota.pods).toBe(50);
   });
 
   it("refuses a plan or an account that doesn't exist, and changes nothing", async () => {

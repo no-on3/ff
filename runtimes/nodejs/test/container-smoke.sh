@@ -42,6 +42,13 @@ check "root filesystem is read-only" denied \
 check "/tmp is writable" ok "$(docker exec "$name" sh -c 'touch /tmp/probe && echo ok')"
 check "no install at start (no npm activity in logs)" 0 "$(docker logs "$name" 2>&1 | grep -c 'npm' || true)"
 check "speaks runtime protocol 2" 1 "$(docker logs "$name" 2>&1 | grep -c '"protocol":2' || true)"
+# The TypeScript compiler's code cache, written at the build, taken by V8 in a worker thread with a small heap, as
+# the runtime loads user code: refused, a cold start at 0.1 CPU takes seconds longer, and nothing else says so.
+check "the TypeScript compiler's code cache is taken, in a worker thread" true \
+  "$(docker exec "$name" node -e "
+const { Worker } = require('node:worker_threads');
+const code = 'require(\"node:worker_threads\").parentPort.postMessage(require(\"/opt/ff/dist/typescript-cache\").loadTypeScript().cached)';
+new Worker(code, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 48, maxYoungGenerationSizeMb: 6 } }).once('message', console.log);")"
 
 # The function runs in its task root, so a relative path finds the files next to its code.
 docker run -d --name "$name-cwd" \

@@ -12,8 +12,8 @@ import { PlanLimits, PlanView, parsePlanLimits, planLimitsSchema } from './plan-
 /** How long a plan read from the database is used: a change (P-73) applies within this time. */
 export const PLAN_CACHE_MS = 60_000;
 
-/** What the scheduler applies to the whole account, from its plan. */
-export const tenantLimits = (limits: PlanLimits): TenantLimits => ({ quota: limits.quota });
+/** What the scheduler applies to the whole account: its plan's quota, and the account's own internet egress. */
+export const tenantLimits = (limits: PlanLimits, internetEgress: boolean): TenantLimits => ({ quota: limits.quota, internetEgress });
 
 /**
  * Plans and their limits (D5). Every account has one, `beta` to start. A plan
@@ -50,6 +50,24 @@ export class PlansService {
     return this.get(account.planId);
   }
 
+  /**
+   * Runs `write`, a deploy or anything else that writes the account's namespace, with what the scheduler applies
+   * to the account as a whole: its plan's quota and its internet egress, read under a share lock on the account.
+   * An operator's change to either holds the account for update while it applies its own, so it waits for a write
+   * under way, and a write that read the old value can't put it back after the change.
+   */
+  async withTenant<T>(accountId: string, write: (tenant: TenantLimits) => Promise<T>): Promise<T> {
+    return this.accounts.manager.transaction(async (manager) => {
+      const account = await manager.findOne(Account, {
+        where: { id: accountId },
+        select: { id: true, planId: true, internetEgress: true },
+        lock: { mode: 'pessimistic_read' },
+      });
+      if (!account) throw new NotFoundException(`Account ${accountId} not found`);
+      return write(tenantLimits((await this.get(account.planId)).limits, account.internetEgress));
+    });
+  }
+
   /** The plans of several accounts, in one query: the idle sweep needs each function's. */
   async forAccounts(accountIds: string[]): Promise<Map<string, PlanView>> {
     const ids = [...new Set(accountIds)];
@@ -65,7 +83,8 @@ export class PlansService {
    * change, from what to what. They apply at once: this process reads the plan
    * fresh, and a changed quota goes to every account on the plan (an account
    * without a namespace gets it with its first deploy). Unchanged, nothing is
-   * written.
+   * written. Each account's quota is applied under a lock on the account, as
+   * withTenant explains.
    */
   async update(planId: string, change: { name?: string; limits: unknown }, reason: string): Promise<{ plan: PlanView; quota: { applied: number; failed: number } }> {
     const limits = checkedLimits(change.limits);
@@ -82,10 +101,12 @@ export class PlansService {
       return 'quota' in changes;
     });
     const quota = { applied: 0, failed: 0 };
+    // Read fresh, which also puts the new limits in this process's cache at once, for withTenant.
+    const plan = await this.get(planId, { fresh: true });
     if (quotaChanged) {
       for (const account of await this.accounts.find({ where: { planId }, select: { id: true } })) {
         try {
-          await this.orchestrator.applyTenantLimits(account.id, tenantLimits(limits));
+          await this.withTenant(account.id, (tenant) => this.orchestrator.applyTenantLimits(account.id, tenant));
           quota.applied++;
         } catch (error) {
           quota.failed++;
@@ -93,8 +114,7 @@ export class PlansService {
         }
       }
     }
-    // Read fresh, which also puts the new limits in this process's cache at once.
-    return { plan: await this.get(planId, { fresh: true }), quota };
+    return { plan, quota };
   }
 
   /** POST /admin/plans (P-73): a plan accounts can be moved to, with its audit entry. */
@@ -123,9 +143,11 @@ export class PlansService {
 
   /**
    * Moves an account to another plan, for an operator's reason (P-71), in one
-   * transaction with the audit entry, then applies the plan's quota to the
-   * account's namespace at once (D5). The same plan writes nothing, but
-   * applies the quota again: a retry after the cluster refused it.
+   * transaction with the audit entry, and applies the plan's quota to the
+   * account's namespace at once, under the account's lock: a deploy under
+   * way can't put the old quota back (withTenant), and if the cluster refuses
+   * it, nothing changes. The same plan writes nothing, but applies the quota
+   * again: a retry after the cluster refused it.
    */
   async assign(accountId: string, planId: string, reason: string): Promise<PlanView> {
     if (!(await this.plans.exists({ where: { id: planId } }))) throw new NotFoundException(`Plan ${planId} not found`);
@@ -133,14 +155,15 @@ export class PlansService {
     await this.accounts.manager.transaction(async (manager) => {
       const account = await manager.findOne(Account, { where: { id: accountId }, lock: { mode: 'pessimistic_write' } });
       if (!account) throw new NotFoundException(`Account ${accountId} not found`);
-      if (account.planId === planId) return;
-      await manager.update(Account, { id: accountId }, { planId });
-      await this.audit.record(
-        { accountId, action: 'account.plan', resource: `account:${accountId}`, details: { reason, changes: { planId: { from: account.planId, to: planId } } } },
-        manager,
-      );
+      if (account.planId !== planId) {
+        await manager.update(Account, { id: accountId }, { planId });
+        await this.audit.record(
+          { accountId, action: 'account.plan', resource: `account:${accountId}`, details: { reason, changes: { planId: { from: account.planId, to: planId } } } },
+          manager,
+        );
+      }
+      await this.orchestrator.applyTenantLimits(accountId, tenantLimits(plan.limits, account.internetEgress));
     });
-    await this.orchestrator.applyTenantLimits(accountId, tenantLimits(plan.limits));
     return plan;
   }
 }

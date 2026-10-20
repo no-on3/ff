@@ -1,7 +1,9 @@
-# Optional isolation layer: run function pods in gVisor (https://gvisor.dev),
-# a user-space kernel that serves the pods' system calls, so tenant code never
-# reaches the node's kernel directly. Not part of base/: it needs runsc on the
-# nodes first (docs/kubernetes-dev-guide.md, "Sandboxing with gVisor").
+# Runs function pods in gVisor (https://gvisor.dev), a user-space kernel that
+# serves the pods' system calls, so tenant code never reaches the node's kernel
+# directly. Optional in development; required in production, where the backend
+# refuses to start without a sandbox (deploy/k8s/platform/backend.env names this
+# one) and deploy.sh to deploy without it. Not part of base/: it needs runsc on
+# the nodes first (docs/kubernetes-dev-guide.md, "Sandboxing with gVisor").
 #   kubectl apply -f deploy/k8s/optional/runtimeclass-gvisor.yaml
 #   kubectl label node <node> ff.dev/gvisor=true   # every node that has runsc
 # Then set K8S_RUNTIME_CLASS=gvisor in the backend.

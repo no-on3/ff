@@ -99,7 +99,7 @@ const Plans: React.FC<{ email: string | undefined }> = ({ email }) => {
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 text-gray-600">
             <tr>
-              {['Plan', 'Functions', 'Memory', 'Timeout', 'Quota', 'Invocations', 'Egress', ''].map((label) => (
+              {['Plan', 'Functions', 'Memory', 'Timeout', 'Quota', 'Invocations', 'Egress by default', ''].map((label) => (
                 <th key={label} className="px-4 py-2 font-medium">
                   {label}
                 </th>

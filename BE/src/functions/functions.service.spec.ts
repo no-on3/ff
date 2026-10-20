@@ -49,9 +49,11 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** The account's plan, and how many functions it has: the transaction that saves a new one counts them. */
   let accountPlan: PlanView;
   let existingFunctions: number;
-  const plans = { forAccount: jest.fn() };
+  /** Whether a write of the account's namespace runs inside PlansService.withTenant, under the account's lock. */
+  let underLock: boolean;
+  const plans = { forAccount: jest.fn(), withTenant: jest.fn() };
   const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn() };
-  const TENANT = { quota: BETA_LIMITS.quota };
+  const TENANT = { quota: BETA_LIMITS.quota, internetEgress: false };
   const audit = { record: jest.fn() };
   const usage = { record: jest.fn() };
   /** D9's balance check (P-33): every account may invoke unless a test says otherwise. */
@@ -91,6 +93,15 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     accountPlan = plan();
     existingFunctions = 0;
     plans.forAccount.mockImplementation(async () => accountPlan);
+    underLock = false;
+    plans.withTenant.mockImplementation(async (_accountId: string, write: (tenant: unknown) => Promise<unknown>) => {
+      underLock = true;
+      try {
+        return await write({ quota: accountPlan.limits.quota, internetEgress: false });
+      } finally {
+        underLock = false;
+      }
+    });
     transaction.countBy.mockImplementation(async () => existingFunctions);
     transaction.save.mockImplementation(async (_target, entity) => functionsRepo.save(entity));
     Object.assign(functionsRepo, { manager: { transaction: jest.fn(async (work) => work(transaction)) } });
@@ -665,9 +676,25 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.update('user-1', 'fn-1', { code: 'broken' }).catch(() => undefined);
 
       expect(orchestrator.update.mock.calls.map(([, tenant]) => tenant)).toEqual([
-        { quota: { pods: 7, cpu: '2', memory: '3Gi' } },
-        { quota: { pods: 7, cpu: '2', memory: '3Gi' } },
+        { quota: { pods: 7, cpu: '2', memory: '3Gi' }, internetEgress: false },
+        { quota: { pods: 7, cpu: '2', memory: '3Gi' }, internetEgress: false },
       ]);
+    });
+
+    // The operator's change of plan or internet egress takes the account for update while it applies its own: a
+    // write that read the old value under the lock can't put it back after.
+    it("writes the account's namespace only with the limits read under the account's lock: deploy, update and rollback", async () => {
+      const writes: Array<[string, boolean]> = [];
+      orchestrator.deploy.mockImplementation(async () => void writes.push(['deploy', underLock]));
+      orchestrator.update.mockImplementation(async () => void writes.push(['update', underLock]));
+      await service.create('user-1', { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 });
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Error', 'boom'));
+
+      await service.update('user-1', 'fn-1', { code: 'broken' }).catch(() => undefined);
+
+      expect(writes).toEqual([['deploy', true], ['update', true], ['update', true]]);
+      expect(plans.withTenant.mock.calls.map(([accountId]) => accountId)).toEqual(['user-1', 'user-1', 'user-1']);
     });
   });
 

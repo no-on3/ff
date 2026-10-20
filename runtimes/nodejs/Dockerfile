@@ -1,7 +1,7 @@
 # FF function runtime for Node.js (runtime protocol v2).
 # Build:  docker build -t ff-runtime-nodejs:24-v2 runtimes/nodejs
-# The final image holds only the compiled runtime and TypeScript (used to
-# transpile user .ts files). Nothing is installed when a function starts.
+# The final image holds only the compiled runtime, TypeScript (used to
+# transpile user .ts files) and its code cache. Nothing is installed when a function starts.
 FROM node:24-alpine AS build
 WORKDIR /opt/ff
 COPY package.json package-lock.json ./
@@ -17,6 +17,10 @@ WORKDIR /opt/ff
 COPY --from=build /opt/ff/package.json ./
 COPY --from=build /opt/ff/node_modules ./node_modules
 COPY --from=build /opt/ff/dist ./dist
+# The TypeScript compiler's V8 code cache, written after a transpile so that it holds the code the transpile
+# runs (src/typescript-cache.ts): at 0.1 CPU in gVisor, a cold start's load of the compiler goes from 7 to 10 s
+# to about 2.5 s. It belongs to root, read-only.
+RUN node -e "require('/opt/ff/dist/ts-hook').writeTypeScriptCache()" && chmod a=r /opt/ff/typescript.codecache
 ENV NODE_ENV=production \
     LAMBDA_TASK_ROOT=/var/task \
     FF_HANDLER=function.handler \

@@ -18,7 +18,7 @@ import {
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { StoredLine, decodeCursor, pageQuery, tailQuery } from './log-store';
-import { MAX_CODE_BYTES, RUNTIME_PORT, TENANT_QUOTA_NAME } from './manifests';
+import { BLOCKED_EGRESS_CIDRS, MAX_CODE_BYTES, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
 import { functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
 
@@ -161,14 +161,23 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
-  describe('applyTenantLimits: a plan change', () => {
-    it("rewrites the quota of the account's namespace at once, and nothing else", async () => {
+  describe('applyTenantLimits: a plan change, or internet egress turned on or off', () => {
+    const internetRule = (manifest: any) => manifest.spec.egress.some((rule: any) => rule.to?.[0]?.ipBlock?.cidr === '0.0.0.0/0');
+
+    it("rewrites the quota and the NetworkPolicy of the account's namespace at once, and nothing else", async () => {
       api.objects.set(`/api/v1/namespaces/${ns}`, { metadata: { name: ns } });
 
-      await orchestrator.applyTenantLimits(fn.accountId, tenant({ pods: 40, cpu: '16', memory: '16Gi' }));
+      await orchestrator.applyTenantLimits(fn.accountId, tenant({ pods: 40, cpu: '16', memory: '16Gi' }, true));
+      await orchestrator.applyTenantLimits(fn.accountId, tenant({ pods: 40, cpu: '16', memory: '16Gi' }, false));
 
-      expect(api.applied.map((a) => a.path)).toEqual([`/api/v1/namespaces/${ns}/resourcequotas/${TENANT_QUOTA_NAME}`]);
+      expect(api.applied.map((a) => a.path)).toEqual([
+        `/api/v1/namespaces/${ns}/resourcequotas/${TENANT_QUOTA_NAME}`,
+        `/apis/networking.k8s.io/v1/namespaces/${ns}/networkpolicies/${TENANT_NETWORK_POLICY_NAME}`,
+        `/api/v1/namespaces/${ns}/resourcequotas/${TENANT_QUOTA_NAME}`,
+        `/apis/networking.k8s.io/v1/namespaces/${ns}/networkpolicies/${TENANT_NETWORK_POLICY_NAME}`,
+      ]);
       expect(api.applied[0].manifest.spec.hard).toMatchObject({ pods: '40', 'limits.cpu': '16', 'limits.memory': '16Gi' });
+      expect([internetRule(api.applied[1].manifest), internetRule(api.applied[3].manifest)]).toEqual([true, false]);
     });
 
     it("leaves an account without a namespace alone: its first function's deploy applies the plan", async () => {
@@ -179,10 +188,13 @@ describe('KubernetesOrchestrator', () => {
   });
 
   describe('update', () => {
-    it("writes the plan's quota again, so a plan change reaches the namespace with the next update", async () => {
-      await orchestrator.update(fn, tenant({ pods: 9 }));
+    it("writes the plan's quota and the account's internet egress again, so a change reaches the namespace with the next update", async () => {
+      await orchestrator.update(fn, tenant({ pods: 9 }, true));
 
       expect(api.applied.find((a) => a.manifest.kind === 'ResourceQuota')!.manifest.spec.hard.pods).toBe('9');
+      expect(api.applied.find((a) => a.manifest.kind === 'NetworkPolicy')!.manifest.spec.egress).toContainEqual({
+        to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }],
+      });
     });
 
     it('keeps the current replica count, never going below minInstances', async () => {

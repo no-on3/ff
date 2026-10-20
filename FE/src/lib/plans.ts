@@ -40,6 +40,7 @@ export function planLimitRows({ limits }: Pick<Plan, 'limits'>): Array<[label: s
     ['Scale to zero after', `${formatSeconds(limits.idleSeconds)} without a call`],
     ['Invocation history kept', `${limits.historyRetentionDays} days`],
     ['Logs kept', `${limits.logRetentionDays} days`],
-    ['Internet access for functions', limits.internetEgress ? 'Yes' : 'No, unless turned on for the account'],
+    // The plan's value is where a new account starts; FF turns it on or off for each account.
+    ['Internet access for functions', limits.internetEgress ? 'Yes, unless turned off for the account' : 'No, unless turned on for the account'],
   ];
 }

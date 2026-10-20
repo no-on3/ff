@@ -24,9 +24,9 @@ import {
   LogStoreUnavailableError,
   initMsOf,
 } from '../orchestrator/orchestrator.errors';
-import { ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
+import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
-import { PlansService, tenantLimits } from '../plans/plans.service';
+import { PlansService } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
 import { UsageStatus } from '../usage/usage-record.entity';
 import { failureStatus, usageRecord } from '../usage/usage';
@@ -134,7 +134,7 @@ export class FunctionsService {
       // Archive the code in object storage (the cluster gets it via an immutable ConfigMap).
       await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
 
-      await this.orchestrator.deploy(savedFunction, tenantLimits(plan.limits));
+      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(savedFunction, tenant));
       // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
       await this.orchestrator.waitUntilReady(savedFunction, this.readyTimeoutMs());
 
@@ -212,7 +212,6 @@ export class FunctionsService {
     const function_ = await this.findOne(accountId, id);
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
-    const tenant = tenantLimits(plan.limits);
     const updated = { ...function_, ...updateFunctionDto };
     const changed = (Object.keys(updateFunctionDto) as Array<keyof UpdateFunctionDto>).filter(
       (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
@@ -232,13 +231,13 @@ export class FunctionsService {
     }
 
     try {
-      await this.orchestrator.update(updated, tenant);
+      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.update(updated, tenant));
       // The old version keeps serving during the rollout; record the change only once it's live.
       await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
     } catch (error) {
       if (error instanceof CodeTooLargeError) throw new BadRequestException(error.message); // nothing was applied
       if (repairing) return this.keepFailedAttempt(function_, updateFunctionDto, changed, error);
-      return this.rollBack(function_, error, tenant, changed);
+      return this.rollBack(function_, error, changed);
     }
 
     const previousCodePath = this.codePath(function_);
@@ -254,11 +253,11 @@ export class FunctionsService {
    * the Deployment matches the record, and answer with the diagnosis. If that
    * fails too, the function is ERROR, with both messages.
    */
-  private async rollBack(previous: Function, error: unknown, tenant: TenantLimits, changed: string[]): Promise<never> {
+  private async rollBack(previous: Function, error: unknown, changed: string[]): Promise<never> {
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
-      await this.orchestrator.update(previous, tenant);
+      await this.plans.withTenant(previous.accountId, (tenant) => this.orchestrator.update(previous, tenant));
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {
       previous.status = FunctionStatus.ERROR;

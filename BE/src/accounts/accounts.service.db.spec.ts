@@ -27,6 +27,7 @@ const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 run('accounts, users and memberships (L2, P-12)', () => {
   let db: ScratchDatabase;
   let service: AccountsService;
+  let plans: PlansService;
   const sent: Mail[] = [];
   let operatorEmail = 'ops@ff.example';
 
@@ -39,7 +40,7 @@ run('accounts, users and memberships (L2, P-12)', () => {
     const config = { getOrThrow: () => ({ operatorEmail, adminUrl: 'https://admin.ff.example' }) } as unknown as ConfigService;
     const ds = db.dataSource;
     const audit = new AuditService(ds.getRepository(AuditEntry));
-    const plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), {} as Orchestrator, audit);
+    plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), {} as Orchestrator, audit);
     service = new AccountsService(ds.getRepository(Account), ds.getRepository(User), ds.getRepository(Membership), ds, mail, config, plans, audit);
   });
 
@@ -224,8 +225,24 @@ run('accounts, users and memberships (L2, P-12)', () => {
   it("creates development mode's account active, once", async () => {
     const [a, b] = await Promise.all([service.developmentAccount('000000000077'), service.developmentAccount('000000000077')]);
 
-    expect(a).toMatchObject({ id: '000000000077', status: 'active', planId: 'beta', name: 'Development account 000000000077' });
+    expect(a).toMatchObject({ id: '000000000077', status: 'active', planId: 'beta', name: 'Development account 000000000077', internetEgress: false });
     expect(b.id).toBe(a.id);
     expect(await db.dataSource.getRepository(Account).count({ where: { id: '000000000077' } })).toBe(1);
+  });
+
+  // The plan's internetEgress is only the default for new accounts: the operator turns it on or off per account.
+  it("gives a new account its plan's internet egress, which the beta plan has off", async () => {
+    const beta = await plans.get('beta', { fresh: true });
+    await db.dataSource.query(`UPDATE plans SET limits = limits || '{"internetEgress": true}' WHERE id = 'beta'`);
+    await plans.get('beta', { fresh: true });
+    try {
+      const created = await service.create(await service.userFor(identity(90)), { name: 'Open Data Tunis' });
+      const development = await service.developmentAccount('000000000078');
+
+      expect([beta.limits.internetEgress, created.internetEgress, development.internetEgress]).toEqual([false, true, true]);
+    } finally {
+      await db.dataSource.query(`UPDATE plans SET limits = limits || '{"internetEgress": false}' WHERE id = 'beta'`);
+      await plans.get('beta', { fresh: true });
+    }
   });
 });

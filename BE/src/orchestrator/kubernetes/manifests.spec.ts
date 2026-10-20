@@ -151,7 +151,7 @@ describe('Kubernetes manifests', () => {
 
   describe('NetworkPolicy', () => {
     it("denies all ingress but the backend's pods, in ff-system: not the platform's other pods there", () => {
-      const np: any = networkPolicyManifest('ff-t-abc', settings());
+      const np: any = networkPolicyManifest('ff-t-abc', settings(), true);
 
       expect(np.spec.podSelector).toEqual({});
       expect(np.spec.policyTypes).toEqual(['Ingress', 'Egress']);
@@ -168,13 +168,13 @@ describe('Kubernetes manifests', () => {
     });
 
     it('adds configured ingress CIDRs', () => {
-      const np: any = networkPolicyManifest('ff-t-abc', settings({ ingressAllowCidrs: ['10.42.0.1/32'] }));
+      const np: any = networkPolicyManifest('ff-t-abc', settings({ ingressAllowCidrs: ['10.42.0.1/32'] }), false);
 
       expect(np.spec.ingress[0].from).toContainEqual({ ipBlock: { cidr: '10.42.0.1/32' } });
     });
 
-    it('allows DNS and the internet, but never private, link-local or loopback ranges', () => {
-      const np: any = networkPolicyManifest('ff-t-abc', settings());
+    it('allows DNS and, for an account whose egress is on, the internet, but never private, link-local or loopback ranges', () => {
+      const np: any = networkPolicyManifest('ff-t-abc', settings(), true);
 
       expect(np.spec.egress[0].ports).toEqual([
         { protocol: 'UDP', port: 53 },
@@ -186,10 +186,15 @@ describe('Kubernetes manifests', () => {
       );
     });
 
-    it('allows only DNS when internet egress is disabled', () => {
-      const np: any = networkPolicyManifest('ff-t-abc', settings({ egressInternet: false }));
+    // Each account's own setting, which the operator turns on; the platform's setting cuts every account off.
+    it.each([
+      ['the account egress off, as every account starts', true, false],
+      ['the platform cutting every account off, whatever their setting', false, true],
+      ['both', false, false],
+    ])('allows only DNS with %s', (_label, platform, account) => {
+      const np: any = networkPolicyManifest('ff-t-abc', settings({ egressInternet: platform }), account);
 
-      expect(np.spec.egress).toHaveLength(1);
+      expect(np.spec.egress).toEqual([expect.objectContaining({ ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] })]);
     });
   });
 

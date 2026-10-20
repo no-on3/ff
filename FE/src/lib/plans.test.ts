@@ -18,6 +18,12 @@ describe('planLimitRows', () => {
       ['Internet access for functions', 'No, unless turned on for the account'],
     ]);
   });
+
+  it("says a plan's internet access is where an account starts, which FF changes for each account", () => {
+    const open = { ...BETA_PLAN, limits: { ...BETA_PLAN.limits, internetEgress: true } };
+
+    expect(planLimitRows(open).slice(-1)[0]).toEqual(['Internet access for functions', 'Yes, unless turned off for the account']);
+  });
 });
 
 describe('formatSeconds', () => {
