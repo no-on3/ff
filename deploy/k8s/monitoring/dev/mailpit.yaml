@@ -1,0 +1,105 @@
+# Mailpit v1.31.4 (2026-10-03), in development only: it catches the alerts' e-mails, which its web page
+# (port 8025, through a port-forward) and its API show. Only Alertmanager may send it mail.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: mailpit
+    app.kubernetes.io/part-of: ff
+spec:
+  selector:
+    app.kubernetes.io/name: mailpit
+  ports:
+    - name: smtp
+      port: 1025
+      targetPort: smtp
+    - name: http
+      port: 8025
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailpit
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: mailpit
+    app.kubernetes.io/part-of: ff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mailpit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mailpit
+        app.kubernetes.io/part-of: ff
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mailpit
+          image: axllent/mailpit:v1.31.4
+          env:
+            - name: MP_MAX_MESSAGES
+              value: "500"
+            - name: MP_DISABLE_VERSION_CHECK
+              value: "true"
+          ports:
+            - name: smtp
+              containerPort: 1025
+            - name: http
+              containerPort: 8025
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          # Its database of messages.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mailpit
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/part-of: ff
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mailpit
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+      ports:
+        - port: 1025
+          protocol: TCP

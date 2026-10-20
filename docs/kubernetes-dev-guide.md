@@ -39,6 +39,7 @@ kubectl get pods -A
 
 ```bash
 hack/k8s/cluster-up.sh             # create (or start) the cluster, apply deploy/k8s/dev, install the log pipeline, mint credentials
+hack/k8s/cluster-up.sh --monitoring    # the same, and the operator's monitoring (below)
 hack/k8s/test-rbac.sh              # verify RBAC, the production manifests and the admission policy (35 checks)
 hack/k8s/cluster-down.sh           # delete the cluster and the local credentials
 ```
@@ -48,7 +49,8 @@ hack/k8s/cluster-down.sh           # delete the cluster and the local credential
 - the API on `127.0.0.1:6550`;
 - a 2 GB node memory cap;
 - Traefik and metrics-server disabled;
-- the log pipeline (below), unless `--no-logging`.
+- the log pipeline (below), unless `--no-logging`;
+- the operator's monitoring (below), with `--monitoring` only.
 
 It is safe to re-run.
 
@@ -221,6 +223,47 @@ The L3 suite (`log-pipeline.it.spec.ts`, run where the pipeline is installed) de
 - the store refusing a function pod and an unlabelled pod in `ff-system`, and accepting one labelled as the backend;
 - the collector's permissions: pods and namespaces read, nothing else.
 
+## The operator's monitoring
+
+VictoriaMetrics scrapes the backend's metrics and the platform's: kube-state-metrics, the kubelet, VictoriaLogs, Fluent Bit and itself. vmalert evaluates the alert rules, Alertmanager e-mails them (to a Mailpit in the cluster, in development), and Grafana shows two dashboards ([ADR 0006](adr/0006-operator-monitoring.md), client-readiness plan P-53). The backend doesn't need any of it, so it is not installed by default: its pods use about 200 MiB of the 2 GB node.
+
+**Grafana runs on this machine** in development, not in the cluster: it needs about 250 MiB of its own, which the node doesn't have beside k3s, the log pipeline and the functions. Squeezed in, it made the node read its files from disk again and again (500 MB a second, the machine's load at 13 to 18) until it was stopped. `hack/k8s/grafana.sh` runs the cluster's Grafana otherwise: the same image, the settings read from its Deployment, the same data source and dashboards, on the cluster's store through a port-forward. Its Deployment stays in the overlay at no replica.
+
+```bash
+hack/k8s/monitoring-up.sh               # install it, its Secrets made for you; safe to re-run
+hack/k8s/grafana.sh                     # Grafana on this machine, on the cluster's store: http://localhost:3001 until Ctrl-C
+hack/k8s/test-monitoring-rules.sh       # the alert rules' unit tests and the dashboards' queries, in the VictoriaMetrics images; Docker only, seconds
+hack/k8s/test-monitoring.sh             # L3: L4's run scraped, every panel with data, the rules loaded, an alert's e-mail (about 12 min)
+hack/k8s/monitoring-down.sh             # remove it, with every stored series
+```
+
+**The backend on the host** is scraped at this machine's address on the k3d network, which `hack/k8s/host-address.sh` prints (172.18.0.1 here), port 9464. Start it listening there:
+
+```bash
+cd BE && FF_METRICS_HOST="$(../hack/k8s/host-address.sh)" npm run start:dev    # or set FF_METRICS_HOST in BE/.env
+```
+
+Without it, the backend's panels are empty and the alert "FFBackendDown" fires, which is true: the store can't reach a backend.
+
+**Looking at it:**
+
+```bash
+source hack/k8s/env.sh
+hack/k8s/grafana.sh &                                                  # http://localhost:3001, admin, the password in hack/.kube/grafana-admin-password
+kubectl -n ff-monitoring port-forward svc/mailpit 8026:8025 &          # http://localhost:8026: the alerts' e-mails
+kubectl -n ff-monitoring port-forward svc/vmalert 8880:8880 &          # http://localhost:8880: each rule, and what fires
+kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://localhost:8428/vmui: any query
+```
+
+**The dashboards and the rules are in git** (`deploy/k8s/monitoring/base/dashboards/`, `rules/`), read-only in Grafana: change the JSON or the YAML, run `hack/k8s/test-monitoring-rules.sh`, then `monitoring-up.sh` again. The ConfigMaps' names carry their content's hash, so Grafana or vmalert restarts with the change. A new rule needs its unit test in `rules/tests/`: series written as the store would have them, and the alert expected when it must fire and when it must not.
+
+**The L3 test** checks the stack's permissions (`kubectl auth can-i` as its ServiceAccounts) and its NetworkPolicies (a pod in a throw-away namespace reaches the API server, and neither the store, Alertmanager nor Mailpit). It then runs L4 with its backend's metrics on the scraped address, so stop a development backend listening there first, and starts Grafana as `grafana.sh` does. After the run, it checks:
+- the run's backend scraped, and every other target up;
+- its values: the calls by outcome (the lost one included), the refusals, its alarm;
+- every query of both dashboards answering with data through Grafana's API;
+- both rule groups loaded and evaluated without error;
+- "FFBackendDown" firing once the run's backend has stopped, and its e-mail in Mailpit, addressed to the operator.
+
 ## Credentials
 
 Everything lives in `hack/.kube/` (git-ignored, mode 0700, files 0600):
@@ -251,4 +294,8 @@ See [`deploy/k8s/README.md`](../deploy/k8s/README.md). In short:
 | `hack/e2e.sh`: `FAIL backend answers on …` with an empty backend log | The backend was still loading its modules. On a spinning disk with a cold page cache that alone took 23 s. The script waits up to 180 s; raise it with `FF_E2E_BACKEND_START_SECONDS`. |
 | `GET /functions/:id/logs` answers 503, and the backend logs `The logs of function … could not be read` | The log store isn't running or reachable. `kubectl -n ff-system get pods -l app.kubernetes.io/name=victoria-logs`; on a cluster made with `--no-logging` or before P-43, run `hack/k8s/logging-up.sh`. A failed deploy then names its load error again too. |
 | Fluent Bit logs `no upstream connections available to victoria-logs…` right after `logging-up.sh` | It started before VictoriaLogs was ready. It retries each chunk (10 times, for an hour or two in all), and the chunks wait on the node's disk: nothing is lost. |
+| Grafana's backend panels are empty, and "FFBackendDown" fires | No backend listens where the store scrapes it: start the backend with `FF_METRICS_HOST="$(hack/k8s/host-address.sh)"`. On the cluster's side, `kubectl -n ff-monitoring get endpointslice ff-backend-dev` must hold that address; `monitoring-up.sh` writes it. |
+| "FFNodeMemoryHigh" fires in development | It is true: the 2 GB node holds k3s, the log pipeline, the monitoring and the functions. Remove the monitoring when you don't need it (`monitoring-down.sh`), or make the cluster with more (`FF_NODE_MEMORY=3g`, before `cluster-up.sh` creates it). Don't scale Grafana up in it: run `hack/k8s/grafana.sh`. |
+| The machine slows down, and `docker stats` shows the k3d node reading hundreds of MB a second | The node is at its memory cap and reads its programs' files from disk again and again. Find the largest pods (`hack/k8s/grafana.sh` runs Grafana outside it) and remove what you don't need: the monitoring, or old functions. |
+| `hack/k8s/test-monitoring.sh`: `something already listens on …:9464` | A development backend listens where L3's run must: stop it, or give the test another port with `FF_DEV_METRICS_PORT` and `monitoring-up.sh` the same. |
 | Function pods in `ImagePullBackOff` for `ff-runtime-*` | kubelet's image GC deleted the imported image; it has no registry to re-pull from. GC runs when the disk passes the high threshold, which this cluster raises from 85% to 95% (`FF_IMAGE_GC_HIGH_THRESHOLD`). Re-import with `hack/k8s/load-images.sh`; `hack/k8s/test-it.sh` does this automatically. |

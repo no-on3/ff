@@ -1,0 +1,176 @@
+# The cluster's alert rules against series written here, named as kube-state-metrics, the kubelet, Fluent Bit,
+# VictoriaLogs and VictoriaMetrics name them. hack/k8s/test-monitoring-rules.sh runs them.
+rule_files:
+  - ../ff-cluster.yaml
+evaluation_interval: 30s
+tests:
+  # A node's memory: the kubelet's working set against kube-state-metrics' allocatable, joined on the node.
+  - interval: 1m
+    input_series:
+      - series: 'node_memory_working_set_bytes{job="kubelet",node="n1"}'
+        values: '1900x20'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="memory",unit="byte"}'
+        values: '2000x20'
+      - series: 'node_memory_working_set_bytes{job="kubelet",node="n2"}'
+        values: '1000x20'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics",node="n2",resource="memory",unit="byte"}'
+        values: '2000x20'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="cpu",unit="core"}'
+        values: '2x20'
+      # The node's other resources, the disk in bytes too: only the memory may divide.
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics",node="n1",resource="ephemeral_storage",unit="byte"}'
+        values: '50000x20'
+    alert_rule_test:
+      - eval_time: 15m
+        groupname: ff-cluster
+        alertname: FFNodeMemoryHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, node: n1 }
+            exp_annotations:
+              summary: Node n1 is running out of memory
+              description: 'It uses 95% of its allocatable memory: new instances may not fit, and the kubelet may evict.'
+
+  # A platform pod restarting; a tenant's, however often, is its owner's (their function's).
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="ff-system",pod="victoria-logs-0",container="victoria-logs"}'
+        values: '0x5 1 2 3 4 4 4'
+      - series: 'kube_pod_container_status_restarts_total{namespace="ff-t-000000000001",pod="fn-x",container="function"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 11m
+        groupname: ff-cluster
+        alertname: FFPlatformPodRestarting
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: ff-system, pod: victoria-logs-0, container: victoria-logs }
+            exp_annotations:
+              summary: ff-system/victoria-logs-0 keeps restarting
+              description: Its container victoria-logs restarted 4 times in 30 minutes.
+
+  # The log collector missing on a node, and lines late: 30 % of them over 10 s, Fluent Bit's le="10.0".
+  - interval: 1m
+    input_series:
+      - series: 'kube_daemonset_status_number_ready{namespace="ff-logging",daemonset="fluent-bit"}'
+        values: '1x20'
+      - series: 'kube_daemonset_status_desired_number_scheduled{namespace="ff-logging",daemonset="fluent-bit"}'
+        values: '2x20'
+      - series: 'fluentbit_output_latency_seconds_bucket{le="10.0",input="tail.0",output="http.0",node="n1"}'
+        values: '0+7x30'
+      - series: 'fluentbit_output_latency_seconds_count{input="tail.0",output="http.0",node="n1"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 15m
+        groupname: ff-cluster
+        alertname: FFLogCollectorMissing
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: ff-logging, daemonset: fluent-bit }
+            exp_annotations:
+              summary: The log collector is not running on every node
+              description: The functions' lines on the nodes without it wait on the node, and are lost if their pods go.
+      - eval_time: 25m
+        groupname: ff-cluster
+        alertname: FFLogPipelineSlow
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: The functions' logs are late
+              description: 30% of the lines in the last 10 minutes took more than 10 s to reach the log store.
+
+  # Lines on time: no alert.
+  - interval: 1m
+    input_series:
+      - series: 'fluentbit_output_latency_seconds_bucket{le="10.0",input="tail.0",output="http.0",node="n1"}'
+        values: '0+10x30'
+      - series: 'fluentbit_output_latency_seconds_count{input="tail.0",output="http.0",node="n1"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 25m
+        groupname: ff-cluster
+        alertname: FFLogPipelineSlow
+        exp_alerts: []
+
+  # The store away: the collector retries, then gives a chunk up.
+  - interval: 1m
+    input_series:
+      - series: 'fluentbit_output_retries_total{name="http.0",node="n1"}'
+        values: '0x5 0+2x20'
+      - series: 'fluentbit_output_retries_failed_total{name="http.0",node="n1"}'
+        values: '0x20 1x5'
+      - series: 'fluentbit_output_dropped_records_total{name="http.0",node="n1"}'
+        values: '0x25'
+    alert_rule_test:
+      - eval_time: 20m
+        groupname: ff-cluster
+        alertname: FFLogPipelineRetrying
+        exp_alerts:
+          - exp_labels: { severity: warning, node: n1 }
+            exp_annotations:
+              summary: The log collector on n1 can't write to the store
+              description: Its lines wait on the node's disk meanwhile. Check VictoriaLogs in ff-system.
+      - eval_time: 22m
+        groupname: ff-cluster
+        alertname: FFLogLinesLost
+        exp_alerts:
+          - exp_labels: { severity: critical, node: n1 }
+            exp_annotations:
+              summary: The log collector on n1 gave up lines
+              description: "1 chunks or lines were given up in the last 30 minutes: customers' logs are missing."
+
+  # A target down; the backend's has its own alert. A node not ready.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="fluent-bit",instance="10.42.0.5:2020"}'
+        values: '0x10'
+      - series: 'up{job="ff-backend",instance="10.42.0.9:9464"}'
+        values: '0x10'
+      - series: 'kube_node_status_condition{node="n1",condition="Ready",status="true"}'
+        values: '1x3 0x7'
+    alert_rule_test:
+      - eval_time: 7m
+        groupname: ff-cluster
+        alertname: FFScrapeTargetDown
+        exp_alerts:
+          - exp_labels: { severity: warning, job: fluent-bit, instance: '10.42.0.5:2020' }
+            exp_annotations:
+              summary: The metrics store can't scrape fluent-bit
+              description: "10.42.0.5:2020 hasn't answered for 5 minutes: its metrics, and the alerts on them, are missing."
+      - eval_time: 9m
+        groupname: ff-cluster
+        alertname: FFNodeNotReady
+        exp_alerts:
+          - exp_labels: { severity: critical, node: n1, condition: Ready, status: 'true' }
+            exp_annotations:
+              summary: Node n1 is not ready
+              description: Its pods, functions included, are being evicted or can't start.
+
+  # The stores' disks.
+  - interval: 1m
+    input_series:
+      - series: 'vl_free_disk_space_bytes{path="/storage"}'
+        values: '536870912x20'
+      - series: 'vm_free_disk_space_bytes{path="/storage"}'
+        values: '4294967296x20'
+    alert_rule_test:
+      - eval_time: 17m
+        groupname: ff-cluster
+        alertname: FFLogStoreDiskLow
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: The log store's disk is nearly full
+              description: 512MiB free.
+      - eval_time: 17m
+        groupname: ff-cluster
+        alertname: FFMetricsStoreDiskLow
+        exp_alerts: []
+
+  # 2 GiB free on the log store: no alert, as it keeps at most 8 GiB of its 10.
+  - interval: 1m
+    input_series:
+      - series: 'vl_free_disk_space_bytes{path="/storage"}'
+        values: '2147483648x20'
+    alert_rule_test:
+      - eval_time: 17m
+        groupname: ff-cluster
+        alertname: FFLogStoreDiskLow
+        exp_alerts: []

@@ -1,0 +1,12 @@
+# Grafana's one data source, the metrics store, provisioned: nobody edits it in the UI.
+apiVersion: 1
+datasources:
+  - name: VictoriaMetrics
+    uid: victoria-metrics
+    type: prometheus
+    access: proxy
+    url: http://victoria-metrics.ff-monitoring.svc:8428
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 30s

@@ -16,7 +16,7 @@ import { PricingService } from '../billing/pricing.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { MonitoringService } from './monitoring.service';
-import { alarmLagSeconds, deliveriesPending, ratingLagSeconds, reconciliationMismatches } from './operator-metrics';
+import { alarmLagSeconds, databaseSizeBytes, deliveriesPending, ratingLagSeconds, reconciliationMismatches } from './operator-metrics';
 import { valueOf } from './test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
@@ -87,6 +87,14 @@ run("the operator's gauges (L2)", () => {
     await monitoring.refresh(now);
 
     expect(await gauges()).toEqual([(now.getTime() - (hour.getTime() + HOUR)) / 1000, 70, 2]);
+  });
+
+  it("reports the database's size on disk, as PostgreSQL counts it", async () => {
+    await monitoring.refresh(new Date());
+    const [{ size }] = await query<Array<{ size: string }>>(`SELECT pg_database_size(current_database())::text AS size`);
+
+    expect(await valueOf(databaseSizeBytes)).toBe(Number(size));
+    expect(Number(size)).toBeGreaterThan(1024 * 1024); // the migrations' tables, at least
   });
 
   describe("the month's reconciliation", () => {

@@ -1,0 +1,95 @@
+# Alertmanager v0.34.1 (2026-09-17): sends the alerts by e-mail, grouped by alert, and again every 4 hours
+# while one lasts. Its configuration, the SMTP server and the addresses, is the Secret alertmanager-config,
+# key alertmanager.yaml, which the deployment writes: hack/k8s/monitoring-up.sh for development, where the
+# mail goes to Mailpit (../dev); the production deployment, to the operator's mailbox. Its silences
+# live on an emptyDir: a restart forgets them, which on one replica is the price of no volume.
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: ff
+spec:
+  selector:
+    app.kubernetes.io/name: alertmanager
+  ports:
+    - name: http
+      port: 9093
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: ff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertmanager
+        app.kubernetes.io/part-of: ff
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.34.1
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yaml
+            - --storage.path=/alertmanager
+            # One replica: no cluster to gossip with.
+            - --cluster.listen-address=
+            - --log.format=json
+          ports:
+            - name: http
+              containerPort: 9093
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+              readOnly: true
+            - name: data
+              mountPath: /alertmanager
+      volumes:
+        - name: config
+          secret:
+            secretName: alertmanager-config
+        - name: data
+          emptyDir:
+            sizeLimit: 64Mi

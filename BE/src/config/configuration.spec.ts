@@ -149,9 +149,11 @@ describe('configuration', () => {
   });
 
   it("serves the operator's metrics on port 9464 of this machine only, unless told otherwise, and logs as told", () => {
-    expect(configuration(production).monitoring).toEqual({ metricsPort: 9464, metricsHost: '127.0.0.1' });
+    expect(configuration(production).monitoring).toEqual({ metricsPort: 9464, metricsHost: '127.0.0.1', databaseDiskBytes: 0 });
+    expect(configuration({ ...production, FF_DATABASE_DISK_BYTES: '107374182400' }).monitoring.databaseDiskBytes).toBe(100 * 1024 ** 3);
+    expect(problems({ ...production, FF_DATABASE_DISK_BYTES: '-1' })).toEqual([expect.stringContaining('FF_DATABASE_DISK_BYTES')]);
     expect(configuration({ ...production, FF_METRICS_PORT: '0' }).monitoring.metricsPort).toBe(0);
-    expect(configuration({ ...production, FF_METRICS_PORT: '9100', FF_METRICS_HOST: '0.0.0.0' }).monitoring).toEqual({ metricsPort: 9100, metricsHost: '0.0.0.0' });
+    expect(configuration({ ...production, FF_METRICS_PORT: '9100', FF_METRICS_HOST: '0.0.0.0' }).monitoring).toMatchObject({ metricsPort: 9100, metricsHost: '0.0.0.0' });
     expect(problems({ ...production, FF_METRICS_PORT: '70000' })).toEqual([expect.stringContaining('FF_METRICS_PORT')]);
     expect(() => configuration({ ...production, FF_LOG_FORMAT: 'text' })).not.toThrow();
     expect(problems({ ...production, FF_LOG_FORMAT: 'xml' })).toEqual([expect.stringContaining('FF_LOG_FORMAT')]);

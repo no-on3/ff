@@ -1,0 +1,19 @@
+# Alertmanager's configuration for the dev cluster: every alert to the development operator, through the
+# Mailpit in ff-monitoring. hack/k8s/monitoring-up.sh makes it the Secret alertmanager-config. Production's is
+# the same with its SMTP server, its login and the operator's address (deploy/k8s/README.md).
+global:
+  smtp_smarthost: mailpit.ff-monitoring.svc:1025
+  smtp_from: FF alerts <alerts@ff.test>
+  smtp_require_tls: false
+# Sooner than production's (30 s and 5 minutes), so that a test sees an alert's e-mail within a minute or two.
+route:
+  receiver: operator
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+receivers:
+  - name: operator
+    email_configs:
+      - to: operator@ff.test
+        send_resolved: true

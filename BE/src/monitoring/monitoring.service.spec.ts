@@ -10,7 +10,7 @@ import { createServer } from 'node:net';
 import { DataSource } from 'typeorm';
 import { PricingService } from '../billing/pricing.service';
 import { MonitoringService } from './monitoring.service';
-import { alarmLagSeconds, deliveriesPending, invocations, ratingLagSeconds } from './operator-metrics';
+import { alarmLagSeconds, databaseDiskBytes, databaseSizeBytes, deliveriesPending, invocations, ratingLagSeconds } from './operator-metrics';
 import { valueOf } from './test-fixtures';
 
 const HOUR = 3_600_000;
@@ -26,17 +26,17 @@ const freePort = () =>
 
 describe("the operator's metrics", () => {
   /** What the gauges' query answers: the end of the last hour rated, the alarm judged longest ago, the deliveries pending. */
-  let gauges: { rated: Date | null; judged: Date | null; pending: number } | Error;
+  let gauges: { rated: Date | null; judged: Date | null; pending: number; size: string } | Error;
   let query: jest.Mock;
   let service: MonitoringService;
   let logged: { log: jest.SpyInstance; error: jest.SpyInstance };
-  const make = (metricsPort: number, metricsHost = '127.0.0.1') => {
-    const config = { getOrThrow: () => ({ metricsPort, metricsHost }) } as unknown as ConfigService;
+  const make = (metricsPort: number, metricsHost = '127.0.0.1', databaseDiskBytes?: number) => {
+    const config = { getOrThrow: () => ({ metricsPort, metricsHost, databaseDiskBytes }) } as unknown as ConfigService;
     return new MonitoringService({ query } as unknown as DataSource, {} as PricingService, config);
   };
 
   beforeEach(() => {
-    gauges = { rated: new Date('2026-10-20T11:00:00Z'), judged: new Date('2026-10-20T11:29:30Z'), pending: 3 };
+    gauges = { rated: new Date('2026-10-20T11:00:00Z'), judged: new Date('2026-10-20T11:29:30Z'), pending: 3, size: '52428800' };
     query = jest.fn(async () => {
       if (gauges instanceof Error) throw gauges;
       return [gauges];
@@ -132,15 +132,26 @@ describe("the operator's metrics", () => {
       await service.refresh(new Date('2026-10-20T11:30:00Z'));
 
       expect([await valueOf(ratingLagSeconds), await valueOf(alarmLagSeconds), await valueOf(deliveriesPending)]).toEqual([1800, 30, 3]);
+      expect(await valueOf(databaseSizeBytes)).toBe(50 * 1024 ** 2);
+    });
+
+    it("report the database server's disk as the deployment says, and 0 when it doesn't, which the alert reads as unknown", async () => {
+      service = make(0, '127.0.0.1', 100 * 1024 ** 3);
+      await service.onModuleInit();
+      expect(await valueOf(databaseDiskBytes)).toBe(100 * 1024 ** 3);
+
+      service = make(0);
+      await service.onModuleInit();
+      expect(await valueOf(databaseDiskBytes)).toBe(0);
     });
 
     it('say no lag at all when nothing is due: no book yet, no alarm, or a time still to come', async () => {
       jest.spyOn(service, 'reconcileMonth').mockResolvedValue(0);
-      gauges = { rated: null, judged: null, pending: 0 };
+      gauges = { rated: null, judged: null, pending: 0, size: '0' };
       await service.refresh(new Date('2026-10-20T11:30:00Z'));
       expect([await valueOf(ratingLagSeconds), await valueOf(alarmLagSeconds), await valueOf(deliveriesPending)]).toEqual([0, 0, 0]);
 
-      gauges = { rated: new Date('2026-10-20T12:00:00Z'), judged: new Date('2026-10-20T11:30:01Z'), pending: 0 };
+      gauges = { rated: new Date('2026-10-20T12:00:00Z'), judged: new Date('2026-10-20T11:30:01Z'), pending: 0, size: '0' };
       await service.refresh(new Date('2026-10-20T11:30:00Z'));
       expect([await valueOf(ratingLagSeconds), await valueOf(alarmLagSeconds)]).toEqual([0, 0]);
     });

@@ -1,0 +1,222 @@
+# VictoriaMetrics v1.153.0 (2026-09-28), single node: the metrics store, which scrapes the targets itself
+# (scrape/), so there is no Prometheus server and no separate agent. It keeps 30 days on a 5 GiB volume, and
+# stops writing rather than fill it: past the last GiB free, it only answers queries.
+#
+# What it may read: the nodes and their kubelet's metrics, cluster-wide, which the kubelet authorizes as
+# nodes/metrics; and the pods of the platform's own namespaces, to find them. Never a tenant's namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: victoria-metrics
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: victoria-metrics
+    app.kubernetes.io/part-of: ff
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ff-monitoring-nodes
+  labels:
+    app.kubernetes.io/part-of: ff
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes/metrics]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ff-monitoring-nodes
+  labels:
+    app.kubernetes.io/part-of: ff
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ff-monitoring-nodes
+subjects:
+  - kind: ServiceAccount
+    name: victoria-metrics
+    namespace: ff-monitoring
+---
+# Finding the platform's pods: one Role in each of its namespaces, bound to the store.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ff-monitoring-discovery
+  labels:
+    app.kubernetes.io/part-of: ff
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ff-monitoring-discovery
+  namespace: ff-system
+  labels:
+    app.kubernetes.io/part-of: ff
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ff-monitoring-discovery
+subjects:
+  - kind: ServiceAccount
+    name: victoria-metrics
+    namespace: ff-monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ff-monitoring-discovery
+  namespace: ff-logging
+  labels:
+    app.kubernetes.io/part-of: ff
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ff-monitoring-discovery
+subjects:
+  - kind: ServiceAccount
+    name: victoria-metrics
+    namespace: ff-monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ff-monitoring-discovery
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/part-of: ff
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ff-monitoring-discovery
+subjects:
+  - kind: ServiceAccount
+    name: victoria-metrics
+    namespace: ff-monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoria-metrics
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: victoria-metrics
+    app.kubernetes.io/part-of: ff
+spec:
+  selector:
+    app.kubernetes.io/name: victoria-metrics
+  ports:
+    - name: http
+      port: 8428
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: victoria-metrics
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: victoria-metrics
+    app.kubernetes.io/part-of: ff
+spec:
+  serviceName: victoria-metrics
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victoria-metrics
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victoria-metrics
+        app.kubernetes.io/part-of: ff
+    spec:
+      serviceAccountName: victoria-metrics
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: victoria-metrics
+          image: victoriametrics/victoria-metrics:v1.153.0
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod=30d
+            - -storage.minFreeDiskSpaceBytes=1GiB
+            - -promscrape.config=/etc/victoria-metrics/scrape/scrape.yaml
+            - -promscrape.config.strictParse
+            # Its caches, which would take 60 % of the limit by default: a few thousand series need far less.
+            - -memory.allowedBytes=64MiB
+            # Its own metrics, under job="victoria-metrics".
+            - -selfScrapeInterval=30s
+            - -selfScrapeJob=victoria-metrics
+            - -loggerFormat=json
+          ports:
+            - name: http
+              containerPort: 8428
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /storage
+            - name: scrape
+              mountPath: /etc/victoria-metrics/scrape
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: scrape
+          configMap:
+            name: victoria-metrics-scrape
+            # The jobs apart from the main file, which names them: an overlay replaces one (../dev).
+            items:
+              - key: scrape.yaml
+                path: scrape.yaml
+              - key: backend.yaml
+                path: jobs/backend.yaml
+              - key: platform.yaml
+                path: jobs/platform.yaml
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: victoria-metrics
+          app.kubernetes.io/part-of: ff
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 5Gi

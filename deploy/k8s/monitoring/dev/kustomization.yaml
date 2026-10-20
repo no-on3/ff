@@ -1,0 +1,25 @@
+# The monitoring for the dev cluster: everything in ../base, plus Mailpit, which catches the alerts' e-mails, and
+# the backend's job replaced by one for the backend on the host (backend.yaml). Grafana's Deployment is kept at
+# no replica: its 250 MiB don't fit on the 2 GB node beside k3s, the log pipeline and the functions, so
+# hack/k8s/grafana.sh runs it on this machine instead, with the same dashboards. hack/k8s/monitoring-up.sh
+# applies it, with the Secrets and the host's address.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+  - mailpit.yaml
+  - backend-on-the-host.yaml
+configMapGenerator:
+  - name: victoria-metrics-scrape
+    namespace: ff-monitoring
+    behavior: merge
+    files:
+      - backend.yaml
+patches:
+  - target:
+      kind: Deployment
+      name: grafana
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 0

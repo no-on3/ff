@@ -1,7 +1,9 @@
-# Only the collector writes to the store, and only the backend queries it (D10). Writes and queries share port
-# 9428, which a NetworkPolicy can't tell apart, so it admits the two and refuses every other pod, the tenants'
-# first. The backend's pods carry app.kubernetes.io/name: ff-backend (P-60). The API server's Service proxy,
-# which a backend outside the cluster uses in development, comes from the node: k3s lets that through.
+# Only the collector writes to the store, and only the backend queries it: a customer's logs reach nobody else.
+# Writes and queries share port 9428, which a NetworkPolicy can't tell apart, so it admits the two and refuses
+# every other pod, the tenants' first. The metrics store (deploy/k8s/monitoring) reads its /metrics there too:
+# it is the operator's, as the backend is. The backend's pods carry app.kubernetes.io/name: ff-backend, as its
+# production deployment labels them. The API server's Service proxy, which a backend outside the cluster uses in
+# development, comes from the node: k3s lets that through.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -25,6 +27,12 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: ff-backend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ff-monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: victoria-metrics
       ports:
         - port: 9428
           protocol: TCP
@@ -40,3 +48,28 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: [Ingress]
+---
+# But the metrics store reads its metrics: how many lines it read, and how long they took to reach the store.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fluent-bit-metrics
+  namespace: ff-logging
+  labels:
+    app.kubernetes.io/part-of: ff
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: fluent-bit
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ff-monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: victoria-metrics
+      ports:
+        - port: 2020
+          protocol: TCP

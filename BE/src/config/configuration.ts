@@ -232,6 +232,8 @@ const appShape = {
   // The operator's metrics, in Prometheus's text format: their port (0: none) and address, never the API's.
   FF_METRICS_PORT: integer(9464, 0, 65535),
   FF_METRICS_HOST: text('127.0.0.1'),
+  // The database server's disk, in bytes, which the metrics report beside the database's size; 0: unknown.
+  FF_DATABASE_DISK_BYTES: integer(0, 0, Number.MAX_SAFE_INTEGER),
   CORS_ORIGIN: list(origin),
 
   FF_AUTH_MODE: oneOf(['oidc', 'dev'], 'oidc'),
@@ -481,6 +483,7 @@ export default function configuration(env: Env = process.env) {
     monitoring: {
       metricsPort: parsed.FF_METRICS_PORT,
       metricsHost: parsed.FF_METRICS_HOST,
+      databaseDiskBytes: parsed.FF_DATABASE_DISK_BYTES,
     },
     // Alarms: how often they are evaluated, and how long a period has been over before it is judged, as a call ending then still counts in it.
     alarms: {

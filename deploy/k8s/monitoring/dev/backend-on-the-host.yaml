@@ -1,0 +1,15 @@
+# The backend on the host, as a Service without a selector: its EndpointSlice, which hack/k8s/monitoring-up.sh
+# writes, holds the host's address on the k3d network, which differs between machines.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ff-backend-dev
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: ff-backend-dev
+    app.kubernetes.io/part-of: ff
+spec:
+  ports:
+    - name: metrics
+      port: 9464
+      targetPort: 9464

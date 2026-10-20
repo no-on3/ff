@@ -1,0 +1,109 @@
+# The cluster's alerts: the nodes, the platform's own pods, the log pipeline, and this stack. Tested by
+# tests/ff-cluster.test.yaml.
+groups:
+  - name: ff-cluster
+    interval: 30s
+    rules:
+      - alert: FFNodeNotReady
+        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Node {{ $labels.node }} is not ready'
+          description: Its pods, functions included, are being evicted or can't start.
+
+      - alert: FFNodeMemoryHigh
+        expr: max by (node) (node_memory_working_set_bytes) / on (node) max by (node) (kube_node_status_allocatable{resource="memory"}) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Node {{ $labels.node }} is running out of memory'
+          description: 'It uses {{ $value | humanizePercentage }} of its allocatable memory: new instances may not fit, and the kubelet may evict.'
+
+      - alert: FFPlatformPodRestarting
+        expr: increase(kube_pod_container_status_restarts_total{namespace=~"ff-system|ff-logging|ff-monitoring"}[30m]) > 2
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.namespace }}/{{ $labels.pod }} keeps restarting'
+          description: 'Its container {{ $labels.container }} restarted {{ $value | humanize }} times in 30 minutes.'
+
+      - alert: FFPlatformPodNotRunning
+        expr: sum by (namespace, pod) (kube_pod_status_phase{namespace=~"ff-system|ff-logging|ff-monitoring",phase=~"Pending|Failed|Unknown"}) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.namespace }}/{{ $labels.pod }} is not running'
+          description: It has been Pending, Failed or Unknown for 10 minutes.
+
+      - alert: FFLogCollectorMissing
+        expr: |
+          kube_daemonset_status_number_ready{namespace="ff-logging",daemonset="fluent-bit"}
+            < kube_daemonset_status_desired_number_scheduled{namespace="ff-logging",daemonset="fluent-bit"}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The log collector is not running on every node
+          description: The functions' lines on the nodes without it wait on the node, and are lost if their pods go.
+
+      - alert: FFLogPipelineSlow
+        # The share of lines that took more than 10 s from the node to the store; the plan's target is 5 s.
+        expr: |
+          1 - sum(rate(fluentbit_output_latency_seconds_bucket{le=~"10(\\.0)?"}[10m])) / sum(rate(fluentbit_output_latency_seconds_count[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The functions' logs are late
+          description: '{{ $value | humanizePercentage }} of the lines in the last 10 minutes took more than 10 s to reach the log store.'
+
+      - alert: FFLogPipelineRetrying
+        expr: sum by (node) (increase(fluentbit_output_retries_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The log collector on {{ $labels.node }} can''t write to the store'
+          description: Its lines wait on the node's disk meanwhile. Check VictoriaLogs in ff-system.
+
+      - alert: FFLogLinesLost
+        expr: sum by (node) (increase(fluentbit_output_retries_failed_total[30m]) + increase(fluentbit_output_dropped_records_total[30m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The log collector on {{ $labels.node }} gave up lines'
+          description: '{{ $value | humanize }} chunks or lines were given up in the last 30 minutes: customers'' logs are missing.'
+
+      - alert: FFLogStoreDiskLow
+        # The store keeps at most 8 GiB of its 10 GiB volume: less than 1 GiB free means the volume is too small.
+        expr: min(vl_free_disk_space_bytes) < 1024 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: The log store's disk is nearly full
+          description: '{{ $value | humanize1024 }}B free.'
+
+      - alert: FFMetricsStoreDiskLow
+        # Below 1 GiB free, the metrics store stops writing.
+        expr: min(vm_free_disk_space_bytes) < 1.5 * 1024 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The metrics store's disk is nearly full
+          description: '{{ $value | humanize1024 }}B free; it stops writing below 1 GiB.'
+
+      - alert: FFScrapeTargetDown
+        # The backend has its own alert, FFBackendDown.
+        expr: up{job!="ff-backend"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The metrics store can''t scrape {{ $labels.job }}'
+          description: '{{ $labels.instance }} hasn''t answered for 5 minutes: its metrics, and the alerts on them, are missing.'

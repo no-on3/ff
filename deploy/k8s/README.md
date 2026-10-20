@@ -37,10 +37,41 @@ Closing an account deletes its log lines with the delete key (P-45). The backend
 | `logging/10-victoria-logs.yaml` | Service and StatefulSet `victoria-logs` in `ff-system` | VictoriaLogs v1.53.0: 31 days, and at most 8 GiB of its 10 GiB volume, the oldest days going first. `/delete/*` needs the key, read from the mounted Secret, so it is on no command line. Non-root, read-only root, no capabilities, no API token |
 | `logging/20-fluent-bit-rbac.yaml` | ServiceAccount `fluent-bit`, ClusterRole and ClusterRoleBinding `ff-logging-fluent-bit` | get, list and watch pods and namespaces: the labels it adds |
 | `logging/30-fluent-bit.yaml` | DaemonSet `fluent-bit` | Fluent Bit 5.1.3 on every node, any taint. Root, as the node's container logs are root's (mode 0640), but no capabilities, read-only root and `/var/log`. Its offsets and buffer are in `/var/lib/ff-logging` on the node. The limit's figures are its environment |
-| `logging/40-network-policies.yaml` | NetworkPolicies `victoria-logs` (`ff-system`) and `default-deny-ingress` (`ff-logging`) | Only Fluent Bit's pods and the backend's (`app.kubernetes.io/name: ff-backend`) reach the store; nobody reaches the collector |
+| `logging/40-network-policies.yaml` | NetworkPolicies `victoria-logs` (`ff-system`), `default-deny-ingress` and `fluent-bit-metrics` (`ff-logging`) | Only Fluent Bit's pods and the backend's (`app.kubernetes.io/name: ff-backend`) reach the store, and the metrics store for its `/metrics`; only the metrics store reaches the collector, on its metrics port |
 | `logging/fluent-bit/` | ConfigMap `fluent-bit-<hash>` | `fluent-bit.yaml` (the pipeline) and `ff.lua` (each line's fields and call, the limit, the cut). The hash rolls the DaemonSet when they change. `hack/k8s/test-logging-filter.sh` tests both |
 
 **The collector's permissions,** checked by the log pipeline's L3 suite: it may get, list and watch pods and namespaces, and nothing else: no Secrets, no ConfigMaps, no `pods/log`, no writes, no nodes.
+
+## Monitoring
+
+`monitoring/` is the operator's monitoring (client-readiness plan P-53, [ADR 0006](../../docs/adr/0006-operator-monitoring.md)), in its own namespace `ff-monitoring`. VictoriaMetrics scrapes the backend's metrics and the platform's. vmalert evaluates the alert rules in git, Alertmanager sends what fires by e-mail, and Grafana shows the two dashboards in git. Apply `monitoring/base` after `base/` and `logging/`, once its two Secrets exist:
+
+```bash
+kubectl apply -f deploy/k8s/monitoring/base/00-namespace.yaml
+kubectl -n ff-monitoring create secret generic alertmanager-config --from-file=alertmanager.yaml=./alertmanager.yaml
+kubectl -n ff-monitoring create secret generic grafana-admin --from-file=password=./grafana-password   # random
+kubectl apply -k deploy/k8s/monitoring/base
+```
+
+`alertmanager.yaml` is `monitoring/dev/alertmanager.yaml` with the production SMTP server, its login (`smtp_auth_username`, `smtp_auth_password`), TLS (`smtp_require_tls: true`), the operator's address, and `group_wait: 30s`, `group_interval: 5m`. The backend's pods must carry `app.kubernetes.io/name: ff-backend` and name their metrics port `metrics` (`FF_METRICS_PORT`, with `FF_METRICS_HOST=0.0.0.0`), and `FF_DATABASE_DISK_BYTES` gives the database server's disk for its alert.
+
+In development, `hack/k8s/monitoring-up.sh` applies `monitoring/dev` instead, with the Secrets made for you. `hack/k8s/monitoring-down.sh` removes it and its data. The stack is not installed by default (`cluster-up.sh --monitoring` installs it too): its pods use about 200 MiB of the 2 GiB development node. Grafana's 250 MiB don't fit beside them, so the overlay keeps its Deployment at no replica and `hack/k8s/grafana.sh` runs the same Grafana on the developer's machine, on the store through a port-forward. The overlay adds Mailpit, which catches the alerts' e-mails, and replaces the backend's job with one for the backend on the host: the Service `ff-backend-dev`, whose EndpointSlice the script points at this machine's address on the k3d network (`hack/k8s/host-address.sh`). Start the backend with `FF_METRICS_HOST` set to that address to be scraped. `hack/k8s/test-monitoring-rules.sh` tests the rules and the dashboards in seconds, and `hack/k8s/test-monitoring.sh` is L3: L4's run scraped, then the dashboards, the rules and an alert's e-mail.
+
+| File | Object | Purpose |
+|---|---|---|
+| `monitoring/base/00-namespace.yaml` | Namespace `ff-monitoring` | Pod Security `restricted`: nothing here reads the node's files |
+| `monitoring/base/10-victoria-metrics.yaml` | ServiceAccount, ClusterRole `ff-monitoring-nodes`, ClusterRole `ff-monitoring-discovery` bound in `ff-system`, `ff-logging` and `ff-monitoring`, Service and StatefulSet `victoria-metrics` | VictoriaMetrics v1.153.0, scraping by itself every 30 s; 30 days on a 5 GiB volume, read-only past the last GiB. It reads nodes and their kubelet's metrics (`nodes/metrics`), and finds pods only in the platform's namespaces, never a tenant's |
+| `monitoring/base/20-kube-state-metrics.yaml` | ServiceAccount, ClusterRole and ClusterRoleBinding `ff-kube-state-metrics`, Service and Deployment | kube-state-metrics v2.20.0: list and watch nodes, pods, namespaces, PVCs, quotas, Deployments, StatefulSets and DaemonSets. No Secrets, no ConfigMaps |
+| `monitoring/base/30-vmalert.yaml` | Service and Deployment `vmalert` | vmalert v1.153.0: the rules every 30 s, alerts to Alertmanager, their state written back to the store as `ALERTS` |
+| `monitoring/base/40-alertmanager.yaml` | Service and Deployment `alertmanager` | Alertmanager v0.34.1, one replica, its configuration from the Secret `alertmanager-config` |
+| `monitoring/base/50-grafana.yaml` | Service and Deployment `grafana` | Grafana 13.2.3: the admin's password from the Secret `grafana-admin`, no sign-up, no anonymous access, nothing fetched from the internet; its database on an emptyDir; 256 MiB asked, as it uses about 250 |
+| `monitoring/base/60-network-policies.yaml` | NetworkPolicies in `ff-monitoring` | The store scrapes every pod; vmalert and Grafana query the store; only vmalert reaches Alertmanager. Nothing else, a tenant least of all |
+| `monitoring/base/scrape/` | ConfigMap `victoria-metrics-scrape-<hash>` | The jobs: the backend (`backend.yaml`), and the cluster's objects, the kubelets' `/metrics/resource`, VictoriaLogs, Fluent Bit and the stack's pods, found by their name (`platform.yaml`) |
+| `monitoring/base/rules/` | ConfigMap `vmalert-rules-<hash>` | The alert rules, `ff-backend.yaml` and `ff-cluster.yaml`, and their unit tests in `tests/` |
+| `monitoring/base/dashboards/`, `grafana/` | ConfigMaps `grafana-dashboards-<hash>`, `grafana-datasources-<hash>`, `grafana-dashboard-providers-<hash>` | The dashboards "FF platform" and "FF cluster", read-only in Grafana, and its data source |
+| `monitoring/dev/` | Mailpit, Service `ff-backend-dev`, the backend's job replaced, Grafana at no replica | Development only, with `alertmanager.yaml`, the configuration `monitoring-up.sh` makes a Secret |
+
+**The store's permissions:** get, list and watch nodes, and get `nodes/metrics`, cluster-wide; get, list and watch pods in `ff-system`, `ff-logging` and `ff-monitoring` only. kube-state-metrics lists objects cluster-wide, tenants' included, but reads nothing inside them.
 
 ## Optional
 

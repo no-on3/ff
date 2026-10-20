@@ -7,7 +7,7 @@ import { PricingService } from '../billing/pricing.service';
 import { HOUR_MS } from '../billing/rating-hours';
 import { reconcile, reconciled } from '../billing/reconciliation';
 import { describeError } from '../common/describe-error';
-import { alarmLagSeconds, deliveriesPending, ratingLagSeconds, reconciliationMismatches, registry } from './operator-metrics';
+import { alarmLagSeconds, databaseDiskBytes, databaseSizeBytes, deliveriesPending, ratingLagSeconds, reconciliationMismatches, registry } from './operator-metrics';
 
 /** Seconds from `then` to `now`: 0 when there is no `then`, or it is still to come. */
 const secondsSince = (then: Date | null, now: Date): number => (then ? Math.max(0, (now.getTime() - new Date(then).getTime()) / 1000) : 0);
@@ -15,7 +15,7 @@ const secondsSince = (then: Date | null, now: Date): number => (then ? Math.max(
 /**
  * Serves the operator's metrics on their own port (FF_METRICS_PORT, never
  * the API's), and reads, at each scrape, what only the database knows: the
- * rating's lag, the alarm evaluator's, the deliveries pending; and the month's
+ * rating's lag, the alarm evaluator's, the deliveries pending, its own size; and the month's
  * reconciliation, computed in the background at most once an hour.
  */
 @Injectable()
@@ -32,7 +32,10 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    const { metricsPort, metricsHost } = this.config.getOrThrow<{ metricsPort: number; metricsHost: string }>('monitoring');
+    const { metricsPort, metricsHost, databaseDiskBytes: disk } = this.config.getOrThrow<{ metricsPort: number; metricsHost: string; databaseDiskBytes?: number }>(
+      'monitoring',
+    );
+    databaseDiskBytes.set(disk ?? 0);
     if (!metricsPort) return;
     const server = createServer((request, response) => void this.serve(request, response));
     try {
@@ -73,14 +76,16 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
   /** The gauges only the database knows, as they are now; and the month's reconciliation, if its hour has passed. */
   async refresh(now = new Date()): Promise<void> {
     // The rating is due from the end of the last hour rated; before the first, from the first price book's start, as it rates.
-    const [row] = await this.dataSource.query<Array<{ rated: Date | null; judged: Date | null; pending: number }>>(
+    const [row] = await this.dataSource.query<Array<{ rated: Date | null; judged: Date | null; pending: number; size: string }>>(
       `SELECT coalesce((SELECT max("hour") + interval '1 hour' FROM "rating_runs"), (SELECT min("valid_from") FROM "price_books")) AS "rated",
               (SELECT min(coalesce("evaluated_at", "created_at")) FROM "alarms") AS "judged",
-              (SELECT count(*) FROM "notification_deliveries" WHERE "status" = 'pending')::int AS "pending"`,
+              (SELECT count(*) FROM "notification_deliveries" WHERE "status" = 'pending')::int AS "pending",
+              pg_database_size(current_database())::text AS "size"`,
     );
     ratingLagSeconds.set(secondsSince(row.rated, now));
     alarmLagSeconds.set(secondsSince(row.judged, now));
     deliveriesPending.set(row.pending);
+    databaseSizeBytes.set(Number(row.size));
     if (!this.reconciling && now.getTime() - this.reconciledAt >= HOUR_MS) {
       this.reconciledAt = now.getTime();
       this.reconciling = this.reconcileMonth(now).then(() => undefined).finally(() => (this.reconciling = undefined));

@@ -60,5 +60,16 @@ export const reconciliationMismatches = new Gauge({
   registers: [registry],
 });
 
+/**
+ * The database's size, and the disk it is on as the deployment says (0 when it doesn't): the database
+ * server is outside the cluster, so nothing else there sees its disk.
+ */
+export const databaseSizeBytes = new Gauge({ name: 'ff_database_size_bytes', help: "The database's size on disk", registers: [registry] });
+export const databaseDiskBytes = new Gauge({
+  name: 'ff_database_disk_bytes',
+  help: "The database server's disk, as FF_DATABASE_DISK_BYTES says; 0 when it isn't set",
+  registers: [registry],
+});
+
 /** The status class of an HTTP status: "2xx". */
 export const statusClass = (status: number): string => `${Math.floor(status / 100)}xx`;

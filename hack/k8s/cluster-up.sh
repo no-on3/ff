@@ -3,19 +3,23 @@
 # development manifests (deploy/k8s/dev: the production base plus the Service
 # proxy a backend outside the cluster needs) and mints ff-controller credentials.
 # Safe to re-run: an existing cluster is reused.
-#   hack/k8s/cluster-up.sh [--no-logging]
+#   hack/k8s/cluster-up.sh [--no-logging] [--monitoring]
 # It installs the log pipeline too (hack/k8s/logging-up.sh): the logs API and the
 # load errors read it (client-readiness plan P-43). --no-logging leaves it out,
 # and with it those two. --logging, the default, is accepted for older notes.
+# --monitoring installs the operator's monitoring as well (hack/k8s/monitoring-up.sh),
+# which the backend doesn't need: about 200 MiB of the node, and Grafana on this machine (hack/k8s/grafana.sh).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 logging=true
+monitoring=false
 for arg in "$@"; do
   case "$arg" in
     --logging) logging=true ;;
     --no-logging) logging=false ;;
-    *) echo "usage: $0 [--no-logging]" >&2; exit 2 ;;
+    --monitoring) monitoring=true ;;
+    *) echo "usage: $0 [--no-logging] [--monitoring]" >&2; exit 2 ;;
   esac
 done
 
@@ -49,4 +53,5 @@ kubectl wait --for=condition=Ready node --all --timeout=120s
 kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/dev"
 "$FF_REPO_ROOT/hack/k8s/mint-token.sh"
 if $logging; then "$FF_REPO_ROOT/hack/k8s/logging-up.sh"; fi
+if $monitoring; then "$FF_REPO_ROOT/hack/k8s/monitoring-up.sh"; fi
 echo "cluster $FF_CLUSTER_NAME is ready (admin kubeconfig: $KUBECONFIG)"

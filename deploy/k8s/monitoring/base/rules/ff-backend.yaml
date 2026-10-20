@@ -1,0 +1,116 @@
+# The backend's alerts, on its own metrics (BE/src/monitoring/operator-metrics.ts). critical: something is
+# broken for every customer, or money is wrong; warning: something is late or failing for some. A function's
+# own errors are its owner's, told by their alarms, not the operator's. Tested by tests/ff-backend.test.yaml.
+groups:
+  - name: ff-backend
+    interval: 30s
+    rules:
+      - alert: FFBackendDown
+        expr: absent(up{job="ff-backend"} == 1)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: No backend answers
+          description: The metrics store has reached no backend for 2 minutes. The API, the invocations and every background job are down.
+
+      - alert: FFPlatformErrors
+        # FF's own failures, not the functions': a call the platform couldn't run, or whose answer it lost.
+        expr: |
+          sum(increase(ff_invocations_total{outcome=~"platform_error|lost"}[10m])) / sum(increase(ff_invocations_total[10m])) > 0.05
+          and sum(increase(ff_invocations_total[10m])) >= 20
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Invocations failing because of the platform
+          description: '{{ $value | humanizePercentage }} of the calls in the last 10 minutes failed because of the platform (platform_error or lost).'
+
+      - alert: FFApiErrors
+        expr: |
+          sum(increase(ff_http_responses_total{class="5xx"}[10m])) / sum(increase(ff_http_responses_total[10m])) > 0.05
+          and sum(increase(ff_http_responses_total[10m])) >= 20
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The API answers 5xx
+          description: '{{ $value | humanizePercentage }} of the API''s answers in the last 10 minutes were 5xx. The backend''s log has each one''s request ID.'
+
+      - alert: FFColdStartsSlow
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(ff_cold_start_seconds_bucket[30m]))) > 15
+          and sum(increase(ff_cold_start_seconds_count[30m])) >= 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Cold starts are slow
+          description: 'The slowest 5 % of cold starts in the last 30 minutes took more than {{ $value | humanize }} s.'
+
+      - alert: FFRatingBehind
+        # An hour is rated once it has settled, 33 minutes after its end: the lag is at most about 1.5 hours.
+        expr: ff_rating_lag_seconds > 3 * 3600
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: The hourly rating is behind
+          description: 'The last hour rated ended {{ $value | humanizeDuration }} ago. The backend logs "The hourly rating failed" with why.'
+
+      - alert: FFReconciliationMismatch
+        expr: ff_reconciliation_mismatches > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The month's charges don't match the usage
+          description: '{{ $value }} account(s) this month: run npm run billing:reconcile to see which.'
+
+      - alert: FFAlarmEvaluatorBehind
+        # Every alarm is judged each minute.
+        expr: ff_alarm_evaluator_lag_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Customers' alarms are not being judged
+          description: 'The alarm judged longest ago was judged {{ $value | humanizeDuration }} ago.'
+
+      - alert: FFNotificationsBacklog
+        expr: ff_notification_deliveries_pending > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Notifications are waiting to be sent
+          description: '{{ $value }} e-mails and webhooks are waiting.'
+
+      - alert: FFEmailsFailing
+        # A webhook fails when its customer's server does; an e-mail, when FF's SMTP server does.
+        expr: sum(increase(ff_notification_attempts_total{channel="email",result=~"retry|failed"}[30m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: E-mails to customers are failing
+          description: '{{ $value | humanize }} e-mail attempts failed in the last 30 minutes: check the SMTP server (FF_SMTP_URL).'
+
+      - alert: FFWebhooksFailing
+        expr: sum(increase(ff_notification_attempts_total{channel="webhook",result="failed"}[1h])) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Many webhooks are failing for good
+          description: '{{ $value | humanize }} webhooks were given up in the last hour. A customer''s server may be down; many customers at once suggests FF''s own network.'
+
+      - alert: FFDatabaseDiskFilling
+        # The disk is the deployment's FF_DATABASE_DISK_BYTES; unset, it is 0, and the alert can't fire.
+        expr: ff_database_size_bytes / (ff_database_disk_bytes > 0) > 0.8
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: The database is filling its disk
+          description: 'The database takes {{ $value | humanizePercentage }} of its server''s disk.'

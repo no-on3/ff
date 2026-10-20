@@ -1,0 +1,41 @@
+# The operator's monitoring: VictoriaMetrics scraping the backend and the platform, kube-state-metrics,
+# vmalert with the alert rules in rules/, Alertmanager sending them by e-mail, and Grafana with the dashboards
+# in dashboards/. Apply it after base/ and logging/. It needs two Secrets in ff-monitoring, which the
+# deployment writes: alertmanager-config (key alertmanager.yaml: the SMTP server and the addresses) and
+# grafana-admin (key password). For the dev cluster, hack/k8s/monitoring-up.sh writes both and applies ../dev.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespace.yaml
+  - 10-victoria-metrics.yaml
+  - 20-kube-state-metrics.yaml
+  - 30-vmalert.yaml
+  - 40-alertmanager.yaml
+  - 50-grafana.yaml
+  - 60-network-policies.yaml
+# Each name gets its content's hash, so a change of a rule, a job or a dashboard rolls its pod.
+configMapGenerator:
+  - name: victoria-metrics-scrape
+    namespace: ff-monitoring
+    files:
+      - scrape/scrape.yaml
+      - scrape/backend.yaml
+      - scrape/platform.yaml
+  - name: vmalert-rules
+    namespace: ff-monitoring
+    files:
+      - rules/ff-backend.yaml
+      - rules/ff-cluster.yaml
+  - name: grafana-datasources
+    namespace: ff-monitoring
+    files:
+      - grafana/datasources.yaml
+  - name: grafana-dashboard-providers
+    namespace: ff-monitoring
+    files:
+      - grafana/dashboards.yaml
+  - name: grafana-dashboards
+    namespace: ff-monitoring
+    files:
+      - dashboards/ff-platform.json
+      - dashboards/ff-cluster.json
