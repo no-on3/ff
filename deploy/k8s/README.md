@@ -95,7 +95,7 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 | `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites, HSTS, the allowlist; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
 | `platform/keycloak/ff-realm.json` | ConfigMap `keycloak-realm` | The production realm |
 
-`hack/k8s/test-platform-manifests.sh` checks them without deploying:
+`hack/e2e-platform.sh` deploys them on a k3d cluster of its own, with `deploy.sh` and the overlay `hack/k8s/platform-e2e`, and takes a customer's path through the edge (the Kubernetes dev guide, "The platform on a cluster of its own"). `hack/k8s/test-platform-manifests.sh` checks them without deploying:
 - every pod's hardening, and every workload's NetworkPolicy;
 - the backend's settings, read by the backend's own configuration;
 - the realm up to date;

@@ -264,6 +264,27 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
 - both rule groups loaded and evaluated without error;
 - "FFBackendDown" firing once the run's backend has stopped, and its e-mail in Mailpit, addressed to the operator.
 
+## The platform on a cluster of its own
+
+`hack/e2e-platform.sh` is L4 for `deploy/k8s` (client-readiness plan P-60): it deploys FF on a new k3d cluster, `ff-platform-e2e` (3 GB, ports 58443 and 58080 on this machine), from the manifests alone, and takes a customer's path through the edge. It doesn't touch the dev cluster, and removes everything it made on exit; it needs about 5 GB free, and 12 minutes.
+
+1. It builds the four images (`ff-backend`, `ff-console`, `ff-admin`, `ff-edge`, tagged `e2e`) and imports them.
+2. PostgreSQL, S3 and Mailpit run as containers on the cluster's Docker network, outside it, as in production. Their passwords are made for the run; the backend gets none of development's.
+3. It applies `deploy/k8s/base` and `logging`, then `deploy/k8s/platform/deploy.sh hack/k8s/platform-e2e`. That overlay holds hostnames under `ff.test`, TLS from Caddy's own authority, and the development realm for its test client.
+4. It checks:
+   - TLS and HSTS on the four hostnames, verified against the edge's root, and plain HTTP sent to HTTPS with a 308;
+   - `/readyz`, and the login's public issuer;
+   - the admin app and Keycloak's administration refused, then admitted once this machine's address is allowed;
+   - a customer made, signed in, asking for an account; the operator told by e-mail through the cluster's SMTP, then approving;
+   - a function deployed and invoked in direct mode, and its logs;
+   - the audit log naming the caller's address, not the edge's;
+   - an ordinary pod reaching the edge, and not the backend, Keycloak, the console or a function;
+   - `deploy.sh` run again changing nothing.
+
+```bash
+hack/e2e-platform.sh
+```
+
 ## Credentials
 
 Everything lives in `hack/.kube/` (git-ignored, mode 0700, files 0600):

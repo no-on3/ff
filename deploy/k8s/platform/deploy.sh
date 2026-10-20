@@ -24,7 +24,10 @@ for _ in $(seq 1 180); do
   sleep 5
 done
 [[ $state == *Complete* ]] || { echo "the migrations did not finish within 15 minutes" >&2; exit 1; }
-kubectl -n ff-system logs job/ff-migrations --tail=3
+# What they did, from every attempt: a failed one (the database not reachable yet, say) is tried again.
+kubectl -n ff-system logs -l job-name=ff-migrations --tail=-1 | grep -E 'has been executed successfully|No migrations are pending' || true
+failed="$(kubectl -n ff-system get job ff-migrations -o jsonpath='{.status.failed}')"
+[ -z "$failed" ] || echo "($failed attempt(s) failed before: see kubectl -n ff-system logs -l job-name=ff-migrations)"
 
 echo "== the platform"
 kubectl apply -k "$dir"

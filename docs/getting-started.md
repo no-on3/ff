@@ -764,6 +764,8 @@ hack/k8s/test-rbac.sh                                    # the backend's cluster
 hack/e2e.sh                                              # the whole stack through the API, about 3 min
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 1 min
 hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
+hack/k8s/test-platform-manifests.sh                      # deploy/k8s/platform checked without deploying it, about 1 min
+hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 12 min
 ```
 
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
