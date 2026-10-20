@@ -45,7 +45,9 @@ e2e_cluster
 
 echo "== backend"
 e2e_build
-be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant")
+metrics_port="$(free_port)"
+# The operator's metrics on a port of their own, and the log as production writes it: one JSON object a line.
+be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json)
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -426,5 +428,37 @@ check "and the webhooks are among the account's deliveries, delivered" "2" \
 http DELETE "/alarms/$alarm_id" >/dev/null
 check "the alarm is deleted" 204 "$(status)"
 http DELETE "/functions/$alarmed_id" >/dev/null
+
+echo "== the operator's monitoring: readiness, the metrics on their own port, the log in JSON"
+http GET /readyz >/dev/null
+check "/readyz: ready, the database and the cluster both answering" "200 ready ok ok" \
+  "$(status) $(jq -r '"\(.status) \(.checks.database) \(.checks.kubernetes)"' "$work/body")"
+check "the API's own GET /metrics is the account's metrics, never the operator's" "200 0" \
+  "$(http GET /metrics >/dev/null; status) $(grep -c 'ff_invocations_total' "$work/body")"
+curl -s "http://127.0.0.1:$metrics_port/metrics" >"$work/metrics"
+# metric <name{labels}>: its value since the backend restarted, or 0 when it has none.
+metric() { awk -v m="$1" '$1 == m {print $2; found = 1} END {if (!found) print 0}' "$work/metrics"; }
+check "counted since the restart: the call it marked lost, and the one refused for the account's credit" "1 1" \
+  "$(metric 'ff_invocations_total{outcome="lost"}') $(metric 'ff_invocations_refused_total{reason="credit"}')"
+check "the call that failed, and the API's answers by class" "true true true" \
+  "$([ "$(metric 'ff_invocations_total{outcome="error"}')" -ge 1 ] && echo true || echo false) \
+$([ "$(metric 'ff_http_responses_total{class="2xx"}')" -gt 0 ] && echo true || echo false) \
+$([ "$(metric 'ff_http_responses_total{class="4xx"}')" -gt 0 ] && echo true || echo false)"
+check "the alarm into ALARM once and into OK twice; the two webhooks delivered; none pending" "1 2 2 0" \
+  "$(metric 'ff_alarm_state_changes_total{state="ALARM"}') $(metric 'ff_alarm_state_changes_total{state="OK"}') \
+$(metric 'ff_notification_attempts_total{channel="webhook",result="delivered"}') $(metric ff_notification_deliveries_pending)"
+check "the rating's lag, the process's memory and its event loop" "3" \
+  "$(grep -cE '^(ff_rating_lag_seconds|ff_backend_process_resident_memory_bytes|ff_backend_nodejs_eventloop_lag_seconds) ' "$work/metrics")"
+check "the backend's log: one JSON object a line, each with its time, level and message; the lost call a warning of the usage service; queries naming their request" \
+  "True warn UsageService True" "$(python3 - "$work/backend-restarted.log" <<'PY'
+import json, sys
+lines = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+lost = [line for line in lines if line['message'].startswith('Marked 1 invocation(s) LOST')]
+# Development logs every query: those run for a request carry its ID, through TypeORM's own asynchronous work.
+queries = [line for line in lines if line.get('context') == 'TypeORM' and line['message'].startswith('query:')]
+print(bool(lines) and all({'time', 'level', 'message'} <= line.keys() for line in lines), *(lost and [lost[0]['level'], lost[0].get('context')]),
+      any('requestId' in line for line in queries))
+PY
+)"
 
 echo "e2e: $passed checks passed"

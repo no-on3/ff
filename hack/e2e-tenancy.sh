@@ -72,8 +72,8 @@ with_token() {
   http_at "$api_oidc" "$method" "$path" "$body" -H "Authorization: Bearer $token" "$@"
 }
 message() { jq -r .message "$work/body"; }
-# Routes anyone may call (@Public()).
-public_routes=("GET /healthz")
+# Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer.
+public_routes=("GET /healthz" "GET /readyz")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
 
 # The local Keycloak (realm "ff", deploy/keycloak/ff-realm.json).

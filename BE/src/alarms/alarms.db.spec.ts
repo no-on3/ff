@@ -19,6 +19,8 @@ import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { CustomerMetricsService } from '../metrics/customer-metrics.service';
+import { alarmChanges, alarmEvaluations } from '../monitoring/operator-metrics';
+import { valueOf } from '../monitoring/test-fixtures';
 import { DeliveryChannel, NotificationDelivery } from '../notifications/entities/notification-delivery.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Alarm } from './alarm.entity';
@@ -144,6 +146,13 @@ run('alarms (L2)', () => {
   describe('the evaluator', () => {
     it('fires an error alarm and recovers it, each change told once, to the e-mail and the webhook', async () => {
       const watching = await alarms.create(A, alarm({ name: 'Checkout errors' }));
+      const counted = async () => ({
+        evaluated: await valueOf(alarmEvaluations),
+        alarm: await valueOf(alarmChanges, { state: 'ALARM' }),
+        ok: await valueOf(alarmChanges, { state: 'OK' }),
+        insufficient: await valueOf(alarmChanges, { state: 'INSUFFICIENT_DATA' }),
+      });
+      const before = await counted();
       await call(f, '2026-10-20T10:00:30Z', 'error');
       await call(f, '2026-10-20T10:00:40Z', 'success');
 
@@ -161,6 +170,14 @@ run('alarms (L2)', () => {
         'email OK : « Checkout errors » (Alarmed)',
         'webhook ALARM>OK',
       ]);
+      // The operator's metrics: three evaluations, two changes of state.
+      const after = await counted();
+      expect({ evaluated: after.evaluated - before.evaluated, alarm: after.alarm - before.alarm, ok: after.ok - before.ok, insufficient: after.insufficient - before.insufficient }).toEqual({
+        evaluated: 3,
+        alarm: 1,
+        ok: 1,
+        insufficient: 0,
+      });
       const [webhook] = await db.dataSource.getRepository(NotificationDelivery).find({ where: { channel: DeliveryChannel.WEBHOOK, kind: 'alarm' }, order: { createdAt: 'ASC' } });
       expect((webhook.payload as { data: Record<string, unknown> }).data).toMatchObject({
         alarm: { id: watching.id, name: 'Checkout errors', functionId: f.id, metric: 'Errors', statistic: 'Sum', threshold: 0 },
@@ -231,6 +248,7 @@ run('alarms (L2)', () => {
       for (let i = 0; i < 5; i++) made.push(await alarms.create(A, alarm({ name: `Alarm ${i}`, actions: { email: false, webhookUrls: [] } })));
       const other = new AlarmEvaluator(db.dataSource, new CustomerMetricsService(db.dataSource), {} as BillingService, notifications, config);
       const now = new Date('2026-10-20T15:00:05Z');
+      const evaluatedBefore = await valueOf(alarmEvaluations);
 
       const [mine, theirs] = await Promise.all([evaluator.tick(now), other.tick(now)]);
 
@@ -242,6 +260,7 @@ run('alarms (L2)', () => {
       // The next round: the one judged again 20 s in waits its own minute.
       expect(await evaluator.tick(new Date(now.getTime() + 60_000))).toBe(4);
       expect(await evaluator.tick(new Date(now.getTime() + 80_000))).toBe(1);
+      expect(await valueOf(alarmEvaluations)).toBe(evaluatedBefore + 11); // each evaluation counted once, by whichever backend made it
     });
   });
 });

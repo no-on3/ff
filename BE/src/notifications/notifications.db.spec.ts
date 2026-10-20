@@ -21,6 +21,8 @@ import type { Role } from '../auth/principal';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { Mail, MailService } from '../mail/mail.service';
+import { notificationAttempts } from '../monitoring/operator-metrics';
+import { valueOf } from '../monitoring/test-fixtures';
 import { DeliveryStatus, NotificationDelivery } from './entities/notification-delivery.entity';
 import { LEASE_MS, NotificationWorker } from './notification-worker.service';
 import { NotificationsService, PREVIOUS_SECRET_MS } from './notifications.service';
@@ -220,6 +222,12 @@ run('notifications (L2)', () => {
       const delivery = await webhook(id, '/broken');
       let now = new Date();
       const waits: number[] = [];
+      const attempts = async () => ({
+        retry: await valueOf(notificationAttempts, { channel: 'webhook', result: 'retry' }),
+        failed: await valueOf(notificationAttempts, { channel: 'webhook', result: 'failed' }),
+        delivered: await valueOf(notificationAttempts, { channel: 'webhook', result: 'delivered' }),
+      });
+      const before = await attempts();
 
       for (let attempt = 1; attempt <= 6; attempt++) {
         expect(await worker.tick(now)).toBe(1);
@@ -236,6 +244,9 @@ run('notifications (L2)', () => {
       }
       expect(waits).toEqual([1, 2, 4, 8, 16]);
       expect(received).toHaveLength(6);
+      // The operator's metrics: five attempts to be tried again, then one failed for good.
+      const after = await attempts();
+      expect({ retry: after.retry - before.retry, failed: after.failed - before.failed, delivered: after.delivered - before.delivered }).toEqual({ retry: 5, failed: 1, delivered: 0 });
       expect(await worker.tick(new Date(now.getTime() + 60 * MINUTE))).toBe(0);
     });
 
@@ -269,6 +280,8 @@ run('notifications (L2)', () => {
       const id = await account([[owner, 'owner']]);
       const mail = { email: () => ({ subject: 'Hello', text: 'A notification' }) };
       const [delivered] = await notifications.notify({ accountId: id, kind: 'test', data: {}, ...mail });
+      const counted = async () => [await valueOf(notificationAttempts, { channel: 'email', result: 'delivered' }), await valueOf(notificationAttempts, { channel: 'email', result: 'failed' })];
+      const before = await counted();
 
       await worker.tick();
       smtp = false;
@@ -278,6 +291,8 @@ run('notifications (L2)', () => {
       expect(sent).toEqual([{ to: 'mailed@ff.test', subject: 'Hello', text: 'A notification' }]);
       expect(await row(delivered.id)).toMatchObject({ status: 'delivered', attempts: 1 });
       expect(await row(logged.id)).toMatchObject({ status: 'failed', attempts: 1, lastError: 'FF_SMTP_URL is not set: the e-mail was written to the backend log instead' });
+      const after = await counted();
+      expect([after[0] - before[0], after[1] - before[1]]).toEqual([1, 1]); // the operator's metrics, by channel and result
     });
 
     it('sends each delivery once when two backends work at once, ten at a time each', async () => {

@@ -727,6 +727,23 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
+  describe('ping: whether the cluster answers, for the readiness probe', () => {
+    it('asks the API server its version, within the time given', async () => {
+      api.responses.push({ status: 200, headers: {}, body: '{"major":"1","minor":"31"}' });
+
+      await orchestrator.ping(2000);
+
+      expect(api.requests).toEqual([{ method: 'GET', path: '/version', options: { timeoutMs: 2000 } }]);
+    });
+
+    it('rejects with why when the API server refuses or does not answer', async () => {
+      api.responses.push({ status: 401, headers: {}, body: 'Unauthorized' }, new Error('Kubernetes API request timed out after 2000 ms: GET /version'));
+
+      await expect(orchestrator.ping(2000)).rejects.toThrow('the API server answered 401');
+      await expect(orchestrator.ping(2000)).rejects.toThrow('timed out after 2000 ms');
+    });
+  });
+
   it('scales through the scale subresource and reports ready replicas', async () => {
     await orchestrator.scale(fn, 3.7);
     api.objects.set(deploymentPath, rolledOut(2));

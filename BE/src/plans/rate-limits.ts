@@ -12,6 +12,7 @@ import { RequestWithPrincipal } from '../auth/principal';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { DEFAULT_PLAN, PlanView } from './plan-limits';
 import { PlansService } from './plans.service';
+import { refusals } from '../monitoring/operator-metrics';
 
 /** Marks the route that invokes functions: it counts against the plan's invokesPerSecond, not writesPerMinute. */
 export const INVOCATION = 'ff:invocation';
@@ -98,7 +99,10 @@ export class RateLimitGuard extends ThrottlerGuard {
     const plan = await planOf(this.plans, req as RateLimitedRequest);
     // A refused invocation reached no function and has no usage record: the Throttles metric counts it here.
     const principal = (req as RateLimitedRequest).principal;
-    if (name === 'invokes' && principal) this.refused.count(principal.accountId, (req as { params?: { id?: string } }).params?.id);
+    if (name === 'invokes' && principal) {
+      this.refused.count(principal.accountId, (req as { params?: { id?: string } }).params?.id);
+      refusals.inc({ reason: 'rate_limit' });
+    }
     this.setResponseHeader(res, 'Retry-After', detail.timeToBlockExpire);
     throw new HttpException(
       {

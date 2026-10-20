@@ -1,8 +1,9 @@
 import { DataSourceOptions } from 'typeorm';
-import { DatabaseSettings } from '../config/configuration';
+import { DatabaseSettings, LogFormat } from '../config/configuration';
 import { MIGRATIONS } from '../migrations';
 import { ENTITIES } from './entities';
 import { SnakeNamingStrategy } from './naming.strategy';
+import { TypeOrmLogger } from './typeorm-logger';
 
 export { DatabaseSettings };
 
@@ -40,4 +41,9 @@ export function dataSourceOptions(settings: DatabaseSettings): DataSourceOptions
     installExtensions: false,
     logging: settings.logging,
   };
+}
+
+/** The backend's connection: in a JSON log, TypeORM's lines go through the backend's logger, each one JSON object too. */
+export function backendDataSourceOptions(settings: DatabaseSettings, format: LogFormat): DataSourceOptions {
+  return { ...dataSourceOptions(settings), ...(format === 'json' ? { logger: new TypeOrmLogger(settings.logging) } : {}) };
 }

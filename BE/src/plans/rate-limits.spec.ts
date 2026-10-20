@@ -14,6 +14,8 @@ import { PlanView } from './plan-limits';
 import { PlansService } from './plans.service';
 import { Invocation, RateLimitGuard, rateLimitOf, rateLimitOptions } from './rate-limits';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
+import { refusals } from '../monitoring/operator-metrics';
+import { valueOf } from '../monitoring/test-fixtures';
 import { plan } from './test-fixtures';
 
 @Controller('probe')
@@ -108,11 +110,13 @@ describe('rate limits per account (L1, P-15)', () => {
   it("counts an account's changes on every route together, against its plan's writesPerMinute", async () => {
     const changes = [() => call('POST', '/probe', 'a1', 'tight'), () => call('PUT', '/probe/1', 'a1', 'tight'), () => call('PUT', '/probe/2', 'a1', 'tight')];
 
+    const refusedBefore = await valueOf(refusals, { reason: 'rate_limit' });
     expect(await statuses(changes)).toEqual([201, 200, 200]);
     const refused = await call('POST', '/probe', 'a1', 'tight');
 
     expect(refused.status).toBe(429);
     expect(refusedCount.count).not.toHaveBeenCalled(); // a refused change reached no function: no Throttles
+    expect(await valueOf(refusals, { reason: 'rate_limit' })).toBe(refusedBefore); // nor an invocation refused, for the operator
     const retryAfter = Number(refused.headers.get('retry-after'));
     expect(retryAfter).toBeGreaterThan(55);
     expect(retryAfter).toBeLessThanOrEqual(60);
@@ -129,6 +133,7 @@ describe('rate limits per account (L1, P-15)', () => {
 
   it("keeps invocations apart: their own limit, per second, which a minute's changes don't use up", async () => {
     const invoke = () => call('POST', '/probe/f/invoke', 'a1', 'tight');
+    const refusedBefore = await valueOf(refusals, { reason: 'rate_limit' });
 
     expect(await statuses([invoke, invoke, invoke])).toEqual([201, 201, 429]);
     const refused = await invoke();
@@ -137,6 +142,8 @@ describe('rate limits per account (L1, P-15)', () => {
       ['a1', 'f'],
       ['a1', 'f'],
     ]);
+    // And the operator's metrics, for all accounts together.
+    expect(await valueOf(refusals, { reason: 'rate_limit' })).toBe(refusedBefore + 2);
     expect(((await refused.json()) as { message: string }).message).toMatch(
       /^TooManyRequestsException: Rate exceeded: the Tight plan allows 2 invocations per second\. Retry after 1 s\.$/,
     );

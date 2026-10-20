@@ -712,6 +712,23 @@ npm run migration:check                                  # migrations and entiti
 
 `migration:check` builds a scratch database, runs every migration there, and fails if the entities still need anything. A migration that isn't in `src/migrations/index.ts` never runs, so the check catches it too. `npm run migration:revert` undoes the last migration, and `npm run migration:show` lists them.
 
+**The backend's health, log and metrics** (P-53), as FF's operator watches them. No token is needed: `/readyz` is public, and the metrics are on a port of their own, which only this machine reaches (`FF_METRICS_PORT`, 9464, and `FF_METRICS_HOST`, 127.0.0.1; `FF_METRICS_PORT=0` serves none). The API's port never serves them.
+
+```bash
+curl -s localhost:3000/healthz                           # the process is alive
+curl -s localhost:3000/readyz                            # it can serve: {"status":"ready","checks":{"database":"ok","kubernetes":"ok"}}
+# 503 {"status":"not ready","checks":{"database":"connect ECONNREFUSED 127.0.0.1:5432","kubernetes":"ok"},…} says which failed
+curl -s localhost:9464/metrics | grep -E '^ff_(invocations|notification|alarm|rating)'
+# ff_invocations_total{outcome="success"} 3
+# ff_notification_attempts_total{channel="webhook",result="delivered"} 1
+# ff_alarm_evaluations_total 12
+# ff_rating_lag_seconds 2591.4
+```
+
+- **The backend's own metrics:** invocations by outcome (`success`, `error`, `timeout`, `throttled`, `platform_error`, `lost`), how long they ran and their cold starts, invocations refused (`rate_limit`, `credit`), notification attempts by channel and result, alarm evaluations and changes of state, the API's answers by status class.
+- **Read from the database at each scrape:** the rating's lag (since the end of the last hour rated: between about 33 minutes and an hour and a half when it keeps up), the alarm evaluator's (about a minute), the deliveries waiting to be sent, and the accounts whose month doesn't reconcile (as `npm run billing:reconcile` says, computed at most once an hour). The process's own, prefixed `ff_backend_`: CPU, memory, the event loop's lag.
+- **The log** is readable lines in development. `FF_LOG_FORMAT=json` writes what production writes by default: one JSON object a line, with `time`, `level`, `context`, `message`, an error's `stack`, and the `requestId` of the request it was logged for, the same as in the answer's `x-ff-request-id`. In development that includes each SQL query, with its parameters. Every line of a request then comes with one filter, which skips the watcher's own lines: `FF_LOG_FORMAT=json npm run start:dev | jq -cR 'fromjson? | select(.requestId == "<id>")'`. The backend writes no log files: everything goes to stdout.
+
 **Renew the cluster token.** The backend's token is valid for 24 hours. When calls to Kubernetes start failing with `Unauthorized`, run `hack/k8s/mint-token.sh`. `cluster-up.sh` does this as well.
 
 **After changing a runtime** (`runtimes/nodejs` or `runtimes/python`), rebuild and reload the image. New pods use it. To move an existing function onto it, restart its Deployment (with `NS` and `ID` from sections 3 and 4).
@@ -795,6 +812,8 @@ docker compose down -v
 | `migration:run` stops with `tenants that are not 12-digit account IDs` | Functions from before 2026-10-17 can't move to accounts. Reset the database once, as shown after step 7. |
 | A function you can see in the console answers 404 to `curl` | The two act as different accounts: `curl` sent `X-FF-Dev-Account`, or the backend runs with another `FF_DEV_ACCOUNT_ID` than when the function was created. |
 | An answer is 500 with `… failed because of an internal error (request <id>)` | A failure of the platform, not of your function. The backend's log has the details: search it for the request ID, which every answer also carries in `x-ff-request-id`. |
+| The backend logs `The operator's metrics are not served: 127.0.0.1:9464 cannot be listened on: … EADDRINUSE` | Another backend holds the port, such as one started in another terminal. The API serves all the same. Give this one another `FF_METRICS_PORT`, or `0` for none. |
+| `/readyz` answers 503 | `checks` says which part failed. The database: start it (`docker compose up -d --wait postgres`). Kubernetes with `Unauthorized`: the cluster token expired, run `hack/k8s/mint-token.sh`; with `no answer within 2 s`: start the cluster (`hack/k8s/cluster-up.sh`). |
 | `The backend did not start: The database schema is out of date: … pending` | `cd BE && npm run migration:run`, then start it again. |
 | `migration:run` fails with `relation "functions" already exists` | The database was created before migrations were used. Reset it once, as shown after step 7. |
 | `npm run test:db` fails with `ECONNREFUSED` | PostgreSQL isn't running: `docker compose up -d --wait postgres`. The tests read `DB_*` from `BE/.env`. |

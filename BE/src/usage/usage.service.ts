@@ -8,6 +8,10 @@ import { PLATFORM_LIMITS } from '../plans/plan-limits';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
 import { UsageAmountsView, UsageMonth } from './usage.dto';
+import { coldStartSeconds, invocationSeconds, invocations } from '../monitoring/operator-metrics';
+
+/** The outcomes of a call that ran, measured by the runtime. */
+const RAN: readonly UsageStatus[] = [UsageStatus.SUCCESS, UsageStatus.ERROR, UsageStatus.TIMEOUT];
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -86,6 +90,10 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
    */
   async record(record: UsageRecord, manager: EntityManager = this.records.manager): Promise<void> {
     await manager.createQueryBuilder().insert().into(UsageRecord).values(record).orIgnore().execute();
+    // The operator's metrics: each call's outcome, how long it ran, and its cold start.
+    invocations.inc({ outcome: record.status });
+    if (RAN.includes(record.status)) invocationSeconds.observe(Number(record.durationMs) / 1000);
+    if (record.initMs !== null && record.initMs !== undefined) coldStartSeconds.observe(record.initMs / 1000);
   }
 
   /**

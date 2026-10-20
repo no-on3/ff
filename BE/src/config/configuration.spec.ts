@@ -148,6 +148,20 @@ describe('configuration', () => {
     expect(problems({ ...production, FF_NOTIFY_INTERVAL_SECONDS: '0' })).toEqual([expect.stringContaining('FF_NOTIFY_INTERVAL_SECONDS')]);
   });
 
+  it("serves the operator's metrics on port 9464 of this machine only, unless told otherwise, and logs as told", () => {
+    expect(configuration(production).monitoring).toEqual({ metricsPort: 9464, metricsHost: '127.0.0.1' });
+    expect(configuration({ ...production, FF_METRICS_PORT: '0' }).monitoring.metricsPort).toBe(0);
+    expect(configuration({ ...production, FF_METRICS_PORT: '9100', FF_METRICS_HOST: '0.0.0.0' }).monitoring).toEqual({ metricsPort: 9100, metricsHost: '0.0.0.0' });
+    expect(problems({ ...production, FF_METRICS_PORT: '70000' })).toEqual([expect.stringContaining('FF_METRICS_PORT')]);
+    expect(() => configuration({ ...production, FF_LOG_FORMAT: 'text' })).not.toThrow();
+    expect(problems({ ...production, FF_LOG_FORMAT: 'xml' })).toEqual([expect.stringContaining('FF_LOG_FORMAT')]);
+    expect([configuration(production).logFormat, configuration({ ...production, NODE_ENV: 'development' }).logFormat, configuration({ ...production, FF_LOG_FORMAT: 'text' }).logFormat]).toEqual([
+      'json',
+      'text',
+      'text',
+    ]);
+  });
+
   describe('production refuses development settings', () => {
     it.each<[string, Env, string]>([
       ['the dev authentication mode', { FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' }, 'FF_AUTH_MODE=dev is for development only'],

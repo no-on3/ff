@@ -4,6 +4,7 @@ import { PlatformSettingsService } from '../admin/platform-settings.service';
 import { billingCurrency } from './billing-currency';
 import { CreditDecision, CreditPolicy, CreditStanding, InsufficientCreditException, creditDecision, creditPolicy } from './credit-policy';
 import { LedgerEvents } from './ledger/ledger-events';
+import { refusals } from '../monitoring/operator-metrics';
 
 /** How long a cached standing lasts without a word from the ledger: what a lost notification can delay. */
 const CACHE_MS = 60_000;
@@ -46,7 +47,10 @@ export class CreditService implements OnModuleInit, OnModuleDestroy {
     const settings = await this.settings.get();
     if (settings.billingShadowMode) return;
     const view = await this.view(accountId, now);
-    if (view.decision.state === 'stopped') throw new InsufficientCreditException(view.standing, view.policy, view.decision);
+    if (view.decision.state === 'stopped') {
+      refusals.inc({ reason: 'credit' });
+      throw new InsufficientCreditException(view.standing, view.policy, view.decision);
+    }
   }
 
   /**

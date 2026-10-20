@@ -9,6 +9,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { Alarm } from './alarm.entity';
 import { alarmMail } from './alarm-mail';
 import { AlarmState, BILLING_METRICS, Evaluation, datapointsOf, evaluate, evaluationWindow, notifies, stateReason } from './alarm-rules';
+import { alarmChanges, alarmEvaluations } from '../monitoring/operator-metrics';
 
 /** The most alarms one backend takes at once. */
 export const CLAIM_BATCH = 100;
@@ -104,6 +105,7 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
 
   private async evaluateOne(alarm: Alarm, now: Date): Promise<void> {
     const evaluation = evaluate(alarm, await this.datapoints(alarm, now), alarm.state);
+    alarmEvaluations.inc();
     const reason = stateReason(alarm, evaluation);
     if (evaluation.state === alarm.state) {
       await this.dataSource.getRepository(Alarm).update({ id: alarm.id }, { stateReason: reason, stateReasonData: evaluation });
@@ -115,6 +117,7 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
         { id: alarm.id, state: alarm.state },
         { state: evaluation.state, stateReason: reason, stateReasonData: evaluation, stateChangedAt: now },
       );
+      if (affected) alarmChanges.inc({ state: evaluation.state });
       if (!affected || !notifies(alarm.state, evaluation.state)) return;
       await this.tell(alarm, alarm.state, evaluation, reason, now, manager);
     });

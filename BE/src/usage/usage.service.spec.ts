@@ -1,7 +1,9 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DataSource, Repository } from 'typeorm';
-import { UsageRecord } from './usage-record.entity';
+import { coldStartSeconds, invocationSeconds, invocations } from '../monitoring/operator-metrics';
+import { valueOf } from '../monitoring/test-fixtures';
+import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { UsageService } from './usage.service';
 
 /** The service's jobs, against a database stand-in: the SQL itself is tested in usage.db.spec.ts (L2). */
@@ -83,5 +85,55 @@ describe('UsageService (P-20)', () => {
     const before = query.mock.calls.length;
     await jest.advanceTimersByTimeAsync(2 * 24 * 60 * 60_000);
     expect(query.mock.calls.length).toBe(before);
+  });
+
+  describe("each call's record, counted for the operator's metrics", () => {
+    /** A transaction's manager that takes the insert, or fails it. */
+    const manager = (fails = false) =>
+      ({
+        createQueryBuilder: () => ({
+          insert: () => ({ into: () => ({ values: () => ({ orIgnore: () => ({ execute: async () => (fails ? Promise.reject(new Error('deadlock detected')) : {}) }) }) }) }),
+        }),
+      }) as never;
+    const record = (status: UsageStatus, durationMs: number, initMs?: number) => ({ status, durationMs: String(durationMs), initMs: initMs ?? null }) as unknown as UsageRecord;
+    const now = async () => ({
+      success: await valueOf(invocations, { outcome: 'success' }),
+      timeout: await valueOf(invocations, { outcome: 'timeout' }),
+      throttled: await valueOf(invocations, { outcome: 'throttled' }),
+      lost: await valueOf(invocations, { outcome: 'lost' }),
+      ran: await valueOf(invocationSeconds, {}, 'count'),
+      ranSeconds: await valueOf(invocationSeconds, {}, 'sum'),
+      coldStarts: await valueOf(coldStartSeconds, {}, 'count'),
+      coldStartSeconds: await valueOf(coldStartSeconds, {}, 'sum'),
+    });
+
+    it('counts its outcome; how long it ran, if it ran; and its cold start, if it had one', async () => {
+      const before = await now();
+
+      await service.record(record(UsageStatus.SUCCESS, 250, 1200), manager());
+      await service.record(record(UsageStatus.TIMEOUT, 3000), manager());
+      await service.record(record(UsageStatus.THROTTLED, 0), manager());
+      await service.record(record(UsageStatus.LOST, 0), manager());
+
+      const after = await now();
+      expect({
+        success: after.success - before.success,
+        timeout: after.timeout - before.timeout,
+        throttled: after.throttled - before.throttled,
+        lost: after.lost - before.lost,
+        ran: after.ran - before.ran,
+        ranSeconds: Number((after.ranSeconds - before.ranSeconds).toFixed(3)),
+        coldStarts: after.coldStarts - before.coldStarts,
+        coldStartSeconds: Number((after.coldStartSeconds - before.coldStartSeconds).toFixed(3)),
+      }).toEqual({ success: 1, timeout: 1, throttled: 1, lost: 1, ran: 2, ranSeconds: 3.25, coldStarts: 1, coldStartSeconds: 1.2 });
+    });
+
+    it('counts nothing of a record that could not be written', async () => {
+      const before = await now();
+
+      await expect(service.record(record(UsageStatus.SUCCESS, 250, 1200), manager(true))).rejects.toThrow('deadlock detected');
+
+      expect(await now()).toEqual(before);
+    });
   });
 });

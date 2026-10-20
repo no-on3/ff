@@ -11,13 +11,14 @@ import { AuthGuard } from './auth/auth.guard';
 import { TokenVerifier } from './auth/token-verifier';
 import { ApiExceptionFilter } from './common/api-exception.filter';
 import { RequestIdInterceptor } from './common/request-context';
-import configuration, { DatabaseSettings } from './config/configuration';
-import { dataSourceOptions } from './database/database.options';
+import configuration, { DatabaseSettings, LogFormat } from './config/configuration';
+import { backendDataSourceOptions } from './database/database.options';
 import { FunctionsModule } from './functions/functions.module';
 import { HealthController } from './health/health.controller';
 import { MetricsModule } from './metrics/metrics.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AlarmsModule } from './alarms/alarms.module';
+import { MonitoringModule } from './monitoring/monitoring.module';
 import { MinioClientModule } from './minio-client/minio-client.module';
 import { PlansModule } from './plans/plans.module';
 import { PlansService } from './plans/plans.service';
@@ -34,7 +35,7 @@ import { RetentionModule } from './retention/retention.module';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) =>
-        dataSourceOptions(configService.getOrThrow<DatabaseSettings>('database')),
+        backendDataSourceOptions(configService.getOrThrow<DatabaseSettings>('database'), configService.getOrThrow<LogFormat>('logFormat')),
     }),
     // Per-account rate limits, sized by each account's plan (D5).
     ThrottlerModule.forRootAsync({
@@ -50,6 +51,7 @@ import { RetentionModule } from './retention/retention.module';
     MetricsModule,
     NotificationsModule,
     AlarmsModule,
+    MonitoringModule,
     MinioClientModule,
     PlansModule,
     RetentionModule,

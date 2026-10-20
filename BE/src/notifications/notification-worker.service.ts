@@ -9,6 +9,7 @@ import { nextAttempt } from './retry';
 import { signatureHeader } from './signature';
 import { postWebhook } from './webhook-client';
 import { resolveWebhook } from './webhook-target';
+import { notificationAttempts } from '../monitoring/operator-metrics';
 
 /** The most deliveries one backend sends at once. */
 export const BATCH = 10;
@@ -144,6 +145,7 @@ export class NotificationWorker implements OnModuleInit, OnModuleDestroy {
   /** Delivered, or to be tried again later, or failed for good after its last attempt. */
   private async record(delivery: Due, outcome: Outcome, now: Date): Promise<void> {
     if (outcome.delivered) {
+      notificationAttempts.inc({ channel: delivery.channel, result: 'delivered' });
       await this.dataSource.query(
         `UPDATE "notification_deliveries" SET "status" = 'delivered', "delivered_at" = now(), "last_error" = NULL, "response_status" = $2 WHERE "id" = $1`,
         [delivery.id, outcome.status ?? null],
@@ -151,6 +153,7 @@ export class NotificationWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const next = outcome.final ? null : nextAttempt(delivery.attempts, now);
+    notificationAttempts.inc({ channel: delivery.channel, result: next ? 'retry' : 'failed' });
     await this.dataSource.query(
       `UPDATE "notification_deliveries" SET "status" = $2, "next_attempt_at" = coalesce($3, "next_attempt_at"), "last_error" = $4, "response_status" = $5 WHERE "id" = $1`,
       [delivery.id, next ? 'pending' : 'failed', next, outcome.error, outcome.status ?? null],

@@ -2,6 +2,7 @@ import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nes
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { Observable } from 'rxjs';
+import { httpResponses, statusClass } from '../monitoring/operator-metrics';
 
 /**
  * Every answer carries its request's ID, and the server log names it with any
@@ -70,13 +71,35 @@ export function requestIdOf(request: WithRequestId): string {
   return (request.requestId ??= randomUUID());
 }
 
-/** Gives each request its ID: in the answer's header, and to the code that serves it. */
+/**
+ * Gives each request its ID as it starts, before the guards, so that every
+ * line logged while serving it names it; the answer carries it too. Counts
+ * each answer's status class for the operator's metrics.
+ */
+export function requestContextMiddleware(
+  request: WithCaller & { ip?: string },
+  response: { setHeader(name: string, value: string): void; on(event: 'finish', listener: () => void): void; statusCode: number },
+  next: () => void,
+): void {
+  const requestId = requestIdOf(request);
+  response.setHeader(REQUEST_ID_HEADER, requestId);
+  response.on('finish', () => httpResponses.inc({ class: statusClass(response.statusCode) }));
+  storage.run({ requestId, ip: request.ip }, next);
+}
+
+/** Gives each request its ID: in the answer's header, and to the code that serves it; and once the guards have run, its caller. */
 @Injectable()
 export class RequestIdInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const http = context.switchToHttp();
     const request = http.getRequest<WithCaller>();
     const requestId = requestIdOf(request);
+    const started = storage.getStore();
+    if (started?.requestId === requestId) {
+      // The middleware began the request's context: it gains the caller, which the guards found.
+      started.actor = actorOf(request);
+      return next.handle();
+    }
     http.getResponse<{ setHeader(name: string, value: string): void }>().setHeader(REQUEST_ID_HEADER, requestId);
     // Interceptors run after the guards, so the caller is known (P-17).
     const store: RequestContext = { requestId, actor: actorOf(request), ip: request.ip };

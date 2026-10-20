@@ -350,6 +350,12 @@ export class KubernetesOrchestrator implements Orchestrator {
     return (await this.instances(fn)).desired;
   }
 
+  async ping(timeoutMs: number): Promise<void> {
+    // /version needs no more than a login: every ServiceAccount may read it.
+    const { status } = await this.api.request('GET', '/version', { timeoutMs });
+    if (status !== 200) throw new Error(`the API server answered ${status}`);
+  }
+
   async readyInstancesByFunction(): Promise<Map<string, number>> {
     // One list of FF's Deployments in every namespace: a read the backend's ClusterRole allows (deploy/k8s/README.md).
     const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);

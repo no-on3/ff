@@ -7,7 +7,8 @@ import { FunctionInvocation } from '../functions/entities/function-invocation.en
 import { Function } from '../functions/entities/function.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { MIGRATIONS } from '../migrations';
-import { dataSourceOptions, sslOptions } from './database.options';
+import { backendDataSourceOptions, dataSourceOptions, sslOptions } from './database.options';
+import { TypeOrmLogger } from './typeorm-logger';
 import { ENTITIES } from './entities';
 
 /** Builds the entity mapping without connecting, so it can be checked offline. */
@@ -21,6 +22,14 @@ const SNAKE = /^[a-z][a-z0-9_]*$/;
 
 describe('dataSourceOptions', () => {
   const settings = { host: 'db', port: 5432, username: 'ff', password: 'secret', name: 'ff', logging: false, ssl: false as const };
+
+  it("sends TypeORM's lines through the backend's logger in a JSON log, and leaves them to TypeORM's coloured console otherwise", () => {
+    // It logs what the setting says: the queries in development, nothing in production.
+    expect(backendDataSourceOptions({ ...settings, logging: true }, 'json').logger).toEqual(new TypeOrmLogger(true));
+    expect(backendDataSourceOptions(settings, 'json').logger).toEqual(new TypeOrmLogger(false));
+    expect(backendDataSourceOptions({ ...settings, logging: true }, 'text')).not.toHaveProperty('logger');
+    expect(backendDataSourceOptions(settings, 'json')).toMatchObject({ ...dataSourceOptions(settings), logging: false });
+  });
 
   it.each(['development', 'production', undefined])(
     'never synchronizes the schema or runs migrations by itself (NODE_ENV=%s)',

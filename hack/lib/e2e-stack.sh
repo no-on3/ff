@@ -30,6 +30,8 @@ e2e_base_env=(
   ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy
   K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" K8S_LOG_STORE_DELETE_KEY_FILE="$FF_LOG_STORE_DELETE_KEY_FILE"
   K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
+  # No operator's metrics port: the development backend may hold the default one. A test that reads them gives a free port.
+  FF_METRICS_PORT=0
 )
 
 e2e_cleanup() {

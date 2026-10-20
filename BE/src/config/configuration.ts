@@ -26,6 +26,12 @@ export class ConfigurationError extends Error {
 
 export type Env = Record<string, string | undefined>;
 
+export type LogFormat = 'json' | 'text';
+
+/** The log format: FF_LOG_FORMAT, else JSON in production, for the cluster's log store, and readable lines in development. */
+export const logFormat = (env: Env): LogFormat =>
+  env.FF_LOG_FORMAT === 'json' || env.FF_LOG_FORMAT === 'text' ? env.FF_LOG_FORMAT : env.NODE_ENV === 'production' ? 'json' : 'text';
+
 /** Development defaults that production refuses (docker-compose.yml, BE/.env.example, infrastructure/seaweedfs). */
 export const DEVELOPMENT_CREDENTIALS = {
   DB_PASSWORD: ['postgres'],
@@ -221,6 +227,11 @@ const databaseShape = {
 const appShape = {
   ...databaseShape,
   PORT: port(3000),
+  // JSON a line, or readable lines; JSON by default in production (main.ts reads it before the configuration).
+  FF_LOG_FORMAT: z.preprocess(prepare(undefined), oneOf(['json', 'text']).optional()),
+  // The operator's metrics, in Prometheus's text format: their port (0: none) and address, never the API's.
+  FF_METRICS_PORT: integer(9464, 0, 65535),
+  FF_METRICS_HOST: text('127.0.0.1'),
   CORS_ORIGIN: list(origin),
 
   FF_AUTH_MODE: oneOf(['oidc', 'dev'], 'oidc'),
@@ -463,6 +474,13 @@ export default function configuration(env: Env = process.env) {
     notifications: {
       intervalSeconds: parsed.FF_NOTIFY_INTERVAL_SECONDS,
       allowPrivate: parsed.FF_WEBHOOK_ALLOW_PRIVATE,
+    },
+    // The log: JSON a line, or readable lines (main.ts reads it the same way, before the configuration).
+    logFormat: logFormat(env),
+    // The operator's metrics: where Prometheus scrapes them; port 0 serves none.
+    monitoring: {
+      metricsPort: parsed.FF_METRICS_PORT,
+      metricsHost: parsed.FF_METRICS_HOST,
     },
     // Alarms: how often they are evaluated, and how long a period has been over before it is judged, as a call ending then still counts in it.
     alarms: {

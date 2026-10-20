@@ -28,6 +28,8 @@ import { CreditService } from './credit.service';
 import { LedgerAccountType } from './ledger/ledger-account.entity';
 import { LedgerTransactionKind } from './ledger/ledger-transaction.entity';
 import { LedgerEvents } from './ledger/ledger-events';
+import { refusals } from '../monitoring/operator-metrics';
+import { valueOf } from '../monitoring/test-fixtures';
 import { LedgerService } from './ledger/ledger.service';
 import { LowBalanceService } from './low-balance.service';
 
@@ -251,13 +253,16 @@ run('the balance check and the low-balance e-mails (L2, P-33)', () => {
       const fell = await move(b, -3000n); // -2.000 TND, below -1.000
       const stopAt = new Date(fell.getTime() + 24 * HOUR);
 
+      const refusedBefore = await valueOf(refusals, { reason: 'credit' });
       await expect(credit.admit(b, new Date(stopAt.getTime() - 1))).resolves.toBeUndefined();
       const refusal = credit.admit(b, stopAt);
       await expect(refusal).rejects.toBeInstanceOf(InsufficientCreditException);
       await expect(refusal).rejects.toThrow(`Invokes stopped at ${stopAt.toISOString().slice(0, 16).replace('T', ' ')} UTC: the account's balance is -2.000 TND`);
+      expect(await valueOf(refusals, { reason: 'credit' })).toBe(refusedBefore + 1); // the operator's metrics count the refusal, once
 
       await creditBySql(b, 1500); // -0.500 TND: above the buffer
       await expect(credit.admit(b, new Date(stopAt.getTime() + 48 * HOUR))).resolves.toBeUndefined();
+      expect(await valueOf(refusals, { reason: 'credit' })).toBe(refusedBefore + 1);
     });
 
     it('refuses nothing in shadow mode, and follows the settings as they change', async () => {

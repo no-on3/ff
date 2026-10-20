@@ -1,4 +1,4 @@
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { SwaggerModule } from '@nestjs/swagger';
@@ -9,12 +9,13 @@ import { apiDocument } from './api-document';
 import { AppModule } from './app.module';
 import { describeError } from './common/describe-error';
 import { corsOptions } from './cors';
-import { winstonConfig } from './config/winston.config';
+import { logFormat, winstonConfig } from './config/winston.config';
+import { requestContextMiddleware } from './common/request-context';
 import { assertSchemaUpToDate } from './database/schema-check';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
-    logger: WinstonModule.createLogger(winstonConfig),
+    logger: WinstonModule.createLogger(winstonConfig(logFormat(process.env))),
   });
 
   // Migrations are a separate deploy step. Refuse to serve on an outdated schema,
@@ -23,7 +24,8 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
 
-  // Global middleware
+  // Global middleware: first, each request's ID, so that every line logged while serving it names it.
+  app.use(requestContextMiddleware);
   app.use(helmet());
   app.enableCors(corsOptions(configService.getOrThrow<string[]>('cors.origins')));
   
@@ -43,7 +45,8 @@ async function bootstrap() {
   
   const port = configService.getOrThrow<number>('port');
   await app.listen(port);
-  console.log(`Application is running on: ${await app.getUrl()}`);
+  // Through the logger: in production every line of the log is one JSON object.
+  new Logger('Bootstrap').log(`Application is running on: ${await app.getUrl()}`);
 }
 
 bootstrap().catch((error: unknown) => {

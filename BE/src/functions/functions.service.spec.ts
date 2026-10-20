@@ -114,6 +114,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       applyTenantLimits: jest.fn(),
       logs: jest.fn(),
       tailLogs: jest.fn(),
+      ping: jest.fn(),
     };
 
     const moduleRef = await Test.createTestingModule({

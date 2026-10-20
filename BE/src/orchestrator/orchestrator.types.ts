@@ -124,6 +124,8 @@ export interface Orchestrator {
    * many: FF's capacity at this moment, from one call (P-21).
    */
   readyInstancesByFunction(): Promise<Map<string, number>>;
+  /** Whether the cluster answers, within `timeoutMs`: for the readiness probe. Rejects with why not. */
+  ping(timeoutMs: number): Promise<void>;
   /**
    * A page of the function's log lines, from the log store (P-43), which keeps
    * them after their instance is gone. Rejects with LogStoreUnavailableError when
