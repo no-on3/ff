@@ -4,9 +4,9 @@
  */
 import { Runtime } from '../../functions/entities/function.entity';
 import { CodeTooLargeError } from '../orchestrator.errors';
-import { FunctionWorkload } from '../orchestrator.types';
+import { FunctionWorkload, TenantLimits } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
-import { ANNOTATIONS, LABELS, MANAGED_BY, functionResourceName, tenantHash } from './naming';
+import { ANNOTATIONS, LABELS, MANAGED_BY, accountHash, functionResourceName } from './naming';
 
 export interface K8sObject {
   apiVersion: string;
@@ -38,12 +38,20 @@ export const BLOCKED_EGRESS_CIDRS = [
 ];
 const RUNTIME_UID = 10001;
 
+/**
+ * How long a call may wait for a free instance before the runtime answers 429:
+ * one function timeout. The backend waits this long plus the timeout (P-06, D14).
+ */
+export function maxQueueWaitMs(fn: Pick<FunctionWorkload, 'timeout'>): number {
+  return fn.timeout * 1000;
+}
+
 /** Lambda-like proportional CPU: 1,769 MB ≈ 1 vCPU, never below 100m. */
 export function cpuMillicores(memoryMb: number): number {
   return Math.max(100, Math.round((memoryMb / 1769) * 1000));
 }
 
-export function codeFileName(runtime: Runtime | string): string {
+export function codeFileName(runtime: Runtime): string {
   return runtime === Runtime.PYTHON ? 'function.py' : 'function.ts';
 }
 
@@ -59,33 +67,34 @@ function functionLabels(fn: FunctionWorkload): Record<string, string> {
   });
 }
 
-export function namespaceManifest(name: string, userId: string): K8sObject {
+export function namespaceManifest(name: string, accountId: string): K8sObject {
   return {
     apiVersion: 'v1',
     kind: 'Namespace',
     metadata: {
       name,
       labels: managedLabels({
-        [LABELS.tenantHash]: tenantHash(userId),
+        [LABELS.accountHash]: accountHash(accountId),
         'pod-security.kubernetes.io/enforce': 'restricted',
         'pod-security.kubernetes.io/enforce-version': 'latest',
         'pod-security.kubernetes.io/warn': 'restricted',
         'pod-security.kubernetes.io/audit': 'restricted',
       }),
-      annotations: { [ANNOTATIONS.tenantId]: userId },
+      annotations: { [ANNOTATIONS.accountId]: accountId },
     },
   };
 }
 
-export function resourceQuotaManifest(namespace: string, settings: KubernetesSettings): K8sObject {
-  const { pods, cpu, memory } = settings.tenantQuota;
+/** The account's quota: its plan's, for all its functions together (D5). */
+export function resourceQuotaManifest(namespace: string, quota: TenantLimits['quota']): K8sObject {
+  const { pods, cpu, memory } = quota;
   return {
     apiVersion: 'v1',
     kind: 'ResourceQuota',
     metadata: { name: TENANT_QUOTA_NAME, namespace, labels: managedLabels() },
     spec: {
       hard: {
-        pods,
+        pods: String(pods),
         'requests.cpu': cpu,
         'limits.cpu': cpu,
         'requests.memory': memory,
@@ -115,9 +124,20 @@ export function limitRangeManifest(namespace: string): K8sObject {
   };
 }
 
-export function networkPolicyManifest(namespace: string, settings: KubernetesSettings): K8sObject {
+/**
+ * The account's NetworkPolicy. Its functions resolve names, and reach the internet only when the account's own
+ * setting allows it (the operator turns it on) and the platform's K8S_EGRESS_INTERNET doesn't forbid it for
+ * every account. Never FF's own network, nor the cloud's metadata addresses (BLOCKED_EGRESS_CIDRS).
+ */
+export function networkPolicyManifest(namespace: string, settings: KubernetesSettings, internetEgress: boolean): K8sObject {
+  // Only the backend calls a function: never the other platform pods in ff-system (Keycloak, the console, the
+  // admin app, the log store). A backend outside the cluster calls through the API server's proxy, which comes
+  // from the node, as k3s lets through.
   const ingressFrom: unknown[] = [
-    { namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } } },
+    {
+      namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } },
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'ff-backend' } },
+    },
     ...settings.ingressAllowCidrs.map((cidr) => ({ ipBlock: { cidr } })),
   ];
   const egress: unknown[] = [
@@ -134,7 +154,7 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
       ],
     },
   ];
-  if (settings.egressInternet) {
+  if (settings.egressInternet && internetEgress) {
     egress.push({ to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }] });
   }
   return {
@@ -228,6 +248,7 @@ export function deploymentManifest(
                 { name: 'FUNCTION_VERSION', value: '$LATEST' },
                 { name: 'FUNCTION_MEMORY_LIMIT', value: String(fn.memory) },
                 { name: 'FUNCTION_TIMEOUT', value: String(fn.timeout * 1000) },
+                { name: 'FF_MAX_QUEUE_WAIT_MS', value: String(maxQueueWaitMs(fn)) },
                 { name: 'LAMBDA_TASK_ROOT', value: '/var/task' },
                 { name: 'FF_HANDLER', value: 'function.handler' },
                 { name: 'PORT', value: String(RUNTIME_PORT) },

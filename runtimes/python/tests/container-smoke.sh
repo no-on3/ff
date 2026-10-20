@@ -6,7 +6,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-image="${IMAGE:-ff-runtime-python:3.13-v1}"
+image="${IMAGE:-ff-runtime-python:3.13-v2}"
 prefix="ff-runtime-smoke-$$"
 
 "$repo/hack/check-resources.sh"
@@ -45,11 +45,14 @@ check "readyz" 200 "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$
 check "invoke returns the greeting" "Hello container" \
   "$(curl -s -X POST -H 'content-type: application/json' -d '{"name":"container"}' "http://127.0.0.1:$port/invoke" | jq -r .message)"
 check "runs as uid 10001" 10001 "$(docker exec "$prefix-hello" id -u)"
+check "has no pip: removed, with the packages it vendors" "none" \
+  "$(docker exec "$prefix-hello" sh -c 'command -v pip pip3; python -c "import pip" 2>/dev/null && echo importable; ls /usr/local/lib/python3.13/ensurepip 2>/dev/null' | paste -sd, - | sed 's/^$/none/')"
 check "root filesystem is read-only" denied \
   "$(docker exec "$prefix-hello" sh -c 'touch /opt/ff/probe 2>/dev/null && echo writable || echo denied')"
 check "/tmp is writable" ok "$(docker exec "$prefix-hello" sh -c 'touch /tmp/probe && echo ok')"
 check "user output reaches the container log" 1 "$(docker logs "$prefix-hello" 2>&1 | grep -c 'hello from user code' || true)"
 check "no install at start (no pip activity in logs)" 0 "$(docker logs "$prefix-hello" 2>&1 | grep -ci 'pip' || true)"
+check "speaks runtime protocol 2" 1 "$(docker logs "$prefix-hello" 2>&1 | grep -c '"protocol": 2' || true)"
 
 # Inside the container's 256 MB limit, a function that hoards memory gets
 # Runtime.OutOfMemory from the runtime's own limit, and the container survives.

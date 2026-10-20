@@ -1,15 +1,18 @@
-# FF function runtime for Python (runtime protocol v1).
-# Build:  docker build -t ff-runtime-python:3.13-v1 runtimes/python
+# FF function runtime for Python (runtime protocol v2).
+# Build:  docker build -t ff-runtime-python:3.13-v2 runtimes/python
 # The runtime uses only the standard library, and nothing is installed when a
 # function starts: functions ship their dependencies in their package, as on
 # AWS Lambda. Debian (glibc), so manylinux wheels built for Lambda work.
 FROM python:3.13-slim
 LABEL org.opencontainers.image.title="ff-runtime-python" \
-      org.opencontainers.image.description="FF function runtime for Python, protocol v1"
+      org.opencontainers.image.description="FF function runtime for Python, protocol v2"
 WORKDIR /opt/ff
 COPY ff_runtime ./ff_runtime
 # The root filesystem is read-only at run time, so compile the runtime now.
 RUN python -m compileall -q ff_runtime
+# pip, which nothing here runs: functions ship their dependencies in their package, and nothing can be installed
+# on a read-only root. The packages pip vendors carry advisories that the image scan reports (hack/ci.sh).
+RUN python -m pip uninstall -y -q pip && rm -rf /usr/local/lib/python3.13/ensurepip
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/ff \

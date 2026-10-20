@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | Done: K-00 to K-12 completed on 2026-10-16 (§8, Progress log). K-13 (cold-start performance) is proposed. |
-| **Branch** | `feat/k8s-orchestrator` |
+| **Status** | Done: K-00 to K-12 completed on 2026-10-16 (§8, Progress log). K-13 (cold-start performance) is partly done, in the client-readiness plan's P-62. |
+| **Branch** | `feat/k8s-orchestrator`, which `master` has held since 2026-10-16 |
 | **Decision** | [ADR 0001: Kubernetes as the FF orchestrator](adr/0001-orchestrator-kubernetes.md) |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md), ADR-001 and tasks F-02, F-03, F-06, F-08, F-13, F-15, R-06, R-07 |
 | **Started / finished** | 2026-10-16 / 2026-10-16 |
@@ -131,7 +131,7 @@ and calls functions directly at http://fn-<id>.<ns>.svc:8080 (K8S_INVOKE_MODE=di
 - **Ingress** is allowed only from namespace `ff-system`, plus any CIDRs in `K8S_INGRESS_ALLOW_CIDRS` (development: the API-server proxy source, if the policy engine blocks it).
 - **Egress** is allowed to:
   - DNS (kube-system, `k8s-app=kube-dns`, UDP/TCP 53);
-  - the internet (`0.0.0.0/0`), when `K8S_EGRESS_INTERNET=true`.
+  - the internet (`0.0.0.0/0`), when `K8S_EGRESS_INTERNET=true`. Since client-readiness P-62, only for an account whose own egress is on, as the operator sets it; `K8S_EGRESS_INTERNET=false` cuts every account off.
 - **Blocked egress ranges** (the `except` list): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `100.64.0.0/10`, `127.0.0.0/8`. This covers pod and service CIDRs, node IPs, the API server, and metadata endpoints.
 
 ### 4.5 Backend configuration (environment)
@@ -144,16 +144,16 @@ and calls functions directly at http://fn-<id>.<ns>.svc:8080 (K8S_INVOKE_MODE=di
 | `K8S_CA_FILE` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | API server CA |
 | `K8S_INVOKE_MODE` | `direct` in-cluster, `proxy` outside | How function pods are reached |
 | `K8S_NAMESPACE_PREFIX` | `ff-t-` | Tenant namespace prefix (must match the admission policy) |
-| `K8S_RUNTIME_IMAGE_NODEJS` / `_PYTHON` | `ff-runtime-nodejs:24-v1` / `ff-runtime-python:3.13-v1` | Runtime images |
+| `K8S_RUNTIME_IMAGE_NODEJS` / `_PYTHON` | `ff-runtime-nodejs:24-v1` / `ff-runtime-python:3.13-v1` | Runtime images. `24-v2` and `3.13-v2` since 2026-10-17 ([client-readiness plan](client-readiness-plan.md), P-04) |
 | `K8S_IMAGE_PULL_POLICY` | `IfNotPresent` | |
 | `K8S_RUNTIME_CLASS` | *(empty)* | For example `gvisor` |
 | `FF_READY_TIMEOUT_SECONDS` | `90` | How long create and update wait for the new version to become ready |
 | `K8S_READY_TIMEOUT_SECONDS` | `90` | How long an invocation waits for a cold start from zero |
-| `K8S_EGRESS_INTERNET` | `true` | Allow internet egress from functions |
+| `K8S_EGRESS_INTERNET` | `true` | Allow internet egress from functions; since client-readiness P-62, for the accounts whose own egress is on |
 | `K8S_INGRESS_ALLOW_CIDRS` | *(empty)* | Extra ingress sources (comma-separated) |
 | `K8S_TENANT_QUOTA_PODS` / `_CPU` / `_MEMORY` | `20` / `8` / `8Gi` | Tenant ResourceQuota |
 | `FF_SCALE_TO_ZERO_IDLE_SECONDS` | `900` | Idle time before an eligible function is scaled to zero |
-| `FF_DEV_USER_ID` | *(empty)* | **Development only.** Tenant used when no authenticated user exists (K-07). |
+| `FF_DEV_USER_ID` | *(empty)* | **Development only.** Tenant used when no authenticated user exists (K-07). Replaced on 2026-10-17 by `FF_AUTH_MODE=dev` and `FF_DEV_ACCOUNT_ID` ([client-readiness plan](client-readiness-plan.md), P-02). |
 
 ### 4.6 Pinned versions
 
@@ -273,6 +273,8 @@ The rules:
     }
     ```
     Every method takes the workload, not an ID, because Kubernetes needs the tenant (namespace) as well.
+
+    Since 2026-10-17 ([client-readiness plan](client-readiness-plan.md), P-06), `cpu` and `cpuUsed` are gone and `desiredInstances(fn)` was added: see `src/orchestrator/orchestrator.types.ts`.
   - `src/orchestrator/orchestrator.module.ts`: a provider factory that selects the implementation from `orchestrator.driver` (`ORCHESTRATOR` env). Unknown values fail fast at boot.
   - `src/orchestrator/nomad/nomad.orchestrator.ts`: an adapter delegating to the existing `NomadService`, keeping its current behaviour (including the no-op update and delete). This keeps the change reviewable.
   - FunctionsService and MetricsService inject `ORCHESTRATOR` instead of `NomadService`.
@@ -392,15 +394,15 @@ The rules:
       - Resolved from `K8S_API_URL` / `K8S_TOKEN_FILE` / `K8S_CA_FILE`, or from the in-cluster defaults (§4.5).
       - The token file is re-read every 60 s.
       - Both `https://` and `http://` servers are supported (the latter only for unit tests).
-    - **Methods:**
-      - `apply(obj)`: server-side apply, `PATCH …?fieldManager=ff-controller&force=true` with `Content-Type: application/apply-patch+yaml` (a JSON body).
+    - **Methods,** as built (the names were corrected on 2026-10-17, [client-readiness plan](client-readiness-plan.md) P-08):
+      - `apply(path, manifest)`: server-side apply, `PATCH …?fieldManager=ff-controller&force=true` with `Content-Type: application/apply-patch+yaml` (a JSON body).
       - `get(path)`: returns `null` on 404.
       - `delete(path)`: propagation Background; returns `false` on 404.
       - `deleteCollection(path, labelSelector)`.
-      - `scale(ns, name, n)`: a merge-patch on `deployments/{name}/scale`.
-      - `listPods(ns, selector)` and `podLog(ns, pod, tailLines)`.
-      - `proxyPost(ns, service, portName, path, body, headers, timeoutMs)` through `/api/v1/namespaces/{ns}/services/{svc}:{port}/proxy/{path}`.
-    - **Errors:** API failures become `KubeApiError {status, reason, message}`, parsed from the Kubernetes `Status` object.
+      - `scaleDeployment(ns, name, replicas)`: a merge-patch on `deployments/{name}/scale`, as the field manager `ff-scaler`.
+      - `list(path, labelSelector)`, and `podLog(ns, pod, container, tailLines)`, which is best effort: it returns `''` on any failure.
+      - `request(method, path, {body, timeoutMs})`. Invocations in proxy mode use it on `paths.serviceProxy(ns, service, port, path)`, which is `/api/v1/namespaces/{ns}/services/{svc}:{port}/proxy/{path}`.
+    - **Errors:** API failures become `KubeApiError {status, reason, message}`, parsed from the Kubernetes `Status` object. A request with no answer within its timeout fails with `KubeRequestTimeoutError` (P-08), which the driver turns into a function timeout for an invocation.
   - **`naming.ts`:** tenant namespace, object names, code hash.
   - **`manifests.ts`:** pure builders for:
     - Namespace (PSA labels);
@@ -542,7 +544,7 @@ The rules:
   - L4: `K8S_RUNTIME_CLASS=gvisor hack/e2e.sh` checks the Deployments' `runtimeClassName`.
 - **Rollback:** unset the variable. Functions return to runc at their next deploy or update.
 
-### K-13: Cold-start performance (proposed, not started)
+### K-13: Cold-start performance (partly done in client-readiness P-62)
 - **Found in K-11.** At the smallest size, 128 MB with a 100m CPU limit and request equal to limit, a pod takes about 10 s from creation to Ready, even without gVisor (measured on k3d). Breakdown:
   - Node.js: 7.8 s from listening to initialized for a `.ts` function, and 5.9 s for a `.js` one. `ts-hook.ts` imports the TypeScript compiler (about 9 MB of JavaScript) eagerly, and FF stores every Node.js function as `function.ts`.
   - Python: 3.9 s to listening and 1.3 s to initialized.
@@ -553,6 +555,10 @@ The rules:
   3. Python: defer heavy imports in the main process, such as `http.server`'s email parsing.
   4. Minimum instances and warm pools (parent plan S-02) hide the remaining cold starts.
 - **Tests:** a cold-start benchmark (pod created to first successful invocation) per runtime and size, as an L3 report.
+- **Done in client-readiness P-62 (2026-10-20):**
+  - The benchmark: `hack/k8s/cold-start-benchmark.sh`, any runtime, size and RuntimeClass, several functions at once.
+  - Option 2, for Node.js, as a V8 code cache of the TypeScript compiler written after a transpile (Node.js's `NODE_COMPILE_CACHE` saved the load but not the first transpile), and the compiler loaded only for `.ts` files. In gVisor at 128 MB, the code now loads in 2–5 s, against 8.9–9.4 s before.
+  - Still open: precompiling the code at deploy, which would take the compiler out of the start; option 1, the CPU burst, a product decision; option 3 for Python.
 
 ### K-12: Documentation and plan synchronization
 - **Goal:** the documentation matches reality.
@@ -595,7 +601,7 @@ The rules:
 | K-10 Python runtime | ✅ Done | `815d600` (test-hygiene fix found while verifying), `8a986b8` | • L1 `python3 -m unittest`: **22/22** in about 6 s, stable over 4 runs. It mirrors the Node.js suite: context, Lambda log lines, serial execution, error mapping, timeout, a CPU-bound loop stopped while `/healthz` stays up, OOM, `sys.exit`, six init-failure kinds, 413/400/429/404, no environment in logs. It adds `Decimal` and UTF-8 output, `Runtime.MarshalError`, chunked bodies, and a graceful `SIGTERM`.<br>• L2 `container-smoke.sh`: **10/10**, hardened. Inside a 256 MB container, a hoarding function gets `Runtime.OutOfMemory` and the container is not OOM-killed.<br>• L3 `hack/k8s/test-it.sh`: **7/7**, with a new Python case (deploy, invoke, `ValueError` mapping) at 6.8 s. L4 `hack/e2e.sh`: **19/19**, with a new Python lifecycle.<br>• Verified by hand: numpy 2.5.4 runs in a 128 MB function, and an oversized allocation gets `Runtime.OutOfMemory` and then recovers. Kubernetes sets `memory.oom.group=1` on containers (k3s v1.37.1), so the runtime's own limit is what keeps a container alive.<br>• Image 119 MB on `python:3.13-slim` (Python 3.13.16). Main process 22 MB plus a 15 MB worker. Found while verifying: the e2e backend start budget rose from 60 s to 180 s, because the repository's 5400 rpm disk with a cold page cache took 23 s just to load the modules. Also, a K-06 test left a timer that made Jest force-exit a worker (`815d600`). |
 | K-11 gVisor RuntimeClass | ✅ Done | `a0932f7` and `d7d15bf` (runtime fixes found while verifying), `e57f460` | • **gVisor works on k3d**, contrary to the plan: `hack/k8s/gvisor-up.sh` takes 83 s from scratch on a fresh cluster (download, SHA-512, install, drop-in, one restart, check pod: kernel `4.19.0-gvisor`) and 6 s when re-run.<br>• L1 backend: orchestrator suite 72/72, with a new `ReplicaFailure` diagnostics test.<br>• L3 **11/11**: Node.js and Python inside gVisor with the NetworkPolicy intact; missing RuntimeClass explained; Python and Node.js memory hogs in 128 MB get `Runtime.OutOfMemory` with 0 restarts.<br>• L4: **20/20** with `K8S_RUNTIME_CLASS=gvisor`, **19/19** without.<br>• Measured: +29/+36 MiB per idle pod (declared as 40Mi overhead); cold start 12–15 s against about 10 s with runc (K-13).<br>• Found while verifying, and fixed in their own commits: Python replacement workers died with their connection (`PR_SET_PDEATHSIG` is per thread); a failed thread start could freeze the Python accept loop; both runtimes' memory budgets let the kernel kill the whole container. gVisor does not enforce `RLIMIT_DATA` (documented). |
 | K-12 Docs and plan sync | ✅ Done | `800ec79` | • README rewritten: what works and what does not (authentication not enforced, no billing), the real layout, quick start, test levels.<br>• The quick start was run as written: compose up, `npm run start:dev` against the cluster, a Node.js and a Python function created, invoked, listed in history, and deleted. The console's dev server starts.<br>• Found while doing so: the backend allowed CORS only from port 3001, while the console runs on Vite's 5173. The `.env.example` default is fixed.<br>• Dev guide: requirements measured, gVisor section. Parent plan: F-13 superseded, and a per-finding status column in Appendix A.<br>• `hack/check-docs.py` passes on every Markdown file the migration touched. |
-| K-13 Cold-start performance | 💡 Proposed | | Measurements and options in K-13; needs a product decision on CPU burst |
+| K-13 Cold-start performance | 🔶 Partly done | In client-readiness P-62 | The benchmark, and the TypeScript compiler's code cache (option 2): in gVisor at 128 MB the code loads in 2–5 s instead of 9. Precompiling at deploy, the CPU burst (a product decision) and Python's imports remain |
 
 **After the plan:** [Getting started](getting-started.md) and `examples/` were added: a developer's setup from a fresh clone, plus the everyday commands. Its commands were run against the dev stack. Doing so found one more bug, fixed in `b054a2c`: the Node.js runtime ran TypeScript with syntax errors as code the transpiler had "recovered", so a broken function deployed as ACTIVE and returned `{}`.
 

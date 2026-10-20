@@ -1,0 +1,19 @@
+# FF's log pipeline (client-readiness plan P-42, ADR 0005): Fluent Bit on every node reads the function
+# containers' logs and writes them to VictoriaLogs in ff-system, which only the collector and the backend
+# reach. Apply it after base/ (or dev/): it needs ff-system, and the Secret victoria-logs-delete-key there,
+# which hack/k8s/logging-up.sh creates.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespace.yaml
+  - 10-victoria-logs.yaml
+  - 20-fluent-bit-rbac.yaml
+  - 30-fluent-bit.yaml
+  - 40-network-policies.yaml
+# The configuration's name gets its content's hash, so a change rolls the DaemonSet.
+configMapGenerator:
+  - name: fluent-bit
+    namespace: ff-logging
+    files:
+      - fluent-bit/fluent-bit.yaml
+      - fluent-bit/ff.lua

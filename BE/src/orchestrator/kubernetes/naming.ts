@@ -8,11 +8,11 @@ export const LABELS = {
   name: 'app.kubernetes.io/name',
   functionId: 'ff.dev/function-id',
   runtime: 'ff.dev/runtime',
-  tenantHash: 'ff.dev/tenant-hash',
+  accountHash: 'ff.dev/account-hash',
 } as const;
 
 export const ANNOTATIONS = {
-  tenantId: 'ff.dev/tenant-id',
+  accountId: 'ff.dev/account-id',
   codeSha256: 'ff.dev/code-sha256',
 } as const;
 
@@ -22,13 +22,14 @@ export function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-/** 12 hex characters of sha256(tenant ID): deterministic, DNS-safe, and doesn't expose the ID. */
-export function tenantHash(userId: string): string {
-  return sha256(userId).slice(0, 12);
+/** 12 hex characters of sha256(account ID): deterministic, DNS-safe, and doesn't expose the ID. */
+export function accountHash(accountId: string): string {
+  return sha256(accountId).slice(0, 12);
 }
 
-export function tenantNamespace(prefix: string, userId: string): string {
-  return `${prefix}${tenantHash(userId)}`;
+/** The account's namespace (D1): ff-t-<accountHash>. */
+export function accountNamespace(prefix: string, accountId: string): string {
+  return `${prefix}${accountHash(accountId)}`;
 }
 
 /** Deployment and Service name. Function IDs are lowercase UUIDs. */

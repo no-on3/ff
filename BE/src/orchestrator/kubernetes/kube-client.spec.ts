@@ -3,7 +3,7 @@ import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { KubeApiError, KubeClient } from './kube-client';
+import { KubeApiError, KubeClient, KubeRequestTimeoutError } from './kube-client';
 
 interface Captured {
   method: string;
@@ -142,17 +142,56 @@ describe('KubeClient', () => {
     expect(server.captured.map((r) => r.headers.authorization)).toEqual(['Bearer token-one', 'Bearer token-two']);
   });
 
-  it('fails requests that exceed their timeout', async () => {
+  it('fails requests that exceed their timeout with KubeRequestTimeoutError, so callers can tell a timeout apart', async () => {
     const { client } = await setup(() => ({ status: 200, body: {}, delayMs: 2000 }));
 
-    await expect(client.request('GET', '/slow', { timeoutMs: 100 })).rejects.toThrow('timed out after 100 ms');
+    const error = await client.request('POST', '/slow', { timeoutMs: 100 }).catch((err) => err);
+
+    expect(error).toBeInstanceOf(KubeRequestTimeoutError);
+    expect(error).toMatchObject({ timeoutMs: 100, message: 'Kubernetes API request timed out after 100 ms: POST /slow' });
   });
 
-  it('returns pod logs as text and swallows errors (diagnostics are best effort)', async () => {
-    const { client } = await setup((req) => (req.url.includes('/broken/') ? { status: 500 } : { status: 200, body: 'line' }));
+  it('does not report other failures as timeouts', async () => {
+    const { server } = await setup(() => ({ status: 200 }));
+    const url = server.url;
+    await server.close(); // nothing listens there any more
 
-    await expect(client.podLog('n', 'pod-1', 'function', 20)).resolves.toBe('"line"');
-    await expect(client.podLog('n', 'broken', 'function', 20)).resolves.toBe('');
+    const error = await new KubeClient({ server: url, token: 't' }).request('GET', '/x').catch((err) => err);
+
+    expect(error).toMatchObject({ code: 'ECONNREFUSED' });
+    expect(error).not.toBeInstanceOf(KubeRequestTimeoutError);
+  });
+
+  it('streams an answer as it comes, with its token and no timeout, until the signal aborts it (P-43)', async () => {
+    let closed!: () => void;
+    const requestClosed = new Promise<void>((resolve) => (closed = resolve));
+    const seen: http.IncomingHttpHeaders[] = [];
+    const server = http.createServer((req, res) => {
+      seen.push(req.headers);
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+      res.write('a\n');
+      setTimeout(() => res.write('b\n'), 50); // later, on the same answer, which stays open
+      req.on('close', closed);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    servers.push({ close: () => (server.closeAllConnections(), new Promise<void>((resolve) => server.close(() => resolve()))) });
+    const client = new KubeClient({ server: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, tokenFile, requestTimeoutMs: 20 });
+    const abort = new AbortController();
+
+    const { status, body } = await client.stream('/api/v1/namespaces/n/services/s:1/proxy/tail', abort.signal);
+    body.setEncoding('utf8');
+    body.on('error', () => undefined); // the abort's
+    // Both chunks, the second 50 ms in: past requestTimeoutMs, which a stream doesn't have.
+    const text = await new Promise<string>((resolve) => {
+      let got = '';
+      body.on('data', (chunk: string) => (got += chunk) === 'a\nb\n' && resolve(got));
+    });
+    const bodyClosed = new Promise((resolve) => body.on('close', resolve));
+    abort.abort();
+    await Promise.all([requestClosed, bodyClosed]);
+
+    expect([status, text]).toEqual([200, 'a\nb\n']);
+    expect(seen[0].authorization).toBe('Bearer token-one');
   });
 
   it('rejects unsupported URL schemes', () => {

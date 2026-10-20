@@ -1,201 +1,122 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Card,
-  CardContent,
-  Typography,
-  TextField,
-  Button,
-  Grid,
-  Slider,
-  Box,
-  Alert,
-} from '@mui/material';
-import { updateScalingConfig, getScalingConfig } from '../services/api';
+import React, { useEffect, useState } from 'react';
+import { Alert, Box, Button, Card, CardContent, TextField, Typography } from '@mui/material';
+import { apiErrorMessage, scalingLimitsError } from '../lib/functions';
+import { can } from '../lib/session';
+import { ScalingConfig, ScalingLimits, getScalingConfig, updateScalingConfig } from '../services/api';
+import { useSession } from '../session/session';
 
 interface ScalingConfigurationProps {
   functionId: string;
 }
 
-interface ScalingConfig {
-  minInstances: number;
-  maxInstances: number;
-  targetCpuUtilization: number;
-  targetMemoryUtilization: number;
-  scaleUpThreshold: number;
-  scaleDownThreshold: number;
-  cooldownPeriod: number;
-}
-
-export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({
-  functionId,
-}) => {
-  const [config, setConfig] = useState<ScalingConfig>({
-    minInstances: 1,
-    maxInstances: 10,
-    targetCpuUtilization: 70,
-    targetMemoryUtilization: 70,
-    scaleUpThreshold: 80,
-    scaleDownThreshold: 40,
-    cooldownPeriod: 300,
-  });
-  const [saving, setSaving] = useState(false);
+/**
+ * The function's instance limits. Each instance serves one call at a time:
+ * when calls arrive at once, the function gets more instances, up to the
+ * maximum, and goes back to zero when idle unless a minimum is set.
+ */
+export const ScalingConfiguration: React.FC<ScalingConfigurationProps> = ({ functionId }) => {
+  const { plan, role } = useSession().account!; // the function pages show only for an account
+  const maxInstances = plan.limits.instancesPerFunction;
+  const mayChange = can(role, 'change functions');
+  const [config, setConfig] = useState<ScalingConfig | null>(null);
+  const [form, setForm] = useState<ScalingLimits | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    const loadConfig = async () => {
-      try {
-        const loadedConfig = await getScalingConfig(functionId);
-        setConfig(loadedConfig);
-      } catch (error) {
-        console.error('Error loading scaling configuration:', error);
-        setError('Failed to load scaling configuration');
-      }
-    };
-
-    loadConfig();
+    getScalingConfig(functionId)
+      .then((loaded) => {
+        setConfig(loaded);
+        setForm({ minInstances: loaded.minInstances, maxInstances: loaded.maxInstances });
+      })
+      .catch((err: unknown) => setError(apiErrorMessage(err)));
   }, [functionId]);
-
-  const handleChange = (field: keyof ScalingConfig) => (
-    event: React.ChangeEvent<HTMLInputElement> | any,
-  ) => {
-    const value = Number(event.target?.value ?? event);
-    setConfig((prev) => ({
-      ...prev,
-      [field]: value,
-    }));
-  };
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!form) return;
+    setSaved(false);
+    const invalid = scalingLimitsError(form, plan);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
     setSaving(true);
     setError(null);
-    setSuccess(false);
-
     try {
-      await updateScalingConfig(functionId, config);
-      setSuccess(true);
-    } catch (error) {
-      console.error('Error updating scaling configuration:', error);
-      setError('Failed to update scaling configuration');
+      const updated = await updateScalingConfig(functionId, form);
+      setConfig(updated);
+      setForm({ minInstances: updated.minInstances, maxInstances: updated.maxInstances });
+      setSaved(true);
+    } catch (err) {
+      setError(apiErrorMessage(err));
     } finally {
       setSaving(false);
     }
   };
 
+  const field = (key: keyof ScalingLimits) => (event: React.ChangeEvent<HTMLInputElement>) =>
+    form && setForm({ ...form, [key]: Number(event.target.value) });
+
   return (
     <Card>
       <CardContent>
         <Typography variant="h6" gutterBottom>
-          Auto-Scaling Configuration
+          Scaling
+        </Typography>
+        <Typography variant="body2" color="text.secondary" gutterBottom>
+          Each instance serves one call at a time. Calls that arrive at once get more instances, up to the maximum;
+          a call waits at most one timeout for a free instance. An idle function goes back to zero instances, unless a
+          minimum is set.
         </Typography>
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <Alert severity="error" sx={{ my: 2 }}>
             {error}
           </Alert>
         )}
-
-        {success && (
-          <Alert severity="success" sx={{ mb: 2 }}>
-            Configuration updated successfully
+        {saved && (
+          <Alert severity="success" sx={{ my: 2 }}>
+            Saved. The running instances follow the new limits now.
           </Alert>
         )}
 
-        <form onSubmit={handleSubmit}>
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <Typography gutterBottom>Instance Limits</Typography>
+        {form && config && (
+          <form onSubmit={handleSubmit}>
+            <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
               <TextField
-                label="Minimum Instances"
+                label="Minimum instances"
                 type="number"
-                value={config.minInstances}
-                onChange={handleChange('minInstances')}
-                fullWidth
-                margin="normal"
-                inputProps={{ min: 1 }}
+                disabled={!mayChange}
+                value={form.minInstances}
+                onChange={field('minInstances')}
+                sx={{ minWidth: 220 }}
+                slotProps={{ htmlInput: { min: 0, max: maxInstances, step: 1 } }}
+                helperText={form.minInstances > 0 ? 'Kept running even when idle' : 'Scales to zero when idle'}
               />
               <TextField
-                label="Maximum Instances"
+                label="Maximum instances"
                 type="number"
-                value={config.maxInstances}
-                onChange={handleChange('maxInstances')}
-                fullWidth
-                margin="normal"
-                inputProps={{ min: config.minInstances }}
+                disabled={!mayChange}
+                value={form.maxInstances}
+                onChange={field('maxInstances')}
+                sx={{ minWidth: 220 }}
+                slotProps={{ htmlInput: { min: 1, max: maxInstances, step: 1 } }}
+                helperText={`At most ${maxInstances} on the ${plan.name} plan`}
               />
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <Typography gutterBottom>Resource Targets</Typography>
-              <Box sx={{ px: 2 }}>
-                <Typography>Target CPU Utilization (%)</Typography>
-                <Slider
-                  value={config.targetCpuUtilization}
-                  onChange={handleChange('targetCpuUtilization')}
-                  valueLabelDisplay="auto"
-                  min={0}
-                  max={100}
-                />
-                <Typography>Target Memory Utilization (%)</Typography>
-                <Slider
-                  value={config.targetMemoryUtilization}
-                  onChange={handleChange('targetMemoryUtilization')}
-                  valueLabelDisplay="auto"
-                  min={0}
-                  max={100}
-                />
-              </Box>
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <Typography gutterBottom>Scaling Thresholds</Typography>
-              <Box sx={{ px: 2 }}>
-                <Typography>Scale Up Threshold (%)</Typography>
-                <Slider
-                  value={config.scaleUpThreshold}
-                  onChange={handleChange('scaleUpThreshold')}
-                  valueLabelDisplay="auto"
-                  min={0}
-                  max={100}
-                />
-                <Typography>Scale Down Threshold (%)</Typography>
-                <Slider
-                  value={config.scaleDownThreshold}
-                  onChange={handleChange('scaleDownThreshold')}
-                  valueLabelDisplay="auto"
-                  min={0}
-                  max={100}
-                />
-              </Box>
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <Typography gutterBottom>Timing Configuration</Typography>
-              <TextField
-                label="Cooldown Period (seconds)"
-                type="number"
-                value={config.cooldownPeriod}
-                onChange={handleChange('cooldownPeriod')}
-                fullWidth
-                margin="normal"
-                inputProps={{ min: 60 }}
-                helperText="Minimum time between scaling actions"
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <Button
-                type="submit"
-                variant="contained"
-                color="primary"
-                disabled={saving}
-              >
-                {saving ? 'Saving...' : 'Save Configuration'}
+            </Box>
+            {mayChange ? (
+              <Button type="submit" variant="contained" disabled={saving} sx={{ mt: 2 }}>
+                {saving ? 'Saving…' : 'Save'}
               </Button>
-            </Grid>
-          </Grid>
-        </form>
+            ) : (
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+                As a viewer, you read these limits; owners and developers change them.
+              </Typography>
+            )}
+          </form>
+        )}
       </CardContent>
     </Card>
   );

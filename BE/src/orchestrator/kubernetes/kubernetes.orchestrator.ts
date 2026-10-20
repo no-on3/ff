@@ -1,9 +1,20 @@
 import { Logger } from '@nestjs/common';
+import { readFile } from 'node:fs/promises';
 import * as http from 'node:http';
-import { FunctionRuntimeError, FunctionTimeoutError, OrchestratorError } from '../orchestrator.errors';
-import { FunctionWorkload, InvokeResult, Orchestrator } from '../orchestrator.types';
-import { KubeApi, KubeResponse, paths } from './kube-client';
+import {
+  FunctionLoadError,
+  FunctionRuntimeError,
+  FunctionThrottledError,
+  FunctionTimeoutError,
+  OrchestratorError,
+  withInitMs,
+} from '../orchestrator.errors';
+import { describeError } from '../../common/describe-error';
+import { REQUEST_ID_HEADER } from '../../common/request-context';
+import { FunctionLogLine, FunctionLogsPage, FunctionWorkload, InvokeResult, LogsFilter, LogsQuery, Orchestrator, TenantLimits } from '../orchestrator.types';
+import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
+import { LogStore, namespaceFilter, pageQuery, quoted, tailQuery, toLine, toPage } from './log-store';
 import {
   K8sObject,
   RUNTIME_PORT,
@@ -13,12 +24,13 @@ import {
   codeConfigMapManifest,
   deploymentManifest,
   limitRangeManifest,
+  maxQueueWaitMs,
   namespaceManifest,
   networkPolicyManifest,
   resourceQuotaManifest,
   serviceManifest,
 } from './manifests';
-import { LABELS, codeConfigMapName, codeHash, functionResourceName, tenantNamespace } from './naming';
+import { LABELS, MANAGED_BY, accountNamespace, codeConfigMapName, codeHash, functionResourceName } from './naming';
 
 interface Deployment extends K8sObject {
   metadata: K8sObject['metadata'] & { generation?: number };
@@ -32,6 +44,10 @@ interface Deployment extends K8sObject {
     conditions?: Array<{ type: string; status: string; message?: string }>;
   };
 }
+
+/** How long closing an account waits for its namespace to go, and for its log lines' deletion (P-45). */
+export const TENANT_REMOVAL_TIMEOUT_MS = 120_000;
+export const LOG_DELETION_TIMEOUT_MS = 120_000;
 
 interface Listed extends K8sObject {
   metadata: K8sObject['metadata'] & { creationTimestamp?: string };
@@ -63,55 +79,77 @@ export function isRolledOut(deployment: Deployment): boolean {
 }
 
 /**
- * Runs each function as a Deployment in its tenant's namespace (one namespace
+ * Runs each function as a Deployment in its account's namespace (one namespace
  * per user), with code in an immutable ConfigMap and a ClusterIP Service in
  * front. See docs/kubernetes-migration-plan.md, K-06.
  */
 export class KubernetesOrchestrator implements Orchestrator {
   private readonly logger = new Logger(KubernetesOrchestrator.name);
+  private readonly logStore: LogStore;
 
   constructor(
     private readonly settings: KubernetesSettings,
     private readonly api: KubeApi,
     private readonly pollIntervalMs = 1000,
-  ) {}
+  ) {
+    this.logStore = new LogStore(settings.invokeMode, api);
+  }
 
   private namespaceOf(fn: FunctionWorkload): string {
-    return tenantNamespace(this.settings.namespacePrefix, fn.userId);
+    return accountNamespace(this.settings.namespacePrefix, fn.accountId);
   }
 
-  async deploy(fn: FunctionWorkload): Promise<void> {
-    await this.apply(fn);
+  async deploy(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
+    await this.apply(fn, tenant);
   }
 
-  async update(fn: FunctionWorkload): Promise<void> {
-    await this.apply(fn);
+  async update(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
+    await this.apply(fn, tenant);
   }
 
-  private async ensureTenant(fn: FunctionWorkload, ns: string): Promise<void> {
-    await this.api.apply(paths.namespace(ns), namespaceManifest(ns, fn.userId));
-    await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, this.settings));
-    await this.api.apply(paths.core(ns, 'limitranges', TENANT_LIMITS_NAME), limitRangeManifest(ns));
+  async applyTenantLimits(accountId: string, tenant: TenantLimits): Promise<void> {
+    const ns = accountNamespace(this.settings.namespacePrefix, accountId);
+    // Before its first function, an account has no namespace: that function's deploy applies the plan.
+    if (!(await this.api.get(paths.namespace(ns)))) return;
+    await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, tenant.quota));
     await this.api.apply(
       paths.networking(ns, 'networkpolicies', TENANT_NETWORK_POLICY_NAME),
-      networkPolicyManifest(ns, this.settings),
+      networkPolicyManifest(ns, this.settings, tenant.internetEgress),
     );
   }
 
-  private async apply(fn: FunctionWorkload): Promise<void> {
+  /**
+   * The account's namespace and guardrails, with its plan's quota and its internet egress: written again on
+   * every deploy and update.
+   */
+  private async ensureTenant(fn: FunctionWorkload, ns: string, tenant: TenantLimits): Promise<void> {
+    await this.api.apply(paths.namespace(ns), namespaceManifest(ns, fn.accountId));
+    await this.api.apply(paths.core(ns, 'resourcequotas', TENANT_QUOTA_NAME), resourceQuotaManifest(ns, tenant.quota));
+    await this.api.apply(paths.core(ns, 'limitranges', TENANT_LIMITS_NAME), limitRangeManifest(ns));
+    await this.api.apply(
+      paths.networking(ns, 'networkpolicies', TENANT_NETWORK_POLICY_NAME),
+      networkPolicyManifest(ns, this.settings, tenant.internetEgress),
+    );
+  }
+
+  private async apply(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const hash = codeHash(fn.runtime, fn.code);
     const configMap = codeConfigMapName(fn.id, hash);
     const configMapManifest = codeConfigMapManifest(fn, ns, configMap, hash); // validates size first
 
-    await this.ensureTenant(fn, ns);
+    await this.ensureTenant(fn, ns, tenant);
     await this.api.apply(paths.core(ns, 'configmaps', configMap), configMapManifest);
     await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
 
-    // Keep the current replica count (it may have been scaled since); never go below minInstances.
+    // Keep the current replica count (it may have been scaled since), never below
+    // minInstances, and never below one: every deploy and update is checked by
+    // waitUntilReady, which needs a pod, even for a function scaled to zero. The
+    // idle sweep scales it back down after the idle window.
     const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
-    const replicas = Math.max(existing?.spec?.replicas ?? Math.max(1, fn.minInstances), fn.minInstances);
+    const replicas = Math.max(existing?.spec?.replicas ?? 0, fn.minInstances, 1);
+    if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid minInstances ${fn.minInstances} for function ${fn.id}`);
     await this.api.apply(
       paths.apps(ns, 'deployments', name),
       deploymentManifest(fn, ns, configMap, hash, this.settings, replicas),
@@ -138,7 +176,70 @@ export class KubernetesOrchestrator implements Orchestrator {
     await this.api.deleteCollection(paths.core(ns, 'configmaps'), `${LABELS.functionId}=${fn.id}`);
   }
 
+  /**
+   * Deletes the account's namespace, and with it everything left in it: its
+   * quota, limits and network policy, and any function object (P-45). Waits
+   * until the namespace is gone: one being deleted already is only waited for.
+   */
+  async removeTenant(accountId: string, timeoutMs = TENANT_REMOVAL_TIMEOUT_MS): Promise<void> {
+    const ns = accountNamespace(this.settings.namespacePrefix, accountId);
+    const current = await this.api.get<{ status?: { phase?: string } }>(paths.namespace(ns));
+    if (!current) return;
+    if (current.status?.phase !== 'Terminating') await this.api.delete(paths.namespace(ns));
+    const deadline = Date.now() + timeoutMs;
+    while (await this.api.get(paths.namespace(ns))) {
+      if (Date.now() >= deadline) throw new OrchestratorError(`Namespace ${ns} is still being deleted after ${Math.round(timeoutMs / 1000)} s`);
+      await sleep(this.pollIntervalMs);
+    }
+  }
+
+  /**
+   * Deletes every line of the account's namespace from the log store, with the
+   * store's delete key (P-45), then checks that none is left. A deletion of the
+   * same lines still running, from an earlier attempt, is waited for rather
+   * than started again; one still running after `timeoutMs` throws.
+   */
+  async deleteLogs(accountId: string, timeoutMs = LOG_DELETION_TIMEOUT_MS): Promise<void> {
+    const ns = accountNamespace(this.settings.namespacePrefix, accountId);
+    const filter = namespaceFilter(ns);
+    const key = await this.logStoreDeleteKey();
+    const running = (await this.logStore.activeDeletions(key)).find((task) => task.filter === filter);
+    const taskId = running?.task_id ?? (await this.logStore.startDeletion(filter, key));
+    const deadline = Date.now() + timeoutMs;
+    while ((await this.logStore.activeDeletions(key)).some((task) => task.task_id === taskId)) {
+      if (Date.now() >= deadline) {
+        throw new OrchestratorError(`Deleting the log lines of ${ns} is still running after ${Math.round(timeoutMs / 1000)} s (task ${taskId})`);
+      }
+      await sleep(this.pollIntervalMs);
+    }
+    if ((await this.logStore.query(`${filter} | limit 1 | fields _time`)).length > 0) {
+      throw new OrchestratorError(`Log lines of ${ns} are still in the log store after their deletion (task ${taskId})`);
+    }
+  }
+
+  /** The key, read each time from its file, so that a new one needs no restart. */
+  private async logStoreDeleteKey(): Promise<string> {
+    const file = this.settings.logStoreDeleteKeyFile;
+    let key: string;
+    try {
+      key = (await readFile(file, 'utf8')).trim();
+    } catch (error) {
+      throw new OrchestratorError(`The log store's delete key can't be read from ${file}: ${describeError(error)}`);
+    }
+    if (!key) throw new OrchestratorError(`The log store's delete key file ${file} is empty`);
+    return key;
+  }
+
   async waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void> {
+    await this.waitFor(fn, timeoutMs, isRolledOut);
+  }
+
+  /** For a cold start: one ready instance is enough to serve the call. */
+  private async waitForAnInstance(fn: FunctionWorkload, timeoutMs: number): Promise<void> {
+    await this.waitFor(fn, timeoutMs, (deployment) => (deployment.status?.readyReplicas ?? 0) >= 1);
+  }
+
+  private async waitFor(fn: FunctionWorkload, timeoutMs: number, done: (deployment: Deployment) => boolean): Promise<void> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const deadline = Date.now() + timeoutMs;
@@ -146,26 +247,37 @@ export class KubernetesOrchestrator implements Orchestrator {
     for (;;) {
       deployment = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
       if (!deployment) throw new OrchestratorError(`Deployment ${ns}/${name} does not exist`);
-      if (isRolledOut(deployment)) return;
+      if (done(deployment)) return;
       if (Date.now() >= deadline) break;
       await sleep(this.pollIntervalMs);
     }
-    const diagnostics = await this.diagnose(fn, ns, deployment);
+    const { details, loadError } = await this.diagnose(fn, ns, deployment);
+    // The function's own error, which its owner may see; anything else is the platform's (D4).
+    if (loadError) throw loadError;
     throw new OrchestratorError(
-      `Function "${fn.name}" did not become ready within ${Math.round(timeoutMs / 1000)} s${diagnostics ? `: ${diagnostics}` : ''}`,
+      `Function "${fn.name}" did not become ready within ${Math.round(timeoutMs / 1000)} s${details ? `: ${details}` : ''}`,
     );
   }
 
-  /** Why pods are not ready: container waiting reasons plus the newest pod's last log lines. */
-  private async diagnose(fn: FunctionWorkload, ns: string, deployment: Deployment): Promise<string> {
+  /**
+   * Why pods are not ready: container waiting reasons plus the newest pod's last
+   * log lines, and the load error its runtime reported, if it did.
+   */
+  private async diagnose(
+    fn: FunctionWorkload,
+    ns: string,
+    deployment: Deployment,
+  ): Promise<{ details: string; loadError?: FunctionLoadError }> {
     try {
       const pods = await this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
       if (pods.length === 0) {
         // Pods that cannot even be created (quota exceeded, unknown RuntimeClass) show up here.
         const failure = deployment.status?.conditions?.find((c) => c.type === 'ReplicaFailure' && c.status === 'True');
-        return failure?.message
-          ? `no pods were created: ${failure.message}`
-          : 'no pods were created (check the tenant ResourceQuota and events)';
+        return {
+          details: failure?.message
+            ? `no pods were created: ${failure.message}`
+            : 'no pods were created (check the tenant ResourceQuota and events)',
+        };
       }
       const reasons = new Set<string>();
       for (const pod of pods) {
@@ -179,73 +291,207 @@ export class KubernetesOrchestrator implements Orchestrator {
       const newest = [...pods].sort((a, b) =>
         (b.metadata.creationTimestamp ?? '').localeCompare(a.metadata.creationTimestamp ?? ''),
       )[0];
-      const log = (await this.api.podLog(ns, newest.metadata.name, 'function', 20)).trim();
-      return [...reasons, log && `last log lines: ${log.split('\n').slice(-5).join(' | ')}`].filter(Boolean).join('; ');
+      const log = await this.lastLines(fn, ns, newest.metadata.name);
+      return {
+        details: [...reasons, log && `last log lines: ${log.split('\n').slice(-5).join(' | ')}`].filter(Boolean).join('; '),
+        loadError: loadErrorIn(log),
+      };
     } catch (err) {
-      return `diagnostics unavailable (${(err as Error).message})`;
+      return { details: `diagnostics unavailable (${(err as Error).message})` };
+    }
+  }
+
+  /** A page of the function's lines from the log store, in its account's namespace (P-43). */
+  async logs(fn: FunctionWorkload, query: LogsQuery): Promise<FunctionLogsPage> {
+    const rows = await this.logStore.query(pageQuery(this.namespaceOf(fn), fn.id, query));
+    return toPage(rows, query.limit, query.cursor);
+  }
+
+  /** The function's lines as the log store gets them, in its account's namespace, until `signal` aborts (P-43). */
+  tailLogs(fn: FunctionWorkload, filter: LogsFilter, signal: AbortSignal): AsyncIterable<FunctionLogLine> {
+    const rows = this.logStore.tail(tailQuery(this.namespaceOf(fn), fn.id, filter), signal);
+    return (async function* () {
+      for await (const row of rows) yield toLine(row);
+    })();
+  }
+
+  /**
+   * A pod's last 20 lines of the past hour, from the log store, for the readiness
+   * diagnosis. Best effort, as diagnostics are: '' when the store can't answer.
+   */
+  private async lastLines(fn: FunctionWorkload, ns: string, pod: string): Promise<string> {
+    try {
+      const rows = await this.logStore.query(
+        `{namespace=${quoted(ns)}, function_id=${quoted(fn.id)}} pod:=${quoted(pod)} _time:1h | sort by (_time desc) limit 20 | fields _time, _msg`,
+      );
+      return rows
+        .reverse()
+        .map((row) => row._msg ?? '')
+        .join('\n')
+        .trim();
+    } catch (error) {
+      this.logger.warn(`No log lines for the diagnosis of ${ns}/${pod}: ${(error as Error).message}`);
+      return '';
     }
   }
 
   async scale(fn: FunctionWorkload, replicas: number): Promise<void> {
+    // NaN would go out as "replicas": null, which Kubernetes takes as zero.
+    if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid replica count ${replicas} for function ${fn.id}`);
     await this.api.scaleDeployment(this.namespaceOf(fn), functionResourceName(fn.id), Math.max(0, Math.floor(replicas)));
   }
 
-  async readyInstances(fn: FunctionWorkload): Promise<number> {
+  /** The Deployment's desired and ready replicas, in one read; zeros when it doesn't exist. */
+  private async instances(fn: FunctionWorkload): Promise<{ desired: number; ready: number }> {
     const deployment = await this.api.get<Deployment>(
       paths.apps(this.namespaceOf(fn), 'deployments', functionResourceName(fn.id)),
     );
-    return deployment?.status?.readyReplicas ?? 0;
+    return { desired: deployment?.spec?.replicas ?? 0, ready: deployment?.status?.readyReplicas ?? 0 };
   }
 
-  async invoke(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<InvokeResult> {
-    if ((await this.readyInstances(fn)) === 0) {
-      this.logger.log(`Cold start: scaling ${fn.id} from zero`);
-      await this.scale(fn, 1);
-      await this.waitUntilReady(fn, this.settings.readyTimeoutSeconds * 1000);
+  async readyInstances(fn: FunctionWorkload): Promise<number> {
+    return (await this.instances(fn)).ready;
+  }
+
+  async desiredInstances(fn: FunctionWorkload): Promise<number> {
+    return (await this.instances(fn)).desired;
+  }
+
+  async ping(timeoutMs: number): Promise<void> {
+    // /version needs no more than a login: every ServiceAccount may read it.
+    const { status } = await this.api.request('GET', '/version', { timeoutMs });
+    if (status !== 200) throw new Error(`the API server answered ${status}`);
+  }
+
+  async readyInstancesByFunction(): Promise<Map<string, number>> {
+    // One list of FF's Deployments in every namespace: a read the backend's ClusterRole allows (deploy/k8s/README.md).
+    const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);
+    const ready = new Map<string, number>();
+    for (const deployment of deployments) {
+      const functionId = deployment.metadata.labels?.[LABELS.functionId];
+      const instances = deployment.status?.readyReplicas ?? 0;
+      // Only FF's tenant namespaces: a label is easy to copy.
+      if (!functionId || instances <= 0 || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
+      ready.set(functionId, instances);
     }
-    return this.toResult(await this.post(fn, payload));
+    return ready;
   }
 
-  private post(fn: FunctionWorkload, payload: Record<string, unknown>): Promise<KubeResponse> {
+  async invoke(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<InvokeResult> {
+    let initMs: number | undefined;
+    try {
+      const { desired, ready } = await this.instances(fn);
+      if (ready === 0) {
+        // A cold start: how long it takes is recorded, even when it fails (D7 doesn't bill it).
+        const waitStarted = Date.now();
+        try {
+          // Only raise from zero: an instance may already be starting, perhaps asked for by the
+          // scaler for a burst of calls, and setting 1 here would take the others away again.
+          if (desired === 0) {
+            this.logger.log(`Cold start: scaling ${fn.id} from zero`);
+            await this.scale(fn, 1);
+          }
+          await this.waitForAnInstance(fn, this.settings.readyTimeoutSeconds * 1000);
+        } finally {
+          initMs = Date.now() - waitStarted;
+        }
+      }
+      return { ...this.toResult(await this.post(fn, payload, requestId)), ...(initMs !== undefined ? { initMs } : {}) };
+    } catch (error) {
+      throw withInitMs(error, initMs);
+    }
+  }
+
+  private async post(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<KubeResponse> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const body = JSON.stringify(payload);
-    const timeoutMs = fn.timeout * 1000 + 2000;
+    // The runtime logs the call under this ID, and answers with it (D6).
+    const headers: Record<string, string> = requestId ? { [REQUEST_ID_HEADER]: requestId } : {};
+    // A call may wait for a free instance (the runtime then answers 429), then runs up to its timeout. The
+    // 2 s past that include the second the Node.js runtime may wait for the call's output (OUTPUT_WAIT_MS).
+    const timeoutMs = maxQueueWaitMs(fn) + fn.timeout * 1000 + 2000;
     if (this.settings.invokeMode === 'proxy') {
-      return this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs });
+      try {
+        return await this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs, headers });
+      } catch (error) {
+        // Giving up waiting is the same timeout in both modes, so development records what production does.
+        if (error instanceof KubeRequestTimeoutError) throw noResponseWithin(timeoutMs);
+        throw error;
+      }
     }
-    return postJson(`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`, body, timeoutMs);
+    return postJson(`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`, body, timeoutMs, headers);
   }
 
   private toResult(res: KubeResponse): InvokeResult {
     const parsed = (() => {
       try {
-        return res.body ? JSON.parse(res.body) : null;
+        return res.body ? (JSON.parse(res.body) as unknown) : null;
       } catch {
         return undefined;
       }
     })();
+    // The runtime measures every call it ran, failed ones too: what D7 bills for errors and timeouts (P-20).
+    const measured = { durationMs: measure(res.headers['x-ff-duration-ms']), memoryUsedMb: measure(res.headers['x-ff-max-memory-used-mb']) };
     if (res.status === 200 && parsed !== undefined) {
-      return {
-        output: parsed,
-        durationMs: Number(res.headers['x-ff-duration-ms']) || undefined,
-        memoryUsedMb: Number(res.headers['x-ff-max-memory-used-mb']) || undefined,
-      };
+      return { output: parsed, ...measured };
     }
-    if (parsed && typeof parsed.errorType === 'string') {
-      if (parsed.errorType === 'Sandbox.Timedout') throw new FunctionTimeoutError(parsed.errorMessage);
-      if (res.headers['x-ff-function-error']) throw new FunctionRuntimeError(parsed.errorType, parsed.errorMessage);
+    const failure = runtimeError(parsed);
+    if (failure) {
+      if (failure.errorType === 'Sandbox.Timedout') throw new FunctionTimeoutError(failure.errorMessage, measured);
+      if (res.headers['x-ff-function-error']) throw new FunctionRuntimeError(failure.errorType, failure.errorMessage, measured);
+      // The runtime's queue: full, or no instance was free within one timeout.
+      if (res.status === 429 && failure.errorType === 'TooManyRequestsException') throw new FunctionThrottledError(failure.errorMessage);
     }
     throw new OrchestratorError(`Invocation failed with HTTP ${res.status}: ${res.body.slice(0, 300)}`);
   }
 }
 
+/**
+ * The error the runtime logged when the function's code failed to load: its
+ * last "function initialization failed" line (both runtimes log one, as JSON).
+ */
+export function loadErrorIn(log: string): FunctionLoadError | undefined {
+  for (const line of log.split('\n').reverse()) {
+    try {
+      const entry = JSON.parse(line) as { msg?: unknown; errorType?: unknown; errorMessage?: unknown };
+      if (entry?.msg === 'function initialization failed' && typeof entry.errorType === 'string') {
+        return new FunctionLoadError(entry.errorType, typeof entry.errorMessage === 'string' ? entry.errorMessage : '');
+      }
+    } catch {
+      // not a JSON line
+    }
+  }
+  return undefined;
+}
+
+/** The runtime's error answer, { errorType, errorMessage }, when the body is one. */
+function runtimeError(body: unknown): { errorType: string; errorMessage: string } | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const { errorType, errorMessage } = body as { errorType?: unknown; errorMessage?: unknown };
+  if (typeof errorType !== 'string') return undefined;
+  return { errorType, errorMessage: typeof errorMessage === 'string' ? errorMessage : '' };
+}
+
+/** The backend gave up waiting for the function's answer. */
+function noResponseWithin(timeoutMs: number): FunctionTimeoutError {
+  return new FunctionTimeoutError(`No response within ${timeoutMs} ms`);
+}
+
+/** A number the runtime measured, from its answer's header: 0 is a measure; a missing or garbled header is none. */
+function measure(header: string | string[] | undefined): number | undefined {
+  const text = Array.isArray(header) ? header[0] : header;
+  if (text === undefined || text.trim() === '') return undefined;
+  const value = Number(text);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 /** Direct (in-cluster) call to a function Service. */
-function postJson(url: string, body: string, timeoutMs: number): Promise<KubeResponse> {
+function postJson(url: string, body: string, timeoutMs: number, headers: Record<string, string> = {}): Promise<KubeResponse> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       url,
-      { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+      { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers } },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -255,7 +501,7 @@ function postJson(url: string, body: string, timeoutMs: number): Promise<KubeRes
         res.on('error', reject);
       },
     );
-    req.setTimeout(timeoutMs, () => req.destroy(new FunctionTimeoutError(`No response within ${timeoutMs} ms`)));
+    req.setTimeout(timeoutMs, () => req.destroy(noResponseWithin(timeoutMs)));
     req.on('error', reject);
     req.end(body);
   });

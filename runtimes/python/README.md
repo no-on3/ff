@@ -1,12 +1,12 @@
-# ff-runtime-python (runtime protocol v1)
+# ff-runtime-python (runtime protocol v2)
 
 The image that runs every Python function on FF. It speaks the same HTTP protocol as [ff-runtime-nodejs](../nodejs/README.md), so the backend treats both runtimes alike. User code is mounted read-only at `/var/task`. Nothing is installed when a function starts.
 
 | | |
 |---|---|
-| Image | `ff-runtime-python:3.13-v1` (`3.13` = Python 3.13, as in Lambda's `python3.13`; `v1` = runtime protocol) |
-| Base | `python:3.13-slim` (Debian, glibc 2.41). Built 2026-10-16 from `sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` (Python 3.13.16). The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
-| Size | about 119 MB |
+| Image | `ff-runtime-python:3.13-v2` (`3.13` = Python 3.13, as in Lambda's `python3.13`; `v2` = runtime protocol, see [What changed in v2](#what-changed-in-v2)) |
+| Base | `python:3.13-slim` (Debian, glibc 2.41). First built 2026-10-16 from `sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` (Python 3.13.16); `3.13-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (pip removed), still on Python 3.13.16. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Size | about 122 MB. pip is removed: functions ship their dependencies, nothing can be installed on a read-only root, and the packages pip vendors had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependencies | None: the runtime uses only the standard library |
 | Footprint | About 22 MB resident for the main process and 15 MB for an idle worker |
@@ -24,6 +24,8 @@ main process (main.py)                        worker process (worker.py)
 
 User code never runs in the main process. A Python thread cannot be stopped from outside, so the worker is a separate process: `python -P -m ff_runtime.worker`, connected to the main process by a socket pair that carries length-prefixed JSON messages (`protocol.py`). A CPU-bound infinite loop, a memory blow-up, or `sys.exit()` only ends the worker. The main process answers probes, reports a Lambda-style error, and starts a new worker. Starting a worker takes about 80 ms plus the import time of the user's module.
 
+If a replacement worker can't load code that loaded before, the environment is broken, not the code (a reload that times out at 0.1 CPU, for example). The runtime then answers the waiting invocations with the error, logs `function reload failed; exiting so the container restarts`, and exits with status 1, so Kubernetes restarts the container. A failure of the very first load is the code's fault: it stays reported on `/readyz`.
+
 Each connection gets its own thread, started with the low-level `_thread` call. `threading.Thread.start()` waits, with no timeout, for the new thread to report that it is running, so a thread that dies first under memory pressure would freeze the accept loop. That was seen under gVisor. If the runtime cannot start the worker or a thread it needs, it exits, and Kubernetes restarts the container.
 
 `multiprocessing` is not used: its spawn mode starts an extra resource-tracker process in every container and re-imports the main module in the child. A plain subprocess avoids both and exposes the worker's exit status directly.
@@ -32,13 +34,13 @@ Each connection gets its own thread, started with the low-level `_thread` call. 
 
 | Request | Response |
 |---|---|
-| `GET /healthz` | `200 {"status":"ok"}` while the main process is alive (liveness probe) |
-| `GET /readyz` | `200 {"status":"ready"}` once user code is loaded. Otherwise `503 {"status":"starting"}`, or `503 {"status":"failed","error":{errorType,errorMessage}}` (readiness probe) |
+| `GET /healthz` | `200 {"status": "ok"}` while the main process is alive (liveness probe) |
+| `GET /readyz` | `200 {"status": "ready"}` once user code is loaded. Otherwise `503 {"status": "starting"}`, or `503 {"status": "failed", "error": {"errorType": …, "errorMessage": …}}` (readiness probe) |
 | `POST /invoke` | Body = JSON payload (empty means `{}`; `Content-Length` or chunked). Optional header `X-FF-Request-Id`. Returns `200` with the handler's return value as JSON (`null` for `None`). |
 
 **Response headers:** `X-FF-Request-Id`, `X-FF-Duration-Ms`, `X-FF-Max-Memory-Used-Mb`, and `X-FF-Function-Error: Unhandled` on function errors.
 
-**Error responses** (body `{"errorType","errorMessage"}`):
+**Error responses** (body `{"errorType": …, "errorMessage": …}`):
 
 | Status | `errorType` | When |
 |---|---|---|
@@ -51,7 +53,7 @@ Each connection gets its own thread, started with the low-level `_thread` call. 
 | 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
 | 400 | `InvalidRequestContentException` | Body is not JSON |
 | 413 | `RequestEntityTooLargeException` | Body above 6 MB |
-| 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting |
+| 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting, or one waited longer than `FF_MAX_QUEUE_WAIT_MS` for its turn: `Rate exceeded: no instance was free within X.XX seconds` |
 
 The error names and messages follow AWS Lambda's (for example `Unable to import module 'function': No module named 'requests'`), so code and tooling port across.
 
@@ -97,6 +99,7 @@ On Kubernetes the container's memory limit equals the function's memory, as on L
 | `FUNCTION_NAME`, `FUNCTION_VERSION` | `unknown`, `$LATEST` | Reported in `context` and the logs |
 | `FF_INIT_TIMEOUT_MS` | `max(10000, FUNCTION_TIMEOUT)` | Limit for loading user code |
 | `FF_MAX_QUEUE` | `32` | Invocations allowed to wait behind the running one |
+| `FF_MAX_QUEUE_WAIT_MS` | `FUNCTION_TIMEOUT` | How long an invocation may wait for its turn before it gets 429. The backend's own timeout covers this wait plus the run, so it never gives up on a call that is only waiting |
 | `PORT` | `8080` | HTTP port (all IPv6 and IPv4 addresses) |
 
 The function's own environment variables reach user code unchanged.
@@ -113,13 +116,23 @@ END RequestId: <id>
 REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 128 MB	Max Memory Used: 38 MB
 ```
 
-`Max Memory Used` is the peak resident memory of the main process plus the worker. Platform events (start, initialization, timeouts, restarts) are one-line JSON. An exception from the handler is also logged as one JSON line with `errorType`, `errorMessage`, and `stackTrace`. **Environment variables are never logged.** On `SIGTERM` the runtime stops accepting connections, finishes the invocations in flight, and exits with status 0.
+`Max Memory Used` is the peak resident memory of the main process plus the worker. Platform events (start, initialization, timeouts, restarts) are one-line JSON, written by `json.dumps`, so with a space after each `:` and `,`. An exception from the handler is also logged as one JSON line, the same as the Node.js runtime writes:
+
+```json
+{"time": "…", "level": "error", "msg": "function error", "requestId": "…", "errorType": "ValueError", "errorMessage": "…", "stackTrace": ["  File \"/var/task/function.py\", line 3, in handler\n    raise ValueError(\"…\")"]}
+```
+
+A worker replaced after `Runtime.OutOfMemory` is logged as `function worker crashed; restarting`, with the request ID, as on the Node.js runtime. **Environment variables are never logged.** On `SIGTERM` the runtime stops accepting connections, finishes the invocations in flight, and exits with status 0.
+
+## What changed in v2
+
+Protocol v2 (2026-10-17, client-readiness plan P-04) keeps v1's HTTP interface, so the backend works with both; a function moves to v2 at its next update. For Python, three things changed, as for Node.js: the out-of-memory replacement is logged; a reload that fails after a crash makes the runtime exit, so that Kubernetes restarts the container, instead of leaving the pod unready for good; and a call waits at most `FF_MAX_QUEUE_WAIT_MS` (one timeout by default) for its turn, then gets 429. The startup line says `"protocol": 2`, and the server header `ff-runtime-python/2`.
 
 ## Developing and testing
 
 ```bash
 cd runtimes/python
-python3 -m unittest discover -s tests -v   # L1: 22 protocol tests on real processes, ~6 s, no Docker, no packages
+python3 -m unittest discover -s tests -v   # L1: 29 protocol tests on real processes, ~10 s, no Docker, no packages
 tests/container-smoke.sh                   # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```
 

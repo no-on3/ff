@@ -11,6 +11,7 @@ import {
   resourceQuotaManifest,
   serviceManifest,
 } from './manifests';
+import { accountHash } from './naming';
 import { settings, workload } from './test-fixtures';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -28,16 +29,17 @@ describe('Kubernetes manifests', () => {
   });
 
   describe('Namespace', () => {
-    it('is marked as FF-managed, enforces Pod Security "restricted", and records the tenant', () => {
-      const ns: any = namespaceManifest('ff-t-abc', 'user-1');
+    it('is marked as FF-managed, enforces Pod Security "restricted", and records its account (P-12)', () => {
+      const ns: any = namespaceManifest('ff-t-abc', '123456789012');
 
       expect(ns.metadata.labels).toMatchObject({
         'app.kubernetes.io/managed-by': 'ff-controller',
+        'ff.dev/account-hash': accountHash('123456789012'),
         'pod-security.kubernetes.io/enforce': 'restricted',
         'pod-security.kubernetes.io/warn': 'restricted',
         'pod-security.kubernetes.io/audit': 'restricted',
       });
-      expect(ns.metadata.annotations['ff.dev/tenant-id']).toBe('user-1');
+      expect(ns.metadata.annotations['ff.dev/account-id']).toBe('123456789012');
     });
   });
 
@@ -92,6 +94,8 @@ describe('Kubernetes manifests', () => {
       expect(env).toMatchObject({
         FUNCTION_NAME: 'hello',
         FUNCTION_TIMEOUT: '10000',
+        // A call waits at most one timeout for a free instance, then gets 429 (D14).
+        FF_MAX_QUEUE_WAIT_MS: '10000',
         FUNCTION_MEMORY_LIMIT: '512',
         LAMBDA_TASK_ROOT: '/var/task',
         FF_HANDLER: 'function.handler',
@@ -121,7 +125,7 @@ describe('Kubernetes manifests', () => {
     });
 
     it('picks the image for the runtime and rejects unconfigured runtimes', () => {
-      expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v1');
+      expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v2');
       expect(() => build({ runtime: 'cobol' })).toThrow('No runtime image configured for runtime "cobol"');
     });
   });
@@ -146,24 +150,31 @@ describe('Kubernetes manifests', () => {
   });
 
   describe('NetworkPolicy', () => {
-    it('denies all ingress except from ff-system', () => {
-      const np: any = networkPolicyManifest('ff-t-abc', settings());
+    it("denies all ingress but the backend's pods, in ff-system: not the platform's other pods there", () => {
+      const np: any = networkPolicyManifest('ff-t-abc', settings(), true);
 
       expect(np.spec.podSelector).toEqual({});
       expect(np.spec.policyTypes).toEqual(['Ingress', 'Egress']);
       expect(np.spec.ingress).toEqual([
-        { from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } } }] },
+        {
+          from: [
+            {
+              namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'ff-backend' } },
+            },
+          ],
+        },
       ]);
     });
 
     it('adds configured ingress CIDRs', () => {
-      const np: any = networkPolicyManifest('ff-t-abc', settings({ ingressAllowCidrs: ['10.42.0.1/32'] }));
+      const np: any = networkPolicyManifest('ff-t-abc', settings({ ingressAllowCidrs: ['10.42.0.1/32'] }), false);
 
       expect(np.spec.ingress[0].from).toContainEqual({ ipBlock: { cidr: '10.42.0.1/32' } });
     });
 
-    it('allows DNS and the internet, but never private, link-local or loopback ranges', () => {
-      const np: any = networkPolicyManifest('ff-t-abc', settings());
+    it('allows DNS and, for an account whose egress is on, the internet, but never private, link-local or loopback ranges', () => {
+      const np: any = networkPolicyManifest('ff-t-abc', settings(), true);
 
       expect(np.spec.egress[0].ports).toEqual([
         { protocol: 'UDP', port: 53 },
@@ -175,15 +186,20 @@ describe('Kubernetes manifests', () => {
       );
     });
 
-    it('allows only DNS when internet egress is disabled', () => {
-      const np: any = networkPolicyManifest('ff-t-abc', settings({ egressInternet: false }));
+    // Each account's own setting, which the operator turns on; the platform's setting cuts every account off.
+    it.each([
+      ['the account egress off, as every account starts', true, false],
+      ['the platform cutting every account off, whatever their setting', false, true],
+      ['both', false, false],
+    ])('allows only DNS with %s', (_label, platform, account) => {
+      const np: any = networkPolicyManifest('ff-t-abc', settings({ egressInternet: platform }), account);
 
-      expect(np.spec.egress).toHaveLength(1);
+      expect(np.spec.egress).toEqual([expect.objectContaining({ ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] })]);
     });
   });
 
-  it('sizes the tenant ResourceQuota from the settings', () => {
-    const quota: any = resourceQuotaManifest('ff-t-abc', settings({ tenantQuota: { pods: '5', cpu: '2', memory: '4Gi' } }));
+  it("sizes the tenant ResourceQuota from the account's plan, with pods as a quantity string", () => {
+    const quota: any = resourceQuotaManifest('ff-t-abc', { pods: 5, cpu: '2', memory: '4Gi' });
 
     expect(quota.spec.hard).toMatchObject({
       pods: '5',

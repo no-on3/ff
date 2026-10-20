@@ -1,0 +1,11 @@
+# The dashboards are the JSON files in deploy/k8s/monitoring/dashboards/, read-only in Grafana: a change is
+# made in git and applied, never in the UI, where it would be lost at the next restart.
+apiVersion: 1
+providers:
+  - name: ff
+    folder: FF
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana-dashboards

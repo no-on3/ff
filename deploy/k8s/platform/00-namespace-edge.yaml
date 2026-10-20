@@ -1,0 +1,10 @@
+# The edge proxy's namespace: the only platform pods the internet reaches. Pod Security restricted: the edge
+# listens on 8080 and 8443, unprivileged, and the Service maps 80 and 443 to them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ff-edge
+  labels:
+    app.kubernetes.io/part-of: ff
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

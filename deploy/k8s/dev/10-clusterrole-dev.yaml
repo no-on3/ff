@@ -1,0 +1,30 @@
+# Development only: the backend runs outside the cluster, so it invokes
+# function pods through the API server's Service proxy (K8S_INVOKE_MODE=proxy).
+# Production runs the backend inside the cluster and calls the Services
+# directly, so it never needs this. The ff-controller-scope admission policy
+# (base/40-admission-policy.yaml) confines these calls to ff-t-* namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ff-controller-dev-proxy
+  labels:
+    app.kubernetes.io/part-of: ff
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ff-controller-dev-proxy
+  labels:
+    app.kubernetes.io/part-of: ff
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ff-controller-dev-proxy
+subjects:
+  - kind: ServiceAccount
+    name: ff-controller
+    namespace: ff-system

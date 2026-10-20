@@ -3,6 +3,7 @@ import {
   CreateDateColumn,
   Entity,
   Index,
+  JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
@@ -18,14 +19,12 @@ export class FunctionMetrics {
   functionId: string;
 
   @ManyToOne(() => Function, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'function_id' })
   function: Function;
 
   @Column({ type: 'timestamptz' })
   @Index() // Index for time-based queries
   timestamp: Date;
-
-  @Column('float')
-  cpuUsage: number;
 
   @Column('float')
   memoryUsage: number;
@@ -48,6 +47,10 @@ export class FunctionMetrics {
   @Column('integer')
   activeInstances: number;
 
-  @CreateDateColumn()
+  /** The most calls in flight at once during the minute: the scaling signal (D14). */
+  @Column('integer', { default: 0 })
+  maxConcurrency: number;
+
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

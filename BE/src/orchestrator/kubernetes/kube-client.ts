@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import type { Readable } from 'node:stream';
 
 export const FIELD_MANAGER = 'ff-controller';
 
@@ -46,6 +47,18 @@ export class KubeApiError extends Error {
   }
 }
 
+/** No answer within the request's timeout: the request was abandoned. */
+export class KubeRequestTimeoutError extends Error {
+  constructor(
+    readonly timeoutMs: number,
+    method: string,
+    path: string,
+  ) {
+    super(`Kubernetes API request timed out after ${timeoutMs} ms: ${method} ${path}`);
+    this.name = 'KubeRequestTimeoutError';
+  }
+}
+
 /** The surface the orchestrator depends on (lets tests substitute a fake). */
 export interface KubeApi {
   request(method: string, path: string, options?: RequestOptions): Promise<KubeResponse>;
@@ -55,13 +68,16 @@ export interface KubeApi {
   deleteCollection(path: string, labelSelector: string): Promise<void>;
   scaleDeployment(namespace: string, name: string, replicas: number): Promise<void>;
   list<T>(path: string, labelSelector: string): Promise<T[]>;
-  podLog(namespace: string, pod: string, container: string, tailLines: number): Promise<string>;
+  /** A GET whose answer is read as it comes, for as long as it lasts: no timeout, but `signal` ends it. */
+  stream(path: string, signal: AbortSignal): Promise<{ status: number; body: Readable }>;
 }
 
 export const paths = {
   namespace: (name: string) => `/api/v1/namespaces/${name}`,
   core: (ns: string, plural: string, name?: string) => `/api/v1/namespaces/${ns}/${plural}${name ? `/${name}` : ''}`,
   apps: (ns: string, plural: string, name?: string) => `/apis/apps/v1/namespaces/${ns}/${plural}${name ? `/${name}` : ''}`,
+  /** Every namespace's objects of one kind, for a single list call. */
+  allApps: (plural: string) => `/apis/apps/v1/${plural}`,
   networking: (ns: string, plural: string, name?: string) =>
     `/apis/networking.k8s.io/v1/namespaces/${ns}/${plural}${name ? `/${name}` : ''}`,
   serviceProxy: (ns: string, service: string, port: string, path: string) =>
@@ -70,8 +86,11 @@ export const paths = {
 
 function toApiError(res: KubeResponse): KubeApiError {
   try {
-    const status = JSON.parse(res.body);
-    if (status?.kind === 'Status') return new KubeApiError(res.status, status.reason ?? '', status.message ?? res.body);
+    const status = JSON.parse(res.body) as { kind?: unknown; reason?: unknown; message?: unknown } | null;
+    if (status?.kind === 'Status') {
+      const text = (value: unknown, fallback: string) => (typeof value === 'string' ? value : fallback);
+      return new KubeApiError(res.status, text(status.reason, ''), text(status.message, res.body));
+    }
   } catch {
     // not JSON
   }
@@ -134,9 +153,33 @@ export class KubeClient implements KubeApi {
           res.on('error', reject);
         },
       );
-      req.setTimeout(timeoutMs, () => req.destroy(new Error(`Kubernetes API request timed out after ${timeoutMs} ms: ${method} ${path}`)));
+      req.setTimeout(timeoutMs, () => req.destroy(new KubeRequestTimeoutError(timeoutMs, method, path)));
       req.on('error', reject);
       if (options.body !== undefined) req.write(options.body);
+      req.end();
+    });
+  }
+
+  stream(path: string, signal: AbortSignal): Promise<{ status: number; body: Readable }> {
+    const transport = this.url.protocol === 'https:' ? https : http;
+    const headers: Record<string, string> = {};
+    const token = this.token();
+    if (token) headers.authorization = `Bearer ${token}`;
+    return new Promise((resolve, reject) => {
+      const req = transport.request(
+        {
+          protocol: this.url.protocol,
+          hostname: this.url.hostname,
+          port: this.url.port,
+          method: 'GET',
+          path: this.url.pathname.replace(/\/$/, '') + path,
+          headers,
+          agent: this.agent,
+          signal,
+        },
+        (res) => resolve({ status: res.statusCode ?? 0, body: res }),
+      );
+      req.on('error', reject);
       req.end();
     });
   }
@@ -180,15 +223,5 @@ export class KubeClient implements KubeApi {
   async list<T>(path: string, labelSelector: string): Promise<T[]> {
     const list = await this.json<{ items?: T[] }>('GET', `${path}?labelSelector=${encodeURIComponent(labelSelector)}`);
     return list?.items ?? [];
-  }
-
-  /** Best effort: diagnostics must never fail the caller. */
-  async podLog(namespace: string, pod: string, container: string, tailLines: number): Promise<string> {
-    try {
-      const res = await this.request('GET', `${paths.core(namespace, 'pods', pod)}/log?container=${container}&tailLines=${tailLines}`);
-      return res.status === 200 ? res.body : '';
-    } catch {
-      return '';
-    }
   }
 }

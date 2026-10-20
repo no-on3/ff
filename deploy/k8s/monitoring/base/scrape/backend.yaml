@@ -1,0 +1,13 @@
+# The backend's operator metrics (BE/src/monitoring): its pods in ff-system carry
+# app.kubernetes.io/name: ff-backend and name their metrics port `metrics` (FF_METRICS_PORT, 9464).
+- job_name: ff-backend
+  kubernetes_sd_configs:
+    - role: pod
+      namespaces:
+        names: [ff-system]
+  relabel_configs:
+    - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
+      regex: ff-backend;metrics
+      action: keep
+    - source_labels: [__meta_kubernetes_pod_name]
+      target_label: pod

@@ -1,0 +1,8 @@
+# What the metrics store scrapes, every 30 s. The backend's job is a file of its own, which the development
+# overlay replaces: there the backend runs on the host, not in a pod (../dev/backend.yaml).
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+scrape_config_files:
+  - /etc/victoria-metrics/scrape/jobs/backend.yaml
+  - /etc/victoria-metrics/scrape/jobs/platform.yaml

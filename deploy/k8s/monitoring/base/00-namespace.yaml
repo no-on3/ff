@@ -1,0 +1,10 @@
+# The operator's monitoring: the metrics store, its alert rules and their e-mail, and the dashboards. Nothing
+# here reads the node's files, so the namespace keeps the `restricted` Pod Security level.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ff-monitoring
+  labels:
+    app.kubernetes.io/part-of: ff
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

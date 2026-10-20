@@ -1,0 +1,164 @@
+# P-41 spike: Fluent Bit 5.1.3 (2026-10-01) as a DaemonSet, doing what vector.yaml does: the function containers of the
+# namespaces run.sh names in __PATHS__, the tenant, the function and each line's call, __LIMIT__ lines a second per
+# namespace of the lines' own time, long lines cut, into VictoriaLogs. Fluent Bit has no keyed throttle, so the limit is
+# in the Lua filter.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: ff-logging-spike
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ff-logging-spike-fluent-bit
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ff-logging-spike-fluent-bit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ff-logging-spike-fluent-bit
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: ff-logging-spike
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit
+  namespace: ff-logging-spike
+data:
+  fluent-bit.yaml: |
+    service:
+      flush: 0.5
+      log_level: info
+    pipeline:
+      inputs:
+        - name: tail
+          tag: kube.*
+          # Containers' log files are named <pod>_<namespace>_<container>-<id>.log.
+          path: __PATHS__
+          multiline.parser: cri
+          refresh_interval: 1
+          read_from_head: true
+          db: /var/lib/fluent-bit/tail.db
+          mem_buf_limit: 16MB
+      filters:
+        - name: kubernetes
+          match: kube.*
+          kube_tag_prefix: kube.var.log.containers.
+          merge_log: off
+          labels: on
+          annotations: off
+          buffer_size: 0
+        - name: lua
+          match: kube.*
+          script: /fluent-bit/etc/ff/ff.lua
+          call: ff
+      outputs:
+        - name: http
+          match: kube.*
+          host: victoria-logs.ff-logging-spike.svc
+          port: 9428
+          uri: /insert/jsonline?_stream_fields=namespace,function_id&_msg_field=message&_time_field=time
+          format: json_lines
+          json_date_key: time
+          json_date_format: iso8601
+  ff.lua: |
+    -- Each line: the tenant, the pod, the function, its call, cut when long; dropped past the namespace's limit.
+    local LIMIT = __LIMIT__
+    local MAX = 16384
+    local current = {}
+    local counts = {}
+    local newest = 0
+    local seen = 0
+
+    function ff(tag, timestamp, record)
+      local k = record["kubernetes"] or {}
+      local ns = k["namespace_name"] or "unknown"
+      local pod = k["pod_name"] or "unknown"
+      local labels = k["labels"] or {}
+      local message = record["log"] or ""
+      local out = { namespace = ns, pod = pod, function_id = labels["ff.dev/function-id"], stream = record["stream"], message = message }
+
+      -- An instance runs one call at a time (D14): a call's lines run from its START line to its REPORT.
+      local kind, id = string.match(message, "^(%u+) RequestId: (%S+)")
+      if kind == "START" or kind == "END" or kind == "REPORT" then
+        out.request_id = id
+        if kind == "REPORT" then current[pod] = nil else current[pod] = id end
+      elseif current[pod] then
+        out.request_id = current[pod]
+      end
+
+      -- The namespace's lines in this second of their own time: a backlog read after a restart keeps its seconds' budgets.
+      local second = math.floor(timestamp)
+      local key = ns .. ":" .. second
+      counts[key] = (counts[key] or 0) + 1
+      if second > newest then newest = second end
+      seen = seen + 1
+      if seen % 10000 == 0 then
+        for k, _ in pairs(counts) do
+          local s = tonumber(string.match(k, ":(%d+)$"))
+          if s and s < newest - 120 then counts[k] = nil end
+        end
+      end
+      if counts[key] > LIMIT then return -1, timestamp, record end
+
+      -- LuaJIT has no UTF-8 library: this cuts bytes, and may cut a character.
+      if #message > MAX then out.message = string.sub(message, 1, MAX) .. " …[truncated]" end
+      return 2, timestamp, out
+    end
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: ff-logging-spike
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      serviceAccountName: fluent-bit
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:5.1.3
+          args: [-c, /fluent-bit/etc/ff/fluent-bit.yaml]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/ff
+              readOnly: true
+            - name: var-log
+              mountPath: /var/log
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/fluent-bit
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit
+        - name: var-log
+          hostPath:
+            path: /var/log
+        - name: data
+          hostPath:
+            path: /var/lib/ff-logging-spike/fluent-bit
+            type: DirectoryOrCreate

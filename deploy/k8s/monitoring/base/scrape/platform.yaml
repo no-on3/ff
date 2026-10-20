@@ -1,0 +1,58 @@
+# The platform under the backend: the cluster's objects, the nodes, the log pipeline, and this stack.
+
+# The objects, as kube-state-metrics reports them; honor_labels keeps theirs (namespace, pod) over the target's.
+- job_name: kube-state-metrics
+  honor_labels: true
+  static_configs:
+    - targets: [kube-state-metrics.ff-monitoring.svc:8080]
+
+# Each node's and container's memory and CPU, from the kubelet's light endpoint (cAdvisor's is left out: its
+# thousands of series a node would be most of the store). The kubelet checks the store's token (nodes/metrics).
+- job_name: kubelet
+  scheme: https
+  metrics_path: /metrics/resource
+  bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+  tls_config:
+    ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    # The kubelet's certificate names the node, not the address the store connects to.
+    insecure_skip_verify: true
+  kubernetes_sd_configs:
+    - role: node
+  relabel_configs:
+    - source_labels: [__meta_kubernetes_node_name]
+      target_label: node
+
+# The log store: what it ingests and drops, and its disk.
+- job_name: victoria-logs
+  static_configs:
+    - targets: [victoria-logs.ff-system.svc:9428]
+
+# The log collector on each node: what it reads, and how long its lines take to reach the store.
+- job_name: fluent-bit
+  metrics_path: /api/v2/metrics/prometheus
+  kubernetes_sd_configs:
+    - role: pod
+      namespaces:
+        names: [ff-logging]
+  relabel_configs:
+    - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
+      regex: fluent-bit;http
+      action: keep
+    - source_labels: [__meta_kubernetes_pod_node_name]
+      target_label: node
+
+# This stack, besides the store, which scrapes itself (job victoria-metrics): its pods, found by their name,
+# each its own job. A part that isn't running, as Grafana in development, is no target, rather than one down.
+- job_name: ff-monitoring
+  kubernetes_sd_configs:
+    - role: pod
+      namespaces:
+        names: [ff-monitoring]
+  relabel_configs:
+    - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_container_port_name]
+      regex: (vmalert|alertmanager|grafana);http
+      action: keep
+    - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+      target_label: job
+    - source_labels: [__meta_kubernetes_pod_name]
+      target_label: pod

@@ -1,0 +1,8 @@
+# In development the backend runs on the host, not in a pod: the store reaches it through the Service
+# ff-backend-dev (backend-on-the-host.yaml), whose address hack/k8s/monitoring-up.sh sets to the host's on the
+# k3d network. The backend listens there when its FF_METRICS_HOST is that address (hack/k8s/host-address.sh).
+- job_name: ff-backend
+  static_configs:
+    - targets: [ff-backend-dev.ff-monitoring.svc:9464]
+      labels:
+        pod: development

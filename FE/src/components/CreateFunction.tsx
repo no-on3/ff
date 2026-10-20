@@ -1,36 +1,51 @@
 import React, { useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
+import { apiErrorMessage } from '../lib/functions';
+import { NewFunction, Runtime } from '../services/api';
+import { can } from '../lib/session';
+import { useSession } from '../session/session';
 import { createFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
-export enum Runtime {
-  NODEJS = 'nodejs',
-  PYTHON = 'python',
-}
+
 const CreateFunction: React.FC = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch<AppDispatch>();
-  
-  const [formData, setFormData] = useState({
+  const { plan, role } = useSession().account!; // the function pages show only for an account
+
+  const [formData, setFormData] = useState<NewFunction>({
     name: '',
-    // description: '',
     code: '',
-    runtime : Runtime.NODEJS,
-    memory : 128,
-    timeout : 5,
-    metadata : {}
+    runtime: 'nodejs',
+    memory: 128,
+    timeout: 5,
+    metadata: {},
   });
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    setCreating(true);
+    setError(null);
     try {
       await dispatch(createFunction(formData)).unwrap();
       navigate('/functions');
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err) {
+      // The API's reason: a validation error, or why the function didn't become ready.
+      setError(apiErrorMessage(err));
+    } finally {
+      setCreating(false);
     }
   };
+
+  if (!can(role, 'change functions')) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="card">As a viewer, you read this account's functions; owners and developers create them.</div>
+      </div>
+    );
+  }
 
   return (
     <div className="container mx-auto px-4 py-8">
@@ -56,19 +71,6 @@ const CreateFunction: React.FC = () => {
           />
         </div>
 
-        {/* <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Description
-          </label>
-          <textarea
-            value={formData.description}
-            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-            className="input mt-1"
-            rows={3}
-            required
-          />
-        </div> */}
-
         <div>
           <label className="block text-sm font-medium text-gray-700">
             Code
@@ -92,55 +94,54 @@ const CreateFunction: React.FC = () => {
             className="input mt-1"
             required
           >
-            <option value={Runtime.NODEJS}>Node.js</option>
-            <option value={Runtime.PYTHON}>Python</option>
+            <option value="nodejs">Node.js</option>
+            <option value="python">Python</option>
           </select>
         </div>
 
         <div>
           <label className="block text-sm font-medium text-gray-700">
-            Memory
+            Memory (MB)
           </label>
           <input
             type="number"
+            min={128}
+            max={plan.limits.memoryMb}
             value={formData.memory}
             onChange={(e) => setFormData({ ...formData, memory: parseInt(e.target.value) })}
             className="input mt-1"
             required
           />
+          <p className="mt-1 text-sm text-gray-500">
+            128 to {plan.limits.memoryMb} MB on the {plan.name} plan.
+          </p>
         </div>
 
         <div>
           <label className="block text-sm font-medium text-gray-700">
-            Timeout
+            Timeout (s)
           </label>
           <input
             type="number"
+            min={1}
+            max={plan.limits.timeoutSeconds}
             value={formData.timeout}
             onChange={(e) => setFormData({ ...formData, timeout: parseInt(e.target.value) })}
             className="input mt-1"
             required
           />
+          <p className="mt-1 text-sm text-gray-500">
+            1 to {plan.limits.timeoutSeconds} s on the {plan.name} plan.
+          </p>
         </div>
-
-        {/* <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Metadata
-          </label>
-          <input
-            type="text"
-            value={formData.metadata}
-            onChange={(e) => setFormData({ ...formData, metadata: e.target.value })}
-            className="input mt-1"
-          />
-        </div> */}
 
         <div className="flex gap-4">
           <button
             type="submit"
             className="btn btn-primary"
+            disabled={creating}
           >
-            Create Function
+            {creating ? 'Creating… (waits until it runs)' : 'Create Function'}
           </button>
           <button
             type="button"

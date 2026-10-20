@@ -1,46 +1,74 @@
 @import "tailwindcss";
 
-:root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-body {
-  @apply m-0 flex items-center min-w-screen min-h-screen;
-}
-
-h1 {
-  @apply text-4xl leading-tight;
-}
-
-a {
-  @apply font-medium text-blue-600;
-}
-a:hover {
-  @apply text-blue-500;
-}
-
-button {
-  @apply rounded px-4 py-2 border border-transparent text-base font-medium text-white bg-gray-800 hover:border-blue-600;
-}
-button:hover {
-  @apply border-blue-600;
-}
-button:focus,
-button:focus-visible {
-  @apply outline-none ring-2 ring-blue-600;
-}
-
-@media (prefers-color-scheme: light) {
+/*
+ * The page's defaults go in the base layer, so the component classes below
+ * and the utilities win over them: unlayered, these rules would beat every
+ * layer, whatever its specificity.
+ */
+@layer base {
   :root {
-    @apply text-gray-900 bg-white;
+    font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    color-scheme: light;
+    @apply text-gray-900 bg-gray-50;
+  }
+
+  /* A plain block: the old `flex items-center` shrank the whole console to a narrow column. */
+  body {
+    @apply m-0 min-h-screen;
+  }
+
+  h1 {
+    @apply text-4xl leading-tight;
+  }
+
+  a {
+    @apply font-medium text-blue-600;
   }
   a:hover {
     @apply text-blue-700;
   }
-  button {
-    @apply bg-gray-100;
+
+  button:not(:disabled) {
+    @apply cursor-pointer;
+  }
+  button:disabled {
+    @apply cursor-not-allowed opacity-60;
+  }
+  button:focus-visible {
+    @apply outline-none ring-2 ring-blue-600;
+  }
+}
+
+/*
+ * The console's own classes. They lived in src/styles/main.scss until P-14,
+ * where Tailwind never processed @apply: the browser dropped those rules, so
+ * buttons, cards and inputs had no styles of their own, and the primary
+ * button showed the old global button rule's white text on light grey.
+ */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md px-4 py-2 font-medium transition-colors duration-200;
+  }
+  .btn-primary {
+    @apply bg-blue-600 text-white hover:bg-blue-700;
+  }
+  .btn-secondary {
+    @apply bg-gray-200 text-gray-800 hover:bg-gray-300;
+  }
+  .card {
+    @apply rounded-lg bg-white p-6 shadow-md;
+  }
+  .input {
+    @apply w-full rounded-md border border-gray-300 bg-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500;
+  }
+}
+
+/* A printed page (the pro-forma, P-35): the page's margins; the console's header and banners hide with print:hidden. */
+@media print {
+  @page {
+    margin: 16mm;
   }
 }

@@ -1,0 +1,40 @@
+# The platform as hack/e2e-platform.sh deploys it, on a cluster of its own, never for production: hostnames under
+# ff.test on port 58443; TLS from Caddy's own authority; PostgreSQL, S3 and Mailpit as containers beside the
+# cluster, which Services without a selector name (external.yaml), the script writing their addresses; and the
+# development realm, whose test client and operator give the test its tokens (the ConfigMap keycloak-realm-e2e,
+# which the script makes from deploy/keycloak/ff-realm.json).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../deploy/k8s/platform
+  - external.yaml
+configMapGenerator:
+  - name: ff-backend
+    namespace: ff-system
+    behavior: merge
+    envs: [backend.env]
+  - name: keycloak
+    namespace: ff-system
+    behavior: merge
+    envs: [keycloak.env]
+  - name: ff-edge
+    namespace: ff-edge
+    behavior: merge
+    envs: [edge.env]
+patches:
+  - target:
+      kind: Deployment
+      name: keycloak
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes/0/configMap/name
+        value: keycloak-realm-e2e
+images:
+  - name: ff-backend
+    newTag: e2e
+  - name: ff-console
+    newTag: e2e
+  - name: ff-admin
+    newTag: e2e
+  - name: ff-edge
+    newTag: e2e

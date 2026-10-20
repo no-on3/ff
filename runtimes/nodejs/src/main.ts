@@ -1,5 +1,5 @@
 /**
- * FF Node.js runtime, protocol v1. The main thread serves HTTP and supervises
+ * FF Node.js runtime, protocol v2. The main thread serves HTTP and supervises
  * one worker thread that runs user code (worker.ts):
  *
  *   GET  /healthz   liveness: the main thread is responsive
@@ -8,7 +8,8 @@
  *
  * A timeout, out-of-memory, or crash terminates the worker and starts a fresh
  * one, so even CPU-bound infinite loops are stopped and probes keep answering.
- * Environment variables are never logged.
+ * If that fresh worker can't load code that loaded before, the process exits,
+ * so that Kubernetes restarts the container. Environment variables are never logged.
  */
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -17,6 +18,9 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
 import type { FunctionError, FunctionEvent, WorkerConfig, WorkerMessage } from './protocol';
+import { OutputRelay } from './relay';
+
+type ResultMessage = Extract<WorkerMessage, { type: 'result' }>;
 
 const env = process.env;
 const port = Number(env.PORT ?? 8080);
@@ -24,6 +28,12 @@ const timeoutMs = Number(env.FUNCTION_TIMEOUT ?? 30_000);
 const memoryLimitMb = Number(env.FUNCTION_MEMORY_LIMIT ?? 128);
 const initTimeoutMs = Number(env.FF_INIT_TIMEOUT_MS ?? Math.max(10_000, timeoutMs));
 const maxQueue = Number(env.FF_MAX_QUEUE ?? 32);
+/**
+ * How long a call may wait for the instance to be free. Then it gets 429, as on Lambda when no
+ * environment is free. The backend waits this long plus the timeout, so it never gives up on
+ * a call that is only queued (client-readiness plan, P-06).
+ */
+const maxQueueWaitMs = Number(env.FF_MAX_QUEUE_WAIT_MS ?? timeoutMs);
 /** AWS Lambda's synchronous request and response limit. */
 const MAX_PAYLOAD_BYTES = 6 * 1024 * 1024;
 const MB = 1024 * 1024;
@@ -34,6 +44,12 @@ const WORKER_BASELINE_MB = 12;
 /** Room for this thread's share of an invocation (6 MB requests and replies, held more than once) and for Buffers, which V8's heap limits do not cover. */
 const MARGIN_MB = 16;
 const MIN_HEAP_MB = 32;
+/**
+ * How long END waits for the worker's end-of-call markers (protocol.ts) once the result has come: they
+ * come within a millisecond unless work the handler left running blocks the worker. It must stay under
+ * the 2 s the backend allows past a call's queue wait and timeout (kubernetes.orchestrator.ts).
+ */
+const OUTPUT_WAIT_MS = 1000;
 
 /** The container's memory limit and use (cgroup v2), where this process runs in one. */
 function containerMemoryMb(): { limitMb?: number; inUseMb?: number } {
@@ -71,33 +87,61 @@ const workerConfig: WorkerConfig = {
   memoryLimitMb,
 };
 
+// As on AWS Lambda, the function runs in its task root, so relative paths find the
+// files next to its code. Worker threads can't change directory, and share this one.
+try {
+  process.chdir(workerConfig.taskRoot);
+} catch {
+  // A missing task root is reported when the worker loads the code.
+}
+
 interface Invocation {
   id: number;
   requestId: string;
   event: FunctionEvent;
   res: http.ServerResponse;
   startedAt?: number;
+  /** When the handler settled: the call's duration ends here, not when its output is all forwarded. */
+  endedAt?: number;
   durationMs?: number;
   timer?: NodeJS.Timeout;
+  /** The handler's result, held until the call's output is all forwarded. */
+  result?: ResultMessage;
+  /** The worker's streams whose end-of-call marker came: END waits for both, OUTPUT_WAIT_MS at most. */
+  outputEnded?: Set<'stdout' | 'stderr'>;
+  outputTimer?: NodeJS.Timeout;
+  /** Answers 429 if the call is still queued after maxQueueWaitMs. */
+  queueTimer?: NodeJS.Timeout;
 }
 
 let worker: Worker | undefined;
 /** Incremented whenever a worker is replaced; events from older workers are ignored. */
 let generation = 0;
 let state: 'starting' | 'ready' | 'failed' = 'starting';
+/** The code has loaded at least once: a later load failure is a broken environment, not broken code. */
+let everReady = false;
 let initError: FunctionError | undefined;
 let initTimer: NodeJS.Timeout | undefined;
 let current: Invocation | undefined;
 const queue: Invocation[] = [];
 let nextId = 1;
 let shuttingDown = false;
+/** The current worker's stdout, forwarded by this thread: the runtime's own lines start a line of their own. */
+let stdoutRelay: OutputRelay | undefined;
 
-function log(fields: Record<string, unknown>): void {
-  console.log(JSON.stringify({ time: new Date().toISOString(), ...fields }));
+/** One of the runtime's own lines, after any line the user's output left open. */
+function line(text: string): void {
+  stdoutRelay?.endLine();
+  console.log(text);
 }
 
+function log(fields: Record<string, unknown>): void {
+  line(JSON.stringify({ time: new Date().toISOString(), ...fields }));
+}
+
+/** The runtime's peak resident memory since it started, all threads together, as Lambda's "Max Memory Used". */
 function maxMemoryUsedMb(): number {
-  return Math.round(process.memoryUsage().rss / (1024 * 1024));
+  return Math.max(1, Math.round(process.resourceUsage().maxRSS / 1024)); // maxRSS is in KiB
 }
 
 function send(res: http.ServerResponse, status: number, body: string, headers: Record<string, string> = {}): void {
@@ -126,8 +170,25 @@ function startWorker(): void {
   const gen = ++generation;
   state = 'starting';
   initError = undefined;
-  const w = new Worker(path.join(__dirname, 'worker.js'), { workerData: workerConfig, resourceLimits: heapLimits });
+  // The worker's output comes to this thread, which forwards it: only then can END follow a call's last line.
+  const w = new Worker(path.join(__dirname, 'worker.js'), {
+    workerData: workerConfig,
+    resourceLimits: heapLimits,
+    stdout: true,
+    stderr: true,
+  });
   worker = w;
+  const relays = {
+    stdout: new OutputRelay(process.stdout, (id) => gen === generation && onEndOfCall(id, 'stdout')),
+    stderr: new OutputRelay(process.stderr, (id) => gen === generation && onEndOfCall(id, 'stderr')),
+  };
+  stdoutRelay = relays.stdout;
+  for (const name of ['stdout', 'stderr'] as const) {
+    const stream = w[name];
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk: string) => relays[name].write(chunk));
+    stream.on('end', () => relays[name].flush());
+  }
   w.on('message', (message: WorkerMessage) => gen === generation && onMessage(message));
   w.on('error', (err: NodeJS.ErrnoException) => {
     if (gen !== generation) return;
@@ -153,7 +214,12 @@ function replaceWorker(): void {
   if (!shuttingDown) startWorker();
 }
 
-/** User code cannot be loaded: report it on /readyz and to every caller. */
+/**
+ * User code cannot be loaded: report it on /readyz and to every caller. If it
+ * loaded before, the code is fine and this environment is not (a reload that
+ * timed out at 0.1 CPU, for example). /readyz would stay 503 while /healthz
+ * stays 200, so kubelet would never restart the container: exit instead.
+ */
 function fail(error: FunctionError): void {
   clearTimeout(initTimer);
   state = 'failed';
@@ -164,7 +230,14 @@ function fail(error: FunctionError): void {
   current = undefined;
   for (const inv of pending) {
     if (inv.timer) clearTimeout(inv.timer);
+    if (inv.queueTimer) clearTimeout(inv.queueTimer);
+    clearTimeout(inv.outputTimer);
     respondError(inv, 500, error);
+  }
+  if (everReady) {
+    log({ level: 'error', msg: 'function reload failed; exiting so the container restarts', ...error });
+    server.close();
+    setTimeout(() => process.exit(1), 200); // let the answers above reach their callers
   }
 }
 
@@ -172,24 +245,64 @@ function onMessage(message: WorkerMessage): void {
   if (message.type === 'ready') {
     clearTimeout(initTimer);
     state = 'ready';
+    everReady = true;
     log({ level: 'info', msg: 'function initialized', handler: workerConfig.handler });
     dispatch();
   } else if (message.type === 'init_error') {
     fail({ errorType: message.errorType, errorMessage: message.errorMessage });
-  } else if (current && current.id === message.id) {
+  } else if (current && current.id === message.id && !current.result) {
+    // The handler has settled: no timeout from now on. END waits for the call's output, whose end the worker marks.
     const inv = current;
-    finish(inv);
-    if (!message.ok) {
-      respondError(inv, 500, { errorType: message.errorType, errorMessage: message.errorMessage });
-    } else if (Buffer.byteLength(message.body) > MAX_PAYLOAD_BYTES) {
-      respondError(inv, 500, {
-        errorType: 'Function.ResponseSizeTooLarge',
-        errorMessage: `Response payload size exceeded maximum allowed payload size (${MAX_PAYLOAD_BYTES} bytes)`,
-      });
-    } else {
-      send(inv.res, 200, message.body, invocationHeaders(inv));
-    }
-    dispatch();
+    clearTimeout(inv.timer);
+    inv.endedAt = performance.now();
+    inv.result = message;
+    if (inv.outputEnded?.size === 2) settle(inv);
+    else inv.outputTimer = setTimeout(() => settle(inv), OUTPUT_WAIT_MS);
+  }
+}
+
+/** A worker stream's end-of-call marker: everything the call wrote to that stream is forwarded. */
+function onEndOfCall(id: number, stream: 'stdout' | 'stderr'): void {
+  const inv = current;
+  if (!inv || inv.id !== id) return; // a marker that came after its call's wait ended
+  (inv.outputEnded ??= new Set()).add(stream);
+  if (inv.result && inv.outputEnded.size === 2) settle(inv);
+}
+
+/** Completes a call whose result came, and starts the next one. */
+function settle(inv: Invocation): void {
+  if (current !== inv) return;
+  complete(inv);
+  dispatch();
+}
+
+/** A call whose result came, once its output is in the log: its error line, END and REPORT, then its answer. */
+function complete(inv: Invocation): void {
+  const message = inv.result!;
+  if (!message.ok && message.stackTrace) {
+    // The handler threw: the same line as the Python runtime writes, before END.
+    log({
+      level: 'error',
+      msg: 'function error',
+      requestId: inv.requestId,
+      errorType: message.errorType,
+      errorMessage: message.errorMessage,
+      stackTrace: message.stackTrace,
+    });
+  }
+  finish(inv);
+  if (!message.ok) {
+    respondError(inv, 500, { errorType: message.errorType, errorMessage: message.errorMessage });
+  } else if (typeof message.body !== 'string') {
+    // The worker never sends anything else; this keeps a bad message from crashing this thread.
+    respondError(inv, 500, { errorType: 'Runtime.MarshalError', errorMessage: 'Unable to marshal response' });
+  } else if (Buffer.byteLength(message.body) > MAX_PAYLOAD_BYTES) {
+    respondError(inv, 500, {
+      errorType: 'Function.ResponseSizeTooLarge',
+      errorMessage: `Response payload size exceeded maximum allowed payload size (${MAX_PAYLOAD_BYTES} bytes)`,
+    });
+  } else {
+    send(inv.res, 200, message.body, invocationHeaders(inv));
   }
 }
 
@@ -199,7 +312,12 @@ function onCrash(errorType: string, errorMessage: string): void {
     fail({ errorType, errorMessage }); // died while loading user code
     return;
   }
-  const inv = current;
+  let inv = current;
+  if (inv?.result) {
+    // The handler had returned, and its call keeps its answer: what crashed is work it left running.
+    complete(inv);
+    inv = undefined;
+  }
   log({ level: 'error', msg: 'function worker crashed; restarting', errorType, errorMessage, requestId: inv?.requestId });
   if (inv) {
     finish(inv);
@@ -210,10 +328,11 @@ function onCrash(errorType: string, errorMessage: string): void {
 
 function finish(inv: Invocation): void {
   if (inv.timer) clearTimeout(inv.timer);
+  clearTimeout(inv.outputTimer);
   if (current === inv) current = undefined;
-  inv.durationMs = inv.startedAt === undefined ? 0 : performance.now() - inv.startedAt;
-  console.log(`END RequestId: ${inv.requestId}`);
-  console.log(
+  inv.durationMs = inv.startedAt === undefined ? 0 : (inv.endedAt ?? performance.now()) - inv.startedAt;
+  line(`END RequestId: ${inv.requestId}`);
+  line(
     `REPORT RequestId: ${inv.requestId}\tDuration: ${inv.durationMs.toFixed(2)} ms\t` +
       `Billed Duration: ${Math.ceil(inv.durationMs)} ms\tMemory Size: ${memoryLimitMb} MB\t` +
       `Max Memory Used: ${maxMemoryUsedMb()} MB`,
@@ -222,8 +341,9 @@ function finish(inv: Invocation): void {
 
 function onTimeout(inv: Invocation): void {
   if (current !== inv) return;
-  finish(inv);
+  // Before END, as the Python runtime writes it: the log store tags a call's lines up to its REPORT.
   log({ level: 'error', msg: 'task timed out; restarting worker', requestId: inv.requestId, timeoutMs });
+  finish(inv);
   respondError(inv, 504, {
     errorType: 'Sandbox.Timedout',
     errorMessage: `Task timed out after ${(timeoutMs / 1000).toFixed(2)} seconds`,
@@ -234,14 +354,18 @@ function onTimeout(inv: Invocation): void {
 function dispatch(): void {
   if (current || state !== 'ready' || !worker) return;
   let inv = queue.shift();
-  while (inv && inv.res.destroyed) inv = queue.shift(); // callers that gave up while queued
+  while (inv && inv.res.destroyed) {
+    clearTimeout(inv.queueTimer);
+    inv = queue.shift(); // callers that gave up while queued
+  }
   if (!inv) {
     if (shuttingDown) process.exit(0);
     return;
   }
+  clearTimeout(inv.queueTimer);
   current = inv;
   inv.startedAt = performance.now();
-  console.log(`START RequestId: ${inv.requestId} Version: ${workerConfig.functionVersion}`);
+  line(`START RequestId: ${inv.requestId} Version: ${workerConfig.functionVersion}`);
   const target = inv;
   inv.timer = setTimeout(() => onTimeout(target), timeoutMs);
   worker.postMessage({ type: 'invoke', id: inv.id, requestId: inv.requestId, event: inv.event, deadlineMs: Date.now() + timeoutMs });
@@ -300,7 +424,7 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
     return;
   }
   const header = req.headers['x-ff-request-id'];
-  queue.push({
+  const inv: Invocation = {
     id: nextId++,
     requestId: (Array.isArray(header) ? header[0] : header) || randomUUID(),
     res,
@@ -311,8 +435,21 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
       query: Object.fromEntries(url.searchParams),
       path: url.pathname,
     },
-  });
+  };
+  inv.queueTimer = setTimeout(() => expireQueued(inv), maxQueueWaitMs);
+  queue.push(inv);
   dispatch();
+}
+
+/** A call that waited maxQueueWaitMs without the instance becoming free: 429, as on Lambda. */
+function expireQueued(inv: Invocation): void {
+  const index = queue.indexOf(inv);
+  if (index === -1) return; // it started, or was answered
+  queue.splice(index, 1);
+  sendJson(inv.res, 429, {
+    errorType: 'TooManyRequestsException',
+    errorMessage: `Rate exceeded: no instance was free within ${(maxQueueWaitMs / 1000).toFixed(2)} seconds`,
+  });
 }
 
 const server = http.createServer((req, res) => {
@@ -350,9 +487,10 @@ server.listen(port, () => {
     msg: 'runtime listening',
     port,
     timeoutMs,
+    maxQueueWaitMs,
     memoryLimitMb,
     heapLimitMb: heapLimits.maxOldGenerationSizeMb + heapLimits.maxYoungGenerationSizeMb,
     handler: workerConfig.handler,
-    protocol: 1,
+    protocol: 2,
   });
 });

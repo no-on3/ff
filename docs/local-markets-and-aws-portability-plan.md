@@ -1246,29 +1246,29 @@ A customer exporting to AWS counts as a success metric, not a loss: it is proof 
 
 ## Appendix A: Findings → fixes → phase
 
-The status column records what the [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12, 2026-10-16) changed. The finding IDs refer to the audit in §2.3, which describes the code as it was before the migration.
+The status column records what the [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12, 2026-10-16) and the [client-readiness plan](client-readiness-plan.md) (P-xx tasks, from 2026-10-17) changed. The finding IDs refer to the audit in §2.3, which describes the code as it was before the migration.
 
-| Finding | Fix (task) | Phase | Status (2026-10-16) |
+| Finding | Fix (task) | Phase | Status |
 |---|---|---|---|
-| C-1, C-2, C-3 | F-01 global guard, typed principal, tenant-scoped queries; R-08 IAM | 0 / 1 | Open. Authentication is still not enforced. Development uses one fixed tenant (`FF_DEV_USER_ID`, K-07). |
+| C-1, C-2, C-3 | F-01 global guard, typed principal, tenant-scoped queries; R-08 IAM | 0 / 1 | Done (P-10 to P-17, 2026-10-17). A global guard on every route; logins through Keycloak, and API keys with scopes; every query scoped to the caller's account, another account's function answering 404; members with roles, and an audit log. `hack/e2e-tenancy.sh` checks every route as another account and anonymously. |
 | C-4 | F-02 artifact delivery via pre-signed URL + checksum; R-02/R-03 | 0 / 1 | Partly done. Code is delivered as data in an immutable ConfigMap and never evaluated as a template (K-06). Zip delivery (R-02) is open. |
 | C-5 | F-03 real lifecycle; R-01 versions | 0 / 1 | Lifecycle done. Update rolls out, and delete removes the Deployment, Service, ConfigMaps, and database rows (K-06, K-07, `dbe2ce3`). Versions (R-01) are open. |
-| C-6 | ~~F-13 Nomad ACL/mTLS~~ K-04, K-06; R-07 isolation | 0 / 1 | Done. Least-privilege ServiceAccount, admission policy, non-root read-only pods, a default-deny NetworkPolicy per tenant (K-04 to K-06, K-10), and an optional gVisor sandbox (K-11). |
-| C-7 | F-04 baseline migration, sync off, drift check in CI | 0 | Open |
-| H-1, M-3, M-6 | F-06 → R-02/R-03 zips with dependencies, current runtimes | 0 / 1 | Partly done. The runtime images install nothing at start and run Node.js 24 and Python 3.13 (K-05, K-10). Zips with dependencies are open. |
+| C-6 | ~~F-13 Nomad ACL/mTLS~~ K-04, K-06; R-07 isolation | 0 / 1 | Done. Least-privilege ServiceAccount, admission policy, non-root read-only pods, a default-deny NetworkPolicy per tenant (K-04 to K-06, K-10), and the gVisor sandbox (K-11), required in production since P-62. |
+| C-7 | F-04 baseline migration, sync off, drift check in CI | 0 | Done (P-01, 2026-10-17). One baseline generated from the entities, with snake_case columns and `gen_random_uuid()`; sync off everywhere; migrations as a deploy step (`npm run migration:run:prod`); the backend refuses to start while one is pending; `npm run migration:check` fails on drift, and the pipeline runs it (`hack/ci.sh db`, P-63). |
+| H-1, M-3, M-6 | F-06 → R-02/R-03 zips with dependencies, current runtimes | 0 / 1 | Partly done. The runtime images install nothing at start and run Node.js 24 and Python 3.13 (K-05, K-10), and the platform's images Node.js 24 (P-60). Zips with dependencies are open. |
 | H-2 | R-07/R-01 memory hard limit, CPU proportional to memory | 1 | Done. The memory limit is the function's memory, and CPU is proportional to it (K-06). The runtimes keep user code within that limit, so the container survives an out-of-memory error. |
 | H-3, H-7 | R-05 gateway, R-06 scaling controller (delete in-process autoscaler) | 1 | Partly done. Invocations go through the Service, with timeouts and readiness gating. Scaling uses the scale subresource, with scale to zero when idle (K-06, K-07). The gateway (R-05) is open. |
-| H-4, H-5 | F-07 invocation records → B-01 metering | 0 / 2 | Partly done. Duration and peak memory come from the runtime's response headers (K-05, K-07). Metering is open. |
+| H-4, H-5 | F-07 invocation records → B-01 metering | 0 / 2 | Done. Duration and peak memory come from the runtime's response headers (K-05, K-07), and every invocation leaves a usage record when it ends, which the hourly rating bills from (P-20 to P-22, P-30 to P-33). |
 | H-6 | R-03 Python runtime via official client | 1 | Done, with FF's own Python runtime on the same protocol as Node.js (K-10) |
 | H-8, H-9 | F-08 → R-04 agent + official runtime interface client | 0 / 1 | Done. The environment is never logged, and timeouts stop even CPU-bound loops (K-05, K-10). |
 | H-10 | R-10 single CLI talking to the API only (pre-signed uploads, device-flow login) | 1 | Partly done. Both prototypes, which uploaded zips to storage with the root keys, were removed as dead code. The API-only CLI is planned in the [CLI plan](cli-plan.md). |
-| H-11 | F-10 → B-08 | 0 / 2 | Open. The dev CORS origin now matches the console's Vite port (K-12). |
-| H-12 | F-15 replace MinIO (ADR-002), AWS SDK S3 client | 0 | Partly done. SeaweedFS replaces MinIO in docker-compose (K-08). The backend still uses the `minio` npm client against it. |
-| M-1 | F-09 | 0 | Open |
-| M-2 | F-05 | 0 | Partly done. `BE/.env.example` lists only variables the code reads (82 → 32), and unused configuration sections were removed. The validated schema is open. |
+| H-11 | F-10 → B-08 | 0 / 2 | Mostly done. The console builds, reads the API's address from `VITE_API_URL`, logs in through Keycloak with PKCE (P-14), and matches the API's shapes, which `FE/src/contract.test.ts` checks. Open: one UI kit, as MUI and Tailwind are still side by side (F-10), and the console in French and Arabic (B-08). |
+| H-12 | F-15 replace MinIO (ADR-002), AWS SDK S3 client | 0 | Done. SeaweedFS replaces MinIO in docker-compose (K-08), and the backend uses the AWS SDK's S3 client (P-09). |
+| M-1 | F-09 | 0 | Done (P-53). The backend's metrics are recorded, on a port of their own, never the API's; JSON logs to stdout with each request's ID; `/healthz` and `/readyz`; the dashboards and alert rules in git, tested ([ADR 0006](adr/0006-operator-monitoring.md)). |
+| M-2 | F-05 | 0 | Done (P-02, 2026-10-17). One Zod schema for every variable, checked at boot, with messages that name each variable. Production refuses the dev authentication mode, the default database and storage credentials, and a missing Keycloak issuer, audience or console origin. `BE/.env.example` documents exactly the variables the code reads, which a test enforces. |
 | M-4 | R-01 Lambda naming and limits | 1 | Open |
 | M-5 | F-13 | 0 | Done (K-09) |
-| M-7, M-8, M-9, L-1, L-2 | F-11, F-12 | 0 | M-7, L-1, L-2 done: the unversioned scripts and the old wrapper were deleted, the outdated docs were removed and the README rewritten (K-12), and the root clutter is gone. M-8 done: docker-compose starts only PostgreSQL and S3, with development credentials bound to 127.0.0.1. M-9 partly done: unit, container, cluster and end-to-end tests exist, and the debug logs are gone; CI is open. |
+| M-7, M-8, M-9, L-1, L-2 | F-11, F-12 | 0 | M-7, L-1, L-2 done: the unversioned scripts and the old wrapper were deleted, the outdated docs were removed and the README rewritten (K-12), and the root clutter is gone. M-8 done: docker-compose starts only PostgreSQL and S3, with development credentials bound to 127.0.0.1. M-9 done: unit, container, cluster and end-to-end tests exist, the debug logs are gone, the backend writes no log files (P-53), and the pipeline runs them all (P-63: `hack/ci.sh`, `.github/workflows/ci.yml`), waiting only for its hosting. |
 
 ## Appendix B: AWS Lambda compatibility matrix
 

@@ -183,7 +183,7 @@ developer machine                                   FF platform
   - `output.rs`;
   - tests under `tests/`.
 - **Deploy in phase 1.** `POST /functions` or `PUT /functions/:id` with the code inline, as the guide's `curl` commands do. The API already waits until the version is live (up to `FF_READY_TIMEOUT_SECONDS`, 90 s). The CLI's read timeout is therefore longer than that.
-- **Invoke.** `POST /functions/:id/invoke {"input": …}`. The API answers 400 when the function raises or times out, and the CLI maps that to exit code 5. The Lambda-shaped answer (200 with `X-Amz-Function-Error`) belongs to the API facade (parent §6.6), not to this API.
+- **Invoke.** `POST /functions/:id/invoke {"input": …}`. The API answers 400 when the function raises or times out, and the CLI maps that to exit code 5. Since P-10 of the [client-readiness plan](client-readiness-plan.md), a full queue answers 429, and a platform failure 500 with a request ID. The Lambda-shaped answer (200 with `X-Amz-Function-Error`) belongs to the API facade (parent §6.6), not to this API.
 - **Deploy in phase 2.** `ff package` builds the zip, then `ff deploy` compares its `CodeSha256` with the function's, uploads only when it differs, and waits for the rollout.
 - **Local runs.** The CLI starts the runtime container with production's flags:
   - `--read-only --tmpfs /tmp --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --memory <m>m`;
@@ -264,14 +264,14 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 
 #### C-03: Backend: request limits and function names
 - **Limits:**
-  - `app.useBodyParser('json', { limit: '7mb' })` in `BE/src/main.ts`, with the app created as a `NestExpressApplication` (NestJS 10.4 is installed);
+  - `app.useBodyParser('json', { limit: '7mb' })` in `BE/src/main.ts`, with the app created as a `NestExpressApplication` (NestJS 12 is installed since P-64 of the [client-readiness plan](client-readiness-plan.md), 11.2 before it since P-09);
   - code limited to 900 KiB (in bytes, checked in the DTO, with a message that names the limit);
   - invoke input limited to 6 MB once serialized, answered with 413 and `RequestEntityTooLargeException`, Lambda's name.
 - **Names:**
   - Lambda's naming rule on create and update;
-  - a unique index on `(userId, name)`, with `409 Conflict` for duplicates;
+  - a unique index on `(account_id, name)`, with `409 Conflict` for duplicates (the tenant column is `user_id` until the client-readiness plan's P-12 renames it);
   - `GET /functions?name=<name>`;
-  - a TypeORM migration for production. In development the schema is synchronized; databases that already hold duplicate names need them renamed first, which the migration reports.
+  - a TypeORM migration. Every environment builds its schema from migrations since the client-readiness plan's P-01. Databases that already hold duplicate names need them renamed first, which the migration reports.
 - **Tests:**
   - L1: DTO validation, and the conflict on create and on rename.
   - The e2e script gains checks that 150 KB of code is accepted, 1 MB is refused with the clear message, and a 1 MB input is accepted.
@@ -301,14 +301,16 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 - **Backend:**
   - `GET /functions/:id/logs?tail=200&sinceSeconds=` lists the function's pods by label (`ff.dev/function-id`) and reads each one's `function` container log with timestamps;
   - lines are prefixed with the pod name when there are several pods;
-  - an ownership check is made.
+  - it is scoped to the caller's account: another account's function answers 404 (D4 of the client-readiness plan).
+- **Built by the client-readiness plan's P-40 (2026-10-17):** the backend part, as `GET /functions/:id/logs?tail=&sinceSeconds=`, scoped to the account, in the shape the log store's API keeps (P-43): `{ lines: [{ time, instance, requestId, stream, message }], next }`, oldest first, the instance in place of a pod-name prefix. The CLI part is still to do.
+- **Since P-43** the route reads the log store, so lines outlive their instance. `tail` and `sinceSeconds` work as before; `limit`, `start`, `end`, `q`, `requestId` and `cursor` are new, and `next` leads to older lines. A line's `instance` is null on the store's notice of dropped lines, whose `stream` is `ff`. `GET /functions/:id/logs/stream` is the live tail, as Server-Sent Events: `--follow` can read it instead of polling.
 - **CLI:** `ff logs <name> [--tail N] [--follow]`. `--follow` polls every 2 s with `sinceSeconds` and drops lines it has already printed, using their timestamps. Streaming can come later.
 - **Tests:** L1 backend against the fake Kubernetes API (several pods, no pods, a pod with no log yet); L2 CLI; L3 for a `print` in a function showing up in `ff logs`.
 
 #### C-06: Local runs (`ff local invoke`, `ff local start`)
 - **Docker:** checks `docker version` and says clearly when Docker is missing.
 - **Image:**
-  - from `FF_RUNTIME_IMAGE_NODEJS` / `_PYTHON`, else `ff-runtime-nodejs:24-v1` and `ff-runtime-python:3.13-v1`;
+  - from `FF_RUNTIME_IMAGE_NODEJS` / `_PYTHON`, else `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2`;
   - built locally in this repository; published images come in C-42.
 - **The container gets production's hardening and settings** (§5):
   - memory from `--memory`, default 128 MB;

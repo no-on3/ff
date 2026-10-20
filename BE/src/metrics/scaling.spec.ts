@@ -1,34 +1,41 @@
-import { ScalingInput, decideReplicas, shouldScaleToZero } from './scaling';
+import { ScalingInput, burstTarget, decideReplicas, shouldScaleToZero } from './scaling';
 
 const input = (overrides: Partial<ScalingInput>): ScalingInput => ({
-  activeInstances: 1,
-  requestCount: 1,
-  responseTimeP95: 50,
+  desiredInstances: 1,
+  peakConcurrency: 1,
   minInstances: 0,
   maxInstances: 5,
-  maxRequestsPerInstance: 2,
   ...overrides,
 });
 
 describe('decideReplicas', () => {
   it.each<[string, Partial<ScalingInput>, number | null]>([
-    ['steady load stays put', { activeInstances: 1, requestCount: 2 }, null],
-    ['overloaded instances get one more', { activeInstances: 2, requestCount: 10 }, 3],
-    ['slow p95 gets one more', { activeInstances: 1, requestCount: 1, responseTimeP95: 1500 }, 2],
-    ['never above maxInstances', { activeInstances: 5, requestCount: 100 }, null],
-    ['clamps an over-scaled function back to maxInstances', { activeInstances: 8, requestCount: 100 }, 5],
-    ['under-used instances lose one', { activeInstances: 3, requestCount: 1 }, 2],
-    ['keeps one instance while there is traffic', { activeInstances: 1, requestCount: 1, maxRequestsPerInstance: 10 }, null],
-    ['never below minInstances', { activeInstances: 3, requestCount: 1, minInstances: 3 }, null],
-    ['raises to minInstances', { activeInstances: 1, requestCount: 1, minInstances: 2 }, 2],
-    // The old logic divided by zero here (requests / 0 instances = Infinity).
-    ['zero instances with traffic: one instance, no division by zero', { activeInstances: 0, requestCount: 4 }, 1],
+    ['one call at a time on one instance: no change', { desiredInstances: 1, peakConcurrency: 1 }, null],
+    ['raises to what the peak needed, at once', { desiredInstances: 1, peakConcurrency: 4 }, 4],
+    ['never above maxInstances', { desiredInstances: 1, peakConcurrency: 9, maxInstances: 3 }, 3],
+    ['already at maxInstances under a big peak: no change', { desiredInstances: 3, peakConcurrency: 9, maxInstances: 3 }, null],
+    ['lowers by one instance per window', { desiredInstances: 4, peakConcurrency: 1 }, 3],
+    ['lowers a function above a reduced maxInstances, one at a time', { desiredInstances: 5, peakConcurrency: 1, maxInstances: 2 }, 4],
+    ['keeps one instance when quiet: zero is the idle sweep\'s job', { desiredInstances: 1, peakConcurrency: 0 }, null],
+    ['steps a quiet scaled-up function down towards one', { desiredInstances: 2, peakConcurrency: 0 }, 1],
+    ['never below minInstances', { desiredInstances: 3, peakConcurrency: 0, minInstances: 3 }, null],
+    ['raises to minInstances', { desiredInstances: 1, peakConcurrency: 1, minInstances: 2 }, 2],
+    ['raises a function at zero to minInstances', { desiredInstances: 0, peakConcurrency: 0, minInstances: 1 }, 1],
+    ['leaves a quiet function at zero alone', { desiredInstances: 0, peakConcurrency: 0 }, null],
+    ['gives a function at zero with calls one instance per call', { desiredInstances: 0, peakConcurrency: 2 }, 2],
   ])('%s', (_label, overrides, expected) => {
     expect(decideReplicas(input(overrides))).toBe(expected);
   });
+});
 
-  it('only moves one instance per window', () => {
-    expect(decideReplicas(input({ activeInstances: 1, requestCount: 1000, maxInstances: 100 }))).toBe(2);
+describe('burstTarget', () => {
+  it.each([
+    [2, 5, 2],
+    [7, 5, 5],
+    [1, 5, 1],
+    [3, 1, 1],
+  ])('%i calls in flight, at most %i instances: %i', (inFlight, maxInstances, expected) => {
+    expect(burstTarget(inFlight, maxInstances)).toBe(expected);
   });
 });
 

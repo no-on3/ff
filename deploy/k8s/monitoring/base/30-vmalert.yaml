@@ -1,0 +1,89 @@
+# vmalert v1.153.0 (2026-09-28): evaluates the alert rules (rules/) on the store every 30 s and sends what
+# fires to Alertmanager. It writes each alert's state back to the store as the series ALERTS, which the
+# dashboards show and from which it takes its state again after a restart.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmalert
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: vmalert
+    app.kubernetes.io/part-of: ff
+spec:
+  selector:
+    app.kubernetes.io/name: vmalert
+  ports:
+    - name: http
+      port: 8880
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmalert
+  namespace: ff-monitoring
+  labels:
+    app.kubernetes.io/name: vmalert
+    app.kubernetes.io/part-of: ff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmalert
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vmalert
+        app.kubernetes.io/part-of: ff
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vmalert
+          image: victoriametrics/vmalert:v1.153.0
+          args:
+            - -rule=/etc/vmalert/rules/*.yaml
+            - -datasource.url=http://victoria-metrics.ff-monitoring.svc:8428
+            - -remoteWrite.url=http://victoria-metrics.ff-monitoring.svc:8428
+            - -remoteRead.url=http://victoria-metrics.ff-monitoring.svc:8428
+            - -notifier.url=http://alertmanager.ff-monitoring.svc:9093
+            - -evaluationInterval=30s
+            - -loggerFormat=json
+          ports:
+            - name: http
+              containerPort: 8880
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: rules
+              mountPath: /etc/vmalert/rules
+              readOnly: true
+      volumes:
+        - name: rules
+          configMap:
+            name: vmalert-rules

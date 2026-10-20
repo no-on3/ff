@@ -1,0 +1,162 @@
+# The backend's alert rules against series written here: each alert when it should fire, and the cases it
+# must not. hack/k8s/test-monitoring-rules.sh runs them in the vmalert-tool image.
+rule_files:
+  - ../ff-backend.yaml
+evaluation_interval: 30s
+tests:
+  # No backend at all, as when its last pod is gone: down, after 2 minutes, not before.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="kube-state-metrics",instance="k:8080"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        groupname: ff-backend
+        alertname: FFBackendDown
+        exp_alerts: []
+      - eval_time: 3m
+        groupname: ff-backend
+        alertname: FFBackendDown
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: No backend answers
+              description: The metrics store has reached no backend for 2 minutes. The API, the invocations and every background job are down.
+
+  # One backend answering, the other not: still up.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="ff-backend",pod="a"}'
+        values: '1x10'
+      - series: 'up{job="ff-backend",pod="b"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        groupname: ff-backend
+        alertname: FFBackendDown
+        exp_alerts: []
+
+  # 20 calls a minute, 2 of them the platform's failures: 10 %.
+  - interval: 1m
+    input_series:
+      - series: 'ff_invocations_total{outcome="success"}'
+        values: '0+18x30'
+      - series: 'ff_invocations_total{outcome="platform_error"}'
+        values: '0+1x30'
+      - series: 'ff_invocations_total{outcome="lost"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        groupname: ff-backend
+        alertname: FFPlatformErrors
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: Invocations failing because of the platform
+              description: 10% of the calls in the last 10 minutes failed because of the platform (platform_error or lost).
+
+  # The functions' own errors are their owners': no alert, however many.
+  - interval: 1m
+    input_series:
+      - series: 'ff_invocations_total{outcome="success"}'
+        values: '0+1x30'
+      - series: 'ff_invocations_total{outcome="error"}'
+        values: '0+19x30'
+      - series: 'ff_invocations_total{outcome="timeout"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 20m
+        groupname: ff-backend
+        alertname: FFPlatformErrors
+        exp_alerts: []
+
+  # Too few calls to judge: one lost call in five.
+  - interval: 1m
+    input_series:
+      - series: 'ff_invocations_total{outcome="success"}'
+        values: '0+0.4x30'
+      - series: 'ff_invocations_total{outcome="lost"}'
+        values: '0+0.1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        groupname: ff-backend
+        alertname: FFPlatformErrors
+        exp_alerts: []
+
+  # The rating: 1.5 hours behind is normal, 4 hours isn't.
+  - interval: 1m
+    input_series:
+      - series: 'ff_rating_lag_seconds'
+        values: '5400x15 14400x15'
+    alert_rule_test:
+      - eval_time: 14m
+        groupname: ff-backend
+        alertname: FFRatingBehind
+        exp_alerts: []
+      - eval_time: 28m
+        groupname: ff-backend
+        alertname: FFRatingBehind
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: The hourly rating is behind
+              description: The last hour rated ended 4h 0m 0s ago. The backend logs "The hourly rating failed" with why.
+
+  # The database's disk: unknown (0), no alert however large it is; known, an alert past 80 %.
+  - interval: 1m
+    input_series:
+      - series: 'ff_database_size_bytes{pod="a"}'
+        values: '90x40'
+      - series: 'ff_database_disk_bytes{pod="a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 35m
+        groupname: ff-backend
+        alertname: FFDatabaseDiskFilling
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'ff_database_size_bytes{pod="a"}'
+        values: '90x40'
+      - series: 'ff_database_disk_bytes{pod="a"}'
+        values: '100x40'
+    alert_rule_test:
+      - eval_time: 35m
+        groupname: ff-backend
+        alertname: FFDatabaseDiskFilling
+        exp_alerts:
+          - exp_labels: { severity: warning, pod: a }
+            exp_annotations:
+              summary: The database is filling its disk
+              description: The database takes 90% of its server's disk.
+
+  # A month that doesn't reconcile, and e-mails failing; a webhook given up now and then is no alert.
+  - interval: 1m
+    input_series:
+      - series: 'ff_reconciliation_mismatches'
+        values: '0x5 1x20'
+      - series: 'ff_notification_attempts_total{channel="email",result="failed"}'
+        values: '0x5 1+0x20'
+      - series: 'ff_notification_attempts_total{channel="webhook",result="failed"}'
+        values: '0+0.1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        groupname: ff-backend
+        alertname: FFReconciliationMismatch
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: The month's charges don't match the usage
+              description: '1 account(s) this month: run npm run billing:reconcile to see which.'
+      - eval_time: 20m
+        groupname: ff-backend
+        alertname: FFEmailsFailing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: E-mails to customers are failing
+              description: '1 e-mail attempts failed in the last 30 minutes: check the SMTP server (FF_SMTP_URL).'
+      - eval_time: 50m
+        groupname: ff-backend
+        alertname: FFWebhooksFailing
+        exp_alerts: []

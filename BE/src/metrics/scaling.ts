@@ -1,43 +1,43 @@
 /**
- * Pure scaling decisions, so they can be reasoned about and tested without
- * timers or a scheduler. Replaces the inline logic of checkScalingConditions,
- * which divided by zero at 0 instances, scaled up without bound, ignored
- * minInstances/maxInstances, and compared CPU *ticks* to a percentage.
+ * Pure scaling decisions (client-readiness plan, D14), so they can be reasoned
+ * about and tested without timers or a scheduler.
+ *
+ * Each instance serves one call at a time, as on Lambda, so the signal is
+ * concurrency: the calls in flight at once. As soon as a call finds every
+ * instance busy, the backend raises the replica count (burstTarget). Once a
+ * minute, decideReplicas steps it back down, one instance at a time, but never
+ * below one while the function has instances or traffic: scaling to zero is
+ * the idle sweep's job (shouldScaleToZero).
  */
 
 export interface ScalingInput {
-  activeInstances: number;
-  /** Invocations in the last aggregation window. */
-  requestCount: number;
-  responseTimeP95: number;
+  /** The Deployment's replica count, ready or starting. */
+  desiredInstances: number;
+  /** The most calls in flight at once during the window, those still running included. */
+  peakConcurrency: number;
   minInstances: number;
   maxInstances: number;
-  maxRequestsPerInstance: number;
 }
 
-/** Response time above which a function gets one more instance. */
-export const SLOW_P95_MS = 1000;
-
 /**
- * Returns the new replica count, or null to leave the function alone. Moves by
- * at most one instance per window, stays within [minInstances, maxInstances],
- * and never removes the last instance while there is traffic (scale to zero is
- * the idle sweep's job).
+ * Returns the new replica count, or null to leave the function alone. Raises
+ * to what the peak needed at once; lowers by one per window, so a short lull
+ * doesn't take the capacity of a busy function away; stays within
+ * [minInstances, maxInstances].
  */
 export function decideReplicas(input: ScalingInput): number | null {
-  const current = Math.max(0, input.activeInstances);
-  const floor = Math.max(0, input.minInstances, input.requestCount > 0 ? 1 : 0);
+  const current = Math.max(0, input.desiredInstances);
+  const floor = Math.max(0, input.minInstances, current > 0 || input.peakConcurrency > 0 ? 1 : 0);
   const ceiling = Math.max(floor, input.maxInstances);
-  const perInstance = input.requestCount / Math.max(1, current);
+  const wanted = Math.min(ceiling, Math.max(floor, input.peakConcurrency));
+  if (wanted > current) return wanted; // normally done already, as the calls arrived
+  if (wanted < current) return current - 1;
+  return null;
+}
 
-  let target = current;
-  if (perInstance > input.maxRequestsPerInstance || input.responseTimeP95 > SLOW_P95_MS) {
-    target = current + 1;
-  } else if (perInstance < input.maxRequestsPerInstance * 0.6) {
-    target = current - 1;
-  }
-  target = Math.min(ceiling, Math.max(floor, target));
-  return target === current ? null : target;
+/** The replica count for calls that found every instance busy: one per call in flight, up to maxInstances. */
+export function burstTarget(inFlight: number, maxInstances: number): number {
+  return Math.max(1, Math.min(maxInstances, inFlight));
 }
 
 export interface IdleInput {

@@ -1,28 +1,25 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  HttpException,
-  HttpStatus,
-  Param,
-  Post,
-  Put,
-  Query
-} from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { User } from '../auth/decorators/user.decorator';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, Res } from '@nestjs/common';
+import { ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
+import type { ServerResponse } from 'node:http';
+import { Principal } from '../auth/principal';
+import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
+import { Invocation } from '../plans/rate-limits';
 import { CreateFunctionDto } from './dto/create-function.dto';
+import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
+import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
+import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
+import { sendEvents } from './event-stream';
 import { FunctionsService } from './functions.service';
 
 /**
- * Every endpoint needs a tenant (@User: 401 without one). Ownership is checked
- * on update and delete only; tenant-scoped reads and invokes come with
- * authentication (parent plan F-01).
+ * Every route acts for the caller's account (D4): without a principal it
+ * answers 401, and another account's function answers 404, exactly like one
+ * that doesn't exist. The service scopes every query to the account. Viewers
+ * only read; deploying and invoking need an active account (P-12).
  */
 @ApiTags('functions')
 @Controller('functions')
@@ -30,89 +27,139 @@ export class FunctionsController {
   constructor(private readonly functionsService: FunctionsService) {}
 
   @Post()
+  @RequireScope('functions:write')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
   @ApiOperation({ summary: 'Create a new function' })
   @ApiResponse({ status: 201, description: 'Function created successfully', type: Function })
-  async create(@Body() createFunctionDto: CreateFunctionDto, @User() userId: string): Promise<Function> {
-    return this.functionsService.create(createFunctionDto, userId);
+  async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<Function> {
+    return this.functionsService.create(principal.accountId, createFunctionDto);
   }
 
   @Get()
-  @ApiOperation({ summary: 'Get all functions for the user' })
+  @RequireScope('functions:read')
+  @ApiOperation({ summary: "List the account's functions" })
   @ApiResponse({ status: 200, description: 'List of functions', type: [Function] })
-  async findAll(@User() userId: string): Promise<Function[]> {
-    return this.functionsService.findAllByUser(userId);
+  async findAll(@Principal() principal: Principal): Promise<Function[]> {
+    return this.functionsService.findAll(principal.accountId);
   }
 
   @Get(':id')
+  @RequireScope('functions:read')
   @ApiOperation({ summary: 'Get a function by ID' })
   @ApiResponse({ status: 200, description: 'Function details', type: Function })
-  async findOne(@Param('id') id: string, @User() userId: string): Promise<Function> {
-    return this.functionsService.findOne(id);
+  async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<Function> {
+    return this.functionsService.findOne(principal.accountId, id);
   }
 
   @Put(':id')
+  @RequireScope('functions:write')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
   @ApiOperation({ summary: 'Update a function' })
   @ApiResponse({ status: 200, description: 'Function updated successfully', type: Function })
   async update(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() updateFunctionDto: UpdateFunctionDto,
-    @User() userId: string,
+    @Principal() principal: Principal,
   ): Promise<Function> {
-    const func = await this.functionsService.findOne(id);
-    if (func.userId !== userId) {
-      throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    }
-    return this.functionsService.update(id, updateFunctionDto);
+    return this.functionsService.update(principal.accountId, id, updateFunctionDto);
   }
 
   @Delete(':id')
+  @RequireScope('functions:write')
+  @RequireRole(...WRITERS)
   @ApiOperation({ summary: 'Delete a function' })
   @ApiResponse({ status: 200, description: 'Function deleted successfully' })
-  async remove(@Param('id') id: string, @User() userId: string): Promise<void> {
-    const func = await this.functionsService.findOne(id);
-    if (func.userId !== userId) {
-      throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
-    }
-    await this.functionsService.remove(id);
+  async remove(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<void> {
+    await this.functionsService.remove(principal.accountId, id);
   }
 
   @Post(':id/invoke')
+  @Invocation() // the plan's invocation rate, not its rate of changes (D5)
+  @RequireScope('functions:invoke')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
   @ApiOperation({ summary: 'Invoke a function' })
-  @ApiResponse({ status: 200, description: 'Function invoked successfully', type: FunctionInvocation })
+  @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
   async invoke(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() invokeFunctionDto: InvokeFunctionDto,
-    @User() userId: string,
+    @Principal() principal: Principal,
   ): Promise<FunctionInvocation> {
-    return this.functionsService.invoke(id, invokeFunctionDto.input);
+    return this.functionsService.invoke(principal.accountId, id, invokeFunctionDto.input);
   }
 
   @Get(':id/invocations')
-  @ApiOperation({ summary: 'Get function invocations' })
+  @RequireScope('functions:read')
+  @ApiOperation({ summary: 'Get function invocations, newest first' })
   @ApiResponse({ status: 200, description: 'List of function invocations', type: [FunctionInvocation] })
   async getInvocations(
-    @Param('id') id: string,
-    @Query('limit') limit = 10,
-    @Query('offset') offset = 0,
-    @User() userId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() page: ListInvocationsQuery,
+    @Principal() principal: Principal,
   ): Promise<{ invocations: FunctionInvocation[]; total: number }> {
-    await this.functionsService.findOne(id); // 404 for an unknown function
-    return this.functionsService.getInvocations(id, limit, offset);
+    return this.functionsService.getInvocations(principal.accountId, id, page);
+  }
+
+  @Get(':id/logs')
+  @RequireScope('logs:read')
+  @ApiOperation({
+    summary: "A page of the function's log lines, oldest first: the newest of the window, each with its instance, stream and call's request ID (P-43)",
+    description:
+      'Every member reads them, and an API key with logs:read. They come from the log store, which keeps them after their instance is gone, ' +
+      "for the plan's log retention. A call's lines run from its START line to its REPORT. The window is start (or sinceSeconds) to end; q and " +
+      'requestId narrow it; next leads to the older lines. 503 when the log store is unavailable.',
+  })
+  @ApiResponse({ status: 200, type: FunctionLogsView })
+  @ApiResponse({ status: 503, description: 'The log store is unavailable: try again shortly' })
+  logs(@Param('id', ParseUUIDPipe) id: string, @Query() query: FunctionLogsQuery, @Principal() principal: Principal): Promise<FunctionLogsView> {
+    return this.functionsService.logs(principal.accountId, id, query);
+  }
+
+  @Get(':id/logs/stream')
+  @RequireScope('logs:read')
+  @ApiOperation({
+    summary: "The function's live tail: its lines as Server-Sent Events, as the log store gets them (P-43)",
+    description:
+      'Every member, and an API key with logs:read. Each line comes as a message event whose data is the line, as in a page, about 5 s after it ' +
+      'was written: the store waits for lines that reach it late. q and requestId narrow it. A ping event comes every 15 s; an end event after ' +
+      "30 minutes, when the stream closes and the client opens another; an unavailable event if the log store can't start the tail or fails. " +
+      "404 for another account's function comes as JSON, before the stream.",
+  })
+  @ApiProduces('text/event-stream')
+  @ApiResponse({ status: 200, description: 'The event stream' })
+  async logsStream(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: FunctionLogsStreamQuery,
+    @Principal() principal: Principal,
+    @Res() res: ServerResponse,
+  ): Promise<void> {
+    const tail = new AbortController();
+    // Every check first: another account's function is a JSON 404, before anything of the stream is sent.
+    const events = await this.functionsService.liveLogs(principal.accountId, id, query, tail.signal);
+    await sendEvents(res, events, () => tail.abort());
   }
 
   @Get(':id/scaling-config')
+  @RequireScope('functions:read')
   @ApiOperation({ summary: 'Get function scaling configuration' })
-  @ApiResponse({ status: 200, description: 'Scaling configuration details' })
-  async getScalingConfig(
-    @Param('id') id: string,
-    @User() userId: string,
-  ) {
-    const func = await this.functionsService.findOne(id);
-    return {
-      minInstances: func.minInstances || 0,
-      maxInstances: func.maxInstances || 1,
-      targetConcurrency: func.targetConcurrency || 100,
-      scaleToZero: func.scaleToZero !== false,
-    };
+  @ApiResponse({ status: 200, description: 'Scaling configuration details', type: ScalingConfig })
+  async getScalingConfig(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<ScalingConfig> {
+    return this.functionsService.scalingConfig(await this.functionsService.findOne(principal.accountId, id));
+  }
+
+  @Put(':id/scaling-config')
+  @RequireScope('functions:write')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
+  @ApiOperation({ summary: 'Change how many instances a function may have' })
+  @ApiResponse({ status: 200, description: 'The new scaling configuration', type: ScalingConfig })
+  async updateScalingConfig(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() updateScalingConfigDto: UpdateScalingConfigDto,
+    @Principal() principal: Principal,
+  ): Promise<ScalingConfig> {
+    return this.functionsService.updateScalingConfig(principal.accountId, id, updateScalingConfigDto);
   }
 }

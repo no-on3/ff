@@ -1,0 +1,15 @@
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { Membership } from '../accounts/entities/membership.entity';
+import { AuditModule } from '../audit/audit.module';
+import { ApiKeysController } from './api-keys.controller';
+import { ApiKeysService } from './api-keys.service';
+import { ApiKey } from './entities/api-key.entity';
+
+@Module({
+  imports: [TypeOrmModule.forFeature([ApiKey, Membership]), AuditModule],
+  controllers: [ApiKeysController],
+  providers: [ApiKeysService],
+  exports: [ApiKeysService],
+})
+export class ApiKeysModule {}

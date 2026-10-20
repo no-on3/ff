@@ -1,12 +1,12 @@
-# ff-runtime-nodejs (runtime protocol v1)
+# ff-runtime-nodejs (runtime protocol v2)
 
-The image that runs every Node.js function on FF. User code is mounted read-only at `/var/task`. Nothing is installed when a function starts: the image already contains the compiled runtime and TypeScript (used to transpile `.ts` files).
+The image that runs every Node.js function on FF. User code is mounted read-only at `/var/task`, which is also the working directory. Nothing is installed when a function starts: the image already contains the compiled runtime, TypeScript (used to transpile `.ts` files), and a code cache of TypeScript (see "Start-up").
 
 | | |
 |---|---|
-| Image | `ff-runtime-nodejs:24-v1` (`24` = Node.js 24 LTS, as in Lambda's `nodejs24.x`; `v1` = runtime protocol) |
-| Base | `node:24-alpine`. Built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0). The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
-| Size | about 195 MB |
+| Image | `ff-runtime-nodejs:24-v2` (`24` = Node.js 24 LTS, as in Lambda's `nodejs24.x`; `v2` = runtime protocol, see [What changed in v2](#what-changed-in-v2)) |
+| Base | `node:24-alpine`. First built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0); `24-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (the TypeScript code cache, npm removed), still on Node v24.22.0. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Size | about 198 MB, with the code cache of TypeScript. npm, npx, corepack and yarn are removed: nothing runs them, and npm's own dependencies had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependency | `typescript` 5.7.3, and nothing else (no Express, no ts-node) |
 
@@ -17,9 +17,21 @@ main thread (main.ts)                        worker thread (worker.ts)
  HTTP :8080  /healthz /readyz /invoke ──────▶ loads /var/task/function.(ts|js|cjs) once
  queue: one invocation at a time               runs handler(event, context)
  timer per invocation ── timeout/OOM/crash ──▶ terminate + start a fresh worker
+ forwards output (relay.ts); END last ◀────── stdout, stderr; marks each call's end
 ```
 
 User code never runs on the main thread. A CPU-bound infinite loop, a memory blow-up, or `process.exit()` only kills the worker: the main thread answers probes, reports a Lambda-style error, and starts a new worker. This fixes findings H-8 and H-9 of the review (environment dump, no timeout).
+
+If that new worker can't load code that loaded before, the environment is broken, not the code (a reload that times out at 0.1 CPU, for example). The runtime then answers the waiting invocations with the error, logs `function reload failed; exiting so the container restarts`, and exits with status 1, so Kubernetes restarts the container. A failure of the very first load is the code's fault: it stays reported on `/readyz`.
+
+### Start-up
+
+Loading the code must fit in the start-up limit, 10 s (or the function's timeout if longer), as on Lambda. At the smallest size, 128 MB, a pod gets 0.1 CPU, and in gVisor every step is slower. The longest step was TypeScript: compiling the compiler, about 9 MB of JavaScript, then the functions its first transpile runs, took 7 to 10 s of the limit (client-readiness plan, P-62).
+
+- **The image keeps a V8 code cache of TypeScript** (`/opt/ff/typescript.codecache`, `src/typescript-cache.ts`), written at the build after a transpile, so that it holds the transpile's code too. The worker loads TypeScript with it. In gVisor at 0.1 CPU that takes 2.0 to 2.2 s, and the first transpile 0.2 to 0.4 s; a 128 MB function's code now loads in 2 to 5 s.
+- **Only a `.ts` handler loads TypeScript.** A `.js` or `.cjs` one never does.
+- **The cache only speeds things up.** Without it, or if V8 refuses it (made by another Node.js version), TypeScript is compiled as before, only slower. `test/container-smoke.sh` checks that the image's cache is taken in a worker thread.
+- `hack/k8s/cold-start-benchmark.sh` measures it on the dev cluster, any size and RuntimeClass, several functions at once.
 
 ## HTTP protocol
 
@@ -39,24 +51,27 @@ User code never runs on the main thread. A CPU-bound infinite loop, a memory blo
 | 504 | `Sandbox.Timedout` | `Task timed out after X.XX seconds`; the worker is recycled |
 | 500 | `Runtime.OutOfMemory` | The worker's heap limit was exceeded (see [Memory](#memory)); recycled |
 | 500 | `Runtime.ExitError` | User code exited or crashed the worker; recycled |
+| 500 | `Runtime.MarshalError` | The return value has no JSON form: a function, a symbol, a `BigInt`, or a cycle. `Unable to marshal response: …`, as the Python runtime says |
 | 500 | `Function.ResponseSizeTooLarge` | Return value above 6 MB |
-| 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
+| 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Runtime.CallbackHandlerDeprecated`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
 | 400 | `InvalidRequestContentException` | Body is not JSON |
 | 413 | `RequestEntityTooLargeException` | Body above 6 MB |
-| 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting |
+| 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting, or one waited longer than `FF_MAX_QUEUE_WAIT_MS` for its turn: `Rate exceeded: no instance was free within X.XX seconds` |
 
 The error names follow AWS Lambda's, so code and tooling port across.
 
-## Handler contract (unchanged from the original FF wrapper)
+## Handler contract
 
 ```ts
 export async function handler(event, context) { … }
 // event:   { body, headers, method, query, path }        body = the invoke payload
 // context: { functionName, functionVersion, memoryLimitInMB (string), awsRequestId,
-//            getRemainingTimeInMillis(), callbackWaitsForEmptyEventLoop }
+//            getRemainingTimeInMillis() }
 ```
 
-`getRemainingTimeInMillis()` counts down from the start of *this* invocation, not from process start.
+- `getRemainingTimeInMillis()` counts down from the start of *this* invocation, not from process start.
+- **The working directory is the task root** (`/var/task`), as on Lambda, so relative paths such as `fs.readFileSync('config.json')` find the files next to the code.
+- **No callback-based handlers,** as on Lambda's Node.js 24 runtime: a handler that declares a third parameter fails to load with `Runtime.CallbackHandlerDeprecated`. Return the result, or throw, from an async handler instead. AWS doesn't document whether an async handler with an unused third parameter is spared, so FF refuses that too: remove the parameter. `context.callbackWaitsForEmptyEventLoop` went with callbacks, as on Lambda.
 
 `.ts` files are transpiled without type checking, so type errors don't stop a function. Syntax errors do: they fail initialization with `Runtime.UserCodeSyntaxError` and the position, for example `function.ts:2:11 Property assignment expected.`. The first version let the transpiler recover and run different code instead.
 
@@ -71,6 +86,7 @@ export async function handler(event, context) { … }
 | `FUNCTION_NAME`, `FUNCTION_VERSION` | `unknown`, `$LATEST` | Reported in `context` and the logs |
 | `FF_INIT_TIMEOUT_MS` | `max(10000, FUNCTION_TIMEOUT)` | Limit for loading user code |
 | `FF_MAX_QUEUE` | `32` | Invocations allowed to wait behind the running one |
+| `FF_MAX_QUEUE_WAIT_MS` | `FUNCTION_TIMEOUT` | How long an invocation may wait for its turn before it gets 429. The backend's own timeout covers this wait plus the run, so it never gives up on a call that is only waiting |
 | `PORT` | `8080` | HTTP port |
 
 ## Memory
@@ -81,9 +97,11 @@ Verified on k3d through the API server proxy, with a 128 MB function: a heap-hoa
 
 Not covered: V8 checks its limit when it collects garbage, so a single huge allocation can get past it, and `Buffer`s live outside the heap. Either can still reach the container limit and restart the container.
 
+At 0.1 CPU, V8's last collections before it gives up can take several seconds, so a function that fills its heap slowly may hit its timeout first and get `Sandbox.Timedout` instead. The L3 test gives its memory hog 30 s for that reason.
+
 ## Logs
 
-The user's `console.*` output goes to stdout unchanged. Each invocation adds Lambda-format lines:
+The user's `console.*` output goes to stdout, or stderr for `console.error` and `console.warn`, unchanged. Each invocation adds Lambda-format lines:
 
 ```
 START RequestId: <id> Version: $LATEST
@@ -91,13 +109,46 @@ END RequestId: <id>
 REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 128 MB	Max Memory Used: 61 MB
 ```
 
-Platform events (start, initialization, timeouts, restarts) are one-line JSON. **Environment variables are never logged.**
+`Max Memory Used`, and the `X-FF-Max-Memory-Used-Mb` header, are the runtime's peak resident memory since it started, all threads together, as Lambda reports it. Version 1 reported the memory in use when the call ended, which understated what a call needed.
+
+An error thrown by the handler is also logged, before `END`, as one JSON line, the same as the Python runtime writes:
+
+```json
+{"time":"…","level":"error","msg":"function error","requestId":"…","errorType":"TypeError","errorMessage":"bad input","stackTrace":["at handler (/var/task/function.ts:2:9)"]}
+```
+
+The stack trace points at the lines of the TypeScript source (source maps are on), and leaves out the runtime's own frames and Node's internals. Platform events (start, initialization, timeouts, restarts) are one-line JSON too. A call's own events, a timeout (`task timed out; restarting worker`) or a crash, come before its `END`, as in the Python runtime, so the logs give them its request ID. **Environment variables are never logged.**
+
+**A call's output comes before its `END`.** The log collector gives each line the request ID of the call between its pod's `START` and `REPORT` lines ([ADR 0005](../../docs/adr/0005-log-pipeline.md)), and so does `GET /functions/:id/logs`, so a line written after `END` would have none. A worker thread's output reaches the process asynchronously, so the main thread forwards it itself:
+- **The end of a call's output is marked.** When the handler settles, the worker writes an end-of-call marker to its stdout and to its stderr, through the streams' own `write`, so code that replaced `process.stdout.write` changes nothing. The main thread takes the markers out of what it forwards. It writes `END` and `REPORT` once both markers have come, and only then answers the call and starts the next one.
+- **It waits a second at most.** Work the handler left running can block the worker after the call, and hold the markers up. The call then ends after a second, and the rest of its output comes after its `END`. `Duration` stops when the handler settles, so the wait is never billed, and the backend's deadline leaves 2 s for it past the queue wait and the timeout.
+- **Lines written after the handler settles,** by a timer or a promise it left running, come after `END`, as on Lambda. They have no request ID, or the next call's.
+- **A line left open,** by `process.stdout.write` without a newline, is ended before the runtime's next line, so that `START`, `END`, `REPORT` and the JSON lines always start a line.
+- **A worker that dies after its handler returned,** because work left running filled the heap or exited, doesn't fail that call: it keeps its answer, and the crash is logged after its `REPORT`, without a request ID. The next call gets a fresh worker.
+
+The Python runtime needs none of this: its worker is a process that writes to the same stdout and stderr, unbuffered (`PYTHONUNBUFFERED`), before it sends its result.
+
+## What changed in v2
+
+Protocol v2 (2026-10-17, client-readiness plan P-04; the order of the logs, P-42) keeps v1's HTTP interface, so the backend works with both. A function moves to v2 at its next update. What changed:
+
+| | v1 | v2 |
+|---|---|---|
+| Working directory | `/opt/ff` | `/var/task`, as on Lambda |
+| `Max Memory Used` | in use when the call ended | the peak, as on Lambda and the Python runtime |
+| Handler errors in the logs | not logged | a `function error` JSON line with the source-mapped stack trace |
+| A result JSON can't hold | `undefined` body, which could crash the main thread | `Runtime.MarshalError` |
+| Callback handlers | loaded, then failed with `TypeError` | refused at load: `Runtime.CallbackHandlerDeprecated` |
+| A reload that fails after a crash | pod unready for good | the runtime exits, and Kubernetes restarts it |
+| A call waiting for its turn | waited as long as the queue took | waits at most `FF_MAX_QUEUE_WAIT_MS`, one timeout by default, then gets 429 |
+| A call's output | could reach the log after its `END`: the worker's last `console.log` line did for every call measured in P-41 | before its `END`, which waits a second at most for it (see [Logs](#logs)) |
+| A timeout's log line | after the call's `REPORT` | before its `END`, as in the Python runtime |
 
 ## Developing and testing
 
 ```bash
 cd runtimes/nodejs
 npm install
-npm test                       # L1: 23 protocol tests on real processes, ~10 s, no Docker
+npm test                       # L1: 38 protocol tests on real processes, 4 for the output relay, 3 for the code cache, ~20 s, no Docker
 test/container-smoke.sh        # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```

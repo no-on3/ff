@@ -1,0 +1,62 @@
+# Fluent Bit 5.1.3, FF's log collector (client-readiness plan P-42, ADR 0005). It reads the containers named
+# `function` in the tenant namespaces, adds each pod's labels, runs ff.lua (the fields, each line's call, the
+# limit per namespace, the cut), and writes to VictoriaLogs. Every path is on the node: the offsets and the
+# buffer survive a restart of the pod.
+service:
+  flush: 1
+  log_level: info
+  # The liveness probe reads /.
+  http_server: on
+  http_listen: 0.0.0.0
+  http_port: 2020
+  # Chunks wait on the node's disk while the store is away, up to the output's storage.total_limit_size.
+  storage.path: /var/lib/ff-logging/fluent-bit/storage
+  storage.sync: normal
+  storage.backlog.mem_limit: 16M
+
+pipeline:
+  inputs:
+    # Container log files are named <pod>_<namespace>_<container>-<id>.log. Not threaded: ff.lua keeps its
+    # state in one Lua state, which threaded inputs would split.
+    - name: tail
+      tag: kube.*
+      path: /var/log/containers/*_ff-t-*_function-*.log
+      multiline.parser: cri
+      refresh_interval: 1
+      read_from_head: true
+      db: /var/lib/ff-logging/fluent-bit/tail.db
+      db.locking: true
+      mem_buf_limit: 16MB
+      storage.type: filesystem
+    # ff.lua's clock: once a second it brings out the notices of dropped lines.
+    - name: dummy
+      tag: ff.tick
+      dummy: '{"ff_tick": true}'
+      rate: 1
+
+  filters:
+    - name: kubernetes
+      match: kube.*
+      kube_tag_prefix: kube.var.log.containers.
+      merge_log: off
+      labels: on
+      annotations: off
+      buffer_size: 0
+    - name: lua
+      match: '*'
+      script: /fluent-bit/etc/ff/ff.lua
+      call: ff
+
+  outputs:
+    # The stream fields are the account's namespace and the function: every query names both (P-43).
+    - name: http
+      match: '*'
+      host: victoria-logs.ff-system.svc
+      port: 9428
+      uri: /insert/jsonline?_stream_fields=namespace,function_id&_msg_field=message&_time_field=time
+      format: json_lines
+      json_date_key: time
+      json_date_format: iso8601
+      # Ten retries, the waits doubling from 5 s up to 2,000 s: an hour or two in all.
+      retry_limit: 10
+      storage.total_limit_size: 256M

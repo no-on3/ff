@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { Function, functionsApi } from '../services/api';
+import { apiErrorMessage } from '../lib/functions';
+import { Function, FunctionUpdate, NewFunction, functionsApi } from '../services/api';
 
 interface FunctionState {
   functions: Function[];
@@ -15,27 +16,38 @@ const initialState: FunctionState = {
   error: null,
 };
 
-export const fetchFunctions = createAsyncThunk(
+// The thunks reject with the API's own message: Redux Toolkit would otherwise keep
+// only the HTTP client's generic one ("Request failed with status code 400").
+export const fetchFunctions = createAsyncThunk<Function[], void, { rejectValue: string }>(
   'functions/fetchAll',
-  async () => {
-    const response = await functionsApi.getAllFunctions();
-    return response.data;
+  async (_arg, { rejectWithValue }) => {
+    try {
+      return (await functionsApi.getAllFunctions()).data;
+    } catch (error) {
+      return rejectWithValue(apiErrorMessage(error));
+    }
   }
 );
 
-export const createFunction = createAsyncThunk(
+export const createFunction = createAsyncThunk<Function, NewFunction, { rejectValue: string }>(
   'functions/create',
-  async (functionData: Partial<Function>) => {
-    const response = await functionsApi.createFunction(functionData);
-    return response.data;
+  async (functionData, { rejectWithValue }) => {
+    try {
+      return (await functionsApi.createFunction(functionData)).data;
+    } catch (error) {
+      return rejectWithValue(apiErrorMessage(error));
+    }
   }
 );
 
-export const updateFunction = createAsyncThunk(
+export const updateFunction = createAsyncThunk<Function, { id: string; data: FunctionUpdate }, { rejectValue: string }>(
   'functions/update',
-  async ({ id, data }: { id: string; data: Partial<Function> }) => {
-    const response = await functionsApi.updateFunction(id, data);
-    return response.data;
+  async ({ id, data }, { rejectWithValue }) => {
+    try {
+      return (await functionsApi.updateFunction(id, data)).data;
+    } catch (error) {
+      return rejectWithValue(apiErrorMessage(error));
+    }
   }
 );
 
@@ -71,7 +83,7 @@ const functionSlice = createSlice({
       })
       .addCase(fetchFunctions.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.error.message || 'Failed to fetch functions';
+        state.error = action.payload ?? action.error.message ?? 'Failed to fetch functions';
       })
       // Create function
       .addCase(createFunction.fulfilled, (state, action) => {
