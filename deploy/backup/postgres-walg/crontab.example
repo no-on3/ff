@@ -1,0 +1,7 @@
+# The PostgreSQL server's own schedule, for the user postgres, with walg.env's settings in its environment
+# (deploy/backup/README.md). The WAL goes continuously: PostgreSQL's archive_command.
+# A base backup every night: a restore replays a day of WAL at most.
+15 2 * * * . /etc/ff/walg.env && wal-g backup-push "$PGDATA" >>/var/log/ff/wal-g.log 2>&1
+# Every Sunday: keep the last 35 base backups and the WAL they need, so any second of the last 30 days can be
+# restored; older ones go. The accountant may ask for longer (client-readiness plan, section 9, question 5).
+45 3 * * 0 . /etc/ff/walg.env && wal-g delete retain FULL 35 --confirm >>/var/log/ff/wal-g.log 2>&1

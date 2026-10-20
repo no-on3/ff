@@ -1,0 +1,70 @@
+# The legal records' mirror (mirror.sh), hourly, as rclone 1.75.1 in ff-system: the S3 bucket's invoices and
+# withholding certificates copied to the second site. Its credentials for both sites are the Secret ff-backup-s3
+# (deploy/backup/README.md). The databases are backed up by their server or provider, not from the cluster.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ff-records-mirror
+  namespace: ff-system
+  labels:
+    app.kubernetes.io/name: ff-records-mirror
+    app.kubernetes.io/part-of: ff
+spec:
+  schedule: "17 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3000
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: ff-records-mirror
+            app.kubernetes.io/part-of: ff
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: mirror
+              image: rclone/rclone:1.75.1
+              command: [sh, /etc/ff/mirror.sh]
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: RCLONE_CONFIG
+                  value: /dev/null
+              envFrom:
+                - secretRef:
+                    name: ff-backup-s3
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: script
+                  mountPath: /etc/ff
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: script
+              configMap:
+                name: ff-records-mirror
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi

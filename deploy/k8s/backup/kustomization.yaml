@@ -1,0 +1,11 @@
+# The legal records' hourly mirror to the second site (deploy/backup/README.md). Apply it after base/, once the
+# Secret ff-backup-s3 is there.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cronjob.yaml
+configMapGenerator:
+  - name: ff-records-mirror
+    namespace: ff-system
+    files:
+      - mirror.sh

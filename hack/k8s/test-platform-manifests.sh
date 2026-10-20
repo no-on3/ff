@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The platform's manifests (deploy/k8s/platform), checked without deploying them, in about a minute:
+# The platform's manifests (deploy/k8s/platform, and the legal records' mirror, deploy/k8s/backup), checked
+# without deploying them, in about a minute:
 #   - every pod as Pod Security "restricted" wants it and more: non-root by number, no capability, no privilege
 #     escalation, the runtime's seccomp profile, a read-only root (Keycloak's alone may write, named here),
 #     memory limits, probes, no API token but the backend's;
@@ -19,7 +20,8 @@ passed=0
 check() { # <description> <expected> <actual>
   if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else echo "  FAIL $1 (expected '$2', got '$3')"; exit 1; fi
 }
-kubectl kustomize "$platform" >"$work/platform.yaml"
+# The platform, and the legal records' mirror (deploy/k8s/backup), which runs beside it.
+{ kubectl kustomize "$platform"; echo ---; kubectl kustomize "$FF_REPO_ROOT/deploy/k8s/backup"; } >"$work/platform.yaml"
 
 echo "== the pods"
 python3 - "$work/platform.yaml" >"$work/pods.txt" <<'PY'
@@ -31,9 +33,10 @@ WRITABLE_ROOT = {'keycloak'}
 API_TOKEN = {'ff-backend'}
 problems = []
 for doc in docs:
-    if doc['kind'] not in ('Deployment', 'Job'):
+    if doc['kind'] not in ('Deployment', 'Job', 'CronJob'):
         continue
-    name, pod = doc['metadata']['name'], doc['spec']['template']['spec']
+    name = doc['metadata']['name']
+    pod = (doc['spec']['jobTemplate']['spec'] if doc['kind'] == 'CronJob' else doc['spec'])['template']['spec']
     context = pod.get('securityContext', {})
     if context.get('runAsNonRoot') is not True or not isinstance(context.get('runAsUser'), int) or context['runAsUser'] == 0:
         problems.append(f'{name}: not non-root by number')
@@ -57,11 +60,11 @@ for doc in docs:
         image = container['image']
         if ':' not in image.split('/')[-1] or image.endswith(':latest') and not image.startswith('ff-'):
             problems.append(f'{where}: image {image} not pinned')
-print(len([d for d in docs if d['kind'] in ('Deployment', 'Job')]))
+print(len([d for d in docs if d['kind'] in ('Deployment', 'Job', 'CronJob')]))
 for problem in problems: print(problem)
 PY
 check "every workload hardened: non-root, no capability, no escalation, seccomp, read-only root but Keycloak's, limits, probes" \
-  "6" "$(cat "$work/pods.txt")"
+  "7" "$(cat "$work/pods.txt")"
 
 echo "== who reaches whom"
 python3 - "$work/platform.yaml" >"$work/policies.txt" <<'PY'
