@@ -1,13 +1,15 @@
 import type { ApiKey, Scope } from '../services/api';
 
-/** What each scope lets a key do, as the API's routes require them (P-13). */
+/** What each scope lets a key do, as the API's routes require them. */
 export const SCOPE_INFO: Record<Scope, string> = {
   'functions:read': 'List and read functions, their invocations and scaling',
   'functions:write': 'Create, update and delete functions',
   'functions:invoke': 'Invoke functions',
-  'logs:read': 'Read logs (no route uses it yet)',
+  'logs:read': "Read functions' logs, live too",
   'metrics:read': 'Read metrics',
-  'usage:read': 'Read usage (no route uses it yet)',
+  'alarms:read': 'List and read alarms, with their state',
+  'alarms:write': 'Create, change and delete alarms',
+  'usage:read': 'Read usage, the balance, pro-formas and invoices',
 };
 
 export type KeyState = 'active' | 'revoked' | 'expired';

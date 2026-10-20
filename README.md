@@ -8,7 +8,8 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
   - create, update, delete, and invoke functions;
   - see the invocation history with durations, kept for the plan's retention with up to 64 KiB of each input, output and error;
   - read a function's or the account's metrics, named as CloudWatch names Lambda's (invocations, errors, throttles, cold starts, the duration's percentiles, instances), a point a minute, five minutes or an hour, from the usage records the bill is made of;
-  - be notified by e-mail, each owner in their language, and by webhooks signed with the account's secret and tried again when they fail: a test now, from the API or the console's Notifications page, the alarms next.
+  - be notified by e-mail, each owner in their language, and by webhooks signed with the account's secret and tried again when they fail: a test, from the API or the console's Notifications page;
+  - set alarms, as CloudWatch's, on a function's or the account's metrics and on its money, "M out of N" periods, evaluated every minute and telling their e-mail and webhooks when they go into ALARM and out of it.
 
   Functions scale out when calls arrive together (one instance per call in flight, up to `maxInstances`), scale to zero when idle, and start again on the next invocation.
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
@@ -95,8 +96,8 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 | L2 images | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities |
 | L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor), the function lifecycle (repair, rollback, updates at zero, a runtime that never answers), and, where it is installed, the log pipeline (what functions print reaches the store, limited, and only the backend may query it) |
 | RBAC | `hack/k8s/test-rbac.sh` | What the backend's ServiceAccount may and may not do |
-| L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes, and the code archive in object storage |
-| L5 | `hack/e2e-tenancy.sh` | Every route of the OpenAPI document, as another account (404, nothing changes) and anonymously (401); sign-up through Keycloak and Mailpit; isolation between two real accounts; a function's metrics against its usage records; a test notification to a local receiver, signed, and to the owner's e-mail; closing an account, and its data deleted once its notice period has passed |
+| L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes, and the code archive in object storage; an alarm that fires on a function's error and recovers, telling a local webhook receiver |
+| L5 | `hack/e2e-tenancy.sh` | Every route of the OpenAPI document, as another account (404, nothing changes) and anonymously (401); sign-up through Keycloak and Mailpit; isolation between two real accounts; a function's metrics against its usage records; a test notification to a local receiver, signed, and to the owner's e-mail; each account's alarms its own; closing an account, and its data deleted once its notice period has passed |
 
 ## Documentation
 

@@ -502,6 +502,7 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
+        'alarms',
         'api_keys',
         'audit_log',
         'capacity_samples',
@@ -541,7 +542,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

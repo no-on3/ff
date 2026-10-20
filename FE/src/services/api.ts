@@ -566,7 +566,7 @@ export interface AccountUpdate {
   taxId?: string | null;
 }
 
-export const SCOPES = ['functions:read', 'functions:write', 'functions:invoke', 'logs:read', 'metrics:read', 'usage:read'] as const;
+export const SCOPES = ['functions:read', 'functions:write', 'functions:invoke', 'logs:read', 'metrics:read', 'alarms:read', 'alarms:write', 'usage:read'] as const;
 export type Scope = (typeof SCOPES)[number];
 
 /** An API key, as GET /api-keys lists it: never its secret. */

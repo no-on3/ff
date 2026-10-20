@@ -19,6 +19,7 @@ import { InvocationHistory1792282243364 } from './1792282243364-InvocationHistor
 import { ClosedAccountDeletion1792325241958 } from './1792325241958-ClosedAccountDeletion';
 import { RateLimitedInvocations1792419122035 } from './1792419122035-RateLimitedInvocations';
 import { Notifications1792424270622 } from './1792424270622-Notifications';
+import { Alarms1792462186640 } from './1792462186640-Alarms';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -47,4 +48,5 @@ export const MIGRATIONS: Array<new () => object> = [
   ClosedAccountDeletion1792325241958,
   RateLimitedInvocations1792419122035,
   Notifications1792424270622,
+  Alarms1792462186640,
 ];

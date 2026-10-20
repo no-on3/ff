@@ -17,6 +17,7 @@ import { FunctionsModule } from './functions/functions.module';
 import { HealthController } from './health/health.controller';
 import { MetricsModule } from './metrics/metrics.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { AlarmsModule } from './alarms/alarms.module';
 import { MinioClientModule } from './minio-client/minio-client.module';
 import { PlansModule } from './plans/plans.module';
 import { PlansService } from './plans/plans.service';
@@ -48,6 +49,7 @@ import { RetentionModule } from './retention/retention.module';
     FunctionsModule,
     MetricsModule,
     NotificationsModule,
+    AlarmsModule,
     MinioClientModule,
     PlansModule,
     RetentionModule,

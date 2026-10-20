@@ -16,7 +16,9 @@
 # the first price book (P-30). Then the hourly rating (P-32): every hour settled
 # since the first book rated as the backend started, in shadow mode, the balance,
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
-# invokes refused with 402, a top-up, and invokes accepted again at once.
+# invokes refused with 402, a top-up, and invokes accepted again at once. Then an
+# alarm: a function's error fires it, a quiet minute recovers it, and each
+# change reaches a local webhook receiver, signed.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -59,7 +61,9 @@ e2e_migrate "${be_env[@]}"
 # The backend's own startup check, below, then proves that none is left pending.
 check "the migrations run from the build" true \
   "$(grep -q 'executed successfully' "$work/migrations.log" && echo true || echo false)"
-e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
+# Alarms evaluated every 5 s, each minute as soon as it is over, and notifications sent every second, to this machine too.
+alarm_env=(FF_ALARM_INTERVAL_SECONDS=5 FF_ALARM_SETTLE_SECONDS=0 FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
+e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 check "backend answers on $api" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")"
 
 echo "== scenario (tenant $tenant → namespace $tenant_ns)"
@@ -254,7 +258,7 @@ wait "$be_pid" 2>/dev/null || true # reaped quietly: bash would report "Killed"
 wait "$call_pid" 2>/dev/null || true
 # Restarted at once, as a supervisor would. Its reaper marks the call LOST once the longest a call can
 # take has passed (2 × 3 s + a 1 s cold-start limit + 30 s), at the next run of the minute.
-e2e_start_backend "$work/backend-restarted.log" "$api" "${be_env[@]}" K8S_READY_TIMEOUT_SECONDS=1
+e2e_start_backend "$work/backend-restarted.log" "$api" "${be_env[@]}" "${alarm_env[@]}" K8S_READY_TIMEOUT_SECONDS=1
 state=""
 for _ in $(seq 1 120); do
   state="$(q "SELECT status FROM function_invocations WHERE id = '$lost'")"
@@ -355,5 +359,72 @@ move "$tenant" 1000 topup provider_clearing "e2e:topup"
 http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
 check "a top-up lets them in again at once: the ledger's NOTIFY refreshed the backend's cached balance" 201 "$(status)"
 sql "DELETE FROM platform_settings WHERE key IN ('billingShadowMode', 'negativeBuffer', 'gracePeriodHours')"
+
+echo "== alarms: an error fires an alarm, a quiet minute recovers it, each change told to a webhook"
+receiver_port="$(free_port)"
+cat >"$work/receiver.py" <<'PY'
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Receiver(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('content-length', 0))).decode()
+        with open(sys.argv[2], 'a') as out:
+            out.write(json.dumps({'headers': {k.lower(): v for k, v in self.headers.items()}, 'body': body}) + '\n')
+        self.send_response(204)
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+HTTPServer(('127.0.0.1', int(sys.argv[1])), Receiver).serve_forever()
+PY
+: >"$work/webhooks.jsonl"
+python3 "$work/receiver.py" "$receiver_port" "$work/webhooks.jsonl" &
+e2e_pids+=("$!")
+failing='export async function handler(event: { body: { fail?: boolean } }) {
+  if (event.body.fail) throw new Error("asked to fail");
+  return { ok: true };
+}'
+alarmed_id="$(http POST /functions "$(jq -n --arg code "$failing" '{name: "e2e-alarmed", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+check "a function to watch" 201 "$(status)"
+alarm_id="$(http POST /alarms "$(jq -cn --arg fn "$alarmed_id" --arg url "http://127.0.0.1:$receiver_port/ff" \
+  '{name: "e2e errors", functionId: $fn, metric: "Errors", statistic: "Sum", period: 60, comparison: "GreaterThanThreshold", threshold: 0,
+    evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: [$url]}}')" | jq -r .id)"
+check "an alarm on its errors, each minute, telling the receiver" "201 INSUFFICIENT_DATA" "$(status) $(jq -r .state "$work/body")"
+# alarm_state_after <state> <seconds>: waits for the alarm to reach the state, then prints it.
+alarm_state_after() {
+  local state=""
+  for _ in $(seq 1 "$2"); do
+    state="$(http GET "/alarms/$alarm_id" | jq -r .state)"
+    [ "$state" = "$1" ] && break
+    sleep 1
+  done
+  echo "$state"
+}
+check "its first evaluation judges a quiet minute: OK, and tells nobody" "OK 0" "$(alarm_state_after OK 30) $(wc -l <"$work/webhooks.jsonl" | tr -d ' ')"
+http POST "/functions/$alarmed_id/invoke" '{"input": {"fail": true}}' >/dev/null
+check "the function fails" "400 Error: asked to fail" "$(status) $(jq -r .message "$work/body")"
+check "once that minute is over, the alarm fires" "ALARM" "$(alarm_state_after ALARM 90)"
+check "saying why" "1 of the last 1 period(s) of 60 s breaching Errors Sum > 0 (1 needed); latest 1" "$(http GET "/alarms/$alarm_id" | jq -r .stateReason)"
+check "the next minute, quiet, recovers it" "OK" "$(alarm_state_after OK 90)"
+for _ in $(seq 1 20); do [ "$(wc -l <"$work/webhooks.jsonl" | tr -d ' ')" -ge 2 ] && break; sleep 0.5; done
+secret="$(http GET /notifications/webhook-secret | jq -r .secret)"
+told="$(python3 - "$secret" "$work/webhooks.jsonl" <<'PY'
+import hashlib, hmac, json, sys
+secret, path = sys.argv[1], sys.argv[2]
+for line in open(path):
+    hook = json.loads(line)
+    fields = [part.split('=', 1) for part in hook['headers']['ff-signature'].split(',')]
+    t = dict(fields)['t']
+    body = hook['body']
+    signed = any(name == 'v1' and hmac.compare_digest(value, hmac.new(secret.encode(), f'{t}.{body}'.encode(), hashlib.sha256).hexdigest()) for name, value in fields)
+    data = json.loads(body)['data']
+    print(f"{data['previousState']}>{data['state']}:{'signed' if signed else 'unsigned'}", end=' ')
+PY
+)"
+check "the receiver was told each change once, into ALARM and out of it, signed" "OK>ALARM:signed ALARM>OK:signed" "${told% }"
+check "and the webhooks are among the account's deliveries, delivered" "2" \
+  "$(http GET /notifications/deliveries | jq '[.[] | select(.kind == "alarm" and .status == "delivered")] | length')"
+http DELETE "/alarms/$alarm_id" >/dev/null
+check "the alarm is deleted" 204 "$(status)"
+http DELETE "/functions/$alarmed_id" >/dev/null
 
 echo "e2e: $passed checks passed"

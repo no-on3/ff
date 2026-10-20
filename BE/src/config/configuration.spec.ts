@@ -136,6 +136,12 @@ describe('configuration', () => {
     expect(configuration(dev).database).not.toHaveProperty('synchronize');
   });
 
+  it('evaluates alarms every minute, each period once it has been over a minute, unless told otherwise', () => {
+    expect(configuration(production).alarms).toEqual({ intervalSeconds: 60, settleSeconds: 60 });
+    expect(configuration({ ...production, FF_ALARM_INTERVAL_SECONDS: '5', FF_ALARM_SETTLE_SECONDS: '0' }).alarms).toEqual({ intervalSeconds: 5, settleSeconds: 0 });
+    expect(problems({ ...production, FF_ALARM_INTERVAL_SECONDS: '0' })).toEqual([expect.stringContaining('FF_ALARM_INTERVAL_SECONDS')]);
+  });
+
   it("sends notifications every 10 s, never to a private address, unless told otherwise", () => {
     expect(configuration(production).notifications).toEqual({ intervalSeconds: 10, allowPrivate: false });
     expect(configuration({ ...production, NODE_ENV: 'development', FF_NOTIFY_INTERVAL_SECONDS: '1', FF_WEBHOOK_ALLOW_PRIVATE: 'true' }).notifications).toEqual({ intervalSeconds: 1, allowPrivate: true });

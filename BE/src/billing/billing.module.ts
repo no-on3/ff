@@ -30,6 +30,6 @@ import { PricingService } from './pricing.service';
   imports: [TypeOrmModule.forFeature([PriceBook, Currency]), PlatformSettingsModule, AuditModule, MailModule, MinioClientModule],
   controllers: [BillingController, ProFormasController, InvoicesController],
   providers: [PricingService, LedgerService, HourlyRatingService, BillingService, LedgerEvents, CreditService, LowBalanceService, PaymentsService, InvoicesService, InvoiceNoticesService],
-  exports: [PricingService, LedgerService, HourlyRatingService, CreditService, PaymentsService, InvoicesService],
+  exports: [PricingService, LedgerService, HourlyRatingService, CreditService, PaymentsService, InvoicesService, BillingService],
 })
 export class BillingModule {}

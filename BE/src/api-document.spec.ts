@@ -45,6 +45,8 @@ import { AdminPaymentsController } from './admin/admin-payments.controller';
 import { UsageService } from './usage/usage.service';
 import { NotificationsController } from './notifications/notifications.controller';
 import { NotificationsService } from './notifications/notifications.service';
+import { AlarmsController } from './alarms/alarms.controller';
+import { AlarmsService } from './alarms/alarms.service';
 import { of } from 'rxjs';
 
 const ACCOUNT = '000000000001';
@@ -83,6 +85,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
         AdminInvoicesController,
         AdminSupportController,
         NotificationsController,
+        AlarmsController,
       ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
@@ -108,6 +111,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
         { provide: AdminCreditsService, useValue: succeeding(AdminCreditsService) },
         { provide: AdminSupportService, useValue: succeeding(AdminSupportService) },
         { provide: NotificationsService, useValue: succeeding(NotificationsService, { deliveries: async () => [] }) },
+        { provide: AlarmsService, useValue: succeeding(AlarmsService, { list: async () => [] }) },
         { provide: PlansService, useValue: succeeding(PlansService, { list: async () => [] }) },
         { provide: AdminPricesService, useValue: succeeding(AdminPricesService, { list: async () => [] }) },
         { provide: BillingService, useValue: succeeding(BillingService) },
@@ -158,7 +162,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}']));
     // The scaler's per-minute table answered GET /metrics/:functionId; the metrics now come from the usage records.
     expect(checked.map((r) => r.route)).not.toContain('GET /metrics/{functionId}');
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);

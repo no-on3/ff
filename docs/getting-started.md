@@ -221,6 +221,18 @@ sleep 11; curl -s "$FF/notifications/deliveries?limit=1" | jq -c '.[0] | {status
 
 The body is `{"id", "type", "account", "createdAt", "data"}`; `id` is also the `FF-Event-Id`, the same for each try. `"email": true` sends the test to the owners' e-mail too; development mode's account has no owner, so it answers 400 there. `POST /notifications/webhook-secret/rotate` makes a new secret: for 24 hours after, each webhook carries a `v1` by the old one too, while your receivers change over. Owners read and rotate the secret; owners and developers send tests; every member reads the deliveries, kept 30 days. API keys can't call these routes. The console's Notifications page does all of it: the secret, a test, and how each delivery went, read again while one is still to be sent.
 
+**Alarms**, as CloudWatch's: a metric of a function, or of the whole account without one, its statistic over a period, compared with a threshold, and "M out of N" periods breaching. Every minute FF judges the last N whole periods, each once it has been over a minute, so that a call ending then still counts. M or more breaching is `ALARM`, fewer is `OK`. A period without a datapoint (a duration with no call) is left out by default, and all N missing is `INSUFFICIENT_DATA`; `treatMissingData` makes it `notBreaching`, `breaching`, or `ignore`. Going into `ALARM`, and out of it, the alarm tells its actions: the owners' e-mail and up to 5 webhooks, signed as above, with `"kind": "alarm"` and the alarm, the states it left and entered, why, and the datapoints. Two alarms watch the account's money as it is: `Balance` and `MonthToDateCharges`, with the statistic `Latest` and one datapoint.
+
+```bash
+curl -s -X POST "$FF/alarms" -H 'content-type: application/json' -d "{\"name\": \"py errors\", \"functionId\": \"$PY\",
+  \"metric\": \"Errors\", \"statistic\": \"Sum\", \"period\": 60, \"comparison\": \"GreaterThanThreshold\", \"threshold\": 0,
+  \"evaluationPeriods\": 1, \"datapointsToAlarm\": 1, \"actions\": {\"email\": false, \"webhookUrls\": [\"http://localhost:8090/ff\"]}}" | jq -c '{id, state}'
+# {"id":"…","state":"INSUFFICIENT_DATA"}; within a minute "OK", and "ALARM" the minute after one of its calls fails
+curl -s "$FF/alarms" | jq -c '.[] | {name, state, stateReason}'
+```
+
+The metrics take their statistics: `Sum` for `Invocations`, `Errors`, `Throttles` and `ColdStarts`; `Average`, `Maximum`, `p50`, `p95` or `p99` for `Duration`; `Maximum` or `Average` for `Instances`. A period is 60, 300 or 3600 seconds, N up to 60 periods and a day at most, and an account has up to 50 alarms. Every member reads them; owners and developers change them, and API keys with the scopes `alarms:read` and `alarms:write`. A function's alarms go with it. The evaluation's pace is `FF_ALARM_INTERVAL_SECONDS` (60) and `FF_ALARM_SETTLE_SECONDS` (60), which tests shorten.
+
 **Scaling.** Each instance serves one call at a time, as on Lambda. Calls that arrive together get more instances at once, one per call in flight, up to `maxInstances`. Each quiet minute takes one instance away, and 15 idle minutes take the function to zero, unless `minInstances` is above 0. A call waits at most one timeout for a free instance. Change the limits like this:
 
 ```bash
@@ -370,7 +382,7 @@ A user who belongs to several accounts names one with `-H "X-FF-Account: <id>"`.
 curl -s -X PATCH $FF/me -H "$AUTH" -H 'content-type: application/json' -d '{"locale": "en"}' | jq -r .user.locale   # "en"; "fr-TN" goes back to French
 ```
 
-For scripts, CI and the CLI, an owner makes an **API key** instead: it acts for its account, only with the scopes it was given (`functions:read`, `functions:write`, `functions:invoke`, `metrics:read`, and later `logs:read` and `usage:read`). The whole key is shown once:
+For scripts, CI and the CLI, an owner makes an **API key** instead: it acts for its account, only with the scopes it was given: `functions:read`, `functions:write`, `functions:invoke`, `logs:read`, `metrics:read`, `alarms:read`, `alarms:write`, and `usage:read` (the usage, the balance, pro-formas and invoices). The whole key is shown once:
 
 ```bash
 KEY=$(curl -s -X POST $FF/api-keys -H "$AUTH" -H 'content-type: application/json' \

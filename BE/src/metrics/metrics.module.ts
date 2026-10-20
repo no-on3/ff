@@ -18,6 +18,6 @@ import { PlansModule } from '../plans/plans.module';
   ],
   providers: [MetricsService, CustomerMetricsService, RefusedInvocationsService],
   controllers: [MetricsController],
-  exports: [MetricsService, RefusedInvocationsService],
+  exports: [MetricsService, RefusedInvocationsService, CustomerMetricsService],
 })
 export class MetricsModule {}

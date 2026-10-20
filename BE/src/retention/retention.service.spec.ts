@@ -54,7 +54,7 @@ describe('RetentionService', () => {
       return { affected: marked };
     });
     // The account's notification deliveries and webhook secret, deleted in the transaction that marks it.
-    const managerQuery = jest.fn(async (sql: string, [accountId]: string[]) => void steps.push(`${/webhook_secrets/.test(sql) ? 'secret' : 'deliveries'} ${accountId}`));
+    const managerQuery = jest.fn(async (sql: string, [accountId]: string[]) => void steps.push(`${/webhook_secrets/.test(sql) ? 'secret' : /alarms/.test(sql) ? 'alarms' : 'deliveries'} ${accountId}`));
     const manager = { update, query: managerQuery };
     const dataSource = {
       query,
@@ -155,6 +155,7 @@ describe('RetentionService', () => {
         'logs 300000000001',
         'deliveries 300000000001',
         'secret 300000000001',
+        'alarms 300000000001',
         'mark 300000000001',
         'audit account.data_delete 300000000001',
       ]);
@@ -179,6 +180,7 @@ describe('RetentionService', () => {
         'logs 300000000002',
         'deliveries 300000000002',
         'secret 300000000002',
+        'alarms 300000000002',
         'mark 300000000002',
         'audit account.data_delete 300000000002',
       ]);
@@ -192,7 +194,7 @@ describe('RetentionService', () => {
       await service.deleteClosedAccounts();
 
       // Deleting its notifications again changes nothing: they went with the first run.
-      expect(steps).toEqual(['namespace 300000000001', 'logs 300000000001', 'deliveries 300000000001', 'secret 300000000001', 'mark 300000000001']);
+      expect(steps).toEqual(['namespace 300000000001', 'logs 300000000001', 'deliveries 300000000001', 'secret 300000000001', 'alarms 300000000001', 'mark 300000000001']);
       expect(audit.record).not.toHaveBeenCalled();
     });
 

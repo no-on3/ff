@@ -266,6 +266,11 @@ path_for() {
   local IFS='&'
   printf '%s%s' "$path" "${params:+?${params[*]}}"
 }
+# alarm_body [function ID]: a valid alarm, on that function's errors, or on the account's calls without one.
+alarm_body() {
+  jq -cn --arg fn "${1:-}" '{name: "l5", functionId: (if $fn == "" then null else $fn end), metric: (if $fn == "" then "Invocations" else "Errors" end),
+    statistic: "Sum", period: 60, comparison: "GreaterThanThreshold", threshold: 1000, evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: []}}'
+}
 # body_for <method> <template>: a valid body, so that only the account check can refuse the call.
 body_for() {
   case "$1 $2" in
@@ -277,6 +282,7 @@ body_for() {
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;
     "POST /notifications/test") echo "{\"webhookUrl\": \"$receiver/b\"}" ;;
+    "POST /alarms" | "PUT /alarms/{id}") alarm_body ;;
     "POST /api-keys") echo '{"name": "l5", "scopes": ["functions:read"]}' ;;
     "POST /members") echo '{"email": "l5-invitee@ff.test", "role": "viewer"}' ;;
     "PUT /admin/settings") echo '{"settings": {"gracePeriodHours": 1}, "reason": "l5 tries"}' ;;
@@ -311,6 +317,8 @@ pf_a="$(jq -r .id <<<"$proforma_a")"
 secret_a="$(as_a GET /notifications/webhook-secret | jq -r .secret)"
 as_a POST /notifications/test "{\"webhookUrl\": \"$receiver/a\"}" >/dev/null
 check "A sends itself a test notification, to the receiver" 202 "$(status)"
+alarm_a="$(as_a POST /alarms "$(alarm_body "$id")" | jq -r .id)"
+check "A makes an alarm on its function's errors" 201 "$(status)"
 own=""
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
@@ -421,6 +429,12 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: development mode has no operator" "$no_operator" "$(status) $(message)"
       ;;
+    "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
+      as_b "$method" "/alarms/$alarm_a" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
+      check "$route: B gets 404 for A's alarm" "404 Alarm $alarm_a not found" "$(status) $(message)"
+      alarm_now="$(as_a GET "/alarms/$alarm_a")"
+      check "  ... which A still has, unchanged" "200 l5 Errors $id" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
+      ;;
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
@@ -441,6 +455,16 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /notifications/deliveries")
       others="$(as_b GET /notifications/deliveries | jq --arg url "$receiver/b" 'map(select(.target != $url)) | length')"
       check "$route: B lists only its own deliveries, none of A's" "200 0" "$(status) $others"
+      ;;
+    "GET /alarms")
+      listed="$(as_b GET /alarms | jq --arg id "$alarm_a" 'map(select(.id == $id)) | length')"
+      check "$route: B's list doesn't show A's alarm" "200 0" "$(status) $listed"
+      ;;
+    "POST /alarms")
+      as_b POST /alarms "$(alarm_body "$id")" >/dev/null
+      check "$route: B can't watch A's function" "404 Function with ID $id not found" "$(status) $(message)"
+      as_b POST /alarms "$(alarm_body)" >/dev/null
+      check "  ... but makes its own account's alarm" 201 "$(status)"
       ;;
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
@@ -530,6 +554,8 @@ ref_1="$(jq -r .reference <<<"$proforma_1")"
 
 grant "$account_1" 5000 "promo:l5-1"
 echo "== account 2, on account 1's function and account, on every route (${#routes[@]})"
+alarm_1="$(as_user_1 POST /alarms "$(alarm_body "$fn_1")" | jq -r .id)"
+check "account 1's owner makes an alarm on its function's errors" 201 "$(status)"
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
   template="${route#* }"
@@ -666,6 +692,12 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 DELETE "/members/invitations/$invitation_1" >/dev/null
       check "$route: account 2 can't cancel account 1's invitation" "404 Invitation $invitation_1 not found" "$(status) $(message)"
       ;;
+    "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
+      as_user_2 "$method" "/alarms/$alarm_1" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
+      check "$route: account 2 gets 404 for account 1's alarm" "404 Alarm $alarm_1 not found" "$(status) $(message)"
+      alarm_now="$(as_user_1 GET "/alarms/$alarm_1")"
+      check "  ... which account 1 still has, unchanged" "200 l5 Errors $fn_1" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
+      ;;
     *'{'*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
@@ -688,6 +720,14 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /notifications/deliveries")
       others="$(as_user_2 GET /notifications/deliveries | jq --arg url "$receiver/b" 'map(select(.target != $url)) | length')"
       check "$route: account 2 lists only its own deliveries" "200 0" "$(status) $others"
+      ;;
+    "GET /alarms")
+      listed="$(as_user_2 GET /alarms | jq --arg id "$alarm_1" 'map(select(.id == $id)) | length')"
+      check "$route: account 2's list doesn't show account 1's alarm" "200 0" "$(status) $listed"
+      ;;
+    "POST /alarms")
+      as_user_2 POST /alarms "$(alarm_body "$fn_1")" >/dev/null
+      check "$route: account 2 can't watch account 1's function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
       ;;
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
@@ -813,7 +853,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma api_key.revoke member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create api_key.revoke member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

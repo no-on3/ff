@@ -52,7 +52,10 @@ export type AuditAction =
   | 'credit.adjustment'
   // An owner rotated the secret the account's webhooks are signed with; a member sent a test notification.
   | 'webhook_secret.rotate'
-  | 'notification.test';
+  | 'notification.test'
+  | 'alarm.create'
+  | 'alarm.update'
+  | 'alarm.delete';
 
 export interface AuditEvent {
   /** null for an action on no account. */

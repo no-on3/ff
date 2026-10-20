@@ -244,6 +244,9 @@ const appShape = {
   FF_NOTIFY_INTERVAL_SECONDS: integer(10, 1, 3600),
   // Lets webhooks reach private addresses, such as a receiver on this machine: for development and tests only.
   FF_WEBHOOK_ALLOW_PRIVATE: flag(false),
+  // How often alarms are evaluated, and how long a period has been over before it is judged; tests shorten both.
+  FF_ALARM_INTERVAL_SECONDS: integer(60, 1, 3600),
+  FF_ALARM_SETTLE_SECONDS: integer(60, 0, 3600),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
@@ -460,6 +463,11 @@ export default function configuration(env: Env = process.env) {
     notifications: {
       intervalSeconds: parsed.FF_NOTIFY_INTERVAL_SECONDS,
       allowPrivate: parsed.FF_WEBHOOK_ALLOW_PRIVATE,
+    },
+    // Alarms: how often they are evaluated, and how long a period has been over before it is judged, as a call ending then still counts in it.
+    alarms: {
+      intervalSeconds: parsed.FF_ALARM_INTERVAL_SECONDS,
+      settleSeconds: parsed.FF_ALARM_SETTLE_SECONDS,
     },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.

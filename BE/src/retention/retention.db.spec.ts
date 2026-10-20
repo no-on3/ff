@@ -224,10 +224,16 @@ run('what FF keeps only for a while (L2)', () => {
         [accountId],
       );
       await query(`INSERT INTO webhook_secrets (account_id, secret) VALUES ($1, 'whsec_x')`, [accountId]);
+      await query(
+        `INSERT INTO alarms (account_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+         VALUES ($1, 'Low balance', 'Balance', 'Latest', 60, 'LessThanThreshold', 5, 1, 1, '{"email": true, "webhookUrls": []}')`,
+        [accountId],
+      );
     };
     const notificationsOf = async (accountId: string) => [
       await count('SELECT count(*)::int AS n FROM notification_deliveries WHERE account_id = $1', accountId),
       await count('SELECT count(*)::int AS n FROM webhook_secrets WHERE account_id = $1', accountId),
+      await count('SELECT count(*)::int AS n FROM alarms WHERE account_id = $1', accountId),
     ];
     const auditOf = async (accountId: string) =>
       (await query<Array<{ action: string; actor: string; resource: string }>>('SELECT action, actor, resource FROM audit_log WHERE account_id = $1 ORDER BY id', [accountId])).map(
@@ -246,8 +252,8 @@ run('what FF keeps only for a while (L2)', () => {
 
       expect([await functionsOf(due.id), await historyOf(due.id), await recordsOf(due.id)]).toEqual([0, 0, 2]);
       expect([await notificationsOf(due.id), await notificationsOf(later.id)]).toEqual([
-        [0, 0],
-        [1, 1],
+        [0, 0, 0],
+        [1, 1, 1],
       ]);
       expect(removed).toEqual([node.id, python.id]);
       expect(minio.deleteCode.mock.calls).toEqual([[`${node.id}/code.ts`], [`${python.id}/code.py`]]);

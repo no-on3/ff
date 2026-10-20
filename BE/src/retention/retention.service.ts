@@ -23,9 +23,9 @@ export const DELIVERY_DAYS = 30;
  *   the customer's own users, so it is kept only for the account's plan's
  *   historyRetentionDays;
  * - notification deliveries, kept 30 days to show how they went;
- * - a closed account's functions, their history and logs, its notification
- *   deliveries and webhook secret, once the notice period its closure set has
- *   passed.
+ * - a closed account's functions, their history and logs, its alarms,
+ *   notification deliveries and webhook secret, once the notice period its
+ *   closure set has passed.
  * Usage records, the ledger, invoices and the audit log are not touched: the
  * law requires keeping them for years.
  */
@@ -150,7 +150,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
    * object storage, its row and its history (FunctionsService.remove(), which
    * records each in the audit log); then its namespace, so that nothing writes
    * more of its lines; then its lines in the log store. Then, at once, its
-   * notification deliveries and webhook secret go, and the account is marked,
+   * alarms, notification deliveries and webhook secret go, and the account is marked,
    * with an entry in its audit log, once. Each step may run again, so
    * a run that failed part way is finished by the next.
    */
@@ -162,6 +162,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     await this.dataSource.transaction(async (manager) => {
       await manager.query(`DELETE FROM "notification_deliveries" WHERE "account_id" = $1`, [accountId]);
       await manager.query(`DELETE FROM "webhook_secrets" WHERE "account_id" = $1`, [accountId]);
+      await manager.query(`DELETE FROM "alarms" WHERE "account_id" = $1`, [accountId]);
       const marked = await manager.update(Account, { id: accountId, dataDeletedAt: IsNull() }, { dataDeletedAt: new Date() });
       if (!marked.affected) return;
       await this.audit.record(
