@@ -1,5 +1,5 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import * as http from 'node:http';
+import http from 'node:http';
 import { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

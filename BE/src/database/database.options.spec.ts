@@ -1,7 +1,7 @@
 import { Account } from '../accounts/entities/account.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { DataSource, EntityTarget } from 'typeorm';
-import { PostgresDriver } from 'typeorm/driver/postgres/PostgresDriver';
+import type { PostgresDriver } from 'typeorm/driver/postgres/PostgresDriver.js';
 import { databaseConfiguration } from '../config/configuration';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';

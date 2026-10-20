@@ -58,7 +58,7 @@ Nomad is no longer used; its development VM was removed.
 
 For a step-by-step setup and the everyday commands (create, invoke, update, logs, cold starts, tests, reset), follow **[Getting started](docs/getting-started.md)**. The short version:
 
-You need Docker 24+, Node.js 24, Python 3.11+ (for the Python runtime tests), `curl`, and `jq`. Plan for at least 3.5 GB of free memory and 6 GB free on Docker's disk; the [dev guide](docs/kubernetes-dev-guide.md) has the details. The scripts check resources before every heavy step (`hack/check-resources.sh`).
+You need Docker 24+, Node.js 24.15 or newer, Python 3.11+ (for the Python runtime tests), `curl`, and `jq`. Plan for at least 3.5 GB of free memory and 6 GB free on Docker's disk; the [dev guide](docs/kubernetes-dev-guide.md) has the details. The scripts check resources before every heavy step (`hack/check-resources.sh`).
 
 ```bash
 docker compose up -d --wait                 # PostgreSQL (127.0.0.1:5432) + SeaweedFS S3 (127.0.0.1:9003)

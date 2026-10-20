@@ -7,7 +7,7 @@ FF runs functions on Kubernetes ([ADR 0001](adr/0001-orchestrator-kubernetes.md)
 | Resource | Needed | Why |
 |---|---|---|
 | Docker | 24+ | k3d runs the k3s node as a container |
-| Node.js | 24 | Backend, Node.js runtime tests |
+| Node.js | 24.15 or newer | Backend (NestJS 12), Node.js runtime tests |
 | Python | 3.11+ | Python runtime tests (`python -P`) |
 | `curl`, `jq` | any | Smoke tests, e2e |
 | `zstd`, `sha512sum` | any | Only for `hack/k8s/gvisor-up.sh` |

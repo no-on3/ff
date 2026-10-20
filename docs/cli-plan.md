@@ -264,7 +264,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 
 #### C-03: Backend: request limits and function names
 - **Limits:**
-  - `app.useBodyParser('json', { limit: '7mb' })` in `BE/src/main.ts`, with the app created as a `NestExpressApplication` (NestJS 11.2 is installed since P-09 of the [client-readiness plan](client-readiness-plan.md));
+  - `app.useBodyParser('json', { limit: '7mb' })` in `BE/src/main.ts`, with the app created as a `NestExpressApplication` (NestJS 12 is installed since P-64 of the [client-readiness plan](client-readiness-plan.md), 11.2 before it since P-09);
   - code limited to 900 KiB (in bytes, checked in the DTO, with a message that names the limit);
   - invoke input limited to 6 MB once serialized, answered with 413 and `RequestEntityTooLargeException`, Lambda's name.
 - **Names:**

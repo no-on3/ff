@@ -295,7 +295,15 @@ run('notifications (L2)', () => {
       expect([after[0] - before[0], after[1] - before[1]]).toEqual([1, 1]); // the operator's metrics, by channel and result
     });
 
-    it('sends each delivery once when two backends work at once, ten at a time each', async () => {
+    it('takes ten at a time, and what is left at its next tick', async () => {
+      const id = await account();
+      for (let i = 0; i < 12; i++) await webhook(id, '/ok');
+
+      expect([await worker.tick(), await worker.tick(), await worker.tick()]).toEqual([10, 2, 0]);
+      expect(received).toHaveLength(12);
+    });
+
+    it('sends each delivery once when two backends work at once, at most ten each', async () => {
       const id = await account();
       answers['/slow'] = (res) => setTimeout(() => res.writeHead(200).end(), 100);
       const rows = [];
@@ -306,7 +314,10 @@ run('notifications (L2)', () => {
 
       const [mine, theirs] = await Promise.all([worker.tick(), other.tick()]);
 
-      expect([mine + theirs, Math.max(mine, theirs)]).toEqual([12, 10]);
+      // Both take theirs in the same instant, row by row, each skipping what the other locked: any split can come
+      // out, ten and two, or nine and three, but none above ten, and no delivery taken twice.
+      expect(mine + theirs).toBe(12);
+      expect(Math.max(mine, theirs)).toBeLessThanOrEqual(10);
       expect(received.map((r) => r.headers['ff-delivery-id']).sort()).toEqual(rows.map((r) => r.id).sort());
       expect((await deliveriesOf(id)).every((d) => d.status === DeliveryStatus.DELIVERED && d.attempts === 1)).toBe(true);
     });

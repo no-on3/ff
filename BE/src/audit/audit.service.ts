@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, LessThan, Repository } from 'typeorm';
-import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
+import { EntityManager, In, LessThan, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { describeError } from '../common/describe-error';
 import { likeLiteral } from '../common/like';
 import { Actor, currentRequest } from '../common/request-context';

@@ -19,7 +19,7 @@ The commands were checked on a Linux machine, against a running stack. `git clon
 | Tool | Version | Used for |
 |---|---|---|
 | Docker, with the compose plugin | 24+ | PostgreSQL, S3, and the k3d cluster node |
-| Node.js and npm | 24 | Backend, console, Node.js runtime tests |
+| Node.js and npm | 24.15 or newer | Backend (NestJS 12: its tests need 24.9, its CLI 24.15), console, Node.js runtime tests |
 | Python | 3.11+ | Python runtime tests |
 | git, curl, jq | jq 1.6+ | Getting the code; the commands in this guide |
 | zstd, sha512sum | any | Only for the optional gVisor sandbox |
@@ -752,7 +752,7 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 
 ```bash
 (cd BE && npm run lint)                                  # the backend's linter, with type information, seconds
-(cd BE && npm test)                                      # backend unit tests, seconds
+(cd BE && npm test)                                      # backend unit tests, seconds; one file: (cd BE && npx jest src/<file>.spec.ts)
 (cd BE && npm run test:db)                               # migrations against real PostgreSQL (compose), seconds
 (cd BE && npm run migration:check)                       # the migrations build exactly the entities' schema
 (cd FE && npm test)                                      # console unit tests, seconds
@@ -836,7 +836,8 @@ docker compose down -v
 | 403 `The admin routes are for FF's operators` | The user hasn't the realm role `ff-operator`. Give it in Keycloak's admin console (Users → Role mapping), then log in again. |
 | 400 `Every admin change needs a reason` | Send `reason`, 3 to 500 characters, in the body. |
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. With `FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read` or `K8S_TENANT_QUOTA_… is no longer read`, remove those lines: the account's plan sets them now. |
-| After your machine changed networks, functions can't resolve names (`EAI_AGAIN`, even for `kube-dns.kube-system.svc.cluster.local`), and L3's network cases fail | The cluster's node keeps the DNS servers it started with: `docker exec k3d-ff-dev-server-0 cat /etc/resolv.conf` names the old network's (`ExtServers`). Restart the cluster: `k3d cluster stop ff-dev && k3d cluster start ff-dev` (hack/bin), about 30 s; every pod restarts. |
+| A backend test stops before it starts: `Must use import to load ES Module: …/node_modules/@nestjs/common/index.js` | NestJS ships its packages as ES modules only, and Jest loads them from the backend's CommonJS only on Node.js 24.9 or newer, with the flag `--experimental-vm-modules`. Check `node --version` (with nvm: `nvm install 24 && nvm use 24`). Then start Jest through npm, which passes the flag from `BE/.npmrc`: `npm test`, `npm run test:db`, or `npx jest <file>`. An editor's test runner, or `node_modules/.bin/jest`, needs `NODE_OPTIONS=--experimental-vm-modules` set itself. |
+| After your machine changed networks, functions can't resolve names (`EAI_AGAIN`, even for `kube-dns.kube-system.svc.cluster.local`), and L3's network cases fail | The cluster's node keeps the DNS servers it started with: `docker exec k3d-ff-dev-server-0 cat /etc/resolv.conf` names the old network's (`ExtServers`). Restart the cluster with the k3d in `hack/bin`, which isn't on your `PATH` (a bare `k3d` says the command isn't found): `hack/bin/k3d cluster stop ff-dev && hack/bin/k3d cluster start ff-dev`, about 15 s. The node then names the new network's servers, and L3 passes again. Every pod restarts, those of functions another terminal runs too. |
 | 400 `… must not contain the NUL character (U+0000)` | PostgreSQL stores no NUL in text, so the API refuses it in what it keeps: a function's code, names, settings, searches. Remove it. An invocation's input may hold one: the function gets it whole. |
 | A function can't reach an outside API: `connect ETIMEDOUT`, or a name that resolves but never answers | Its account's internet egress is off, as every new account's is. Turn it on in the admin dashboard (the account's page), or with `PUT /admin/accounts/:id/egress`. In development mode, without the admin dashboard: `UPDATE accounts SET internet_egress = true WHERE id = '<FF_DEV_ACCOUNT_ID>';` in the database, then change a function's code or create one: every rollout writes the account's NetworkPolicy. |
 | The backend won't start: `K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production` | Production runs customers' code in gVisor. Install it on the nodes, apply `deploy/k8s/optional/runtimeclass-gvisor.yaml`, and set `K8S_RUNTIME_CLASS=gvisor` (the platform's `backend.env` has it). Only a cluster that tries the platform's manifests, without customers, sets `K8S_ALLOW_UNSANDBOXED=true` instead. |

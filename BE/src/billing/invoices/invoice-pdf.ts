@@ -1,4 +1,4 @@
-import * as PDFDocument from 'pdfkit';
+import PDFDocument from 'pdfkit';
 import { frenchDay, frenchDecimal, frenchMoney, frenchMonth, frenchPercent, groupDigits } from '../../common/french';
 import { Statement } from './statement';
 
