@@ -31,7 +31,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Deployment:** images for the backend, the console, the admin app and the edge, each non-root on a read-only root; `deploy/k8s/platform` deploys them with Keycloak and a Caddy edge proxy (Let's Encrypt, an admin allowlist), migrations first, every workload behind its own NetworkPolicy, PostgreSQL and S3 outside the cluster. `hack/e2e-platform.sh` deploys it on a cluster of its own and takes a customer's path through the edge.
 - **Backups** ([deploy/backup](deploy/backup/README.md)): point-in-time recovery of FF's and Keycloak's databases to a second site, encrypted, with at most 5 minutes of WAL at risk; the invoices and withholding certificates mirrored hourly; a restore runbook, and a monthly drill (`hack/backup-drill.sh`) recorded in `docs/backup-drills.md`.
 - **Admin dashboard:** a separate web app in `admin/`, for you as FF's operator: Keycloak's client `ff-admin`, the realm role `ff-operator` and a one-time password. It opens on the accounts waiting for your approval; every account has a page with its members, functions, usage, balance and history, where you approve, reject, suspend, reactivate or close it, and change its plan or internet egress, and its owners get an e-mail. Its Payments page finds a pro-forma by the reference on the bank statement, records the transfer, and takes the withholding certificate; its Invoices page issues a month's invoices and their credit notes; its Prices page makes new price books, tried first on last month; its Plans page edits plans' limits, which apply at once. Every change takes a reason, which the audit log keeps; the operator audit log lists every operator's actions, filtered by operator, account, action and date, and exports them as CSV. The platform's settings are there too.
-- **Console:** a React + Vite web app in `FE/`: login and sign-up, the new account's onboarding and approval, account settings, members, API keys, the function pages, which show each role only what it may do, with each function's logs, searched or followed live, and the month's usage.
+- **Console:** a React + Vite web app in `FE/`: login and sign-up, the new account's onboarding and approval, account settings, members, API keys, the function pages, which show each role only what it may do, with each function's logs, searched or followed live, its metrics and its alarms; the account's alarms, notifications and usage; and billing: the balance on every page, credit by bank transfer against a pro-forma, the invoices and the usage statements.
 
 **Not implemented yet**, despite what older documents say:
 - Paying: usage is rated and charged hourly (debited once you turn shadow mode off), credit comes by bank transfer and from FF's grants, and each month's credit is invoiced as a PDF, but there are no refunds yet, no card payments, and no El Fatoora e-invoicing (skipped for now). See phase 3 of the client-readiness plan.
@@ -47,7 +47,7 @@ Nomad is no longer used; its development VM was removed.
 | `BE/` | Backend: functions API, metrics, scaling, and the orchestrator (`src/orchestrator/kubernetes`) |
 | `FE/` | Console (React, Vite, Tailwind) |
 | `admin/` | Admin dashboard for FF's operators (React, Vite, Tailwind): a separate app, behind its own login (P-70) |
-| `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol v1 |
+| `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol 2 |
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs), `logging/` (the log pipeline), `monitoring/` (the operator's metrics, alerts and dashboards), `platform/` (the backend, the apps, Keycloak and the edge proxy, with their deploy script), `backup/` (the legal records' mirror) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
 | `infrastructure/` | SeaweedFS (S3) identities for `docker-compose.yml` |
@@ -84,7 +84,7 @@ curl -s -X POST localhost:3000/functions/<id>/invoke -H 'content-type: applicati
 
 For Python, use `"runtime": "python"` and code such as `"def handler(event, context):\n    return {\"message\": \"Hello \" + event[\"body\"].get(\"name\", \"world\")}\n"`. Creating a function returns once it is running (`"status": "ACTIVE"`). On the beta plan, the memory range is 128–1024 MB and the timeout 1–300 s: each account's plan sets its limits and rates ("Plans and limits" in [Getting started](docs/getting-started.md)).
 
-To start the console: `cd FE && npm install && npm run dev`. It runs on http://localhost:5199 and calls the API on localhost:3000, which allows that origin (`CORS_ORIGIN`). Without a login, it acts as the backend's development account. With `VITE_OIDC_AUTHORITY` set (`FE/.env.example`), users log in through Keycloak, sign up, create their account, and manage API keys: see "Log in with Keycloak" in [Getting started](docs/getting-started.md). The metrics charts get a new source in the client-readiness plan (P-50).
+To start the console: `cd FE && npm install && npm run dev`. It runs on http://localhost:5199 and calls the API on localhost:3000, which allows that origin (`CORS_ORIGIN`). Without a login, it acts as the backend's development account. With `VITE_OIDC_AUTHORITY` set (`FE/.env.example`), users log in through Keycloak, sign up, create their account, and manage API keys: see "Log in with Keycloak" in [Getting started](docs/getting-started.md).
 
 ## Tests
 
@@ -108,10 +108,13 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 - [Getting started](docs/getting-started.md): local setup from a fresh clone, and how to use FF day to day.
 - [How FF works](docs/how-it-works.html): every feature from request to result, as step-by-step simulations with the messages and records at each hop (open it in a browser).
 - [Kubernetes dev guide](docs/kubernetes-dev-guide.md): cluster, images, tests, gVisor, troubleshooting.
+- [Client-readiness plan](docs/client-readiness-plan.md): the work that takes FF to its first paying customers, task by task, with its progress log.
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.
 - [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in four phases (proposed).
-- [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why.
+- [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why; how to deploy the platform.
+- [deploy/backup](deploy/backup/README.md): the backups, the restore runbook and the monthly drill.
+- [The documentation's index](docs/README.md), with the architecture decisions (ADRs).
 
 ## License
 

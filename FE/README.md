@@ -1,6 +1,6 @@
 # FF console
 
-The web console for FF. Users log in or sign up through Keycloak, create their account, and wait for its approval. Then they list, create, edit and invoke functions, change their instance limits, and view their metrics. They read the month's usage, and the account's balance on every page. Owners rename the account, set its tax ID, manage its members and API keys, and ask for pro-formas to add credit by bank transfer. It is a React app built with Vite, and it uses Redux Toolkit, MUI, Tailwind, and `react-oidc-context`.
+The web console for FF. Users log in or sign up through Keycloak, create their account, and wait for its approval. Then they list, create, edit and invoke functions, change their instance limits, and read their history, logs, metrics and alarms. They read the month's usage, the account's notifications and alarms, its balance on every page, its invoices and usage statements. Owners rename the account, set its tax ID, manage its members, API keys and webhooks' secret, and ask for pro-formas to add credit by bank transfer. It is a React app built with Vite, and it uses Redux Toolkit, MUI, Tailwind, and `react-oidc-context`.
 
 ```bash
 npm install
@@ -49,5 +49,4 @@ They are built into the bundle, so a production build needs its own values. The 
 
 `dependencies` lists exactly what ships in the bundle, so `npm audit --omit=dev` audits what users get; the build and test tools are `devDependencies`.
 
-Known gaps, each with its task in the [client-readiness plan](../docs/client-readiness-plan.md):
-- two UI kits (MUI and Tailwind) are used side by side.
+Known gap, which no task of the [client-readiness plan](../docs/client-readiness-plan.md) takes on yet: two UI kits (MUI and Tailwind) are used side by side.

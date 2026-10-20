@@ -1,6 +1,6 @@
 # FF admin dashboard
 
-The web app for FF's operators (client-readiness plan, D12): approvals, accounts, prices, payments and the operator audit log, as their tasks land (P-70 to P-76). It is a separate app from the customer console, so it never ships in the console's bundle, and in production it has its own hostname that only your addresses reach. It is a React app built with Vite and Tailwind, like the console, and logs in with `react-oidc-context`.
+The web app for FF's operators (client-readiness plan, D12, tasks P-70 to P-76): the overview, approvals and accounts, support, payments, credit, invoices, prices, plans, the platform's settings and the operator audit log. It is a separate app from the customer console, so it never ships in the console's bundle, and in production it has its own hostname that only your addresses reach. It is a React app built with Vite and Tailwind, like the console, and logs in with `react-oidc-context`.
 
 ```bash
 npm install

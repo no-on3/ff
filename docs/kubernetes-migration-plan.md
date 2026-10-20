@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | Done: K-00 to K-12 completed on 2026-10-16 (§8, Progress log). K-13 (cold-start performance) is proposed. |
-| **Branch** | `feat/k8s-orchestrator` |
+| **Status** | Done: K-00 to K-12 completed on 2026-10-16 (§8, Progress log). K-13 (cold-start performance) is partly done, in the client-readiness plan's P-62. |
+| **Branch** | `feat/k8s-orchestrator`, which `master` has held since 2026-10-16 |
 | **Decision** | [ADR 0001: Kubernetes as the FF orchestrator](adr/0001-orchestrator-kubernetes.md) |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md), ADR-001 and tasks F-02, F-03, F-06, F-08, F-13, F-15, R-06, R-07 |
 | **Started / finished** | 2026-10-16 / 2026-10-16 |
@@ -544,7 +544,7 @@ The rules:
   - L4: `K8S_RUNTIME_CLASS=gvisor hack/e2e.sh` checks the Deployments' `runtimeClassName`.
 - **Rollback:** unset the variable. Functions return to runc at their next deploy or update.
 
-### K-13: Cold-start performance (proposed, not started)
+### K-13: Cold-start performance (partly done in client-readiness P-62)
 - **Found in K-11.** At the smallest size, 128 MB with a 100m CPU limit and request equal to limit, a pod takes about 10 s from creation to Ready, even without gVisor (measured on k3d). Breakdown:
   - Node.js: 7.8 s from listening to initialized for a `.ts` function, and 5.9 s for a `.js` one. `ts-hook.ts` imports the TypeScript compiler (about 9 MB of JavaScript) eagerly, and FF stores every Node.js function as `function.ts`.
   - Python: 3.9 s to listening and 1.3 s to initialized.

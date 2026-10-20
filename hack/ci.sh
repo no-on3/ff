@@ -76,6 +76,7 @@ stage_static() {
   step "admin app: linter" in_dir admin npm run lint
   step "admin app: types and build" in_dir admin npm run build
   step "Node.js runtime: build" in_dir runtimes/nodejs npm run build
+  step "docs: the checker itself, on documents with one problem each" hack/test-check-docs.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses

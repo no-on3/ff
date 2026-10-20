@@ -5,7 +5,7 @@ The image that runs every Python function on FF. It speaks the same HTTP protoco
 | | |
 |---|---|
 | Image | `ff-runtime-python:3.13-v2` (`3.13` = Python 3.13, as in Lambda's `python3.13`; `v2` = runtime protocol, see [What changed in v2](#what-changed-in-v2)) |
-| Base | `python:3.13-slim` (Debian, glibc 2.41). First built 2026-10-16 from `sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` (Python 3.13.16); `3.13-v2` was built on 2026-10-17 on the same base. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Base | `python:3.13-slim` (Debian, glibc 2.41). First built 2026-10-16 from `sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` (Python 3.13.16); `3.13-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (pip removed), still on Python 3.13.16. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
 | Size | about 122 MB. pip is removed: functions ship their dependencies, nothing can be installed on a read-only root, and the packages pip vendors had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependencies | None: the runtime uses only the standard library |

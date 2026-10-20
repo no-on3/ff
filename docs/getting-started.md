@@ -35,11 +35,10 @@ The commands were checked on a Linux machine, against a running stack. `git clon
 
 Run everything from the repository root unless a step says otherwise.
 
-**1. Get the code.** Until the Kubernetes work is merged, it lives on its branch.
+**1. Get the code.** `master` has everything this guide uses.
 
 ```bash
 git clone <repository-url> ff && cd ff
-git checkout feat/k8s-orchestrator
 ```
 
 **2. Check the machine.** Every heavy script runs this check first and stops when memory, disk, or CPU headroom is too low.
@@ -110,7 +109,7 @@ source hack/k8s/env.sh && kubectl delete namespace "ff-t-$(printf %s 1 | sha256s
 cd FE && npm install && npm run dev
 ```
 
-It runs on http://localhost:5199 and calls the API on localhost:3000. Without a login, as here, it acts as the backend's development account: it creates, invokes, and edits functions, shows their invocation history, and changes their instance limits. "Log in with Keycloak" in section 5 adds the login, sign-up, accounts and API keys.
+It runs on http://localhost:5199 and calls the API on localhost:3000. Without a login, as here, it acts as the backend's development account: its functions, with their history, logs, metrics and alarms; the account's usage, notifications and billing. "Log in with Keycloak" in section 5 adds the login, sign-up, accounts, members and API keys.
 
 **9. The gVisor sandbox (optional here, required in production).** This runs every function in gVisor, an extra isolation layer: customers' code never talks to the node's kernel. In production the backend refuses to start without it. Restart the backend afterwards.
 
@@ -208,7 +207,7 @@ curl -s "$FF/metrics?period=3600&start=$(date -u -d '-1 day' +%FT%TZ)" | jq -c '
 # {"calls":4,"throttles":0}
 ```
 
-**Notifications.** FF tells an account what happens by e-mail to its owners, each in their language, and by webhooks: a POST of JSON to a URL of yours. The alarms will send theirs this way; for now, send a test. Each webhook is signed with the account's secret, which owners read at `GET /notifications/webhook-secret`: `FF-Signature: t=<Unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, keyed with the secret as written. A receiver checks the signature, that `t` is recent, and drops an `FF-Event-Id` it already has, as [`examples/webhook-receiver.mjs`](../examples/webhook-receiver.mjs) does. It answers 2xx within 5 seconds, or FF tries again 1, 2, 4, 8 and 16 minutes later, then gives up; a redirect is never followed. FF never sends a webhook to a private or reserved address. A receiver on your own machine needs `FF_WEBHOOK_ALLOW_PRIVATE=true` in `BE/.env`, as `.env.example` sets it; production refuses that setting.
+**Notifications.** FF tells an account what happens by e-mail to its owners, each in their language, and by webhooks: a POST of JSON to a URL of yours. Alarms send theirs this way (below); a test shows how it arrives. Each webhook is signed with the account's secret, which owners read at `GET /notifications/webhook-secret`: `FF-Signature: t=<Unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, keyed with the secret as written. A receiver checks the signature, that `t` is recent, and drops an `FF-Event-Id` it already has, as [`examples/webhook-receiver.mjs`](../examples/webhook-receiver.mjs) does. It answers 2xx within 5 seconds, or FF tries again 1, 2, 4, 8 and 16 minutes later, then gives up; a redirect is never followed. FF never sends a webhook to a private or reserved address. A receiver on your own machine needs `FF_WEBHOOK_ALLOW_PRIVATE=true` in `BE/.env`, as `.env.example` sets it; production refuses that setting.
 
 ```bash
 FF_WEBHOOK_SECRET=$(curl -s "$FF/notifications/webhook-secret" | jq -r .secret) node examples/webhook-receiver.mjs &   # on :8090
@@ -530,7 +529,7 @@ cd BE && npm run capacity:report -- --days 7      # the last 7 days by the UTC c
 # 2026-10-17  000000000001         45.000             0.000        0.004         3            11,250×
 ```
 
-One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bills 0.000125 GB-s: that gap is D8's, and the report is how you watch it until the admin dashboard does (P-75). "Provisioned" is what `minInstances` would bill at the provisioned price. The report reads the database that `BE/.env` names, and changes nothing.
+One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bills 0.000125 GB-s: that gap is D8's. The admin dashboard's Overview shows the same for the last 7 days (P-75); the report goes further back. "Provisioned" is what `minInstances` would bill at the provisioned price. The report reads the database that `BE/.env` names, and changes nothing.
 
 **The console with a login.** With the backend in OIDC mode as above, copy `FE/.env.example` to `FE/.env.local`, set `VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff` in it, and restart `npm run dev`. The console then opens on a login page:
 1. "Sign up" opens Keycloak's registration form. The verification e-mail arrives in Mailpit (http://localhost:58025); its link asks for a password, then brings you back to the console, logged in.
@@ -539,7 +538,7 @@ One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bil
 
 The console keeps its tokens in the tab's session storage, and renews the 5-minute access token with the refresh token before it expires. "Log out" ends the Keycloak session too. When that session ends another way (30 minutes without a renewal, as after the laptop slept, or a logout in another tab), the next call gets 401, and the console asks you to log in again.
 
-**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for approvals and accounts, payments, invoices, the operator audit log and the platform's settings, and billing as it lands. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
+**The admin dashboard** (P-70) is for you, FF's operator: a separate web app in `admin/` (http://localhost:5198), for approvals and accounts, support, payments, credit, invoices, prices and plans, the overview, the operator audit log and the platform's settings. It always logs in, through Keycloak's client `ff-admin`: start Keycloak as above, and the backend in OIDC mode, with `CORS_ORIGIN` including http://localhost:5198 (`BE/.env.example` has both addresses). Then:
 
 ```bash
 cd admin && cp .env.example .env.local && npm install && npm run dev
@@ -620,12 +619,14 @@ curl -s "$FF/admin/audit-log?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z" 
 
 The e-mail of a rejection, a suspension or a closure gives your reason. A change that doesn't apply to the account's status answers 409.
 
+Once a minute, the backend scales back to zero any function of a suspended or closed account that started anyway, such as with a call already under way. Moving an account to another plan applies the plan's quota to its namespace at once. Internet egress is off for every new account (its plan's default: beta has it off) until you turn it on: the change writes the account's NetworkPolicy at once, and if the cluster refuses it, nothing changes and you get the error, so try again. Private addresses, FF's own network and the cloud's metadata addresses stay out of reach either way. `K8S_EGRESS_INTERNET=false` cuts every account off, whatever its setting.
+
 **Closing an account deletes its data, after a notice.** Closing sets the date: now plus the notice period in the settings, `closedAccountDeletionDays`, 30 days by default. The owners' e-mail gives it, to the minute in UTC, and so do the account page, `GET /me` and the console's banner; until then, the members still read the account's functions, history and logs. Once the date has passed, a job deletes each function, with its code in object storage and its invocation history, then the account's namespace, then its lines in the log store, and checks that none is left. The account's audit log then shows each deletion as FF's. Its usage records, payments, invoices and audit log stay: the law requires keeping them. The job runs at the backend's start and every hour (`FF_RETENTION_INTERVAL_SECONDS`), with the purge of old invocation history; a step that fails is logged, and the next run does it again. Changing the notice period doesn't move the date of an account closed already.
 
 ```bash
 curl -s $FF/admin/accounts/$ACCOUNT -H "Authorization: Bearer $OP" | jq -c '.account | {status, dataDeletionDueAt, dataDeletedAt}'
 # {"status":"closed","dataDeletionDueAt":"2026-11-17T10:32:45.123Z","dataDeletedAt":null}
-``` Once a minute, the backend scales back to zero any function of a suspended or closed account that started anyway, such as with a call already under way. Moving an account to another plan applies the plan's quota to its namespace at once. Internet egress is off for every new account (its plan's default: beta has it off) until you turn it on: the change writes the account's NetworkPolicy at once, and if the cluster refuses it, nothing changes and you get the error, so try again. Private addresses, FF's own network and the cloud's metadata addresses stay out of reach either way. `K8S_EGRESS_INTERNET=false` cuts every account off, whatever its setting.
+```
 
 ```bash
 curl -s "$FF/admin/accounts?status=pending" -H "Authorization: Bearer $OP" | jq -c '.accounts[] | {id, name, useCase, owners: [.owners[].email]}'
@@ -848,7 +849,7 @@ docker compose down -v
 | Every API call returns 401 | `FF_AUTH_MODE` isn't `dev`, and the call has no valid token. Use the development values from `BE/.env.example`, or send a token: see "Log in with Keycloak" in section 5. |
 | 401 `The token was issued by another issuer` | `FF_OIDC_ISSUER` must be exactly the token's `iss`, `http://localhost:8180/realms/ff` for the local Keycloak, including `localhost`. |
 | 403 `This user has no account yet: create one with POST /accounts` | The token is valid, but the user has no account to act for: create one, as "Log in with Keycloak" in section 5 shows. |
-| 403 `Your account is waiting for approval` | A new account can't deploy or invoke until it is approved. Until the admin dashboard exists, approve it in the database (section 5). |
+| 403 `Your account is waiting for approval` | A new account can't deploy or invoke until it is approved: in the admin dashboard's Approvals, or with the operator's token ("Log in with Keycloak" in section 5). |
 | 400 `This user belongs to several accounts` | Name one: `-H "X-FF-Account: <account ID>"`. `GET /me` lists them. |
 | 403 `This API key lacks the scope …` | The key wasn't given that scope. Make one that has it; scopes can't be added to a key. |
 | 401 `The API key was revoked`, or `has expired` | Make a new key. |

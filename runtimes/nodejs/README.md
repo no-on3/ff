@@ -5,7 +5,7 @@ The image that runs every Node.js function on FF. User code is mounted read-only
 | | |
 |---|---|
 | Image | `ff-runtime-nodejs:24-v2` (`24` = Node.js 24 LTS, as in Lambda's `nodejs24.x`; `v2` = runtime protocol, see [What changed in v2](#what-changed-in-v2)) |
-| Base | `node:24-alpine`. First built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0); `24-v2` was built on 2026-10-17 on the same base. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Base | `node:24-alpine`. First built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0); `24-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (the TypeScript code cache, npm removed), still on Node v24.22.0. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
 | Size | about 198 MB, with the code cache of TypeScript. npm, npx, corepack and yarn are removed: nothing runs them, and npm's own dependencies had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependency | `typescript` 5.7.3, and nothing else (no Express, no ts-node) |

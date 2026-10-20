@@ -2,7 +2,8 @@
 """Markdown sanity checks for FF docs (standard library only).
 
 Checks, per file:
-  * code fences are balanced;
+  * code fences are balanced, a closing one has nothing after it (Markdown would keep the block open, and the
+    text after it would show as code), and an opening one names one language at most;
   * every table row has the same number of cells as its header;
   * every relative link target exists (anchors are not checked).
 
@@ -29,6 +30,11 @@ def check(path: Path) -> list[str]:
     header = None
     for number, line in enumerate(lines, start=1):
         if line.strip().startswith("```"):
+            after = line.strip().lstrip("`").strip()
+            if in_code and after:
+                problems.append(f"{path}:{number}: text after a closing code fence: the block doesn't end there")
+            elif not in_code and " " in after:
+                problems.append(f"{path}:{number}: a code fence names one language; the rest belongs on a line of its own")
             in_code = not in_code
             fences += 1
             header = None

@@ -5,7 +5,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [master, main] # the repository's main branch is master; a host may name it main
   pull_request:
   workflow_dispatch:
   schedule:

@@ -12,7 +12,7 @@ FF runs functions on Kubernetes ([ADR 0001](adr/0001-orchestrator-kubernetes.md)
 | `curl`, `jq` | any | Smoke tests, e2e |
 | `zstd`, `sha512sum` | any | Only for `hack/k8s/gvisor-up.sh` |
 | Free memory | ≥ 3 GB to create the cluster or run L3, ≥ 3.5 GB for e2e | The node is capped at 2 GB (`FF_NODE_MEMORY`) and idles at about 370 MiB. Each function pod takes its memory setting (128 MB minimum). |
-| Free disk (Docker filesystem) | ≥ 6 GB | The k3s image, the runtime images (195 MB Node.js, 119 MB Python) and their copies imported into the node, plus about 150 MB of gVisor in the node if installed |
+| Free disk (Docker filesystem) | ≥ 6 GB | The k3s image, the runtime images (198 MB Node.js, 123 MB Python) and their copies imported into the node, plus about 150 MB of gVisor in the node if installed |
 | Free disk (repository) | about 1 GB | `node_modules`, `hack/bin` (tools; gVisor adds about 200 MB) |
 | Ports | `127.0.0.1:6550` | Kubernetes API |
 
