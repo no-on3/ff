@@ -81,6 +81,7 @@ Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox, runs the 
 The realm is imported at Keycloak's first start only: a realm already there is left as it is, so later changes to it are made in the admin console. `deploy/keycloak/production-realm.py` makes `platform/keycloak/ff-realm.json` from the development realm:
 - no test client, and no password grant on `ff-admin`;
 - no user;
+- a password policy: 12 to 128 characters, neither the username nor the e-mail address;
 - the apps' addresses and the mail server from Keycloak's environment.
 
 | File | Object | Purpose |

@@ -224,5 +224,6 @@
       }
     }
   ],
-  "users": []
+  "users": [],
+  "passwordPolicy": "length(12) and maxLength(128) and notUsername(undefined) and notEmail(undefined)"
 }

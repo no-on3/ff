@@ -537,6 +537,12 @@ check "approved, account 1 deploys a function" "201 ACTIVE $account_1" \
 fn_1="$(jq -r .id <<<"$created")"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"one"}}' >/dev/null
 check "and invokes it" 201 "$(status)"
+# PostgreSQL stores no NUL in text: refused with a 400 naming it, never the database's 500.
+as_user_1 POST /functions "$(jq -cn '{name: "l5-nul", runtime: "nodejs", code: "export const handler = async () => \"a\u0000b\";", memory: 128, timeout: 5}')" >/dev/null
+check "code with a NUL character is refused, named, and nothing is created" "400 code must not contain the NUL character (U+0000) 1" \
+  "$(status) $(jq -r '.message[0]' "$work/body") $(as_user_1 GET /functions | jq length)"
+as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"text":"a\u0000b"}}' >/dev/null
+check "but an invocation's input reaches the function whole" 201 "$(status)"
 key_1="$(as_user_1 POST /api-keys '{"name": "l5 reader", "scopes": ["functions:read", "functions:invoke"]}' | jq -r .key)"
 check "account 1's owner creates an API key, shown once" "201 true" "$(status) $([[ $key_1 =~ ^ffk_[0-9a-f]{12}_ ]] && echo true || echo false)"
 key_1_id="$(cut -d_ -f2 <<<"$key_1")"

@@ -6,7 +6,9 @@ deploy/keycloak/ff-realm.json, so that the two never drift apart. What differs:
     which it reads when it imports the realm (${FF_CONSOLE_URL}, ${FF_ADMIN_URL}, ${FF_SMTP_HOST}, ...);
   - no test client (ff-e2e), and no password grant on the admin app's client: operators log in through the
     browser, with their one-time password;
-  - no user: the first operator is made in Keycloak's admin console (deploy/k8s/README.md).
+  - no user: the first operator is made in Keycloak's admin console (deploy/k8s/README.md);
+  - a password policy: 12 characters at least, 128 at most, neither the username nor the e-mail address. The
+    development realm has none, so that its test users keep short passwords.
   deploy/keycloak/production-realm.py            # writes it
   deploy/keycloak/production-realm.py --check    # says whether the file is up to date, for the tests
 """
@@ -32,6 +34,7 @@ def production(realm: dict) -> dict:
         client.setdefault('attributes', {})['post.logout.redirect.uris'] = f'{origin}/*'
         client['directAccessGrantsEnabled'] = False
     realm['users'] = []
+    realm['passwordPolicy'] = 'length(12) and maxLength(128) and notUsername(undefined) and notEmail(undefined)'
     realm['smtpServer'] = {
         'host': '${FF_SMTP_HOST}',
         'port': '${FF_SMTP_PORT}',

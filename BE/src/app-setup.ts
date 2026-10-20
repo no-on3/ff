@@ -4,6 +4,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { apiDocument } from './api-document';
+import { NoNulPipe } from './common/no-nul.pipe';
 import { requestContextMiddleware } from './common/request-context';
 import { corsOptions } from './cors';
 
@@ -22,7 +23,8 @@ export function configureApp(app: INestApplication, config: ConfigService): void
   // log's address and the rate limits by address see the caller rather than the proxy.
   const trusted = config.getOrThrow<string[]>('http.trustProxy');
   if (trusted.length > 0) (app as NestExpressApplication).set('trust proxy', trusted);
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }));
+  // Then text with a NUL character, which PostgreSQL can't store: a 400 rather than the database's 500.
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }), new NoNulPipe());
   // The OpenAPI document and its viewer, at /api: off in production unless FF_API_DOCS says otherwise.
   if (config.getOrThrow<boolean>('http.apiDocs')) SwaggerModule.setup('api', app, apiDocument(app));
 }

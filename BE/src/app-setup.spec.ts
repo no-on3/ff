@@ -3,19 +3,59 @@
  * server. Behind the edge proxy, only the proxies named may say who the caller
  * is, so that the audit log's address and the rate limits by address see the
  * caller and nobody can pose as another address; the API's documents are
- * served only where the settings say, off in production.
+ * served only where the settings say, off in production; and text with a NUL
+ * character, which PostgreSQL can't store, is refused with a 400 rather than
+ * failing at the database with a 500, but for an invocation's input.
  */
-import { Controller, Get, INestApplication, Req } from '@nestjs/common';
+import { Body, Controller, Get, INestApplication, Param, Post, Query, Req } from '@nestjs/common';
+import { IsObject, IsOptional, IsString } from 'class-validator';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { configureApp } from './app-setup';
 import { REQUEST_ID_HEADER } from './common/request-context';
+import { InvokeFunctionDto } from './functions/dto/invoke-function.dto';
+
+class NamedDto {
+  @IsString()
+  name: string;
+
+  @IsObject()
+  @IsOptional()
+  settings?: Record<string, unknown>;
+}
+
+class SearchDto {
+  @IsString()
+  @IsOptional()
+  q?: string;
+}
+
+/** What reached the handler, which a refused request never does. */
+const handled: unknown[] = [];
 
 @Controller('probe')
 class ProbeController {
   @Get('caller')
   caller(@Req() request: { ip?: string }) {
     return { ip: request.ip };
+  }
+
+  @Post('named/:id')
+  named(@Param('id') id: string, @Body() body: NamedDto) {
+    handled.push({ id, ...body });
+    return 'ok';
+  }
+
+  @Get('search')
+  search(@Query() query: SearchDto) {
+    handled.push(query);
+    return 'ok';
+  }
+
+  @Post('invoke')
+  invoke(@Body() body: InvokeFunctionDto) {
+    handled.push(body.input);
+    return body.input;
   }
 }
 
@@ -63,9 +103,49 @@ describe('the app as main.ts sets it up', () => {
     const without = await open({ trustProxy: [], apiDocs: false });
 
     const document = await fetch(`${withDocs}/api-json`);
-    expect([document.status, ((await document.json()) as { paths: object }).paths]).toEqual([200, { '/probe/caller': expect.any(Object) }]);
+    expect([document.status, ((await document.json()) as { paths: object }).paths]).toEqual([200, expect.objectContaining({ '/probe/caller': expect.any(Object) })]);
     expect((await fetch(`${withDocs}/api`)).status).toBe(200);
     expect([(await fetch(`${without}/api-json`)).status, (await fetch(`${without}/api`)).status]).toEqual([404, 404]);
+  });
+
+  describe('text with a NUL character (U+0000)', () => {
+    const post = (url: string, path: string, body: unknown) =>
+      fetch(`${url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const refusal = async (res: Response) => [res.status, ((await res.json()) as { message: string[] }).message];
+
+    beforeEach(() => void (handled.length = 0));
+
+    it('is refused in a body, at any depth and in a key, naming each place, before the handler runs', async () => {
+      const url = await open({ trustProxy: [], apiDocs: false });
+
+      expect(await refusal(await post(url, '/probe/named/1', { name: 'Atelier\u0000Sfax' }))).toEqual([
+        400,
+        ['name must not contain the NUL character (U+0000)'],
+      ]);
+      expect(await refusal(await post(url, '/probe/named/1', { name: 'ok', settings: { a: [{ b: 'x\u0000' }], ['k\u0000']: 1 } }))).toEqual([
+        400,
+        ['settings.a[0].b must not contain the NUL character (U+0000)', 'settings has a key with the NUL character (U+0000)'],
+      ]);
+      expect(handled).toEqual([]);
+    });
+
+    it('is refused in a query and a route parameter, which reach the database too', async () => {
+      const url = await open({ trustProxy: [], apiDocs: false });
+
+      expect(await refusal(await fetch(`${url}/probe/search?q=a%00b`))).toEqual([400, ['q must not contain the NUL character (U+0000)']]);
+      expect(await refusal(await post(url, '/probe/named/1%00', { name: 'ok' }))).toEqual([400, ['id must not contain the NUL character (U+0000)']]);
+      expect(handled).toEqual([]);
+    });
+
+    it("passes an invocation's input on whole, as the function gets it, and every other text as it is", async () => {
+      const url = await open({ trustProxy: [], apiDocs: false });
+
+      const invoked = await post(url, '/probe/invoke', { input: { text: 'a\u0000b', ['k\u0000']: true } });
+      await post(url, '/probe/named/7', { name: 'Atelier Sfax é ✓' });
+
+      expect([invoked.status, await invoked.json()]).toEqual([201, { text: 'a\u0000b', ['k\u0000']: true }]);
+      expect(handled).toEqual([{ text: 'a\u0000b', ['k\u0000']: true }, { id: '7', name: 'Atelier Sfax é ✓' }]);
+    });
   });
 
   it("keeps the rest: each answer's request ID, the security headers, and CORS for the console", async () => {
