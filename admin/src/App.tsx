@@ -12,6 +12,7 @@ import Account from './pages/Account';
 import Accounts from './pages/Accounts';
 import AuditLog from './pages/AuditLog';
 import Invoices from './pages/Invoices';
+import Overview from './pages/Overview';
 import Payments from './pages/Payments';
 import Plans from './pages/Plans';
 import FunctionPage from './pages/FunctionPage';
@@ -80,6 +81,7 @@ function LoginGate() {
     <BrowserRouter>
       <Layout email={email} onLogOut={() => void auth.signoutRedirect()}>
         <Routes>
+          <Route path="/overview" element={<Overview email={email} />} />
           <Route path="/accounts" element={<AccountsRoute email={email} />} />
           <Route path="/accounts/:id" element={<Account email={email} />} />
           <Route path="/payments" element={<PaymentsRoute email={email} />} />

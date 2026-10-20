@@ -1292,6 +1292,23 @@ check "a token meant for another API (Keycloak's admin-cli client): 401" \
   "401 The token is not meant for this API" "$(status) $(message)"
 check "A's function, history and limits are still unchanged" "$before" "$(snapshot as_a "$id")"
 
+echo "== the overview: the platform at a glance, for the operator"
+overview="$(with_token "$operator_token" GET /admin/stats/overview)"
+check "the operator reads it" 200 "$(status)"
+# sql <query>: one value, from the test's database.
+sql_value() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
+check "the approvals waiting, as many as the queue lists" \
+  "$(with_token "$operator_token" GET '/admin/accounts?status=pending' | jq '.accounts | length')" "$(jq .accounts.pendingApprovals <<<"$overview")"
+check "today's calls, as the usage records count them" \
+  "$(sql_value "SELECT count(*) FILTER (WHERE status <> 'throttled') FROM usage_records WHERE started_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'")" \
+  "$(jq .today.invocations <<<"$overview")"
+check "the credit FF owes, as the wallets hold it, to the millime" \
+  "$(sql_value "SELECT to_char(coalesce(sum(greatest(balance, 0)), 0) / 1000.0, 'FM999999990.000') FROM (SELECT sum(e.amount_minor) AS balance FROM ledger_accounts a LEFT JOIN ledger_entries e ON e.ledger_account_id = a.id WHERE a.type = 'wallet' AND a.currency = 'TND' GROUP BY a.id) w")" \
+  "$(jq -r '.money[] | select(.currency == "TND") | .balances.owedByFF' <<<"$overview")"
+check "the invoices issued this month, the one above among them" \
+  "$(sql_value "SELECT count(*) FROM invoices WHERE kind = 'invoice' AND issued_on >= date_trunc('month', now() AT TIME ZONE 'UTC')::date")" "$(jq .invoices.issued <<<"$overview")"
+check "and the last 7 days of capacity against billing" 7 "$(jq '.capacity | length' <<<"$overview")"
+
 echo "== closing an account: its functions, their history and logs deleted once its notice period has passed"
 # Last, as it deletes account 1's data. By now it has a function, calls, log lines, usage, payments and invoices.
 sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }

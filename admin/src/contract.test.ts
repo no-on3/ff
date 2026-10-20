@@ -17,6 +17,7 @@ import invoiceEntitySource from '../../BE/src/billing/invoices/invoice.entity.ts
 import adminAccountsDtoSource from '../../BE/src/admin/admin-accounts.dto.ts?raw';
 import adminCreditsDtoSource from '../../BE/src/admin/admin-credits.dto.ts?raw';
 import adminSupportDtoSource from '../../BE/src/admin/admin-support.dto.ts?raw';
+import adminStatsDtoSource from '../../BE/src/admin/admin-stats.dto.ts?raw';
 import creditGrantsSource from '../../BE/src/admin/credit-grants.ts?raw';
 import ledgerTransactionSource from '../../BE/src/billing/ledger/ledger-transaction.entity.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
@@ -27,6 +28,7 @@ import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
 import { CALL_FIELDS, CALL_HIT_FIELDS, FUNCTION_HIT_FIELDS } from './lib/support';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
 import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
+import { OVERVIEW_FIELDS } from './lib/overview';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
 import { LIMIT_FIELDS } from './lib/plans';
 import { SKUS, multiplyDecimals } from './lib/prices';
@@ -215,6 +217,12 @@ describe('credit grants and the account page\'s credit (P-74)', () => {
     const body = source.slice(source.indexOf(start));
     return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1]);
   };
+
+  it("have the API's overview fields, the accounts' statuses among them", () => {
+    expect(fieldsOf(adminStatsDtoSource, 'export class OverviewView {')).toEqual([...OVERVIEW_FIELDS]);
+    expect(fieldsOf(adminStatsDtoSource, 'export class OverviewCapacityDay {')).toEqual(['day', 'reservedGbS', 'provisionedGbS', 'billedGbS', 'requests']);
+    expect(adminStatsDtoSource).toContain('byStatus: Record<AccountStatus, number>;');
+  });
 
   it("have the API's credit fields on the account page", () => {
     expect(fieldsOf(adminAccountsDtoSource, 'export class AdminCreditView {')).toEqual([...ADMIN_CREDIT_FIELDS]);

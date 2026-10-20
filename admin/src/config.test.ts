@@ -9,6 +9,13 @@ describe('adminConfig', () => {
     });
   });
 
+  it("reads where the operator's Grafana is, when it is set", () => {
+    expect(adminConfig({ VITE_OIDC_AUTHORITY: 'https://login.ff.example/realms/ff', VITE_GRAFANA_URL: ' https://grafana.ff.example/ ' })).toMatchObject({
+      grafanaUrl: 'https://grafana.ff.example',
+    });
+    expect(adminConfig({ VITE_OIDC_AUTHORITY: 'https://login.ff.example/realms/ff', VITE_GRAFANA_URL: ' ' })).not.toHaveProperty('grafanaUrl');
+  });
+
   it('has no development mode: without a realm, it says what is missing', () => {
     expect(adminConfig({})).toEqual({
       problem: 'VITE_OIDC_AUTHORITY is not set: the admin dashboard needs the realm operators log in with (see admin/.env.example).',

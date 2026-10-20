@@ -16,6 +16,9 @@ const Layout: React.FC<{ email: string | undefined; onLogOut: () => void; childr
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-8 gap-y-3 px-4 py-3">
           <span className="text-xl font-bold">FF admin</span>
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <NavLink to="/overview" className={linkClass}>
+              Overview
+            </NavLink>
             <Link to="/accounts?status=pending" className={linkClass({ isActive: approvals })}>
               Approvals
             </Link>

@@ -7,6 +7,8 @@ export interface AdminConfig {
     authority: string;
     clientId: string;
   };
+  /** Where the operator's Grafana is, for the overview's links to its dashboards; none when unset. */
+  grafanaUrl?: string;
 }
 
 export const DEFAULT_API_URL = 'http://localhost:3000';
@@ -21,9 +23,11 @@ const trimmed = (value: string | undefined) => value?.trim().replace(/\/+$/, '')
 export function adminConfig(env: Partial<Record<string, string>>): AdminConfig | { problem: string } {
   const authority = trimmed(env.VITE_OIDC_AUTHORITY);
   if (!authority) return { problem: 'VITE_OIDC_AUTHORITY is not set: the admin dashboard needs the realm operators log in with (see admin/.env.example).' };
+  const grafanaUrl = trimmed(env.VITE_GRAFANA_URL);
   return {
     apiUrl: trimmed(env.VITE_API_URL) || DEFAULT_API_URL,
     oidc: { authority, clientId: env.VITE_OIDC_CLIENT_ID?.trim() || DEFAULT_OIDC_CLIENT_ID },
+    ...(grafanaUrl ? { grafanaUrl } : {}),
   };
 }
 

@@ -5,6 +5,7 @@ import type { AccountSummary, AccountView, StatusChange } from './lib/accounts';
 import type { OperatorAction } from './lib/audit';
 import type { Grant, GrantRequest } from './lib/credits';
 import type { AdminInvoice, DraftsPage, IssueResult } from './lib/invoices';
+import type { Overview } from './lib/overview';
 import type { AdminPayment } from './lib/payments';
 import { REASON_HEADER } from './lib/reason';
 import type { Plan, PlanLimits } from './lib/plans';
@@ -167,4 +168,9 @@ export const settingsApi = {
   get: () => api.get<SettingsView>('/admin/settings'),
   /** Every change carries the operator's reason, which the audit log keeps (D12). */
   update: (settings: Partial<PlatformSettings>, reason: string) => api.put<SettingsView>('/admin/settings', { settings, reason }),
+};
+
+/** The overview: the platform at a glance, at most a minute old. */
+export const statsApi = {
+  overview: () => api.get<Overview>('/admin/stats/overview'),
 };

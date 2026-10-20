@@ -523,6 +523,7 @@
           <tr><td>The caller of a request, and its account</td><td><code>BE/src/auth/principal.ts</code></td></tr>
           <tr><td>API keys</td><td><code>BE/src/api-keys/</code></td></tr>
           <tr><td>The admin dashboard: its routes, the operator check, the platform's settings, and the app</td><td><code>BE/src/admin/</code>, <code>BE/src/auth/auth.guard.ts</code> <code>authenticateOperator()</code>, <code>admin/src/</code></td></tr>
+          <tr><td>The overview for operators: accounts, functions and today's calls, this month's money, invoices to issue, capacity against billing</td><td><code>BE/src/admin/admin-stats.service.ts</code>, <code>admin/src/pages/Overview.tsx</code>, <code>admin/src/lib/overview.ts</code></td></tr>
           <tr><td>Accounts for operators: the approvals queue, the account page, status changes and their rules, plan and egress</td><td><code>BE/src/admin/admin-accounts.service.ts</code>, <code>account-status-changes.ts</code>, <code>BE/src/metrics/metrics.service.ts</code> <code>holdStoppedAccounts()</code>, <code>admin/src/pages/Accounts.tsx</code>, <code>Account.tsx</code></td></tr>
           <tr><td>The audit log: what it records, each account's log, and the operator audit log with its CSV</td><td><code>BE/src/audit/</code>, <code>BE/src/admin/admin-audit.controller.ts</code>, <code>BE/src/common/csv.ts</code>, <code>admin/src/pages/AuditLog.tsx</code></td></tr>
           <tr><td>The development realm (Keycloak)</td><td><code>deploy/keycloak/ff-realm.json</code></td></tr>

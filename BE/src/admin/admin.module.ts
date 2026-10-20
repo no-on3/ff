@@ -23,6 +23,8 @@ import { AdminPlansController } from './admin-plans.controller';
 import { AdminPricesController } from './admin-prices.controller';
 import { AdminPricesService } from './admin-prices.service';
 import { AdminSettingsController } from './admin-settings.controller';
+import { AdminStatsController } from './admin-stats.controller';
+import { AdminStatsService } from './admin-stats.service';
 import { AdminSupportController } from './admin-support.controller';
 import { AdminSupportService } from './admin-support.service';
 import { PlatformSettingsModule } from './platform-settings.module';
@@ -40,8 +42,18 @@ import { PlatformSettingsModule } from './platform-settings.module';
     PlansModule,
     UsageModule,
   ],
-  controllers: [AdminSettingsController, AdminAuditController, AdminAccountsController, AdminPlansController, AdminPricesController, AdminPaymentsController, AdminInvoicesController, AdminSupportController],
-  providers: [AdminAccountsService, AdminCreditsService, AdminPricesService, AdminSupportService],
+  controllers: [
+    AdminSettingsController,
+    AdminAuditController,
+    AdminAccountsController,
+    AdminPlansController,
+    AdminPricesController,
+    AdminPaymentsController,
+    AdminInvoicesController,
+    AdminSupportController,
+    AdminStatsController,
+  ],
+  providers: [AdminAccountsService, AdminCreditsService, AdminPricesService, AdminSupportService, AdminStatsService],
 })
 export class AdminModule implements NestModule {
   /** A withholding certificate comes as the request's body (P-35). */

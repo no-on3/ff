@@ -600,6 +600,14 @@ curl -s "$FF/admin/audit-log?action=settings.update&limit=5" -H "Authorization: 
 curl -s "$FF/admin/audit-log?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z" -H "Authorization: Bearer $OP" -H 'Accept: text/csv'
 ```
 
+**The overview** (P-75): the dashboard's first page, Overview, has the platform at a glance, from `GET /admin/stats/overview`, worked out at most once a minute:
+- the accounts by status, and how many wait for your approval;
+- the functions, and today's calls, failures and throttles;
+- this month's usage charged (debited, or only rated in the billing trial), the credit bought by transfers, the credit FF owes in the wallets, and what accounts in debt owe;
+- the invoices issued this month, and last month's to issue;
+- the last 7 days of capacity held against billed;
+- links to the Grafana dashboards when `VITE_GRAFANA_URL` is set (`http://localhost:3001` in `admin/.env.example`, where `hack/k8s/grafana.sh` serves them).
+
 **Accounts and approvals** (P-71). The dashboard opens on **Approvals**: the accounts waiting for your approval, with who signed up and what they plan to build; the new-account e-mail links there. **Accounts** lists every account, newest first, searched by ID, name or a member's e-mail, and filtered by status and plan. An account's page shows its owners and members, its functions with their last call, this month's usage, its credit (below), its payments and invoices, its status history and its whole audit log, and makes the changes. Each change takes a reason, which the account's audit log keeps, and sends each owner an e-mail:
 
 | Change | From | Then |
