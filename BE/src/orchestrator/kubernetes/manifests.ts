@@ -125,8 +125,14 @@ export function limitRangeManifest(namespace: string): K8sObject {
 }
 
 export function networkPolicyManifest(namespace: string, settings: KubernetesSettings): K8sObject {
+  // Only the backend calls a function: never the other platform pods in ff-system (Keycloak, the console, the
+  // admin app, the log store). A backend outside the cluster calls through the API server's proxy, which comes
+  // from the node, as k3s lets through.
   const ingressFrom: unknown[] = [
-    { namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } } },
+    {
+      namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } },
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'ff-backend' } },
+    },
     ...settings.ingressAllowCidrs.map((cidr) => ({ ipBlock: { cidr } })),
   ];
   const egress: unknown[] = [

@@ -4,7 +4,7 @@
 
 | File | Object | Purpose |
 |---|---|---|
-| `00-namespace.yaml` | Namespace `ff-system` | FF platform components. Pod Security `restricted`. Tenant namespaces accept ingress only from here. |
+| `00-namespace.yaml` | Namespace `ff-system` | FF platform components. Pod Security `restricted`. Tenant namespaces accept ingress only from the backend's pods here (`app.kubernetes.io/name: ff-backend`). |
 | `10-serviceaccount.yaml` | ServiceAccount `ff-controller` | The backend's identity for managing tenant workloads |
 | `20-clusterrole.yaml` | ClusterRole `ff-controller` | Least-privilege verbs (below) |
 | `30-clusterrolebinding.yaml` | ClusterRoleBinding | Binds the role to the ServiceAccount |
@@ -41,6 +41,66 @@ Closing an account deletes its log lines with the delete key (P-45). The backend
 | `logging/fluent-bit/` | ConfigMap `fluent-bit-<hash>` | `fluent-bit.yaml` (the pipeline) and `ff.lua` (each line's fields and call, the limit, the cut). The hash rolls the DaemonSet when they change. `hack/k8s/test-logging-filter.sh` tests both |
 
 **The collector's permissions,** checked by the log pipeline's L3 suite: it may get, list and watch pods and namespaces, and nothing else: no Secrets, no ConfigMaps, no `pods/log`, no writes, no nodes.
+
+## Platform
+
+`platform/` is FF itself in the cluster (client-readiness plan P-60):
+- the backend in `ff-system`, as `ff-controller`, calling functions' Services directly;
+- its migrations, as a Job;
+- the console and the admin app, two replicas each;
+- Keycloak;
+- the edge proxy in `ff-edge`: Caddy, TLS from Let's Encrypt for four hostnames, and the admin app and Keycloak's administration for FF's addresses only.
+
+PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`, `FE/`, `admin/` and `deploy/edge/` (getting-started, "The platform's images").
+
+**Before the first deploy:**
+1. Two databases on the PostgreSQL server, `ff` and `keycloak`, each with its user.
+2. DNS for the four hostnames (API, console, admin, login) to the edge's load balancer, ports 80 and 443 open: Let's Encrypt checks them.
+3. An overlay of `platform/` with FF's values:
+   - `backend.env`, merged: the hostnames, the database, S3, the seller's and the bank's details, `FF_TRUST_PROXY` (the cluster's pod network, which only the edge reaches the backend from);
+   - `keycloak.env`: the login hostname, its database, the mail server;
+   - `edge.env`: the four hostnames, the ACME e-mail, and `FF_ADMIN_ALLOW`, FF's own addresses;
+   - `images`: the registry's images and their tags.
+4. The Secrets:
+
+   ```bash
+   kubectl -n ff-system create secret generic ff-backend --from-literal=DB_PASSWORD=… --from-literal=MINIO_ACCESS_KEY=… \
+     --from-literal=MINIO_SECRET_KEY=… --from-literal=FF_SMTP_URL='smtp://user:password@smtp.example.tn:587'
+   kubectl -n ff-system create secret generic keycloak --from-literal=KC_DB_PASSWORD=… \
+     --from-literal=KC_BOOTSTRAP_ADMIN_USERNAME=admin --from-literal=KC_BOOTSTRAP_ADMIN_PASSWORD=… --from-literal=FF_SMTP_PASSWORD=…
+   ```
+
+Then `deploy/k8s/platform/deploy.sh <overlay>`. It runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
+
+**The first operator:**
+1. In Keycloak's admin console (`https://<login>/admin`, from an address `FF_ADMIN_ALLOW` names), as the bootstrap administrator, make the user.
+2. Give them the realm role `ff-operator`; they set up their one-time password at their first login.
+3. Make a permanent administrator, and remove the bootstrap one.
+
+The realm is imported at Keycloak's first start only: a realm already there is left as it is, so later changes to it are made in the admin console. `deploy/keycloak/production-realm.py` makes `platform/keycloak/ff-realm.json` from the development realm:
+- no test client, and no password grant on `ff-admin`;
+- no user;
+- the apps' addresses and the mail server from Keycloak's environment.
+
+| File | Object | Purpose |
+|---|---|---|
+| `platform/00-namespace-edge.yaml` | Namespace `ff-edge` | The edge's, the only pods the internet reaches. Pod Security `restricted` |
+| `platform/10-backend.yaml` | Service and Deployment `ff-backend` in `ff-system` | One replica, as `ff-controller`; `/readyz` and `/healthz` its probes, its metrics port named `metrics`; user 10001, read-only root, the log store's key mounted for deleting a closed account's lines |
+| `platform/15-migrations.yaml` | Job `ff-migrations` | The migrations, from the backend's image and settings; `deploy.sh` runs it first |
+| `platform/20-console.yaml`, `30-admin.yaml` | Services and Deployments `ff-console`, `ff-admin` | The static builds, two replicas each, user 65532, read-only root |
+| `platform/40-keycloak.yaml` | Service and Deployment `keycloak` | Keycloak 26.7.5 with `start`, TLS at the edge, its database outside; the realm imported at its first start. Non-root, no capability; its root is writable, as its start builds its configuration there |
+| `platform/50-edge.yaml` | PVC, Service (LoadBalancer, keeping callers' addresses) and Deployment `ff-edge` | Caddy on 8080 and 8443, the Service on 80 and 443; its certificates on the volume |
+| `platform/60-network-policies.yaml` | NetworkPolicies | `ff-system` denies by default; the edge reaches the backend, the apps and Keycloak; the backend reaches Keycloak for the realm's keys; the metrics store reaches the backend's metrics port; the edge takes the world on its two ports |
+| `platform/backend.env`, `keycloak.env`, `edge.env` | ConfigMaps | What isn't secret, with example values (`example.tn`) for an overlay to replace |
+| `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites, HSTS, the allowlist; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
+| `platform/keycloak/ff-realm.json` | ConfigMap `keycloak-realm` | The production realm |
+
+`hack/k8s/test-platform-manifests.sh` checks them without deploying:
+- every pod's hardening, and every workload's NetworkPolicy;
+- the backend's settings, read by the backend's own configuration;
+- the realm up to date;
+- the edge's Caddyfile, valid for Caddy;
+- the cluster API's schemas, with a server dry run.
 
 ## Monitoring
 

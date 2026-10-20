@@ -1,0 +1,117 @@
+# The edge proxy: TLS for the four hostnames, its certificates from Let's Encrypt kept on its volume, so that a
+# restart doesn't ask for them again; the admin app and Keycloak's administration for FF's addresses only
+# (edge/Caddyfile). The Service is the cluster's load balancer on 80 and 443, and keeps the callers' addresses
+# (externalTrafficPolicy: Local): the allowlist and the backend's audit log and rate limits read them. One
+# replica, as its volume is mounted on one node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ff-edge-data
+  namespace: ff-edge
+  labels:
+    app.kubernetes.io/name: ff-edge
+    app.kubernetes.io/part-of: ff
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ff-edge
+  namespace: ff-edge
+  labels:
+    app.kubernetes.io/name: ff-edge
+    app.kubernetes.io/part-of: ff
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: ff-edge
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: https
+      port: 443
+      targetPort: https
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ff-edge
+  namespace: ff-edge
+  labels:
+    app.kubernetes.io/name: ff-edge
+    app.kubernetes.io/part-of: ff
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ff-edge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ff-edge
+        app.kubernetes.io/part-of: ff
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: edge
+          image: ff-edge
+          envFrom:
+            - configMapRef:
+                name: ff-edge
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: caddyfile
+              mountPath: /etc/caddy
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: caddyfile
+          configMap:
+            name: ff-edge-caddyfile
+        - name: data
+          persistentVolumeClaim:
+            claimName: ff-edge-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

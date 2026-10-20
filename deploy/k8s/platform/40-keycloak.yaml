@@ -1,0 +1,98 @@
+# Keycloak 26.7.5, the login, with `start`, not development's `start-dev`: TLS ends at the edge (KC_HTTP_ENABLED,
+# KC_PROXY_HEADERS), its address is the login hostname (KC_HOSTNAME), and its database is a database of the
+# same PostgreSQL server as the backend's, which these manifests don't deploy. It imports the production realm
+# (keycloak/ff-realm.json) at its first start, the console's and the admin app's addresses and the mail server
+# filled in from its environment; a realm already there is left as it is. Its settings: the ConfigMap keycloak
+# (keycloak.env) and the Secret keycloak (KC_DB_PASSWORD, KC_BOOTSTRAP_ADMIN_USERNAME and _PASSWORD for the first
+# administrator, FF_SMTP_PASSWORD). Its start builds its configuration into its own directories: its root can't
+# be read-only, but it runs non-root, without any capability.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: ff-system
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: ff
+spec:
+  selector:
+    app.kubernetes.io/name: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: ff-system
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: ff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/part-of: ff
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.7.5
+          args: [start, --import-realm]
+          envFrom:
+            - configMapRef:
+                name: keycloak
+            - secretRef:
+                name: keycloak
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          startupProbe:
+            httpGet:
+              path: /health/started
+              port: management
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm

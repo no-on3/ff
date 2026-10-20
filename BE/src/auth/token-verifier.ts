@@ -73,10 +73,10 @@ export class TokenVerifier {
   constructor(private readonly config: ConfigService) {}
 
   async verify(token: string): Promise<Identity> {
-    const { issuer, audience } = this.config.getOrThrow<{ issuer: string; audience: string }>('auth.oidc');
+    const { issuer, audience, jwksUrl } = this.config.getOrThrow<{ issuer: string; audience: string; jwksUrl?: string }>('auth.oidc');
     let payload: JWTPayload;
     try {
-      ({ payload } = await jwtVerify(token, await this.keySet(issuer), {
+      ({ payload } = await jwtVerify(token, await this.keySet(issuer, jwksUrl), {
         issuer,
         audience,
         algorithms: ACCEPTED_ALGORITHMS,
@@ -102,11 +102,12 @@ export class TokenVerifier {
    * The realm's public keys, found through its OpenID configuration. jose
    * caches them, and fetches them again when a token names a key it doesn't
    * have, once keyRefetchCooldownMs has passed. A failed discovery is tried
-   * again next time.
+   * again next time. With FF_OIDC_JWKS_URL, the keys are read there, without
+   * a discovery.
    */
-  private keySet(issuer: string): Promise<JWTVerifyGetKey> {
+  private keySet(issuer: string, jwksUrl?: string): Promise<JWTVerifyGetKey> {
     if (!this.keys) {
-      const keys = discoverJwksUri(issuer).then((uri) =>
+      const keys = (jwksUrl ? Promise.resolve(jwksUrl) : discoverJwksUri(issuer)).then((uri) =>
         createRemoteJWKSet(new URL(uri), {
           cooldownDuration: this.keyRefetchCooldownMs,
           cacheMaxAge: 10 * 60_000,

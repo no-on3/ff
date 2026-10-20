@@ -1,0 +1,228 @@
+{
+  "realm": "ff",
+  "displayName": "FF",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "verifyEmail": true,
+  "resetPasswordAllowed": true,
+  "rememberMe": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "smtpServer": {
+    "host": "${FF_SMTP_HOST}",
+    "port": "${FF_SMTP_PORT}",
+    "from": "${FF_SMTP_FROM}",
+    "fromDisplayName": "FF",
+    "auth": "true",
+    "user": "${FF_SMTP_USER}",
+    "password": "${FF_SMTP_PASSWORD}",
+    "starttls": "true",
+    "ssl": "false"
+  },
+  "browserFlow": "ff browser",
+  "roles": {
+    "realm": [
+      {
+        "name": "ff-operator",
+        "description": "FF's operators: the admin dashboard, with a one-time password (D12)"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "ff-console",
+      "name": "FF console",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "protocolMappers": [
+        {
+          "name": "ff-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "ff-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "redirectUris": [
+        "${FF_CONSOLE_URL}/*"
+      ],
+      "webOrigins": [
+        "${FF_CONSOLE_URL}"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${FF_CONSOLE_URL}/*"
+      }
+    },
+    {
+      "clientId": "ff-admin",
+      "name": "FF admin dashboard",
+      "description": "FF's operators only (D12). Direct access grants are for the development realm's tests: production's realm turns them off (P-60).",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "protocolMappers": [
+        {
+          "name": "ff-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "ff-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "redirectUris": [
+        "${FF_ADMIN_URL}/*"
+      ],
+      "webOrigins": [
+        "${FF_ADMIN_URL}"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${FF_ADMIN_URL}/*"
+      }
+    },
+    {
+      "clientId": "ff-cli",
+      "name": "ff CLI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "protocolMappers": [
+        {
+          "name": "ff-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "ff-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
+      }
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "alias": "ff browser",
+      "description": "Keycloak's browser flow, with a one-time password for FF's operators (D12)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "identity-provider-redirector",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 25,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 30,
+          "flowAlias": "ff browser forms",
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "ff browser forms",
+      "description": "The password, then a one-time password for operators",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "flowAlias": "ff operator one-time password",
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "ff operator one-time password",
+      "description": "Users with the ff-operator role: a one-time password, which they set up at their first login",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "conditional-user-role",
+          "authenticatorConfig": "ff-operator role",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "ff-operator role",
+      "config": {
+        "condUserRole": "ff-operator",
+        "negate": "false"
+      }
+    }
+  ],
+  "users": []
+}

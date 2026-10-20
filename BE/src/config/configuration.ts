@@ -266,6 +266,9 @@ const appShape = {
   FF_DEV_ACCOUNT_ID: optionalText(accountId),
   FF_OIDC_ISSUER: optionalText(httpUrl),
   FF_OIDC_AUDIENCE: optionalText(),
+  // Where the realm's keys are, when not where its public OpenID configuration says: in a cluster, Keycloak's own
+  // Service, so that the backend never goes out through the edge to reach it. Tokens still name FF_OIDC_ISSUER.
+  FF_OIDC_JWKS_URL: optionalText(httpUrl),
   FF_DEV_USER_ID: optionalText(),
 
   MINIO_ENDPOINT: text('localhost'),
@@ -481,7 +484,11 @@ export default function configuration(env: Env = process.env) {
       devAccountId: parsed.FF_AUTH_MODE === 'dev' ? parsed.FF_DEV_ACCOUNT_ID : undefined,
       oidc:
         parsed.FF_AUTH_MODE === 'oidc'
-          ? { issuer: parsed.FF_OIDC_ISSUER as string, audience: parsed.FF_OIDC_AUDIENCE as string }
+          ? {
+              issuer: parsed.FF_OIDC_ISSUER as string,
+              audience: parsed.FF_OIDC_AUDIENCE as string,
+              ...(parsed.FF_OIDC_JWKS_URL ? { jwksUrl: parsed.FF_OIDC_JWKS_URL } : {}),
+            }
           : undefined,
     },
     database: toDatabaseSettings(parsed),

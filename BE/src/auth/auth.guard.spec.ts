@@ -129,11 +129,12 @@ async function newKey(kid: string, alg = 'RS256'): Promise<Key> {
 
 /** A fake OpenID issuer: its configuration and its keys, which a test can change. */
 async function fakeIssuer() {
-  const state = { keys: [] as JWK[], jwksFetches: 0, up: true };
+  const state = { keys: [] as JWK[], jwksFetches: 0, discoveries: 0, up: true };
   const server = http.createServer((req, res) => {
     if (!state.up) return void res.destroy();
     res.setHeader('content-type', 'application/json');
     if (req.url === '/realms/ff/.well-known/openid-configuration') {
+      state.discoveries++;
       res.end(JSON.stringify({ issuer: `${base}/realms/ff`, jwks_uri: `${base}/realms/ff/certs` }));
     } else if (req.url === '/realms/ff/certs') {
       state.jwksFetches++;
@@ -507,6 +508,17 @@ describe('the global guard and token checks (L1, P-11)', () => {
     // A forged key ID right after can't make it read them again.
     await expect(verifier.verify(forged)).rejects.toBeInstanceOf(InvalidTokenError);
     expect(fetches()).toBe(start + 2);
+  });
+
+  it('reads the keys where FF_OIDC_JWKS_URL says, without a discovery, and still checks the issuer the token names', async () => {
+    const verifier = new TokenVerifier({ getOrThrow: () => ({ issuer: issuer.issuer, audience: AUDIENCE, jwksUrl: `${issuer.issuer}/certs` }) } as never);
+    const [discoveries, fetches] = [issuer.state.discoveries, issuer.state.jwksFetches];
+
+    await expect(verifier.verify(await token())).resolves.toMatchObject({ userId: 'kc-user-1' });
+    expect([issuer.state.discoveries - discoveries, issuer.state.jwksFetches - fetches]).toEqual([0, 1]);
+
+    const elsewhere = new TokenVerifier({ getOrThrow: () => ({ issuer: 'https://login.ff.example/realms/ff', audience: AUDIENCE, jwksUrl: `${issuer.issuer}/certs` }) } as never);
+    await expect(elsewhere.verify(await token())).rejects.toThrow('The token was issued by another issuer');
   });
 
   it('lets anyone call a @Public() route', async () => {

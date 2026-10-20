@@ -1,0 +1,108 @@
+# The backend in ff-system, as the ServiceAccount ff-controller (base/), which may manage the tenants'
+# namespaces and nothing else. One replica: its jobs (the rating, the alarms, the notifications) take their work
+# with row locks, so a second would be safe, but the beta needs one. It calls functions' Services directly
+# (K8S_INVOKE_MODE=direct). Its settings are the ConfigMap ff-backend (backend.env) and the Secret ff-backend,
+# which the deployment writes (deploy/k8s/README.md): DB_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
+# FF_SMTP_URL. It refuses to start on a schema with pending migrations: deploy.sh runs the migrations Job first.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ff-backend
+  namespace: ff-system
+  labels:
+    app.kubernetes.io/name: ff-backend
+    app.kubernetes.io/part-of: ff
+spec:
+  selector:
+    app.kubernetes.io/name: ff-backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ff-backend
+  namespace: ff-system
+  labels:
+    app.kubernetes.io/name: ff-backend
+    app.kubernetes.io/part-of: ff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ff-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ff-backend
+        app.kubernetes.io/part-of: ff
+    spec:
+      serviceAccountName: ff-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # A stopping backend finishes its calls: the longest a function may run, 15 minutes, would be too long a
+      # rollout, so calls cut off are marked lost by the next backend, and not billed.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: backend
+          image: ff-backend
+          envFrom:
+            - configMapRef:
+                name: ff-backend
+            - secretRef:
+                name: ff-backend
+          ports:
+            - name: http
+              containerPort: 3000
+            - name: metrics
+              containerPort: 9464
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: log-store-key
+              mountPath: /etc/ff/victoria-logs-delete-key
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        # Deleting a closed account's log lines takes the log store's key (deploy/k8s/logging).
+        - name: log-store-key
+          secret:
+            secretName: victoria-logs-delete-key
+            defaultMode: 0440

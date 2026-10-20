@@ -1,0 +1,54 @@
+# FF's edge: TLS for the API, the console, the admin app and the login, each on its hostname, its certificate
+# from Let's Encrypt (ACME), kept on the edge's volume. Every value is the edge's environment (edge.env), read
+# when Caddy starts. The admin app, and Keycloak's own admin console, answer only the addresses FF_ADMIN_ALLOW
+# names; everyone else gets 403. The caller's address is the connection's: the Service keeps it
+# (externalTrafficPolicy: Local), and each app behind is told it in X-Forwarded-For.
+{
+	admin off
+	email {$FF_ACME_EMAIL}
+	http_port 8080
+	https_port 8443
+	# Empty in production. A test sets it to local_certs: certificates from Caddy's own authority, offline.
+	{$FF_EDGE_TLS}
+	log {
+		output stdout
+		format json
+	}
+}
+
+(common) {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	log
+}
+
+{$FF_API_HOST} {
+	import common
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:80
+}
+
+{$FF_CONSOLE_HOST} {
+	import common
+	reverse_proxy ff-console.ff-system.svc.cluster.local:80
+}
+
+{$FF_ADMIN_HOST} {
+	import common
+	@outside not remote_ip {$FF_ADMIN_ALLOW}
+	respond @outside "Forbidden: the admin dashboard answers FF's own addresses only" 403
+	reverse_proxy ff-admin.ff-system.svc.cluster.local:80
+}
+
+{$FF_LOGIN_HOST} {
+	import common
+	# Keycloak's admin console and its API, for FF's addresses only; the login pages and tokens for everyone.
+	@admin {
+		path /admin /admin/*
+		not remote_ip {$FF_ADMIN_ALLOW}
+	}
+	respond @admin "Forbidden: Keycloak's administration answers FF's own addresses only" 403
+	reverse_proxy keycloak.ff-system.svc.cluster.local:8080
+}

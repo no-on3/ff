@@ -1,0 +1,50 @@
+# FF's platform in the cluster: the backend and its migrations, the console, the admin app, Keycloak and the
+# edge proxy, with their NetworkPolicies. Apply it after base/, logging/ and, if wanted, monitoring/base, with
+# deploy.sh, which runs the migrations first; PostgreSQL and S3 are outside the cluster, any provider's will do. Its
+# example values (example.tn) and image names are for an overlay to replace: deploy/k8s/README.md, "Platform".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespace-edge.yaml
+  - 10-backend.yaml
+  - 15-migrations.yaml
+  - 20-console.yaml
+  - 30-admin.yaml
+  - 40-keycloak.yaml
+  - 50-edge.yaml
+  - 60-network-policies.yaml
+# Each name gets its content's hash, so a change of settings rolls the pods that read them.
+configMapGenerator:
+  - name: ff-backend
+    namespace: ff-system
+    envs: [backend.env]
+    # deploy.sh applies the migrations first: their Job and the settings they read.
+    options:
+      labels:
+        ff.dev/deploy-step: migrations
+  - name: keycloak
+    namespace: ff-system
+    envs: [keycloak.env]
+  - name: keycloak-realm
+    namespace: ff-system
+    files:
+      - keycloak/ff-realm.json
+  - name: ff-edge
+    namespace: ff-edge
+    envs: [edge.env]
+  - name: ff-edge-caddyfile
+    namespace: ff-edge
+    files:
+      - edge/Caddyfile
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: ff
+images:
+  - name: ff-backend
+    newTag: latest
+  - name: ff-console
+    newTag: latest
+  - name: ff-admin
+    newTag: latest
+  - name: ff-edge
+    newTag: latest

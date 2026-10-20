@@ -164,6 +164,13 @@ describe('configuration', () => {
     ]);
   });
 
+  it("reads the realm's keys from its OpenID configuration, or where FF_OIDC_JWKS_URL says", () => {
+    expect(configuration(production).auth.oidc).not.toHaveProperty('jwksUrl');
+    const inCluster = 'http://keycloak.ff-system.svc:8080/realms/ff/protocol/openid-connect/certs';
+    expect(configuration({ ...production, FF_OIDC_JWKS_URL: inCluster }).auth.oidc).toMatchObject({ issuer: production.FF_OIDC_ISSUER, jwksUrl: inCluster });
+    expect(problems({ ...production, FF_OIDC_JWKS_URL: 'keycloak/certs' })).toEqual([expect.stringContaining('FF_OIDC_JWKS_URL')]);
+  });
+
   it("serves the API's documents in development and not in production, unless told otherwise", () => {
     expect([configuration(dev).http.apiDocs, configuration(production).http.apiDocs]).toEqual([true, false]);
     expect([configuration({ ...dev, FF_API_DOCS: 'false' }).http.apiDocs, configuration({ ...production, FF_API_DOCS: 'true' }).http.apiDocs]).toEqual([false, true]);

@@ -46,7 +46,7 @@ Nomad is no longer used; its development VM was removed.
 | `FE/` | Console (React, Vite, Tailwind) |
 | `admin/` | Admin dashboard for FF's operators (React, Vite, Tailwind): a separate app, behind its own login (P-70) |
 | `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol v1 |
-| `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs), `logging/` (the log pipeline), `monitoring/` (the operator's metrics, alerts and dashboards) and `optional/` (gVisor) |
+| `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs), `logging/` (the log pipeline), `monitoring/` (the operator's metrics, alerts and dashboards), `platform/` (the backend, the apps, Keycloak and the edge proxy, with their deploy script) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
 | `infrastructure/` | SeaweedFS (S3) identities for `docker-compose.yml` |
 | `docs/` | The [getting-started guide](docs/getting-started.md), plans, ADRs, and the [Kubernetes dev guide](docs/kubernetes-dev-guide.md) |

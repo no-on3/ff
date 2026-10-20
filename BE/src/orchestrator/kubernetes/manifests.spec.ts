@@ -150,13 +150,20 @@ describe('Kubernetes manifests', () => {
   });
 
   describe('NetworkPolicy', () => {
-    it('denies all ingress except from ff-system', () => {
+    it("denies all ingress but the backend's pods, in ff-system: not the platform's other pods there", () => {
       const np: any = networkPolicyManifest('ff-t-abc', settings());
 
       expect(np.spec.podSelector).toEqual({});
       expect(np.spec.policyTypes).toEqual(['Ingress', 'Egress']);
       expect(np.spec.ingress).toEqual([
-        { from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } } }] },
+        {
+          from: [
+            {
+              namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'ff-backend' } },
+            },
+          ],
+        },
       ]);
     });
 

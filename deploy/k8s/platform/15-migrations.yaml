@@ -1,0 +1,56 @@
+# The migrations, from the backend's image, with its settings: deploy.sh runs this Job, waits for it, and only
+# then rolls the backend. A Job's template can't change, so deploy.sh deletes the last one first.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ff-migrations
+  namespace: ff-system
+  labels:
+    app.kubernetes.io/name: ff-migrations
+    app.kubernetes.io/part-of: ff
+    app.kubernetes.io/component: migrations
+    ff.dev/deploy-step: migrations
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ff-migrations
+        app.kubernetes.io/part-of: ff
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrations
+          image: ff-backend
+          command: [node, node_modules/typeorm/cli.js, migration:run, -d, dist/database/data-source.js]
+          envFrom:
+            - configMapRef:
+                name: ff-backend
+            - secretRef:
+                name: ff-backend
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
