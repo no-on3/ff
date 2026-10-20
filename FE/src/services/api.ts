@@ -714,6 +714,74 @@ export const notificationsApi = {
   deliveries: (limit = 50) => api.get<Delivery[]>('/notifications/deliveries', { params: { limit } }),
 };
 
+/** An alarm's state, as CloudWatch's. */
+export const ALARM_STATES = ['OK', 'ALARM', 'INSUFFICIENT_DATA'] as const;
+export type AlarmState = (typeof ALARM_STATES)[number];
+
+/** What an alarm is, as POST /alarms and PUT /alarms/:id take it. */
+export interface AlarmBody {
+  name: string;
+  /** null: the account's, all its functions together, or its money. */
+  functionId: string | null;
+  metric: string;
+  statistic: string;
+  /** Seconds per datapoint: 60, 300 or 3600. */
+  period: number;
+  comparison: string;
+  threshold: number;
+  /** N: the last periods judged. */
+  evaluationPeriods: number;
+  /** M: how many of them must breach. */
+  datapointsToAlarm: number;
+  treatMissingData: string;
+  actions: { email: boolean; webhookUrls: string[] };
+}
+
+export const ALARM_FIELDS = [
+  'id',
+  'name',
+  'functionId',
+  'metric',
+  'statistic',
+  'period',
+  'comparison',
+  'threshold',
+  'evaluationPeriods',
+  'datapointsToAlarm',
+  'treatMissingData',
+  'actions',
+  'state',
+  'stateReason',
+  'stateChangedAt',
+  'evaluatedAt',
+  'createdAt',
+  'updatedAt',
+] as const;
+/** An alarm, with its state and why. */
+export interface Alarm extends AlarmBody {
+  id: string;
+  state: AlarmState;
+  /** Why, in English, as CloudWatch says it. */
+  stateReason: string | null;
+  stateChangedAt: string | null;
+  /** Its last evaluation: every minute. */
+  evaluatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+// A field missing from ALARM_FIELDS stops the build.
+type UnlistedAlarmField = Exclude<keyof Alarm, (typeof ALARM_FIELDS)[number]>;
+const everyAlarmFieldListed: [UnlistedAlarmField] extends [never] ? true : never = true;
+void everyAlarmFieldListed;
+
+/** The account's alarms: every member reads them; owners and developers change them. */
+export const alarmsApi = {
+  list: () => api.get<Alarm[]>('/alarms'),
+  create: (data: AlarmBody) => api.post<Alarm>('/alarms', data),
+  update: (id: string, data: AlarmBody) => api.put<Alarm>(`/alarms/${id}`, data),
+  remove: (id: string) => api.delete(`/alarms/${id}`),
+};
+
 /** The chosen account's API keys: its owners' only. */
 export const apiKeysApi = {
   listKeys: () => api.get<ApiKey[]>('/api-keys'),

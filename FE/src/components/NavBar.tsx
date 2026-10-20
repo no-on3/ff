@@ -38,6 +38,9 @@ const NavBar: React.FC = () => {
             <NavLink to="/functions" className={linkClass}>
               Functions
             </NavLink>
+            <NavLink to="/alarms" className={linkClass}>
+              Alarms
+            </NavLink>
             <NavLink to="/usage" className={linkClass}>
               Usage
             </NavLink>

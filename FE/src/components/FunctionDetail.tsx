@@ -19,6 +19,7 @@ import { updateFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
 import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
 import { FunctionLogs } from './FunctionLogs';
+import FunctionAlarms from './FunctionAlarms';
 import { MetricsDashboard } from './MetricsDashboard';
 import { ScalingConfiguration } from './ScalingConfiguration';
 
@@ -170,6 +171,8 @@ const FunctionDetail: React.FC = () => {
               {func.runtime} · {func.memory} MB · {func.timeout} s
             </span>
           </div>
+
+          <FunctionAlarms functionId={func.id} mayChange={mayChange} />
 
           {func.status === 'ERROR' && func.error && (
             <div className="bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded mb-4">

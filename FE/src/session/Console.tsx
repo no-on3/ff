@@ -11,6 +11,7 @@ import FunctionDetail from '../components/FunctionDetail';
 import FunctionList from '../components/FunctionList';
 import Members from '../components/Members';
 import Notifications from '../components/Notifications';
+import Alarms from '../components/Alarms';
 import NavBar from '../components/NavBar';
 import Onboarding from '../components/Onboarding';
 import PendingApproval from '../components/PendingApproval';
@@ -42,6 +43,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
           <Route path="/account/api-keys" element={account ? <ApiKeys /> : <Navigate to="/" replace />} />
           <Route path="/account/members" element={account ? <Members /> : <Navigate to="/" replace />} />
           <Route path="/account/notifications" element={account ? <Notifications /> : <Navigate to="/" replace />} />
+          <Route path="/alarms" element={account ? <Alarms /> : <Navigate to="/" replace />} />
           {page === 'console' ? (
             <>
               <Route path="/" element={<FunctionList />} />

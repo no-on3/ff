@@ -16,13 +16,18 @@ import languageSource from '../../BE/src/mail/language.ts?raw';
 import notificationsDtoSource from '../../BE/src/notifications/notifications.dto.ts?raw';
 import deliveryEntitySource from '../../BE/src/notifications/entities/notification-delivery.entity.ts?raw';
 import retrySource from '../../BE/src/notifications/retry.ts?raw';
+import alarmRulesSource from '../../BE/src/alarms/alarm-rules.ts?raw';
+import alarmsDtoSource from '../../BE/src/alarms/alarms.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
+import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import {
+  ALARM_FIELDS,
+  ALARM_STATES,
   BALANCE_FIELDS,
   CREDIT_STATE_FIELDS,
   DELIVERY_FIELDS,
@@ -258,5 +263,27 @@ describe('the notifications', () => {
     const minutes = /export const RETRY_MINUTES = \[([^\]]*)\]/.exec(retrySource)?.[1].split(',').length;
     expect(retrySource).toContain('export const MAX_ATTEMPTS = RETRY_MINUTES.length + 1;');
     expect(MAX_ATTEMPTS).toBe((minutes ?? 0) + 1);
+  });
+});
+
+describe('the alarms', () => {
+  /** A literal list in the backend's source: \`export const NAME = [...]\`. */
+  const listIn = (source: string, name: string) =>
+    /export const \w+ = \[([^\]]*)\]/.exec(source.slice(source.indexOf(`export const ${name} =`)))?.[1].split(',').map((item) => item.trim().replace(/'/g, '')).filter(Boolean);
+
+  it("offer the API's metrics, each with its statistics", () => {
+    const block = alarmRulesSource.slice(alarmRulesSource.indexOf('export const STATISTICS = {'), alarmRulesSource.indexOf('} as const;'));
+    const backend = Object.fromEntries([...block.matchAll(/^\s+(\w+): \[([^\]]*)\]/gm)].map(([, metric, list]) => [metric, list.split(',').map((s) => s.trim().replace(/'/g, ''))]));
+    expect(backend).toEqual(Object.fromEntries(Object.entries(STATISTICS).map(([metric, list]) => [metric, [...list]])));
+  });
+
+  it("offer its comparisons, missing data treatments, periods and limits, and read an alarm's fields and states", () => {
+    expect(listIn(alarmRulesSource, 'COMPARISONS')).toEqual(COMPARISONS.map((c) => c.value));
+    expect(listIn(alarmRulesSource, 'MISSING_DATA')).toEqual(MISSING_DATA.map((m) => m.value));
+    expect(listIn(alarmRulesSource, 'ALARM_PERIODS')?.map(Number)).toEqual(PERIODS.map((p) => p.value));
+    expect(listIn(alarmRulesSource, 'STATES')).toEqual([...ALARM_STATES]);
+    expect(alarmRulesSource).toContain(`export const MAX_EVALUATION_PERIODS = ${MAX_EVALUATION_PERIODS};`);
+    expect(alarmRulesSource).toContain(`export const MAX_WEBHOOKS = ${MAX_WEBHOOKS};`);
+    expect(dtoFields(alarmsDtoSource, 'export class AlarmView {')).toEqual([...ALARM_FIELDS]);
   });
 });
