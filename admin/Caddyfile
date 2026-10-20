@@ -1,0 +1,38 @@
+# Serves the admin's static build on :8080: the files Vite built, and index.html for every other path, which
+# the app's router reads. A non-root user, a read-only root: Caddy keeps nothing on disk, and its admin API is off.
+{
+	admin off
+	auto_https off
+	persist_config off
+	log {
+		output stdout
+		format json
+	}
+}
+
+:8080 {
+	root * /srv
+	encode zstd gzip
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+	# For the kubelet's probes.
+	handle /healthz {
+		respond "ok" 200
+	}
+	# Built files carry their content's hash in their name: kept a year. A file that isn't there is a 404.
+	handle /assets/* {
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+	# The app itself, never cached, so that a new build is used at once.
+	handle {
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}

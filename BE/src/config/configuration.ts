@@ -125,6 +125,17 @@ function flag(fallback: boolean) {
   );
 }
 
+/** A flag whose default depends on the environment: undefined when unset. */
+function optionalFlag() {
+  return z.preprocess(
+    prepare(undefined),
+    z
+      .enum(['true', 'false'], { error: (issue) => `must be true or false; ${got(issue.input)}` })
+      .transform((value) => value === 'true')
+      .optional(),
+  );
+}
+
 function oneOf<const T extends readonly [string, ...string[]]>(values: T, fallback?: T[number]) {
   return z.preprocess(
     prepare(fallback),
@@ -160,6 +171,17 @@ function isUrl(value: string, protocols: string[]): boolean {
 }
 
 const httpUrl = { test: (v: string) => isUrl(v, ['http:', 'https:']), expected: 'an http:// or https:// URL' };
+/** A proxy Express may trust: an address, a CIDR, or one of its named ranges (loopback, linklocal, uniquelocal). */
+const trustedProxy = {
+  test: (value: string) => {
+    if (['loopback', 'linklocal', 'uniquelocal'].includes(value)) return true;
+    const [address, bits, ...rest] = value.split('/');
+    const family = isIP(address);
+    if (!family || rest.length) return false;
+    return bits === undefined || (/^\d{1,3}$/.test(bits) && Number(bits) <= (family === 4 ? 32 : 128));
+  },
+  expected: 'an IP address, a CIDR such as 10.42.0.0/16, or loopback, linklocal or uniquelocal',
+};
 const origin = {
   test: (v: string) => isUrl(v, ['http:', 'https:']) && new URL(v).origin === v.replace(/\/$/, ''),
   expected: 'origins such as https://console.example.com (scheme, host and port only)',
@@ -235,6 +257,10 @@ const appShape = {
   // The database server's disk, in bytes, which the metrics report beside the database's size; 0: unknown.
   FF_DATABASE_DISK_BYTES: integer(0, 0, Number.MAX_SAFE_INTEGER),
   CORS_ORIGIN: list(origin),
+  // The OpenAPI document and its viewer at /api: on in development, off in production unless set.
+  FF_API_DOCS: optionalFlag(),
+  // The proxies whose X-Forwarded-For the backend believes: addresses, CIDRs, or Express's named ranges. None by default.
+  FF_TRUST_PROXY: list(trustedProxy),
 
   FF_AUTH_MODE: oneOf(['oidc', 'dev'], 'oidc'),
   FF_DEV_ACCOUNT_ID: optionalText(accountId),
@@ -442,6 +468,11 @@ export default function configuration(env: Env = process.env) {
   return {
     nodeEnv: parsed.NODE_ENV,
     port: parsed.PORT,
+    // How the API is served: its documents, and the proxies in front of it.
+    http: {
+      apiDocs: parsed.FF_API_DOCS ?? !production,
+      trustProxy: parsed.FF_TRUST_PROXY,
+    },
     cors: {
       origins: parsed.CORS_ORIGIN.length > 0 ? parsed.CORS_ORIGIN : production ? [] : [DEV_CORS_ORIGIN, DEV_ADMIN_URL],
     },

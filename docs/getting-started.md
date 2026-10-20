@@ -763,7 +763,18 @@ hack/k8s/test-logging-filter.sh                          # the log collector's c
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
 hack/e2e.sh                                              # the whole stack through the API, about 3 min
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 1 min
+hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
 ```
+
+**The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
+
+```bash
+docker build -t ff-backend BE
+docker build -t ff-console --build-arg VITE_API_URL=https://api.example.tn --build-arg VITE_OIDC_AUTHORITY=https://login.example.tn/realms/ff FE
+docker build -t ff-admin --build-arg VITE_API_URL=https://api.example.tn --build-arg VITE_OIDC_AUTHORITY=https://login.example.tn/realms/ff admin
+```
+
+In production the backend serves no API documents unless `FF_API_DOCS=true`, and believes `X-Forwarded-For` only from the proxies `FF_TRUST_PROXY` names (the edge's addresses), so that the audit log and the rate limits see the caller.
 
 **Reset everything.** This is destructive: it deletes the cluster and all local FF data.
 

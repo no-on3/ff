@@ -164,6 +164,26 @@ describe('configuration', () => {
     ]);
   });
 
+  it("serves the API's documents in development and not in production, unless told otherwise", () => {
+    expect([configuration(dev).http.apiDocs, configuration(production).http.apiDocs]).toEqual([true, false]);
+    expect([configuration({ ...dev, FF_API_DOCS: 'false' }).http.apiDocs, configuration({ ...production, FF_API_DOCS: 'true' }).http.apiDocs]).toEqual([false, true]);
+    expect(problems({ ...production, FF_API_DOCS: 'yes' })).toEqual([expect.stringContaining('FF_API_DOCS')]);
+  });
+
+  it('trusts no proxy unless told, and only addresses, CIDRs and named ranges', () => {
+    expect(configuration(production).http.trustProxy).toEqual([]);
+    expect(configuration({ ...production, FF_TRUST_PROXY: '10.42.0.0/16, 127.0.0.1, loopback, fd00::/8' }).http.trustProxy).toEqual([
+      '10.42.0.0/16',
+      '127.0.0.1',
+      'loopback',
+      'fd00::/8',
+    ]);
+    // A count of hops would let a client name its own address by sending the header itself.
+    for (const value of ['2', 'true', '10.42.0.0/33', '10.42.0.0/16/1', 'proxy.ff.example']) {
+      expect(problems({ ...production, FF_TRUST_PROXY: value })).toEqual([expect.stringContaining('FF_TRUST_PROXY')]);
+    }
+  });
+
   describe('production refuses development settings', () => {
     it.each<[string, Env, string]>([
       ['the dev authentication mode', { FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' }, 'FF_AUTH_MODE=dev is for development only'],
