@@ -1,0 +1,22 @@
+# gitleaks findings that are not secrets (hack/ci.sh, the security stage). Each line is one finding:
+# commit:file:rule:line. Anything else in these files is still reported.
+
+# An old doc's curl examples: "Authorization: Bearer YOUR_TOKEN", a placeholder.
+1945b3ef0631a416422b6c0b8069c72fc992a8ff:docs/monitoring-debugging.md:curl-auth-header:106
+1945b3ef0631a416422b6c0b8069c72fc992a8ff:docs/monitoring-debugging.md:curl-auth-header:145
+1945b3ef0631a416422b6c0b8069c72fc992a8ff:docs/monitoring-debugging.md:curl-auth-header:175
+1945b3ef0631a416422b6c0b8069c72fc992a8ff:docs/monitoring-debugging.md:curl-auth-header:60
+1945b3ef0631a416422b6c0b8069c72fc992a8ff:docs/monitoring-debugging.md:curl-auth-header:75
+1945b3ef0631a416422b6c0b8069c72fc992a8ff:docs/monitoring-debugging.md:curl-auth-header:91
+
+# `curl -sN ... | sed -u 's/^data: //'`: sed's -u read as curl's user and password.
+80edcab21b20f3b060af8999fc5e93c1a23d6123:docs/getting-started.md:curl-auth-user:250
+
+# A made-up UUID a test uses as an ID.
+1991c0ed8c4ff923ed40e737292c5912ea7628a0:BE/src/admin/admin-accounts.controller.spec.ts:generic-api-key:20
+
+# A made-up API key ID in an audit entry's actor (key:0123456789ab).
+db4d11ad7f0f48f2e2a4c4ecbca738fc0a8d9074:BE/src/audit/audit.service.spec.ts:generic-api-key:98
+
+# A fake JWT a test feeds to the key format check (eyJhbGciOiJSUzI1NiJ9.e30.sig).
+ba4fdf5f123f7fc2c9801cb8b0407ee598e43017:BE/src/api-keys/api-key-format.spec.ts:generic-api-key:24

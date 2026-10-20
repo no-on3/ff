@@ -36,7 +36,7 @@ random() { head -c 18 /dev/urandom | base64 | tr -d '/+=\n'; }
 echo "== images"
 docker build -q -t ff-postgres-walg:drill "$repo/deploy/backup/postgres-walg" >/dev/null
 docker build -q -t ff-backend:drill "$repo/BE" >/dev/null
-echo "  ff-postgres-walg (PostgreSQL 15.18, WAL-G 3.0.9) and ff-backend built"
+echo "  ff-postgres-walg (PostgreSQL 15.19, WAL-G 3.0.9) and ff-backend built"
 
 echo "== two sites"
 docker network create "$network" >/dev/null
@@ -171,7 +171,7 @@ check "and comes back from it, byte for byte" "$(sha256sum <"$work/records/invoi
 
 echo "backup drill: $passed checks passed; restored to the target in $restore_seconds s"
 if $record; then
-  printf '| %s | %s | PostgreSQL 15.18 with WAL-G 3.0.9, both databases to a target time; the legal records with rclone 1.75.1 | %s s | %s checks passed |\n' \
+  printf '| %s | %s | PostgreSQL 15.19 with WAL-G 3.0.9, both databases to a target time; the legal records with rclone 1.75.1 | %s s | %s checks passed |\n' \
     "$(date -u +%Y-%m-%d)" "$(git -C "$repo" rev-parse --short HEAD)" "$restore_seconds" "$passed" >>"$repo/docs/backup-drills.md"
   echo "recorded in docs/backup-drills.md"
 fi

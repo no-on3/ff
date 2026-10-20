@@ -164,3 +164,5 @@ hack/.kube/
 # End-to-end test work files (K-08)
 hack/.e2e/
 hack/.e2e-tenancy/
+# hack/ci.sh: its work files, the scanner's database and the SBOMs
+hack/.ci/

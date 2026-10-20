@@ -45,6 +45,8 @@ check "readyz" 200 "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$
 check "invoke returns the greeting" "Hello container" \
   "$(curl -s -X POST -H 'content-type: application/json' -d '{"name":"container"}' "http://127.0.0.1:$port/invoke" | jq -r .message)"
 check "runs as uid 10001" 10001 "$(docker exec "$prefix-hello" id -u)"
+check "has no pip: removed, with the packages it vendors" "none" \
+  "$(docker exec "$prefix-hello" sh -c 'command -v pip pip3; python -c "import pip" 2>/dev/null && echo importable; ls /usr/local/lib/python3.13/ensurepip 2>/dev/null' | paste -sd, - | sed 's/^$/none/')"
 check "root filesystem is read-only" denied \
   "$(docker exec "$prefix-hello" sh -c 'touch /opt/ff/probe 2>/dev/null && echo writable || echo denied')"
 check "/tmp is writable" ok "$(docker exec "$prefix-hello" sh -c 'touch /tmp/probe && echo ok')"

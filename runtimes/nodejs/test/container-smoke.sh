@@ -37,6 +37,8 @@ check "readyz" 200 "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$
 check "invoke returns the greeting" "Hello container" \
   "$(curl -s -X POST -H 'content-type: application/json' -d '{"name":"container"}' "http://127.0.0.1:$port/invoke" | jq -r .message)"
 check "runs as uid 10001" 10001 "$(docker exec "$name" id -u)"
+check "has no package manager: npm, npx, corepack and yarn removed" none \
+  "$(docker exec "$name" sh -c 'for tool in npm npx corepack yarn; do command -v $tool; done; ls /usr/local/lib/node_modules 2>/dev/null' | paste -sd, - | sed 's/^$/none/')"
 check "root filesystem is read-only" denied \
   "$(docker exec "$name" sh -c 'touch /opt/ff/probe 2>/dev/null && echo writable || echo denied')"
 check "/tmp is writable" ok "$(docker exec "$name" sh -c 'touch /tmp/probe && echo ok')"

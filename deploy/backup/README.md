@@ -16,7 +16,7 @@ FF's database and Keycloak's are two databases of one PostgreSQL server (D13). P
 **A managed PostgreSQL** has its provider's point-in-time recovery: turn it on, with a window of at least 30 days. If the provider can copy the backups to another region, turn that on too, or add a nightly `pg_dump` of both databases to the second site's bucket. The monthly drill then restores the provider's way, to a new server, and runs the checks of `hack/backup-drill.sh` against it.
 
 **A server of FF's own** archives its WAL with WAL-G, as `postgres-walg/` shows:
-- `Dockerfile`: PostgreSQL 15.18 with WAL-G 3.0.9, its checksum checked;
+- `Dockerfile`: PostgreSQL 15.19 with WAL-G 3.0.9, its checksum checked. It starts as `postgres` (999), never as root, so it has no `gosu`; WAL-G's binary has advisories that `.trivyignore.yaml` accepts until 2026-11-20, for a client of the second site alone;
 - `postgresql.backup.conf`: every WAL segment shipped when it is full, and at least every 5 minutes (`archive_timeout = 300`): the recovery point is never older than that;
 - `walg.env.example`: the second site, its keys, and `WALG_LIBSODIUM_KEY`, 32 random bytes (hex) that encrypt every backup;
 - `crontab.example`: a base backup every night; every Sunday, the last 35 kept with their WAL, so any second of the last 30 days can be restored.

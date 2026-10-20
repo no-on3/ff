@@ -79,6 +79,8 @@ for _ in $(seq 1 90); do
 done
 check "it starts on a read-only root, as uid 10001, and is alive" "200 10001" \
   "$(curl -s -o /dev/null -w '%{http_code}' "$api/healthz") $(docker exec "$prefix-backend" id -u)"
+check "it has no package manager: npm, npx, corepack and yarn removed" none \
+  "$(docker exec "$prefix-backend" sh -c 'for tool in npm npx corepack yarn; do command -v $tool; done; ls /usr/local/lib/node_modules 2>/dev/null' | paste -sd, - | sed 's/^$/none/')"
 check "and ready: its database and the cluster answer" '200 {"database":"ok","kubernetes":"ok"}' \
   "$(curl -s -o "$work/ready" -w '%{http_code}' "$api/readyz") $(jq -c .checks "$work/ready")"
 check "each answer names its request" true \

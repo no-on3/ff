@@ -96,10 +96,11 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 | L1 log filter | `hack/k8s/test-logging-filter.sh` | The log collector's configuration and Lua filter (each line's call, the limit, the notices, the cut), in the Fluent Bit image (Docker) |
 | L1 console | `cd FE && npm test` | What the console sends and shows: the fields of an edit, invoke input, API error messages, units; the token and account on each request, token renewal, the account it acts for, API keys; and that its port, client and scopes match the realm and the API (Vitest) |
 | L2 database | `cd BE && npm run test:db`; `npm run migration:check` | The migrations against real PostgreSQL, each case in its own scratch database; no drift between the migrations and the entities |
-| L2 images | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities |
+| L2 images | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities, no package manager |
 | L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor), the function lifecycle (repair, rollback, updates at zero, a runtime that never answers), and, where it is installed, the log pipeline (what functions print reaches the store, limited, and only the backend may query it) |
 | RBAC | `hack/k8s/test-rbac.sh` | What the backend's ServiceAccount may and may not do |
 | L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes, and the code archive in object storage; an alarm that fires on a function's error and recovers, telling a local webhook receiver |
+| Pipeline | `hack/ci.sh static unit db security cluster` | All of the above in stages, as the CI server runs them (`.github/workflows/ci.yml`): plus the builds, the docs, gitleaks on every commit, `npm audit`, and every image scanned by Trivy with its SBOM ([getting started](docs/getting-started.md), "The pipeline") |
 | L5 | `hack/e2e-tenancy.sh` | Every route of the OpenAPI document, as another account (404, nothing changes) and anonymously (401); sign-up through Keycloak and Mailpit; isolation between two real accounts; a function's metrics against its usage records; a test notification to a local receiver, signed, and to the owner's e-mail; each account's alarms its own; closing an account, and its data deleted once its notice period has passed |
 
 ## Documentation

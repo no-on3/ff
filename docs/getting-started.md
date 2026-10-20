@@ -769,6 +769,20 @@ hack/e2e-platform.sh                                     # FF deployed from depl
 hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, about 2 min
 ```
 
+**The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). Each stage stops at its first failing step and names it:
+
+```bash
+hack/ci.sh static            # linters, types, builds, the docs, how-it-works.html's script, the shell scripts, the workflow, about 5 min
+hack/ci.sh unit              # every unit suite: backend, console, admin app, both runtimes, alert rules, log filter, about 2 min
+hack/ci.sh db                # L2 and the migrations' drift check, on a PostgreSQL 15.19 of its own, about 2 min
+hack/ci.sh security          # gitleaks on every commit, npm audit, and each image scanned by Trivy with its SBOM in hack/.ci/sbom, about 3 min
+hack/ci.sh cluster           # L3, L4, L5, the images and the platform's manifests, on the dev cluster, about 15 min
+hack/ci.sh platform          # hack/e2e-platform.sh: nightly on the CI server, about 15 min
+hack/ci.sh all               # static, unit, db, security and cluster
+```
+
+`security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet is accepted in `.trivyignore.yaml`, for the one binary it is in, with why and until when; on that date the scan reports it again. A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
+
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 
 ```bash
@@ -822,6 +836,7 @@ docker compose down -v
 | 403 `The admin routes are for FF's operators` | The user hasn't the realm role `ff-operator`. Give it in Keycloak's admin console (Users → Role mapping), then log in again. |
 | 400 `Every admin change needs a reason` | Send `reason`, 3 to 500 characters, in the body. |
 | `The backend did not start` with `Invalid configuration (… problems)` | Each line names a variable and what it expects. With `FF_DEV_USER_ID is no longer read`, your `BE/.env` is from before 2026-10-17: copy `BE/.env.example` again. With `FF_SCALE_TO_ZERO_IDLE_SECONDS is no longer read` or `K8S_TENANT_QUOTA_… is no longer read`, remove those lines: the account's plan sets them now. |
+| After your machine changed networks, functions can't resolve names (`EAI_AGAIN`, even for `kube-dns.kube-system.svc.cluster.local`), and L3's network cases fail | The cluster's node keeps the DNS servers it started with: `docker exec k3d-ff-dev-server-0 cat /etc/resolv.conf` names the old network's (`ExtServers`). Restart the cluster: `k3d cluster stop ff-dev && k3d cluster start ff-dev` (hack/bin), about 30 s; every pod restarts. |
 | A function can't reach an outside API: `connect ETIMEDOUT`, or a name that resolves but never answers | Its account's internet egress is off, as every new account's is. Turn it on in the admin dashboard (the account's page), or with `PUT /admin/accounts/:id/egress`. In development mode, without the admin dashboard: `UPDATE accounts SET internet_egress = true WHERE id = '<FF_DEV_ACCOUNT_ID>';` in the database, then change a function's code or create one: every rollout writes the account's NetworkPolicy. |
 | The backend won't start: `K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production` | Production runs customers' code in gVisor. Install it on the nodes, apply `deploy/k8s/optional/runtimeclass-gvisor.yaml`, and set `K8S_RUNTIME_CLASS=gvisor` (the platform's `backend.env` has it). Only a cluster that tries the platform's manifests, without customers, sets `K8S_ALLOW_UNSANDBOXED=true` instead. |
 | 400 `… must be at most … on the Beta plan`, or `The Beta plan allows 25 functions per account` | The request goes beyond the account's plan. Ask for less, or move the account to a larger plan ("Plans and limits" in section 5). |

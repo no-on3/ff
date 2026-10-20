@@ -10,6 +10,9 @@ WORKDIR /opt/ff
 COPY ff_runtime ./ff_runtime
 # The root filesystem is read-only at run time, so compile the runtime now.
 RUN python -m compileall -q ff_runtime
+# pip, which nothing here runs: functions ship their dependencies in their package, and nothing can be installed
+# on a read-only root. The packages pip vendors carry advisories that the image scan reports (hack/ci.sh).
+RUN python -m pip uninstall -y -q pip && rm -rf /usr/local/lib/python3.13/ensurepip
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/ff \

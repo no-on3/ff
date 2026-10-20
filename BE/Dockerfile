@@ -27,6 +27,10 @@ ENV NODE_ENV=production
 COPY --from=build /app/package.json ./
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+# The base image's package managers, which the backend never runs: npm's own dependencies carry advisories that
+# the image scan reports (hack/ci.sh), and fewer tools means less to use for whoever got in.
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+    /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-*
 USER 10001:10001
 # The API, and the operator's metrics (FF_METRICS_PORT).
 EXPOSE 3000 9464
