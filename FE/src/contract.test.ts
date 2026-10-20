@@ -13,15 +13,22 @@ import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
 import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
 import languageSource from '../../BE/src/mail/language.ts?raw';
+import notificationsDtoSource from '../../BE/src/notifications/notifications.dto.ts?raw';
+import deliveryEntitySource from '../../BE/src/notifications/entities/notification-delivery.entity.ts?raw';
+import retrySource from '../../BE/src/notifications/retry.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
+import { MAX_ATTEMPTS } from './lib/notifications';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import {
   BALANCE_FIELDS,
   CREDIT_STATE_FIELDS,
+  DELIVERY_FIELDS,
+  DELIVERY_STATUSES,
   EMAIL_LANGUAGES,
+  WEBHOOK_SECRET_FIELDS,
   INVOCATION_FIELDS,
   INVOCATION_STATUSES,
   ME_ACCOUNT_FIELDS,
@@ -236,5 +243,20 @@ describe("the e-mails' languages", () => {
     const backend = /export const LOCALES = \[([^\]]*)\] as const;/.exec(languageSource)?.[1];
     expect(backend?.split(',').map((locale) => locale.trim().replace(/'/g, ''))).toEqual(EMAIL_LANGUAGES.map((language) => language.locale));
     expect(accountDtoSource).toContain('@IsIn([...LOCALES]');
+  });
+});
+
+describe('the notifications', () => {
+  it("are read with the API's fields: a delivery's, and the signing secret's", () => {
+    expect(dtoFields(notificationsDtoSource, 'export class DeliveryViewDto {')).toEqual([...DELIVERY_FIELDS]);
+    expect(dtoFields(notificationsDtoSource, 'export class WebhookSecretView {')).toEqual([...WEBHOOK_SECRET_FIELDS]);
+  });
+
+  it("know each status a delivery has, and as many tries as the backend makes", () => {
+    const statuses = deliveryEntitySource.slice(deliveryEntitySource.indexOf('export enum DeliveryStatus {'));
+    expect([...statuses.slice(0, statuses.indexOf('}')).matchAll(/= '(\w+)'/g)].map((match) => match[1])).toEqual([...DELIVERY_STATUSES]);
+    const minutes = /export const RETRY_MINUTES = \[([^\]]*)\]/.exec(retrySource)?.[1].split(',').length;
+    expect(retrySource).toContain('export const MAX_ATTEMPTS = RETRY_MINUTES.length + 1;');
+    expect(MAX_ATTEMPTS).toBe((minutes ?? 0) + 1);
   });
 });

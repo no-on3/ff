@@ -650,6 +650,70 @@ export const accountsApi = {
   updateAccount: (id: string, data: AccountUpdate) => api.patch<Account>(`/accounts/${id}`, data),
 };
 
+/** How a notification's delivery stands (GET /notifications/deliveries). */
+export const DELIVERY_STATUSES = ['pending', 'delivered', 'failed'] as const;
+export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number];
+
+export const DELIVERY_FIELDS = [
+  'id',
+  'notificationId',
+  'kind',
+  'channel',
+  'target',
+  'status',
+  'attempts',
+  'lastError',
+  'responseStatus',
+  'createdAt',
+  'deliveredAt',
+  'nextAttemptAt',
+] as const;
+/** One delivery of a notification: an e-mail to an owner, or a POST to a webhook, and how it went. */
+export interface Delivery {
+  id: string;
+  /** The notification's ID: the webhook's FF-Event-Id, the same for each of its deliveries. */
+  notificationId: string;
+  kind: string;
+  channel: 'email' | 'webhook';
+  /** The e-mail address, or the webhook's URL. */
+  target: string;
+  status: DeliveryStatus;
+  /** The attempts made so far: up to 6. */
+  attempts: number;
+  lastError: string | null;
+  /** The webhook's last HTTP status. */
+  responseStatus: number | null;
+  createdAt: string;
+  deliveredAt: string | null;
+  /** When it is tried next; null once delivered or failed. */
+  nextAttemptAt: string | null;
+}
+// A field missing from DELIVERY_FIELDS stops the build.
+type UnlistedDeliveryField = Exclude<keyof Delivery, (typeof DELIVERY_FIELDS)[number]>;
+const everyDeliveryFieldListed: [UnlistedDeliveryField] extends [never] ? true : never = true;
+void everyDeliveryFieldListed;
+
+export const WEBHOOK_SECRET_FIELDS = ['secret', 'createdAt', 'previousExpiresAt'] as const;
+/** The secret the account's webhooks are signed with: its owners' only. */
+export interface WebhookSecret {
+  secret: string;
+  createdAt: string;
+  /** Until when the previous secret signs too, after a rotation; null otherwise. */
+  previousExpiresAt: string | null;
+}
+
+/** The account's notifications: its webhooks' secret, a test, and how the latest deliveries went. */
+export const notificationsApi = {
+  secret: () => api.get<WebhookSecret>('/notifications/webhook-secret'),
+
+  /** A new secret; the previous one signs too for 24 hours. */
+  rotate: () => api.post<WebhookSecret>('/notifications/webhook-secret/rotate'),
+
+  test: (data: { webhookUrl?: string; email?: boolean }) => api.post<{ notificationId: string; deliveries: Delivery[] }>('/notifications/test', data),
+
+  deliveries: (limit = 50) => api.get<Delivery[]>('/notifications/deliveries', { params: { limit } }),
+};
+
 /** The chosen account's API keys: its owners' only. */
 export const apiKeysApi = {
   listKeys: () => api.get<ApiKey[]>('/api-keys'),

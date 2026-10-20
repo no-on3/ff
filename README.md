@@ -8,7 +8,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
   - create, update, delete, and invoke functions;
   - see the invocation history with durations, kept for the plan's retention with up to 64 KiB of each input, output and error;
   - read a function's or the account's metrics, named as CloudWatch names Lambda's (invocations, errors, throttles, cold starts, the duration's percentiles, instances), a point a minute, five minutes or an hour, from the usage records the bill is made of;
-  - be notified by e-mail, each owner in their language, and by webhooks signed with the account's secret and tried again when they fail: a test now, the alarms next.
+  - be notified by e-mail, each owner in their language, and by webhooks signed with the account's secret and tried again when they fail: a test now, from the API or the console's Notifications page, the alarms next.
 
   Functions scale out when calls arrive together (one instance per call in flight, up to `maxInstances`), scale to zero when idle, and start again on the next invocation.
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):

@@ -47,6 +47,9 @@ const NavBar: React.FC = () => {
             <NavLink to="/account" end className={linkClass}>
               Account
             </NavLink>
+            <NavLink to="/account/notifications" className={linkClass}>
+              Notifications
+            </NavLink>
             {account.role === 'owner' && (
               <>
                 <NavLink to="/account/members" className={linkClass}>
