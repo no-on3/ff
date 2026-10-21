@@ -34,6 +34,8 @@ e2e_base_env=(
   K8S_RUNTIME_IMAGE_NODEJS=ff-runtime-nodejs:24-v3 K8S_RUNTIME_IMAGE_PYTHON=ff-runtime-python:3.13-v3
   # No operator's metrics port: the development backend may hold the default one. A test that reads them gives a free port.
   FF_METRICS_PORT=0
+  # Nor a function URL gateway, for the same reason: a test that calls URLs gives it a free port, and the base to match.
+  FF_FUNCTION_URL_PORT=0
 )
 
 e2e_cleanup() {

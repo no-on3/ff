@@ -59,6 +59,9 @@ account_b="$(random_account)"
 e2e_namespaces+=("$(tenant_namespace "$account_a")" "$(tenant_namespace "$account_b")")
 api="http://127.0.0.1:$(free_port)"
 api_oidc="http://127.0.0.1:$(free_port)"
+# Each backend answers function URLs on a port of its own, at http://<id>.fn.localhost:<port>/.
+url_port="$(free_port)"
+url_port_oidc="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
@@ -200,13 +203,25 @@ e2e_migrate "${e2e_base_env[@]}"
 # Both send notifications every second, and may reach the receiver on this machine.
 notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
 e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" PORT="${api##*:}" \
-  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}"
+  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
-  FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}"
+  FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
+  FF_FUNCTION_URL_PORT="$url_port_oidc" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port_oidc"
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
+# call_url <function URL> [curl option...]: a GET of the URL; prints the status, and the body goes to $work/url-body.
+# --resolve takes the URL's host to this machine, whatever the system's resolver does with *.localhost.
+call_url() {
+  local url=$1 host port
+  shift
+  host="${url#http://}"
+  port="${host#*:}"
+  host="${host%%:*}"
+  curl -s -o "$work/url-body" -w '%{http_code}' --resolve "$host:${port%/}:127.0.0.1" "$@" "$url"
+}
 
 echo "== account A's function"
 code='export async function handler(event: { name?: string }) {
@@ -224,9 +239,14 @@ check "A's usage counts the call (P-22)" "1" \
 snapshot() {
   local caller=$1 fn=$2
   jq -cn --argjson fn "$("$caller" GET "/functions/$fn")" --argjson history "$("$caller" GET "/functions/$fn/invocations")" \
+    --argjson url "$("$caller" GET "/functions/$fn/url")" \
     '{name: $fn.name, code: $fn.code, status: $fn.status, memory: $fn.memory, timeout: $fn.timeout,
-      minInstances: $fn.minInstances, maxInstances: $fn.maxInstances, invocations: $history.total}'
+      minInstances: $fn.minInstances, maxInstances: $fn.maxInstances, invocations: $history.total,
+      url: $url.functionUrl, urlAuthType: $url.authType}'
 }
+url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .functionUrl)"
+check "A gives its function a URL" "201 true" "$(status) $([[ $url_a =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
+check "which anyone may call: its host reaches A's function" '200 {"message":"Hello world"}' "$(call_url "$url_a") $(cat "$work/url-body")"
 before="$(snapshot as_a "$id")"
 missing="$(node -e "console.log(require('crypto').randomUUID())")"
 as_a GET "/functions/$missing" >/dev/null
@@ -279,6 +299,7 @@ body_for() {
     "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}}' ;;
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
     "PATCH /functions/{id}/secrets") echo '{"secrets": {"L5_SECRET": "l5"}}' ;;
+    "POST /functions/{id}/url" | "PUT /functions/{id}/url") echo '{"authType": "NONE"}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;
@@ -802,12 +823,25 @@ for route in "${routes[@]}"; do
   with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
   check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
+echo "== a function URL that takes the account's credentials"
+url_1="$(as_user_1 POST "/functions/$fn_1/url" '{"authType": "AWS_IAM"}' | jq -r .functionUrl)"
+check "account 1 gives its function a URL that takes its account's API keys" "201 AWS_IAM" "$(status) $(as_user_1 GET "/functions/$fn_1/url" | jq -r .authType)"
+check "account 1's key with functions:invoke calls it" '200 {"message":"Hello world"}' "$(call_url "$url_1" -H "Authorization: Bearer $key_1") $(cat "$work/url-body")"
+check "account 2's key, which may invoke account 2's functions, can't" '403 {"Message":"Forbidden"}' \
+  "$(call_url "$url_1" -H "Authorization: Bearer $key_2") $(cat "$work/url-body")"
+check "nor a key without functions:invoke, nor a user's token, nor nobody" "403 403 403" \
+  "$(call_url "$url_1" -H "Authorization: Bearer $key_usage") $(call_url "$url_1" -H "Authorization: Bearer $token_1") $(call_url "$url_1")"
+check "the call is in account 1's history as its URL's, and account 2's key reaches none of it" "url 404" \
+  "$(as_user_1 GET "/functions/$fn_1/invocations?limit=1" | jq -r '.invocations[0].source') $(with_token "$key_2" GET "/functions/$fn_1/url" >/dev/null; status)"
 as_user_1 DELETE "/api-keys/$key_1_id" >/dev/null
 check "account 1 revokes its key" 200 "$(status)"
 with_token "$key_1" GET /functions >/dev/null
 check "which stops working at once" "401 The API key was revoked" "$(status) $(message)"
-check "account 1's function was invoked once more, by its key, and is otherwise unchanged" \
-  "$(jq -c '.invocations += 1' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
+check "on the URL too" 403 "$(call_url "$url_1" -H "Authorization: Bearer $key_1")"
+as_user_1 DELETE "/functions/$fn_1/url" >/dev/null
+check "account 1 deletes the URL" 204 "$(status)"
+check "account 1's function was invoked twice more by its key, through the API and its URL, and is otherwise unchanged" \
+  "$(jq -c '.invocations += 2' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
 
 echo "== members (P-16): user 2 is invited into account 1"
 as_user_1 POST /members "$(jq -cn --arg email "$user_2" '{email: $email, role: "viewer"}')" >/dev/null
@@ -860,7 +894,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create api_key.revoke member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

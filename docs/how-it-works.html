@@ -400,6 +400,7 @@
         <thead><tr><th>Data</th><th>Stored in</th><th>Written by</th><th>Read by</th></tr></thead>
         <tbody>
           <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
+          <tr><td>A function's URL: the address's random ID, who may call it, CORS</td><td>PostgreSQL <code>function_urls</code>, one per function, deleted with it</td><td><code>POST</code>, <code>PUT</code> and <code>DELETE /functions/:id/url</code></td><td>the function URL gateway, by each request's host; <code>GET /functions/:id/url</code>; the support page</td></tr>
           <tr><td>Invocations: input, output and error, up to 64 KiB each, flagged when cut; status, duration, memory</td><td>PostgreSQL <code>function_invocations</code>, kept for the plan's history retention (P-45)</td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST); the hourly purge deletes what is past the retention</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
           <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td><code>GET /usage</code> and the console's Usage page; the capacity report; the hourly rating (P-32); the metrics, <code>GET /functions/:id/metrics</code> and <code>GET /metrics</code> (P-50)</td></tr>
           <tr><td>The platform's settings: shadow billing, the negative buffer and grace period, low-balance e-mails, the invoice reminder, the large-credit threshold</td><td>PostgreSQL <code>platform_settings</code>; a setting without a row has its default (<code>BE/src/admin/platform-settings.ts</code>)</td><td>the admin dashboard, with a reason, through <code>PUT /admin/settings</code></td><td>the tasks that use them: P-32, P-33, P-36, P-74</td></tr>
@@ -519,6 +520,7 @@
         <tbody>
           <tr><td>REST API</td><td><code>BE/src/functions/functions.controller.ts</code>, <code>BE/src/metrics/metrics.controller.ts</code></td></tr>
           <tr><td>Create, update, delete, invoke</td><td><code>BE/src/functions/functions.service.ts</code></td></tr>
+          <tr><td>Function URLs: their configuration, the gateway on its own port, the event, the answer, CORS</td><td><code>BE/src/function-urls/function-urls.service.ts</code>, <code>function-url.gateway.ts</code>, <code>url-event.ts</code>, <code>url-response.ts</code>, <code>url-cors.ts</code>, <code>url-address.ts</code>; the shared call: <code>functions.service.ts</code> <code>call()</code>; the shared rate: <code>BE/src/plans/rate-limits.ts</code> <code>countInvocation()</code></td></tr>
           <tr><td>Token checks, the global guard</td><td><code>BE/src/auth/auth.guard.ts</code>, <code>token-verifier.ts</code></td></tr>
           <tr><td>The caller of a request, and its account</td><td><code>BE/src/auth/principal.ts</code></td></tr>
           <tr><td>API keys</td><td><code>BE/src/api-keys/</code></td></tr>
@@ -655,7 +657,7 @@ const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'ser
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
-  'PostgreSQL': { 'functions': null, 'function_invocations': null, 'function_metrics': null, 'usage_records': null, 'notification_deliveries': null, 'webhook_secrets': null, 'alarms': null, 'capacity_samples': null, 'usage_hourly': null, 'usage_charges': null, 'ledger_entries': null, 'payments': null, 'invoices': null },
+  'PostgreSQL': { 'functions': null, 'function_urls': null, 'function_invocations': null, 'function_metrics': null, 'usage_records': null, 'notification_deliveries': null, 'webhook_secrets': null, 'alarms': null, 'capacity_samples': null, 'usage_hourly': null, 'usage_charges': null, 'ledger_entries': null, 'payments': null, 'invoices': null },
   'S3 (bucket functions)': { 'object': null },
   [K]: { 'Namespace': null, 'ResourceQuota': null, 'LimitRange': null, 'NetworkPolicy': null, 'ConfigMap': null, 'Service': null, 'Deployment': null, 'Pod': null },
   'Runtime': { 'main process': null, 'worker': null },
@@ -832,6 +834,53 @@ const SCENARIOS = [
         text: 'The response is the invocation record; output holds what your handler returned, whole, even when the history keeps only the start of it (outputTruncated).',
         code: 'functions.controller.ts invoke()',
         msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { functionId: FN, input: { name: 'Tunis' }, status: 'COMPLETED', output: { message: 'Hello Tunis', requestId: REQ }, memoryUsed: 98, error: null, inputTruncated: false, outputTruncated: false, errorTruncated: false, id: INV, duration: 1.09, createdAt: '2026-10-16T14:02:10.212Z', updatedAt: '2026-10-16T14:02:10.251Z' } } },
+    ],
+  },
+  {
+    id: 'url', title: 'A request to a function\'s URL', lanes: ['user', 'api', 'db', 'k8s', 'pod', 'worker'],
+    summary: 'GET http://<id>.fn.localhost:3001/hello?name=Amira, from a browser or curl. The backend\'s second server, the function URL gateway, finds the URL by its host, calls the function as POST /functions/:id/invoke does, with AWS Lambda\'s event for function URLs, and sends its answer back as the HTTP response.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_urls': 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5 · NONE' }),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /hello?name=Amira · host <id>.fn.localhost', title: 'Anyone calls the URL',
+        text: 'Every name under .localhost is this machine, for browsers and curl. The gateway is a plain Node.js HTTP server in the backend, on FF_FUNCTION_URL_PORT (3001), apart from the API: none of the API\'s middleware runs here, no login, no CORS of the console\'s, no body parser. It serves only hosts <32 letters and digits>.<the host of FF_FUNCTION_URL_BASE>; any other host gets 404. In a cluster the edge will send *.fn.<domain> to it, over HTTPS.',
+        code: 'BE/src/function-urls/function-url.gateway.ts serve() · url-address.ts urlIdOf()',
+        msg: { kind: 'http', first: 'GET /hello?name=Amira HTTP/1.1', headers: { host: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5.fn.localhost:3001', 'user-agent': 'curl/8.22.0', accept: '*/*' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT function_urls · the account', title: 'The URL, by its ID',
+        text: 'The host\'s first label is the URL\'s ID, unique. Its authType is NONE, so anyone may call it; with AWS_IAM, the caller must send an API key of the account with functions:invoke, created by an owner or a developer, and anyone else gets 403 {"Message":"Forbidden"}. The account must be active, as for any invoke.',
+        code: 'function-urls.service.ts forUrlId() · function-url.gateway.ts callerOf(), accountOf()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"function_urls\" WHERE \"url_id\" = 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5' LIMIT 1;   -- function " + FN + ", NONE, no CORS\nSELECT \"id\", \"status\", \"plan_id\" FROM \"accounts\" WHERE \"id\" = '000000000001';   -- active, beta" } },
+      { from: 'api', to: 'api', kind: 'int', label: 'the rate · ACTIVE? · the credit · 6 MB', title: 'The same checks as the API\'s invoke',
+        text: 'The call counts against the plan\'s invocations per second in the throttler\'s own storage, under the account\'s key: one count for the API\'s invokes and the URL\'s calls together (429 with Retry-After past it). The function must be ACTIVE (503 otherwise), the account must have credit (402, saying nothing of the balance), and the request must fit in 6 MB, as on Lambda (413). Each refusal is a JSON {"Message": …} with x-amzn-RequestId.',
+        code: 'function-url.gateway.ts count(), functionOf(), admit() · BE/src/plans/rate-limits.ts countInvocation()' },
+      { from: 'api', to: 'api', kind: 'int', label: 'build the event (payload format 2.0)', title: 'AWS Lambda\'s event for function URLs',
+        text: 'Header names in lower case, repeated ones joined with commas, cookies apart; the query decoded, repeated parameters joined; the body as text for text, JSON and XML, base64 otherwise. requestId is chosen now, a UUID: the invocation\'s ID, the runtime\'s request ID, and the x-amzn-RequestId of the answer. The history will keep this event with the values of authorization, proxy-authorization and x-api-key as ***, and without its cookies.',
+        code: 'url-event.ts urlEvent(), eventForHistory()',
+        msg: { kind: 'ipc', title: 'the event', body: { version: '2.0', routeKey: '$default', rawPath: '/hello', rawQueryString: 'name=Amira', headers: { accept: '*/*', host: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5.fn.localhost:3001', 'user-agent': 'curl/8.22.0' }, queryStringParameters: { name: 'Amira' }, requestContext: { accountId: 'anonymous', apiId: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5', domainName: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5.fn.localhost', domainPrefix: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5', http: { method: 'GET', path: '/hello', protocol: 'HTTP/1.1', sourceIp: '127.0.0.1', userAgent: 'curl/8.22.0' }, requestId: INV, routeKey: '$default', stage: '$default', time: '16/Oct/2026:14:02:10 +0000', timeEpoch: 1792159330212 }, isBase64Encoded: false } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING, url)', title: 'Recorded as every call is',
+        text: 'From here the call is the API\'s: the same method runs it for both, and for schedules later. The row is inserted under the ID chosen above, with source url.',
+        code: 'BE/src/functions/functions.service.ts call()',
+        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"id\", \"function_id\", \"source\", \"input\", \"input_truncated\", \"status\", …)\nVALUES ('" + INV + "', '" + FN + "', 'url', '{\"version\":\"2.0\",\"rawPath\":\"/hello\",…}', false, 'RUNNING', …);" },
+        set: { 'PostgreSQL.function_invocations': 'RUNNING · url' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'POST …/services/fn-…:http/proxy/invoke', title: 'The event goes to the function\'s Service',
+        text: 'As in "Invoke (warm)", with a cold start first if no instance is ready. The body is the event, and x-ff-request-id its request ID.',
+        code: 'kubernetes.orchestrator.ts invoke()', hl: ['service'],
+        msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json', 'x-ff-request-id': INV }, body: { version: '2.0', rawPath: '/hello', '…': '…' } } },
+      { from: 'k8s', to: 'pod', kind: 'req', label: 'POST /invoke → pod :8080', title: 'The runtime takes it as it is',
+        text: 'The function takes AWS Lambda\'s events (FF_EVENT_FORMAT=lambda), so the runtime passes the event to the handler as it came; a function with FF\'s original wrapped event can\'t have a URL.',
+        code: 'runtimes/nodejs/src/main.ts', hl: ['pod-box'],
+        msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', 'x-ff-request-id': INV }, body: { version: '2.0', rawPath: '/hello', '…': '…' } } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'handler(event, context)', title: 'A handler written for Lambda\'s function URLs',
+        text: 'It reads the query from queryStringParameters and answers with a response object; anything else it returned would be sent as JSON with 200, as Lambda does.',
+        code: 'your function.ts',
+        msg: { kind: 'ipc', title: 'what the handler returns', body: { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: 'Ahlan Amira' } } },
+      { from: 'pod', to: 'api', kind: 'res', label: '200 · the response object', title: 'Back to the backend',
+        text: 'The runtime answers as for any call: the output, the duration and the memory. The invocation is COMPLETED, and its usage record is written in the same transaction, under the same ID: a URL\'s call costs what an invoke costs.',
+        code: 'functions.service.ts finish()',
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · url', 'PostgreSQL.usage_records': 'success · 128 MB · billed 2 ms' } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 text/plain · Ahlan Amira', title: 'The response, by Lambda\'s rules',
+        text: 'statusCode from 200 to 599, the headers (names checked, no line breaks in values, no length or per-connection ones), each of cookies a Set-Cookie, the body decoded from base64 when isBase64Encoded. A response that can\'t be sent, or one over 6 MB, answers 502 {"Message":"Internal Server Error"}, the reason in the backend\'s log; so does a function that throws or times out, its error left to the history, for its account to read. With CORS set, the URL answers a browser\'s preflight itself and puts the configured headers on every answer.',
+        code: 'url-response.ts urlAnswer() · url-cors.ts · function-url.gateway.ts send()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'x-amzn-RequestId': INV, 'content-type': 'text/plain', 'content-length': '11' }, body: 'Ahlan Amira' } },
     ],
   },
   {

@@ -51,7 +51,7 @@ One more rule for every service: **a function must reach it over FF's private ne
 
 Four gaps stop a customer from running anything real. They come before any new service.
 
-**Under way:** the [step-1 plan](step-1-plan.md) builds this step, in this order: environment variables and secrets; the event a function receives, which must be AWS's before a web address or a schedule can send one; function URLs, their TLS at the edge, and custom domains; schedules; then packages and the `ff` command, as the CLI plan's phases 0 to 2.
+**Under way:** the [step-1 plan](step-1-plan.md) builds this step, in this order: environment variables and secrets; the event a function receives, which must be AWS's before a web address or a schedule can send one; function URLs, their TLS at the edge, and custom domains; schedules; then packages and the `ff` command, as the CLI plan's phases 0 to 2. **Done so far:** environment variables and secrets; AWS Lambda's event, with the functions made before keeping theirs until switched; and function URLs in the backend, served on a port of their own, which the console and the edge come to next. The plan's progress log has the details.
 
 | Feature | Why | Parent task | Size |
 |---|---|---|---|

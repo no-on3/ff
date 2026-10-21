@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TRUNCATED, callValue, foundIn, lookDialog, milliseconds, outcome, searchSummary } from './support';
+import { TRUNCATED, callValue, eventFormatText, foundIn, lookDialog, milliseconds, namesText, outcome, searchSummary, sourceText, urlText } from './support';
 
 describe("a look at a customer's data", () => {
   it("says what it shows, and that the account's owners see it in their audit log, with the reason", () => {
@@ -47,5 +47,23 @@ describe('a call, to read', () => {
     expect(callValue('{"rows":[1,2', true)).toBe('{"rows":[1,2');
     expect(callValue('plain', false)).toBe('"plain"');
     expect(TRUNCATED).toBe('Truncated: the history keeps the first 64 KiB.');
+  });
+});
+
+describe("a function's configuration, to read", () => {
+  it('says what brought each call', () => {
+    expect([sourceText('api'), sourceText('url'), sourceText('schedule')]).toEqual(['API', 'URL', 'Schedule']);
+  });
+
+  it('says who may call its URL, and whether it has CORS', () => {
+    const url = { functionUrl: 'https://abc.fn.example.tn/', createdAt: '2026-10-21T08:00:00Z' };
+
+    expect(urlText({ ...url, authType: 'NONE', cors: false })).toBe('anyone may call it');
+    expect(urlText({ ...url, authType: 'AWS_IAM', cors: true })).toBe('only with an API key of the account, with CORS');
+  });
+
+  it('names the variables and secrets, or says there are none', () => {
+    expect([namesText(['DB_URL', 'TABLE']), namesText([])]).toEqual(['DB_URL, TABLE', 'none']);
+    expect(eventFormatText('wrapped')).toBe("FF's original wrapped event, from before AWS Lambda's");
   });
 });

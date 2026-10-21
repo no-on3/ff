@@ -41,6 +41,11 @@ export const DEVELOPMENT_CREDENTIALS = {
 } as const;
 
 const DEV_CORS_ORIGIN = 'http://localhost:5199';
+/**
+ * Function URLs in development: http://<id>.fn.localhost:3001/, which every browser, and curl, takes to this
+ * machine, as any name under .localhost.
+ */
+export const DEV_FUNCTION_URL_BASE = 'http://fn.localhost:3001';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
@@ -226,6 +231,18 @@ const smtpUrl = {
   test: (v: string) => isUrl(v, ['smtp:', 'smtps:']),
   expected: 'an smtp:// or smtps:// URL, such as smtp://localhost:51025 (credentials go in it: smtps://user:password@host)',
 };
+/** Where function URLs live: a scheme, a host under which each URL is <id>.<host>, and a port if any; no path. */
+const functionUrlBase = {
+  test: (v: string) => {
+    try {
+      const url = new URL(v);
+      return ['http:', 'https:'].includes(url.protocol) && url.origin === v.replace(/\/$/, '') && url.hostname.includes('.');
+    } catch {
+      return false;
+    }
+  },
+  expected: 'an origin whose host has a dot, such as https://fn.example.tn, under which each function URL is https://<id>.fn.example.tn/',
+};
 const emailAddress = { test: (v: string) => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(v), expected: 'an e-mail address' };
 const mailbox = {
   test: (v: string) => emailAddress.test(v) || /^[^<>]*<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>$/.test(v),
@@ -328,6 +345,10 @@ const appShape = {
   FF_BANK_IBAN: text(DEV_SELLER.FF_BANK_IBAN, iban),
   FF_BANK_BIC: optionalText(),
 
+  // Function URLs: the port of the server that answers them, apart from the API's (0: none), and where they live.
+  FF_FUNCTION_URL_PORT: integer(3001, 0, 65535),
+  FF_FUNCTION_URL_BASE: text(DEV_FUNCTION_URL_BASE, functionUrlBase),
+
   // The keys that encrypt functions' environment variables and secrets at rest: one a line, <id>:<32 bytes in base64>,
   // the first sealing. Unset: the development key, which production refuses.
   FF_ENCRYPTION_KEYS_FILE: optionalText(),
@@ -420,6 +441,9 @@ function appRules(env: AppEnv): string[] {
       problems.push(
         "K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production; K8S_ALLOW_UNSANDBOXED=true runs them without one, for a cluster that only tries the platform's manifests",
       );
+    }
+    if (!env.FF_FUNCTION_URL_BASE.startsWith('https://')) {
+      problems.push('FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production, such as https://fn.example.tn: function URLs are served over TLS');
     }
     if (!env.FF_ENCRYPTION_KEYS_FILE) {
       problems.push("FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production: its keys encrypt functions' environment variables and secrets");
@@ -588,6 +612,11 @@ export default function configuration(env: Env = process.env) {
       adminUrl: parsed.FF_ADMIN_URL.replace(/\/$/, ''),
       // The console, which invitation e-mails link to (P-16).
       consoleUrl: parsed.FF_CONSOLE_URL.replace(/\/$/, ''),
+    },
+    // Function URLs: the server that answers them, and the origin under which each is <id>.<host>.
+    functionUrls: {
+      port: parsed.FF_FUNCTION_URL_PORT,
+      base: parsed.FF_FUNCTION_URL_BASE.replace(/\/$/, ''),
     },
     // What FF keeps encrypted at rest (functions' environments) is sealed with these keys, the first sealing.
     encryption: {

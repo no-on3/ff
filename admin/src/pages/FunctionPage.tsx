@@ -7,7 +7,22 @@ import { EmptyState, ErrorState, Loading } from '../components/States';
 import StatusBadge from '../components/StatusBadge';
 import { ownersOf } from '../lib/accounts';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
-import { Call, CallData, FunctionPage as Page, LogLine, Look, TRUNCATED, callValue, lookDialog, milliseconds, outcome } from '../lib/support';
+import {
+  Call,
+  CallData,
+  FunctionPage as Page,
+  LogLine,
+  Look,
+  TRUNCATED,
+  callValue,
+  eventFormatText,
+  lookDialog,
+  milliseconds,
+  namesText,
+  outcome,
+  sourceText,
+  urlText,
+} from '../lib/support';
 import { whenUtc } from '../lib/time';
 
 /** What a look showed: kept on the page until another replaces it. */
@@ -72,6 +87,7 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
   const callRows = (calls: Call[]) =>
     calls.map((call) => [
       <span className={`font-mono text-xs ${call.id === asked ? 'rounded bg-yellow-100 px-1' : ''}`}>{call.id}</span>,
+      sourceText(call.source),
       outcome(call),
       milliseconds(call.duration),
       whenUtc(call.createdAt),
@@ -113,6 +129,18 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
           <Fact label="Runtime">{fn.runtime}</Fact>
           <Fact label="Memory, timeout">{`${fn.memory} MB, ${fn.timeout} s`}</Fact>
           <Fact label="Instances">{`${fn.minInstances} kept warm, ${fn.maxInstances} at most`}</Fact>
+          <Fact label="Event">{eventFormatText(fn.eventFormat)}</Fact>
+          <Fact label="URL">
+            {page.url ? (
+              <>
+                <span className="break-all font-mono text-sm">{page.url.functionUrl}</span> · {urlText(page.url)}
+              </>
+            ) : (
+              'none'
+            )}
+          </Fact>
+          <Fact label="Variables">{namesText(page.variables)}</Fact>
+          <Fact label="Secrets">{namesText(page.secrets)}</Fact>
           <Fact label="Created, changed">{`${whenUtc(fn.createdAt)}, ${whenUtc(fn.updatedAt)}`}</Fact>
         </dl>
         <div className="flex flex-wrap gap-3">
@@ -124,7 +152,8 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
           </button>
         </div>
         <p className="text-sm text-gray-600">
-          The code, a call's data and the logs are the customer's: each look needs a reason, and the account's owners see it in their audit log.
+          The code, a call's data and the logs are the customer's: each look needs a reason, and the account's owners see it in their audit log. The
+          variables' and secrets' values are never shown here.
         </p>
       </section>
 
@@ -169,7 +198,7 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
         {page.recentErrors.length === 0 ? (
           <EmptyState>No failure in the history.</EmptyState>
         ) : (
-          <Table head={['Request ID', 'Outcome', 'Duration', 'At', '']} rows={callRows(page.recentErrors)} />
+          <Table head={['Request ID', 'Source', 'Outcome', 'Duration', 'At', '']} rows={callRows(page.recentErrors)} />
         )}
       </section>
 
@@ -186,7 +215,7 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
         {page.recentCalls.length === 0 ? (
           <EmptyState>No call in the history.</EmptyState>
         ) : (
-          <Table head={['Request ID', 'Outcome', 'Duration', 'At', '']} rows={callRows(page.recentCalls)} />
+          <Table head={['Request ID', 'Source', 'Outcome', 'Duration', 'At', '']} rows={callRows(page.recentCalls)} />
         )}
       </section>
 

@@ -9,6 +9,7 @@ import { AuditModule } from '../audit/audit.module';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsModule } from '../functions/functions.module';
+import { FunctionUrlsModule } from '../function-urls/function-urls.module';
 import { MailModule } from '../mail/mail.module';
 import { OrchestratorModule } from '../orchestrator/orchestrator.module';
 import { PlansModule } from '../plans/plans.module';
@@ -36,6 +37,7 @@ import { PlatformSettingsModule } from './platform-settings.module';
     AuditModule,
     BillingModule,
     FunctionsModule,
+    FunctionUrlsModule,
     PlatformSettingsModule,
     MailModule,
     OrchestratorModule,

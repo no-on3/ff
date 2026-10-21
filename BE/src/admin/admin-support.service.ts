@@ -7,6 +7,7 @@ import { FunctionLogsQuery, FunctionLogsView } from '../functions/dto/function-l
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
+import { FunctionUrlsService } from '../function-urls/function-urls.service';
 import { AdminAccountsService } from './admin-accounts.service';
 import { AdminCallDataView, AdminCallHitView, AdminCallView, AdminCodeView, AdminFunctionHitView, AdminFunctionPageView, AdminSearchView } from './admin-support.dto';
 
@@ -38,6 +39,7 @@ export function errorType(error: string | null | undefined): string | null {
 const callView = (invocation: FunctionInvocation): AdminCallView => ({
   id: invocation.id,
   status: invocation.status,
+  source: invocation.source,
   duration: invocation.duration,
   memoryUsed: invocation.memoryUsed ?? null,
   createdAt: invocation.createdAt,
@@ -59,6 +61,7 @@ export class AdminSupportService {
     private readonly accounts: AdminAccountsService,
     private readonly functionsService: FunctionsService,
     private readonly audit: AuditService,
+    private readonly urls: FunctionUrlsService,
   ) {}
 
   /**
@@ -127,13 +130,17 @@ export class AdminSupportService {
   /** A function's page: its settings and state, its account, and its recent calls and failures, without their data. */
   async functionPage(id: string): Promise<AdminFunctionPageView> {
     const fn = await this.findFunction(id);
-    const [recent, failed] = await Promise.all([
+    const [recent, failed, url, names] = await Promise.all([
       this.invocations.find({ where: { functionId: id }, order: { createdAt: 'DESC' }, take: 20 }),
       this.invocations.find({ where: { functionId: id, status: In(FAILED) }, order: { createdAt: 'DESC' }, take: 10 }),
+      this.urls.find(id),
+      this.functionsService.environmentNames(id),
     ]);
-    const { name, runtime, memory, timeout, minInstances, maxInstances, status, createdAt, updatedAt } = fn;
+    const { name, runtime, memory, timeout, minInstances, maxInstances, status, eventFormat, createdAt, updatedAt } = fn;
     return {
-      function: { id, name, runtime, memory, timeout, minInstances, maxInstances, status, error: fn.error ?? null, createdAt, updatedAt },
+      function: { id, name, runtime, memory, timeout, minInstances, maxInstances, status, eventFormat, error: fn.error ?? null, createdAt, updatedAt },
+      url: url && { functionUrl: url.functionUrl, authType: url.authType, cors: url.cors !== null, createdAt: url.createdAt },
+      ...names,
       account: await this.accounts.summaryOf(fn.accountId),
       recentCalls: recent.map(callView),
       recentErrors: failed.map(callView),

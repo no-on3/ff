@@ -10,7 +10,10 @@
 # a Secret, replaced by an update, sealed in the database) and its secrets
 # (never in an answer or the audit log, set and removed by name), and the
 # event a function receives (the payload itself, or the old wrapper until
-# switched). Then plans:
+# switched). Then a function's URL, called with curl through its gateway: a
+# query, a JSON body, bytes, a cookie, the function's own 404 and its error, a
+# browser's preflight, the account's credentials, and the call in the history
+# and the usage records. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -54,8 +57,11 @@ e2e_build
 # hack/k8s/test-monitoring.sh sets the address, for the cluster's metrics store to scrape them during the run.
 metrics_host="${FF_E2E_METRICS_HOST:-127.0.0.1}"
 metrics_port="${FF_E2E_METRICS_PORT:-$(free_port)}"
+# Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which curl takes to this machine.
+url_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
-  FF_METRICS_HOST="$metrics_host" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json)
+  FF_METRICS_HOST="$metrics_host" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -263,6 +269,78 @@ check "switching it is an update, rolled out, after which it gets the payload it
 http PUT "/functions/$wrapped_fn" '{"eventFormat": "v2"}' >/dev/null
 check "an unknown format is refused" "400 eventFormat must be one of the following values: lambda, wrapped" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 for f in "$event_fn" "$wrapped_fn"; do http DELETE "/functions/$f" >/dev/null; done
+
+echo "== a function's URL"
+url_code='export async function handler(event: any) {
+  if (event.rawPath === "/fail") throw new Error("broken on purpose");
+  if (event.rawPath === "/missing") return { statusCode: 404, headers: { "content-type": "text/plain" }, body: "no such page" };
+  if (event.rawPath === "/cookie") return { statusCode: 200, cookies: ["visited=yes; Path=/"], body: "set" };
+  return {
+    statusCode: 200,
+    headers: { "x-handled-by": "e2e" },
+    body: JSON.stringify({
+      method: event.requestContext.http.method, path: event.rawPath, query: event.queryStringParameters ?? null,
+      cookies: event.cookies ?? [], body: event.body ?? null, base64: event.isBase64Encoded, auth: event.headers.authorization ?? null,
+      account: event.requestContext.accountId, requestId: event.requestContext.requestId, domain: event.requestContext.domainName,
+    }),
+  };
+}'
+created="$(http POST /functions "$(jq -n --arg code "$url_code" '{name: "e2e-url", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+url_fn="$(jq -r .id <<<"$created")"
+made="$(http POST "/functions/$url_fn/url" '{"authType": "NONE"}')"
+url_address="$(jq -r .functionUrl <<<"$made")"
+check "a function gets a URL, at a random address under the function domain" "201 true" \
+  "$(status) $([[ $url_address =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
+url_host="${url_address#http://}"
+url_host="${url_host%%:*}"
+# at_url <method> <path> [curl option...]: a request to the URL, by its address; prints the body, the status and
+# the headers go to $work/url-status and $work/url-headers. --resolve so that no system resolver is needed.
+at_url() {
+  local method=$1 path=$2
+  shift 2
+  curl -sS -o "$work/url-body" -D "$work/url-headers" -w '%{http_code}' -X "$method" --resolve "$url_host:$url_port:127.0.0.1" \
+    "$@" "http://$url_host:$url_port$path" >"$work/url-status"
+  cat "$work/url-body"
+}
+url_status() { cat "$work/url-status"; }
+url_header() { awk -v name="$1" 'tolower($1) == tolower(name ":") { sub(/\r$/, ""); $1 = ""; sub(/^ /, ""); print }' "$work/url-headers"; }
+answered="$(at_url GET '/hello?name=Amira&tag=a&tag=b')"
+check "GET with a query reaches the function as AWS Lambda's event, anonymous, and its answer comes back" \
+  '200 e2e {"method":"GET","path":"/hello","query":{"name":"Amira","tag":"a,b"},"account":"anonymous"}' \
+  "$(url_status) $(url_header x-handled-by) $(jq -c '{method, path, query, account}' <<<"$answered")"
+check "the answer names the call, as the event does: the invocation's ID" true \
+  "$(jq -r --arg id "$(url_header x-amzn-requestid)" '.requestId == $id and ($id | test("^[0-9a-f-]{36}$"))' <<<"$answered")"
+url_call="$(url_header x-amzn-requestid)"
+check "a JSON POST comes as text" '200 {"body":"{\"order\":7}","base64":false}' \
+  "$(url_status) $(at_url POST /orders -H 'content-type: application/json' --data '{"order":7}' | jq -c '{body, base64}')"
+printf '\x89PNG\r\n\x1a\n\x00\xff' >"$work/url-bytes"
+check "a binary PUT comes in base64" "200 $(base64 -w0 "$work/url-bytes") true" \
+  "$(url_status) $(at_url PUT /upload -H 'content-type: image/png' --data-binary @"$work/url-bytes" | jq -r '"\(.body) \(.base64)"')"
+at_url GET /cookie >/dev/null
+check "a cookie set by the function, and read back" '200 visited=yes; Path=/ ["visited=yes"]' \
+  "$(url_status) $(url_header set-cookie) $(at_url GET / -H 'cookie: visited=yes' | jq -c .cookies)"
+check "a path the function doesn't know: its own 404" "no such page 404" "$(at_url GET /missing) $(url_status)"
+check "a function's error is a 502, without its message" '502 {"Message":"Internal Server Error"}' "$(at_url GET /fail >/dev/null; url_status) $(cat "$work/url-body")"
+check "a host that is no URL is a 404" "404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' --resolve "nothing.fn.localhost:$url_port:127.0.0.1" "http://nothing.fn.localhost:$url_port/")"
+at_url GET / -H 'authorization: Bearer the-callers-own-token' >/dev/null
+latest="$(http GET "/functions/$url_fn/invocations?limit=1" | jq -c '.invocations[0]')"
+check "the call is in the history as the URL's, its credentials kept as ***" 'url *** null' \
+  "$(jq -r '"\(.source) \(.input.headers.authorization) \(.input.cookies)"' <<<"$latest")"
+check "each call has its usage record, under its request ID" 1 "$(env_q "SELECT count(*) FROM usage_records WHERE request_id = '$url_call'")"
+http PUT "/functions/$url_fn/url" '{"cors": {"allowOrigins": ["https://app.example.tn"], "allowMethods": ["POST"], "maxAge": 60}}' >/dev/null
+at_url OPTIONS /orders -H 'origin: https://app.example.tn' -H 'access-control-request-method: POST' >/dev/null
+check "with CORS set, the URL answers a browser's preflight itself" "200 204 https://app.example.tn POST 60" \
+  "$(status) $(url_status) $(url_header access-control-allow-origin) $(url_header access-control-allow-methods) $(url_header access-control-max-age)"
+http PUT "/functions/$url_fn/url" '{"authType": "AWS_IAM"}' >/dev/null
+check "a URL that takes the account's credentials refuses a caller without them" '403 403' \
+  "$(at_url GET / >/dev/null; url_status) $(at_url GET / -H 'authorization: Bearer ffk_0123456789ab_not-a-real-secret' >/dev/null; url_status)"
+http PUT "/functions/$url_fn" '{"eventFormat": "wrapped"}' >/dev/null
+check "a function with a URL keeps AWS Lambda's event" 400 "$(status)"
+http DELETE "/functions/$url_fn/url" >/dev/null
+check "deleting the URL: its address answers 404 at once, and the function has none" "204 404 404" \
+  "$(status) $(at_url GET / >/dev/null; url_status) $(http GET "/functions/$url_fn/url" >/dev/null; status)"
+http DELETE "/functions/$url_fn" >/dev/null
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account

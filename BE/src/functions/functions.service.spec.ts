@@ -24,7 +24,8 @@ import { CreditService } from '../billing/credit.service';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
-import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
+import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
+import { FunctionUrl } from './entities/function-url.entity';
 import { EventFormat, Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
@@ -46,7 +47,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     findOne: jest.fn(),
     remove: jest.fn(),
   };
-  const invocationsRepo = { create: jest.fn(), save: jest.fn(), findAndCount: jest.fn() };
+  const invocationsRepo = { create: jest.fn(), save: jest.fn(), insert: jest.fn(), findAndCount: jest.fn() };
   const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
   const metrics = { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() };
   /** The account's plan, and how many functions it has: the transaction that saves a new one counts them. */
@@ -120,7 +121,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     Object.assign(functionsRepo, {
       manager: { transaction: jest.fn(async (work) => work(transaction)), existsBy: jest.fn(async (_target, where: { name: string }) => named(where)) },
     });
-    invocationsRepo.create.mockImplementation((dto) => ({ ...dto, id: 'inv-1', createdAt: new Date('2026-10-17T10:00:00Z') }));
+    // The database's ID, unless the caller chose one.
+    invocationsRepo.create.mockImplementation((dto) => ({ id: 'inv-1', ...dto, createdAt: new Date('2026-10-17T10:00:00Z') }));
     ending.findOne.mockImplementation(async () => ({ status: InvocationStatus.RUNNING }));
     ending.save.mockImplementation(async (_target, entity) => invocationsRepo.save({ ...entity, updatedAt: new Date('2026-10-17T10:00:02Z') }));
     Object.assign(invocationsRepo, { manager: { transaction: jest.fn(async (work) => work(ending)) } });
@@ -386,6 +388,20 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining(change), TENANT);
     });
 
+    it("refuses the wrapped event to a function with a URL, which sends AWS Lambda's events, and rolls nothing out", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const { manager } = functionsRepo as unknown as { manager: { existsBy: jest.Mock } };
+      manager.existsBy.mockImplementation(async (target: unknown, where: { functionId?: string }) => target === FunctionUrl && where.functionId === 'fn-1');
+
+      await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
+        "The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/fn-1/url) first, or keep eventFormat lambda",
+      );
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      // Back to lambda, or another change, is no business of its URL's.
+      await service.update('user-1', 'fn-1', { eventFormat: EventFormat.LAMBDA, memory: 256 });
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+    });
+
     it('moves the archived copy when the runtime changes', async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
 
@@ -536,6 +552,46 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(credit.admit).toHaveBeenCalledWith('user-1');
       expect([invocationsRepo.save.mock.calls.length, orchestrator.invoke.mock.calls.length, usage.record.mock.calls.length]).toEqual([0, 0, 0]);
       expect(refusal.getStatus()).toBe(HttpStatus.PAYMENT_REQUIRED);
+    });
+
+    it('records a call through the API as such, under the ID the database gives it', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 1, memoryUsedMb: 1 });
+
+      await service.invoke('user-1', 'fn-1', {});
+
+      expect(invocationsRepo.create).toHaveBeenCalledWith(expect.objectContaining({ source: InvocationSource.API }));
+      expect(invocationsRepo.create.mock.calls[0][0]).not.toHaveProperty('id');
+      expect(invocationsRepo.insert).not.toHaveBeenCalled();
+    });
+
+    it('records a call that came another way under the ID its caller chose, keeping what the caller says to keep', async () => {
+      orchestrator.invoke.mockResolvedValue({ output: { statusCode: 204 }, durationMs: 3, memoryUsedMb: 10 });
+      const inserted: unknown[] = [];
+      invocationsRepo.insert.mockImplementation(async (row: object) => inserted.push({ ...row })); // as it was then
+      const event = { version: '2.0', headers: { authorization: 'Bearer their-token' } };
+
+      const outcome = await service.call(activeFunction(), event, {
+        source: InvocationSource.URL,
+        requestId: 'req-1',
+        history: { version: '2.0', headers: { authorization: '***' } },
+      });
+
+      // Inserted at once: the ID is new, and needs no lookup first.
+      expect(inserted).toEqual([
+        expect.objectContaining({ id: 'req-1', source: InvocationSource.URL, input: { version: '2.0', headers: { authorization: '***' } }, status: InvocationStatus.RUNNING }),
+      ]);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1');
+      expect(outcome).toMatchObject({ ok: true, output: { statusCode: 204 }, invocation: { id: 'req-1', status: InvocationStatus.COMPLETED } });
+      expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-1' }), ending);
+    });
+
+    it('answers a failed call as an outcome, so that each way in answers it its own way', async () => {
+      orchestrator.invoke.mockRejectedValue(new FunctionRuntimeError('TypeError', 'x is undefined', { durationMs: 2 }));
+
+      const outcome = await service.call(activeFunction(), {}, { source: InvocationSource.URL, requestId: 'req-2' });
+
+      expect(outcome).toMatchObject({ ok: false, visible: 'TypeError: x is undefined', invocation: { id: 'req-2', status: InvocationStatus.ERROR } });
     });
 
     it('hands the function its input as the event, any JSON value, as AWS Lambda takes a payload; {} without one', async () => {

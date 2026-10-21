@@ -45,6 +45,16 @@ export const alarmChanges = new Counter({ name: 'ff_alarm_state_changes_total', 
 
 /** The API's answers, by status class: 2xx, 3xx, 4xx, 5xx. */
 export const httpResponses = new Counter({ name: 'ff_http_responses_total', help: "The API's answers, by status class", labelNames: ['class'], registers: [registry] });
+/**
+ * Function URLs' answers, by status class, apart from the API's: a 5xx there is
+ * mostly a function's own error (502), which says nothing of the platform.
+ */
+export const urlResponses = new Counter({
+  name: 'ff_function_url_responses_total',
+  help: "Function URLs' answers, by status class",
+  labelNames: ['class'],
+  registers: [registry],
+});
 
 /** Read at each scrape (MonitoringService sets how). */
 export const ratingLagSeconds = new Gauge({

@@ -44,6 +44,7 @@ import {
   EMAIL_LANGUAGES,
   WEBHOOK_SECRET_FIELDS,
   INVOCATION_FIELDS,
+  INVOCATION_SOURCES,
   INVOCATION_STATUSES,
   ME_ACCOUNT_FIELDS,
   METRIC_NAMES,
@@ -132,6 +133,15 @@ describe("an invocation's status", () => {
 
     expect(backendStatuses).toContain('LOST');
     expect(backendStatuses).toEqual([...INVOCATION_STATUSES]);
+  });
+});
+
+describe("what brought an invocation", () => {
+  it("is one of the API's, so the history names each one it may show", () => {
+    const enumBody = invocationSource.slice(invocationSource.indexOf('export enum InvocationSource'));
+    const backendSources = [...enumBody.slice(0, enumBody.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1]);
+
+    expect(backendSources).toEqual([...INVOCATION_SOURCES]);
   });
 });
 

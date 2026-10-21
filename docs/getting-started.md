@@ -270,6 +270,30 @@ curl -s "$FF/functions/$ID/secrets" | jq -c '[.secrets[].name]'
 
 Every member lists their names; owners and developers change them, and API keys with `functions:read` and `functions:write`. A value set again unchanged, or a name already gone, changes nothing. The console's Environment tab lists them under the variables, sets one (the value typed once, never shown again) and removes one.
 
+**A web address for a function.** A function URL makes the function a web endpoint, as on AWS Lambda: every request to it, any method and any path, calls the function, and what the function returns is the response.
+
+```bash
+URL=$(curl -s -X POST "$FF/functions/$ID/url" -H 'content-type: application/json' -d '{"authType": "NONE"}' | jq -r .functionUrl)
+echo "$URL"                        # http://<32 letters and digits>.fn.localhost:3001/
+curl -si "${URL}hello?name=Amira"  # the function's answer, with x-amzn-RequestId
+```
+
+The backend answers URLs on a port of its own, `FF_FUNCTION_URL_PORT` (3001), at `FF_FUNCTION_URL_BASE` (`http://fn.localhost:3001`): browsers and curl take every name under `.localhost` to your machine. The address is random and stays the same until you delete the URL; a new URL gets a new address. The function gets AWS Lambda's event for function URLs, API Gateway's payload format 2.0: `rawPath`, `rawQueryString`, `queryStringParameters`, `headers` (names in lower case), `cookies`, `body` (text for text, JSON and XML; otherwise base64, with `isBase64Encoded`), and `requestContext` with `http.method`, `http.sourceIp` and `requestId`. It answers with `statusCode`, `headers`, `cookies`, `body` and `isBase64Encoded`; any other value is sent as JSON with 200. A handler written for a Lambda function URL runs unchanged:
+
+```ts
+export async function handler(event: { queryStringParameters?: Record<string, string> }) {
+  const name = event.queryStringParameters?.name ?? 'world';
+  return { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: `Ahlan ${name}` };
+}
+```
+
+- **Who may call it.** `"authType": "NONE"`: anyone, on the account's bill. `"AWS_IAM"`: only callers with an API key of the account that has `functions:invoke`, made by an owner or a developer, sent as `Authorization: Bearer ffk_…`; the function never sees the key. On AWS the same setting takes callers' SigV4 signatures instead.
+- **Browsers on other sites.** `"cors"` takes AWS Lambda's six fields: `allowOrigins`, `allowMethods`, `allowHeaders`, `exposeHeaders`, `allowCredentials` and `maxAge`. With them, the URL answers browsers' preflights itself and puts its CORS headers on every answer; without them, the function answers preflights like any request.
+- **A call like any other.** It counts against the plan's invocations per second together with the API's invokes, needs the account's credit, has its usage record and its price, and is in the history with `"source": "url"`. The history keeps the request with the values of `authorization`, `proxy-authorization` and `x-api-key` as `***`, and without its cookies.
+- **When FF answers instead of the function**, with `{"Message": …}`: `404` for an address that is no URL, `403` without the account's credentials, `429` past the plan's rate, `402` without credit, `503` while the function isn't `ACTIVE`, `413` for a request over 6 MB, as on Lambda. A function that throws, times out, or returns something that can't be an HTTP response gets `502`, never its error's text: the history has that for you, and the backend's log says why a response couldn't be sent. Every answer carries `x-amzn-RequestId`, the call's request ID in the history and the logs.
+- **The rest.** `GET /functions/<id>/url` reads it; `PUT` changes what you send and keeps the rest (`"cors": null` removes CORS); `DELETE` stops the address at once. Every member reads it; owners and developers change it, and API keys with `functions:read` and `functions:write`. Only functions with AWS Lambda's event can have a URL, and a function with a URL can't go back to FF's original wrapped event until the URL is deleted.
+- **In a cluster**, the edge will send `*.fn.<your domain>` to that port over HTTPS: it comes with the next part of step 1 ([the plan](step-1-plan.md), U-05). Until then a cluster serves no function URL from outside.
+
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
 ```bash
@@ -288,7 +312,7 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 
 **What a function can be, today:**
 - one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
-- up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
+- up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads, and a request to the function's URL may be up to 6 MB; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
 - within the account's plan: on the beta plan, 25 functions, each with 128–1024 MB of memory and a timeout of 1–300 s;
 - with environment variables and secrets, 4 KB at most together, as on Lambda (above);
 - up to 3 instances by default, and at most the plan's `instancesPerFunction` (10 on the beta plan) with `maxInstances`; `minInstances` from 0 up to the same limit keeps instances running when idle.

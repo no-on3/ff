@@ -12,7 +12,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Observable } from 'rxjs';
-import { EntityManager, Not, Repository } from 'typeorm';
+import { EntityManager, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { describeError } from '../common/describe-error';
@@ -39,8 +39,9 @@ import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { SecretsView } from './dto/secrets.dto';
-import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
-import { Function, FunctionStatus } from './entities/function.entity';
+import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
+import { EventFormat, Function, FunctionStatus } from './entities/function.entity';
+import { FunctionUrl } from './entities/function-url.entity';
 import {
   FunctionEnvironmentValues,
   NO_ENVIRONMENT,
@@ -105,6 +106,14 @@ type FieldChanges = Omit<UpdateFunctionDto, 'environment'>;
 /** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
 const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
   Object.fromEntries(Object.entries(secrets).map(([name, secret]) => [name, secret.value]));
+
+/**
+ * A call's outcome: the invocation as kept, and the function's output, or why
+ * the call failed: the error, and what its caller may see of it.
+ */
+export type CallOutcome =
+  | { invocation: FunctionInvocation; ok: true; output: unknown }
+  | { invocation: FunctionInvocation; ok: false; error: unknown; visible: string };
 
 /** A message without its final period, to continue it with another sentence. */
 const clause = (message: string): string => message.replace(/\.\s*$/, '');
@@ -329,6 +338,7 @@ export class FunctionsService {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
     const { environment: variables, ...changes } = updateFunctionDto;
+    if (changes.eventFormat === EventFormat.WRAPPED && function_.eventFormat !== EventFormat.WRAPPED) await this.refuseWrappedWithUrl(id);
     const newName = changes.name !== undefined && changes.name !== function_.name ? changes.name : undefined;
     // Refused before anything changes. The save claims the name again, under the account's lock:
     // another request may take it during a rollout.
@@ -344,6 +354,21 @@ export class FunctionsService {
     if (environmentChanges) changed.push('environment');
     const { saved, environment } = await this.change(function_, changes, { before, after }, changed);
     return viewOf(saved, environment);
+  }
+
+  /** The names of the function's variables and secrets, never a value: what the platform's support may see. */
+  async environmentNames(functionId: string): Promise<{ variables: string[]; secrets: string[] }> {
+    const { variables, secrets } = await this.environments.load(functionId);
+    return { variables: Object.keys(variables).sort(), secrets: Object.keys(secrets).sort() };
+  }
+
+  /** A function URL sends AWS Lambda's events: its function can't go back to FF's original wrapped one while it has one. */
+  private async refuseWrappedWithUrl(id: string): Promise<void> {
+    if (await this.functionsRepository.manager.existsBy(FunctionUrl, { functionId: id })) {
+      throw new BadRequestException(
+        `The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/${id}/url) first, or keep eventFormat lambda`,
+      );
+    }
   }
 
   /** The function's secrets: each one's name and when it was set, never a value. */
@@ -549,16 +574,42 @@ export class FunctionsService {
     await this.credit.admit(accountId);
 
     const payload = input === undefined ? {} : input;
+    const outcome = await this.call(function_, payload, { source: InvocationSource.API });
+    if (!outcome.ok) throw failureResponse(outcome.error, outcome.visible);
+    // The answer: the invocation as kept, with the input and output whole.
+    return Object.assign(outcome.invocation, { input: payload, output: outcome.output });
+  }
+
+  /**
+   * Runs one call of an ACTIVE function, whatever brought it (the API, its URL,
+   * a schedule), and records it as every call is: the invocation and its
+   * history, the metrics and the concurrency, the usage record. The caller has
+   * checked the function, the account's credit and its rate. The call's own
+   * failure is an outcome, not an exception, as each way in answers it its own
+   * way; only a failure to record it throws. `history` is what the history
+   * keeps of the event, when not the event itself: a URL's, without its
+   * callers' credentials. `requestId` is the invocation's ID when the caller
+   * chose it first: a URL's event names it.
+   */
+  async call(
+    function_: Function,
+    payload: unknown,
+    options: { source: InvocationSource; history?: unknown; requestId?: string },
+  ): Promise<CallOutcome> {
     // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
-    const keptInput = keptJson(payload);
+    const keptInput = keptJson(options.history === undefined ? payload : options.history);
     const invocation = this.invocationsRepository.create({
-      functionId: id,
+      ...(options.requestId === undefined ? {} : { id: options.requestId }),
+      functionId: function_.id,
+      source: options.source,
       input: keptInput.value,
       inputTruncated: keptInput.truncated,
       status: InvocationStatus.RUNNING,
     });
 
-    await this.invocationsRepository.save(invocation);
+    // A chosen ID is a new row: inserted, without the lookup by ID that save() makes first.
+    if (options.requestId === undefined) await this.invocationsRepository.save(invocation);
+    else await this.invocationsRepository.insert(invocation as QueryDeepPartialEntity<FunctionInvocation>);
 
     // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once (D14).
     this.metricsService.invocationStarted(function_);
@@ -569,7 +620,7 @@ export class FunctionsService {
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
-      this.metricsService.recordMetric(id, duration, result.memoryUsedMb || 0, false);
+      this.metricsService.recordMetric(function_.id, duration, result.memoryUsedMb || 0, false);
 
       // Update invocation with results and metrics. Duration is the execution
       // time reported by the runtime (the basis for metering), else end-to-end
@@ -582,12 +633,10 @@ export class FunctionsService {
       invocation.status = InvocationStatus.COMPLETED;
       // Should this fail, the catch below ends the call as a platform failure, unbilled: its outcome couldn't be kept.
       await this.finish(function_, invocation, UsageStatus.SUCCESS, result.initMs);
-
-      // The answer: the invocation as kept, with the input and output whole.
-      return Object.assign(invocation, { input: payload, output: result.output });
+      return { invocation, ok: true, output: result.output };
     } catch (error) {
       const duration = Date.now() - startTime;
-      this.metricsService.recordMetric(id, duration, 0, true);
+      this.metricsService.recordMetric(function_.id, duration, 0, true);
 
       // The runtime measures a call that failed too; without its measure, end-to-end without the cold start.
       const measured = error instanceof FunctionRuntimeError ? error : undefined;
@@ -605,7 +654,7 @@ export class FunctionsService {
       invocation.error = keptError.value;
       invocation.errorTruncated = keptError.truncated;
       await this.finish(function_, invocation, failureStatus(error), initMsOf(error));
-      throw failureResponse(error, visible);
+      return { invocation, ok: false, error, visible };
     } finally {
       this.metricsService.invocationFinished(function_);
     }

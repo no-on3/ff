@@ -25,7 +25,7 @@ import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
 import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
 import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
-import { CALL_FIELDS, CALL_HIT_FIELDS, FUNCTION_HIT_FIELDS } from './lib/support';
+import { CALL_FIELDS, CALL_HIT_FIELDS, FUNCTION_HIT_FIELDS, FUNCTION_PAGE_FIELDS, FUNCTION_URL_FIELDS } from './lib/support';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
 import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
 import { OVERVIEW_FIELDS } from './lib/overview';
@@ -262,5 +262,10 @@ describe('support', () => {
     expect(fieldsOf(adminSupportDtoSource, 'export class AdminFunctionHitView {')).toEqual([...FUNCTION_HIT_FIELDS]);
     expect(fieldsOf(adminSupportDtoSource, 'export class AdminCallHitView {')).toEqual([...CALL_HIT_FIELDS]);
     expect(fieldsOf(adminSupportDtoSource, 'export class AdminCallView {')).toEqual([...CALL_FIELDS]);
+  });
+
+  it("has the API's fields for a function's page and its URL", () => {
+    expect(fieldsOf(adminSupportDtoSource, 'export class AdminFunctionPageView {')).toEqual([...FUNCTION_PAGE_FIELDS]);
+    expect(fieldsOf(adminSupportDtoSource, 'export class AdminFunctionUrlView {')).toEqual([...FUNCTION_URL_FIELDS]);
   });
 });

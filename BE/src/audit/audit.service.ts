@@ -27,6 +27,10 @@ export type AuditAction =
   | 'function.update'
   | 'function.delete'
   | 'function.scaling'
+  // A function's URL, its public address: given, changed, taken away.
+  | 'function_url.create'
+  | 'function_url.update'
+  | 'function_url.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

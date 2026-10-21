@@ -36,6 +36,7 @@ const production: Env = {
   FF_BANK_IBAN: 'TN5910006035183598478831',
   K8S_RUNTIME_CLASS: 'gvisor',
   FF_ENCRYPTION_KEYS_FILE: keysFile,
+  FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
 };
 
 /** The problems a configuration is refused for; fails the test if it is accepted. */
@@ -222,6 +223,7 @@ describe('configuration', () => {
       ["webhooks allowed into FF's own network", { FF_WEBHOOK_ALLOW_PRIVATE: 'true' }, "FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network"],
       ["customers' code on the node's own kernel, without a sandbox", { K8S_RUNTIME_CLASS: '' }, 'K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production'],
       ["functions' environments sealed with the development key", { FF_ENCRYPTION_KEYS_FILE: undefined }, 'FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production'],
+      ['function URLs without TLS, the development default', { FF_FUNCTION_URL_BASE: undefined }, 'FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production'],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 
@@ -248,6 +250,23 @@ describe('configuration', () => {
       expect(message).toContain('MINIO_SECRET_KEY');
       expect(message).not.toContain('ffdevsecretkey-local-only');
       expect(message).not.toMatch(/"postgres"|: postgres/);
+    });
+  });
+
+  describe('function URLs', () => {
+    it('are served on port 3001, apart from the API, under fn.localhost in development', () => {
+      expect(configuration(dev).functionUrls).toEqual({ port: 3001, base: 'http://fn.localhost:3001' });
+    });
+
+    it('take an origin with a dot in its host, a trailing slash dropped, and port 0 for none', () => {
+      expect(configuration({ ...production, FF_FUNCTION_URL_BASE: 'https://fn.example.tn/', FF_FUNCTION_URL_PORT: '0' }).functionUrls).toEqual({
+        port: 0,
+        base: 'https://fn.example.tn',
+      });
+    });
+
+    it.each(['https://fn.example.tn/path', 'ftp://fn.example.tn', 'https://localhost', 'fn.example.tn'])('refuse %s as where they live', (base) => {
+      expect(problems({ ...dev, FF_FUNCTION_URL_BASE: base })).toEqual([expect.stringMatching(/^FF_FUNCTION_URL_BASE must be an origin whose host has a dot/)]);
     });
   });
 

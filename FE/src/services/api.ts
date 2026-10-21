@@ -106,6 +106,10 @@ export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' 
 export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'COMPLETED', 'THROTTLED', 'LOST'] as const;
 export type InvocationStatus = (typeof INVOCATION_STATUSES)[number];
 
+/** What brought an invocation: the API's invoke, the function's URL, or one of its schedules. contract.test.ts checks them. */
+export const INVOCATION_SOURCES = ['api', 'url', 'schedule'] as const;
+export type InvocationSource = (typeof INVOCATION_SOURCES)[number];
+
 /** An invocation's fields, as the API's entity names them: contract.test.ts checks them against it. */
 export const INVOCATION_FIELDS = [
   'id',
@@ -113,6 +117,7 @@ export const INVOCATION_FIELDS = [
   'input',
   'output',
   'status',
+  'source',
   'duration',
   'memoryUsed',
   'error',
@@ -132,6 +137,8 @@ export interface FunctionInvocation {
   /** In the history, the start of its JSON text, as a string, when outputTruncated. */
   output: unknown;
   status: InvocationStatus;
+  /** What brought it: the API, the function's URL, or a schedule. */
+  source: InvocationSource;
   /** Milliseconds, as the runtime measured it. */
   duration: number;
   /** MB: the runtime's peak memory. */
