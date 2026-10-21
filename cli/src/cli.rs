@@ -366,6 +366,10 @@ pub enum LocalCommand {
         /// Start it again when its code changes
         #[arg(long)]
         watch: bool,
+
+        /// Serve it as its URL would: any request calls it with AWS Lambda's URL event, its answer the response
+        #[arg(long)]
+        url: bool,
     },
 }
 

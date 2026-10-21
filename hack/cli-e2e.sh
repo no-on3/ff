@@ -291,5 +291,20 @@ check "and answers there, as the runtime answers the backend" "Hello Port" \
 kill -INT "$starter"
 wait "$starter" 2>/dev/null || true
 check "Ctrl-C stops it and removes its container" 0 "$(leftover)"
+url_local_port="$(free_port)"
+"$ff_bin" local start "$work/web.ts" --url --port "$url_local_port" >"$work/start.out" 2>"$work/start.err" &
+starter=$!
+for _ in $(seq 1 60); do
+  grep -q 'runs as its URL would' "$work/start.out" 2>/dev/null && break
+  sleep 0.5
+done
+check "local start --url serves it as its URL would" \
+  "web (nodejs) runs as its URL would at http://127.0.0.1:$url_local_port/: any request calls it with AWS Lambda's URL event. Ctrl-C stops it" \
+  "$(cat "$work/start.out")"
+check "a request there gets the function's answer, from Lambda's URL event" "200 Ahlan Local at /hi" \
+  "$(curl -s -o "$work/answer" -w '%{http_code}' "http://127.0.0.1:$url_local_port/hi?name=Local") $(cat "$work/answer")"
+kill -INT "$starter"
+wait "$starter" 2>/dev/null || true
+check "and Ctrl-C removes its container too" 0 "$(leftover)"
 
 echo "cli-e2e: $passed checks passed"

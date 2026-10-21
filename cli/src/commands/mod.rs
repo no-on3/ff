@@ -51,7 +51,9 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Local(LocalCommand::Invoke { function, data, raw }) => {
             local::invoke(&function, data.as_deref(), raw, context)
         }
-        Command::Local(LocalCommand::Start { function, port, watch }) => local::start(&function, port, watch, context),
+        Command::Local(LocalCommand::Start { function, port, watch, url }) => {
+            local::start(&function, port, watch, url, context)
+        }
         Command::Env(EnvCommand::List { name, show }) => env::list(&name, show, context),
         Command::Env(EnvCommand::Set { name, variables }) => env::set(&name, &variables, context),
         Command::Env(EnvCommand::Unset { name, keys }) => env::unset(&name, &keys, context),

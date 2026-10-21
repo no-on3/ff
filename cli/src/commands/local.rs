@@ -1,8 +1,11 @@
 //! `ff local invoke` and `ff local start`: a function run on this machine before it is deployed,
 //! in the runtime image and with the hardening production gives it.
 
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +19,7 @@ use super::invoke::input_of;
 use crate::cli::{Format, LocalArgs, Runtime};
 use crate::error::{Error, Kind};
 use crate::local::{self, Answer, Code, Container, LocalFunction, Readiness};
+use crate::local_url;
 use crate::progress::Progress;
 
 /// The function a path holds: a file, its runtime from its extension; or a folder, its runtime
@@ -154,13 +158,25 @@ pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context
     })
 }
 
-pub fn start(args: &LocalArgs, port: Option<u16>, watch: bool, context: &Context) -> Result<(), Error> {
+pub fn start(args: &LocalArgs, port: Option<u16>, watch: bool, url: bool, context: &Context) -> Result<(), Error> {
     let function = local_function(args)?;
     let image = local::image(function.runtime, &|name| std::env::var(name).ok());
     local::check_docker(&image)?;
     local::remove_on_interrupt();
 
-    let mut port = port;
+    // As its URL: a front on the port asked for, calling the container wherever it runs, a restart's too.
+    let front = if url {
+        let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).map_err(|error| {
+            Error::new(Kind::Failed, format!("Couldn't listen on 127.0.0.1:{}: {error}", port.unwrap_or(0)))
+        })?;
+        let address = format!("http://127.0.0.1:{}/", listener.local_addr().map(|address| address.port()).unwrap_or(0));
+        let runtime_port = Arc::new(AtomicU16::new(0));
+        local_url::serve(listener, Arc::clone(&runtime_port), function.timeout);
+        Some((address, runtime_port))
+    } else {
+        None
+    };
+    let mut port = if url { None } else { port };
     loop {
         let container = match started(&function, &image, port, context) {
             Ok(container) => container,
@@ -172,15 +188,27 @@ pub fn start(args: &LocalArgs, port: Option<u16>, watch: bool, context: &Context
             }
             Err(error) => return Err(error),
         };
-        port = Some(container.port);
-        let url = container.url("/invoke");
-        context.out.result(&json!({ "name": function.name, "url": url }), || {
-            format!(
-                "{} ({}) runs at {url}: POST an event to it. Ctrl-C stops it{}",
-                function.name,
-                function.runtime.as_str(),
-                if watch { "; a change of its code starts it again" } else { "" }
-            )
+        let again = if watch { "; a change of its code starts it again" } else { "" };
+        let (address, how) = match &front {
+            Some((address, runtime_port)) => {
+                runtime_port.store(container.port, Ordering::SeqCst);
+                (address.clone(), "as its URL would")
+            }
+            None => {
+                port = Some(container.port);
+                (container.url("/invoke"), "")
+            }
+        };
+        context.out.result(&json!({ "name": function.name, "url": address }), || {
+            if url {
+                format!(
+                    "{} ({}) runs {how} at {address}: any request calls it with AWS Lambda's URL event. Ctrl-C stops it{again}",
+                    function.name,
+                    function.runtime.as_str()
+                )
+            } else {
+                format!("{} ({}) runs at {address}: POST an event to it. Ctrl-C stops it{again}", function.name, function.runtime.as_str())
+            }
         })?;
         // Its log as it comes, on stderr, until the container goes, or a file changes: stdout has the address alone.
         let mut logs = Command::new("docker")

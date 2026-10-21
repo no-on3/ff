@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod error;
 mod local;
+mod local_url;
 mod output;
 mod progress;
 mod table;
