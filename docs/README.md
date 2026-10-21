@@ -13,7 +13,8 @@
 | [What to build next](what-to-build-next.md) | What to add after functions, in which order and why: the next five steps (web addresses, secrets, packages, schedules; a database and file storage; queues; sites, e-mail, a cache; the way out to AWS), then the longer view (proposed) |
 | [ADR 0001](adr/0001-orchestrator-kubernetes.md) | Why Kubernetes is FF's orchestrator |
 | [ADR 0002](adr/0002-cli.md) | The `ff` command: one Rust binary that talks only to the API, its configuration and tokens, functions by name, Lambda's packaging rules, its exit codes |
-| [ADR 0004](adr/0004-identity-and-tenancy.md) | Accounts, Keycloak login, API keys, account-scoped access, plans, and the operators' separate login. ADR 0003 is reserved by the CLI plan, for how packaged code reaches the pods |
+| [ADR 0003](adr/0003-code-delivery.md) | How a function's code reaches its pods: each version's code an image in a registry in the cluster, mounted at `/var/task` on its runtime's image; measured against an image per version, by a spike (proposed, to confirm) |
+| [ADR 0004](adr/0004-identity-and-tenancy.md) | Accounts, Keycloak login, API keys, account-scoped access, plans, and the operators' separate login |
 | [ADR 0005](adr/0005-log-pipeline.md) | The log pipeline: Fluent Bit collects, VictoriaLogs stores, measured against Vector in the P-41 spike; request IDs, the per-namespace limit, deletion and retention |
 | [ADR 0006](adr/0006-operator-monitoring.md) | The operator's monitoring: the backend's metrics, VictoriaMetrics, alert rules e-mailed through Alertmanager, Grafana's dashboards |
 | [ADR 0007](adr/0007-function-events.md) | The event a function receives: AWS Lambda's, the payload itself, built by the backend for every way in; functions made before keep FF's original wrapper until switched |

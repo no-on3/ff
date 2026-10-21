@@ -167,5 +167,6 @@ hack/.rust/
 hack/.e2e/
 hack/.e2e-tenancy/
 hack/.cli-e2e/
+hack/.code-delivery-spike/
 # hack/ci.sh: its work files, the scanner's database and the SBOMs
 hack/.ci/
