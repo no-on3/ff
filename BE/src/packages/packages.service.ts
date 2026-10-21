@@ -1,0 +1,203 @@
+import { BadRequestException, Injectable, Logger, PayloadTooLargeException, UnsupportedMediaTypeException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { createHash, randomUUID } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { QueryFailedError, Repository } from 'typeorm';
+import { AuditService } from '../audit/audit.service';
+import { describeError } from '../common/describe-error';
+import { MinioClientService } from '../minio-client/minio-client.service';
+import { PACKAGE_LIMITS, PackageRefused, readPackage } from './package-archive';
+import { Package, packageKey } from './package.entity';
+
+/** The media types a zip comes as: its own, the one older Windows tools send, or plain bytes. */
+const ZIP_TYPES = new Set(['application/zip', 'application/x-zip-compressed', 'application/octet-stream']);
+/**
+ * How many packages an account keeps that no function names, at most, and how
+ * long one is kept unnamed: a package is uploaded to be named at once, by the
+ * create or update that follows, and the storage uploads take stays bounded.
+ */
+export const MAX_UNUSED_PACKAGES = 20;
+export const UNUSED_PACKAGE_HOURS = 1;
+const UNIQUE_VIOLATION = '23505';
+
+/** A package as the API answers it: what it is, without its files, which can be thousands. */
+export type PackageView = Pick<Package, 'codeSha256' | 'codeSize' | 'unpackedSize' | 'fileCount' | 'createdAt'>;
+
+const viewOf = ({ codeSha256, codeSize, unpackedSize, fileCount, createdAt }: Package): PackageView => ({ codeSha256, codeSize, unpackedSize, fileCount, createdAt });
+
+/** The packages a function of their account names: the others are unused. */
+const NAMED = `EXISTS (SELECT 1 FROM "functions" "f" WHERE "f"."account_id" = "p"."account_id" AND "f"."package_type" = 'zip' AND "f"."code_sha256" = "p"."code_sha256")`;
+
+const bytes = (n: number): string => n.toLocaleString('en-US');
+const hours = (n: number): string => (n === 1 ? 'an hour' : `${n} hours`);
+
+/** Past Lambda's 50 MB for a package uploaded directly. */
+const tooLarge = () =>
+  new PayloadTooLargeException(`A package may have ${bytes(PACKAGE_LIMITS.zipBytes)} bytes (50 MB) at most, as AWS Lambda takes one uploaded directly`);
+
+/** Writes the body to `file` as it comes, hashing it, and refuses it past the limit. Answers its SHA-256 in base64 and its size. */
+async function receive(body: Readable, file: string): Promise<{ codeSha256: string; codeSize: number }> {
+  const hash = createHash('sha256');
+  let size = 0;
+  const counted = new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      size += chunk.length;
+      if (size > PACKAGE_LIMITS.zipBytes) return done(tooLarge());
+      hash.update(chunk);
+      done(null, chunk);
+    },
+  });
+  try {
+    await pipeline(body, counted, createWriteStream(file, { flags: 'wx', mode: 0o600 }));
+  } catch (error) {
+    if (error instanceof PayloadTooLargeException) throw error;
+    const code = (error as { code?: string }).code;
+    if (code === 'ECONNRESET' || code === 'ERR_STREAM_PREMATURE_CLOSE') throw new BadRequestException('The upload stopped before the end of the package');
+    throw error;
+  }
+  return { codeSha256: hash.digest('base64'), codeSize: size };
+}
+
+/**
+ * Functions' packages (CLI plan, C-22): a zip, as AWS Lambda takes one,
+ * uploaded once, checked (package-archive.ts), kept in object storage and
+ * named by its SHA-256, which a function gives in place of inline code. An
+ * account has each package once. A package that no function names is deleted
+ * after an hour by the retention job, and a closed account's go with its data.
+ */
+@Injectable()
+export class PackagesService {
+  private readonly logger = new Logger(PackagesService.name);
+
+  constructor(
+    @InjectRepository(Package) private readonly packages: Repository<Package>,
+    private readonly storage: MinioClientService,
+    private readonly audit: AuditService,
+  ) {}
+
+  /**
+   * Takes a package from a request's body: written to a temporary file as it
+   * comes, within 50 MB; then, unless the account has it already, checked,
+   * stored, and recorded, with an entry in the audit log. Answers it, and
+   * whether it is new.
+   */
+  async upload(accountId: string, body: Readable, contentType: string | undefined, contentLength?: number): Promise<{ created: boolean; package: PackageView }> {
+    const type = (contentType ?? '').split(';')[0].trim().toLowerCase();
+    if (!ZIP_TYPES.has(type)) {
+      throw new UnsupportedMediaTypeException(`Send the package as the body, a zip archive, with Content-Type: application/zip${type ? `, not ${type}` : ''}`);
+    }
+    if (contentLength !== undefined && contentLength > PACKAGE_LIMITS.zipBytes) throw tooLarge();
+    const file = join(tmpdir(), `ff-package-${randomUUID()}.zip`);
+    try {
+      const { codeSha256, codeSize } = await receive(body, file);
+      if (codeSize === 0) throw new BadRequestException('The body is empty: send the package, a zip archive');
+      const existing = await this.find(accountId, codeSha256);
+      if (existing) return { created: false, package: existing };
+      await this.refuseTooManyUnused(accountId);
+      const contents = await readPackage(file).catch((error: unknown) => {
+        throw error instanceof PackageRefused ? new BadRequestException(error.message) : error;
+      });
+      // The bytes first: a row never names a package that object storage hasn't.
+      await this.storage.putFile(packageKey(accountId, codeSha256), file, codeSize, 'application/zip');
+      const record = { accountId, codeSha256, codeSize, unpackedSize: contents.unpackedSize, fileCount: contents.files.length };
+      try {
+        await this.packages.manager.transaction(async (manager) => {
+          await manager.insert(Package, { ...record, files: contents.files });
+          await this.audit.record(
+            { accountId, action: 'package.upload', resource: `package:${codeSha256}`, details: { codeSha256, codeSize, unpackedSize: record.unpackedSize, files: record.fileCount } },
+            manager,
+          );
+        });
+      } catch (error) {
+        // The same package, uploaded by another request meanwhile: the account has it once.
+        if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) {
+          const kept = await this.find(accountId, codeSha256);
+          if (kept) return { created: false, package: kept };
+        }
+        throw error;
+      }
+      return { created: true, package: (await this.find(accountId, codeSha256)) as PackageView };
+    } finally {
+      await rm(file, { force: true });
+    }
+  }
+
+  /** The account's package of this SHA-256, if it has one. */
+  async find(accountId: string, codeSha256: string): Promise<PackageView | undefined> {
+    const found = await this.packages.findOneBy({ accountId, codeSha256 });
+    return found ? viewOf(found) : undefined;
+  }
+
+  /** The account's packages, newest first; with a SHA-256, the one of it, if any. */
+  async list(accountId: string, codeSha256?: string): Promise<PackageView[]> {
+    const found = await this.packages.find({ where: codeSha256 === undefined ? { accountId } : { accountId, codeSha256 }, order: { createdAt: 'DESC' } });
+    return found.map(viewOf);
+  }
+
+  /** 400 when the account keeps as many packages as it may that no function names: one must go, or be named. */
+  private async refuseTooManyUnused(accountId: string): Promise<void> {
+    const [{ unused }] = await this.packages.query<Array<{ unused: number }>>(
+      `SELECT count(*)::int AS "unused" FROM "packages" "p" WHERE "p"."account_id" = $1 AND NOT ${NAMED}`,
+      [accountId],
+    );
+    if (unused >= MAX_UNUSED_PACKAGES) {
+      throw new BadRequestException(
+        `The account has ${unused} packages that no function names, ${MAX_UNUSED_PACKAGES} at most: name one in a function, ` +
+          `or upload this one once those are deleted, within ${hours(UNUSED_PACKAGE_HOURS)} of their upload`,
+      );
+    }
+  }
+
+  /**
+   * Deletes the packages that no function names, uploaded more than an hour
+   * before `now`, a batch at a time: the rows first, each checked again as it
+   * goes, so that a package a function has just named stays; then their zips.
+   * A zip that can't be deleted is logged: no row names it any more. Returns
+   * how many packages were deleted.
+   */
+  async purgeUnused(now = new Date(), batch = 100): Promise<number> {
+    const before = new Date(now.getTime() - UNUSED_PACKAGE_HOURS * 3_600_000);
+    let deleted = 0;
+    for (;;) {
+      const gone = await this.packages.manager.transaction(async (manager) => {
+        const candidates: Array<{ id: string }> = await manager.query(
+          `SELECT "p"."id" FROM "packages" "p" WHERE "p"."created_at" < $1 AND NOT ${NAMED} ORDER BY "p"."created_at" LIMIT $2 FOR UPDATE OF "p" SKIP LOCKED`,
+          [before, batch],
+        );
+        if (candidates.length === 0) return { rows: [] as Array<{ account_id: string; code_sha256: string }>, full: false };
+        // A statement of its own sees the functions saved since the one above: a package named meanwhile stays.
+        const [rows] = await manager.query<[Array<{ account_id: string; code_sha256: string }>, number]>(
+          `DELETE FROM "packages" "p" WHERE "p"."id" = ANY($1) AND NOT ${NAMED} RETURNING "p"."account_id", "p"."code_sha256"`,
+          [candidates.map((candidate) => candidate.id)],
+        );
+        return { rows, full: candidates.length === batch };
+      });
+      for (const row of gone.rows) {
+        await this.storage
+          .deleteObject(packageKey(row.account_id, row.code_sha256))
+          .catch((error: unknown) => this.logger.error(`Could not delete the zip of package ${row.code_sha256} of account ${row.account_id}: ${describeError(error)}`));
+      }
+      deleted += gone.rows.length;
+      if (!gone.full) break;
+    }
+    if (deleted) this.logger.log(`Deleted ${deleted} package(s) that no function named within ${hours(UNUSED_PACKAGE_HOURS)} of their upload`);
+    return deleted;
+  }
+
+  /**
+   * Deletes all of a closed account's packages: each zip first, so that a run
+   * that fails part way leaves rows for the next to find; then the rows.
+   * Returns how many there were.
+   */
+  async deleteAll(accountId: string): Promise<number> {
+    const rows = await this.packages.find({ where: { accountId }, select: { id: true, codeSha256: true } });
+    for (const row of rows) await this.storage.deleteObject(packageKey(accountId, row.codeSha256));
+    await this.packages.delete({ accountId });
+    return rows.length;
+  }
+}

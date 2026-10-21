@@ -27,6 +27,8 @@ export type AuditAction =
   | 'function.update'
   | 'function.delete'
   | 'function.scaling'
+  // A function's package, uploaded: its SHA-256 and its sizes, once per account and package.
+  | 'package.upload'
   // A function's URL, its public address: given, changed, taken away.
   | 'function_url.create'
   | 'function_url.update'

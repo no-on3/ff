@@ -8,6 +8,7 @@ import { describeError } from '../common/describe-error';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { PackagesService } from '../packages/packages.service';
 import { parsePlanLimits } from '../plans/plan-limits';
 
 const DAY_SECONDS = 86_400;
@@ -23,9 +24,10 @@ export const DELIVERY_DAYS = 30;
  *   the customer's own users, so it is kept only for the account's plan's
  *   historyRetentionDays;
  * - notification deliveries, kept 30 days to show how they went;
- * - a closed account's functions, their history and logs, its alarms,
- *   notification deliveries and webhook secret, once the notice period its
- *   closure set has passed.
+ * - packages that no function names, an hour after their upload;
+ * - a closed account's functions, their history and logs, its packages, its
+ *   alarms, notification deliveries and webhook secret, once the notice period
+ *   its closure set has passed.
  * Usage records, the ledger, invoices and the audit log are not touched: the
  * law requires keeping them for years.
  */
@@ -39,6 +41,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly dataSource: DataSource,
     private readonly functions: FunctionsService,
+    private readonly packages: PackagesService,
     @Inject(ORCHESTRATOR) private readonly orchestrator: Orchestrator,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
@@ -55,12 +58,13 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     clearInterval(this.timer);
   }
 
-  /** The history's purge, then the closed accounts: a failure of either is logged, and the next run tries again. */
+  /** The purges, then the closed accounts: a failure of any is logged, and the next run tries again. */
   private runInBackground(): void {
     if (this.running) return;
     this.running = (async () => {
       await this.purgeHistory().catch((error: unknown) => this.logger.error(`Could not purge the invocation history: ${describeError(error)}`));
       await this.purgeDeliveries().catch((error: unknown) => this.logger.error(`Could not purge the notification deliveries: ${describeError(error)}`));
+      await this.packages.purgeUnused().catch((error: unknown) => this.logger.error(`Could not purge the unused packages: ${describeError(error)}`));
       await this.deleteClosedAccounts().catch((error: unknown) => this.logger.error(`Could not look for closed accounts to delete: ${describeError(error)}`));
     })().finally(() => (this.running = undefined));
   }
@@ -148,8 +152,8 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
   /**
    * A closed account's data: each function, with its objects, its code in
    * object storage, its row and its history (FunctionsService.remove(), which
-   * records each in the audit log); then its namespace, so that nothing writes
-   * more of its lines; then its lines in the log store. Then, at once, its
+   * records each in the audit log); then its packages; then its namespace, so
+   * that nothing writes more of its lines; then its lines in the log store. Then, at once, its
    * alarms, notification deliveries and webhook secret go, and the account is marked,
    * with an entry in its audit log, once. Each step may run again, so
    * a run that failed part way is finished by the next.
@@ -157,6 +161,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
   private async deleteAccountData(accountId: string): Promise<void> {
     const functions = await this.dataSource.getRepository(Function).find({ where: { accountId }, order: { createdAt: 'ASC' } });
     for (const fn of functions) await this.functions.remove(accountId, fn.id);
+    const packages = await this.packages.deleteAll(accountId);
     await this.orchestrator.removeTenant(accountId);
     await this.orchestrator.deleteLogs(accountId);
     await this.dataSource.transaction(async (manager) => {
@@ -166,7 +171,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       const marked = await manager.update(Account, { id: accountId, dataDeletedAt: IsNull() }, { dataDeletedAt: new Date() });
       if (!marked.affected) return;
       await this.audit.record(
-        { accountId, action: 'account.data_delete', resource: `account:${accountId}`, details: { functions: functions.length } },
+        { accountId, action: 'account.data_delete', resource: `account:${accountId}`, details: { functions: functions.length, packages } },
         manager,
       );
     });

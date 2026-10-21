@@ -1,0 +1,161 @@
+/**
+ * L2: functions' packages on a real PostgreSQL: an account has each package
+ * once, however many uploads, two at once included, and the audit log says so
+ * once; its files are kept; the unused ones, which no zip function of the
+ * account names, are counted and purged after an hour with their zips; and a
+ * closed account's go. Each run works in a scratch database, dropped afterwards.
+ *   docker compose up -d --wait postgres && npm run test:db
+ */
+import 'dotenv/config';
+import { Logger } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+import { Readable } from 'node:stream';
+import { Account, AccountStatus } from '../accounts/entities/account.entity';
+import { AuditEntry } from '../audit/audit-entry.entity';
+import { AuditService } from '../audit/audit.service';
+import { databaseConfiguration } from '../config/configuration';
+import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { Package, packageKey } from './package.entity';
+import { MAX_UNUSED_PACKAGES, PackagesService } from './packages.service';
+import { zipOf } from './test-fixtures';
+
+const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
+
+run("functions' packages (L2)", () => {
+  let db: ScratchDatabase;
+  let packages: PackagesService;
+  let accounts = 0;
+  /** What object storage holds: each zip's key and size. */
+  const stored = new Map<string, number>();
+  const storage = {
+    putFile: jest.fn(async (key: string, _file: string, size: number) => void stored.set(key, size)),
+    deleteObject: jest.fn(async (key: string) => void stored.delete(key)),
+  };
+
+  const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
+  /** A new account of its own for each test. */
+  const account = async (): Promise<string> => {
+    const id = `50000000${String(++accounts).padStart(4, '0')}`;
+    await db.dataSource.getRepository(Account).save({ id, name: `Packages ${accounts}`, planId: 'beta', status: AccountStatus.ACTIVE });
+    return id;
+  };
+  const zip = (code: string) => zipOf([{ name: 'app.js', data: code }, { name: 'lib/util.js', data: '// util' }]);
+  const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('base64');
+  const upload = (accountId: string, bytes: Buffer) => packages.upload(accountId, Readable.from([bytes]), 'application/zip', bytes.length);
+  const rowsOf = async (accountId: string) =>
+    (await query<Array<{ code_sha256: string }>>('SELECT code_sha256 FROM packages WHERE account_id = $1 ORDER BY code_sha256', [accountId])).map((row) => row.code_sha256);
+  const uploadsAudited = async (accountId: string) =>
+    (await query<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM audit_log WHERE account_id = $1 AND action = 'package.upload'`, [accountId]))[0].n;
+  /** A zip function of the account naming the package, as a function made from it will. */
+  const named = (accountId: string, codeSha256: string, name = 'zipped') =>
+    query(
+      `INSERT INTO functions (name, account_id, runtime, code, package_type, code_sha256, code_size, memory, timeout) VALUES ($1, $2, 'nodejs', '', 'zip', $3, 100, 128, 5)`,
+      [name, accountId, codeSha256],
+    );
+  const uploadedAgo = (accountId: string, codeSha256: string, minutes: number) =>
+    query(`UPDATE packages SET created_at = now() - make_interval(mins => $3) WHERE account_id = $1 AND code_sha256 = $2`, [accountId, codeSha256, minutes]);
+
+  beforeAll(async () => {
+    db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
+    await db.dataSource.runMigrations({ transaction: 'each' });
+    packages = new PackagesService(db.dataSource.getRepository(Package), storage as never, new AuditService(db.dataSource.getRepository(AuditEntry)));
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+  });
+
+  afterAll(async () => {
+    jest.restoreAllMocks();
+    await db?.drop();
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('keeps a package once per account, uploaded again or by two requests at once, and records its upload once', async () => {
+    const a = await account();
+    const b = await account();
+    const first = zip('exports.handler = async () => 1;');
+    const second = zip('exports.handler = async () => 2;');
+
+    expect([(await upload(a, first)).created, (await upload(a, first)).created]).toEqual([true, false]);
+    const together = await Promise.all([upload(a, second), upload(a, second)]);
+    expect(together.map((result) => result.created).sort()).toEqual([false, true]);
+    // Another account's is its own.
+    expect((await upload(b, first)).created).toBe(true);
+
+    expect(await rowsOf(a)).toEqual([sha(first), sha(second)].sort());
+    expect(await rowsOf(b)).toEqual([sha(first)]);
+    expect([await uploadsAudited(a), await uploadsAudited(b)]).toEqual([2, 1]);
+    expect(stored.get(packageKey(a, sha(first)))).toBe(first.length);
+    expect(stored.get(packageKey(b, sha(first)))).toBe(first.length);
+  });
+
+  it('keeps its files, which only a query that asks for them reads', async () => {
+    const a = await account();
+    const bytes = zip('exports.handler = async () => 3;');
+    await upload(a, bytes);
+
+    const repository = db.dataSource.getRepository(Package);
+    expect((await repository.findOneByOrFail({ accountId: a })).files).toBeUndefined();
+    expect(
+      await repository.findOneOrFail({ where: { accountId: a }, select: { codeSha256: true, files: true, fileCount: true, unpackedSize: true } }),
+    ).toEqual({ codeSha256: sha(bytes), files: ['app.js', 'lib/util.js'], fileCount: 2, unpackedSize: 32 + 7 });
+  });
+
+  it(`refuses a new package while ${MAX_UNUSED_PACKAGES} are unused, counting only those no zip function of the account names`, async () => {
+    const a = await account();
+    const b = await account();
+    const shas: string[] = [];
+    for (let i = 0; i < MAX_UNUSED_PACKAGES; i++) {
+      const bytes = zip(`exports.handler = async () => ${i};`);
+      await upload(a, bytes);
+      shas.push(sha(bytes));
+    }
+
+    await expect(upload(a, zip('exports.handler = async () => "one more";'))).rejects.toThrow(
+      `The account has ${MAX_UNUSED_PACKAGES} packages that no function names`,
+    );
+    // Another account's function naming the same bytes doesn't make them used.
+    await named(b, shas[0]);
+    await expect(upload(a, zip('exports.handler = async () => "one more";'))).rejects.toThrow(`The account has ${MAX_UNUSED_PACKAGES} packages`);
+    // Named by a function of its own, a package is used: there is room again.
+    await named(a, shas[0]);
+    expect((await upload(a, zip('exports.handler = async () => "one more";'))).created).toBe(true);
+  });
+
+  it('purges the packages no function named for an hour, and their zips; keeps one a function names, and one uploaded since', async () => {
+    const a = await account();
+    const [old, used, recent] = ['old', 'used', 'recent'].map((code) => zip(`exports.handler = async () => "${code}";`));
+    for (const bytes of [old, used, recent]) await upload(a, bytes);
+    await uploadedAgo(a, sha(old), 61);
+    await uploadedAgo(a, sha(used), 120);
+    await uploadedAgo(a, sha(recent), 59);
+    await named(a, sha(used));
+
+    await expect(packages.purgeUnused()).resolves.toBe(1);
+
+    expect(await rowsOf(a)).toEqual([sha(used), sha(recent)].sort());
+    expect(storage.deleteObject.mock.calls).toEqual([[packageKey(a, sha(old))]]);
+    expect(stored.has(packageKey(a, sha(old)))).toBe(false);
+    // A batch at a time, until one comes back short.
+    for (const bytes of [old, recent]) {
+      await upload(a, bytes);
+      await uploadedAgo(a, sha(bytes), 90);
+    }
+    await expect(packages.purgeUnused(new Date(), 1)).resolves.toBe(2);
+    expect(await rowsOf(a)).toEqual([sha(used)]);
+  });
+
+  it("deletes all of an account's packages and their zips, and no other account's", async () => {
+    const closed = await account();
+    const other = await account();
+    const bytes = zip('exports.handler = async () => "closing";');
+    await upload(closed, bytes);
+    await upload(other, bytes);
+
+    await expect(packages.deleteAll(closed)).resolves.toBe(1);
+
+    expect([await rowsOf(closed), await rowsOf(other)]).toEqual([[], [sha(bytes)]]);
+    expect(storage.deleteObject.mock.calls).toEqual([[packageKey(closed, sha(bytes))]]);
+  });
+});

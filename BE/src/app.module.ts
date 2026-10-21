@@ -21,6 +21,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { AlarmsModule } from './alarms/alarms.module';
 import { MonitoringModule } from './monitoring/monitoring.module';
 import { MinioClientModule } from './minio-client/minio-client.module';
+import { PackagesModule } from './packages/packages.module';
 import { PlansModule } from './plans/plans.module';
 import { PlansService } from './plans/plans.service';
 import { RateLimitGuard, rateLimitOptions } from './plans/rate-limits';
@@ -56,6 +57,7 @@ import { SchedulesModule } from './schedules/schedules.module';
     AlarmsModule,
     MonitoringModule,
     MinioClientModule,
+    PackagesModule,
     PlansModule,
     RetentionModule,
     SchedulesModule,

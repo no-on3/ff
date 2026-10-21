@@ -7,7 +7,8 @@
 # invoke → delete, with checks on the Kubernetes side and in object storage (the
 # code archive, read through SeaweedFS's filer), and on the code's hash and size
 # as AWS Lambda gives them; then the same lifecycle for a Python function (its
-# handler then renamed lambda_handler), a function's environment variables (delivered through
+# handler then renamed lambda_handler), a package uploaded (named by its SHA-256,
+# kept once, refused when a name leaves it), a function's environment variables (delivered through
 # a Secret, replaced by an update, sealed in the database) and its secrets
 # (never in an answer or the audit log, set and removed by name), and the
 # event a function receives (the payload itself, or the old wrapper until
@@ -246,6 +247,42 @@ check "any other body over 100 KB is refused with 413 and why, where the API ans
   "$(status) $(jq -r .message "$work/body") $(jq -r '.requestId | length == 36' "$work/body")"
 http DELETE "/functions/$large_id" >/dev/null
 check "delete returns 200" 200 "$(status)"
+
+echo "== a function's package"
+# zip_of <zip> <name=text>...: a zip as zip tools make one, each file deflated, its names as given.
+zip_of() {
+  python3 - "$@" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as archive:
+    for entry in sys.argv[2:]:
+        name, text = entry.split('=', 1)
+        archive.writestr(name, text)
+PY
+}
+# upload <zip> [content type]: POST /packages with the file as the body; its answer, its status in $work/status.
+upload() { curl -sS -o "$work/body" -w '%{http_code}' -X POST -H "content-type: ${2:-application/zip}" --data-binary @"$1" "$api/packages" >"$work/status"; cat "$work/body"; }
+sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
+zip_of "$work/package.zip" 'index.js=exports.handler = async () => require("./lib/greet")("e2e");' 'lib/greet.js=module.exports = (name) => "Hello " + name;'
+package_sha="$(sha256_of "$work/package.zip")"
+uploaded="$(upload "$work/package.zip")"
+check "a package is taken: 201, named by its SHA-256 in base64 as computed here, with its sizes and files" \
+  "201 $package_sha $(stat -c %s "$work/package.zip") 2" "$(status) $(jq -r '"\(.codeSha256) \(.codeSize) \(.fileCount)"' <<<"$uploaded")"
+upload "$work/package.zip" >/dev/null
+check "the same package again: 200, and the account has it once" "200 1" "$(status) $(http GET /packages | jq length)"
+check "GET /packages?codeSha256= finds it" "$package_sha" \
+  "$(http GET "/packages?codeSha256=$(jq -rn --arg s "$package_sha" '$s | @uri')" | jq -r '.[0].codeSha256')"
+check "its zip is in object storage, under its account and its SHA-256 in hex" "$(stat -c %s "$work/package.zip")" \
+  "$(archived "packages/$tenant/$(printf '%s' "$package_sha" | base64 -d | od -An -tx1 | tr -d ' \n').zip" | wc -c)"
+check "the audit log records the upload once" 1 \
+  "$(http GET /audit-log | jq --arg r "package:$package_sha" '[.entries[] | select(.resource == $r and .action == "package.upload")] | length')"
+zip_of "$work/slip.zip" 'index.js=exports.handler = async () => 1;' '../../etc/cron.d/evil=* * * * * root sh'
+upload "$work/slip.zip" >/dev/null
+check "a package whose name leaves it is refused, saying which, and nothing is kept" \
+  "400 The package can't be read: ../../etc/cron.d/evil leaves the package with ..: a package's names stay inside it 1" \
+  "$(status) $(jq -r .message "$work/body") $(http GET /packages | jq length)"
+upload "$work/package.zip" text/plain >/dev/null
+check "a body not sent as a zip is refused with 415" "415 Send the package as the body, a zip archive, with Content-Type: application/zip, not text/plain" \
+  "$(status) $(jq -r .message "$work/body")"
 
 echo "== environment variables"
 # A variable of its own for the function: the sections below still read $id, the Python function's.
