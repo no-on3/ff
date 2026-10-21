@@ -3,6 +3,7 @@ import { config } from '../config';
 import { requestHeaders } from '../lib/session';
 import type { AuthType, FunctionUrl, UrlCors } from '../lib/function-url';
 import type { CustomDomain } from '../lib/custom-domains';
+import type { Schedule } from '../lib/schedules';
 
 const api = axios.create({
   baseURL: config.apiUrl,
@@ -201,6 +202,16 @@ export const domainsApi = {
   add: (functionId: string, domain: string) => api.post<CustomDomain>(`/functions/${functionId}/url/domains`, { domain }),
   verify: (functionId: string, domain: string) => api.post<CustomDomain>(`/functions/${functionId}/url/domains/${encodeURIComponent(domain)}/verify`),
   remove: (functionId: string, domain: string) => api.delete(`/functions/${functionId}/url/domains/${encodeURIComponent(domain)}`),
+};
+
+/** A function's schedules, and an expression's next runs for the form's preview. */
+export const schedulesApi = {
+  list: (functionId: string) => api.get<Schedule[]>(`/functions/${functionId}/schedules`),
+  create: (functionId: string, schedule: Record<string, unknown>) => api.post<Schedule>(`/functions/${functionId}/schedules`, schedule),
+  /** What is sent changes, what is left out stays. */
+  update: (functionId: string, id: string, changes: Record<string, unknown>) => api.put<Schedule>(`/functions/${functionId}/schedules/${id}`, changes),
+  remove: (functionId: string, id: string) => api.delete(`/functions/${functionId}/schedules/${id}`),
+  nextRuns: (expression: string) => api.get<{ runs: string[] }>('/schedules/next-runs', { params: { expression } }),
 };
 
 /** GET and PUT /functions/:id/scaling-config. Each instance serves one call at a time. */

@@ -24,7 +24,7 @@ Checked against the README and the client-readiness plan's progress log on 2026-
 - Logs per function (search and live tail), metrics with CloudWatch's names, alarms, e-mail and webhook notifications.
 - An admin dashboard for the operator, operator monitoring, backups that can restore to any minute, deployment manifests with TLS.
 
-**Not there yet:**
+**Not there yet** (on 2026-10-21; step 1, in §4, has added some of it since):
 - A function can only be called through the API, with a login token or an API key. No public web address, no schedule, no queue.
 - No environment variables or secrets for functions.
 - A function is one file. No packages with libraries, and no `ff` command (the CLI plan is not started).
@@ -51,7 +51,7 @@ One more rule for every service: **a function must reach it over FF's private ne
 
 Four gaps stop a customer from running anything real. They come before any new service.
 
-**Under way:** the [step-1 plan](step-1-plan.md) builds this step, in this order: environment variables and secrets; the event a function receives, which must be AWS's before a web address or a schedule can send one; function URLs, their TLS at the edge, and custom domains; schedules; then packages and the `ff` command, as the CLI plan's phases 0 to 2. **Done so far:** environment variables and secrets; AWS Lambda's event, with the functions made before keeping theirs until switched; and function URLs, in the API and the console, served by the backend on a port of its own and over HTTPS at the edge, at customers' own domains too, proved by DNS; and schedules in the API, with EventBridge's expressions and event, the console's tab coming next; then packages and the `ff` command. The plan's progress log has the details.
+**Under way:** the [step-1 plan](step-1-plan.md) builds this step, in this order: environment variables and secrets; the event a function receives, which must be AWS's before a web address or a schedule can send one; function URLs, their TLS at the edge, and custom domains; schedules; then packages and the `ff` command, as the CLI plan's phases 0 to 2. **Done so far:** environment variables and secrets; AWS Lambda's event, with the functions made before keeping theirs until switched; function URLs, in the API and the console, served by the backend on a port of its own and over HTTPS at the edge, at customers' own domains too, proved by DNS; and schedules, in the API and the console, with EventBridge's expressions and its Scheduled Event. **Left:** packages and the `ff` command, then the step's close. The plan's progress log has the details.
 
 | Feature | Why | Parent task | Size |
 |---|---|---|---|

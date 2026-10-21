@@ -29,6 +29,7 @@ import urlResponseSource from '../../BE/src/function-urls/url-response.ts?raw';
 import functionUrlEntitySource from '../../BE/src/functions/entities/function-url.entity.ts?raw';
 import customDomainDtoSource from '../../BE/src/function-urls/dto/custom-domain.dto.ts?raw';
 import customDomainEntitySource from '../../BE/src/function-urls/custom-domain.entity.ts?raw';
+import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
@@ -37,6 +38,7 @@ import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIOD
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
+import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
@@ -392,5 +394,12 @@ describe("a function URL's own domain", () => {
     expect(dtoFields(customDomainDtoSource, 'export class CustomDomainView {')).toEqual([...CUSTOM_DOMAIN_FIELDS]);
     expect([...statuses.slice(0, statuses.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...DOMAIN_STATUSES]);
     expect(dtoFields(customDomainDtoSource, 'export class DomainRecordsView {')).toEqual(['cname', 'txt']);
+  });
+});
+
+describe("a function's schedule", () => {
+  it("has the API's fields and name rule, so the tab reads each one there is and the form refuses what the API would", () => {
+    expect(dtoFields(scheduleDtoSource, 'export class ScheduleView {')).toEqual([...SCHEDULE_FIELDS]);
+    expect(scheduleDtoSource).toContain(`export const SCHEDULE_NAME = ${SCHEDULE_NAME.toString()};`);
   });
 });

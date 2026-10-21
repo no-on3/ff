@@ -25,6 +25,7 @@ import { AppDispatch } from '../store/store';
 import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
 import { EnvironmentTab } from './FunctionEnvironment';
 import { FunctionUrlTab } from './FunctionUrl';
+import { FunctionSchedules } from './FunctionSchedules';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
 import { MetricsDashboard } from './MetricsDashboard';
@@ -34,11 +35,12 @@ import { ScalingConfiguration } from './ScalingConfiguration';
 const HISTORY_PAGE = 20;
 
 /** The page's tabs, by their name in the address (`?tab=logs`), so that a link opens one, in their order. */
-const TABS = ['overview', 'environment', 'url', 'invocations', 'logs', 'metrics', 'scaling'] as const;
+const TABS = ['overview', 'environment', 'url', 'schedules', 'invocations', 'logs', 'metrics', 'scaling'] as const;
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   overview: 'Overview',
   environment: 'Environment',
   url: 'URL',
+  schedules: 'Schedules',
   invocations: 'Invocations',
   logs: 'Logs',
   metrics: 'Metrics',
@@ -307,6 +309,12 @@ const FunctionDetail: React.FC = () => {
       {tab === 'url' && (
         <Box p={3}>
           <FunctionUrlTab func={func} mayChange={mayChange} />
+        </Box>
+      )}
+
+      {tab === 'schedules' && (
+        <Box p={3}>
+          <FunctionSchedules func={func} mayChange={mayChange} />
         </Box>
       )}
 
