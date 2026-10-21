@@ -350,6 +350,27 @@ The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runt
 
 **If a function cannot load** (a syntax error, a missing handler, an exception at import), the create call answers 400 as soon as the runtime has said why, in about 10 s: the runtime logs it at start, and the backend reads it in the log store, which has it about 5 s later. Without the log pipeline (`--no-logging`), the backend can't read it, and waits for the readiness timeout instead (90 s, `FF_READY_TIMEOUT_SECONDS` in `BE/.env`). The answer gives the runtime's reason, for example `The function failed to load: Runtime.UserCodeSyntaxError: SyntaxError: function.ts:2:11 Property assignment expected.`, and `functionId`: the function is saved all the same, listed with status `ERROR` and that reason, and its pod is released. Creating it again would only answer 409, since the name is taken: the console opens the saved function's page instead of keeping its form. **Fix it with an update:** send the corrected code (`PUT /functions/<id>`), and the function becomes `ACTIVE`, keeping its ID. An update of an `ERROR` function always rolls out, even without changes, so `PUT` with `{}` retries the same code after a passing failure such as a full quota. Without the log pipeline, a lower timeout such as 30 gives faster feedback.
 
+**With the `ff` command.** Everything above has its command in `ff`, FF's command-line tool ([`cli/`](../cli/README.md), [ADR 0002](adr/0002-cli.md)): one Rust binary that talks to the API only. Build it once, point it at the backend, and say whom it acts as: in development mode, the account the backend acts as stands in for a token.
+
+```bash
+(cd cli && cargo build --release --locked) && export PATH="$PWD/cli/target/release:$PATH"
+ff config set endpoint "$FF"
+ff config set dev_account "$(curl -s "$FF/me" | jq -r '.accounts[0].id')"   # development mode only
+ff whoami                                         # Development mode, as the owner of account …
+ff deploy examples/hello.ts                       # creates "hello", or updates it with what changed
+ff invoke hello --data '{"name": "Tunis"}'        # the answer, then its request ID, duration and memory
+ff logs hello --follow                            # its log lines as they come; Ctrl-C stops
+ff deploy examples/hello.py --name hello-py --memory 256
+ff history hello                                  # its calls, newest first, by request ID
+ff scale hello --min 1 --max 5
+ff list
+ff delete hello --yes
+ff local invoke examples/hello.py --data '{"name": "here"}'   # on this machine, in Docker, as FF runs it
+ff init orders --runtime python                   # a new function's folder: its handler and an event
+```
+
+On an FF with logins, an owner of the account makes an API key in the console's API keys page, with the scopes the commands need (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`), and `ff config set-token` saves it without showing it; `ff config set endpoint https://api.<domain>` names the API. A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh` makes the static Linux binary, with its SHA-256.
+
 ## 4. Look inside the cluster
 
 ```bash
@@ -865,11 +886,13 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 (cd FE && npm test)                                      # console unit tests, seconds
 (cd runtimes/nodejs && npm test)                         # Node.js runtime protocol
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
+(cd cli && cargo test --locked)                          # the ff command: unit tests, then its binary against a scripted API, seconds
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
 hack/k8s/test-logging-filter.sh                          # the log collector's configuration and filter, in its image, seconds
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
 hack/e2e.sh                                              # the whole stack through the API, about 3 min
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 1 min
+hack/cli-e2e.sh                                          # the ff command on the stack, and in Docker, about 5 min
 hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
 hack/k8s/test-platform-manifests.sh                      # deploy/k8s/platform checked without deploying it, about 1 min
 hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 15 min

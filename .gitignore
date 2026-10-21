@@ -159,6 +159,8 @@ sketch
 # Kubernetes migration (K-00): local tool binaries and cluster credentials
 hack/bin/
 hack/.kube/
+# hack/install-tools.sh: Rust, where the machine has none recent enough
+hack/.rust/
 *.kubeconfig
 
 # End-to-end test work files (K-08)

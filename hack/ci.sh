@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # FF's pipeline, one stage per job, the same here as on the CI server (.github/workflows/ci.yml calls it):
-#   deps      npm ci in the backend, the console, the admin app and the Node.js runtime (CI only: locally,
-#             the installed dependencies are used as they are)
-#   static    linters and type checks, the builds, the docs' links and tables, how-it-works.html's script,
-#             every shell script parsed, and the CI workflow linted
-#   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the alert
-#             rules' and the log collector's filter (these two in their own images)
+#   deps      npm ci in the backend, the console, the admin app and the Node.js runtime, and Rust for the ff
+#             command where the machine has none recent enough (CI only: locally, the installed
+#             dependencies are used as they are)
+#   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
+#             tables, how-it-works.html's script, every shell script parsed, and the CI workflow linted
+#   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the ff
+#             command's and its binary's (L1, L2), the alert rules' and the log collector's filter (these two
+#             in their own images)
 #   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own
 #   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit), and every image
 #             built, scanned (Trivy) and listed as an SBOM (CycloneDX), into hack/.ci/sbom
 #   cluster   on the k3d dev cluster (hack/k8s/cluster-up.sh reuses or makes it): the Kubernetes driver (L3),
-#             the stack (L4), every route as another account (L5), the images run as the cluster runs them,
-#             and the platform's manifests
+#             the stack (L4), every route as another account (L5), the ff command on the stack and in
+#             Docker, the images run as the cluster runs them, and the platform's manifests
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
 # Each stage stops at its first failure, naming the step. Heavy steps run one at a time.
@@ -27,6 +29,10 @@ POSTGRES_IMAGE=postgres:15.19-alpine3.24
 ACTIONLINT_IMAGE=rhysd/actionlint:1.7.12
 ci_dir="$repo/hack/.ci"
 mkdir -p "$ci_dir"
+# The ff command's Rust, where hack/install-tools.sh put it because the machine had none recent enough.
+if [ -x "$repo/hack/.rust/cargo/bin/cargo" ]; then
+  export PATH="$repo/hack/.rust/cargo/bin:$PATH" RUSTUP_HOME="$repo/hack/.rust/rustup" CARGO_HOME="$repo/hack/.rust/cargo"
+fi
 
 # A step runs as an `if`'s condition, where bash ignores `set -e`: a step of several commands checks each one.
 step() { # <name> <command...>: runs one step, timed; stops the stage when it fails
@@ -46,6 +52,7 @@ stage_deps() {
   for dir in BE FE admin runtimes/nodejs; do
     step "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund
   done
+  step "Rust for the ff command" hack/install-tools.sh rust
 }
 
 # The page's one script, which a syntax error stops entirely (and with it every scenario).
@@ -76,6 +83,8 @@ stage_static() {
   step "admin app: linter" in_dir admin npm run lint
   step "admin app: types and build" in_dir admin npm run build
   step "Node.js runtime: build" in_dir runtimes/nodejs npm run build
+  step "ff: formatting" in_dir cli cargo fmt --check
+  step "ff: lints, its tests included, and its build (clippy)" in_dir cli cargo clippy --all-targets --locked -- -D warnings
   step "docs: the checker itself, on documents with one problem each" hack/test-check-docs.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
@@ -91,6 +100,7 @@ stage_unit() {
   step "admin app: unit tests" in_dir admin npm test
   step "Node.js runtime: protocol tests" in_dir runtimes/nodejs npm test
   step "Python runtime: protocol tests" in_dir runtimes/python python3 -m unittest discover -s tests
+  step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked
   step "alert rules and dashboards" hack/k8s/test-monitoring-rules.sh
   step "log collector: configuration and filter" hack/k8s/test-logging-filter.sh
 }
@@ -181,6 +191,7 @@ stage_cluster() {
   step "L3: the Kubernetes driver on the cluster" hack/k8s/test-it.sh
   step "L4: the stack through the API" hack/e2e.sh
   step "L5: every route as another account" hack/e2e-tenancy.sh
+  step "the ff command on the stack and in Docker" hack/cli-e2e.sh
   step "the platform's images, run as the cluster runs them" hack/test-images.sh
   step "the platform's manifests, without deploying them" hack/k8s/test-platform-manifests.sh
 }
@@ -190,7 +201,8 @@ stage_platform() {
   step "FF deployed from deploy/k8s on a cluster of its own" hack/e2e-platform.sh
 }
 
-[ $# -gt 0 ] || { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+# Without a stage: the header above, its comment lines to the first line of code.
+[ $# -gt 0 ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
 for stage in "$@"; do
   case "$stage" in
     deps | static | unit | db | security | cluster | platform) "stage_$stage" ;;

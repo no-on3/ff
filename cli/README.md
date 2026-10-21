@@ -88,9 +88,13 @@ A read the plan's rate refused (429) is tried once more after its `Retry-After`,
 
 An error goes to stderr: `error: <message>`, the API's own when it refused, and its request ID on the next line when there is one; with `--output json`, `{"error": {"message", "exitCode", "status", "requestId"}}`, the API's status and request ID null when the API gave none.
 
+## Install
+
+`hack/build-cli.sh`, from the repository's root, makes the static Linux binary for x86_64, `cli/target/dist/ff-linux-x86_64`, and its SHA-256 beside it: here, when the musl target and `musl-gcc` are installed, else inside the Rust image (`--container` asks for it). Copy it as `ff` anywhere on the `PATH`; it needs nothing else, and `ff version` names the commit it was built from. Releases for other systems, signed, come with the CLI plan's C-41.
+
 ## Build and test
 
-Rust 1.91 or later (`rustup`), from this folder:
+Rust 1.91 or later (`rustup`; `hack/install-tools.sh rust` installs it in `hack/.rust` where there is none recent enough), from this folder:
 
 ```bash
 cargo build --release --locked                                    # target/release/ff
