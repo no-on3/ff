@@ -231,6 +231,8 @@ const smtpUrl = {
   test: (v: string) => isUrl(v, ['smtp:', 'smtps:']),
   expected: 'an smtp:// or smtps:// URL, such as smtp://localhost:51025 (credentials go in it: smtps://user:password@host)',
 };
+/** A region's name, as AWS's are made: letters, then a word, then a number, such as tn-tunis-1 or eu-west-3. */
+const region = { test: (v: string) => /^[a-z]{2,4}(-[a-z]+)+-\d{1,2}$/.test(v), expected: 'a region name, such as tn-tunis-1' };
 /** An IP address, as the edge's are given. */
 const ipAddress = { test: (v: string) => isIP(v) !== 0, expected: 'IP addresses, such as 203.0.113.10 or 2001:db8::10' };
 /** A DNS server: an IP address, with a port after a colon, IPv6 in brackets then. */
@@ -320,6 +322,10 @@ const appShape = {
   // How often alarms are evaluated, and how long a period has been over before it is judged; tests shorten both.
   FF_ALARM_INTERVAL_SECONDS: integer(60, 1, 3600),
   FF_ALARM_SETTLE_SECONDS: integer(60, 0, 3600),
+  // How often the scheduler takes the schedules due (0: never, a backend that runs none); and FF's region, which
+  // events name, as AWS's do theirs.
+  FF_SCHEDULER_INTERVAL_SECONDS: integer(5, 0, 60),
+  FF_REGION: text('tn-tunis-1', region),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
@@ -618,6 +624,11 @@ export default function configuration(env: Env = process.env) {
     alarms: {
       intervalSeconds: parsed.FF_ALARM_INTERVAL_SECONDS,
       settleSeconds: parsed.FF_ALARM_SETTLE_SECONDS,
+    },
+    // Schedules: how often the due ones are taken, and the region their events name.
+    schedules: {
+      intervalSeconds: parsed.FF_SCHEDULER_INTERVAL_SECONDS,
+      region: parsed.FF_REGION,
     },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.

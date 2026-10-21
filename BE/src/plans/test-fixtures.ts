@@ -17,6 +17,7 @@ export const BETA_LIMITS: PlanLimits = {
   idleSeconds: 900,
   internetEgress: false,
   customDomains: 5,
+  schedules: 20,
 };
 
 /** A plan: the beta plan, with the given limits changed. */

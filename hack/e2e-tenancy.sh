@@ -273,6 +273,7 @@ path_for() {
   path="${path//\{userId\}/$missing}"
   path="${path//\{invocationId\}/$missing}"
   path="${path//\{domain\}/l5.example.tn}"
+  path="${path//\{scheduleId\}/$missing}"
   path="${path//\{month\}/$(date -u +%Y-%m)}"
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
@@ -280,6 +281,7 @@ path_for() {
       start) params+=("start=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)") ;;
       end) params+=("end=$(date -u +%Y-%m-%dT%H:%M:%SZ)") ;;
       q) params+=("q=l5") ;;
+      expression) params+=("expression=rate(1%20hour)") ;;
       *) fail "$method $template: no value for its required query parameter $name" ;;
     esac
   done < <(jq -r --arg path "$template" --arg method "${method,,}" \
@@ -302,6 +304,7 @@ body_for() {
     "PATCH /functions/{id}/secrets") echo '{"secrets": {"L5_SECRET": "l5"}}' ;;
     "POST /functions/{id}/url" | "PUT /functions/{id}/url") echo '{"authType": "NONE"}' ;;
     "POST /functions/{id}/url/domains") echo '{"domain": "l5.example.tn"}' ;;
+    "POST /functions/{id}/schedules" | "PUT /functions/{id}/schedules/{scheduleId}") echo '{"name": "l5", "expression": "rate(1 hour)"}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;
@@ -462,6 +465,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
+      ;;
+    "GET /schedules/next-runs")
+      runs_b="$(as_b GET "$(path_for "$template" "$method" "$id" "$account_a")")"
+      check "$route: B previews an expression, which reads no account's data" "200 5" "$(status) $(jq '.runs | length' <<<"$runs_b")"
       ;;
     "GET /notifications/webhook-secret")
       secret_b="$(as_b GET /notifications/webhook-secret | jq -r .secret)"
@@ -731,6 +738,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     *'{'*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
+      ;;
+    "GET /schedules/next-runs")
+      runs_2="$(as_user_2 GET "$(path_for "$template" "$method" "$fn_1" "$account_1")")"
+      check "$route: user 2 previews an expression, which reads no account's data" "200 5" "$(status) $(jq '.runs | length' <<<"$runs_2")"
       ;;
     "GET /notifications/webhook-secret")
       secret_2="$(as_user_2 GET /notifications/webhook-secret | jq -r .secret)"

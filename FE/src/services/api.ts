@@ -558,6 +558,8 @@ export interface PlanLimits {
   internetEgress: boolean;
   /** Customers' own domains for their functions' URLs, all together. */
   customDomains: number;
+  /** Functions' schedules, all together. */
+  schedules: number;
 }
 
 export interface Plan {

@@ -25,6 +25,7 @@ import { FunctionEnvironments1792555028887 } from './1792555028887-FunctionEnvir
 import { EventFormat1792558201826 } from './1792558201826-EventFormat';
 import { FunctionUrls1792559781729 } from './1792559781729-FunctionUrls';
 import { CustomDomains1792564226078 } from './1792564226078-CustomDomains';
+import { Schedules1792568579855 } from './1792568579855-Schedules';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -59,4 +60,5 @@ export const MIGRATIONS: Array<new () => object> = [
   EventFormat1792558201826,
   FunctionUrls1792559781729,
   CustomDomains1792564226078,
+  Schedules1792568579855,
 ];

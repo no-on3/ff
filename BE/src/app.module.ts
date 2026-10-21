@@ -25,6 +25,7 @@ import { PlansModule } from './plans/plans.module';
 import { PlansService } from './plans/plans.service';
 import { RateLimitGuard, rateLimitOptions } from './plans/rate-limits';
 import { RetentionModule } from './retention/retention.module';
+import { SchedulesModule } from './schedules/schedules.module';
 
 @Module({
   imports: [
@@ -57,6 +58,7 @@ import { RetentionModule } from './retention/retention.module';
     MinioClientModule,
     PlansModule,
     RetentionModule,
+    SchedulesModule,
   ],
   controllers: [HealthController],
   providers: [

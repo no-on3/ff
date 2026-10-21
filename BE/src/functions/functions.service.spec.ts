@@ -26,6 +26,7 @@ import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { FunctionUrl } from './entities/function-url.entity';
+import { Schedule } from '../schedules/schedule.entity';
 import { EventFormat, Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
@@ -400,6 +401,17 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       // Back to lambda, or another change, is no business of its URL's.
       await service.update('user-1', 'fn-1', { eventFormat: EventFormat.LAMBDA, memory: 256 });
       expect(orchestrator.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses the wrapped event to a function with schedules, which send EventBridge's Scheduled Event", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const { manager } = functionsRepo as unknown as { manager: { existsBy: jest.Mock } };
+      manager.existsBy.mockImplementation(async (target: unknown, where: { functionId?: string }) => target === Schedule && where.functionId === 'fn-1');
+
+      await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
+        "The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/fn-1/schedules/{scheduleId}) first, or keep eventFormat lambda",
+      );
+      expect(orchestrator.update).not.toHaveBeenCalled();
     });
 
     it('moves the archived copy when the runtime changes', async () => {

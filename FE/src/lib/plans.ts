@@ -14,6 +14,7 @@ export const PLAN_LIMIT_KEYS = [
   'idleSeconds',
   'internetEgress',
   'customDomains',
+  'schedules',
 ] as const satisfies ReadonlyArray<keyof PlanLimits>;
 
 // A limit missing from the list above stops the build.
@@ -44,5 +45,6 @@ export function planLimitRows({ limits }: Pick<Plan, 'limits'>): Array<[label: s
     // The plan's value is where a new account starts; FF turns it on or off for each account.
     ['Internet access for functions', limits.internetEgress ? 'Yes, unless turned off for the account' : 'No, unless turned on for the account'],
     ["Your own domains for functions' URLs", String(limits.customDomains)],
+    ['Schedules', String(limits.schedules)],
   ];
 }

@@ -42,6 +42,7 @@ import { SecretsView } from './dto/secrets.dto';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { EventFormat, Function, FunctionStatus } from './entities/function.entity';
 import { FunctionUrl } from './entities/function-url.entity';
+import { Schedule } from '../schedules/schedule.entity';
 import {
   FunctionEnvironmentValues,
   NO_ENVIRONMENT,
@@ -338,7 +339,7 @@ export class FunctionsService {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
     const { environment: variables, ...changes } = updateFunctionDto;
-    if (changes.eventFormat === EventFormat.WRAPPED && function_.eventFormat !== EventFormat.WRAPPED) await this.refuseWrappedWithUrl(id);
+    if (changes.eventFormat === EventFormat.WRAPPED && function_.eventFormat !== EventFormat.WRAPPED) await this.refuseWrappedWhileSent(id);
     const newName = changes.name !== undefined && changes.name !== function_.name ? changes.name : undefined;
     // Refused before anything changes. The save claims the name again, under the account's lock:
     // another request may take it during a rollout.
@@ -362,11 +363,20 @@ export class FunctionsService {
     return { variables: Object.keys(variables).sort(), secrets: Object.keys(secrets).sort() };
   }
 
-  /** A function URL sends AWS Lambda's events: its function can't go back to FF's original wrapped one while it has one. */
-  private async refuseWrappedWithUrl(id: string): Promise<void> {
-    if (await this.functionsRepository.manager.existsBy(FunctionUrl, { functionId: id })) {
+  /**
+   * A function URL and a schedule send AWS's events: their function can't go
+   * back to FF's original wrapped one while it has either.
+   */
+  private async refuseWrappedWhileSent(id: string): Promise<void> {
+    const manager = this.functionsRepository.manager;
+    if (await manager.existsBy(FunctionUrl, { functionId: id })) {
       throw new BadRequestException(
         `The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/${id}/url) first, or keep eventFormat lambda`,
+      );
+    }
+    if (await manager.existsBy(Schedule, { functionId: id })) {
+      throw new BadRequestException(
+        `The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/${id}/schedules/{scheduleId}) first, or keep eventFormat lambda`,
       );
     }
   }

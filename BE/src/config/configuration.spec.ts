@@ -287,6 +287,20 @@ describe('configuration', () => {
     });
   });
 
+  describe('schedules', () => {
+    it('are taken every 5 s, and name the region tn-tunis-1, by default', () => {
+      expect(configuration(dev).schedules).toEqual({ intervalSeconds: 5, region: 'tn-tunis-1' });
+    });
+
+    it('take another region, and 0 for a backend that runs none', () => {
+      expect(configuration({ ...dev, FF_REGION: 'eu-west-3', FF_SCHEDULER_INTERVAL_SECONDS: '0' }).schedules).toEqual({ intervalSeconds: 0, region: 'eu-west-3' });
+    });
+
+    it.each(['Tunis', 'tn_tunis_1', 'tn-tunis'])('refuse %s as a region', (region) => {
+      expect(problems({ ...dev, FF_REGION: region })).toEqual([expect.stringMatching(/^FF_REGION must be a region name, such as tn-tunis-1/)]);
+    });
+  });
+
   describe('the runtime images', () => {
     it('run protocol 3 by default, which hands a function the payload as its event', () => {
       expect(configuration(dev).kubernetes.runtimeImages).toEqual({ nodejs: 'ff-runtime-nodejs:24-v3', python: 'ff-runtime-python:3.13-v3' });

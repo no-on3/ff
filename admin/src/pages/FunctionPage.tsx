@@ -21,6 +21,7 @@ import {
   milliseconds,
   namesText,
   outcome,
+  scheduleText,
   sourceText,
   urlText,
 } from '../lib/support';
@@ -144,6 +145,15 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
           </Fact>
           <Fact label="Variables">{namesText(page.variables)}</Fact>
           <Fact label="Secrets">{namesText(page.secrets)}</Fact>
+          <Fact label="Schedules">
+            {page.schedules.length === 0
+              ? 'none'
+              : page.schedules.map((schedule) => (
+                  <span key={schedule.name} className="block font-mono text-sm">
+                    {scheduleText(schedule, whenUtc)}
+                  </span>
+                ))}
+          </Fact>
           <Fact label="Created, changed">{`${whenUtc(fn.createdAt)}, ${whenUtc(fn.updatedAt)}`}</Fact>
         </dl>
         <div className="flex flex-wrap gap-3">

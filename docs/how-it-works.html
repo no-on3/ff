@@ -400,6 +400,7 @@
         <thead><tr><th>Data</th><th>Stored in</th><th>Written by</th><th>Read by</th></tr></thead>
         <tbody>
           <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
+          <tr><td>A function's schedules: each one's name, expression, input, next run, and how its last run went</td><td>PostgreSQL <code>schedules</code>, deleted with their function</td><td><code>POST</code>, <code>PUT</code> and <code>DELETE /functions/:id/schedules</code>; the scheduler, at each run</td><td>the scheduler, every few seconds, by their next run; <code>GET /functions/:id/schedules</code>; the support page</td></tr>
           <tr><td>A function's URL: the address's random ID, who may call it, CORS</td><td>PostgreSQL <code>function_urls</code>, one per function, deleted with it</td><td><code>POST</code>, <code>PUT</code> and <code>DELETE /functions/:id/url</code></td><td>the function URL gateway, by each request's host; <code>GET /functions/:id/url</code>; the support page</td></tr>
           <tr><td>Invocations: input, output and error, up to 64 KiB each, flagged when cut; status, duration, memory</td><td>PostgreSQL <code>function_invocations</code>, kept for the plan's history retention (P-45)</td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST); the hourly purge deletes what is past the retention</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
           <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td><code>GET /usage</code> and the console's Usage page; the capacity report; the hourly rating (P-32); the metrics, <code>GET /functions/:id/metrics</code> and <code>GET /metrics</code> (P-50)</td></tr>
@@ -520,6 +521,7 @@
         <tbody>
           <tr><td>REST API</td><td><code>BE/src/functions/functions.controller.ts</code>, <code>BE/src/metrics/metrics.controller.ts</code></td></tr>
           <tr><td>Create, update, delete, invoke</td><td><code>BE/src/functions/functions.service.ts</code></td></tr>
+          <tr><td>Schedules: EventBridge's expressions and their next runs, the routes, the scheduler, the Scheduled Event</td><td><code>BE/src/schedules/schedule-expression.ts</code>, <code>schedules.service.ts</code>, <code>scheduler.service.ts</code>, <code>scheduled-event.ts</code>, <code>schedules.controller.ts</code></td></tr>
           <tr><td>Function URLs: their configuration, the gateway on its own port, the event, the answer, CORS</td><td><code>BE/src/function-urls/function-urls.service.ts</code>, <code>function-url.gateway.ts</code>, <code>url-event.ts</code>, <code>url-response.ts</code>, <code>url-cors.ts</code>, <code>url-address.ts</code>; the shared call: <code>functions.service.ts</code> <code>call()</code>; the shared rate: <code>BE/src/plans/rate-limits.ts</code> <code>countInvocation()</code></td></tr>
           <tr><td>Token checks, the global guard</td><td><code>BE/src/auth/auth.guard.ts</code>, <code>token-verifier.ts</code></td></tr>
           <tr><td>The caller of a request, and its account</td><td><code>BE/src/auth/principal.ts</code></td></tr>
@@ -657,7 +659,7 @@ const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'ser
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
-  'PostgreSQL': { 'functions': null, 'function_urls': null, 'function_invocations': null, 'function_metrics': null, 'usage_records': null, 'notification_deliveries': null, 'webhook_secrets': null, 'alarms': null, 'capacity_samples': null, 'usage_hourly': null, 'usage_charges': null, 'ledger_entries': null, 'payments': null, 'invoices': null },
+  'PostgreSQL': { 'functions': null, 'function_urls': null, 'schedules': null, 'function_invocations': null, 'function_metrics': null, 'usage_records': null, 'notification_deliveries': null, 'webhook_secrets': null, 'alarms': null, 'capacity_samples': null, 'usage_hourly': null, 'usage_charges': null, 'ledger_entries': null, 'payments': null, 'invoices': null },
   'S3 (bucket functions)': { 'object': null },
   [K]: { 'Namespace': null, 'ResourceQuota': null, 'LimitRange': null, 'NetworkPolicy': null, 'ConfigMap': null, 'Service': null, 'Deployment': null, 'Pod': null },
   'Runtime': { 'main process': null, 'worker': null },
@@ -842,7 +844,7 @@ const SCENARIOS = [
     initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_urls': 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5 · NONE' }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'GET /hello?name=Amira · host <id>.fn.localhost', title: 'Anyone calls the URL',
-        text: 'Every name under .localhost is this machine, for browsers and curl. The gateway is a plain Node.js HTTP server in the backend, on FF_FUNCTION_URL_PORT (3001), apart from the API: none of the API\'s middleware runs here, no login, no CORS of the console\'s, no body parser. It serves hosts <32 letters and digits>.<the host of FF_FUNCTION_URL_BASE>, and customers' own domains once DNS has proved them theirs (a CNAME to the URL's host, or a TXT record with the domain's token); any other host gets 404. In a cluster the edge sends *.fn.<domain> to it over HTTPS, with a wildcard certificate it gets through FF's DNS (RFC 2136 updates), or one per host on demand once this port has said the host is a URL (GET /tls/allowed?domain=).',
+        text: 'Every name under .localhost is this machine, for browsers and curl. The gateway is a plain Node.js HTTP server in the backend, on FF_FUNCTION_URL_PORT (3001), apart from the API: none of the API\'s middleware runs here, no login, no CORS of the console\'s, no body parser. It serves hosts <32 letters and digits>.<the host of FF_FUNCTION_URL_BASE>, and customers\' own domains once DNS has proved them theirs (a CNAME to the URL\'s host, or a TXT record with the domain\'s token); any other host gets 404. In a cluster the edge sends *.fn.<domain> to it over HTTPS, with a wildcard certificate it gets through FF\'s DNS (RFC 2136 updates), or one per host on demand once this port has said the host is a URL (GET /tls/allowed?domain=).',
         code: 'BE/src/function-urls/function-url.gateway.ts serve() · url-address.ts urlIdOf()',
         msg: { kind: 'http', first: 'GET /hello?name=Amira HTTP/1.1', headers: { host: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5.fn.localhost:3001', 'user-agent': 'curl/8.22.0', accept: '*/*' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT function_urls · the account', title: 'The URL, by its ID',
@@ -881,6 +883,49 @@ const SCENARIOS = [
         text: 'statusCode from 200 to 599, the headers (names checked, no line breaks in values, no length or per-connection ones), each of cookies a Set-Cookie, the body decoded from base64 when isBase64Encoded. A response that can\'t be sent, or one over 6 MB, answers 502 {"Message":"Internal Server Error"}, the reason in the backend\'s log; so does a function that throws or times out, its error left to the history, for its account to read. With CORS set, the URL answers a browser\'s preflight itself and puts the configured headers on every answer.',
         code: 'url-response.ts urlAnswer() · url-cors.ts · function-url.gateway.ts send()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'x-amzn-RequestId': INV, 'content-type': 'text/plain', 'content-length': '11' }, body: 'Ahlan Amira' } },
+    ],
+  },
+  {
+    id: 'schedule', title: 'A function on a schedule', lanes: ['api', 'db', 'k8s', 'pod', 'worker'],
+    summary: 'A schedule, cron(0 2 * * ? *), comes due at 02:00 UTC. Within five seconds the backend\'s scheduler takes it, moves it to its next run, then calls the function with EventBridge\'s Scheduled Event, as a call like any other.',
+    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.schedules': 'nightly-report · next 02:00' }),
+    steps: [
+      { from: 'api', to: 'api', kind: 'int', label: 'every 5 s: the scheduler wakes', title: 'The scheduler\'s tick',
+        text: 'Every FF_SCHEDULER_INTERVAL_SECONDS (5 s), in each backend. A tick still taking its schedules makes the next wait its turn.',
+        code: 'BE/src/schedules/scheduler.service.ts tick()' },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT … FOR UPDATE SKIP LOCKED · UPDATE next_run_at', title: 'The due schedules, taken and moved, then committed',
+        text: 'In one transaction: the enabled schedules whose next run has come, locked, those another backend holds skipped; each moved to its next run after now, its request ID chosen. Once committed, no backend takes them again: a run happens at most once, and a backend stopped before the call loses it. A schedule late by any amount runs once, then follows its expression.',
+        code: 'scheduler.service.ts takeDue() · schedule-expression.ts nextRun()',
+        msg: { kind: 'sql', text: "BEGIN;\nSELECT … FROM \"schedules\" WHERE \"enabled\" = true AND \"next_run_at\" <= now()\n  ORDER BY \"next_run_at\" LIMIT 50 FOR UPDATE SKIP LOCKED;   -- nightly-report, due 02:00\nUPDATE \"schedules\" SET \"next_run_at\" = '2026-10-23 02:00+00', \"last_run_at\" = '2026-10-22 02:00+00',\n  \"last_request_id\" = '" + INV + "', \"last_outcome\" = 'running' WHERE \"id\" = '…';\nCOMMIT;" },
+        set: { 'PostgreSQL.schedules': 'nightly-report · next 2026-10-23 02:00 · running' } },
+      { from: 'api', to: 'api', kind: 'int', label: 'the checks · the Scheduled Event', title: 'A call like the API\'s',
+        text: 'The function must be ACTIVE, the account active with credit, and the call within the plan\'s invocations per second, which the API\'s invokes and the URLs\' calls count too; else the run is skipped, and the schedule says why. The event is EventBridge\'s Scheduled Event, unless the schedule has an input of its own.',
+        code: 'scheduler.service.ts call() · scheduled-event.ts',
+        msg: { kind: 'ipc', title: 'the Scheduled Event', body: { version: '0', id: INV, 'detail-type': 'Scheduled Event', source: 'aws.events', account: '000000000001', time: '2026-10-22T02:00:00Z', region: 'tn-tunis-1', resources: ['arn:aws:events:tn-tunis-1:000000000001:rule/hello-nightly-report'], detail: {} } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING, schedule)', title: 'Recorded as every call is',
+        text: 'The same method as the API\'s invoke and the URLs\' calls, under the request ID chosen above, with source schedule.',
+        code: 'BE/src/functions/functions.service.ts call()',
+        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"id\", \"function_id\", \"source\", \"input\", \"status\", …)\nVALUES ('" + INV + "', '" + FN + "', 'schedule', '{\"detail-type\":\"Scheduled Event\",…}', 'RUNNING', …);" },
+        set: { 'PostgreSQL.function_invocations': 'RUNNING · schedule' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'POST …/services/fn-…:http/proxy/invoke', title: 'The event goes to the function',
+        text: 'As in "Invoke (warm)", a cold start first if the function had scaled to zero.',
+        code: 'kubernetes.orchestrator.ts invoke()', hl: ['service'],
+        msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json', 'x-ff-request-id': INV }, body: { 'detail-type': 'Scheduled Event', '…': '…' } } },
+      { from: 'k8s', to: 'pod', kind: 'req', label: 'POST /invoke → pod :8080', title: 'The runtime takes it as it is',
+        text: 'The function takes AWS Lambda\'s events, so its handler gets the Scheduled Event itself.',
+        code: 'runtimes/nodejs/src/main.ts', hl: ['pod-box'] },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'handler(event, context)', title: 'The handler runs',
+        text: 'A handler written for an EventBridge rule on AWS runs unchanged.',
+        code: 'your function.ts' },
+      { from: 'pod', to: 'api', kind: 'res', label: '200 · the output', title: 'The call ends',
+        text: 'The invocation is COMPLETED and its usage record written, as for any call.',
+        code: 'functions.service.ts finish()',
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · schedule', 'PostgreSQL.usage_records': 'success · 128 MB · billed 2 ms' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE schedules · last_outcome', title: 'The schedule says how it went',
+        text: 'success, error, timeout or throttled, or skipped and why; unless a later run has replaced this one. A failed run isn\'t retried: it is in the history and the metrics, where an alarm can watch it.',
+        code: 'scheduler.service.ts run()',
+        msg: { kind: 'sql', text: "UPDATE \"schedules\" SET \"last_outcome\" = 'success'\nWHERE \"id\" = '…' AND \"last_request_id\" = '" + INV + "';" },
+        set: { 'PostgreSQL.schedules': 'nightly-report · next 2026-10-23 02:00 · success' } },
     ],
   },
   {

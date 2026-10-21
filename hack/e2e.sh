@@ -14,7 +14,9 @@
 # query, a JSON body, bytes, a cookie, the function's own 404 and its error, a
 # browser's preflight, the account's credentials, and the call in the history
 # and the usage records; the URL's own domains, proved through a DNS server of
-# the test's, a subdomain by its CNAME and an apex by its TXT record. Then plans:
+# the test's, a subdomain by its CNAME and an apex by its TXT record. Then a
+# function on schedules: rate(1 minute) within about 70 s, with EventBridge's
+# Scheduled Event or the schedule's input, a disabled one never. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -392,6 +394,43 @@ http DELETE "/functions/$url_fn/url" >/dev/null
 check "deleting the URL: its address answers 404 at once, and the function has none" "204 404 404" \
   "$(status) $(at_url GET / >/dev/null; url_status) $(http GET "/functions/$url_fn/url" >/dev/null; status)"
 http DELETE "/functions/$url_fn" >/dev/null
+
+echo "== a function on a schedule"
+created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-scheduled", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+sched_fn="$(jq -r .id <<<"$created")"
+check "the next runs of an expression, for a preview: five, in UTC" "200 5 true" \
+  "$(http GET '/schedules/next-runs?expression=cron(0%208%20*%20*%20%3F%20*)' >/dev/null; status) $(jq '.runs | length' "$work/body") $(jq '[.runs[] | endswith("T08:00:00.000Z")] | all' "$work/body")"
+http POST "/functions/$sched_fn/schedules" '{"name": "bad", "expression": "rate(5 minute)"}' >/dev/null
+check "an expression EventBridge wouldn't take is refused, saying why" "400 rate(5 minute) must be rate(5 minutes): the unit is plural above 1" "$(status) $(jq -r .message "$work/body")"
+made_at="$(date -u +%s)"
+every="$(http POST "/functions/$sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}')"
+check "a schedule is made, its first run a minute after" "201 true" \
+  "$(status) $(jq --argjson t "$made_at" '(.nextRunAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $t | (. >= 55 and . <= 65)' <<<"$every")"
+http POST "/functions/$sched_fn/schedules" '{"name": "with-input", "expression": "rate(1 minute)", "input": {"report": "daily"}}' >/dev/null
+http POST "/functions/$sched_fn/schedules" '{"name": "off", "expression": "rate(1 minute)", "enabled": false}' >/dev/null
+check "and one with an input of its own, and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
+http PUT "/functions/$sched_fn" '{"eventFormat": "wrapped"}' >/dev/null
+check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
+# Within about 70 s: a minute, and the scheduler's tick, every 5 s.
+for _ in $(seq 1 30); do
+  [ "$(http GET "/functions/$sched_fn/invocations?limit=10" | jq '[.invocations[] | select(.source == "schedule")] | length')" -ge 2 ] && break
+  sleep 5
+done
+history="$(http GET "/functions/$sched_fn/invocations?limit=10")"
+event="$(jq -c '[.invocations[] | select(.source == "schedule" and .input["detail-type"] != null)][0].input' <<<"$history")"
+check "each schedule ran within a minute and a few seconds, as calls of its schedule" 2 "$(jq '[.invocations[] | select(.source == "schedule")] | length' <<<"$history")"
+check "with EventBridge's Scheduled Event: its source, its account, FF's region, the rule's ARN" \
+  "Scheduled Event aws.events $tenant tn-tunis-1 arn:aws:events:tn-tunis-1:$tenant:rule/e2e-scheduled-every-minute true" \
+  "$(jq -r '"\(.["detail-type"]) \(.source) \(.account) \(.region) \(.resources[0]) \(.time | test("^[0-9-]{10}T[0-9:]{8}Z$"))"' <<<"$event")"
+check "or the schedule's own input" '{"report":"daily"}' \
+  "$(jq -c '[.invocations[] | select(.source == "schedule" and .input.report != null)][0].input' <<<"$history")"
+schedules="$(http GET "/functions/$sched_fn/schedules")"
+check "each schedule says how its run went, and which call it was; the disabled one never ran" \
+  "every-minute success true off null with-input success" \
+  "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
+check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM usage_records WHERE function_id = '$sched_fn'")"
+http DELETE "/functions/$sched_fn" >/dev/null
+check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account

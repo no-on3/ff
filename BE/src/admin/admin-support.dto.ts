@@ -110,11 +110,22 @@ export class AdminFunctionUrlView {
   @ApiProperty({ type: [AdminDomainView] }) domains: AdminDomainView[];
 }
 
+/** A function's schedule as support sees it: when it runs, and how its last run went; never its input. */
+export class AdminScheduleView {
+  @ApiProperty() name: string;
+  @ApiProperty({ example: 'cron(0 2 * * ? *)' }) expression: string;
+  @ApiProperty() enabled: boolean;
+  @ApiProperty({ nullable: true, type: Date }) nextRunAt: Date | null;
+  @ApiProperty({ nullable: true, type: Date }) lastRunAt: Date | null;
+  @ApiProperty({ nullable: true, type: String, example: 'success' }) lastOutcome: string | null;
+}
+
 export class AdminFunctionPageView {
   @ApiProperty({ type: AdminFunctionConfigView }) function: AdminFunctionConfigView;
   @ApiProperty({ type: AdminFunctionUrlView, nullable: true, description: 'Its public address, if it has one' }) url: AdminFunctionUrlView | null;
   @ApiProperty({ type: [String], description: "Its variables' names, never their values" }) variables: string[];
   @ApiProperty({ type: [String], description: "Its secrets' names, never their values" }) secrets: string[];
+  @ApiProperty({ type: [AdminScheduleView], description: 'Its schedules, by name' }) schedules: AdminScheduleView[];
   @ApiProperty({ type: AdminAccountSummaryView }) account: AdminAccountSummaryView;
   @ApiProperty({ type: [AdminCallView], description: 'The 20 newest calls' }) recentCalls: AdminCallView[];
   @ApiProperty({ type: [AdminCallView], description: 'The 10 newest that failed' }) recentErrors: AdminCallView[];

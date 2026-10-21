@@ -26,6 +26,7 @@ import { FunctionUrl, UrlAuthType } from '../functions/entities/function-url.ent
 import { FunctionUrlsService } from '../function-urls/function-urls.service';
 import { CustomDomain, DomainStatus } from '../function-urls/custom-domain.entity';
 import { CustomDomainsService } from '../function-urls/custom-domains.service';
+import { Schedule } from '../schedules/schedule.entity';
 import { capturingMail } from '../mail/capturing-mail';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
@@ -133,6 +134,7 @@ run('support, for operators (L2)', () => {
       audit,
       urls,
       domains,
+      ds.getRepository(Schedule),
     );
   });
 
@@ -191,6 +193,7 @@ run('support, for operators (L2)', () => {
 
     await db.dataSource.getRepository(FunctionUrl).insert({ functionId: f.id, accountId: id, urlId: 'u'.repeat(32), authType: UrlAuthType.AWS_IAM, cors: { allowOrigins: ['*'] } });
     await db.dataSource.getRepository(CustomDomain).insert({ domain: 'shop.example.tn', accountId: id, functionId: f.id, token: 't'.repeat(32), status: DomainStatus.VERIFIED });
+    await db.dataSource.getRepository(Schedule).insert({ accountId: id, functionId: f.id, name: 'nightly', expression: 'cron(0 2 * * ? *)', input: { secret: PRIVATE }, lastOutcome: 'success' });
 
     const page = await support.functionPage(f.id);
 
@@ -216,6 +219,7 @@ run('support, for operators (L2)', () => {
       domains: [{ domain: 'shop.example.tn', status: 'verified', checkError: null }],
     });
     expect([page.variables, page.secrets]).toEqual([['TABLE'], ['DB_PASSWORD']]);
+    expect(page.schedules).toEqual([{ name: 'nightly', expression: 'cron(0 2 * * ? *)', enabled: true, nextRunAt: null, lastRunAt: null, lastOutcome: 'success' }]);
     expect([page.account.id, page.account.owners.map((o) => o.email)]).toEqual([id, ['owner@page-labs.test']]);
     expect(page.recentCalls.map((c) => c.id)).toEqual([timedOut, failed, ...calls.slice(-18).reverse()]);
     expect(page.recentErrors.map((c) => [c.id, c.status, c.errorType])).toEqual([

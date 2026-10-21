@@ -10,6 +10,7 @@ import { Function } from '../functions/entities/function.entity';
 import { FunctionEnvironment } from '../functions/entities/function-environment.entity';
 import { FunctionUrl } from '../functions/entities/function-url.entity';
 import { CustomDomain } from '../function-urls/custom-domain.entity';
+import { Schedule } from '../schedules/schedule.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { RateLimitedInvocations } from '../metrics/entities/rate-limited-invocations.entity';
 import { NotificationDelivery } from '../notifications/entities/notification-delivery.entity';
@@ -38,4 +39,4 @@ import { InvoiceNotice } from '../billing/invoices/invoice-notice.entity';
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm];

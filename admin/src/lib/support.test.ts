@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TRUNCATED, callValue, domainsText, eventFormatText, foundIn, lookDialog, milliseconds, namesText, outcome, searchSummary, sourceText, urlText } from './support';
+import { TRUNCATED, callValue, domainsText, eventFormatText, scheduleText, foundIn, lookDialog, milliseconds, namesText, outcome, searchSummary, sourceText, urlText } from './support';
 
 describe("a look at a customer's data", () => {
   it("says what it shows, and that the account's owners see it in their audit log, with the reason", () => {
@@ -67,6 +67,15 @@ describe("a function's configuration, to read", () => {
       'shop.example.tn (verified), example.tn (pending)',
     );
     expect(domainsText([])).toBe('none');
+  });
+
+  it('says when each schedule runs, and how its last run went', () => {
+    const when = (iso: string) => iso.slice(0, 16).replace('T', ' ');
+    const schedule = { name: 'nightly', expression: 'cron(0 2 * * ? *)', enabled: true, nextRunAt: '2026-10-22T02:00:00Z', lastRunAt: null, lastOutcome: null };
+
+    expect(scheduleText(schedule, when)).toBe('nightly: cron(0 2 * * ? *), next 2026-10-22 02:00');
+    expect(scheduleText({ ...schedule, enabled: false, lastOutcome: 'error' }, when)).toBe('nightly: cron(0 2 * * ? *), disabled; last: error');
+    expect(scheduleText({ ...schedule, nextRunAt: null }, when)).toBe('nightly: cron(0 2 * * ? *), no run left');
   });
 
   it('names the variables and secrets, or says there are none', () => {

@@ -9,6 +9,7 @@ import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionUrlsService } from '../function-urls/function-urls.service';
 import { CustomDomainsService } from '../function-urls/custom-domains.service';
+import { Schedule } from '../schedules/schedule.entity';
 import { AdminAccountsService } from './admin-accounts.service';
 import { AdminCallDataView, AdminCallHitView, AdminCallView, AdminCodeView, AdminFunctionHitView, AdminFunctionPageView, AdminSearchView } from './admin-support.dto';
 
@@ -64,6 +65,7 @@ export class AdminSupportService {
     private readonly audit: AuditService,
     private readonly urls: FunctionUrlsService,
     private readonly domains: CustomDomainsService,
+    @InjectRepository(Schedule) private readonly schedules: Repository<Schedule>,
   ) {}
 
   /**
@@ -132,12 +134,13 @@ export class AdminSupportService {
   /** A function's page: its settings and state, its account, and its recent calls and failures, without their data. */
   async functionPage(id: string): Promise<AdminFunctionPageView> {
     const fn = await this.findFunction(id);
-    const [recent, failed, url, names, domains] = await Promise.all([
+    const [recent, failed, url, names, domains, schedules] = await Promise.all([
       this.invocations.find({ where: { functionId: id }, order: { createdAt: 'DESC' }, take: 20 }),
       this.invocations.find({ where: { functionId: id, status: In(FAILED) }, order: { createdAt: 'DESC' }, take: 10 }),
       this.urls.find(id),
       this.functionsService.environmentNames(id),
       this.domains.forFunction(id),
+      this.schedules.find({ where: { functionId: id }, order: { name: 'ASC' } }),
     ]);
     const { name, runtime, memory, timeout, minInstances, maxInstances, status, eventFormat, createdAt, updatedAt } = fn;
     return {
@@ -150,6 +153,7 @@ export class AdminSupportService {
         domains: domains.map(({ domain, status, checkError }) => ({ domain, status, checkError })),
       },
       ...names,
+      schedules: schedules.map(({ name, expression, enabled, nextRunAt, lastRunAt, lastOutcome }) => ({ name, expression, enabled, nextRunAt, lastRunAt, lastOutcome })),
       account: await this.accounts.summaryOf(fn.accountId),
       recentCalls: recent.map(callView),
       recentErrors: failed.map(callView),

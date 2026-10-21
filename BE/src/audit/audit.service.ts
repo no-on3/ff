@@ -36,6 +36,10 @@ export type AuditAction =
   | 'custom_domain.verify'
   | 'custom_domain.unverify'
   | 'custom_domain.remove'
+  // A function's schedule: made, changed (enabled, disabled, its expression…), deleted.
+  | 'schedule.create'
+  | 'schedule.update'
+  | 'schedule.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

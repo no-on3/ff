@@ -45,6 +45,8 @@ export const planLimitsSchema = z.strictObject({
   internetEgress: z.boolean(),
   /** Customers' own domains for their functions' URLs, all the account's together. */
   customDomains: z.number().int().min(0),
+  /** Functions' schedules, all the account's together. */
+  schedules: z.number().int().min(0),
 });
 
 export type PlanLimits = z.infer<typeof planLimitsSchema>;

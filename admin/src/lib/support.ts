@@ -67,7 +67,18 @@ export interface FunctionUrl {
   domains: Domain[];
 }
 
-export const FUNCTION_PAGE_FIELDS = ['function', 'url', 'variables', 'secrets', 'account', 'recentCalls', 'recentErrors'] as const;
+export const SCHEDULE_FIELDS = ['name', 'expression', 'enabled', 'nextRunAt', 'lastRunAt', 'lastOutcome'] as const;
+/** A function's schedule: when it runs, and how its last run went; never its input. */
+export interface Schedule {
+  name: string;
+  expression: string;
+  enabled: boolean;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastOutcome: string | null;
+}
+
+export const FUNCTION_PAGE_FIELDS = ['function', 'url', 'variables', 'secrets', 'schedules', 'account', 'recentCalls', 'recentErrors'] as const;
 export interface FunctionPage {
   function: {
     id: string;
@@ -88,6 +99,7 @@ export interface FunctionPage {
   /** Its variables' and secrets' names: never their values. */
   variables: string[];
   secrets: string[];
+  schedules: Schedule[];
   account: AccountSummary;
   recentCalls: Call[];
   recentErrors: Call[];
@@ -160,6 +172,12 @@ export function urlText(url: FunctionUrl): string {
 /** A URL's own domains, to read: each with where it stands. */
 export const domainsText = (domains: Domain[]): string =>
   domains.length ? domains.map(({ domain, status }) => `${domain} (${status})`).join(', ') : 'none';
+
+/** A schedule, to read: its expression, and its next run or why there is none. */
+export function scheduleText(schedule: Schedule, when: (iso: string) => string): string {
+  const next = !schedule.enabled ? 'disabled' : schedule.nextRunAt ? `next ${when(schedule.nextRunAt)}` : 'no run left';
+  return `${schedule.name}: ${schedule.expression}, ${next}${schedule.lastOutcome ? `; last: ${schedule.lastOutcome}` : ''}`;
+}
 
 /** Names, to read: "A, B", or "none". */
 export const namesText = (names: string[]): string => (names.length ? names.join(', ') : 'none');

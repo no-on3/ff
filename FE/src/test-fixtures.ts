@@ -18,5 +18,6 @@ export const BETA_PLAN: Plan = {
     idleSeconds: 900,
     internetEgress: false,
     customDomains: 5,
+    schedules: 20,
   },
 };

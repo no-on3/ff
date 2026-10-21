@@ -17,6 +17,7 @@ describe('planLimitRows', () => {
       ['Logs kept', '14 days'],
       ['Internet access for functions', 'No, unless turned on for the account'],
       ["Your own domains for functions' URLs", '5'],
+      ['Schedules', '20'],
     ]);
   });
 

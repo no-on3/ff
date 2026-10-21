@@ -633,6 +633,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'price_books',
         'rate_limited_invocations',
         'rating_runs',
+        'schedules',
         'tax_rates',
         'usage_charges',
         'usage_hourly',
