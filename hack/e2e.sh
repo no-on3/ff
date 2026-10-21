@@ -6,10 +6,12 @@
 # build, as a deploy step would. Scenario: create → invoke → history → update →
 # invoke → delete, with checks on the Kubernetes side and in object storage (the
 # code archive, read through SeaweedFS's filer), then the same lifecycle
-# for a Python function, and a function's environment variables: delivered
-# through a Secret, replaced by an update, sealed in the database. Then plans (P-15): an account on a small plan, its
-# limits, its namespace's quota and its rate limits, which don't touch other
-# accounts. Then usage records (P-20): one per invocation, with the runtime
+# for a Python function, a function's environment variables (delivered through
+# a Secret, replaced by an update, sealed in the database) and its secrets
+# (never in an answer or the audit log, set and removed by name). Then plans:
+# an account on a small plan, its limits, its namespace's quota and its rate
+# limits, which don't touch other accounts. Then usage records (P-20): one per
+# invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
@@ -197,6 +199,47 @@ check "the audit log names the variables changed, never their values" '{"added":
 http DELETE "/functions/$env_fn" >/dev/null
 check "deleting the function deletes its Secrets and its row" "200  0" \
   "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$env_fn" -o name) $(env_q "SELECT count(*) FROM function_environments WHERE function_id = '$env_fn'")"
+
+echo "== secrets"
+# Variables whose values nobody reads back, read by a Python function as its variables.
+sec_reader='import os
+
+def handler(event, context):
+    return {"user": os.environ.get("DB_USER"), "password": os.environ.get("DB_PASSWORD"), "token": os.environ.get("API_TOKEN")}
+'
+created="$(http POST /functions "$(jq -n --arg code "$sec_reader" '{name: "e2e-secrets", runtime: "python", code: $code, memory: 128, timeout: 5,
+  environment: {DB_USER: "ff"}, secrets: {DB_PASSWORD: "e2e-first-password"}}')")"
+check "a function created with a secret answers with its variable, never the secret" "201 ACTIVE ff 0" \
+  "$(status) $(jq -r '"\(.status) \(.environment.DB_USER)"' <<<"$created") $(grep -c e2e-first-password <<<"$created")"
+sec_fn="$(jq -r .id <<<"$created")"
+check "the Python function reads both, as variables" "ff e2e-first-password null" \
+  "$(http POST "/functions/$sec_fn/invoke" '{"input":{}}' | jq -r '"\(.output.user) \(.output.password) \(.output.token)"')"
+http GET "/functions/$sec_fn/secrets" >/dev/null
+check "GET .../secrets names it, with when it was set, never its value" '200 ["DB_PASSWORD"] true 0' \
+  "$(status) $(jq -c '[.secrets[].name]' "$work/body") $(jq -r '.secrets[0].updatedAt | test("^20[0-9-]{8}T")' "$work/body") $(grep -c e2e-first-password "$work/body")"
+http PATCH "/functions/$sec_fn/secrets" '{"secrets": {"DB_PASSWORD": "e2e-second-password", "API_TOKEN": "e2e-token"}}' >/dev/null
+check "PATCH sets and replaces them, rolled out, and answers their names alone" '200 ["API_TOKEN","DB_PASSWORD"] 0' \
+  "$(status) $(jq -c '[.secrets[].name]' "$work/body") $(grep -c -E 'e2e-second-password|e2e-token' "$work/body")"
+check "the new version reads the new values" "e2e-second-password e2e-token" \
+  "$(http POST "/functions/$sec_fn/invoke" '{"input":{}}' | jq -r '"\(.output.password) \(.output.token)"')"
+in_use="$(kubectl -n "$tenant_ns" get deployment "fn-$sec_fn" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')"
+check "they reach the pods through the Secret the Deployment names, and the Deployment holds none" "e2e-second-password 0" \
+  "$(kubectl -n "$tenant_ns" get secret "$in_use" -o jsonpath='{.data.DB_PASSWORD}' | base64 -d) $(kubectl -n "$tenant_ns" get deployment "fn-$sec_fn" -o json | grep -c -E 'e2e-(first|second)-password|e2e-token')"
+http PATCH "/functions/$sec_fn/secrets" '{"secrets": {"API_TOKEN": null}}' >/dev/null
+check "null removes one, and the function no longer reads it" '200 ["DB_PASSWORD"] null' \
+  "$(status) $(jq -c '[.secrets[].name]' "$work/body") $(http POST "/functions/$sec_fn/invoke" '{"input":{}}' | jq -r .output.token)"
+http PUT "/functions/$sec_fn" '{"environment": {"DB_USER": "ff", "DB_PASSWORD": "x"}}' >/dev/null
+check "a variable can't take a secret's name" "400 DB_PASSWORD is both a variable and a secret: a name is one or the other" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+http PATCH "/functions/$sec_fn/secrets" "$(jq -cn --arg big "$(head -c 4100 /dev/zero | tr '\0' x)" '{secrets: {BIG: $big}}')" >/dev/null
+check "nor do variables and secrets go over 4 KB together" "400 true" \
+  "$(status) $(jq -r '.message | join("; ") | test("AWS Lambda allows 4096 \\(4 KB\\)")' "$work/body")"
+check "neither the function's answers, nor the audit log, nor the database holds a secret's value" "0 0 0" \
+  "$(http GET "/functions/$sec_fn" | grep -c -E 'e2e-(first|second)-password') $(http GET /audit-log | grep -c -E 'e2e-(first|second)-password|e2e-token') $(env_q "SELECT count(*) FROM function_environments WHERE document::text ~ 'e2e-|DB_PASSWORD'")"
+check "the audit log names the secrets changed" '{"added":["API_TOKEN"],"changed":["DB_PASSWORD"],"removed":[]}' \
+  "$(http GET /audit-log | jq -c --arg r "function:$sec_fn" '[.entries[] | select(.resource == $r and .action == "function.update")] | last | .details.secrets')"
+http DELETE "/functions/$sec_fn" >/dev/null
+check "deleting the function deletes its Secrets" "200 " "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$sec_fn" -o name)"
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account

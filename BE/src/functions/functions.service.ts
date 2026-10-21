@@ -38,9 +38,24 @@ import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
+import { SecretsView } from './dto/secrets.dto';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
-import { FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty, newRevision, processEnvironment, sameVariables, variableChanges } from './environment';
+import {
+  FunctionEnvironmentValues,
+  NO_ENVIRONMENT,
+  StoredSecret,
+  changedSecrets,
+  combinedProblems,
+  isEmpty,
+  newRevision,
+  processEnvironment,
+  sameVariables,
+  secretsView,
+  storedSecrets,
+  variableChanges,
+  withSecrets,
+} from './environment';
 import { EnvironmentStore } from './environment.store';
 import { callersFailure, failureResponse, platformFailure } from './failures';
 import { keptJson, keptText } from './history';
@@ -71,6 +86,25 @@ function withVariables(environment: FunctionEnvironmentValues, variables: Record
   const next = { ...environment, variables: { ...variables } };
   return { ...next, revision: isEmpty(next) ? '' : newRevision() };
 }
+
+/** A name that is a variable and a secret, or more than 4 KB between them: 400, before anything changes. */
+function refuseCombined(environment: FunctionEnvironmentValues): void {
+  const problems = combinedProblems(environment);
+  if (problems.length) throw new BadRequestException(problems);
+}
+
+/** A function's environment before a change, and after it: the same object when the change leaves it alone. */
+interface EnvironmentChange {
+  before: FunctionEnvironmentValues;
+  after: FunctionEnvironmentValues;
+}
+
+/** The fields of a function a change asks for, without its environment. */
+type FieldChanges = Omit<UpdateFunctionDto, 'environment'>;
+
+/** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
+const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
+  Object.fromEntries(Object.entries(secrets).map(([name, secret]) => [name, secret.value]));
 
 /** A message without its final period, to continue it with another sentence. */
 const clause = (message: string): string => message.replace(/\.\s*$/, '');
@@ -171,8 +205,9 @@ export class FunctionsService {
   async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<FunctionView> {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, createFunctionDto);
-    const { environment: variables, ...fields } = createFunctionDto;
-    const environment = withVariables(NO_ENVIRONMENT, variables ?? {});
+    const { environment: variables, secrets, ...fields } = createFunctionDto;
+    const environment = withSecrets(withVariables(NO_ENVIRONMENT, variables ?? {}), storedSecrets(secrets ?? {}, new Date()));
+    refuseCombined(environment);
     const function_ = this.functionsRepository.create({
       ...fields,
       accountId,
@@ -221,14 +256,22 @@ export class FunctionsService {
       }
       const saved = await manager.save(Function, function_);
       if (!isEmpty(environment)) await this.environments.save(saved, environment, manager);
-      // Recorded with the row: a function whose deploy fails later still says who created it. Variables by name only.
-      const names = Object.keys(environment.variables).sort();
+      // Recorded with the row: a function whose deploy fails later still says who created it. Variables and secrets by name only.
+      const variables = Object.keys(environment.variables).sort();
+      const secrets = Object.keys(environment.secrets).sort();
       await this.audit.record(
         {
           accountId: saved.accountId,
           action: 'function.create',
           resource: `function:${saved.id}`,
-          details: { name: saved.name, runtime: saved.runtime, memory: saved.memory, timeout: saved.timeout, ...(names.length ? { environment: names } : {}) },
+          details: {
+            name: saved.name,
+            runtime: saved.runtime,
+            memory: saved.memory,
+            timeout: saved.timeout,
+            ...(variables.length ? { environment: variables } : {}),
+            ...(secrets.length ? { secrets } : {}),
+          },
         },
         manager,
       );
@@ -238,23 +281,24 @@ export class FunctionsService {
 
   /**
    * The fields an update changes, for the audit log: their names, and the new
-   * values but the code's; the variables by name only, never their values.
+   * values but the code's; the variables and the secrets by name only, never
+   * their values.
    */
-  private recordUpdate(
-    function_: Function,
-    changed: string[],
-    outcome: string,
-    environment?: { before: FunctionEnvironmentValues; after: FunctionEnvironmentValues },
-  ): Promise<void> {
+  private recordUpdate(function_: Function, changed: string[], outcome: string, environment?: EnvironmentChange): Promise<void> {
     const values = Object.fromEntries(
-      changed.filter((field) => field !== 'code' && field !== 'environment').map((field) => [field, function_[field as keyof Function]]),
+      changed
+        .filter((field) => !['code', 'environment', 'secrets'].includes(field))
+        .map((field) => [field, function_[field as keyof Function]]),
     );
-    const variables = environment && changed.includes('environment') ? { environment: variableChanges(environment.before.variables, environment.after.variables) } : {};
+    const names = {
+      ...(environment && changed.includes('environment') ? { environment: variableChanges(environment.before.variables, environment.after.variables) } : {}),
+      ...(environment && changed.includes('secrets') ? { secrets: variableChanges(valuesOf(environment.before.secrets), valuesOf(environment.after.secrets)) } : {}),
+    };
     return this.audit.record({
       accountId: function_.accountId,
       action: 'function.update',
       resource: `function:${function_.id}`,
-      details: { changed, ...values, ...variables, outcome },
+      details: { changed, ...values, ...names, outcome },
     });
   }
 
@@ -285,56 +329,96 @@ export class FunctionsService {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
     const { environment: variables, ...changes } = updateFunctionDto;
-    const previousName = function_.name;
-    const newName = changes.name !== undefined && changes.name !== previousName ? changes.name : undefined;
+    const newName = changes.name !== undefined && changes.name !== function_.name ? changes.name : undefined;
     // Refused before anything changes. The save claims the name again, under the account's lock:
     // another request may take it during a rollout.
     if (newName !== undefined && (await nameInUse(this.functionsRepository.manager, accountId, newName, id))) throw nameTaken(newName);
     // The variables sent replace them all, as on AWS Lambda; a change is a new version, as the code's is.
-    const environment = await this.environments.load(id);
-    const environmentChanges = variables !== undefined && !sameVariables(variables, environment.variables);
-    const nextEnvironment = environmentChanges ? withVariables(environment, variables) : environment;
-    const updated = { ...function_, ...changes };
-    const changed: string[] = (Object.keys(changes) as Array<keyof typeof changes>).filter(
+    const before = await this.environments.load(id);
+    const environmentChanges = variables !== undefined && !sameVariables(variables, before.variables);
+    const after = environmentChanges ? withVariables(before, variables) : before;
+    if (environmentChanges) refuseCombined(after);
+    const changed: string[] = (Object.keys(changes) as Array<keyof FieldChanges>).filter(
       (field) => changes[field] !== undefined && changes[field] !== function_[field],
     );
     if (environmentChanges) changed.push('environment');
+    const { saved, environment } = await this.change(function_, changes, { before, after }, changed);
+    return viewOf(saved, environment);
+  }
+
+  /** The function's secrets: each one's name and when it was set, never a value. */
+  async listSecrets(accountId: string, id: string): Promise<SecretsView> {
+    await this.findOne(accountId, id);
+    return secretsView(await this.environments.load(id));
+  }
+
+  /**
+   * Sets and removes secrets (null removes one), rolled out as a new version
+   * like a change of variables; the answer comes once it is live. Values
+   * already there, and names already gone, change nothing, and roll nothing out.
+   */
+  async updateSecrets(accountId: string, id: string, changes: Record<string, string | null>): Promise<SecretsView> {
+    const function_ = await this.findOne(accountId, id);
+    const before = await this.environments.load(id);
+    const { secrets, changed } = changedSecrets(before.secrets, changes, new Date());
+    if (!changed) return secretsView(before);
+    const after = withSecrets(before, secrets);
+    refuseCombined(after);
+    const { environment } = await this.change(function_, {}, { before, after }, ['secrets']);
+    return secretsView(environment);
+  }
+
+  /**
+   * Applies a change: saved at once when it needs no new version (a new name),
+   * else rolled out and waited for, then saved, with the environment that went
+   * live. A failure rolls back to the working version, or keeps the attempt of
+   * a function that had none, as the lifecycle above describes.
+   */
+  private async change(
+    function_: Function,
+    changes: FieldChanges,
+    environment: EnvironmentChange,
+    changed: string[],
+  ): Promise<{ saved: Function; environment: FunctionEnvironmentValues }> {
+    const previousName = function_.name;
+    const newName = changes.name !== undefined && changes.name !== previousName ? changes.name : undefined;
+    const environmentChanges = environment.after !== environment.before;
+    const updated = { ...function_, ...changes };
     const changesVersion = environmentChanges || ROLLOUT_FIELDS.some((field) => changes[field] !== undefined && changes[field] !== function_[field]);
     // A function that isn't ACTIVE always rolls out, even unchanged, so the same code
     // can be retried after a passing failure (a full quota, a missing image).
     const repairing = function_.status !== FunctionStatus.ACTIVE;
-    const audited = { before: environment, after: nextEnvironment };
 
     if (!changesVersion && !repairing) {
       Object.assign(function_, changes);
       const saved = await this.saveClaimingName(function_, previousName, 'refuse');
       if (changed.length) await this.recordUpdate(saved, changed, 'saved');
-      return viewOf(saved, environment);
+      return { saved, environment: environment.before };
     }
 
     try {
-      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.update(workloadOf(updated, nextEnvironment), tenant));
+      await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.update(workloadOf(updated, environment.after), tenant));
       // The old version keeps serving during the rollout; record the change only once it's live.
       await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
     } catch (error) {
       if (error instanceof CodeTooLargeError) throw new BadRequestException(error.message); // nothing was applied
-      if (repairing) return this.keepFailedAttempt(function_, changes, changed, error, environmentChanges ? audited : undefined);
-      return this.rollBack(function_, environment, error, changed);
+      if (repairing) return this.keepFailedAttempt(function_, changes, changed, error, environmentChanges ? environment : undefined);
+      return this.rollBack(function_, environment.before, error, changed);
     }
 
     const previousCodePath = this.codePath(function_);
     Object.assign(function_, changes, { status: FunctionStatus.ACTIVE, error: null });
     // The new version is live, and the record says so even when the new name went to another function meanwhile.
-    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName', environmentChanges ? nextEnvironment : undefined);
+    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName', environmentChanges ? environment.after : undefined);
     const nameLost = newName !== undefined && saved.name !== newName;
-    await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'live', audited);
+    await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'live', environment);
     await this.archiveCode(saved, previousCodePath);
     if (nameLost) {
       throw new ConflictException(
         `The new version is live, but the function keeps its name "${previousName}": another function was given the name "${newName}" meanwhile`,
       );
     }
-    return viewOf(saved, nextEnvironment);
+    return { saved, environment: environment.after };
   }
 
   /**
@@ -391,10 +475,10 @@ export class FunctionsService {
    */
   private async keepFailedAttempt(
     function_: Function,
-    changes: Omit<UpdateFunctionDto, 'environment'>,
+    changes: FieldChanges,
     changed: string[],
     error: unknown,
-    environment?: { before: FunctionEnvironmentValues; after: FunctionEnvironmentValues },
+    environment?: EnvironmentChange,
   ): Promise<never> {
     const previousCodePath = this.codePath(function_);
     const previousName = function_.name;

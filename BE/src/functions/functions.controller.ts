@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
 import { ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { ServerResponse } from 'node:http';
 import { Principal } from '../auth/principal';
@@ -8,6 +8,7 @@ import { CreateFunctionDto } from './dto/create-function.dto';
 import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
+import { SecretsView, UpdateSecretsDto } from './dto/secrets.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation } from './entities/function-invocation.entity';
@@ -157,6 +158,38 @@ export class FunctionsController {
     // Every check first: another account's function is a JSON 404, before anything of the stream is sent.
     const events = await this.functionsService.liveLogs(principal.accountId, id, query, tail.signal);
     await sendEvents(res, events, () => tail.abort());
+  }
+
+  @Get(':id/secrets')
+  @RequireScope('functions:read')
+  @ApiOperation({
+    summary: "The function's secrets: each one's name, and when it was set; never a value",
+    description: 'Every member reads them, and an API key with functions:read. Nobody reads a value back, not even this API: the function alone does.',
+  })
+  @ApiResponse({ status: 200, type: SecretsView })
+  listSecrets(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<SecretsView> {
+    return this.functionsService.listSecrets(principal.accountId, id);
+  }
+
+  @Patch(':id/secrets')
+  @RequireScope('functions:write')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
+  @ApiOperation({
+    summary: 'Set secrets, and remove them with null',
+    description:
+      'The secrets named are set, or removed with null; the others stay. A change rolls out a new version, as a change of variables does, ' +
+      'and the answer comes once it is live; a value already set, or a name already gone, changes nothing. Owners and developers, and an ' +
+      'API key with functions:write.',
+  })
+  @ApiResponse({ status: 200, type: SecretsView })
+  @ApiResponse({
+    status: 400,
+    description:
+      "A name outside the rule or a variable's, or more than 4 KB with the variables; or the new version didn't start, and the previous one is still live",
+  })
+  updateSecrets(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateSecretsDto, @Principal() principal: Principal): Promise<SecretsView> {
+    return this.functionsService.updateSecrets(principal.accountId, id, dto.secrets);
   }
 
   @Get(':id/scaling-config')

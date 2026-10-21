@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, IconButton, TextField, Typography } from '@mui/material';
 import { MAX_ENVIRONMENT_BYTES, VariableRow, environmentBytes, environmentOf, environmentProblems, rowsOf, sameEnvironment } from '../lib/environment';
 import { apiErrorMessage } from '../lib/functions';
-import { Function, functionsApi } from '../services/api';
+import { Function, SecretView, functionsApi, secretsApi } from '../services/api';
+import { FunctionSecrets } from './FunctionSecrets';
 
 interface FunctionEnvironmentProps {
   func: Function;
@@ -11,12 +12,44 @@ interface FunctionEnvironmentProps {
   onSaved: (updated: Function) => void;
 }
 
+/** The Environment tab: the function's variables, then its secrets, whose names a variable can't take, nor the reverse. */
+export const EnvironmentTab: React.FC<FunctionEnvironmentProps> = ({ func, mayChange, onSaved }) => {
+  const [secrets, setSecrets] = useState<SecretView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    secretsApi
+      .list(func.id)
+      .then(({ data }) => setSecrets(data.secrets))
+      .catch((err: unknown) => setError(apiErrorMessage(err)));
+  }, [func.id]);
+
+  return (
+    <>
+      <FunctionEnvironment func={func} mayChange={mayChange} onSaved={onSaved} secretNames={(secrets ?? []).map((secret) => secret.name)} />
+      {error ? (
+        <Alert severity="error" sx={{ mt: 3 }}>
+          {error}
+        </Alert>
+      ) : (
+        <FunctionSecrets
+          functionId={func.id}
+          secrets={secrets}
+          variableNames={Object.keys(func.environment ?? {})}
+          mayChange={mayChange}
+          onChanged={setSecrets}
+        />
+      )}
+    </>
+  );
+};
+
 /**
  * A function's environment variables, as on AWS Lambda: names and string
  * values, 4 KB at most. Saving rolls out a new version, which the API waits
  * for. Whoever reads the function reads them.
  */
-export const FunctionEnvironment: React.FC<FunctionEnvironmentProps> = ({ func, mayChange, onSaved }) => {
+export const FunctionEnvironment: React.FC<FunctionEnvironmentProps & { secretNames: string[] }> = ({ func, mayChange, onSaved, secretNames }) => {
   const [rows, setRows] = useState<VariableRow[]>(() => rowsOf(func.environment));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +58,7 @@ export const FunctionEnvironment: React.FC<FunctionEnvironmentProps> = ({ func, 
   useEffect(() => setRows(rowsOf(func.environment)), [func.environment]);
 
   const environment = useMemo(() => environmentOf(rows), [rows]);
-  const problems = useMemo(() => environmentProblems(rows), [rows]);
+  const problems = useMemo(() => environmentProblems(rows, secretNames), [rows, secretNames]);
   const unchanged = sameEnvironment(environment, func.environment ?? {});
 
   const change = (index: number, field: keyof VariableRow) => (event: React.ChangeEvent<HTMLInputElement>) => {

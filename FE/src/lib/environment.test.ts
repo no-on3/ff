@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_ENVIRONMENT_BYTES, environmentBytes, environmentOf, environmentProblems, nameProblem, rowsOf, sameEnvironment } from './environment';
+import { MAX_ENVIRONMENT_BYTES, environmentBytes, environmentOf, environmentProblems, nameProblem, rowsOf, sameEnvironment, secretProblem } from './environment';
 
 describe("a function's environment variables in the console", () => {
   it('shows them as rows, by name, and sends them back as a map, without the rows left empty', () => {
@@ -58,5 +58,14 @@ describe("a function's environment variables in the console", () => {
     expect(sameEnvironment({ A: '1', B: '2' }, { B: '2', A: '1' })).toBe(true);
     expect(sameEnvironment({ A: '1' }, { A: '2' })).toBe(false);
     expect(sameEnvironment({ A: '1' }, { A: '1', B: '' })).toBe(false);
+  });
+});
+
+describe("a function's secrets in the console", () => {
+  it("are set under a name the API takes, which isn't a variable's, and with a value typed", () => {
+    expect(secretProblem('DB_PASSWORD', 'hunter2', ['DB_USER'])).toBeUndefined();
+    expect(secretProblem('DB_USER', 'x', ['DB_USER'])).toBe('DB_USER is a variable already: a name is a variable or a secret, not both');
+    expect(secretProblem('AWS_SECRET_ACCESS_KEY', 'x', [])).toBe("AWS_SECRET_ACCESS_KEY is reserved: AWS Lambda or FF's runtime sets it");
+    expect(secretProblem('DB_PASSWORD', '', [])).toBe('Type the value: it is never shown again');
   });
 });

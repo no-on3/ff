@@ -1072,6 +1072,146 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
   });
 
+  describe("a function's secrets", () => {
+    const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
+    const notReady = () => new FunctionLoadError('Error', 'boom at init');
+    const given = () => [...orchestrator.deploy.mock.calls, ...orchestrator.update.mock.calls].map(([fn]) => fn.environment);
+    const set = '2026-10-20T08:00:00.000Z';
+    /** Why a call was refused with 400: its messages. */
+    const refused = async (call: Promise<unknown>) => {
+      const failure = await call.catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(BadRequestException);
+      return ((failure as BadRequestException).getResponse() as { message: string[] }).message;
+    };
+    const tooLarge = (bytes: number) =>
+      `The environment is ${bytes} bytes as JSON text: AWS Lambda allows 4096 (4 KB) for a function's variables and secrets together`;
+    const stored = (secrets: Record<string, string>, variables: Record<string, string> = {}) =>
+      environments.saved.set('fn-1', {
+        revision: 'r0',
+        variables,
+        secrets: Object.fromEntries(Object.entries(secrets).map(([name, value]) => [name, { value, updatedAt: set }])),
+      });
+
+    it('are saved with the new function and given to it with its variables, and its answer holds none of them', async () => {
+      const result = await service.create('user-1', { ...dto, environment: { DB_USER: 'ff' }, secrets: { DB_PASSWORD: 'hunter2' } });
+
+      expect(environments.saved.get('fn-1')!.secrets).toEqual({ DB_PASSWORD: { value: 'hunter2', updatedAt: expect.any(String) } });
+      expect(given()).toEqual([{ revision: expect.any(String), values: { DB_USER: 'ff', DB_PASSWORD: 'hunter2' } }]);
+      expect(result.environment).toEqual({ DB_USER: 'ff' });
+      expect(JSON.stringify(result)).not.toContain('hunter2');
+      expect(audit.record.mock.calls[0][0].details).toMatchObject({ environment: ['DB_USER'], secrets: ['DB_PASSWORD'] });
+      expect(JSON.stringify(audit.record.mock.calls)).not.toContain('hunter2');
+    });
+
+    it('refuse a name that is a variable too, or 4 KB with the variables, before anything is saved or deployed', async () => {
+      expect(await refused(service.create('user-1', { ...dto, environment: { TOKEN: 'a' }, secrets: { TOKEN: 'b' } }))).toEqual([
+        'TOKEN is both a variable and a secret: a name is one or the other',
+      ]);
+      // {"BIG":"…","MORE":"…"}: 20 bytes around the values.
+      expect(await refused(service.create('user-1', { ...dto, environment: { BIG: 'x'.repeat(3000) }, secrets: { MORE: 'y'.repeat(1100) } }))).toEqual([
+        tooLarge(4120),
+      ]);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+    });
+
+    it("keep variables from taking a secret's name, or the 4 KB, in an update, which then rolls nothing out", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2' });
+
+      expect(await refused(service.update('user-1', 'fn-1', { environment: { DB_PASSWORD: 'x' } }))).toEqual([
+        'DB_PASSWORD is both a variable and a secret: a name is one or the other',
+      ]);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it('are listed by name and date, never by value', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2', API_TOKEN: 'tok' });
+
+      const listed = await service.listSecrets('user-1', 'fn-1');
+
+      expect(listed).toEqual({ secrets: [{ name: 'API_TOKEN', updatedAt: set }, { name: 'DB_PASSWORD', updatedAt: set }] });
+    });
+
+    it("of another account's function are not found, as the function isn't", async () => {
+      functionsRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.listSecrets('user-2', 'fn-1')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.updateSecrets('user-2', 'fn-1', { X_SECRET: 'v' })).rejects.toBeInstanceOf(NotFoundException);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it('set and removed by name roll out a new version with them, then are saved, and the answer names them', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2', OLD_TOKEN: 'old' }, { DB_USER: 'ff' });
+
+      const result = await service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'correct-horse', OLD_TOKEN: null, API_KEY: 'k' });
+
+      const [rolledOut] = given();
+      expect(rolledOut).toEqual({ revision: expect.stringMatching(/^[0-9a-f]{16}$/), values: { DB_USER: 'ff', DB_PASSWORD: 'correct-horse', API_KEY: 'k' } });
+      expect(rolledOut!.revision).not.toBe('r0');
+      expect(environments.saved.get('fn-1')).toMatchObject({ revision: rolledOut!.revision, variables: { DB_USER: 'ff' } });
+      expect(result.secrets.map((secret) => secret.name)).toEqual(['API_KEY', 'DB_PASSWORD']);
+      expect(JSON.stringify(result)).not.toMatch(/correct-horse|"k"/);
+    });
+
+    it('names the secrets added, changed and removed in the audit log, never their values', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2', OLD_TOKEN: 'old' });
+
+      await service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'correct-horse', OLD_TOKEN: null, API_KEY: 'k' });
+
+      expect(audit.record).toHaveBeenCalledWith({
+        accountId: 'user-1',
+        action: 'function.update',
+        resource: 'function:fn-1',
+        details: { changed: ['secrets'], secrets: { added: ['API_KEY'], changed: ['DB_PASSWORD'], removed: ['OLD_TOKEN'] }, outcome: 'live' },
+      });
+      expect(JSON.stringify(audit.record.mock.calls)).not.toMatch(/hunter2|correct-horse/);
+    });
+
+    it('roll nothing out for a value already set, or a name already gone', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2' });
+
+      const result = await service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'hunter2', NEVER_SET: null });
+
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(result).toEqual({ secrets: [{ name: 'DB_PASSWORD', updatedAt: set }] });
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('roll the function back to the previous secrets when the new version fails, and save nothing', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2' });
+      orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
+
+      await expect(service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'broken' })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(given().map((environment) => environment?.values)).toEqual([{ DB_PASSWORD: 'broken' }, { DB_PASSWORD: 'hunter2' }]);
+      expect(environments.saved.get('fn-1')!.secrets.DB_PASSWORD.value).toBe('hunter2');
+    });
+
+    it('refuse more than 4 KB with the variables, and roll nothing out', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({}, { BIG: 'x'.repeat(4000) });
+
+      // {"BIG":"…","MORE":"…"}: 20 bytes around the values.
+      expect(await refused(service.updateSecrets('user-1', 'fn-1', { MORE: 'y'.repeat(100) }))).toEqual([tooLarge(4120)]);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it('can repair a function in ERROR: one that failed to load without its secret becomes ACTIVE with it', async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'missing DB_PASSWORD' });
+
+      await service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'hunter2' });
+
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ status: FunctionStatus.ACTIVE, error: null }));
+      expect(environments.saved.get('fn-1')!.secrets.DB_PASSWORD.value).toBe('hunter2');
+    });
+  });
+
   describe('the audit log (P-17)', () => {
     const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
     const recorded = () => audit.record.mock.calls.map(([event]) => event);

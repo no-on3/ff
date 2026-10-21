@@ -124,6 +124,21 @@ run("functions' environments, sealed in the database (L2)", () => {
     await expect(otherKeys.load(fn.id)).rejects.toBeInstanceOf(UnsealError);
   });
 
+  it('keeps secrets sealed too: set and removed through the service, never in clear, never in its answers', async () => {
+    const fn = await functions.create(ACCOUNT, { ...body('with-secrets', { DB_USER: 'ff' }), secrets: { DB_PASSWORD: 'first-password' } });
+
+    const listed = await functions.updateSecrets(ACCOUNT, fn.id, { DB_PASSWORD: 'second-password', API_TOKEN: 'token-value' });
+    const [{ dump }] = await db.dataSource.query<Array<{ dump: string }>>(`SELECT string_agg(e::text, ' ') AS dump FROM function_environments e`);
+
+    expect(listed.secrets.map((secret) => secret.name)).toEqual(['API_TOKEN', 'DB_PASSWORD']);
+    expect(dump).not.toMatch(/password|token-value|DB_PASSWORD|API_TOKEN/);
+    expect((await store.load(fn.id)).secrets.DB_PASSWORD.value).toBe('second-password');
+    expect(JSON.stringify([fn, listed, await functions.describe(ACCOUNT, fn.id)])).not.toMatch(/first-password|second-password|token-value/);
+
+    await functions.updateSecrets(ACCOUNT, fn.id, { API_TOKEN: null });
+    expect(Object.keys((await store.load(fn.id)).secrets)).toEqual(['DB_PASSWORD']);
+  });
+
   it('goes with its function: deleting the function deletes its row', async () => {
     const fn = await functions.create(ACCOUNT, body('deleted', { TABLE: 'orders' }));
 

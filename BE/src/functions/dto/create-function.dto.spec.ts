@@ -2,6 +2,7 @@ import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { Runtime } from '../entities/function.entity';
 import { CreateFunctionDto } from './create-function.dto';
 import { UpdateFunctionDto } from './update-function.dto';
+import { UpdateSecretsDto } from './secrets.dto';
 
 /** A body as the API validates it, with main.ts's pipe: the instance it passes on, or why it answers 400. */
 async function validated(metatype: typeof CreateFunctionDto | typeof UpdateFunctionDto, body: object): Promise<{ name?: unknown } | string[]> {
@@ -118,5 +119,42 @@ describe("a function's environment variables, as the API takes them: AWS Lambda'
     expect(await validated(CreateFunctionDto, { ...create, environment: accented })).toEqual([
       "The environment is 4098 bytes as JSON text: AWS Lambda allows 4096 (4 KB) for a function's variables and secrets together",
     ]);
+  });
+});
+
+describe("a function's secrets, as the API takes them", () => {
+  const create = { name: 'hello', runtime: Runtime.NODEJS, code: 'exports.handler = async () => 1;', memory: 128, timeout: 5 };
+  const changes = async (secrets: unknown) => {
+    const pipe = new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true });
+    try {
+      return await pipe.transform({ secrets }, { type: 'body', metatype: UpdateSecretsDto });
+    } catch (error) {
+      return ((error as BadRequestException).getResponse() as { message: string[] }).message;
+    }
+  };
+
+  it('takes names to strings on create, with the variables rule for names, never echoing a value', async () => {
+    expect(await validated(CreateFunctionDto, { ...create, secrets: { DB_PASSWORD: 'hunter2' } })).toMatchObject({ secrets: { DB_PASSWORD: 'hunter2' } });
+    const refused = await validated(CreateFunctionDto, { ...create, secrets: { AWS_SECRET_ACCESS_KEY: 'k', 'bad name': 'v', TOKEN: 42 } });
+    expect(refused).toEqual([
+      "AWS_SECRET_ACCESS_KEY is reserved: AWS Lambda or FF's runtime sets it; " +
+        '"bad name" is not a variable name: a letter first, then letters, digits or underscores, two characters at least, as on AWS Lambda; ' +
+        "TOKEN's value must be a string, as every variable's is on AWS Lambda",
+    ]);
+  });
+
+  it("isn't part of an update: secrets change through their own route alone", async () => {
+    expect(await validated(UpdateFunctionDto, { secrets: { DB_PASSWORD: 'x' } })).toEqual(['property secrets should not exist']);
+  });
+
+  it('takes a change of names to strings, which set, or to null, which removes', async () => {
+    expect(await changes({ DB_PASSWORD: 'new', OLD_TOKEN: null })).toMatchObject({ secrets: { DB_PASSWORD: 'new', OLD_TOKEN: null } });
+  });
+
+  it('refuses a change naming nothing, or what is not a map, or a value neither a string nor null, never echoing one', async () => {
+    expect(await changes({})).toEqual(['secrets must name at least one secret to set or remove']);
+    expect(await changes(['DB_PASSWORD'])).toEqual(['secrets must be a JSON object of secret names to string values, or to null to remove one']);
+    expect(await changes({ DB_PASSWORD: 12345 })).toEqual(["DB_PASSWORD's value must be a string, or null to remove the secret"]);
+    expect(await changes(undefined)).toEqual(['secrets must be a JSON object of secret names to string values, or to null to remove one']);
   });
 });

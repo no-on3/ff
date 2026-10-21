@@ -96,3 +96,12 @@ export function sameEnvironment(a: Record<string, string>, b: Record<string, str
   const names = Object.keys(a);
   return names.length === Object.keys(b).length && names.every((name) => Object.prototype.hasOwnProperty.call(b, name) && a[name] === b[name]);
 }
+
+/** What would keep a secret from being set: a name the API refuses, a variable's, or no value. */
+export function secretProblem(name: string, value: string, variableNames: string[]): string | undefined {
+  const problem = nameProblem(name);
+  if (problem) return problem;
+  if (variableNames.includes(name)) return `${name} is a variable already: a name is a variable or a secret, not both`;
+  if (value === '') return 'Type the value: it is never shown again';
+  return undefined;
+}

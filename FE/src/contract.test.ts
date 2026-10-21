@@ -12,6 +12,7 @@ import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import functionsServiceSource from '../../BE/src/functions/functions.service.ts?raw';
 import createFunctionDtoSource from '../../BE/src/functions/dto/create-function.dto.ts?raw';
+import secretsDtoSource from '../../BE/src/functions/dto/secrets.dto.ts?raw';
 import environmentSource from '../../BE/src/functions/environment.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
 import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
@@ -32,6 +33,7 @@ import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD }
 import { FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
+  SECRET_FIELDS,
   ALARM_STATES,
   BALANCE_FIELDS,
   CREDIT_STATE_FIELDS,
@@ -320,5 +322,12 @@ describe("a function's environment variables", () => {
     expect(LAMBDA_RESERVED).toEqual(listed('LAMBDA_RESERVED'));
     expect(FF_RESERVED).toEqual(listed('FF_RESERVED'));
     expect(environmentSource).toContain("name.startsWith('FF_')");
+  });
+});
+
+describe("a function's secrets", () => {
+  it('are read as the API says them: a name and when it was set, nothing else', () => {
+    const view = /export class SecretView \{([\s\S]*?)\n\}/.exec(secretsDtoSource)![1];
+    expect([...view.matchAll(/^ {2}(\w+): /gm)].map((m) => m[1])).toEqual([...SECRET_FIELDS]);
   });
 });

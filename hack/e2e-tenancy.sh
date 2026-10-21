@@ -278,6 +278,7 @@ body_for() {
     "PUT /functions/{id}") echo '{"name": "l5-taken-over"}' ;;
     "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}}' ;;
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
+    "PATCH /functions/{id}/secrets") echo '{"secrets": {"L5_SECRET": "l5"}}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;

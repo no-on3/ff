@@ -4,7 +4,7 @@
 # FF-managed ff-t-* tenant namespaces. Reads stay cluster-wide: README.md says
 # what that exposes, and why the beta accepts it. Secrets are written, never
 # read: no get, list or watch, anywhere. Deliberately absent: pods
-# create/exec/attach, pods/log (logs come from the log store, P-43),
+# create/exec/attach, pods/log (logs come from the log store),
 # services/proxy (development only: deploy/k8s/dev), roles and bindings, nodes,
 # and any escalate/bind/impersonate verbs.
 apiVersion: rbac.authorization.k8s.io/v1

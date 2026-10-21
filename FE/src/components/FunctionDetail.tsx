@@ -21,7 +21,7 @@ import { useSession } from '../session/session';
 import { updateFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
 import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
-import { FunctionEnvironment } from './FunctionEnvironment';
+import { EnvironmentTab } from './FunctionEnvironment';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
 import { MetricsDashboard } from './MetricsDashboard';
@@ -265,7 +265,7 @@ const FunctionDetail: React.FC = () => {
 
       {tab === 'environment' && (
         <Box p={3}>
-          <FunctionEnvironment func={func} mayChange={mayChange} onSaved={setFunc} />
+          <EnvironmentTab func={func} mayChange={mayChange} onSaved={setFunc} />
         </Box>
       )}
 

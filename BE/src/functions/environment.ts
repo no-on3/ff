@@ -88,20 +88,69 @@ export function environmentProblems(value: unknown): string[] {
   return problems;
 }
 
-/** Validates an environment property: environmentProblems' rules, one message for all its problems. */
-export function IsEnvironment(options?: ValidationOptions): PropertyDecorator {
+/** What is wrong with secrets as a create sends them: a JSON object of names to strings, the names free. Never a value in a message. */
+export function secretsProblems(value: unknown): string[] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return ['secrets must be a JSON object of secret names to string values'];
+  }
+  return Object.entries(value).flatMap(([name, secret]) => {
+    const problem = nameProblem(name);
+    if (problem) return [problem];
+    return typeof secret === 'string' ? [] : [`${name}'s value must be a string, as every variable's is on AWS Lambda`];
+  });
+}
+
+/** What is wrong with a change of secrets: names to strings, which set them, or to null, which removes them. */
+export function secretChangesProblems(value: unknown): string[] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return ['secrets must be a JSON object of secret names to string values, or to null to remove one'];
+  }
+  if (Object.keys(value).length === 0) return ['secrets must name at least one secret to set or remove'];
+  return Object.entries(value).flatMap(([name, secret]) => {
+    const problem = nameProblem(name);
+    if (problem) return [problem];
+    return secret === null || typeof secret === 'string' ? [] : [`${name}'s value must be a string, or null to remove the secret`];
+  });
+}
+
+/**
+ * What keeps variables and secrets from going together: a name that is both,
+ * or more than 4 KB between them, as AWS Lambda counts its variables, which the
+ * secrets become there.
+ */
+export function combinedProblems(environment: EnvironmentDocument): string[] {
+  const problems = Object.keys(environment.secrets)
+    .filter((name) => Object.prototype.hasOwnProperty.call(environment.variables, name))
+    .sort()
+    .map((name) => `${name} is both a variable and a secret: a name is one or the other`);
+  const bytes = environmentBytes(processEnvironment(environment));
+  if (bytes > MAX_ENVIRONMENT_BYTES) problems.push(tooLarge(bytes));
+  return problems;
+}
+
+/** Validates a property with one of the rules above, one message for all its problems. */
+function validatedBy(name: string, problemsOf: (value: unknown) => string[], options?: ValidationOptions): PropertyDecorator {
   return (target, propertyName) =>
     registerDecorator({
-      name: 'isEnvironment',
+      name,
       target: target.constructor,
       propertyName: propertyName as string,
       options,
       validator: {
-        validate: (value: unknown) => environmentProblems(value).length === 0,
-        defaultMessage: (args) => environmentProblems(args?.value).join('; '),
+        validate: (value: unknown) => problemsOf(value).length === 0,
+        defaultMessage: (args) => problemsOf(args?.value).join('; '),
       },
     });
 }
+
+/** Secrets as a create sends them: names to strings. */
+export const IsSecrets = (options?: ValidationOptions): PropertyDecorator => validatedBy('isSecrets', secretsProblems, options);
+
+/** A change of secrets: names to strings, or to null to remove one. */
+export const IsSecretChanges = (options?: ValidationOptions): PropertyDecorator => validatedBy('isSecretChanges', secretChangesProblems, options);
+
+/** Validates an environment property: environmentProblems' rules, one message for all its problems. */
+export const IsEnvironment = (options?: ValidationOptions): PropertyDecorator => validatedBy('isEnvironment', environmentProblems, options);
 
 /** A secret, as the function's environment keeps it: its value, and when it was set. */
 export interface StoredSecret {
@@ -154,5 +203,50 @@ export function variableChanges(before: Record<string, string>, after: Record<st
     added: Object.keys(after).filter((name) => !has(before, name)).sort(),
     changed: Object.keys(after).filter((name) => has(before, name) && before[name] !== after[name]).sort(),
     removed: Object.keys(before).filter((name) => !has(after, name)).sort(),
+  };
+}
+
+/** An environment with these secrets, and a new revision when there is anything: a change rolls out. */
+export function withSecrets(environment: FunctionEnvironmentValues, secrets: Record<string, StoredSecret>): FunctionEnvironmentValues {
+  const next = { ...environment, secrets: { ...secrets } };
+  return { ...next, revision: isEmpty(next) ? '' : newRevision() };
+}
+
+/** Secrets as a create sends them, kept with the time they were set. */
+export function storedSecrets(values: Record<string, string>, now: Date): Record<string, StoredSecret> {
+  return Object.fromEntries(Object.entries(values).map(([name, value]) => [name, { value, updatedAt: now.toISOString() }]));
+}
+
+/**
+ * The secrets after a change: a string sets one, kept with the time it was
+ * set, unless it is the value already there; null removes one, if it is there.
+ * `changed` is false when nothing is different.
+ */
+export function changedSecrets(
+  secrets: Record<string, StoredSecret>,
+  changes: Record<string, string | null>,
+  now: Date,
+): { secrets: Record<string, StoredSecret>; changed: boolean } {
+  const next = { ...secrets };
+  let changed = false;
+  for (const [name, value] of Object.entries(changes)) {
+    if (value === null) {
+      if (!Object.prototype.hasOwnProperty.call(next, name)) continue;
+      delete next[name];
+      changed = true;
+    } else if (next[name]?.value !== value) {
+      next[name] = { value, updatedAt: now.toISOString() };
+      changed = true;
+    }
+  }
+  return { secrets: next, changed };
+}
+
+/** Each secret's name and when it was set, by name: what the API says of them. Never a value. */
+export function secretsView(environment: EnvironmentDocument): { secrets: Array<{ name: string; updatedAt: string }> } {
+  return {
+    secrets: Object.entries(environment.secrets)
+      .map(([name, secret]) => ({ name, updatedAt: secret.updatedAt }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
   };
 }

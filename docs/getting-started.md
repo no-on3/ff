@@ -257,7 +257,18 @@ curl -s -X PUT "$FF/functions/$ID" -H 'content-type: application/json' \
 # {"GREETING":"Ahlan","TZ":"Africa/Tunis"}
 ```
 
-They are configuration: whoever reads the function reads them, as on Lambda, and `GET /functions/<id>` answers with them (the list doesn't). The database keeps them encrypted, with the keys of `FF_ENCRYPTION_KEYS_FILE`: development has a key of its own, which production refuses. The cluster gives them to the function's pods through a Kubernetes Secret, and the audit log names the variables an update added, changed or removed, never their values. The console's Environment tab edits them. A value nobody should read back, such as a database password, belongs in a secret, which the [step-1 plan](step-1-plan.md)'s U-02 adds.
+They are configuration: whoever reads the function reads them, as on Lambda, and `GET /functions/<id>` answers with them (the list doesn't). The database keeps them encrypted, with the keys of `FF_ENCRYPTION_KEYS_FILE`: development has a key of its own, which production refuses. The cluster gives them to the function's pods through a Kubernetes Secret, and the audit log names the variables an update added, changed or removed, never their values. The console's Environment tab edits them. A value nobody should read back, such as a database password, belongs in a secret.
+
+**Secrets** are variables whose values nobody reads back: not the console, not the API, not the audit log. The function reads them as its other variables, so its code is the same on AWS, where they become variables or Secrets Manager entries. They follow the variables' name rule, a name being a variable or a secret but not both, and count in the same 4 KB. Give them on create (`"secrets": {"DB_PASSWORD": "…"}`), or set and remove them later, `null` removing one; the others stay. A change rolls out a new version, as a change of variables does, and answers once it is live, with each secret's name and when it was set:
+
+```bash
+curl -s -X PATCH "$FF/functions/$ID/secrets" -H 'content-type: application/json' \
+  -d '{"secrets": {"DB_PASSWORD": "correct-horse-battery-staple", "OLD_TOKEN": null}}' | jq -c .
+# {"secrets":[{"name":"DB_PASSWORD","updatedAt":"2026-10-21T08:00:00.000Z"}]}
+curl -s "$FF/functions/$ID/secrets" | jq -c '[.secrets[].name]'
+```
+
+Every member lists their names; owners and developers change them, and API keys with `functions:read` and `functions:write`. A value set again unchanged, or a name already gone, changes nothing. The console's Environment tab lists them under the variables, sets one (the value typed once, never shown again) and removes one.
 
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
@@ -277,7 +288,7 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 - one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
 - up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
 - within the account's plan: on the beta plan, 25 functions, each with 128–1024 MB of memory and a timeout of 1–300 s;
-- with environment variables, 4 KB at most, as on Lambda (above);
+- with environment variables and secrets, 4 KB at most together, as on Lambda (above);
 - up to 3 instances by default, and at most the plan's `instancesPerFunction` (10 on the beta plan) with `maxInstances`; `minInstances` from 0 up to the same limit keeps instances running when idle.
 
 A request beyond the plan gets 400 with the plan's limit, for example `memory must be at most 1024 MB on the Beta plan`. "Plans and limits" in section 5 lists them all.

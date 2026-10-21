@@ -82,6 +82,8 @@ export interface Function {
 export type NewFunction = Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'> & {
   metadata?: Record<string, unknown>;
   environment?: Record<string, string>;
+  /** Write-only: never in any answer. */
+  secrets?: Record<string, string>;
 };
 
 /** What PUT /functions/:id accepts: any subset of these. `environment` replaces all the variables, and rolls out. */
@@ -148,6 +150,21 @@ export interface InvocationPage {
   invocations: FunctionInvocation[];
   total: number;
 }
+
+/**
+ * A function's secret, as the API says it: its name, and when its value was set. The value never comes back.
+ * contract.test.ts checks these names against the API's.
+ */
+export const SECRET_FIELDS = ['name', 'updatedAt'] as const;
+export type SecretView = Record<(typeof SECRET_FIELDS)[number], string>;
+
+/** GET and PATCH /functions/:id/secrets. A change rolls out a new version, and the answer comes once it is live. */
+export const secretsApi = {
+  list: (functionId: string) => api.get<{ secrets: SecretView[] }>(`/functions/${functionId}/secrets`),
+  /** Each name to its new value, or to null to remove it. */
+  change: (functionId: string, secrets: Record<string, string | null>) =>
+    api.patch<{ secrets: SecretView[] }>(`/functions/${functionId}/secrets`, { secrets }),
+};
 
 /** GET and PUT /functions/:id/scaling-config. Each instance serves one call at a time. */
 export interface ScalingConfig {

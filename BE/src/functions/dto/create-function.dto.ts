@@ -3,7 +3,7 @@ import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
 import { Runtime } from '../entities/function.entity';
-import { IsEnvironment } from '../environment';
+import { IsEnvironment, IsSecrets } from '../environment';
 
 /**
  * AWS Lambda's rule for a function's name, which FF's follow: names address
@@ -59,6 +59,20 @@ export class CreateFunctionDto {
 
   @EnvironmentProperty()
   environment?: Record<string, string>;
+
+  @ApiPropertyOptional({
+    description:
+      "The function's secrets: variables whose values nobody reads back, not even this API. The function reads them as variables " +
+      "(process.env.NAME). The same name rule as variables, and the 4 KB counts them together. Each is kept with when it was set; " +
+      'later, GET and PATCH /functions/{id}/secrets list their names and change them. Encrypted at rest.',
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    writeOnly: true,
+    example: { DB_PASSWORD: 'correct-horse-battery-staple' },
+  })
+  @ValidateIf((_dto, value) => value !== undefined)
+  @IsSecrets()
+  secrets?: Record<string, string>;
 }
 
 /**
