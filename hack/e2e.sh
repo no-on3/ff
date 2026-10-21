@@ -327,6 +327,25 @@ check "and back to inline code: a code ConfigMap again, which answers" "200 inli
   "$(status) $(http GET "/functions/$pkg_fn" | jq -r .packageType) $(http POST "/functions/$pkg_fn/invoke" '{"input":{}}' | jq -r .output) $(kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$pkg_fn" -o name | wc -l)"
 http DELETE "/functions/$pkg_fn" >/dev/null
 check "delete returns 200" 200 "$(status)"
+# A native module built as AWS Lambda's builds are, against glibc: bcrypt with the prebuilt linux-x64-glibc binary that npm
+# fetches as it installs it. Made once, then kept in hack/.cache, since it needs the npm registry and GitHub.
+native_zip="$FF_REPO_ROOT/hack/.cache/bcrypt-5.1.1-glibc.zip"
+if [ ! -s "$native_zip" ]; then
+  mkdir -p "$(dirname "$native_zip")" "$work/native"
+  printf '%s\n' "const bcrypt = require('bcrypt');" "exports.handler = async (event) => {" \
+    "  const hash = bcrypt.hashSync(event.password ?? 'secret', 4);" \
+    "  return { native: true, matches: bcrypt.compareSync(event.password ?? 'secret', hash) };" "};" >"$work/native/index.js"
+  docker run --rm -v "$work/native:/out" -w /out node:24-trixie-slim sh -c \
+    "npm init -y >/dev/null && npm install --silent --omit=dev bcrypt@5.1.1 >/dev/null && chown -R $(id -u):$(id -g) /out" ||
+    fail "could not build the bcrypt package: npm needs the network"
+  (cd "$work/native" && python3 -c 'import shutil, sys; shutil.make_archive(sys.argv[1][:-4], "zip", ".")' "$native_zip")
+fi
+upload "$native_zip" >/dev/null
+native="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$native_zip")" '{name: "e2e-native", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 10}')")"
+check "a package with a native module built against glibc, as Lambda's are, runs on the Node.js runtime: bcrypt hashes and checks" \
+  '201 ACTIVE {"native":true,"matches":true}' \
+  "$(status) $(jq -r .status <<<"$native") $(http POST "/functions/$(jq -r .id <<<"$native")/invoke" '{"input":{"password":"hunter2"}}' | jq -c .output)"
+http DELETE "/functions/$(jq -r .id <<<"$native")" >/dev/null
 
 echo "== environment variables"
 # A variable of its own for the function: the sections below still read $id, the Python function's.

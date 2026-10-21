@@ -5,8 +5,9 @@ The image that runs every Node.js function on FF. User code is mounted read-only
 | | |
 |---|---|
 | Image | `ff-runtime-nodejs:24-v3` (`24` = Node.js 24 LTS, as in Lambda's `nodejs24.x`; `v3` = runtime protocol, see [What changed in v3](#what-changed-in-v3)) |
-| Base | `node:24-alpine`. First built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0); `24-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (the TypeScript code cache, npm removed), still on Node v24.22.0; `24-v3` on 2026-10-21, on the same base, and rebuilt the same day for AWS Lambda's handler resolution (below). The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
-| Size | about 198 MB, with the code cache of TypeScript. npm, npx, corepack and yarn are removed: nothing runs them, and npm's own dependencies had advisories |
+| Base | `node:24-trixie-slim`: Debian 13, glibc 2.41, as the Python runtime's, since 2026-10-21, built from `sha256:a6155384446670e9719bdc4fd0ebe4d4b29fb32a8d6aa523da3547a6cfbcf22c` (Node v24.22.0). Before, `node:24-alpine` (musl): first built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f`, `24-v2` on 2026-10-17 and last rebuilt on 2026-10-20 (the TypeScript code cache, npm removed), `24-v3` on 2026-10-21, rebuilt the same day for AWS Lambda's handler resolution (below). The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Why glibc | A native module built for Linux as AWS Lambda builds them, against glibc, loads: bcrypt 5.1.1's prebuilt `linux-x64-glibc` binary, as npm installs it on a glibc machine, hashes here; on Alpine's musl the same package loaded, then crashed the process (SIGSEGV) at its first hash. Not `node:24-slim`, which is still Debian 12's glibc 2.36: 2.41 runs what a newer glibc built, and matches the Python runtime. Trivy finds no fixed high or critical vulnerability in it (2026-10-21) |
+| Size | about 260 MB, with the code cache of TypeScript (198 MB on Alpine). npm, npx, corepack and yarn are removed: nothing runs them, and npm's own dependencies had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependency | `typescript` 5.7.3, and nothing else (no Express, no ts-node) |
 
@@ -32,6 +33,7 @@ Loading the code must fit in the start-up limit, 10 s (or the function's timeout
 - **Only a `.ts` handler loads TypeScript.** A `.js`, `.mjs` or `.cjs` one never does.
 - **The cache only speeds things up.** Without it, or if V8 refuses it (made by another Node.js version), TypeScript is compiled as before, only slower. `test/container-smoke.sh` checks that the image's cache is taken in a worker thread.
 - `hack/k8s/cold-start-benchmark.sh` measures it on the dev cluster, any size and RuntimeClass, several functions at once.
+- **On the glibc base** (2026-10-21), 128 MB in gVisor, three at once, two rounds: the code loaded 1.4 to 2.3 s after the runtime listened, and each function was ready 5.1 to 8.0 s after its deploy.
 
 ## HTTP protocol
 
