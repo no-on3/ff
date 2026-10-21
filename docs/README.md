@@ -6,7 +6,7 @@
 | [How FF works](how-it-works.html) | Every feature from request to result, as step-by-step simulations with the messages, records, and Kubernetes objects at each hop. Open it in a browser |
 | [Kubernetes dev guide](kubernetes-dev-guide.md) | The local cluster, runtime images, tests, the gVisor sandbox, the log pipeline, troubleshooting |
 | [Kubernetes migration plan](kubernetes-migration-plan.md) | How FF moved from Nomad to Kubernetes, task by task (K-00 to K-13) |
-| [CLI plan](cli-plan.md) | The `ff` command-line tool, in six phases. Its phases 0 to 2 are step 1's U-08, done but C-24, under way since ADR 0003's confirmation: its progress log (section 12) says what is done |
+| [CLI plan](cli-plan.md) | The `ff` command-line tool, in six phases. Its phases 0 to 2 are step 1's U-08, done: its progress log (section 12) says what is done |
 | [Client-readiness plan](client-readiness-plan.md) | Accounts and isolation, metering, prepaid credit at AWS prices in dinars, customer logs, metrics and alarms, the admin dashboard, the production setup, and the pilot launch. Under way: its progress log (section 11) says what is done |
 | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md) | The product and portability roadmap |
 | [Step 1 plan](step-1-plan.md) | Make one function useful: environment variables and secrets, AWS's events, function URLs with TLS and custom domains, schedules, then packages and the CLI. Done in development: its progress log (section 11) says what was built; ADR 0003, confirmed since, brings the rest |

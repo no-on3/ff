@@ -4,7 +4,8 @@
 #   + the k3d dev cluster + the backend (built, started on a free port).
 # The backend first refuses the new database, then the migrations run from the
 # build, as a deploy step would. Scenario: create → invoke → history → update →
-# invoke → delete, with checks on the Kubernetes side and in object storage (the
+# invoke → delete, with checks on the Kubernetes side (inline code too an image
+# of the cluster's registry, no ConfigMap) and in object storage (the
 # code archive, read through SeaweedFS's filer), and on the code's hash and size
 # as AWS Lambda gives them; then the same lifecycle for a Python function (its
 # handler then renamed lambda_handler), a package uploaded (named by its SHA-256,
@@ -56,6 +57,10 @@ e2e_namespaces+=("$tenant_ns")
 http() { http_at "$api" "$@"; }
 # A text's SHA-256 in base64 and its size, as AWS Lambda's CodeSha256 and CodeSize give a function's code.
 code_facts() { printf '%s' "$1" | python3 -c 'import base64, hashlib, sys; code = sys.stdin.buffer.read(); print(base64.b64encode(hashlib.sha256(code).digest()).decode(), len(code))'; }
+# The code image a function's pods mount at /var/task (ADR 0003), and whether it is the account's in the cluster's registry, by digest.
+code_image_of() { kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'; }
+in_registry() { [[ "$1" == "$FF_REGISTRY_NAME:5000/ff-code/$tenant@sha256:"* ]] && echo true || echo false; }
+code_configmaps() { kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$1" -o name | wc -l; }
 
 e2e_dependencies
 e2e_cluster
@@ -107,6 +112,10 @@ check "its code is inline, its handler function.handler, with its SHA-256 and si
 check "its code is archived in object storage" "$v1" "$(archived "$id/code.ts")"
 check "its Deployment runs in the tenant namespace" "fn-$id" \
   "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.metadata.name}' 2>/dev/null)"
+v1_image="$(code_image_of "$id")"
+check "its code reaches its pods as an image of the registry, as a package's, and no ConfigMap holds it" "true 0" \
+  "$(in_registry "$v1_image") $(code_configmaps "$id")"
+check "the account's packages are its uploads, none: not the one the backend made of this code" 0 "$(http GET /packages | jq length)"
 if [ -n "${K8S_RUNTIME_CLASS:-}" ]; then
   check "its pods use RuntimeClass $K8S_RUNTIME_CLASS" "$K8S_RUNTIME_CLASS" \
     "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.runtimeClassName}')"
@@ -162,6 +171,8 @@ check "the new code is live after the update" 2 \
   "$(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.version)"
 check "the record has the new code's SHA-256 and size" "$(code_facts "$v2")" "$(http GET "/functions/$id" | jq -r '"\(.codeSha256) \(.codeSize)"')"
 check "the archive holds the new code" "$v2" "$(archived "$id/code.ts")"
+v2_image="$(code_image_of "$id")"
+check "its pods mount the new code's image" "true true" "$([ "$v2_image" != "$v1_image" ] && echo true || echo false) $(in_registry "$v2_image")"
 
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
@@ -219,27 +230,33 @@ check "a function with 150 KB of code is made, which a body of 100 KB at most re
 large_id="$(jq -r .id <<<"$created")"
 check "GET /functions?name= finds it, and only it" "1 $large_id" "$(http GET '/functions?name=e2e-large' | jq -r '"\(length) \(.[0].id)"')"
 check "and compares names exactly: another case finds none" 0 "$(http GET '/functions?name=e2e-LARGE' | jq length)"
-xs 1048576 >"$work/huge.ts"
+{ printf '// '; xs 1048576; printf '\n%s\n' "$greeter"; } >"$work/mib.ts"
+jq -n --rawfile code "$work/mib.ts" '{code: $code}' >"$work/mib.json"
+http PUT "/functions/$large_id" "" --data-binary @"$work/mib.json" >/dev/null
+check "1 MiB of code, more than a ConfigMap holds, is taken, as its image, and answers" "200 $(stat -c %s "$work/mib.ts") Hello Sfax" \
+  "$(status) $(jq -r .codeSize "$work/body") $(http POST "/functions/$large_id/invoke" '{"input":{"name":"Sfax"}}' | jq -r .output.message)"
+xs 3145729 >"$work/huge.ts"
 jq -n --rawfile code "$work/huge.ts" '{code: $code}' >"$work/huge.json"
 http PUT "/functions/$large_id" "" --data-binary @"$work/huge.json" >/dev/null
-check "1 MiB of code is refused, saying the limit, and the function stays as it was" \
-  "400 code is 1,048,576 bytes of UTF-8; it may have 921,600 at most, what a function's ConfigMap holds (900 KiB) ACTIVE" \
-  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$large_id" | jq -r .status)"
+check "3 MiB and a byte of code is refused, saying the limit, and the function stays as it was" \
+  "400 code is 3,145,729 bytes of UTF-8; it may have 3,145,728 at most, as AWS Lambda's console takes in its editor (3 MiB): more comes as a package ACTIVE $(stat -c %s "$work/mib.ts")" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$large_id" | jq -r '"\(.status) \(.codeSize)"')"
 xs 1000000 >"$work/name.txt"
 jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
 invoked="$(http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json")"
 check "an input of 1 MB is taken, and its answer comes whole" "201 COMPLETED 1000006" "$(status) $(jq -r '"\(.status) \(.output.message | length)"' <<<"$invoked")"
 xs 6300000 >"$work/name.txt"
 jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
+calls="$(http GET "/functions/$large_id/invocations" | jq -r .total)"
 http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json" >/dev/null
 check "an input over 6 MB is refused as AWS Lambda refuses it, and nothing runs" \
-  "413 RequestEntityTooLargeException Request must be smaller than 6291456 bytes for the InvokeFunction operation: the input is 6300011 bytes as JSON 1" \
+  "413 RequestEntityTooLargeException Request must be smaller than 6291456 bytes for the InvokeFunction operation: the input is 6300011 bytes as JSON $calls" \
   "$(status) $(jq -r '"\(.error) \(.message)"' "$work/body") $(http GET "/functions/$large_id/invocations" | jq -r .total)"
 xs 7400000 >"$work/name.txt"
 jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
 http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json" >/dev/null
 check "a body over 7 MB is refused, saying the limits" \
-  "413 The request's body is over 7 MB (7,340,032 bytes): a function's code may have 900 KiB, an invocation's input 6 MB" \
+  "413 The request's body is over 7 MB (7,340,032 bytes): a function's code may have 3 MiB, an invocation's input 6 MB" \
   "$(status) $(jq -r .message "$work/body")"
 xs 120000 >"$work/name.txt"
 jq -n --rawfile name "$work/name.txt" '{name: "e2e-large", expression: "rate(1 hour)", input: {name: $name}}' >"$work/schedule.json"
@@ -293,11 +310,10 @@ check "a function made from the package is ACTIVE: zip, the package's hash and s
   "$(status) $(jq -r '"\(.status) \(.packageType) \(.codeSha256) \(.codeSize) \(.code | length)"' <<<"$created")"
 pkg_fn="$(jq -r .id <<<"$created")"
 check "it runs the package's code, its library in a folder included" "Hello e2e" "$(http POST "/functions/$pkg_fn/invoke" '{"input":{}}' | jq -r .output)"
-code_image="$(kubectl -n "$tenant_ns" get deployment "fn-$pkg_fn" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}')"
-check "its pods mount the package's code image at /var/task, from the registry, by digest" true \
-  "$([[ "$code_image" == "$FF_REGISTRY_NAME:5000/ff-code/$tenant@sha256:"* ]] && echo true || echo false)"
+code_image="$(code_image_of "$pkg_fn")"
+check "its pods mount the package's code image at /var/task, from the registry, by digest" true "$(in_registry "$code_image")"
 check "the registry has that image, and the function no code ConfigMap" "200 0" \
-  "$(curl -s -o /dev/null -w '%{http_code}' -I -H 'accept: application/vnd.oci.image.manifest.v1+json' "http://127.0.0.1:$FF_REGISTRY_PORT/v2/ff-code/$tenant/manifests/${code_image##*@}") $(kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$pkg_fn" -o name | wc -l)"
+  "$(curl -s -o /dev/null -w '%{http_code}' -I -H 'accept: application/vnd.oci.image.manifest.v1+json' "http://127.0.0.1:$FF_REGISTRY_PORT/v2/ff-code/$tenant/manifests/${code_image##*@}") $(code_configmaps "$pkg_fn")"
 http POST /functions "$(jq -n --arg sha "$package_sha" '{name: "e2e-wrong-handler", runtime: "nodejs", codeSha256: $sha, handler: "src/app.handler", memory: 128, timeout: 5}')" >/dev/null
 check "a handler the package lacks is refused, saying which file, and nothing is made" \
   "400 The package has no src/app.js, .mjs, .cjs or .ts, nor a folder src/app/, which the handler src/app.handler names 0" \
@@ -323,8 +339,10 @@ check "one update moves it to a Python package, with its handler, runtime and me
 http PUT "/functions/$pkg_fn" "$(jq -n --arg code 'def handler(event, context):
     return "inline again"
 ' '{code: $code, handler: "function.handler"}')" >/dev/null
-check "and back to inline code: a code ConfigMap again, which answers" "200 inline inline again 1" \
-  "$(status) $(http GET "/functions/$pkg_fn" | jq -r .packageType) $(http POST "/functions/$pkg_fn/invoke" '{"input":{}}' | jq -r .output) $(kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$pkg_fn" -o name | wc -l)"
+inline_image="$(code_image_of "$pkg_fn")"
+check "and back to inline code: an image of its own, which answers, and still no ConfigMap" "200 inline inline again true true 0" \
+  "$(status) $(http GET "/functions/$pkg_fn" | jq -r .packageType) $(http POST "/functions/$pkg_fn/invoke" '{"input":{}}' | jq -r .output) $([ "$inline_image" != "$code_image" ] && echo true || echo false) $(in_registry "$inline_image") $(code_configmaps "$pkg_fn")"
+check "the account's packages are still its two uploads" 2 "$(http GET /packages | jq length)"
 http DELETE "/functions/$pkg_fn" >/dev/null
 check "delete returns 200" 200 "$(status)"
 # A native module built as AWS Lambda's builds are, against glibc: bcrypt with the prebuilt linux-x64-glibc binary that npm

@@ -18,8 +18,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
   - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy: its functions reach the internet only once you turn the account's egress on, and never FF's own network;
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
-  - inline code is stored in immutable ConfigMaps, up to 900 KiB, which the API checks when it is sent; an invocation's input may have 6 MB as JSON, as on AWS Lambda;
-  - a package, a zip with its libraries as AWS Lambda takes one (50 MB, 250 MB unpacked), is checked entry by entry when it is uploaded, and runs as an image in the cluster's registry that its pods mount at `/var/task` ([ADR 0003](docs/adr/0003-code-delivery.md)).
+  - every function's code runs as an image in the cluster's registry, which its pods mount read-only at `/var/task` ([ADR 0003](docs/adr/0003-code-delivery.md)): a package's, a zip with its libraries as AWS Lambda takes one (50 MB, 250 MB unpacked), checked entry by entry when it is uploaded; and inline code's, one file of up to 3 MiB, as AWS Lambda's console takes, which the backend makes a one-file package of. An invocation's input may have 6 MB as JSON, as on AWS Lambda.
 - **Runtimes** `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`, runtime protocol 3 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
   - Lambda's `handler(event, context)`, error names, and log lines, with the code's directory as the working directory and the peak memory as `Max Memory Used`;
   - real timeouts;
@@ -118,7 +117,7 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 - [Client-readiness plan](docs/client-readiness-plan.md): the work that takes FF to its first paying customers, task by task, with its progress log.
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.
-- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in six phases; phases 0 to 2 done with step 1, but inline code's move to the packages' path (C-24), under way.
+- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in six phases; phases 0 to 2 done with step 1.
 - [What to build next](docs/what-to-build-next.md): what FF adds after functions, in five steps, and the longer view.
 - [Step 1 plan](docs/step-1-plan.md): environment variables and secrets, AWS's events, function URLs, schedules, packages and the CLI, task by task, with its progress log; done in development.
 - [Step 2 plan](docs/step-2-plan.md): a database and file storage, managed PostgreSQL and buckets behind an S3 front door; proposed, for you to confirm.

@@ -62,4 +62,4 @@ Use **Kubernetes**, and only as the internal scheduler:
 
 **Follow-ups:**
 - The Lambda Runtime API agent (parent plan R-04) will run as a sidecar container in the same pod.
-- Zip artifacts from S3 (R-02) will replace the ConfigMap code delivery, lifting the 900 KiB limit.
+- Zip artifacts from S3 (R-02) will replace the ConfigMap code delivery, lifting the 900 KiB limit. **Done** another way: [ADR 0003](0003-code-delivery.md) delivers every function's code as an image, the CLI plan's C-23 and C-24 built it, and inline code may have 3 MiB.

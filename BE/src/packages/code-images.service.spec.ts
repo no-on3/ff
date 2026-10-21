@@ -92,7 +92,7 @@ describe('CodeImagesService: a package as the image its pods mount', () => {
     const without = service({ registry: '', pullHost: '' });
 
     expect(() => without.assertAvailable()).toThrow(ServiceUnavailableException);
-    await expect(without.imageFor(ACCOUNT, SHA)).rejects.toThrow("This FF has no code registry, so it can't run a package: its operator sets FF_CODE_REGISTRY (ADR 0003)");
+    await expect(without.imageFor(ACCOUNT, SHA)).rejects.toThrow("This FF has no code registry, so it can't deploy a function: its operator sets FF_CODE_REGISTRY (ADR 0003)");
     await expect(without.deleteImage(ACCOUNT, `sha256:${'0'.repeat(64)}`)).resolves.toBeUndefined();
   });
 

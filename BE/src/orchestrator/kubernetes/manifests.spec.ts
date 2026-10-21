@@ -1,9 +1,6 @@
 import { EventFormat, Runtime } from '../../functions/entities/function.entity';
-import { CodeTooLargeError } from '../orchestrator.errors';
 import {
   BLOCKED_EGRESS_CIDRS,
-  MAX_CODE_BYTES,
-  codeConfigMapManifest,
   cpuMillicores,
   deploymentManifest,
   environmentSecretManifest,
@@ -13,7 +10,7 @@ import {
   serviceManifest,
 } from './manifests';
 import { accountHash } from './naming';
-import { settings, workload } from './test-fixtures';
+import { CODE_IMAGE, settings, workload } from './test-fixtures';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const podSpec = (d: any) => d.spec.template.spec;
@@ -46,7 +43,7 @@ describe('Kubernetes manifests', () => {
 
   describe('Deployment', () => {
     const build = (overrides = {}, s = settings()) =>
-      deploymentManifest(workload(overrides), 'ff-t-abc', 'fn-x-0123456789', 'hash', s, 1) as any;
+      deploymentManifest(workload(overrides), 'ff-t-abc', 'hash', s, 1) as any;
 
     it('applies the pod security baseline', () => {
       const d = build();
@@ -69,11 +66,11 @@ describe('Kubernetes manifests', () => {
       });
     });
 
-    it('uses only volume types allowed by the restricted profile, with code mounted read-only', () => {
+    it("uses only volume types allowed by the restricted profile: the code's image at /var/task, read-only, and /tmp", () => {
       const d = build();
 
       expect(podSpec(d).volumes).toEqual([
-        { name: 'code', configMap: { name: 'fn-x-0123456789', defaultMode: 0o444 } },
+        { name: 'code', image: { reference: CODE_IMAGE, pullPolicy: 'IfNotPresent' } },
         { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } },
       ]);
       expect(container(d).volumeMounts).toEqual([
@@ -82,19 +79,9 @@ describe('Kubernetes manifests', () => {
       ]);
     });
 
-    it("mounts a package's code image, read-only, where inline code's ConfigMap would be, and names its version by it", () => {
-      const image = 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'e'.repeat(64);
-      const d = deploymentManifest(workload({ codeImage: image, code: '' }), 'ff-t-abc', undefined, 'image-hash', settings(), 1) as any;
-
-      expect(podSpec(d).volumes).toEqual([
-        { name: 'code', image: { reference: image, pullPolicy: 'IfNotPresent' } },
-        { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } },
-      ]);
-      expect(container(d).volumeMounts).toEqual([
-        { name: 'code', mountPath: '/var/task', readOnly: true },
-        { name: 'tmp', mountPath: '/tmp' },
-      ]);
-      expect(d.spec.template.metadata.annotations['ff.dev/code-sha256']).toBe('image-hash');
+    it("names its version by its code's hash, and refuses a function without an image of its code", () => {
+      expect(build().spec.template.metadata.annotations['ff.dev/code-sha256']).toBe('hash');
+      expect(() => build({ codeImage: undefined })).toThrow(`Function ${workload().id} has no code image`);
     });
 
     it('sets equal requests and limits from the configured memory', () => {
@@ -135,7 +122,7 @@ describe('Kubernetes manifests', () => {
     describe("the function's own variables and secrets", () => {
       const environment = { revision: 'a1b2c3d4e5f60718', values: { DB_HOST: 'db.internal', DB_PASSWORD: 'hunter2' } };
       const withEnvironment = (values: Record<string, string> = environment.values) =>
-        deploymentManifest(workload({ environment: { ...environment, values } }), 'ff-t-abc', 'fn-x-0123456789', 'hash', settings(), 1, 'fn-x-env-1') as any;
+        deploymentManifest(workload({ environment: { ...environment, values } }), 'ff-t-abc', 'hash', settings(), 1, 'fn-x-env-1') as any;
 
       it('come from their Secret through envFrom, and the template names their revision, so a change rolls out', () => {
         const d = withEnvironment();
@@ -158,7 +145,7 @@ describe('Kubernetes manifests', () => {
       });
 
       it('are left out entirely for a function without any, or without the Secret named', () => {
-        const unnamed = deploymentManifest(workload({ environment }), 'ff-t-abc', 'fn-x-0123456789', 'hash', settings(), 1) as any;
+        const unnamed = deploymentManifest(workload({ environment }), 'ff-t-abc', 'hash', settings(), 1) as any;
         for (const d of [build(), withEnvironment({}), unnamed]) {
           expect(container(d).envFrom).toBeUndefined();
           expect(d.spec.template.metadata.annotations).toEqual({ 'ff.dev/code-sha256': 'hash' });
@@ -190,25 +177,6 @@ describe('Kubernetes manifests', () => {
     it('picks the image for the runtime and rejects unconfigured runtimes', () => {
       expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v3');
       expect(() => build({ runtime: 'cobol' })).toThrow('No runtime image configured for runtime "cobol"');
-    });
-  });
-
-  describe('code ConfigMap', () => {
-    it('is immutable and keyed by the runtime file name', () => {
-      const cm: any = codeConfigMapManifest(workload(), 'ff-t-abc', 'fn-x-1', 'hash');
-      const py: any = codeConfigMapManifest(workload({ runtime: Runtime.PYTHON }), 'ff-t-abc', 'fn-x-1', 'hash');
-
-      expect(cm.immutable).toBe(true);
-      expect(Object.keys(cm.data)).toEqual(['function.ts']);
-      expect(Object.keys(py.data)).toEqual(['function.py']);
-      expect(cm.metadata.labels['ff.dev/function-id']).toBe(workload().id);
-    });
-
-    it('accepts code up to the limit and rejects larger code with CodeTooLargeError', () => {
-      expect(() => codeConfigMapManifest(workload({ code: 'x'.repeat(MAX_CODE_BYTES) }), 'n', 'c', 'h')).not.toThrow();
-      expect(() => codeConfigMapManifest(workload({ code: 'x'.repeat(MAX_CODE_BYTES + 1) }), 'n', 'c', 'h')).toThrow(
-        CodeTooLargeError,
-      );
     });
   });
 

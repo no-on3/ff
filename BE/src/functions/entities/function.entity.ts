@@ -91,6 +91,15 @@ export class Function {
   @Column({ type: 'integer' })
   codeSize: number;
 
+  /**
+   * The package its pods run (ADR 0003): its own for a package function; for
+   * inline code, the one-file package the backend makes of it, which the purge
+   * of unused packages must keep. The backend's to know, read in SQL only: no
+   * answer gives it. None for inline code not rolled out since packages came.
+   */
+  @Column({ type: 'varchar', length: 44, nullable: true, select: false })
+  packageSha256?: string | null;
+
   @Column()
   memory: number;
 

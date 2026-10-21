@@ -12,7 +12,7 @@ import { MEDIA_TYPES, Registry, bytesBlob, fileBlob } from './registry';
 
 /** Where code images go, as the configuration gives it (FF_CODE_REGISTRY…): none without a registry. */
 export interface CodeImagesSettings {
-  /** The registry's URL, which the backend pushes to; empty: packages can't run. */
+  /** The registry's URL, which the backend pushes to; empty: no function can be deployed. */
   registry: string;
   /** The registry's host, as the cluster's nodes pull from it. */
   pullHost: string;
@@ -23,6 +23,38 @@ export interface CodeImagesSettings {
 /** An account's code images: one repository each, a tag per package, its SHA-256 in hex. */
 export const codeRepository = (accountId: string): string => `ff-code/${accountId}`;
 const tagOf = (codeSha256: string): string => Buffer.from(codeSha256, 'base64').toString('hex');
+
+/**
+ * Makes a package's image from its zip, `zip` a file of `work`, and pushes it:
+ * the layer, its configuration, then the manifest. Answers its digest. No time
+ * and no history in it: the same package makes the same image.
+ */
+export async function pushCodeImage(registry: Registry, accountId: string, codeSha256: string, zip: string, work: string): Promise<{ digest: string; layerSize: number }> {
+  const layerFile = join(work, 'layer.tar.gz');
+  const layer = await buildLayer(zip, layerFile);
+  const repository = codeRepository(accountId);
+  await registry.pushBlob(repository, fileBlob(layerFile, layer.digest, layer.size));
+  const config = bytesBlob(
+    Buffer.from(
+      JSON.stringify({
+        architecture: 'amd64',
+        os: 'linux',
+        config: { Labels: { 'ff.dev/account': accountId, 'ff.dev/code-sha256': codeSha256 } },
+        rootfs: { type: 'layers', diff_ids: [layer.diffId] },
+      }),
+    ),
+  );
+  await registry.pushBlob(repository, config);
+  const manifest = Buffer.from(
+    JSON.stringify({
+      schemaVersion: 2,
+      mediaType: MEDIA_TYPES.manifest,
+      config: { mediaType: MEDIA_TYPES.config, digest: config.digest, size: config.size },
+      layers: [{ mediaType: MEDIA_TYPES.layer, digest: layer.digest, size: layer.size }],
+    }),
+  );
+  return { digest: await registry.pushManifest(repository, tagOf(codeSha256), manifest), layerSize: layer.size };
+}
 
 /**
  * Functions' code images (ADR 0003): a package's files as an image of one
@@ -48,10 +80,12 @@ export class CodeImagesService {
     }
   }
 
-  /** 503 when this FF has no registry: a package can't run here, and its operator says where images go. */
+  /** 503 when this FF has no registry: no function's code can reach its pods, and its operator says where images go. */
   assertAvailable(): void {
     if (!this.registry) {
-      throw new ServiceUnavailableException("This FF has no code registry, so it can't run a package: its operator sets FF_CODE_REGISTRY (ADR 0003)");
+      throw new ServiceUnavailableException(
+        "This FF has no code registry, so it can't deploy a function: its operator sets FF_CODE_REGISTRY (ADR 0003); in development, BE/.env.example names the one hack/k8s/registry-up.sh runs",
+      );
     }
   }
 
@@ -74,38 +108,14 @@ export class CodeImagesService {
     return `${this.settings.pullHost}/${repository}@${digest}`;
   }
 
-  /** Makes the package's image from its zip, and pushes it: the layer, its configuration, then the manifest. Answers its digest. */
+  /** Makes the package's image from its zip in object storage, and pushes it (pushCodeImage). Answers its digest. */
   private async make(registry: Registry, accountId: string, codeSha256: string): Promise<string> {
     const work = await mkdtemp(join(tmpdir(), 'ff-image-'));
     try {
       const zip = join(work, 'package.zip');
-      const layerFile = join(work, 'layer.tar.gz');
       await this.storage.getFile(packageKey(accountId, codeSha256), zip);
-      const layer = await buildLayer(zip, layerFile);
-      const repository = codeRepository(accountId);
-      await registry.pushBlob(repository, fileBlob(layerFile, layer.digest, layer.size));
-      // No time and no history: the same package makes the same configuration, and the same digest.
-      const config = bytesBlob(
-        Buffer.from(
-          JSON.stringify({
-            architecture: 'amd64',
-            os: 'linux',
-            config: { Labels: { 'ff.dev/account': accountId, 'ff.dev/code-sha256': codeSha256 } },
-            rootfs: { type: 'layers', diff_ids: [layer.diffId] },
-          }),
-        ),
-      );
-      await registry.pushBlob(repository, config);
-      const manifest = Buffer.from(
-        JSON.stringify({
-          schemaVersion: 2,
-          mediaType: MEDIA_TYPES.manifest,
-          config: { mediaType: MEDIA_TYPES.config, digest: config.digest, size: config.size },
-          layers: [{ mediaType: MEDIA_TYPES.layer, digest: layer.digest, size: layer.size }],
-        }),
-      );
-      const digest = await registry.pushManifest(repository, tagOf(codeSha256), manifest);
-      this.logger.log(`Pushed the code image of package ${codeSha256} of account ${accountId}: ${repository}@${digest}, its layer ${layer.size} bytes`);
+      const { digest, layerSize } = await pushCodeImage(registry, accountId, codeSha256, zip, work);
+      this.logger.log(`Pushed the code image of package ${codeSha256} of account ${accountId}: ${codeRepository(accountId)}@${digest}, its layer ${layerSize} bytes`);
       return digest;
     } finally {
       await rm(work, { recursive: true, force: true });

@@ -52,6 +52,7 @@ const CLOSED_ACCOUNT_DELETION = migrationNames.find((name) => name.startsWith('C
 const ALARMS = migrationNames.find((name) => name.startsWith('Alarms')) as string;
 const FUNCTION_ENVIRONMENTS = migrationNames.find((name) => name.startsWith('FunctionEnvironments')) as string;
 const SCHEDULES = migrationNames.find((name) => name.startsWith('Schedules')) as string;
+const CODE_IMAGES = migrationNames.find((name) => name.startsWith('CodeImages')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -531,6 +532,38 @@ run('database schema (L2, real PostgreSQL)', () => {
       // Back to inline code: its code's again.
       await dataSource.query(`UPDATE functions SET package_type = 'inline', code = 'v2' WHERE name = 'zipped'`);
       expect(await facts('zipped')).toEqual(of('v2'));
+    });
+  });
+
+  it("the inline-code-packages migration names each package function's package, an inline one's at its next rollout, makes no package inline, and reverts with both named", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CODE_IMAGES);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const zipped = 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=';
+      await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, package_type, code_sha256, code_size, memory, timeout) VALUES ('zipped', $1, 'python', '', 'zip', $2, 4096, 128, 5)`,
+        [ACCOUNT, zipped],
+      );
+      await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('inline', $1, 'nodejs', 'v1', 128, 5)`, [ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO packages (account_id, code_sha256, code_size, unpacked_size, file_count, files) VALUES ($1, $2, 4096, 9000, 1, '{app.py}')`,
+        [ACCOUNT, zipped],
+      );
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT name, package_sha256 FROM functions ORDER BY name`)).toEqual([
+        { name: 'inline', package_sha256: null },
+        { name: 'zipped', package_sha256: zipped },
+      ]);
+      expect(await dataSource.query(`SELECT code_sha256, inline FROM packages`)).toEqual([{ code_sha256: zipped, inline: false }]);
+
+      await dataSource.query(`UPDATE functions SET package_sha256 = 'its own package' WHERE name = 'inline'`);
+      await migrateDownTo(dataSource, CODE_IMAGES);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM functions`)).toEqual([{ n: 2 }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });
 

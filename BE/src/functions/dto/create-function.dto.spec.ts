@@ -247,20 +247,20 @@ describe("the event a function receives, as the API takes it", () => {
   });
 });
 
-describe("a function's code and metadata, as the API takes them: what a ConfigMap holds, labels rather than data", () => {
+describe("a function's code and metadata, as the API takes them: as AWS Lambda's console takes code, labels rather than data", () => {
   const create = { name: 'hello', runtime: Runtime.NODEJS, memory: 128, timeout: 5 };
 
-  it('takes code up to 900 KiB of UTF-8, on create and on update', async () => {
-    const code = `// ${'x'.repeat(921_600 - 3)}`;
+  it('takes code up to 3 MiB of UTF-8, on create and on update', async () => {
+    const code = `// ${'x'.repeat(3_145_728 - 3)}`;
 
     expect(await validated(CreateFunctionDto, { ...create, code })).toMatchObject({ code });
     expect(await validated(UpdateFunctionDto, { code })).toMatchObject({ code });
   });
 
-  it("refuses code over 900 KiB, counting bytes as stored, and says how many it has", async () => {
-    // 460,801 characters, two bytes each in UTF-8: 921,602 bytes.
-    const code = 'é'.repeat(460_801);
-    const message = "code is 921,602 bytes of UTF-8; it may have 921,600 at most, what a function's ConfigMap holds (900 KiB)";
+  it("refuses code over 3 MiB, counting bytes as stored, and says how many it has", async () => {
+    // 1,572,865 characters, two bytes each in UTF-8: 3,145,730 bytes.
+    const code = 'é'.repeat(1_572_865);
+    const message = "code is 3,145,730 bytes of UTF-8; it may have 3,145,728 at most, as AWS Lambda's console takes in its editor (3 MiB): more comes as a package";
 
     expect(await validated(CreateFunctionDto, { ...create, code })).toEqual([message]);
     expect(await validated(UpdateFunctionDto, { code })).toEqual([message]);

@@ -10,6 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import { QueryFailedError, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
+import type { InlinePackage } from '../functions/inline-package';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { CodeImagesService } from './code-images.service';
 import { PACKAGE_LIMITS, PackageRefused, readPackage } from './package-archive';
@@ -32,8 +33,13 @@ export type PackageView = Pick<Package, 'codeSha256' | 'codeSize' | 'unpackedSiz
 
 const viewOf = ({ codeSha256, codeSize, unpackedSize, fileCount, createdAt }: Package): PackageView => ({ codeSha256, codeSize, unpackedSize, fileCount, createdAt });
 
-/** The packages a function of their account names: the others are unused. */
-const NAMED = `EXISTS (SELECT 1 FROM "functions" "f" WHERE "f"."account_id" = "p"."account_id" AND "f"."package_type" = 'zip' AND "f"."code_sha256" = "p"."code_sha256")`;
+/**
+ * The packages a function of their account names, its pods running them: a
+ * package function's own, and the one-file package of inline code
+ * (package_sha256); or a package function's code_sha256, as a backend from
+ * before packages named inline code saved it. The others are unused.
+ */
+const NAMED = `EXISTS (SELECT 1 FROM "functions" "f" WHERE "f"."account_id" = "p"."account_id" AND ("f"."package_sha256" = "p"."code_sha256" OR ("f"."package_type" = 'zip' AND "f"."code_sha256" = "p"."code_sha256")))`;
 
 const bytes = (n: number): string => n.toLocaleString('en-US');
 const hours = (n: number): string => (n === 1 ? 'an hour' : `${n} hours`);
@@ -66,10 +72,11 @@ async function receive(body: Readable, file: string): Promise<{ codeSha256: stri
 }
 
 /**
- * Functions' packages (CLI plan, C-22): a zip, as AWS Lambda takes one,
- * uploaded once, checked (package-archive.ts), kept in object storage and
- * named by its SHA-256, which a function gives in place of inline code; its
- * code runs as an image (CodeImagesService). An account has each package once.
+ * Functions' packages: a zip, as AWS Lambda takes one, uploaded once, checked
+ * (package-archive.ts), kept in object storage and named by its SHA-256, which
+ * a function gives in place of inline code; or the one-file package the
+ * backend makes of inline code (inline-package.ts). Its code runs as an image
+ * (CodeImagesService). An account has each package once.
  * A package that no function names is deleted, with its image, by the
  * retention job an hour after its upload or its last use; a closed account's
  * go with its data.
@@ -103,8 +110,8 @@ export class PackagesService {
       if (codeSize === 0) throw new BadRequestException('The body is empty: send the package, a zip archive');
       const existing = await this.find(accountId, codeSha256);
       if (existing) {
-        // Sent again to be named: kept another hour.
-        await this.packages.update({ accountId, codeSha256 }, { usedAt: () => 'now()' });
+        // Sent again to be named: kept another hour; and an upload, if the backend had made the same of inline code.
+        await this.packages.update({ accountId, codeSha256 }, { usedAt: () => 'now()', inline: false });
         return { created: false, package: existing };
       }
       await this.refuseTooManyUnused(accountId);
@@ -155,16 +162,42 @@ export class PackagesService {
     return rows[0] ? { codeSize: rows[0].code_size, files: rows[0].files } : undefined;
   }
 
-  /** The account's packages, newest first; with a SHA-256, the one of it, if any. */
+  /** The account's packages, newest first; with a SHA-256, the one of it, if any. Those the backend made of inline code aren't the account's uploads: left out. */
   async list(accountId: string, codeSha256?: string): Promise<PackageView[]> {
-    const found = await this.packages.find({ where: codeSha256 === undefined ? { accountId } : { accountId, codeSha256 }, order: { createdAt: 'DESC' } });
+    const where = codeSha256 === undefined ? { accountId, inline: false } : { accountId, codeSha256, inline: false };
+    const found = await this.packages.find({ where, order: { createdAt: 'DESC' } });
     return found.map(viewOf);
   }
 
-  /** 400 when the account keeps as many packages as it may that no function names: one must go, or be named. */
+  /**
+   * Keeps the one-file package the backend made of a function's inline code
+   * (inline-package.ts), once, its last use now, as naming an uploaded one
+   * makes it: the purge keeps it while a function's record names it, and an
+   * hour after. No checks and no audit entry, as the backend made it of code
+   * the API took; and none of the uploads' limits, as the account uploaded
+   * nothing.
+   */
+  async storeInline(accountId: string, built: InlinePackage): Promise<void> {
+    const [touched] = await this.packages.query<[Array<{ id: string }>, number]>(
+      `UPDATE "packages" SET "used_at" = now() WHERE "account_id" = $1 AND "code_sha256" = $2 RETURNING "id"`,
+      [accountId, built.codeSha256],
+    );
+    if (touched.length) return;
+    // The bytes first, as for an upload: a row never names a package that object storage hasn't.
+    await this.storage.putDocument(packageKey(accountId, built.codeSha256), built.zip, 'application/zip');
+    await this.packages
+      .createQueryBuilder()
+      .insert()
+      .values({ accountId, codeSha256: built.codeSha256, codeSize: built.zip.length, unpackedSize: built.unpackedSize, fileCount: 1, files: [built.file], inline: true })
+      // Made by another rollout meanwhile: the account has it once.
+      .orIgnore()
+      .execute();
+  }
+
+  /** 400 when the account keeps as many uploaded packages as it may that no function names: one must go, or be named. */
   private async refuseTooManyUnused(accountId: string): Promise<void> {
     const [{ unused }] = await this.packages.query<Array<{ unused: number }>>(
-      `SELECT count(*)::int AS "unused" FROM "packages" "p" WHERE "p"."account_id" = $1 AND NOT ${NAMED}`,
+      `SELECT count(*)::int AS "unused" FROM "packages" "p" WHERE "p"."account_id" = $1 AND NOT "p"."inline" AND NOT ${NAMED}`,
       [accountId],
     );
     if (unused >= MAX_UNUSED_PACKAGES) {

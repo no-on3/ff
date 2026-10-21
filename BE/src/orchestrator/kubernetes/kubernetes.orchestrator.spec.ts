@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import {
-  CodeTooLargeError,
   FunctionLoadError,
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -19,7 +18,7 @@ import {
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { StoredLine, decodeCursor, pageQuery, tailQuery } from './log-store';
-import { BLOCKED_EGRESS_CIDRS, MAX_CODE_BYTES, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
+import { BLOCKED_EGRESS_CIDRS, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
 import { ANNOTATIONS, LABELS, functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
 
@@ -123,18 +122,10 @@ describe('KubernetesOrchestrator', () => {
   });
 
   describe('deploy', () => {
-    it('applies tenant guardrails first, then code, Service and Deployment', async () => {
+    it('applies tenant guardrails first, then the Service and the Deployment, which mounts the code image', async () => {
       await orchestrator.deploy(fn, tenant());
 
-      expect(api.applied.map((a) => a.manifest.kind)).toEqual([
-        'Namespace',
-        'ResourceQuota',
-        'LimitRange',
-        'NetworkPolicy',
-        'ConfigMap',
-        'Service',
-        'Deployment',
-      ]);
+      expect(api.applied.map((a) => a.manifest.kind)).toEqual(['Namespace', 'ResourceQuota', 'LimitRange', 'NetworkPolicy', 'Service', 'Deployment']);
       expect(api.applied[0].path).toBe(`/api/v1/namespaces/${ns}`);
       expect(api.applied.every((a) => a.manifest.metadata.namespace === ns || a.manifest.kind === 'Namespace')).toBe(true);
     });
@@ -161,20 +152,18 @@ describe('KubernetesOrchestrator', () => {
       expect(replicas).toEqual([1, 2]);
     });
 
-    it("mounts a package's code image, and writes no ConfigMap for it", async () => {
-      const image = 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'c'.repeat(64);
+    it("mounts the code's image, inline code's as a package's, and writes no ConfigMap", async () => {
+      const image = 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'e'.repeat(64);
 
-      await orchestrator.deploy(workload({ codeImage: image, code: '' }), tenant());
+      await orchestrator.deploy(workload({ codeImage: image }), tenant());
 
-      expect(api.applied.map((a) => a.manifest.kind)).toEqual(['Namespace', 'ResourceQuota', 'LimitRange', 'NetworkPolicy', 'Service', 'Deployment']);
       const deployment = api.applied.find((a) => a.manifest.kind === 'Deployment')!.manifest;
       expect(deployment.spec.template.spec.volumes[0]).toEqual({ name: 'code', image: { reference: image, pullPolicy: 'IfNotPresent' } });
+      expect(api.applied.some((a) => a.manifest.kind === 'ConfigMap')).toBe(false);
     });
 
-    it('rejects oversized code before touching the cluster', async () => {
-      await expect(orchestrator.deploy(workload({ code: 'x'.repeat(MAX_CODE_BYTES + 1) }), tenant())).rejects.toBeInstanceOf(
-        CodeTooLargeError,
-      );
+    it('refuses a function without an image of its code before touching the cluster', async () => {
+      await expect(orchestrator.deploy(workload({ codeImage: undefined }), tenant())).rejects.toThrow(`Function ${fn.id} has no code image`);
       expect(api.applied).toHaveLength(0);
     });
   });
@@ -233,33 +222,26 @@ describe('KubernetesOrchestrator', () => {
       expect(deployment.spec.replicas).toBe(1);
     });
 
-    it('garbage-collects code ConfigMaps older than the current and previous versions', async () => {
-      const cm = (n: string, ts: string) => ({ metadata: { name: n, creationTimestamp: ts } });
-      await orchestrator.update(fn, tenant());
-      const current = api.applied.find((a) => a.manifest.kind === 'ConfigMap')!.manifest.metadata.name;
-      api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [
-        cm(current, '2026-10-16T10:00:00Z'),
-        cm('previous', '2026-10-16T09:00:00Z'),
-        cm('older', '2026-10-16T08:00:00Z'),
-        cm('oldest', '2026-10-16T07:00:00Z'),
-      ]);
-      api.deleted = [];
+    it('keeps the code ConfigMap the replaced version mounts, from before code came as an image, and deletes the others', async () => {
+      const cm = (n: string) => ({ metadata: { name: n, creationTimestamp: '2026-10-21T09:00:00Z' } });
+      api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [cm('fn-x-inline-now'), cm('fn-x-inline-before')]);
+      api.objects.set(deploymentPath, {
+        ...rolledOut(1),
+        spec: { replicas: 1, template: { spec: { volumes: [{ name: 'code', configMap: { name: 'fn-x-inline-now' } }] } } },
+      });
 
       await orchestrator.update(fn, tenant());
 
-      expect(api.deleted).toEqual([
-        `/api/v1/namespaces/${ns}/configmaps/older`,
-        `/api/v1/namespaces/${ns}/configmaps/oldest`,
-      ]);
+      expect(api.deleted).toEqual([`/api/v1/namespaces/${ns}/configmaps/fn-x-inline-before`]);
     });
 
-    it("keeps the newest code ConfigMap when the function moves to a package, for the pods of the version it replaces", async () => {
-      const cm = (n: string, ts: string) => ({ metadata: { name: n, creationTimestamp: ts } });
-      api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [cm('inline-now', '2026-10-21T10:00:00Z'), cm('inline-before', '2026-10-21T09:00:00Z')]);
+    it('deletes the last code ConfigMap at the next rollout, once no pod mounts any', async () => {
+      api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [{ metadata: { name: 'fn-x-inline-now' } }]);
+      api.objects.set(deploymentPath, rolledOut(1));
 
-      await orchestrator.update(workload({ codeImage: 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'd'.repeat(64), code: '' }), tenant());
+      await orchestrator.update(fn, tenant());
 
-      expect(api.deleted).toEqual([`/api/v1/namespaces/${ns}/configmaps/inline-before`]);
+      expect(api.deleted).toEqual([`/api/v1/namespaces/${ns}/configmaps/fn-x-inline-now`]);
     });
   });
 

@@ -2,9 +2,6 @@
  * Pure builders for every Kubernetes object FF creates. Conventions are
  * documented in docs/kubernetes-migration-plan.md §4.
  */
-import { codeFileName } from '../../functions/code-package';
-import { MAX_CODE_BYTES } from '../../functions/limits';
-import { CodeTooLargeError } from '../orchestrator.errors';
 import { FunctionWorkload, TenantLimits, WorkloadEnvironment } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
 import { ANNOTATIONS, LABELS, MANAGED_BY, accountHash, functionResourceName } from './naming';
@@ -23,8 +20,6 @@ export interface K8sObject {
 }
 
 export const RUNTIME_PORT = 8080;
-/** A ConfigMap holds at most 1 MiB; the API refuses larger code first, with this limit. */
-export { MAX_CODE_BYTES };
 export const TENANT_QUOTA_NAME = 'ff-tenant-quota';
 export const TENANT_LIMITS_NAME = 'ff-tenant-limits';
 export const TENANT_NETWORK_POLICY_NAME = 'ff-default-deny';
@@ -169,23 +164,6 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
   };
 }
 
-export function codeConfigMapManifest(fn: FunctionWorkload, namespace: string, name: string, hash: string): K8sObject {
-  const bytes = Buffer.byteLength(fn.code, 'utf8');
-  if (bytes > MAX_CODE_BYTES) throw new CodeTooLargeError(bytes, MAX_CODE_BYTES);
-  return {
-    apiVersion: 'v1',
-    kind: 'ConfigMap',
-    metadata: {
-      name,
-      namespace,
-      labels: functionLabels(fn),
-      annotations: { [ANNOTATIONS.codeSha256]: hash },
-    },
-    immutable: true,
-    data: { [codeFileName(fn.runtime)]: fn.code },
-  };
-}
-
 /** Whether the function has variables or secrets to be given. */
 export function hasEnvironment(fn: FunctionWorkload): fn is FunctionWorkload & { environment: WorkloadEnvironment } {
   return fn.environment !== undefined && Object.keys(fn.environment.values).length > 0;
@@ -228,8 +206,7 @@ export function serviceManifest(fn: FunctionWorkload, namespace: string): K8sObj
 export function deploymentManifest(
   fn: FunctionWorkload,
   namespace: string,
-  /** The ConfigMap of inline code; none for a package, whose code image the pods mount (fn.codeImage). */
-  configMapName: string | undefined,
+  /** The version's code (codeHash): a new one rolls the pods out. */
   hash: string,
   settings: KubernetesSettings,
   replicas: number,
@@ -238,6 +215,8 @@ export function deploymentManifest(
 ): K8sObject {
   const image = settings.runtimeImages[fn.runtime];
   if (!image) throw new Error(`No runtime image configured for runtime "${fn.runtime}"`);
+  const codeImage = fn.codeImage;
+  if (!codeImage) throw new Error(`Function ${fn.id} has no code image: its code reaches its pods as one (ADR 0003)`);
   const memory = `${fn.memory}Mi`;
   const cpu = `${cpuMillicores(fn.memory)}m`;
   const labels = functionLabels(fn);
@@ -319,10 +298,8 @@ export function deploymentManifest(
             },
           ],
           volumes: [
-            // A package's image, read-only, pulled by the node like the runtime's; or inline code's ConfigMap.
-            fn.codeImage
-              ? { name: 'code', image: { reference: fn.codeImage, pullPolicy: 'IfNotPresent' } }
-              : { name: 'code', configMap: { name: configMapName, defaultMode: 0o444 } },
+            // The code's image, read-only, pulled by the node like the runtime's (ADR 0003).
+            { name: 'code', image: { reference: codeImage, pullPolicy: 'IfNotPresent' } },
             { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } },
           ],
         },

@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Runs the L3 integration suites (BE: npm run test:it) against the dev cluster.
 # Re-imports the runtime images first: in development they have no registry, so
-# anything kubelet's image GC removed could not be pulled back.
+# anything kubelet's image GC removed could not be pulled back. Functions' code
+# goes to the development registry, which it makes sure runs.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 "$FF_REPO_ROOT/hack/k8s/load-images.sh"
+# Functions' code reaches their pods as images (ADR 0003): the suites push them to the development registry.
+"$FF_REPO_ROOT/hack/k8s/registry-up.sh"
 # The sandboxed case runs where the gvisor RuntimeClass exists (hack/k8s/gvisor-up.sh).
 if kubectl get runtimeclass gvisor >/dev/null 2>&1; then
   export K8S_IT_RUNTIME_CLASS="${K8S_IT_RUNTIME_CLASS:-gvisor}"

@@ -25,6 +25,9 @@ export const tenant = (quota: Partial<TenantLimits['quota']> = {}, internetEgres
   internetEgress,
 });
 
+/** The image a workload's code comes as, inline code's too (ADR 0003). */
+export const CODE_IMAGE = 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'c'.repeat(64);
+
 export const workload = (overrides: Partial<FunctionWorkload> = {}): FunctionWorkload => ({
   id: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
   name: 'hello',
@@ -37,5 +40,6 @@ export const workload = (overrides: Partial<FunctionWorkload> = {}): FunctionWor
   minInstances: 0,
   maxInstances: 3,
   eventFormat: EventFormat.LAMBDA,
+  codeImage: CODE_IMAGE,
   ...overrides,
 });

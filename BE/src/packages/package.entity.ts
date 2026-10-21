@@ -42,6 +42,10 @@ export class Package {
   @Column({ type: 'text', array: true, select: false })
   files: string[];
 
+  /** Made by the backend of a function's inline code, rather than uploaded: not in the account's list, nor its limit of unused ones. */
+  @Column({ type: 'boolean', default: false })
+  inline: boolean;
+
   /** Its code image's manifest digest, once made (ADR 0003): sha256:<hex>. */
   @Column({ type: 'varchar', length: 71, nullable: true })
   imageDigest: string | null;

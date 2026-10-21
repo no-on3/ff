@@ -40,14 +40,9 @@ export function functionResourceName(functionId: string): string {
   return `fn-${id}`;
 }
 
-/** Hash of everything the code ConfigMap contains. */
-export function codeHash(runtime: string, code: string): string {
-  return sha256(`${runtime}\n${code}`);
-}
-
-/** Immutable ConfigMap name: a new code version gets a new name. */
-export function codeConfigMapName(functionId: string, hash: string): string {
-  return `${functionResourceName(functionId)}-${hash.slice(0, 10)}`;
+/** A version's code as its pods get it, its runtime and its image: a new one rolls the pods out. */
+export function codeHash(runtime: string, codeImage: string): string {
+  return sha256(`${runtime}\n${codeImage}`);
 }
 
 /** The two Secrets a function's environment is written to, in turn: 0 and 1. */

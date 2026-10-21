@@ -4,6 +4,8 @@ import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
 import { QueryFailedError } from 'typeorm';
+import { Runtime } from '../functions/entities/function.entity';
+import { inlinePackage } from '../functions/inline-package';
 import { PACKAGE_LIMITS } from './package-archive';
 import { Package, packageKey } from './package.entity';
 import { MAX_UNUSED_PACKAGES, PackagesService } from './packages.service';
@@ -23,6 +25,7 @@ const SAVED: Package = {
   unpackedSize: 60,
   fileCount: 2,
   files: [],
+  inline: false,
   imageDigest: null,
   createdAt: new Date('2026-10-21T12:00:00Z'),
   usedAt: new Date('2026-10-21T12:00:00Z'),
@@ -39,14 +42,24 @@ describe("PackagesService: a function's package, uploaded", () => {
   let before: string[];
   const leftovers = () => temporaryFiles().filter((name) => !before.includes(name));
   const insert = jest.fn();
+  /** The rows an UPDATE of a package's last use finds: inline code's package, when the account has it already. */
+  let touched: Array<{ id: string }>;
+  const inserted = jest.fn();
+  const builder = {
+    insert: () => builder,
+    values: (values: unknown) => (inserted(values), builder),
+    orIgnore: () => builder,
+    execute: jest.fn(),
+  };
   const repository = {
     update: jest.fn(),
     findOneBy: jest.fn(async () => found),
     find: jest.fn(async () => (found ? [found] : [])),
-    query: jest.fn(async () => [{ unused }]),
+    query: jest.fn(async (sql: string) => (sql.startsWith('UPDATE') ? [touched, touched.length] : [{ unused }])),
+    createQueryBuilder: () => builder,
     manager: { transaction: jest.fn(async (work: (manager: unknown) => Promise<unknown>) => work({ insert })) },
   };
-  const storage = { putFile: jest.fn(), deleteObject: jest.fn() };
+  const storage = { putFile: jest.fn(), putDocument: jest.fn(), deleteObject: jest.fn() };
   const audit = { record: jest.fn() };
   const images = { deleteImage: jest.fn() };
 
@@ -54,6 +67,7 @@ describe("PackagesService: a function's package, uploaded", () => {
     jest.clearAllMocks();
     found = null;
     unused = 0;
+    touched = [];
     before = temporaryFiles();
     // What the database answers once the row is in.
     insert.mockImplementation(async () => {
@@ -108,7 +122,8 @@ describe("PackagesService: a function's package, uploaded", () => {
     expect(result.package.codeSha256).toBe(SHA);
     expect(storage.putFile).not.toHaveBeenCalled();
     expect(audit.record).not.toHaveBeenCalled();
-    expect(repository.update).toHaveBeenCalledWith({ accountId: ACCOUNT, codeSha256: SHA }, { usedAt: expect.any(Function) });
+    // An upload too, if the backend had made the same package of inline code.
+    expect(repository.update).toHaveBeenCalledWith({ accountId: ACCOUNT, codeSha256: SHA }, { usedAt: expect.any(Function), inline: false });
   });
 
   it('answers the package another request recorded meanwhile, the same bytes: the account has it once', async () => {
@@ -188,8 +203,42 @@ describe("PackagesService: a function's package, uploaded", () => {
     found = SAVED;
 
     expect(await service.list(ACCOUNT, SHA)).toEqual([{ codeSha256: SHA, codeSize: ZIP.length, unpackedSize: 60, fileCount: 2, createdAt: SAVED.createdAt }]);
-    expect(repository.find).toHaveBeenCalledWith({ where: { accountId: ACCOUNT, codeSha256: SHA }, order: { createdAt: 'DESC' } });
+    // Those the backend made of inline code are no upload of the account's.
+    expect(repository.find).toHaveBeenCalledWith({ where: { accountId: ACCOUNT, codeSha256: SHA, inline: false }, order: { createdAt: 'DESC' } });
     await service.list(ACCOUNT);
-    expect(repository.find).toHaveBeenLastCalledWith({ where: { accountId: ACCOUNT }, order: { createdAt: 'DESC' } });
+    expect(repository.find).toHaveBeenLastCalledWith({ where: { accountId: ACCOUNT, inline: false }, order: { createdAt: 'DESC' } });
+  });
+
+  describe("inline code's one-file package", () => {
+    const built = inlinePackage("export const handler = async () => 'Ahlan';\n", Runtime.NODEJS);
+
+    it('is stored once, its zip first, marked inline, without the checks, the audit entry or the limit of an upload', async () => {
+      unused = 20;
+
+      await service.storeInline(ACCOUNT, built);
+
+      expect(storage.putDocument).toHaveBeenCalledWith(packageKey(ACCOUNT, built.codeSha256), built.zip, 'application/zip');
+      expect(inserted).toHaveBeenCalledWith({
+        accountId: ACCOUNT,
+        codeSha256: built.codeSha256,
+        codeSize: built.zip.length,
+        unpackedSize: built.unpackedSize,
+        fileCount: 1,
+        files: ['function.ts'],
+        inline: true,
+      });
+      expect(storage.putDocument.mock.invocationCallOrder[0]).toBeLessThan(builder.execute.mock.invocationCallOrder[0]);
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('is kept another hour, and nothing stored again, when the account has it', async () => {
+      touched = [{ id: 'p-1' }];
+
+      await service.storeInline(ACCOUNT, built);
+
+      expect(repository.query).toHaveBeenCalledWith(expect.stringContaining('SET "used_at" = now()'), [ACCOUNT, built.codeSha256]);
+      expect(storage.putDocument).not.toHaveBeenCalled();
+      expect(inserted).not.toHaveBeenCalled();
+    });
   });
 });

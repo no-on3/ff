@@ -386,7 +386,7 @@ const appShape = {
   // the first sealing. Unset: the development key, which production refuses.
   FF_ENCRYPTION_KEYS_FILE: optionalText(),
 
-  // Functions' code images (ADR 0003): the registry the backend pushes them to (unset: packages can't run here), the
+  // Functions' code images (ADR 0003): the registry the backend pushes them to (unset: no function can be deployed), the
   // host the cluster's nodes pull them from (the registry's own by default), and a push's credentials, if it needs any.
   FF_CODE_REGISTRY: optionalText(httpUrl),
   FF_CODE_REGISTRY_PULL: optionalText(registryHost),
@@ -494,6 +494,10 @@ function appRules(env: AppEnv): string[] {
     }
     if (!env.FF_ENCRYPTION_KEYS_FILE) {
       problems.push("FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production: its keys encrypt functions' environment variables and secrets");
+    }
+    // Every function's code reaches its pods as an image (ADR 0003): without a registry, none could be deployed.
+    if (!env.FF_CODE_REGISTRY) {
+      problems.push("FF_CODE_REGISTRY is required when NODE_ENV=production: every function's code reaches its pods as an image from the code registry (deploy/k8s/README.md, \"The code registry\")");
     }
     if (env.FF_WEBHOOK_ALLOW_PRIVATE) {
       problems.push("FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network");

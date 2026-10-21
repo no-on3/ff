@@ -21,7 +21,6 @@ import {
   TENANT_LIMITS_NAME,
   TENANT_NETWORK_POLICY_NAME,
   TENANT_QUOTA_NAME,
-  codeConfigMapManifest,
   deploymentManifest,
   environmentSecretManifest,
   hasEnvironment,
@@ -38,7 +37,6 @@ import {
   LABELS,
   MANAGED_BY,
   accountNamespace,
-  codeConfigMapName,
   codeHash,
   environmentSecretName,
   environmentSlotOf,
@@ -51,7 +49,10 @@ interface Deployment extends K8sObject {
     replicas?: number;
     template?: {
       metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'>;
-      spec?: { containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }> };
+      spec?: {
+        containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }>;
+        volumes?: Array<{ name: string; configMap?: { name?: string } }>;
+      };
     };
   };
   status?: {
@@ -126,9 +127,8 @@ export function isRolledOut(deployment: Deployment): boolean {
 
 /**
  * Runs each function as a Deployment in its account's namespace (one namespace
- * per user), with inline code in an immutable ConfigMap, or a package's code
- * image mounted (ADR 0003), and a ClusterIP Service in front. See
- * docs/kubernetes-migration-plan.md, K-06.
+ * per user), its code's image mounted (ADR 0003), and a ClusterIP Service in
+ * front. See docs/kubernetes-migration-plan.md for how it came to be.
  */
 export class KubernetesOrchestrator implements Orchestrator {
   private readonly logger = new Logger(KubernetesOrchestrator.name);
@@ -188,13 +188,11 @@ export class KubernetesOrchestrator implements Orchestrator {
   private async apply(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
-    // A package's code is its image, which names its version; inline code goes in a ConfigMap named by its hash.
-    const hash = codeHash(fn.runtime, fn.codeImage ?? fn.code);
-    const configMap = fn.codeImage ? undefined : codeConfigMapName(fn.id, hash);
-    const configMapManifest = configMap ? codeConfigMapManifest(fn, ns, configMap, hash) : undefined; // validates size first
+    // The code is its image, inline code's too, which names its version (ADR 0003).
+    if (!fn.codeImage) throw new OrchestratorError(`Function ${fn.id} has no code image: its code reaches its pods as one (ADR 0003)`);
+    const hash = codeHash(fn.runtime, fn.codeImage);
 
     await this.ensureTenant(fn, ns, tenant);
-    if (configMap && configMapManifest) await this.api.apply(paths.core(ns, 'configmaps', configMap), configMapManifest);
     await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
 
     // Keep the current replica count (it may have been scaled since), never below
@@ -205,11 +203,8 @@ export class KubernetesOrchestrator implements Orchestrator {
     const replicas = Math.max(existing?.spec?.replicas ?? 0, fn.minInstances, 1);
     if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid minInstances ${fn.minInstances} for function ${fn.id}`);
     const environmentSecret = await this.applyEnvironment(fn, ns, existing);
-    await this.api.apply(
-      paths.apps(ns, 'deployments', name),
-      deploymentManifest(fn, ns, configMap, hash, this.settings, replicas, environmentSecret),
-    );
-    await this.collectOldConfigMaps(fn, ns, configMap);
+    await this.api.apply(paths.apps(ns, 'deployments', name), deploymentManifest(fn, ns, hash, this.settings, replicas, environmentSecret));
+    await this.collectOldConfigMaps(fn, ns, existing);
   }
 
   /**
@@ -247,13 +242,16 @@ export class KubernetesOrchestrator implements Orchestrator {
     }
   }
 
-  /** Keeps the current code ConfigMap and the newest previous one (still used during rollouts); a package has none of its own. */
-  private async collectOldConfigMaps(fn: FunctionWorkload, ns: string, current: string | undefined): Promise<void> {
+  /**
+   * The code ConfigMaps of a function deployed before its code came as an
+   * image: the one the replaced version mounts stays while its pods serve the
+   * rollout, and a rollback finds it; the others go, and that one goes at the
+   * next rollout, once no pod mounts any.
+   */
+  private async collectOldConfigMaps(fn: FunctionWorkload, ns: string, replaced: Deployment | null): Promise<void> {
+    const mounted = replaced?.spec?.template?.spec?.volumes?.find((volume) => volume.name === 'code')?.configMap?.name;
     const configMaps = await this.api.list<Listed>(paths.core(ns, 'configmaps'), `${LABELS.functionId}=${fn.id}`);
-    const older = configMaps
-      .filter((cm) => cm.metadata.name !== current)
-      .sort((a, b) => (b.metadata.creationTimestamp ?? '').localeCompare(a.metadata.creationTimestamp ?? ''));
-    for (const cm of older.slice(1)) {
+    for (const cm of configMaps.filter((configMap) => configMap.metadata.name !== mounted)) {
       await this.api.delete(paths.core(ns, 'configmaps', cm.metadata.name));
     }
   }

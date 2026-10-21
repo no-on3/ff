@@ -34,7 +34,7 @@ pub struct LocalFunction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Code {
-    /// One file, mounted as /var/task/function.<extension>, as the backend's ConfigMap holds it.
+    /// One file, mounted as /var/task/function.<extension>, as the backend's one-file package of inline code has it.
     File { path: PathBuf, extension: String },
     /// A folder, mounted as /var/task.
     Folder(PathBuf),

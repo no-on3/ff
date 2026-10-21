@@ -8,8 +8,8 @@
 #     authority, whose root the test then trusts, and the development realm, for its test client.
 # It checks: TLS and HSTS on the four hostnames; the admin app and Keycloak's administration refused, then
 # admitted once the operator's address is allowed; the login's issuer; a customer signing in, asking for an
-# account, an operator approving it, the account deploying and invoking a function in direct mode, inside gVisor
-# as production requires (hack/k8s/gvisor-up.sh installs it in the cluster; deploy.sh refuses a sandbox the
+# account, an operator approving it, the account deploying and invoking a function in direct mode, its inline
+# code an image from the platform's registry as every function's is, inside gVisor as production requires (hack/k8s/gvisor-up.sh installs it in the cluster; deploy.sh refuses a sandbox the
 # cluster lacks or no node runs), and reading its logs, the backend's token for the cluster's API lasting an
 # hour; the operator's e-mail through the cluster's SMTP; the audit log naming the caller's address, not
 # the edge's; a function URL over HTTPS through the edge, its certificate made on demand once the backend says
@@ -257,6 +257,11 @@ code="import * as os from 'node:os';
 export async function handler(event: { name?: string }) { return { message: \`Hello \${event.name ?? 'world'}\`, kernel: os.release() }; }"
 fn="$(as "$token" /functions -d "$(jq -cn --arg code "$code" '{name: "e2e-platform", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
 check "the customer deploys a function" "201 ACTIVE" "$(status) $(jq -r .status "$work/body")"
+tenant="ff-t-$(printf %s "$account" | sha256sum | cut -c1-12)"
+# The image a function's pods mount at /var/task, as the Deployment names it.
+code_image() { kubectl -n "$tenant" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'; }
+check "its inline code is an image too, from the platform's registry, by digest, under the name the nodes map to it" true \
+  "$(code_image "$fn" | grep -qE '^registry\.ff\.internal/ff-code/[0-9]{12}@sha256:[0-9a-f]{64}$' && echo true || echo false)"
 # gVisor answers with a kernel of its own, not the node's.
 check "and invokes it: the backend calls its Service directly, the function inside gVisor" "201 Hello platform true" \
   "$(as "$token" "/functions/$fn/invoke" -d '{"input": {"name": "platform"}}' >/dev/null; status) $(jq -r .output.message "$work/body") $(jq -r '.output.kernel | test("gvisor")' "$work/body")"
@@ -293,9 +298,8 @@ check "and makes a function of it: its code image pushed to the platform's regis
   "$(status) $(jq -r '"\(.status) \(.packageType)"' "$work/body")"
 check "which answers from its package, inside gVisor" "201 Hello platform, from a package" \
   "$(as "$token" "/functions/$pkg_fn/invoke" -d '{"input": {"name": "platform"}}' >/dev/null; status) $(jq -r .output.message "$work/body")"
-tenant="ff-t-$(printf %s "$account" | sha256sum | cut -c1-12)"
 check "its pods mount the image by digest, under the name the nodes map to the registry" true \
-  "$(kubectl -n "$tenant" get deployment "fn-$pkg_fn" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}' | grep -qE '^registry\.ff\.internal/ff-code/[0-9]{12}@sha256:[0-9a-f]{64}$' && echo true || echo false)"
+  "$(code_image "$pkg_fn" | grep -qE '^registry\.ff\.internal/ff-code/[0-9]{12}@sha256:[0-9a-f]{64}$' && echo true || echo false)"
 reach_fn="$(as "$token" /functions -d "$(jq -cn --arg sha "$sha" '{name: "e2e-package-reach", runtime: "nodejs", codeSha256: $sha, handler: "index.reach", memory: 128, timeout: 5}')" | jq -r .id)"
 check "a second function from the same package, the image the registry has" "201 ACTIVE" "$(status) $(jq -r .status "$work/body")"
 check "whose own code doesn't reach the registry: a tenant reaches no private address" "201 refused" \

@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import { describeError } from '../common/describe-error';
 import { currentRequestId } from '../common/request-context';
 import {
-  CodeTooLargeError,
   FunctionLoadError,
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -17,7 +16,6 @@ import {
 export function callersFailure(error: unknown): string | undefined {
   if (error instanceof FunctionLoadError) return `The function failed to load: ${error.errorType}: ${error.message}`;
   if (error instanceof FunctionRuntimeError || error instanceof FunctionThrottledError) return `${error.errorType}: ${error.message}`;
-  if (error instanceof CodeTooLargeError) return error.message;
   return undefined;
 }
 

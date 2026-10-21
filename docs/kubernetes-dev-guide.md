@@ -303,7 +303,7 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
    - the admin app and Keycloak's administration refused, then admitted once this machine's address is allowed;
    - a customer made, signed in, asking for an account; the operator told by e-mail through the cluster's SMTP, then approving;
    - the backend's token for the cluster's API, read in its pod, lasting an hour;
-   - a function deployed and invoked in direct mode, answering from gVisor's kernel, and its logs;
+   - a function deployed and invoked in direct mode, its inline code an image from the platform's registry, answering from gVisor's kernel, and its logs;
    - a function made from a package, its code image pushed to the platform's registry and pulled by the node under the name it maps, answering from its package; a second from the same package, whose own code can't reach the registry;
    - the audit log naming the caller's address, not the edge's;
    - a function URL over HTTPS through the edge, its certificate made on demand once the backend said yes, the function told the caller's address; no certificate for a host that is no URL;

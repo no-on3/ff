@@ -11,7 +11,7 @@ import { corsOptions } from './cors';
 
 /**
  * The routes whose JSON bodies may be large: a function's create and update,
- * with its code (900 KiB), and an invocation, with its input (6 MB, as AWS
+ * with its code (3 MiB), and an invocation, with its input (6 MB, as AWS
  * Lambda's). Every other route keeps 100 KB, which its fields' own limits
  * stay within.
  */
@@ -30,7 +30,7 @@ function jsonBodies(): RequestHandler {
       next(
         new PayloadTooLargeException(
           isLarge
-            ? "The request's body is over 7 MB (7,340,032 bytes): a function's code may have 900 KiB, an invocation's input 6 MB"
+            ? "The request's body is over 7 MB (7,340,032 bytes): a function's code may have 3 MiB, an invocation's input 6 MB"
             : "The request's body is over 100 KB (102,400 bytes), this route's limit",
         ),
       );

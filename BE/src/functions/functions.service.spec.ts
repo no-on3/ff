@@ -6,7 +6,6 @@ import { Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import {
-  CodeTooLargeError,
   FunctionLoadError,
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -28,6 +27,7 @@ import { FunctionInvocation, InvocationSource, InvocationStatus } from './entiti
 import { FunctionUrl } from './entities/function-url.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { inlineCodeFacts } from './code-package';
+import { inlinePackage } from './inline-package';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { CodeImagesService } from '../packages/code-images.service';
@@ -71,8 +71,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** D9's balance check (P-33): every account may invoke unless a test says otherwise. */
   const credit = { admit: jest.fn(async (_accountId: string) => undefined) };
   /** The account's packages, and the registry their images go to. */
-  const packages = { name: jest.fn() };
+  const packages = { name: jest.fn(), storeInline: jest.fn() };
   const codeImages = { assertAvailable: jest.fn(), imageFor: jest.fn() };
+  /** The image the registry gives a package, by its SHA-256. */
+  const imageOf = (codeSha256: string) => `ff-dev-registry:5000/ff-code/user-1@sha256:${Buffer.from(codeSha256, 'base64').toString('hex')}`;
   /** The transaction that ends an invocation: it locks the row, saves the final state, then writes the usage record (D6). */
   const ending = { findOne: jest.fn(), save: jest.fn() };
   /** Each function's variables and secrets, as the service saved them. */
@@ -113,6 +115,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
     accountPlan = plan();
     existingFunctions = 0;
+    codeImages.imageFor.mockImplementation(async (_accountId: string, codeSha256: string) => imageOf(codeSha256));
     plans.forAccount.mockImplementation(async () => accountPlan);
     underLock = false;
     plans.withTenant.mockImplementation(async (_accountId: string, write: (tenant: unknown) => Promise<unknown>) => {
@@ -191,6 +194,29 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(result.status).toBe(FunctionStatus.ACTIVE);
     });
 
+    it("makes inline code a one-file package, kept with the account's, and mounts its image; the record names that package", async () => {
+      const built = inlinePackage('x', Runtime.NODEJS);
+
+      const result = await service.create('user-42', dto);
+
+      expect(packages.storeInline).toHaveBeenCalledWith('user-42', built);
+      expect(codeImages.imageFor).toHaveBeenCalledWith('user-42', built.codeSha256);
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ codeImage: imageOf(built.codeSha256) }), TENANT);
+      expect(functionsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ packageSha256: built.codeSha256 }));
+      // The answer gives the code's own hash, as for inline code: the package is the backend's to know.
+      expect(result).toMatchObject({ packageType: PackageType.INLINE, ...inlineCodeFacts('x') });
+    });
+
+    it('refuses with 503, saving nothing, where this FF has no registry: no code reaches its pods without one', async () => {
+      codeImages.assertAvailable.mockImplementation(() => {
+        throw new ServiceUnavailableException("This FF has no code registry, so it can't deploy a function");
+      });
+
+      await expect(service.create('user-1', dto)).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(packages.storeInline).not.toHaveBeenCalled();
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
     it("marks the function ERROR with its own load error, which its owner sees, and releases its pod", async () => {
       orchestrator.waitUntilReady.mockRejectedValue(new FunctionLoadError('Runtime.ImportModuleError', "Cannot find module 'lodash'"));
 
@@ -237,19 +263,11 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ERROR]);
     });
 
-    it('does not try to release anything when the code was refused before reaching the cluster', async () => {
-      orchestrator.deploy.mockRejectedValue(new CodeTooLargeError(2_000_000, 921_600));
-
-      await expect(service.create('user-1', dto)).rejects.toThrow('the current limit is 921600 bytes');
-      expect(orchestrator.scale).not.toHaveBeenCalled();
-    });
-
     // The function is saved before it is deployed: a client that took the failure for "nothing
     // created" would create it again, as the console did, and the account would have two.
     it.each([
       ['its code failed to load', new FunctionLoadError('Error', 'boom at init'), 400],
       ['the platform failed', new OrchestratorError('no pods were created'), 500],
-      ['its code is too large', new CodeTooLargeError(2_000_000, 921_600), 400],
     ])('names the function it saved, as ERROR, in the failure answer when %s', async (_case, error, status) => {
       orchestrator.deploy.mockRejectedValue(error);
 
@@ -355,8 +373,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       functionsRepo.findOne.mockResolvedValue({ ...zipped });
       const inline = await service.update('user-1', 'fn-1', { code: 'export const main = async () => 2;', handler: 'function.main' });
 
-      const workload = orchestrator.update.mock.calls.at(-1)?.[0];
-      expect(workload).not.toHaveProperty('codeImage');
+      // Inline code goes the same way: its one-file package, kept with the account's, and that package's image.
+      const built = inlinePackage('export const main = async () => 2;', Runtime.NODEJS);
+      expect(packages.storeInline).toHaveBeenLastCalledWith('user-1', built);
+      expect(codeImages.imageFor).toHaveBeenLastCalledWith('user-1', built.codeSha256);
       expect(inline).toMatchObject({ packageType: PackageType.INLINE, ...inlineCodeFacts('export const main = async () => 2;') });
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'export const main = async () => 2;');
     });
@@ -394,7 +414,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await service.update('user-1', 'fn-1', { code: 'broken', handler: 'function.handler' }).catch(() => undefined);
 
-      expect(orchestrator.update.mock.calls.map(([workload]) => (workload as { codeImage?: string }).codeImage)).toEqual([undefined, IMAGE]);
+      // The attempt ran inline code's package; the rollback, the package before.
+      expect(codeImages.imageFor.mock.calls.map(([, codeSha256]) => codeSha256)).toEqual([inlinePackage('broken', Runtime.NODEJS).codeSha256, PACKAGE]);
+      expect(orchestrator.update.mock.calls.map(([workload]) => (workload as { codeImage?: string }).codeImage)).toEqual([IMAGE, IMAGE]);
     });
   });
 
@@ -501,6 +523,17 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   describe('update', () => {
     const notReady = () => new FunctionLoadError('Error', 'boom at init');
     const errored = (): Function => ({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'old diagnosis' });
+
+    it("makes a new version of inline code a new package, which the record names once it is live", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const built = inlinePackage('v2', Runtime.NODEJS);
+
+      await service.update('user-1', 'fn-1', { code: 'v2' });
+
+      expect(packages.storeInline).toHaveBeenCalledWith('user-1', built);
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ codeImage: imageOf(built.codeSha256) }), TENANT);
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ code: 'v2', packageSha256: built.codeSha256 }));
+    });
 
     it('rolls out code changes, waits until they are live, then saves them and archives the code', async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
@@ -678,16 +711,6 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       );
       expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ code: 'still broken' }), 0);
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'still broken');
-    });
-
-    it('changes nothing when the code is refused before reaching the cluster', async () => {
-      functionsRepo.findOne.mockResolvedValue(activeFunction());
-      orchestrator.update.mockRejectedValueOnce(new CodeTooLargeError(2_000_000, 921_600));
-
-      await expect(service.update('user-1', 'fn-1', { code: 'x'.repeat(10) })).rejects.toThrow('the current limit is 921600 bytes');
-      expect(orchestrator.update).toHaveBeenCalledTimes(1);
-      expect(orchestrator.waitUntilReady).not.toHaveBeenCalled();
-      expect(functionsRepo.save).not.toHaveBeenCalled();
     });
 
     it('saves a successful update even when its code cannot be archived (the copy is not read yet)', async () => {

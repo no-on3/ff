@@ -37,6 +37,7 @@ const production: Env = {
   K8S_RUNTIME_CLASS: 'gvisor',
   FF_ENCRYPTION_KEYS_FILE: keysFile,
   FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
+  FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
 
 /** The problems a configuration is refused for; fails the test if it is accepted. */
@@ -257,6 +258,7 @@ describe('configuration', () => {
       ["customers' code on the node's own kernel, without a sandbox", { K8S_RUNTIME_CLASS: '' }, 'K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production'],
       ["functions' environments sealed with the development key", { FF_ENCRYPTION_KEYS_FILE: undefined }, 'FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production'],
       ['function URLs without TLS, the development default', { FF_FUNCTION_URL_BASE: undefined }, 'FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production'],
+      ["no registry, which every function's code reaches its pods through", { FF_CODE_REGISTRY: undefined }, 'FF_CODE_REGISTRY is required when NODE_ENV=production'],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 

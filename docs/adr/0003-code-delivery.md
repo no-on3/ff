@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | **Status** | Accepted on 2026-10-21: proposed after the spike, and confirmed by you the same day, with the registry it adds to the platform (the [CLI plan](../cli-plan.md)'s question 2) |
-| **Supersedes** | For packages, the code ConfigMap of the [Kubernetes migration](../kubernetes-migration-plan.md) (K-03); inline code moves to the same path once this is built (the CLI plan's C-24) |
-| **Implementation** | The CLI plan's C-21 to C-28, the [step-1 plan](../step-1-plan.md)'s U-08: as built in development by C-23, and in production's manifests by C-28 (below); inline code follows with C-24 |
+| **Supersedes** | The code ConfigMap of the [Kubernetes migration](../kubernetes-migration-plan.md) (K-03): for packages since the CLI plan's C-23, for inline code since its C-24 |
+| **Implementation** | The CLI plan's C-21 to C-28, the [step-1 plan](../step-1-plan.md)'s U-08: as built in development by C-23, in production's manifests by C-28, and for inline code by C-24 (below) |
 | **Evidence** | The spike `hack/spikes/code-delivery/run.sh` (the CLI plan's C-20), measured on 2026-10-21 |
 | **Related** | [ADR 0001](0001-orchestrator-kubernetes.md) (Kubernetes), [ADR 0002](0002-cli.md) (the CLI and Lambda's packaging rules), the [parent plan](../local-markets-and-aws-portability-plan.md)'s §6.1 (packaging; customers' own images later) |
 
@@ -61,7 +61,8 @@ On a k3d cluster of its own, k3s v1.37.1, with a registry of its own: a Python h
 - **A runtime's update reaches every function without rebuilding its code:** the Deployment's runtime image changes, its code image doesn't, and the rollout is today's. With A, each function's image would have to be made again on every runtime release.
 - **The push is small:** one layer and a manifest, no base to mount, no configuration to edit; content-addressed, so a package sent twice is pushed once.
 - **A registry joins the platform,** to run, back up (or rebuild from the zips) and keep within its disk; its address in the cluster's containerd configuration.
-- **Kubernetes must take image volumes:** k3s v1.37.1 does, as it comes. A cluster without them can't run packaged functions, which the deploy checks will say.
+- **Kubernetes must take image volumes:** k3s v1.37.1 does, as it comes. A cluster without them can't run any function, since C-24 inline ones too.
+- **Every function needs the registry** since C-24, where only packages did: to deploy, and for a pod to start on a node that hasn't its code's image. A running pod keeps its code; a lost image is made again from its zip (below).
 - **Customers' own images** (the parent plan's §6.1) can come later through the same registry, as A-like images.
 - **Runtime versions to choose from** stay open, as AWS Lambda offers them (`nodejs22.x`, `nodejs24.x`, `python3.12`): which you'd like later. A code image depends on no runtime's build, so a function moves to another version with an update and its package as it is, the Deployment's runtime image the only change; but for native libraries built for one version (a CPython 3.13 wheel, a Node.js addon), which the package then needs built again, as on Lambda.
 - **The CLI's packages** (C-26) fetch Python wheels for the runtime's glibc, `manylinux_2_28` (the image has 2.41), not `manylinux2014`, which holds numpy to 2.2.
@@ -89,3 +90,14 @@ On a k3d cluster of its own, k3s v1.37.1, with a registry of its own: a Python h
 - **Its blobs** that no manifest names go a day later (`gc`, an hour's grace for an upload under way); the backend deletes a manifest with its package. No backup: the zips in object storage make the images again.
 - **Found on the way:** the backend streamed a layer without stating its length, so its upload went chunked, which the development registry took and Zot refuses; it states the length now, as the distribution spec has a monolithic upload.
 - **Checked:** `deploy.sh` refuses to deploy without the two users and the backend's password, then says where the nodes pull from; `hack/k8s/test-platform-manifests.sh` checks Zot's settings with Zot's own `verify`, the address the backend's settings name, and that the backend alone reaches it; `hack/e2e-platform.sh` makes a function from a package on a cluster of its own, the node pulling its image from Zot as an operator's node would, and a function's own code finding the registry out of reach.
+
+## As built for inline code (C-24, 2026-10-21)
+
+- **A one-file package:** the backend makes a zip of inline code itself (`BE/src/functions/inline-package.ts`), its one file `function.ts` or `function.py` stored, not compressed, dated 1980-01-01, a regular file 0644, its name in UTF-8. No compression library's version changes a byte, so the same code makes the same zip, the same SHA-256 and the same image. The upload's own checks read it back (L1).
+- **Kept as an upload is,** marked `inline`: its zip in object storage under the package's key, its row in `packages`. The account's list (`GET /packages`) leaves it out, and so does its limit of 20 unused packages: it is no upload. A function's record names the package its pods run (`functions.package_sha256`), its own for a package function, the one-file package for inline code; the hourly purge keeps what a record names, and deletes the rest an hour after its last use, image included.
+- **Before anything changes:** a create makes the image before it saves the function, an update before it rolls out, so a registry out of reach answers 503 with nothing saved or changed. A failed update rolls back to the previous version's image, which the record still names.
+- **No code ConfigMap:** the backend writes none. A function deployed before keeps its own until its next rollout, which mounts the image; the ConfigMap stays during that rollout, for a rollback, and goes at the one after, or with the function. Kept, though the backend no longer makes ConfigMaps: its rights over them, which deleting the old ones needs.
+- **3 MiB of inline code,** as AWS Lambda's console takes in its editor, where a ConfigMap held 900 KiB; more comes as a package. A request's body stays at 7 MB.
+- **Production requires the registry:** the backend refuses to start with `NODE_ENV=production` and no `FF_CODE_REGISTRY`; a development backend without one answers 503 to every create and update, saying where the development registry is.
+- **The migration** (`InlineCodePackages`): `functions.package_sha256`, filled in for package functions at once and for inline ones at their next rollout, and `packages.inline`. Down, both go; a backend from before then writes ConfigMaps again at each function's next rollout.
+- **A lost image** is made again at its function's next create or update, from the zip that object storage keeps, with the same digest when the same backend makes it. Until then a pod that starts on a node without it can't pull it: running pods keep their code, and so does a node that has the image. A job that makes lost images again without waiting for a rollout is planned (the CLI plan's C-29).

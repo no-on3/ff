@@ -201,7 +201,7 @@ describe('the app as main.ts sets it up', () => {
         {
           statusCode: 413,
           error: 'Payload Too Large',
-          message: "The request's body is over 7 MB (7,340,032 bytes): a function's code may have 900 KiB, an invocation's input 6 MB",
+          message: "The request's body is over 7 MB (7,340,032 bytes): a function's code may have 3 MiB, an invocation's input 6 MB",
         },
       ]);
       expect(res.headers.get('access-control-allow-origin')).toBe('https://console.ff.example');

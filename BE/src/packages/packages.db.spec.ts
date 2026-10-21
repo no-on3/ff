@@ -1,9 +1,11 @@
 /**
  * L2: functions' packages on a real PostgreSQL: an account has each package
  * once, however many uploads, two at once included, and the audit log says so
- * once; its files are kept; the unused ones, which no zip function of the
- * account names, are counted and purged after an hour with their zips; and a
- * closed account's go. Each run works in a scratch database, dropped afterwards.
+ * once; its files are kept; the unused ones, which no function of the account
+ * names, are counted and purged after an hour with their zips; the one-file
+ * packages the backend makes of inline code are kept while a function names
+ * them, as no upload; and a closed account's go. Each run works in a scratch
+ * database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -15,6 +17,8 @@ import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { Runtime } from '../functions/entities/function.entity';
+import { inlinePackage } from '../functions/inline-package';
 import { Package, packageKey } from './package.entity';
 import { MAX_UNUSED_PACKAGES, PackagesService } from './packages.service';
 import { zipOf } from './test-fixtures';
@@ -29,6 +33,7 @@ run("functions' packages (L2)", () => {
   const stored = new Map<string, number>();
   const storage = {
     putFile: jest.fn(async (key: string, _file: string, size: number) => void stored.set(key, size)),
+    putDocument: jest.fn(async (key: string, body: Buffer) => void stored.set(key, body.length)),
     deleteObject: jest.fn(async (key: string) => void stored.delete(key)),
   };
   const images = { deleteImage: jest.fn(async (_accountId: string, _digest: string) => undefined) };
@@ -169,6 +174,32 @@ run("functions' packages (L2)", () => {
     expect(await rowsOf(a)).toEqual([sha(named), sha(resent)].sort());
     // Another account's package, or none: nothing to name.
     expect(await packages.name(await account(), sha(named))).toBeUndefined();
+  });
+
+  it("keeps inline code's package while a function names it, as no upload: not listed, not counted, and purged an hour after", async () => {
+    const a = await account();
+    const live = inlinePackage("export const handler = async () => 'live';\n", Runtime.NODEJS);
+    const replaced = inlinePackage("export const handler = async () => 'replaced';\n", Runtime.NODEJS);
+    for (const built of [live, replaced]) await packages.storeInline(a, built);
+    await packages.storeInline(a, live); // a rollout of the same code: kept once
+    // The function's record names the package its pods run, as the backend saves it.
+    await query(
+      `INSERT INTO functions (name, account_id, runtime, code, package_type, code_sha256, code_size, memory, timeout, package_sha256) VALUES ('inline', $1, 'nodejs', $2, 'inline', 'x', 1, 128, 5, $3)`,
+      [a, "export const handler = async () => 'live';\n", live.codeSha256],
+    );
+    for (const built of [live, replaced]) await usedAgo(a, built.codeSha256, 90);
+
+    expect(await rowsOf(a)).toEqual([live.codeSha256, replaced.codeSha256].sort());
+    expect(stored.get(packageKey(a, live.codeSha256))).toBe(live.zip.length);
+    expect(await packages.list(a)).toEqual([]);
+    // Its uploads may still leave 20 unused: the backend's own don't count.
+    for (let i = 0; i < MAX_UNUSED_PACKAGES - 1; i++) await upload(a, zip(`exports.handler = async () => ${i};`));
+    await expect(upload(a, zip('exports.handler = async () => "one more";'))).resolves.toMatchObject({ created: true });
+
+    await expect(packages.purgeUnused()).resolves.toBe(1);
+
+    expect((await rowsOf(a)).filter((code) => code === live.codeSha256 || code === replaced.codeSha256)).toEqual([live.codeSha256]);
+    expect(stored.has(packageKey(a, replaced.codeSha256))).toBe(false);
   });
 
   it("deletes all of an account's packages and their zips, and no other account's", async () => {

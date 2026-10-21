@@ -20,7 +20,6 @@ import { MinioClientService } from '../minio-client/minio-client.service';
 import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
 import {
-  CodeTooLargeError,
   FunctionRuntimeError,
   FunctionThrottledError,
   FunctionTimeoutError,
@@ -63,6 +62,7 @@ import {
 } from './environment';
 import { EnvironmentStore } from './environment.store';
 import { DEFAULT_HANDLER, handlerProblem, inlineCodeFacts, packageHandlerProblem } from './code-package';
+import { inlinePackage } from './inline-package';
 import { CodeImagesService } from '../packages/code-images.service';
 import { RegistryError } from '../packages/registry';
 import { PackagesService } from '../packages/packages.service';
@@ -83,12 +83,12 @@ function viewOf(function_: Function, environment: FunctionEnvironmentValues): Fu
   return { ...function_, environment: { ...environment.variables } };
 }
 
-/** The function as the orchestrator runs it: its record, the variables and secrets its process gets, and a package's code image. */
-function workloadOf(function_: Function, environment: FunctionEnvironmentValues, codeImage?: string): FunctionWorkload {
+/** The function as the orchestrator runs it: its record, the variables and secrets its process gets, and its code's image. */
+function workloadOf(function_: Function, environment: FunctionEnvironmentValues, codeImage: string): FunctionWorkload {
   return {
     ...function_,
     environment: isEmpty(environment) ? undefined : { revision: environment.revision, values: processEnvironment(environment) },
-    ...(codeImage ? { codeImage } : {}),
+    codeImage,
   };
 }
 
@@ -120,7 +120,7 @@ interface EnvironmentChange {
 }
 
 /** The fields of a function a change asks for, without its environment; with new code, how it comes, its hash and size. */
-type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields>;
+type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields> & { packageSha256?: string };
 
 /** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
 const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
@@ -238,21 +238,22 @@ export class FunctionsService {
     const { environment: variables, secrets, ...fields } = createFunctionDto;
     const handler = fields.handler ?? DEFAULT_HANDLER;
     const code = await this.codeOf(accountId, fields, handler, fields.runtime);
-    // A package's image before anything is saved: without it, there is no function to keep.
-    const codeImage = await this.codeImageOf({ accountId, ...code });
     const environment = withSecrets(withVariables(NO_ENVIRONMENT, variables ?? {}), storedSecrets(secrets ?? {}, new Date()));
     refuseCombined(environment);
+    // The code's image before anything is saved: without it, there is no function to keep.
+    const { codeImage, packageSha256 } = await this.codeImageOf({ accountId, runtime: fields.runtime, ...code });
     const function_ = this.functionsRepository.create({
       ...fields,
       handler,
       ...code,
+      packageSha256,
       accountId,
       status: FunctionStatus.CREATING,
     });
 
     const savedFunction = await this.insertWithinPlan(plan, function_, environment);
     try {
-      // Archive inline code in object storage (the cluster gets it via an immutable ConfigMap); a package is there already.
+      // A copy of inline code's text in object storage, beside the package its pods run; a package is there already.
       if (savedFunction.packageType === PackageType.INLINE) await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
 
       await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workloadOf(savedFunction, environment, codeImage), tenant));
@@ -269,7 +270,7 @@ export class FunctionsService {
       savedFunction.error = failure;
       await this.functionsRepository.save(savedFunction);
       // Its objects and the diagnosis stay, so an update can repair it, and a delete removes everything.
-      if (!(error instanceof CodeTooLargeError)) await this.releaseInstances(savedFunction);
+      await this.releaseInstances(savedFunction);
       // The function exists all the same: its ID lets the caller open it to fix it, rather than create it again.
       throw failureResponse(error, failure, { functionId: savedFunction.id });
     }
@@ -302,17 +303,28 @@ export class FunctionsService {
   }
 
   /**
-   * The code image a function's pods mount, for a package; none for inline
-   * code, which a ConfigMap holds. 503 when the registry can't be reached: the
-   * caller tries again, nothing having changed.
+   * The code image a function's pods mount (ADR 0003), and the package it is
+   * made of: a package function's own; for inline code, the one-file package
+   * the backend makes of it, kept as an uploaded one is, so that the purge of
+   * unused packages keeps it while the function's record names it. 503 when
+   * this FF has no registry, or the registry can't be reached: the caller tries
+   * again, nothing having changed.
    */
-  private async codeImageOf(function_: Pick<Function, 'accountId' | 'packageType' | 'codeSha256'>): Promise<string | undefined> {
-    if (function_.packageType !== PackageType.ZIP) return undefined;
+  private async codeImageOf(
+    function_: Pick<Function, 'accountId' | 'runtime' | 'packageType' | 'code' | 'codeSha256'>,
+  ): Promise<{ codeImage: string; packageSha256: string }> {
+    this.codeImages.assertAvailable();
+    let packageSha256 = function_.codeSha256;
+    if (function_.packageType === PackageType.INLINE) {
+      const built = inlinePackage(function_.code, function_.runtime);
+      await this.packages.storeInline(function_.accountId, built);
+      packageSha256 = built.codeSha256;
+    }
     try {
-      return await this.codeImages.imageFor(function_.accountId, function_.codeSha256);
+      return { codeImage: await this.codeImages.imageFor(function_.accountId, packageSha256), packageSha256 };
     } catch (error) {
       if (!(error instanceof RegistryError)) throw error;
-      this.logger.error(`The code registry failed for package ${function_.codeSha256} of account ${function_.accountId}: ${error.message}`);
+      this.logger.error(`The code registry failed for package ${packageSha256} of account ${function_.accountId}: ${error.message}`);
       throw new ServiceUnavailableException("The code registry can't be reached: nothing changed, try again in a moment");
     }
   }
@@ -514,19 +526,19 @@ export class FunctionsService {
     }
 
     // The code image first: without it, nothing has changed, and nothing needs rolling back.
-    const workload = workloadOf(updated, environment.after, await this.codeImageOf(updated));
+    const { codeImage, packageSha256 } = await this.codeImageOf(updated);
+    const workload = workloadOf(updated, environment.after, codeImage);
     try {
       await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       // The old version keeps serving during the rollout; record the change only once it's live.
       await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
     } catch (error) {
-      if (error instanceof CodeTooLargeError) throw new BadRequestException(error.message); // nothing was applied
-      if (repairing) return this.keepFailedAttempt(function_, changes, changed, error, environmentChanges ? environment : undefined);
+      if (repairing) return this.keepFailedAttempt(function_, { ...changes, packageSha256 }, changed, error, environmentChanges ? environment : undefined);
       return this.rollBack(function_, environment.before, error, changed);
     }
 
     const previousCodePath = this.codePath(function_);
-    Object.assign(function_, changes, { status: FunctionStatus.ACTIVE, error: null });
+    Object.assign(function_, changes, { packageSha256, status: FunctionStatus.ACTIVE, error: null });
     // The new version is live, and the record says so even when the new name went to another function meanwhile.
     const saved = await this.saveClaimingName(function_, previousName, 'keepOldName', environmentChanges ? environment.after : undefined);
     const nameLost = newName !== undefined && saved.name !== newName;
@@ -573,7 +585,7 @@ export class FunctionsService {
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
-      const workload = workloadOf(previous, previousEnvironment, await this.codeImageOf(previous));
+      const workload = workloadOf(previous, previousEnvironment, (await this.codeImageOf(previous)).codeImage);
       await this.plans.withTenant(previous.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {

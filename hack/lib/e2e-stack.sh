@@ -40,7 +40,7 @@ e2e_base_env=(
   FF_METRICS_PORT=0
   # Nor a function URL gateway, for the same reason: a test that calls URLs gives it a free port, and the base to match.
   FF_FUNCTION_URL_PORT=0
-  # Packages run as code images (ADR 0003), pushed to the cluster's registry (hack/k8s/registry-up.sh), pulled by its node.
+  # Every function's code runs as a code image (ADR 0003), pushed to the cluster's registry (hack/k8s/registry-up.sh), pulled by its node.
   FF_CODE_REGISTRY="http://127.0.0.1:$FF_REGISTRY_PORT" FF_CODE_REGISTRY_PULL="$FF_REGISTRY_NAME:5000"
 )
 
@@ -130,7 +130,7 @@ e2e_cluster() {
   kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/logging-up.sh" >/dev/null
   # Closing an account deletes its log lines with the store's key (P-45).
   "$FF_REPO_ROOT/hack/k8s/log-store-key.sh" >/dev/null
-  # Packages run as code images (ADR 0003): a cluster made before its registry gets it now.
+  # Every function's code runs as a code image (ADR 0003): a cluster made before its registry gets it now.
   "$FF_REPO_ROOT/hack/k8s/registry-up.sh" >/dev/null
   docker image inspect ff-runtime-nodejs:24-v3 >/dev/null 2>&1 ||
     docker build -q -t ff-runtime-nodejs:24-v3 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null

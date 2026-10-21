@@ -45,14 +45,14 @@ export class CreateFunctionDto {
 
   @ApiPropertyOptional({
     description:
-      "The function's code, one file, inline: 900 KiB (921,600 bytes) of UTF-8 at most, what its ConfigMap holds. Required unless " +
+      "The function's code, one file, inline: 3 MiB (3,145,728 bytes) of UTF-8 at most, as AWS Lambda's console takes in its editor; more comes as a package. Required unless " +
       'codeSha256 names a package; sent to a function made from a package, it makes the function inline',
     maxLength: MAX_CODE_BYTES,
   })
   // Required unless a package is named; with one, refused by the service, which says why.
   @ValidateIf((dto: { codeSha256?: unknown; code?: unknown }) => dto.codeSha256 === undefined || dto.code !== undefined)
   @IsString()
-  @MaxUtf8Bytes(MAX_CODE_BYTES, "what a function's ConfigMap holds (900 KiB)")
+  @MaxUtf8Bytes(MAX_CODE_BYTES, "as AWS Lambda's console takes in its editor (3 MiB): more comes as a package")
   code?: string;
 
   @ApiPropertyOptional({
