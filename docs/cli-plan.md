@@ -2,29 +2,33 @@
 
 | | |
 |---|---|
-| **Status** | Proposed, not started. Open questions for you are in §10. |
+| **Status** | Proposed, not started. Brought up to date on 2026-10-21 with the platform as the [client-readiness plan](client-readiness-plan.md) left it: login and API keys exist, the logs API exists, and unique function names are under way (§1.2). Open questions for you are in §10. |
 | **Replaces** | The plan in `cli/README.md`, which no longer matched the platform (§1). It was removed with the prototypes; git history has it, for example at commit `fb9d833`. |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): finding H-10; tasks R-02 (in part) and R-10; ADR-007 (Rust) and ADR-009 (SAM); §6.1 packaging, §7.1 `ff export`, §7.4 `ff doctor` |
-| **Builds on** | The [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12) and the [getting-started guide](getting-started.md) |
-| **Decision records** | ADR 0002 (the CLI) in C-00, ADR 0003 (code delivery) in C-20 |
+| **Builds on** | The [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12), the [client-readiness plan](client-readiness-plan.md) (accounts, API keys, logs, metrics, usage) and the [getting-started guide](getting-started.md) |
+| **Decision records** | ADR 0002 (the CLI) in C-00, ADR 0003 (code delivery) in C-20. [ADR 0004](adr/0004-identity-and-tenancy.md) already names the CLI's Keycloak client, `ff-cli`, and its login flow. |
+| **Comes next** | [What to build next](what-to-build-next.md): the CLI side of each new service is phase 5 here |
 
-FF needs one command-line tool for developers. With it you write a function, run it locally in the same runtime it gets in production, deploy it, invoke it, read its logs, and later package it with dependencies, all with the packaging rules of AWS Lambda. That way a project built on FF can move to AWS without changes. Today that work is done with the `curl` commands in the getting-started guide. The two CLI prototypes in the repository can't do it (§1).
+FF needs one command-line tool for developers. With it you write a function, run it locally in the same runtime it gets in production, deploy it, invoke it, read its logs, and later package it with dependencies, all with the packaging rules of AWS Lambda. That way a project built on FF can move to AWS without changes. Today that work is done with the `curl` commands in the getting-started guide. The two CLI prototypes that were in the repository couldn't do it (§1).
 
-The plan has four phases. Each delivers something usable on its own:
+The plan has six phases. Each delivers something usable on its own:
 
 | Phase | You get | Needs from the platform |
 |---|---|---|
-| **0. Groundwork** | One Rust CLI skeleton; the Node.js CLI and the direct-to-storage upload retired | nothing |
-| **1. The CLI on today's API** | `ff deploy`, `invoke`, `list`, `get`, `history`, `logs`, `delete`, `init`, `local invoke` / `local start` for single-file functions | larger request limit, unique names, a logs endpoint (small backend changes) |
+| **0. Groundwork** | One Rust CLI skeleton, and ADR 0002 | nothing |
+| **1. The CLI on today's API** | `ff deploy`, `invoke`, `list`, `get`, `history`, `logs`, `scale`, `delete`, `init`, `local invoke` / `local start` for single-file functions, with an API key; then `whoami`, `account`, `usage`, `balance` and `metrics` | a larger request limit (C-03). Unique names are under way, and the logs API, API keys, metrics and usage exist. |
 | **2. Packages with dependencies** | `ff package` and `ff deploy <dir>`: zips with `node_modules` or pip packages, Lambda-compatible | the code artifact pipeline (upload, validation, delivery to pods) and a glibc Node.js runtime |
-| **3. AWS projects and the exit kit** | `ff deploy` from an AWS SAM `template.yaml`; `ff export --target aws`; `ff doctor` | function environment variables; the Lambda event shape (§10, question 1) |
-| **4. Customer-ready** | `ff login`, signed releases for Linux, macOS, and Windows, published runtime images, CI usage | authentication on the API (parent F-01/R-08) |
+| **3. AWS projects and the exit kit** | `ff deploy` from an AWS SAM `template.yaml`; `ff env`; `ff export --target aws`; `ff doctor` | function environment variables; the Lambda event shape (§10, question 1) |
+| **4. Customer-ready** | `ff login` (the device flow: its Keycloak client exists), `ff api-keys`, signed releases for Linux, macOS and Windows, published runtime images, CI usage | nothing new: authentication exists since the client-readiness plan's P-11 and P-13 |
+| **5. The services after functions** | `ff url`, `ff schedule`, async invokes, queues, buckets and secrets: one command set per service of [What to build next](what-to-build-next.md), as each ships | each service's API |
 
 ---
 
 ## 1. Why the old plan is replaced
 
-A review of the two prototypes, `cli/` (Node.js, 234 lines) and `cli-rust/` (Rust, 383 lines), against the platform as it is now. Both were then removed as dead code, and they remain in git history (for example at commit `fb9d833`):
+### 1.1 The prototypes
+
+A review of the two prototypes, `cli/` (Node.js, 234 lines) and `cli-rust/` (Rust, 383 lines), against the platform as it was on 2026-10-16. Both were then removed as dead code, and they remain in git history (for example at commit `fb9d833`):
 
 | The old plan assumed | What is true now | Consequence |
 |---|---|---|
@@ -33,36 +37,55 @@ A review of the two prototypes, `cli/` (Node.js, 234 lines) and `cli-rust/` (Rus
 | Zip layout: `dist/`, `node_modules/`, `package.json`, `tsconfig.json` | The runtimes, like Lambda, load the handler from the root of `/var/task`, with `node_modules/` (or Python packages) next to it | Packages built this way would not load |
 | Two CLIs, Node.js and Rust | Parent ADR-007 chose **Rust**: a single static binary, easy to install offline, no Node.js needed | Two code bases for one job |
 | Node.js 18, `npm install --production` | Node 18 is end of life; the flag is deprecated (`--omit=dev`). The CLI also ran it in the user's own folder, mutating their `node_modules`. | Rework in any case |
-| No limits | **Measured:** the backend rejects request bodies over about 100 KB with `413 request entity too large`, for function code and for invoke input alike. The runtimes accept 900 KiB of code and 6 MB payloads. | Deploys and payloads over 100 KB fail today (fixed in C-03) |
+| No limits | **Measured, and still true on 2026-10-21:** the backend rejects request bodies over about 100 KB with `413 request entity too large`, for function code and for invoke input alike. The runtimes accept 900 KiB of code and 6 MB payloads. | Deploys and payloads over 100 KB fail today (fixed in C-03) |
 
 Both prototypes are small, so starting cleanly costs little. The new CLI can borrow the Rust prototype's `clap` command structure and error type from git history.
+
+### 1.2 The platform since then
+
+The client-readiness plan ran from 2026-10-17 to 2026-10-20. This plan was written before it, so several of its assumptions are stale. Checked against the code on 2026-10-21:
+
+| Then | Now | What changes here |
+|---|---|---|
+| No login. The tenant came from a development variable. | **Every route needs a Keycloak token or an API key** (P-11, P-13). An API key is `ffk_<key ID>_<secret>`, with scopes (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`, `metrics:read`, `alarms:read`, `alarms:write`, `usage:read`), created in the console by an owner. Roles: `owner`, `developer`, `viewer`; a viewer can't deploy or invoke. A user with several accounts names one in the `X-FF-Account` header. The development stack has `FF_AUTH_MODE=dev`, where `X-FF-Dev-Account` picks the account, as `hack/e2e.sh` does. Both Keycloak realm files already hold a public client `ff-cli` with the device flow turned on and the `ff-api` audience. | Phase 1 works with an API key (D8, C-02). `ff login` (C-40) is no longer blocked; it can move up whenever you want (§10, question 7). New account commands (C-09). |
+| No logs API | **Done by P-40 and P-43:** `GET /functions/:id/logs` (a page, oldest first, with `tail`, `sinceSeconds`, `start`, `end`, `limit`, a phrase `q`, `requestId`, and a `cursor`/`next` pair) and `GET /functions/:id/logs/stream`, the live tail as Server-Sent Events. Lines outlive their instance (the plan's `logRetentionDays`). 503 while the log store is unavailable. | C-05 is CLI-only, and `--follow` streams instead of polling |
+| Names weren't unique | **Under way on 2026-10-21, in the working tree, outside this plan:** a name belongs to one function of its account, 1 to 100 characters, trimmed, compared exactly (`Hello` and `hello` are two names), with `409 Conflict` on a duplicate and a migration that renames existing duplicates. Lambda's character rule isn't enforced, and `GET /functions` has no `name` filter. | D3 and C-03 updated: the CLI resolves a name from the list, warns when a name wouldn't work on Lambda, and `ff export` maps such names (§10, question 6) |
+| Invoke answered 200, or 400 on a function error | **201 with the invocation record** (P-08): `id`, `status` (`COMPLETED`, `ERROR`, `TIMEOUT`, `THROTTLED`), `duration`, `memoryUsed`, `output`, `error`. A function error or timeout answers 400 with `ErrorType: message`; a function that can't load, 400 "The function failed to load: …"; no free instance in time, 429; a platform failure, 500 with a request ID; no credit, 402 (P-33). **The invocation's ID is the request ID** that the runtime logs (P-20), so `ff invoke` prints it and `ff logs --request-id` finds the call's lines. | C-04 and D7 |
+| No plans | **Plans** (P-15) set the account's limits: functions, memory and timeout per function, instances per function, changes per minute and invocations per second (429 with `Retry-After`), log and history retention, idle time, internet egress (off on `beta`). | C-02 honours `Retry-After` on reads; `ff account` shows the plan and egress |
+| One instance per function | `minInstances` and `maxInstances` per function, `GET`/`PUT /functions/:id/scaling-config` (P-06, D14) | `ff scale` (C-04) |
+| No metrics, usage or balance for customers | `GET /functions/:id/metrics` and `GET /metrics` (P-50), `GET /usage?month=` as JSON or CSV (P-22), `GET /billing/balance` (P-31), `GET /me` and `GET /accounts/:id` (P-12) | C-09 |
+| `functions.userId` | `accountId` (P-12), 12 digits | C-03's note |
+| Cold start "about 10 s" | 6 to 11 s at 128 MB under gVisor, of which 2 to 5 s loading the code (P-62) | §9 |
+| NestJS 10 | NestJS 12 on TypeScript 6, Express 5, ESLint 10 (P-09, P-64) | C-03 |
 
 ## 2. Goals and non-goals
 
 **Goals:**
 - **One static binary, `ff`,** for Linux and macOS (Windows in phase 4). It needs no Node.js or Python to run, and it installs offline.
-- **API only.** No storage keys, cluster credentials, or kubeconfig on developer machines. Later, a user token from `ff login`.
+- **API only.** No storage keys, cluster credentials, or kubeconfig on developer machines. An API key from day one; a user login from `ff login`.
+- **One account at a time.** A profile names its account, so every command acts on one account, as the API requires.
 - **Lambda-compatible packages.** A zip built by `ff package` follows Lambda's rules: handler at the root, dependencies inside, the same size limits, and the same `CodeSha256`. Later, the project file is an AWS SAM `template.yaml` (parent ADR-009), so leaving FF is `sam deploy` with the same file.
 - **Local runs equal production runs.** `ff local` uses the same runtime images and the same hardening as function pods: read-only root, uid 10001, no capabilities, the memory limit.
 - **Scriptable.** Stable exit codes, `--output json` on every command, and non-interactive use in CI.
 
 **Non-goals (for now):**
 - **Replacing the AWS CLI.** The Lambda API facade (parent §6.6) is what will make `aws lambda …`, the SDKs, and Terraform work against FF. `ff` adds what AWS tools can't: local runs against FF's runtimes, FF logs, packaging checks, export, and doctor.
+- **Managing the account.** Members, alarms, notification settings, payments and invoices stay in the console. The CLI reads usage, the balance and metrics, and manages API keys (C-40), since CI needs them.
 - Server-side builds ("deploy from source"). Parent §6.1 keeps builds on the developer's side, with a build service later.
-- Layers, versions and aliases (until parent R-01), event sources (parent phase 3), and a terminal UI.
+- Layers, versions and aliases (until parent R-01), and a terminal UI. Event sources come in phase 5, as the platform ships them.
 
 ## 3. Decisions
 
-Decisions D1–D3, D5 and D7 are recorded in ADR 0002 (task C-00). D4 is decided by a spike and recorded in ADR 0003 (C-20).
+Decisions D1–D3, D5, D7 and D8 are recorded in ADR 0002 (task C-00). D4 is decided by a spike and recorded in ADR 0003 (C-20).
 
 ### D1. Rust, one binary, talking only to the API
 - **Crates:**
   - `clap` (derive) and `clap_complete`;
-  - `ureq` for HTTP: blocking and small, using `rustls` with the operating system's certificate store, so company CAs and TLS-inspecting proxies work. `HTTPS_PROXY` and `NO_PROXY` are honoured.
-  - `serde` / `serde_json` (`serde_yaml` in phase 3);
+  - `ureq` for HTTP: blocking and small, using `rustls` with the operating system's certificate store, so company CAs and TLS-inspecting proxies work. `HTTPS_PROXY` and `NO_PROXY` are honoured. Its streaming reader serves the live tail (Server-Sent Events are a plain text stream).
+  - `serde` / `serde_json` (`serde_yaml` in phase 3), and `toml` for the configuration files;
   - `zip` (writer, deflate), with `sha2` and `base64` for `CodeSha256`;
   - `walkdir` and `ignore` (`.ffignore` in gitignore syntax);
-  - `directories` (config paths), `anyhow` / `thiserror`, and `notify` (watch mode);
+  - `directories` (config paths), `anyhow` / `thiserror`, `humantime` (`--since 15m`), and `notify` (watch mode);
   - versions: the latest stable at implementation time, locked in `Cargo.lock`, built with `--locked`.
 - **Not carried over from the Rust prototype:** `tokio` (no async runtime is needed for a CLI that does one request at a time), `s3`, and `dotenv`.
 - **Static builds:** `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`; macOS and Windows targets in phase 4. The toolchain on the reference machine is Rust 1.91, so edition 2024 is available.
@@ -74,17 +97,21 @@ Decisions D1–D3, D5 and D7 are recorded in ADR 0002 (task C-00). D4 is decided
     ```toml
     [profiles.default]
     endpoint = "http://localhost:3000"
+    dev_account = "123456789012"      # development stack only: sent as X-FF-Dev-Account
 
     [profiles.staging]
     endpoint = "https://api.staging.ff.example"
+    account = "210987654321"          # sent as X-FF-Account, for a user with several accounts
     ```
 
-  - tokens go in a separate `credentials.toml`, created with mode 0600 and never printed (phase 4).
-- **Precedence:** command-line flags, then environment variables (`FF_ENDPOINT`, `FF_PROFILE`, `FF_TOKEN`), then the profile, then the default `http://localhost:3000`.
+  - tokens go in a separate `credentials.toml`, created with mode 0600 and never printed: per profile, an API key, or the user token and refresh token from `ff login` (C-40).
+- **Precedence:** command-line flags, then environment variables (`FF_ENDPOINT`, `FF_PROFILE`, `FF_TOKEN`, `FF_ACCOUNT`), then the profile, then the default `http://localhost:3000`. There is no `--token` flag: a token on the command line ends up in the shell's history.
 - **TLS:** plain `http://` is accepted only for `localhost` and `127.0.0.1`, unless `--allow-http` is given.
 
 ### D3. Functions are addressed by name, as on Lambda
-`ff invoke hello`, not a UUID. Names must therefore be unique per tenant, and they follow Lambda's rule `^[A-Za-z0-9_-]{1,64}$` (parent M-4). Both are backend changes (C-03). Until then the CLI resolves names on the client and refuses ambiguous ones.
+`ff invoke hello`, not a UUID. The API is making names unique per account (§1.2), compared exactly and trimmed, so a name always finds one function. The CLI finds it in `GET /functions` (a plan caps the number of functions, so the list is short); a `name` filter on that route is a convenience for later (C-03).
+
+The API doesn't enforce Lambda's character rule, `^[A-Za-z0-9_-]{1,64}$` (parent M-4). The CLI does what it can for portability: `ff deploy` warns when a name wouldn't work on Lambda, `ff doctor` flags it, and `ff export` derives a logical ID from such a name and says so (§10, question 6).
 
 ### D4. How packaged code reaches the pods (ADR 0003, after the C-20 spike)
 Inline code fits in a ConfigMap today, which is limited to 1 MiB. A zip with `node_modules` does not. The options:
@@ -112,37 +139,59 @@ Inline code fits in a ConfigMap today, which is limited to 1 MiB. A zip with `no
 |---|---|
 | 0 | Success (also "no changes" on deploy) |
 | 2 | Usage error: unknown flag, bad argument (clap's standard) |
-| 3 | Configuration, connection, or API error (the API was unreachable or refused the request) |
+| 3 | Configuration, connection, or API error (the API was unreachable, or refused the request for a reason that isn't code 4, 5 or 6) |
 | 4 | Deploy failed: the function did not become ready. The diagnostics are printed. |
 | 5 | The invocation failed: the function raised (`ERROR`) or timed out (`TIMEOUT`) |
+| 6 | Refused by the account, not by the request: no credit (402), a role or a key's scopes that don't allow it (403), or the plan's rate limits (429 with `Retry-After`). CI can tell "my deploy is broken" from "the account needs attention". |
 
-Text output is for people. `--output json` prints one JSON document per command, with a documented, stable shape. Errors always go to stderr.
+Text output is for people. `--output json` prints one JSON document per command, with a documented, stable shape. Errors always go to stderr, and an API error's message is printed as the API wrote it, with its request ID when there is one.
+
+### D8. Authentication: an API key first, a login later
+- **Every request carries `Authorization: Bearer <token>`.** The token is an API key (`ffk_…`) or a user token from `ff login`. The API tells them apart by the prefix; the CLI doesn't need to.
+- **Phase 1 uses API keys.** An owner creates one in the console's API keys page, with the scopes the CLI needs (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `metrics:read` and `usage:read` for C-09), and puts it in `FF_TOKEN` or `ff config set-token`. An API key acts on its own account, so no account header is needed.
+- **`ff login` (C-40)** is the OAuth device flow against Keycloak's `ff-cli` client, which exists in both realm files with the `ff-api` audience. A user token may act on any of the user's accounts: the profile's `account`, or `--account`, goes into `X-FF-Account`. When the API answers 400 "This user belongs to several accounts", the CLI lists them (`GET /me`) and says how to pick one.
+- **The development stack** runs with `FF_AUTH_MODE=dev` and needs no token. The profile's `dev_account` is sent as `X-FF-Dev-Account`, so the CLI's tests can act as a second account exactly as `hack/e2e.sh` does.
+- **A 403 names what is missing:** the scope the key lacks, or the role the user would need. A 401 says whether the token is missing, expired or revoked, as the API's message does.
 
 ## 4. Commands (target)
 
 | Command | What it does | Phase |
 |---|---|---|
-| `ff config set <key> <value>`, `ff config show` | Endpoint and profile settings | 1 |
+| `ff config set <key> <value>`, `ff config show`, `ff config set-token` | Endpoint, account and profile settings; the token, read from a prompt or stdin, never from an argument | 1 |
 | `ff init <name> --runtime nodejs\|python` | A function folder: handler, `events/event.json`, README | 1 (SAM layout in 3) |
-| `ff deploy <file\|dir> [--name] [--memory] [--timeout] [--handler]` | Create, or update by name. Sends only what changed, waits until the new version is live, and prints the diagnostics if it never gets there. | 1: one file; 2: folder as zip; 3: `template.yaml` |
-| `ff list`, `ff get <name>` | Functions and their state; `get` shows the error of a function in `ERROR` | 1 |
-| `ff invoke <name> [--data JSON\|@file\|-] [--raw]` | Invoke and print the output, the duration, and the error if any (exit 5) | 1 |
-| `ff history <name> [--limit N]` | Recent invocations: time, status, duration, error | 1 |
-| `ff logs <name> [--tail N] [--follow]` | The function pods' logs: START/END/REPORT lines, user output, errors | 1 |
+| `ff deploy <file\|dir> [--name] [--memory] [--timeout] [--handler] [--min-instances] [--max-instances]` | Create, or update by name. Sends only what changed, waits until the new version is live, and prints the diagnostics if it never gets there. | 1: one file; 2: folder as zip; 3: `template.yaml` |
+| `ff list`, `ff get <name>` | Functions and their state; `get` shows the error of a function in `ERROR`, and its instances | 1 |
+| `ff invoke <name> [--data JSON\|@file\|-] [--raw]` | Invoke and print the output, the request ID, the duration, the memory used, and the error if any (exit 5) | 1 |
+| `ff history <name> [--limit N]` | Recent invocations: time, request ID, status, duration, error | 1 |
+| `ff logs <name> [--tail N] [--since 15m] [--grep phrase] [--request-id ID] [--follow]` | The function's logs from the log store: START/END/REPORT lines, user output, errors. `--follow` is the live tail. | 1 |
+| `ff scale <name> [--min N] [--max N]` | The function's instances: the minimum kept warm (billed as provisioned concurrency), and the most it may run | 1 |
 | `ff delete <name> [--yes]` | Delete (asks first in a terminal) | 1 |
 | `ff local invoke <file\|dir> [--data …]` | Run once in the production runtime image on Docker, and print the output and logs | 1 |
 | `ff local start <file\|dir> [--port] [--watch]` | Keep it running on a local port; `--watch` restarts it when files change | 1 |
+| `ff whoami`, `ff accounts` | The token's user and account, and the user's accounts with their roles | 1 |
+| `ff account` | The current account: status, plan, role, internet egress | 1 |
+| `ff usage [--month YYYY-MM] [--csv]`, `ff balance` | The month's usage per function with its estimated cost, and the account's balance | 1 |
+| `ff metrics [<name>] [--period 60\|300\|3600] [--since 1h]` | Invocations, errors, throttles, duration percentiles, cold starts and instances, for one function or the whole account | 1 |
 | `ff package <dir> [-o file.zip] [--container]` | Build a Lambda-compatible zip; `--container` builds inside the runtime image for an exact platform match | 2 |
+| `ff env list\|set\|unset <name> …` | A function's environment variables, with `--env KEY=value` on deploy | 3 |
 | `ff export --target aws [<name>…]` | `template.yaml`, code zips, and a migration checklist (parent §7.1, first slice) | 3 |
 | `ff doctor [<dir>]` | Portability linter (parent §7.4, first slice) | 3 |
-| `ff login`, `ff logout`, `ff whoami` | Device-flow login and tokens | 4 |
+| `ff login`, `ff logout` | Device-flow login and tokens | 4 |
+| `ff api-keys create\|list\|revoke` | API keys for CI, by an owner logged in with `ff login` | 4 |
+| `ff url enable\|disable\|show <name>`, `ff domains …` | A function's public web address and custom domains | 5 |
+| `ff schedule set\|remove <name>` | Run a function on AWS's `cron()` or `rate()` schedule | 5 |
+| `ff invoke --async`, `ff queues …`, `ff event-sources …` | Background work: async invokes, queues, and functions that read them | 5 |
+| `ff buckets …`, `ff secrets …` | File storage and secrets | 5 |
 | `ff version`, `ff completion <shell>` | | 1 |
 
-**Global flags:** `--profile`, `--endpoint`, `--output text|json`, `--quiet`, `--verbose`, `--no-color`.
+**Global flags:** `--profile`, `--endpoint`, `--account`, `--output text|json`, `--quiet`, `--verbose`, `--no-color`.
 
 **What a phase-1 session looks like:**
 
 ```text
+$ export FF_TOKEN=ffk_…                                  # an API key from the console, or ff config set-token
+$ ff whoami
+key "laptop" on account 123456789012 (Acme Dev, plan beta)
 $ ff init hello --runtime python
 created hello/function.py, hello/events/event.json
 $ ff local invoke hello --data @hello/events/event.json
@@ -150,12 +199,12 @@ $ ff local invoke hello --data @hello/events/event.json
 $ ff deploy hello/function.py --name hello
 creating hello (python, 128 MB, 5 s) … ACTIVE in 6.4 s
 $ ff invoke hello --data '{"name": "Tunis"}'
-{"message": "Hello Tunis", "requestId": "…"}        0.17 ms
+{"message": "Hello Tunis"}        0.17 ms · 36 MB · request 7d1e…
 $ ff logs hello --tail 4
-START RequestId: … Version: $LATEST
+START RequestId: 7d1e… Version: $LATEST
 greeting Tunis
-END RequestId: …
-REPORT RequestId: …  Duration: 0.17 ms  Billed Duration: 1 ms  Memory Size: 128 MB  Max Memory Used: 36 MB
+END RequestId: 7d1e…
+REPORT RequestId: 7d1e…  Duration: 0.17 ms  Billed Duration: 1 ms  Memory Size: 128 MB  Max Memory Used: 36 MB
 ```
 
 ## 5. Architecture
@@ -164,57 +213,63 @@ REPORT RequestId: …  Duration: 0.17 ms  Billed Duration: 1 ms  Memory Size: 12
 developer machine                                   FF platform
 ┌────────────────────────────┐   HTTPS + token  ┌─────────────────────────────────────────────┐
 │ ff                         │ ───────────────▶ │ backend API                                 │
-│  ├─ API client             │                  │  ├─ functions, invocations, logs            │
-│  ├─ packager (zip, D5)     │                  │  ├─ artifact pipeline (phase 2): validate,  │
-│  └─ local runner ──┐       │                  │  │   store in S3, build the version image   │
-└────────────────────│───────┘                  │  └─▶ Kubernetes: Deployment per function    │
+│  ├─ API client             │                  │  ├─ functions, invocations, scaling         │
+│  ├─ packager (zip, D5)     │                  │  ├─ logs: pages and a live tail (log store) │
+│  └─ local runner ──┐       │                  │  ├─ me, accounts, usage, balance, metrics   │
+└────────────────────│───────┘                  │  ├─ artifact pipeline (phase 2): validate,  │
+                     │             device flow  │  │   store in S3, build the version image   │
+                     │            (phase 4) ──▶ │  └─▶ Kubernetes: Deployment per function    │
                      ▼                          └─────────────────────────────────────────────┘
-        docker: ff-runtime-* image                       registry ◀── kubelet pulls (phase 2)
+        docker: ff-runtime-* image                Keycloak (ff-cli)   registry ◀── kubelet pulls (phase 2)
         (same hardening as production pods)
 ```
 
 - **Source layout.** The CLI lives in `cli/`:
   - `src/main.rs` (clap);
-  - `config.rs`;
+  - `config.rs` and `auth.rs`;
   - `api/` (client, types, error mapping);
   - `commands/` (one file per command);
   - `package/` (rules, zip writer, builders);
   - `local/` (docker runner);
   - `output.rs`;
   - tests under `tests/`.
-- **Deploy in phase 1.** `POST /functions` or `PUT /functions/:id` with the code inline, as the guide's `curl` commands do. The API already waits until the version is live (up to `FF_READY_TIMEOUT_SECONDS`, 90 s). The CLI's read timeout is therefore longer than that.
-- **Invoke.** `POST /functions/:id/invoke {"input": …}`. The API answers 400 when the function raises or times out, and the CLI maps that to exit code 5. Since P-10 of the [client-readiness plan](client-readiness-plan.md), a full queue answers 429, and a platform failure 500 with a request ID. The Lambda-shaped answer (200 with `X-Amz-Function-Error`) belongs to the API facade (parent §6.6), not to this API.
+- **Deploy in phase 1.** `POST /functions` or `PUT /functions/:id` with the code inline, as the guide's `curl` commands do. The API already waits until the version is live (up to `FF_READY_TIMEOUT_SECONDS`, 90 s), and answers in seconds when the code can't load. The CLI's read timeout is therefore longer than that.
+- **Invoke.** `POST /functions/:id/invoke {"input": …}` answers 201 with the invocation: its `id` (the request ID), `status`, `duration`, `memoryUsed`, `output`. The API answers 400 when the function raises or times out (`ErrorType: message`), which the CLI maps to exit code 5; 429 when no instance could take the call in time or the plan's rate is reached; 402 without credit; 500 with a request ID on a platform failure. The Lambda-shaped answer (200 with `X-Amz-Function-Error`) belongs to the API facade (parent §6.6), not to this API.
 - **Deploy in phase 2.** `ff package` builds the zip, then `ff deploy` compares its `CodeSha256` with the function's, uploads only when it differs, and waits for the rollout.
 - **Local runs.** The CLI starts the runtime container with production's flags:
   - `--read-only --tmpfs /tmp --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --memory <m>m`;
-  - the `FUNCTION_*` and `FF_HANDLER` variables;
+  - the variables the backend sets (`BE/src/orchestrator/kubernetes/manifests.ts`): `FUNCTION_NAME`, `FUNCTION_VERSION=$LATEST`, `FUNCTION_MEMORY_LIMIT`, `FUNCTION_TIMEOUT` (milliseconds), `FF_MAX_QUEUE_WAIT_MS`, `LAMBDA_TASK_ROOT=/var/task`, `FF_HANDLER=function.handler`, `PORT`, `TZ=UTC`;
   - the code mounted read-only at `/var/task`, and the port published on `127.0.0.1` only.
 
-  It then waits for `/readyz` (showing the init error if loading fails) and posts the event to `/invoke`, the same protocol the platform uses.
+  It then waits for `/readyz` (showing the init error if loading fails) and posts the payload to `/invoke`, the same protocol the platform uses. The runtime itself wraps the request into the event (`{ body, headers, method, query, path }`, §10 question 1), so a local run sees exactly what a production call sees.
 
 ## 6. Platform changes the CLI needs
 
-| Change | Why | Task |
-|---|---|---|
-| Raise the API's JSON body limit to 7 MB. Check code against the real 900 KiB limit, and invoke input against Lambda's 6 MB, with clear messages. | The measured 100 KB default blocks both | C-03 |
-| Unique function names per tenant, Lambda naming rules, `GET /functions?name=` | Address functions by name (D3) | C-03 |
-| `GET /functions/:id/logs?tail=&sinceSeconds=` | `ff logs` without cluster access. The backend's ServiceAccount can already read pod logs. | C-05 |
-| Function fields `packageType`, `handler`, `codeSha256`, `codeSize`; handler resolution with `.mjs` | Zip packages; Lambda handler names | C-21 |
-| Upload, validation, and artifact storage | Zip packages, safely | C-22 |
-| Version images and a registry (if ADR 0003 picks option A) | Delivering zips to pods (D4) | C-23 |
-| Node.js runtime on glibc | Native modules (D6) | C-25 |
-| Function environment variables (Lambda limit: 4 KB) | SAM `Environment`, and everyday configuration | C-31 |
-| `GET /functions/:id/code` (the zip, or the inline file) | `ff export` | C-32 |
-| The Lambda event shape | Portability of handler code (§10, question 1) | Parent R-04 |
-| Authentication and API tokens | `ff login`, customers, CI | Parent F-01/R-08 → C-40 |
+| Change | Why | Task | State on 2026-10-21 |
+|---|---|---|---|
+| Raise the API's JSON body limit to 7 MB. Check code against the real 900 KiB limit, and invoke input against Lambda's 6 MB, with clear messages. | The measured 100 KB default blocks both | C-03 | not started |
+| Unique function names per account | Address functions by name (D3) | C-03 | under way outside this plan (§1.2) |
+| Lambda's naming rule, and `GET /functions?name=` | Portability; a shortcut for the CLI | C-03 | open: §10, question 6 |
+| `GET /functions/:id/logs` and `/logs/stream` | `ff logs` without cluster access | C-05 | **done** (P-40, P-43) |
+| Authentication: tokens, API keys, the `ff-cli` client | `ff` for customers and CI | C-02, C-40 | **done** (P-11, P-13; the realm has the client) |
+| Metrics, usage, balance, `/me` and `/accounts/:id` | `ff metrics`, `ff usage`, `ff balance`, `ff whoami` | C-09 | **done** (P-12, P-22, P-31, P-50) |
+| Function fields `packageType`, `handler`, `codeSha256`, `codeSize`; handler resolution with `.mjs` | Zip packages; Lambda handler names | C-21 | not started |
+| Upload, validation, and artifact storage | Zip packages, safely | C-22 | not started |
+| Version images and a registry (if ADR 0003 picks option A) | Delivering zips to pods (D4) | C-23 | not started |
+| Node.js runtime on glibc | Native modules (D6) | C-25 | not started |
+| Function environment variables (Lambda limit: 4 KB) | SAM `Environment`, and everyday configuration | C-31 | not started; step 1 of [What to build next](what-to-build-next.md) |
+| `GET /functions/:id/code` (the zip, or the inline file) | `ff export` | C-32 | not started |
+| The Lambda event shape | Portability of handler code (§10, question 1) | Parent R-04 | open |
+| Function URLs, schedules, async invokes, queues, buckets, secrets | Phase 5 | Parent E-01 to E-05 | not started; steps 1 to 3 of [What to build next](what-to-build-next.md) |
 
 ## 7. Working rules
 
-These are the same as the Kubernetes migration:
+These are the same as the Kubernetes migration and the client-readiness plan:
 - `hack/check-resources.sh` runs before every heavy step: builds, Docker runs, cluster tests.
 - One heavy operation at a time.
-- Work on a branch `feat/cli`, with one commit per task: `type(scope): summary (C-xx)`.
+- Work on a branch `feat/cli`, with one commit per task: `type(scope): summary (C-xx)`. Task numbers go in commit messages and in this plan, not in code comments, tests or API documentation, which explain their context in plain words instead.
 - Each task's progress row records its tests and documentation.
+- The CLI's checks join `hack/ci.sh` (C-08), and `hack/install-tools.sh` installs the Rust toolchain it needs.
 
 **Test levels:**
 
@@ -222,8 +277,8 @@ These are the same as the Kubernetes migration:
 |---|---|---|
 | L0 | `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo build --locked` | cargo |
 | L1 | Unit tests: config precedence, error mapping, name rules, packaging rules, zip determinism, docker argument building | `cargo test`, `insta` snapshots |
-| L2 | The real `ff` binary against a mock API: commands, outputs, and exit codes, black-box | `assert_cmd`, `predicates`, `httpmock`, `tempfile` |
-| L3 | Against the dev stack (backend plus k3d) and Docker: `hack/cli-e2e.sh` deploys, invokes, logs, updates, deletes, and runs locally, for both runtimes | bash, like `hack/e2e.sh` |
+| L2 | The real `ff` binary against a mock API: commands, outputs, and exit codes, black-box. The mock's bodies are copied from the API's documented examples (Swagger UI at `/api`), and L3 catches drift between the two. | `assert_cmd`, `predicates`, `httpmock`, `tempfile` |
+| L3 | Against the dev stack (backend plus k3d) and Docker: `hack/cli-e2e.sh` deploys, invokes, logs, updates, deletes, and runs locally, for both runtimes, in `FF_AUTH_MODE=dev` with a `dev_account` like `hack/e2e.sh` | bash, like `hack/e2e.sh` |
 | L4 | Portability (phases 2 and 3): zips checked against Lambda's packaging rules, and the exported `template.yaml` against SAM's schema (`sam validate`, where the SAM CLI is available) | bash |
 
 A task is done when its tests pass at the levels listed, the docs it touches pass `hack/check-docs.py`, and the progress log row is filled in.
@@ -235,7 +290,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 #### C-00: Preparation and ADR 0002
 - **Steps:**
   - Create the branch.
-  - Write `docs/adr/0002-cli.md`, recording D1, D2, D3, D5, and D7 and naming the parent's ADR-007 and ADR-009.
+  - Write `docs/adr/0002-cli.md`, recording D1, D2, D3, D5, D7 and D8, and naming the parent's ADR-007 and ADR-009 and ADR 0004's `ff-cli` client.
 - **Done when:** `hack/check-docs.py` passes on the new and changed documents.
 
 #### C-01: One CLI
@@ -254,58 +309,60 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 
 ### Phase 1: the CLI on today's API
 
-#### C-02: Configuration and API client
-- **Config:** files, profiles, and precedence (D2); `ff config set` and `ff config show`. The TLS rule: refuse `http://` outside localhost unless `--allow-http`.
+#### C-02: Configuration, authentication and the API client
+- **Config:** files, profiles, and precedence (D2); `ff config set`, `ff config show` (the token shown as `ffk_1a2b…` only) and `ff config set-token`, which reads the token from a prompt or stdin. The TLS rule: refuse `http://` outside localhost unless `--allow-http`.
+- **Authentication (D8):** `Authorization: Bearer` from `FF_TOKEN` or `credentials.toml`; `X-FF-Account` from `--account`, `FF_ACCOUNT` or the profile; `X-FF-Dev-Account` from the profile's `dev_account`. Without any token, and without `dev_account`, the CLI says how to get a key before it calls the API.
 - **API client:**
-  - timeouts: connect 5 s; read 120 s for deploys (the API waits up to 90 s for readiness); for invokes, the function timeout plus 90 s (cold start) plus a margin;
-  - sends `User-Agent: ff-cli/<version>`, and `Authorization: Bearer` when a token is configured;
-  - maps NestJS error bodies (`{statusCode, message, error}`) to typed errors.
-- **Tests:** L1 for precedence, the TLS rule, and error mapping; L2 against `httpmock` (an unreachable API exits 3 with the address in the message).
+  - timeouts: connect 5 s; read 120 s for deploys (the API waits up to 90 s for readiness); for invokes, the function timeout, plus one more for the wait for a free instance (D14 of the client-readiness plan), plus 90 s (cold start) plus a margin;
+  - sends `User-Agent: ff-cli/<version>`;
+  - maps the API's error bodies (`{statusCode, message, error}`, and a request ID when the API gives one) to typed errors: 401 and 403 name what is missing; 402, 403 and 429 become exit 6; a 429 on a read (list, get, history, logs) is retried once after `Retry-After`, never a write;
+  - 503 from the logs routes ("the log store is unavailable") is reported as such, exit 3.
+- **Tests:** L1 for precedence, the TLS rule, the headers sent, and error mapping; L2 against `httpmock` (an unreachable API exits 3 with the address in the message; a 403 names the scope; a 429 read is retried once).
 
 #### C-03: Backend: request limits and function names
 - **Limits:**
-  - `app.useBodyParser('json', { limit: '7mb' })` in `BE/src/main.ts`, with the app created as a `NestExpressApplication` (NestJS 12 is installed since P-64 of the [client-readiness plan](client-readiness-plan.md), 11.2 before it since P-09);
+  - the JSON body limit raised to 7 MB where the app is set up (`BE/src/app-setup.ts`), on NestJS 12;
   - code limited to 900 KiB (in bytes, checked in the DTO, with a message that names the limit);
   - invoke input limited to 6 MB once serialized, answered with 413 and `RequestEntityTooLargeException`, Lambda's name.
-- **Names:**
-  - Lambda's naming rule on create and update;
-  - a unique index on `(account_id, name)`, with `409 Conflict` for duplicates (the tenant column is `user_id` until the client-readiness plan's P-12 renames it);
-  - `GET /functions?name=<name>`;
-  - a TypeORM migration. Every environment builds its schema from migrations since the client-readiness plan's P-01. Databases that already hold duplicate names need them renamed first, which the migration reports.
+- **Names.** Unique names per account are under way outside this plan (§1.2): the unique index on `(account_id, name)`, `409 Conflict`, and the migration that renames duplicates. What this task adds, once that lands:
+  - `GET /functions?name=<name>`, so the CLI needn't list to resolve a name;
+  - Lambda's naming rule as the API's rule **only if** you decide so in §10, question 6; otherwise nothing, and the CLI warns.
 - **Tests:**
   - L1: DTO validation, and the conflict on create and on rename.
   - The e2e script gains checks that 150 KB of code is accepted, 1 MB is refused with the clear message, and a 1 MB input is accepted.
-- **Docs:** the limits in the getting-started guide and the README.
+- **Docs:** the limits in the getting-started guide and the README, which both still say "about 100 KB".
 
 #### C-04: Core commands
 - **`ff deploy <file>`:**
-  - the name comes from `--name`, else the file name without its extension;
+  - the name comes from `--name`, else the file name without its extension, trimmed as the API trims it; a name outside Lambda's rule gets a warning (D3);
   - the runtime comes from the extension (`.ts`, `.js`, `.cjs` → `nodejs`; `.py` → `python`), or `--runtime`;
-  - the CLI looks the name up, then creates the function or updates it with only the changed fields;
+  - the CLI looks the name up in the list, then creates the function or updates it with only the changed fields; `--min-instances` and `--max-instances` go to `PUT /functions/:id/scaling-config` after the rollout;
   - "no changes" when the SHA-256 of the code equals the server's;
-  - a spinner while the API waits for the rollout, and on failure the API's diagnostics with exit 4;
-  - a 409 from a concurrent create is retried as an update.
+  - a spinner while the API waits for the rollout, and on failure the API's diagnostics with exit 4 (a function that failed to load stays, in `ERROR`, with its error in `ff get`);
+  - a 409 on create means another deploy took the name first: the CLI reloads the list and updates that function; a 409 on a rename ("the new version is live, but the function keeps its name") is printed as the API says it, exit 3;
+  - a 400 naming the plan ("The beta plan allows 5 per account") is printed as is, exit 3.
 - **`ff invoke`:**
   - `--data` takes inline JSON, `@file`, or `-` for stdin;
-  - prints the output (pretty-printed in text mode) and the duration;
-  - on `ERROR` or `TIMEOUT`, prints the error on stderr and exits 5;
+  - prints the output (pretty-printed in text mode), the request ID, the duration and the memory used;
+  - on `ERROR` or `TIMEOUT`, prints the error on stderr and exits 5; on 429 (no instance in time, or the plan's rate), 402 and 403, exits 6;
   - `--raw` prints only the output, for pipes.
-- **`ff list`, `ff get`, `ff history`** print tables, or JSON. `get` shows the stored error of a function in `ERROR`.
+- **`ff list`, `ff get`, `ff history`** print tables, or JSON. `get` shows the stored error of a function in `ERROR`, its `minInstances` and `maxInstances`, and whether it scales to zero. `history` shows each call's request ID, so `ff logs --request-id` can follow it.
+- **`ff scale <name> --min N --max N`** calls `PUT /functions/:id/scaling-config` and prints the result; the plan's `instancesPerFunction` bounds both, and the API's message says so.
 - **`ff delete`** asks for confirmation in a terminal, unless `--yes` is given. With no terminal (CI), it requires `--yes`.
 - **Tests:**
-  - L1: name and runtime inference, and change detection;
-  - L2: each command against the mock, including the exit codes;
-  - L3: `hack/cli-e2e.sh` runs deploy → invoke → update → history → delete for `examples/hello.ts` and `examples/hello.py`, plus the error and timeout paths with `examples/slow.py`.
+  - L1: name and runtime inference, the Lambda-rule warning, and change detection;
+  - L2: each command against the mock, including the exit codes and the 409 paths;
+  - L3: `hack/cli-e2e.sh` runs deploy → invoke → scale → update → history → delete for `examples/hello.ts` and `examples/hello.py`, plus the error and timeout paths with `examples/slow.py`, as a second account where the first account's functions answer 404.
 
 #### C-05: Logs
-- **Backend:**
-  - `GET /functions/:id/logs?tail=200&sinceSeconds=` lists the function's pods by label (`ff.dev/function-id`) and reads each one's `function` container log with timestamps;
-  - lines are prefixed with the pod name when there are several pods;
-  - it is scoped to the caller's account: another account's function answers 404 (D4 of the client-readiness plan).
-- **Built by the client-readiness plan's P-40 (2026-10-17):** the backend part, as `GET /functions/:id/logs?tail=&sinceSeconds=`, scoped to the account, in the shape the log store's API keeps (P-43): `{ lines: [{ time, instance, requestId, stream, message }], next }`, oldest first, the instance in place of a pod-name prefix. The CLI part is still to do.
-- **Since P-43** the route reads the log store, so lines outlive their instance. `tail` and `sinceSeconds` work as before; `limit`, `start`, `end`, `q`, `requestId` and `cursor` are new, and `next` leads to older lines. A line's `instance` is null on the store's notice of dropped lines, whose `stream` is `ff`. `GET /functions/:id/logs/stream` is the live tail, as Server-Sent Events: `--follow` can read it instead of polling.
-- **CLI:** `ff logs <name> [--tail N] [--follow]`. `--follow` polls every 2 s with `sinceSeconds` and drops lines it has already printed, using their timestamps. Streaming can come later.
-- **Tests:** L1 backend against the fake Kubernetes API (several pods, no pods, a pod with no log yet); L2 CLI; L3 for a `print` in a function showing up in `ff logs`.
+- **Backend: done.** `GET /functions/:id/logs` (P-40, then P-43) answers `{ lines: [{ time, instance, requestId, stream, message }], next }`, oldest first, from the log store, for the plan's retention. `tail`, `sinceSeconds`, `start`, `end`, `limit`, `q` (a phrase), `requestId` and `cursor` narrow it; `next` leads to older lines. A line's `instance` is null on the store's notice of dropped lines, whose `stream` is `ff`. `GET /functions/:id/logs/stream` is the live tail, as Server-Sent Events: a `message` event per line, a `ping` every 15 s, an `end` after 30 minutes, an `unavailable` event when the store fails. Another account's function answers 404 as JSON before the stream.
+- **CLI:** `ff logs <name>`:
+  - `--tail N` (default 100), `--since 15m|2h|1d` (to `sinceSeconds`) or `--start`/`--end` (RFC 3339), `--grep <phrase>` (to `q`), `--request-id <id>`;
+  - `--all` follows `next` until the window is exhausted;
+  - `--follow` opens the stream, prints each line as it comes, reopens it on `end`, waits 5 s and reopens on `unavailable` for up to a minute, then exits 3; through a proxy that buffers streams, `--follow --poll` falls back to polling with `sinceSeconds` every 2 s, dropping lines already printed;
+  - text mode prints `time [instance] message`, with the request ID under `--verbose`; JSON mode prints one line per JSON object;
+  - the store's notice of dropped lines is printed as a warning, not as a function line.
+- **Tests:** L1 for the duration parser and the stream parser (events split across reads, `ping`, `end`, `unavailable`); L2 CLI against the mock, including a paged window and a stream; L3 for a `print` in a function showing up in `ff logs`, and in `ff logs --follow`, within 10 s.
 
 #### C-06: Local runs (`ff local invoke`, `ff local start`)
 - **Docker:** checks `docker version` and says clearly when Docker is missing.
@@ -313,25 +370,34 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
   - from `FF_RUNTIME_IMAGE_NODEJS` / `_PYTHON`, else `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2`;
   - built locally in this repository; published images come in C-42.
 - **The container gets production's hardening and settings** (§5):
-  - memory from `--memory`, default 128 MB;
-  - the timeout from `--timeout`, default 5 s;
-  - a single file is mounted as `/var/task/function.<ext>`, a folder as `/var/task`, both read-only;
+  - memory from `--memory`, default 128 MB; the timeout from `--timeout`, default 5 s, sent in milliseconds as `FUNCTION_TIMEOUT`;
+  - a single file is mounted as `/var/task/function.<ext>`, a folder as `/var/task`, both read-only; the Node.js runtime loads `.ts`, `.js` and `.cjs` (`.mjs` comes with C-21);
   - a random port on `127.0.0.1`.
 - **`ff local invoke`:**
   - waits for `/readyz` and prints the init error if loading fails;
-  - posts the event and prints the output, the `x-ff-duration-ms` and `x-ff-max-memory-used-mb` headers, and the container's log lines;
+  - posts the event and prints the output, the `X-FF-Duration-Ms` and `X-FF-Max-Memory-Used-Mb` headers, the error when `X-FF-Function-Error` is set (exit 5), and the container's log lines;
   - removes the container, even after Ctrl-C.
 - **`ff local start`** keeps the container running and prints its address. `--watch` restarts it when a file changes (about 1 s, debounced).
 - **Tests:** L1 for the docker argument builder; L3 with real Docker: hello in both runtimes, an init error, a timeout, and an out-of-memory error (the runtimes report all of these).
 
 #### C-07: `ff init` and examples
-- `ff init <name> --runtime nodejs|python` creates `<name>/function.<ext>`, `<name>/events/event.json`, and `<name>/README.md` from templates embedded in the binary. The templates follow the event shape decided in §10, question 1.
+- `ff init <name> --runtime nodejs|python` creates `<name>/function.<ext>`, `<name>/events/event.json`, and `<name>/README.md` from templates embedded in the binary. The templates follow the event shape decided in §10, question 1, which is why that question comes before this task.
 - **Tests:** L1 snapshots of the generated files; L3 for init → local invoke → deploy → invoke.
 
 #### C-08: Phase-1 release and docs
 - **Build:** `hack/build-cli.sh` makes the static Linux build (`x86_64-unknown-linux-musl`), writes a SHA-256 checksum, and runs the resource check first. It can build inside `rust:alpine` when the musl target isn't installed.
-- **Docs:** `cli/README.md` becomes the command reference. The getting-started guide gains "Using the CLI", the CLI equivalents of its `curl` section.
-- **Done when:** on the dev stack, `ff deploy examples/hello.py --name hello && ff invoke hello --data '{"name": "x"}'` works, and `hack/cli-e2e.sh` is green.
+- **CI:** `hack/ci.sh` gains the CLI's L0 to L2 next to the backend's levels, and `hack/cli-e2e.sh` next to `hack/e2e.sh`; `hack/install-tools.sh` installs the Rust toolchain.
+- **Docs:** `cli/README.md` becomes the command reference. The getting-started guide gains "Using the CLI": the CLI equivalents of its `curl` commands in "Use FF" and "Everyday tasks", starting with the API key.
+- **Done when:** on the dev stack, `ff deploy examples/hello.py --name hello && ff invoke hello --data '{"name": "x"}'` works, and `hack/cli-e2e.sh` is green in CI.
+
+#### C-09: Account, usage, balance and metrics
+- **`ff whoami`:** `GET /me`: the user (or the key's name) and the current account with its role. **`ff accounts`:** the user's accounts, from the same call.
+- **`ff account`:** `GET /accounts/:id` for the current account: name, status, plan, role, internet egress (so a developer whose `fetch` fails learns why), and the plan's limits from its view when the API exposes them.
+- **`ff usage [--month YYYY-MM] [--csv]`:** `GET /usage?month=`, as a table per function (requests, GB-seconds, estimated cost, the calls not billed), or the API's CSV with `Accept: text/csv`.
+- **`ff balance`:** `GET /billing/balance`, with the low-balance state when the API reports one.
+- **`ff metrics [<name>] [--period 60|300|3600] [--since 1h]`:** `GET /functions/:id/metrics` or `GET /metrics`, a table with a row per period: invocations, errors, throttles, duration (average, p50, p95, p99, maximum), cold starts, instances.
+- **Scopes:** `metrics:read` and `usage:read`; `ff whoami` and `ff account` need none beyond a valid token. A missing scope is named, exit 6.
+- **Tests:** L1 for the month and period parsing; L2 against the mock; L3 for `ff usage` after the e2e invocations, and `ff metrics hello` showing them.
 
 ### Phase 2: packages with dependencies
 
@@ -359,7 +425,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 
 #### C-22: Upload and validation (backend)
 - **Upload:**
-  - `PUT /functions/:id/code` with `Content-Type: application/zip`;
+  - `PUT /functions/:id/code` with `Content-Type: application/zip`, under the `functions:write` scope;
   - streamed to disk and refused beyond 50 MB, Lambda's direct-upload limit;
   - for larger packages (up to 250 MB unzipped), later: `POST /uploads` returns a pre-signed S3 URL, then `PUT /functions/:id/code {"uploadId": …}`.
 - **Validation** with `yauzl` (a new backend dependency), refusing:
@@ -368,7 +434,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
   - more than 250 MB unzipped, or more than 20,000 files;
   - compression ratios that suggest a zip bomb;
   - a handler module that doesn't exist (for example `src/app.handler` needs `src/app.js|.mjs|.cjs|.ts` or `src/app.py`).
-- **Storage:** content-addressed, `artifacts/<tenant>/<function>/<sha256>.zip`. An identical upload is a no-op.
+- **Storage:** content-addressed, `artifacts/<account>/<function>/<sha256>.zip`. An identical upload is a no-op.
 - **Tests:** L1 with crafted zips (zip-slip, a bomb, symlinks, a missing handler, too large, an empty zip); L3 uploading through the API.
 
 #### C-23: Version images and the registry (backend; option A)
@@ -392,7 +458,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 
 #### C-24: Inline code on the same path (decided in ADR 0003)
 - If option A is chosen, turn inline code into a one-file zip inside the backend, so there is one delivery path. ConfigMaps for code, and their 900 KiB limit, then disappear.
-- The API's `code` field stays, for the dashboard and quick edits.
+- The API's `code` field stays, for the console and quick edits.
 
 #### C-25: Node.js runtime on glibc
 - Move to `node:24-slim`, keeping the same hardening. Record the size difference in the runtime README.
@@ -427,25 +493,28 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
   - `Parameters`;
   - `!Ref` and `!Sub` within that subset.
 - **Runtime names map** as follows: `nodejs22.x` and `nodejs24.x` → `nodejs`; `python3.12` and `python3.13` → `python`. Other runtimes are refused, with the supported list.
-- **Anything outside the subset** fails with one message listing every unsupported key and resource.
+- **Anything outside the subset** fails with one message listing every unsupported key and resource. `Events` (schedules, queues, URLs) join the subset in phase 5, with parent E-10.
 - **Tests:** L1 for template fixtures (valid, unsupported, malformed); L3 for a `sam init` hello world deployed unchanged; L4 `sam validate` on the fixtures, where available.
 
-#### C-31: Function environment variables (backend)
+#### C-31: Function environment variables (backend and CLI)
 - **Field:** `environment`, a map of names to values, limited to 4 KB in total, as on Lambda.
 - **Names:** must be valid variable names. The reserved prefixes `AWS_`, `LAMBDA_`, `FF_`, and `FUNCTION_` are refused (parent §6.2).
-- **Delivery:** injected into the Deployment. Values are never logged.
-- **Secrets:** later, from the secrets store (OpenBao, parent §4.10).
-- **Tests:** L1 for validation and manifests; L3 for a function reading its variable.
+- **Delivery:** injected into the Deployment. Values are never logged, and the API never returns them to a `viewer`.
+- **CLI:** `--env KEY=value` on `ff deploy` (repeatable), and `ff env list|set|unset <name>`: `list` hides values unless `--show`; `set` reads a value from stdin when none is given, so secrets stay out of the shell's history. `ff local` passes `--env` to the container.
+- **Secrets:** later, from the secrets store (OpenBao, parent §4.10), as step 1 of [What to build next](what-to-build-next.md) says.
+- **Tests:** L1 for validation and manifests, and the CLI's parsing; L3 for a function reading its variable, deployed with `--env` and changed with `ff env set`.
 
 #### C-32: `ff export --target aws` (parent §7.1, first slice)
-- For each function, `ff export` writes a SAM `template.yaml`: runtime names mapped back, `Handler`, `MemorySize`, `Timeout`, `Environment`.
+- For each function, `ff export` writes a SAM `template.yaml`: runtime names mapped back, `Handler`, `MemorySize`, `Timeout`, `Environment` (names only, unless `--with-values`), and `minInstances` as provisioned concurrency.
+- A name outside Lambda's rule becomes a logical ID made of its letters, digits, `_` and `-`, and the export's checklist lists each such rename (D3).
 - It also writes the code zips, compiled to JavaScript for Node.js. The backend gains `GET /functions/:id/code` for this.
 - It adds a `MIGRATION.md` checklist. Terraform output comes later.
-- **Tests:** L1 for the generated template against fixtures; L4 `sam validate` on the output; L3 for an export after a deploy.
+- **Tests:** L1 for the generated template against fixtures, including a renamed function; L4 `sam validate` on the output; L3 for an export after a deploy.
 
 #### C-33: `ff doctor` (parent §7.4, first slice)
 - **Static checks on a project:**
   - memory, timeout, and payload beyond Lambda's limits;
+  - a function name outside Lambda's rule (D3);
   - writes outside `/tmp` (heuristic);
   - FF-only environment variables and hard-coded FF endpoints;
   - deprecated runtimes;
@@ -455,10 +524,12 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 
 ### Phase 4: customer-ready
 
-#### C-40: `ff login` (requires the parent's F-01/R-08)
-- An OAuth 2.0 device flow against the identity provider (Keycloak, parent §4.10). Tokens go in `credentials.toml` (0600), with refresh.
-- Plus `ff logout`, `ff whoami`, and API keys for CI (`FF_TOKEN`).
-- **Tests:** L2 for the device flow against a mock token endpoint.
+#### C-40: `ff login` and API keys
+- **The device flow** (RFC 8628) against Keycloak's `ff-cli` client, which both realm files already define as a public client with the device grant turned on and the `ff-api` audience. The CLI prints the verification address and the code, opens the browser when there is one, and polls the token endpoint at the interval Keycloak gives. Tokens go in `credentials.toml` (0600), with the refresh token; a refresh happens before a call when the access token is about to expire, and a failed refresh says to log in again.
+- **`ff logout`** removes the profile's tokens. `ff whoami` (C-09) then shows the user and the chosen account.
+- **`ff api-keys create --name <n> --scopes a,b [--expires 90d]`, `list`, `revoke <id>`:** `POST`, `GET` and `DELETE /api-keys`. Only an owner's user token may manage keys, which is why this task comes with the login. The new key is printed once, and `--output json` gives it in a field, for scripts.
+- **Not blocked any more:** this task was waiting for the parent's F-01/R-08, done by the client-readiness plan's P-11 and P-13. It can move to phase 1 (§10, question 7).
+- **Tests:** L2 for the device flow against a mock authorization server (pending, slow-down, expired, success), the refresh, and the keys; L3 against the development realm (`docker compose --profile auth`), when it is up.
 
 #### C-41: Distribution
 - **Builds:** Linux x64 and arm64 (static musl), macOS x64 and arm64, Windows x64.
@@ -470,7 +541,30 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 - `ff local` then works outside this repository.
 
 #### C-43: CI usage
-- Examples for GitHub Actions and GitLab CI: install, deploy with `FF_TOKEN`, and `--output json` with exit codes.
+- Examples for GitHub Actions and GitLab CI: install, an API key with the scopes a deploy needs in `FF_TOKEN`, deploy with `--output json`, and the exit codes (a 6 fails the job with the account's message, not the function's).
+
+### Phase 5: the services after functions
+
+The CLI side of steps 1 to 3 of [What to build next](what-to-build-next.md). Each task starts when its service's API exists, and each follows the same rules: the AWS shape where there is one, `--output json`, exit codes, L2 against the mock, L3 against the stack, and the SAM subset of C-30 extended so `template.yaml` carries the new resource (parent E-10).
+
+#### C-50: Function URLs and custom domains (parent E-01)
+- `ff url enable <name> [--auth none|key]`, `ff url disable`, `ff url show`: the function's public address, and `ff domains add|remove|list` with the DNS record to set and the certificate's state.
+- `ff invoke --http GET /path?x=1` sends an API Gateway v2 event through the URL, for testing; `ff local start` serves the same event shape on its port.
+- `ff export` writes `FunctionUrlConfig` and `HttpApi` events.
+
+#### C-51: Schedules (parent E-02)
+- `ff schedule set <name> "rate(5 minutes)"|"cron(…)" [--input @event.json]`, `ff schedule remove`, `ff schedule list`, with the next runs printed.
+- `ff export` writes `Schedule` events.
+
+#### C-52: Async invokes, queues and event sources (parent E-03, E-05)
+- `ff invoke --async <name>` returns the request ID at once; `ff history` shows the retries and the dead-letter outcome.
+- `ff queues create|list|purge|delete`, `ff queues send <queue> --data …`, `ff queues receive <queue>` for debugging, and `ff event-sources add <queue> <function> [--batch-size] [--batching-window]`, `remove`, `list`.
+- `ff export` writes `SQS` events and the queues as `AWS::SQS::Queue`.
+
+#### C-53: Buckets and secrets (parent E-04, and step 1's secrets)
+- `ff buckets create|list|delete`, `ff buckets keys` for the account's access keys, `ff buckets notify <bucket> <function> [--prefix] [--suffix]`.
+- `ff secrets set|list|unset <function> <NAME>` for values that must not live in `environment`, read from stdin or a prompt.
+- `ff export` writes `S3` events and the buckets as `AWS::S3::Bucket`.
 
 ## 9. Risks
 
@@ -479,28 +573,34 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 | The registry (option A) adds an operated component | The C-20 spike measures it first. Zot is a single binary with built-in GC. It also fixes the dev cluster's image GC problem. |
 | Native modules built for the wrong platform | D6 (glibc Node.js runtime), `--container` builds, and pip's `--platform` wheels |
 | Portability is only skin-deep while handlers read `event.body` | §10, question 1; `ff doctor` flags it meanwhile |
-| Cold starts at the smallest size (about 10 s, migration plan K-13) make `deploy` and `local` feel slow | K-13 (CPU burst); `ff local start` keeps a container warm while developing |
+| Function names outside Lambda's rule reach AWS and `sam deploy` fails | `ff deploy` warns, `ff doctor` flags, `ff export` renames and says so (D3); or the API adopts Lambda's rule (§10, question 6) |
+| A token lands in the shell history or in logs | No `--token` flag (D2); `set-token` and `env set` read from stdin; `config show` masks the token; `--verbose` never prints headers |
+| Cold starts at the smallest size (6 to 11 s under gVisor, client-readiness P-62) make `deploy` and `local` feel slow | `ff local start` keeps a container warm while developing; the migration plan's K-13 continues on the platform side |
+| The live tail doesn't work through a proxy that buffers responses | `--follow --poll` falls back to polling (C-05) |
 | SAM scope creep | A documented subset, with one clear error listing everything unsupported |
 | Docker Desktop differences on macOS (file mounts, ports) | `ff local` tested on Linux first; macOS in phase 4, with C-41 |
 | Customers' TLS-inspecting proxies | The operating system's certificate store (D1); `HTTPS_PROXY` honoured |
 
 ## 10. Open questions for you
 
-1. **Event shape.** Today FF hands the payload to the handler as `event.body`, inside `{body, headers, method, query, path}`. That is the old wrapper's format, kept in K-05. On AWS Lambda, a direct invoke passes the payload as `event` itself, and the parent plan's runtime contract (§6.2, task R-04) follows Lambda. Code written for FF today therefore needs changes on Lambda. **Recommendation:** add runtime protocol v2, where the payload is the event, as the default for new functions, and keep v1 per function for existing ones. `ff init` templates follow v2.
+1. **Event shape.** Today both runtimes hand the payload to the handler as `event.body`, inside `{body, headers, method, query, path}` built from the HTTP request to `/invoke`. That is the old wrapper's format, kept in K-05. On AWS Lambda, a direct invoke passes the payload as `event` itself, and the parent plan's runtime contract (§6.2, task R-04) follows Lambda. Code written for FF today therefore needs changes on Lambda. Function URLs (step 1 of [What to build next](what-to-build-next.md)) will need the API Gateway v2 shape too, where `body` is a string and `isBase64Encoded` says how to read it. **Recommendation:** add runtime protocol v3, where the payload is the event for direct invokes and the API Gateway v2 shape for URLs, as the default for new functions, and keep the wrapper per function for existing ones. `ff init` templates follow it, which is why this question comes before C-07.
 2. **Code delivery.** May the C-20 spike go ahead with option A? It adds a registry to the platform.
 3. **Where releases and images live.** Which domain or registry should host the CLI downloads and the public runtime images, given that customers may not rely on GitHub?
-4. **Inline code long-term.** Should the API's `code` field stay as a convenience for the dashboard, with C-24 making it a zip internally? That is the recommendation.
+4. **Inline code long-term.** Should the API's `code` field stay as a convenience for the console, with C-24 making it a zip internally? That is the recommendation.
 5. **Windows.** Is it needed in phase 4, or only when a customer asks?
+6. **Function names.** The API is adopting unique names of 1 to 100 characters, any characters. Lambda allows 1 to 64 of `A-Z a-z 0-9 _ -`. Should the API adopt Lambda's rule (which refuses names the console accepts today, and needs a renaming migration), or keep its rule while the CLI warns and `ff export` renames? **Recommendation:** keep the API's rule, warn in the CLI. Nothing on FF breaks with a longer name, and the export handles the rest.
+7. **`ff login` sooner.** Its Keycloak client exists, and nothing blocks it. Phase 1 works with API keys. Should C-40 move right after C-09, so the first customers never paste a key? **Recommendation:** yes, if the first pilot customers are teams that log in to the console anyway; otherwise keep the order.
 
 ## 11. Effort (rough estimates)
 
 | Phase | Working days | Notes |
 |---|---|---|
 | 0 | 1–2 | Mostly deleting and moving code |
-| 1 | 7–9 | C-03 and C-05 touch the backend; C-06 needs Docker in the tests |
+| 1 | 10–13 | Authentication and the account commands are new since the first estimate; C-03 touches the backend; C-06 needs Docker in the tests; C-05 is CLI-only now |
 | 2 | 15–20 | The spike, upload and validation, the OCI push, the glibc runtime, packaging |
-| 3 | 10–15 | The SAM subset is the largest part |
-| 4 | 5–8 | Once authentication exists (parent F-01/R-08) |
+| 3 | 11–16 | The SAM subset is the largest part; `ff env` is new |
+| 4 | 4–6 | The login is unblocked and its client exists |
+| 5 | 2–4 per task | Each one waits for its service |
 
 ## 12. Progress log
 
@@ -508,13 +608,14 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 |---|---|---|---|
 | C-00 Preparation and ADR 0002 | ⏳ Planned | | |
 | C-01 One CLI | ⏳ Planned | | |
-| C-02 Configuration and API client | ⏳ Planned | | |
-| C-03 Backend: request limits and names | ⏳ Planned | | |
+| C-02 Configuration, authentication and API client | ⏳ Planned | | |
+| C-03 Backend: request limits and names | 🔶 Names under way outside this plan (2026-10-21, uncommitted in the working tree); the limits are not started | | |
 | C-04 Core commands | ⏳ Planned | | |
-| C-05 Logs | ⏳ Planned | | |
+| C-05 Logs | 🔶 Backend done (client-readiness P-40, P-43); the CLI part is planned | | |
 | C-06 Local runs | ⏳ Planned | | |
 | C-07 `ff init` and examples | ⏳ Planned | | |
 | C-08 Phase-1 release and docs | ⏳ Planned | | |
+| C-09 Account, usage, balance and metrics | ⏳ Planned | | |
 | C-20 Spike and ADR 0003 | ⏳ Planned | | |
 | C-21 Function model v2 | ⏳ Planned | | |
 | C-22 Upload and validation | ⏳ Planned | | |
@@ -527,7 +628,11 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 | C-31 Environment variables | ⏳ Planned | | |
 | C-32 `ff export --target aws` | ⏳ Planned | | |
 | C-33 `ff doctor` | ⏳ Planned | | |
-| C-40 `ff login` | ⏳ Planned | | |
+| C-40 `ff login` and API keys | ⏳ Planned, unblocked (the `ff-cli` client exists) | | |
 | C-41 Distribution | ⏳ Planned | | |
 | C-42 Published runtime images | ⏳ Planned | | |
 | C-43 CI usage | ⏳ Planned | | |
+| C-50 Function URLs and custom domains | ⏳ Waits for the platform (parent E-01) | | |
+| C-51 Schedules | ⏳ Waits for the platform (parent E-02) | | |
+| C-52 Async invokes, queues and event sources | ⏳ Waits for the platform (parent E-03, E-05) | | |
+| C-53 Buckets and secrets | ⏳ Waits for the platform (parent E-04) | | |

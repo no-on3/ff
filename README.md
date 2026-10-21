@@ -111,7 +111,7 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 - [Client-readiness plan](docs/client-readiness-plan.md): the work that takes FF to its first paying customers, task by task, with its progress log.
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.
-- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in four phases (proposed).
+- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in six phases (proposed).
 - [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why; how to deploy the platform.
 - [deploy/backup](deploy/backup/README.md): the backups, the restore runbook and the monthly drill.
 - [The documentation's index](docs/README.md), with the architecture decisions (ADRs).
