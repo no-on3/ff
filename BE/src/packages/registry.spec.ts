@@ -43,7 +43,7 @@ describe('Registry: the OCI distribution API, as code images need it', () => {
     expect(fake.blobs.get(blob.digest)?.length).toBe(4096);
   });
 
-  it('streams a blob from its file', async () => {
+  it('streams a blob from its file, stating its length, as a monolithic upload must', async () => {
     const bytes = randomBytes(300_000);
     const file = join(dir, 'layer.tar.gz');
     writeFileSync(file, bytes);
@@ -51,6 +51,8 @@ describe('Registry: the OCI distribution API, as code images need it', () => {
     await registry().pushBlob(REPO, fileBlob(file, sha256(bytes), bytes.length));
 
     expect(fake.blobs.get(sha256(bytes))?.equals(bytes)).toBe(true);
+    const upload = fake.requests.find((request) => request.method === 'PUT');
+    expect(upload).toMatchObject({ contentLength: '300000', transferEncoding: undefined });
   });
 
   it('starts an upload again when one fails, or gets no answer, and gives up after three tries, saying why', async () => {

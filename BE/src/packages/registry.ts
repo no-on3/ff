@@ -105,7 +105,8 @@ export class Registry {
         if (started.status !== 202) return Registry.refused(started, `an upload to ${repository}`);
         const location = new URL(started.headers.get('location') ?? '', this.base);
         location.searchParams.set('digest', blob.digest);
-        const done = await this.request('PUT', location.toString(), { 'content-type': 'application/octet-stream' }, blob.bytes, 1);
+        // Its length stated, as the distribution spec wants a monolithic upload: a stream would go chunked, which Zot refuses.
+        const done = await this.request('PUT', location.toString(), { 'content-type': 'application/octet-stream', 'content-length': String(blob.size) }, blob.bytes, 1);
         if (done.status !== 201) return Registry.refused(done, `blob ${blob.digest}`);
         return;
       } catch (error) {

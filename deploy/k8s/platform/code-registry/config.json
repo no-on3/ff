@@ -1,0 +1,39 @@
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "gc": true,
+    "gcDelay": "1h",
+    "gcInterval": "24h"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "auth": {
+      "htpasswd": {
+        "path": "/etc/zot-auth/htpasswd"
+      },
+      "failDelay": 1
+    },
+    "accessControl": {
+      "repositories": {
+        "ff-code/**": {
+          "policies": [
+            {
+              "users": ["ff-backend"],
+              "actions": ["read", "create", "update", "delete"]
+            },
+            {
+              "users": ["ff-node"],
+              "actions": ["read"]
+            }
+          ],
+          "defaultPolicy": []
+        }
+      }
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}

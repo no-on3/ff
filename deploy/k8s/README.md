@@ -49,7 +49,8 @@ Closing an account deletes its log lines with the delete key (P-45). The backend
 - its migrations, as a Job;
 - the console and the admin app, two replicas each;
 - Keycloak;
-- the edge proxy in `ff-edge`: Caddy, TLS from Let's Encrypt for four hostnames and for functions' URLs under the function domain, and the admin app and Keycloak's administration for FF's addresses only.
+- the edge proxy in `ff-edge`: Caddy, TLS from Let's Encrypt for four hostnames and for functions' URLs under the function domain, and the admin app and Keycloak's administration for FF's addresses only;
+- the code registry, Zot, which keeps packages' code images for the nodes to mount ([ADR 0003](../../docs/adr/0003-code-delivery.md)).
 
 PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`, `FE/`, `admin/` and `deploy/edge/` (getting-started, "The platform's images").
 
@@ -66,7 +67,12 @@ PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`
 
    ```bash
    kubectl -n ff-system create secret generic ff-backend --from-literal=DB_PASSWORD=… --from-literal=MINIO_ACCESS_KEY=… \
-     --from-literal=MINIO_SECRET_KEY=… --from-literal=FF_SMTP_URL='smtp://user:password@smtp.example.tn:587'
+     --from-literal=MINIO_SECRET_KEY=… --from-literal=FF_SMTP_URL='smtp://user:password@smtp.example.tn:587' \
+     --from-literal=FF_CODE_REGISTRY_PASSWORD="$BACKEND_PASSWORD"
+   # The code registry's two users, bcrypt: htpasswd comes with Apache's tools, or as
+   # docker run --rm httpd:2.4.69-alpine htpasswd -nbBC 12 <user> <password>
+   htpasswd -nbBC 12 ff-backend "$BACKEND_PASSWORD" > htpasswd && htpasswd -nbBC 12 ff-node "$NODE_PASSWORD" >> htpasswd
+   kubectl -n ff-system create secret generic ff-code-registry --from-file=htpasswd=./htpasswd
    kubectl -n ff-system create secret generic keycloak --from-literal=KC_DB_PASSWORD=… \
      --from-literal=KC_BOOTSTRAP_ADMIN_USERNAME=admin --from-literal=KC_BOOTSTRAP_ADMIN_PASSWORD=… --from-literal=FF_SMTP_PASSWORD=…
    # The keys that encrypt functions' variables and secrets at rest: one a line, <id>:<32 bytes in base64>, the first sealing
@@ -75,8 +81,29 @@ PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`
    ```
 
    Keep a copy of the keys file apart from the cluster and the database, as the backups' own key is kept (`deploy/backup/README.md`): without it, no function's variables or secrets can be read. To change keys, put a new line first in the Secret, restart the backend, and remove the old line once every function has been updated since.
+6. Each node's containerd told where code images are ("The code registry", below).
 
-Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox and the function URLs' settings, runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
+Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox, the function URLs' settings and the code registry's Secrets, runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
+
+**The code registry** ([ADR 0003](../../docs/adr/0003-code-delivery.md)). A function made from a package runs its code from an image of its own, which the backend makes from the package and pushes to the registry, and which the node pulls to mount at the function's `/var/task`. The registry is Zot, in its minimal build, in `ff-system` (`platform/70-code-registry.yaml`, its settings `platform/code-registry/config.json`):
+- **Two users,** from the Secret `ff-code-registry`'s `htpasswd`: `ff-backend` pushes and deletes, with its password in the Secret `ff-backend` (`FF_CODE_REGISTRY_PASSWORD`); `ff-node` only pulls. Nobody reads anything without a login.
+- **The backend** pushes to the Service by its name (`FF_CODE_REGISTRY` in `backend.env`), and names the images `registry.ff.internal/ff-code/<account>@sha256:…` (`FF_CODE_REGISTRY_PULL`). Only the backend reaches the registry from a pod: tenants' pods reach no private address, and `ff-system` denies by default.
+- **The nodes** pull from themselves, which k3s lets through, at the Service's fixed address, `10.43.0.250`, in the band of k3s's Service range (`10.43.0.0/16`) that Kubernetes keeps for fixed addresses; a cluster with another range gives another address in an overlay. Each node's containerd maps the name to it. On k3s, `/etc/rancher/k3s/registries.yaml` on every node, then a restart of k3s there:
+
+  ```yaml
+  mirrors:
+    registry.ff.internal:
+      endpoint:
+        - "http://10.43.0.250:5000"
+  configs:
+    "10.43.0.250:5000":
+      auth:
+        username: ff-node
+        password: "<ff-node's password>"
+  ```
+
+  Elsewhere, containerd's `hosts.toml` for `registry.ff.internal`, and its CRI configuration for the login. With a network plugin other than k3s's, or nodes that pull from the registry on another node, add the nodes' addresses to the NetworkPolicy `ff-code-registry`.
+- **No backup:** the backend makes an image again from its package's zip, which object storage keeps, when the registry has lost it. Blobs nothing names any more go a day later (`gc`); the volume, 20 GiB here, holds the images of the packages in use and those an hour unused.
 
 **Function URLs** (step-1 plan, D6 and D7). Each function URL is `https://<32 letters and digits>.<function domain>/`. The backend answers them on a port of its own, 3001 (`FF_FUNCTION_URL_PORT`), which its Service names `function-urls` and only the edge reaches; the edge sends every host under the function domain there. Three settings must agree, and `deploy.sh` checks that they do: the backend's `FF_FUNCTION_URL_BASE` (`https://fn.example.tn`, the addresses the API gives), the edge's `FF_FUNCTION_URL_DOMAIN` (`fn.example.tn`), and the DNS record `*.fn.example.tn` to the edge. Their certificates come one of two ways, as the edge's `FF_FUNCTION_URL_TLS` says:
 - `wildcard`, for production: one certificate for `*.fn.example.tn`, which Let's Encrypt issues only through a DNS-01 challenge, a TXT record `_acme-challenge.fn.example.tn` the edge writes and removes. It writes it with RFC 2136 updates, the standard that BIND, Knot and PowerDNS take, so FF depends on no DNS company: `FF_DNS_SERVER` (the primary server, `host:53`), `FF_DNS_TSIG_KEY_NAME` and `FF_DNS_TSIG_KEY_ALG` in `edge.env`, and the key itself in a Secret, which `deploy.sh` refuses to go without:
@@ -116,7 +143,9 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 | `platform/20-console.yaml`, `30-admin.yaml` | Services and Deployments `ff-console`, `ff-admin` | The static builds, two replicas each, user 65532, read-only root |
 | `platform/40-keycloak.yaml` | Service and Deployment `keycloak` | Keycloak 26.7.5 with `start`, TLS at the edge, its database outside; the realm imported at its first start. Non-root, no capability; its root is writable, as its start builds its configuration there |
 | `platform/50-edge.yaml` | PVC, Service (LoadBalancer, keeping callers' addresses) and Deployment `ff-edge` | Caddy, with the RFC 2136 DNS module, on 8080 and 8443, the Service on 80 and 443; its certificates on the volume; the Secret `ff-edge-dns` in its environment when there is one |
-| `platform/60-network-policies.yaml` | NetworkPolicies | `ff-system` denies by default; the edge reaches the backend (its API and its port for functions' URLs), the apps and Keycloak; the backend reaches Keycloak for the realm's keys; the metrics store reaches the backend's metrics port; the edge takes the world on its two ports |
+| `platform/60-network-policies.yaml` | NetworkPolicies | `ff-system` denies by default; the edge reaches the backend (its API and its port for functions' URLs), the apps and Keycloak; the backend reaches Keycloak for the realm's keys, and the code registry; the metrics store reaches the backend's metrics port; the edge takes the world on its two ports |
+| `platform/70-code-registry.yaml` | PVC, Service (at a fixed address) and Deployment `ff-code-registry` | Zot 2.1.22, minimal, the code images of packages; user 10001, read-only root; two users from the Secret `ff-code-registry` |
+| `platform/code-registry/config.json` | ConfigMap `ff-code-registry` | Zot's settings: its storage and its collection of blobs nothing names, the login, `ff-backend` pushing and deleting, `ff-node` pulling |
 | `platform/backend.env`, `keycloak.env`, `edge.env` | ConfigMaps | What isn't secret, with example values (`example.tn`) for an overlay to replace |
 | `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites and the function domain's, HSTS, the allowlist, function URLs' certificates by DNS or on demand; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
 | `platform/keycloak/ff-realm.json` | ConfigMap `keycloak-realm` | The production realm |
@@ -129,6 +158,7 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 - the realm up to date;
 - the function domain the same for the backend and the edge, and the backend's port for function URLs reached by the edge alone;
 - the edge's image with the RFC 2136 module, and its Caddyfile valid for Caddy, with function URLs' certificates either way;
+- the code registry: Zot's settings valid for its pinned image, where the volume and the users' Secret are mounted; its fixed address and port the backend's settings name; the backend alone reaching it;
 - the cluster API's schemas, with a server dry run.
 
 ## Monitoring

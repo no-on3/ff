@@ -101,7 +101,7 @@ const sha256 = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).d
 export class FakeRegistry {
   readonly blobs = new Map<string, Buffer>();
   readonly manifests = new Map<string, Buffer>();
-  readonly requests: Array<{ method: string; path: string; authorization?: string; contentType?: string }> = [];
+  readonly requests: Array<{ method: string; path: string; authorization?: string; contentType?: string; contentLength?: string; transferEncoding?: string }> = [];
   /** What the next PUTs of uploads do instead of storing: answer 500, or close the connection. */
   failUploads: Array<'500' | 'drop'> = [];
   private readonly uploads = new Set<string>();
@@ -114,7 +114,14 @@ export class FakeRegistry {
       request.on('data', (chunk: Buffer) => chunks.push(chunk));
       request.on('end', () => {
         const url = new URL(request.url ?? '/', 'http://registry');
-        this.requests.push({ method: request.method ?? '', path: url.pathname, authorization: request.headers.authorization, contentType: request.headers['content-type'] });
+        this.requests.push({
+          method: request.method ?? '',
+          path: url.pathname,
+          authorization: request.headers.authorization,
+          contentType: request.headers['content-type'],
+          contentLength: request.headers['content-length'],
+          transferEncoding: request.headers['transfer-encoding'],
+        });
         const body = Buffer.concat(chunks);
         const blob = /^\/v2\/(.+)\/blobs\/(sha256:[0-9a-f]{64})$/.exec(url.pathname);
         const upload = /^\/v2\/(.+)\/blobs\/uploads\/([0-9a-f-]*)$/.exec(url.pathname);
@@ -133,6 +140,8 @@ export class FakeRegistry {
           if (failure === '500') return response.writeHead(500).end('storage unavailable');
           const digest = url.searchParams.get('digest') ?? '';
           if (url.searchParams.get('_state') !== 'opaque') return response.writeHead(400).end('lost the upload state');
+          // A monolithic upload states its length, as the distribution spec has it, and as Zot needs it.
+          if (request.headers['content-length'] === undefined) return response.writeHead(400).end('DIGEST_INVALID: no Content-Length');
           if (sha256(body) !== digest) return response.writeHead(400).end('DIGEST_INVALID');
           this.blobs.set(digest, body);
           return response.writeHead(201).end();

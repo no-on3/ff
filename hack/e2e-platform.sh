@@ -14,8 +14,9 @@
 # hour; the operator's e-mail through the cluster's SMTP; the audit log naming the caller's address, not
 # the edge's; a function URL over HTTPS through the edge, its certificate made on demand once the backend says
 # yes, and none for a host that is no URL; a customer's own domain, proved through a DNS server beside the
-# cluster, reaching the function the same way; who reaches whom inside the cluster; and deploy.sh again, which
-# changes nothing.
+# cluster, reaching the function the same way; a function made from a package, its code image pushed to the
+# platform's own registry (Zot) and pulled by the node as the node is told to, which no tenant's code reaches;
+# who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
@@ -42,6 +43,8 @@ cleanup() {
   k3d cluster delete "$cluster" >/dev/null 2>&1 || true
   rm -f "$FF_KUBE_DIR/$cluster.kubeconfig"
   docker rm -f "$prefix-postgres" "$prefix-s3" "$prefix-mailpit" "$prefix-dns" >/dev/null 2>&1 || true
+  # The cluster's network, which k3d keeps while the containers above are still on it.
+  docker network rm "k3d-$cluster" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -67,12 +70,29 @@ for app in console:FE admin:admin; do
 done
 docker build -q -t ff-edge:e2e "$FF_REPO_ROOT/deploy/edge" >/dev/null
 docker image inspect ff-runtime-nodejs:24-v3 >/dev/null 2>&1 || docker build -q -t ff-runtime-nodejs:24-v3 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
-echo "  ff-backend, ff-console, ff-admin and ff-edge built, tagged e2e"
+# The code registry's image, as the platform pins it; from ghcr.io, without the caller's Docker logins, which it may refuse.
+zot_image="$(sed -n 's/^ *image: \(.*zot.*\)$/\1/p' "$FF_REPO_ROOT/deploy/k8s/platform/70-code-registry.yaml")"
+mkdir -p "$work/docker" && echo '{}' >"$work/docker/config.json"
+docker image inspect "$zot_image" >/dev/null 2>&1 || DOCKER_CONFIG="$work/docker" docker pull -q "$zot_image" >/dev/null
+echo "  ff-backend, ff-console, ff-admin and ff-edge built, tagged e2e; $zot_image"
 
 echo "== a cluster of its own"
 api_port="$(free_port)"
+# The node told where code images are, as an operator tells each node: the registry's fixed address, as ff-node.
+node_password="$(random)"
+cat >"$work/registries.yaml" <<YAML
+mirrors:
+  registry.ff.internal:
+    endpoint:
+      - "http://10.43.0.250:5000"
+configs:
+  "10.43.0.250:5000":
+    auth:
+      username: ff-node
+      password: "$node_password"
+YAML
 k3d cluster create "$cluster" --image "$FF_K3S_IMAGE" --servers 1 --agents 0 --no-lb \
-  --api-port "127.0.0.1:$api_port" --servers-memory 3g \
+  --api-port "127.0.0.1:$api_port" --servers-memory 3g --registry-config "$work/registries.yaml" \
   --k3s-arg "--disable=traefik@server:0" --k3s-arg "--disable=metrics-server@server:0" \
   --port "127.0.0.1:$https_port:443@server:0:direct" --port "127.0.0.1:$http_port:80@server:0:direct" \
   --kubeconfig-update-default=false --kubeconfig-switch-context=false --wait --timeout 180s >/dev/null
@@ -87,7 +107,7 @@ kubectl wait --for=condition=Ready node --all --timeout=120s >/dev/null
 # CoreDNS's Deployment a moment after the node is ready.
 for _ in $(seq 1 60); do kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && break; sleep 2; done
 kubectl -n kube-system rollout status deployment/coredns --timeout=180s >/dev/null
-k3d image import -c "$cluster" ff-backend:e2e ff-console:e2e ff-admin:e2e ff-edge:e2e ff-runtime-nodejs:24-v3 >/dev/null 2>&1
+k3d image import -c "$cluster" ff-backend:e2e ff-console:e2e ff-admin:e2e ff-edge:e2e ff-runtime-nodejs:24-v3 "$zot_image" >/dev/null 2>&1
 echo "  $cluster: k3s ${FF_K3S_IMAGE#*:}, the images imported"
 
 echo "== outside the cluster: PostgreSQL, S3, Mailpit"
@@ -126,9 +146,15 @@ kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/logging" >/dev/null
 # The keys that encrypt functions' variables and secrets at rest: one, made for this run.
 echo "e2e:$(head -c 32 /dev/urandom | base64)" >"$work/encryption-keys"
 kubectl -n ff-system create secret generic ff-encryption-keys --from-file=keys="$work/encryption-keys" >/dev/null
+registry_password="$(random)"
 kubectl -n ff-system create secret generic ff-backend --from-literal=DB_PASSWORD="$ff_db" \
   --from-literal=MINIO_ACCESS_KEY="$s3_key" --from-literal=MINIO_SECRET_KEY="$s3_secret" \
-  --from-literal=FF_SMTP_URL=smtp://ff-test-smtp.ff-system.svc.cluster.local:1025 >/dev/null
+  --from-literal=FF_SMTP_URL=smtp://ff-test-smtp.ff-system.svc.cluster.local:1025 \
+  --from-literal=FF_CODE_REGISTRY_PASSWORD="$registry_password" >/dev/null
+# The code registry's two users, bcrypt, as the README makes them.
+{ docker run --rm httpd:2.4.69-alpine htpasswd -nbBC 10 ff-backend "$registry_password"
+  docker run --rm httpd:2.4.69-alpine htpasswd -nbBC 10 ff-node "$node_password"; } | grep . >"$work/htpasswd"
+kubectl -n ff-system create secret generic ff-code-registry --from-file=htpasswd="$work/htpasswd" >/dev/null
 kc_admin="$(random)"
 kubectl -n ff-system create secret generic keycloak --from-literal=KC_DB_PASSWORD="$kc_db" \
   --from-literal=KC_BOOTSTRAP_ADMIN_USERNAME=admin --from-literal=KC_BOOTSTRAP_ADMIN_PASSWORD="$kc_admin" \
@@ -154,8 +180,10 @@ check "deploy.sh refuses a sandbox the cluster lacks, or no node runs, before de
   "$missing $unlabelled $(grep -q 'RuntimeClass ff-missing, which the cluster lacks' "$work/refused.log" && echo true || echo false) $(grep -q 'no node has the label ff.dev/gvisor=true' "$work/refused.log" && echo true || echo false) $(kubectl -n ff-system get job ff-migrations >/dev/null 2>&1 && echo true || echo false)"
 "$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >"$work/deploy.log" 2>&1 \
   || { tail -30 "$work/deploy.log" >&2; fail "deploy.sh failed"; }
-check "deploy.sh: the sandbox and a node for it, the migrations first, each run, then every rollout" "true true true" \
-  "$(grep -q '^functions run in the RuntimeClass gvisor, on 1 node(s)$' "$work/deploy.log" && echo true || echo false) $(grep -q 'has been executed successfully' "$work/deploy.log" && echo true || echo false) $(grep -q '^platform deployed$' "$work/deploy.log" && echo true || echo false)"
+check "deploy.sh: the sandbox and a node for it, the registry's users, the migrations first, each run, then every rollout" "true true true true" \
+  "$(grep -q '^functions run in the RuntimeClass gvisor, on 1 node(s)$' "$work/deploy.log" && echo true || echo false) $(grep -q "^the registry's users: ff-backend pushes, ff-node pulls$" "$work/deploy.log" && echo true || echo false) $(grep -q 'has been executed successfully' "$work/deploy.log" && echo true || echo false) $(grep -q '^platform deployed$' "$work/deploy.log" && echo true || echo false)"
+check "and it says where the nodes pull code images" true \
+  "$(grep -q "^functions' code images: registry.ff.internal, which each node's containerd maps to http://10.43.0.250:5000, as ff-node$" "$work/deploy.log" && echo true || echo false)"
 grep -E 'attempt\(s\) failed' "$work/deploy.log" | sed 's/^/  note: /' || true
 # The backend's token for the cluster's API is asked for an hour (deploy/k8s/platform/10-backend.yaml): the one
 # Kubernetes mounts by default is valid for a year. Read in its pod, from the file the backend reads.
@@ -242,6 +270,37 @@ check "its logs, from the cluster's log store" true "$([ "$lines" -ge 1 ] && ech
 check "the audit log names the caller's address, not the edge's" "$client_ip" \
   "$(as "$token" '/audit-log?limit=50' -X GET | jq -r '[.entries[] | select(.action == "function.create")][0].ip')"
 
+echo "== a function from a package, through the platform's code registry"
+mkdir -p "$work/package/lib"
+cat >"$work/package/index.js" <<'JS'
+const net = require('node:net');
+exports.handler = async (event) => ({ message: require('./lib/greet')(event.name ?? 'world') });
+// Whether the function's own code reaches the code registry, at the address the nodes pull from.
+exports.reach = () => new Promise((resolve) => {
+  const socket = net.connect({ host: '10.43.0.250', port: 5000 });
+  const done = (state) => { socket.destroy(); resolve({ registry: state }); };
+  socket.setTimeout(3000, () => done('refused'));
+  socket.once('connect', () => done('open'));
+  socket.once('error', () => done('refused'));
+});
+JS
+echo 'module.exports = (name) => `Hello ${name}, from a package`;' >"$work/package/lib/greet.js"
+(cd "$work/package" && python3 -c 'import shutil; shutil.make_archive("../package", "zip", ".")')
+sha="$(https api /packages -H "authorization: Bearer $token" -H 'content-type: application/zip' --data-binary "@$work/package.zip" | jq -r .codeSha256)"
+check "the customer uploads a package" 201 "$(status)"
+pkg_fn="$(as "$token" /functions -d "$(jq -cn --arg sha "$sha" '{name: "e2e-package", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}')" | jq -r .id)"
+check "and makes a function of it: its code image pushed to the platform's registry, pulled by the node, mounted" "201 ACTIVE zip" \
+  "$(status) $(jq -r '"\(.status) \(.packageType)"' "$work/body")"
+check "which answers from its package, inside gVisor" "201 Hello platform, from a package" \
+  "$(as "$token" "/functions/$pkg_fn/invoke" -d '{"input": {"name": "platform"}}' >/dev/null; status) $(jq -r .output.message "$work/body")"
+tenant="ff-t-$(printf %s "$account" | sha256sum | cut -c1-12)"
+check "its pods mount the image by digest, under the name the nodes map to the registry" true \
+  "$(kubectl -n "$tenant" get deployment "fn-$pkg_fn" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}' | grep -qE '^registry\.ff\.internal/ff-code/[0-9]{12}@sha256:[0-9a-f]{64}$' && echo true || echo false)"
+reach_fn="$(as "$token" /functions -d "$(jq -cn --arg sha "$sha" '{name: "e2e-package-reach", runtime: "nodejs", codeSha256: $sha, handler: "index.reach", memory: 128, timeout: 5}')" | jq -r .id)"
+check "a second function from the same package, the image the registry has" "201 ACTIVE" "$(status) $(jq -r .status "$work/body")"
+check "whose own code doesn't reach the registry: a tenant reaches no private address" "201 refused" \
+  "$(as "$token" "/functions/$reach_fn/invoke" -d '{"input": {}}' >/dev/null; status) $(jq -r .output.registry "$work/body")"
+
 echo "== a function's URL, through the edge"
 url="$(as "$token" "/functions/$fn/url" -d '{"authType": "NONE"}' | jq -r .functionUrl)"
 check "the customer gives the function a URL, under the function domain" "201 true" \
@@ -301,7 +360,7 @@ kubectl create namespace e2e-probe >/dev/null
 kubectl -n e2e-probe run probe --image=ff-runtime-nodejs:24-v3 --image-pull-policy=Never --restart=Never --command -- node -e '
 const net = require("node:net");
 const targets = { edge: ["ff-edge.ff-edge.svc", 443], backend: ["ff-backend.ff-system.svc", 80], urls: ["ff-backend.ff-system.svc", 3001], keycloak: ["keycloak.ff-system.svc", 8080],
-  console: ["ff-console.ff-system.svc", 80], function: [process.argv[1], 8080] };
+  console: ["ff-console.ff-system.svc", 80], registry: ["ff-code-registry.ff-system.svc", 5000], function: [process.argv[1], 8080] };
 Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((resolve) => {
   const socket = net.connect({ host, port });
   const done = (state) => { socket.destroy(); resolve(name + "=" + state); };
@@ -310,8 +369,8 @@ Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((r
   socket.once("error", () => done("refused"));
 }))).then((states) => console.log(states.join(" ")));' "fn-$fn.ff-t-$(printf %s "$account" | sha256sum | cut -c1-12).svc" >/dev/null
 kubectl -n e2e-probe wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe --timeout=120s >/dev/null || true
-check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console nor a function" \
-  "edge=open backend=refused urls=refused keycloak=refused console=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
+check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry nor a function" \
+  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
 
 echo "== deploy.sh again"
 "$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >"$work/redeploy.log" 2>&1 || { tail -20 "$work/redeploy.log" >&2; fail "deploy.sh failed the second time"; }
