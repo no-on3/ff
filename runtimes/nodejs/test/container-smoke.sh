@@ -6,7 +6,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-image="${IMAGE:-ff-runtime-nodejs:24-v2}"
+image="${IMAGE:-ff-runtime-nodejs:24-v3}"
 name="ff-runtime-smoke-$$"
 
 "$repo/hack/check-resources.sh"
@@ -43,7 +43,7 @@ check "root filesystem is read-only" denied \
   "$(docker exec "$name" sh -c 'touch /opt/ff/probe 2>/dev/null && echo writable || echo denied')"
 check "/tmp is writable" ok "$(docker exec "$name" sh -c 'touch /tmp/probe && echo ok')"
 check "no install at start (no npm activity in logs)" 0 "$(docker logs "$name" 2>&1 | grep -c 'npm' || true)"
-check "speaks runtime protocol 2" 1 "$(docker logs "$name" 2>&1 | grep -c '"protocol":2' || true)"
+check "speaks runtime protocol 3" 1 "$(docker logs "$name" 2>&1 | grep -c '"protocol":3' || true)"
 # The TypeScript compiler's code cache, written at the build, taken by V8 in a worker thread with a small heap, as
 # the runtime loads user code: refused, a cold start at 0.1 CPU takes seconds longer, and nothing else says so.
 check "the TypeScript compiler's code cache is taken, in a worker thread" true \

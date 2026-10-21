@@ -49,6 +49,7 @@ const CANCELLED_PRO_FORMAS = migrationNames.find((name) => name.startsWith('Canc
 const INVOCATION_HISTORY = migrationNames.find((name) => name.startsWith('InvocationHistory')) as string;
 const CLOSED_ACCOUNT_DELETION = migrationNames.find((name) => name.startsWith('ClosedAccountDeletion')) as string;
 const ALARMS = migrationNames.find((name) => name.startsWith('Alarms')) as string;
+const FUNCTION_ENVIRONMENTS = migrationNames.find((name) => name.startsWith('FunctionEnvironments')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -437,6 +438,35 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       expect(await indexes()).toEqual([{ indexdef: expect.stringMatching(/^CREATE INDEX .* ON public\.functions USING btree \(account_id\)$/) }]);
       expect((await names()).map((row: { name: string }) => row.name)).toEqual(['test', renamed[second], renamed[third], 'test', 'testing']);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the event-format migration gives every function that exists FF's original wrapper, a new one Lambda's event, and reverts with both present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, FUNCTION_ENVIRONMENTS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ('000000000001', 'A', 'active', 'beta')`);
+      const insert = (name: string) =>
+        dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ($1, '000000000001', 'nodejs', 'x', 128, 5)`, [name]);
+      await insert('reads-event-body');
+      const printed = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+      try {
+        await dataSource.runMigrations({ transaction: 'each' });
+        expect(printed).toHaveBeenCalledWith("1 function(s) keep the event they had, FF's original wrapper: each moves to AWS Lambda's with an update");
+      } finally {
+        printed.mockRestore();
+      }
+      await insert('made-after');
+
+      expect(await dataSource.query(`SELECT name, event_format FROM functions ORDER BY created_at, name`)).toEqual([
+        { name: 'reads-event-body', event_format: 'wrapped' },
+        { name: 'made-after', event_format: 'lambda' },
+      ]);
+
+      await migrateDownTo(dataSource, FUNCTION_ENVIRONMENTS);
+      expect((await dataSource.query(`SELECT count(*)::int AS n FROM functions`))[0].n).toBe(2);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

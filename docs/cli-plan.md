@@ -241,7 +241,7 @@ developer machine                                   FF platform
   - the variables the backend sets (`BE/src/orchestrator/kubernetes/manifests.ts`): `FUNCTION_NAME`, `FUNCTION_VERSION=$LATEST`, `FUNCTION_MEMORY_LIMIT`, `FUNCTION_TIMEOUT` (milliseconds), `FF_MAX_QUEUE_WAIT_MS`, `LAMBDA_TASK_ROOT=/var/task`, `FF_HANDLER=function.handler`, `PORT`, `TZ=UTC`;
   - the code mounted read-only at `/var/task`, and the port published on `127.0.0.1` only.
 
-  It then waits for `/readyz` (showing the init error if loading fails) and posts the payload to `/invoke`, the same protocol the platform uses. The runtime itself wraps the request into the event (`{ body, headers, method, query, path }`, §10 question 1), so a local run sees exactly what a production call sees.
+  It then waits for `/readyz` (showing the init error if loading fails) and posts the payload to `/invoke`, the same protocol the platform uses. The payload is the event, as on Lambda (runtime protocol v3, [ADR 0007](adr/0007-function-events.md)); `ff local` passes `FF_EVENT_FORMAT` as the function's `eventFormat` says, so a local run sees exactly what a production call sees.
 
 ## 6. Platform changes the CLI needs
 
@@ -367,7 +367,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 #### C-06: Local runs (`ff local invoke`, `ff local start`)
 - **Docker:** checks `docker version` and says clearly when Docker is missing.
 - **Image:**
-  - from `FF_RUNTIME_IMAGE_NODEJS` / `_PYTHON`, else `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2`;
+  - from `FF_RUNTIME_IMAGE_NODEJS` / `_PYTHON`, else `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`;
   - built locally in this repository; published images come in C-42.
 - **The container gets production's hardening and settings** (§5):
   - memory from `--memory`, default 128 MB; the timeout from `--timeout`, default 5 s, sent in milliseconds as `FUNCTION_TIMEOUT`;
@@ -516,7 +516,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
   - writes outside `/tmp` (heuristic);
   - FF-only environment variables and hard-coded FF endpoints;
   - deprecated runtimes;
-  - **reading the payload from `event.body`**, which is FF's current event shape and differs from Lambda's (§10, question 1).
+  - **reading the payload from `event.body`**, FF's original event, which a function made before 2026-10-21 keeps until it is switched ([ADR 0007](adr/0007-function-events.md)), and which differs from Lambda's.
 - **Output:** a list with file and line. `--strict` makes warnings fail with exit 1.
 - **Tests:** L1 for fixtures, one per check.
 
@@ -581,7 +581,7 @@ The CLI side of steps 1 to 3 of [What to build next](what-to-build-next.md). Eac
 
 ## 10. Open questions for you
 
-1. **Event shape.** Today both runtimes hand the payload to the handler as `event.body`, inside `{body, headers, method, query, path}` built from the HTTP request to `/invoke`. That is the old wrapper's format, kept in K-05. On AWS Lambda, a direct invoke passes the payload as `event` itself, and the parent plan's runtime contract (§6.2, task R-04) follows Lambda. Code written for FF today therefore needs changes on Lambda. Function URLs (step 1 of [What to build next](what-to-build-next.md)) will need the API Gateway v2 shape too, where `body` is a string and `isBase64Encoded` says how to read it. **Recommendation:** add runtime protocol v3, where the payload is the event for direct invokes and the API Gateway v2 shape for URLs, as the default for new functions, and keep the wrapper per function for existing ones. `ff init` templates follow it, which is why this question comes before C-07. **Taken up by the [step-1 plan](step-1-plan.md)** (its D5, task U-03, ADR 0007), with this recommendation; its §9 asks you to confirm it.
+1. **Event shape.** Today both runtimes hand the payload to the handler as `event.body`, inside `{body, headers, method, query, path}` built from the HTTP request to `/invoke`. That is the old wrapper's format, kept in K-05. On AWS Lambda, a direct invoke passes the payload as `event` itself, and the parent plan's runtime contract (§6.2, task R-04) follows Lambda. Code written for FF today therefore needs changes on Lambda. Function URLs (step 1 of [What to build next](what-to-build-next.md)) will need the API Gateway v2 shape too, where `body` is a string and `isBase64Encoded` says how to read it. **Recommendation:** add runtime protocol v3, where the payload is the event for direct invokes and the API Gateway v2 shape for URLs, as the default for new functions, and keep the wrapper per function for existing ones. `ff init` templates follow it, which is why this question comes before C-07. **Done by the [step-1 plan](step-1-plan.md)**'s U-03, with this recommendation ([ADR 0007](adr/0007-function-events.md)): new functions get the payload itself, those made before keep the wrapper until switched. Its §9 asks you to confirm it.
 2. **Code delivery.** May the C-20 spike go ahead with option A? It adds a registry to the platform.
 3. **Where releases and images live.** Which domain or registry should host the CLI downloads and the public runtime images, given that customers may not rely on GitHub?
 4. **Inline code long-term.** Should the API's `code` field stay as a convenience for the console, with C-24 making it a zip internally? That is the recommendation.

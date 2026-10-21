@@ -10,6 +10,6 @@ with open(MARKER, "w") as marker:
 
 
 def handler(event, context):
-    if event["body"].get("crash"):
+    if event.get("crash"):
         os._exit(3)
     return "ok"

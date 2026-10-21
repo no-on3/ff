@@ -35,12 +35,12 @@ describe('resolveKubernetesSettings', () => {
       K8S_API_URL: 'https://x',
       K8S_INGRESS_ALLOW_CIDRS: '10.42.0.1/32, 172.18.0.0/16',
       K8S_EGRESS_INTERNET: 'false',
-      K8S_RUNTIME_IMAGE_NODEJS: 'registry.local/ff-runtime-nodejs:24-v2',
+      K8S_RUNTIME_IMAGE_NODEJS: 'registry.local/ff-runtime-nodejs:24-v3',
     });
 
     expect(s.ingressAllowCidrs).toEqual(['10.42.0.1/32', '172.18.0.0/16']);
     expect(s.egressInternet).toBe(false);
-    expect(s.runtimeImages.nodejs).toBe('registry.local/ff-runtime-nodejs:24-v2');
+    expect(s.runtimeImages.nodejs).toBe('registry.local/ff-runtime-nodejs:24-v3');
     expect(s).not.toHaveProperty('tenantQuota'); // each account's plan sets it (P-15)
   });
 

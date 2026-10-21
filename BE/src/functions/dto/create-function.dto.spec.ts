@@ -1,8 +1,9 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
-import { Runtime } from '../entities/function.entity';
+import { EventFormat, Runtime } from '../entities/function.entity';
 import { CreateFunctionDto } from './create-function.dto';
 import { UpdateFunctionDto } from './update-function.dto';
 import { UpdateSecretsDto } from './secrets.dto';
+import { InvokeFunctionDto } from './invoke-function.dto';
 
 /** A body as the API validates it, with main.ts's pipe: the instance it passes on, or why it answers 400. */
 async function validated(metatype: typeof CreateFunctionDto | typeof UpdateFunctionDto, body: object): Promise<{ name?: unknown } | string[]> {
@@ -156,5 +157,23 @@ describe("a function's secrets, as the API takes them", () => {
     expect(await changes(['DB_PASSWORD'])).toEqual(['secrets must be a JSON object of secret names to string values, or to null to remove one']);
     expect(await changes({ DB_PASSWORD: 12345 })).toEqual(["DB_PASSWORD's value must be a string, or null to remove the secret"]);
     expect(await changes(undefined)).toEqual(['secrets must be a JSON object of secret names to string values, or to null to remove one']);
+  });
+});
+
+describe("the event a function receives, as the API takes it", () => {
+  const create = { name: 'hello', runtime: Runtime.NODEJS, code: 'exports.handler = async () => 1;', memory: 128, timeout: 5 };
+
+  it("takes lambda or wrapped as a function's event format, on create and on update, and nothing else", async () => {
+    expect(await validated(CreateFunctionDto, { ...create, eventFormat: 'wrapped' })).toMatchObject({ eventFormat: EventFormat.WRAPPED });
+    expect(await validated(UpdateFunctionDto, { eventFormat: 'lambda' })).toMatchObject({ eventFormat: EventFormat.LAMBDA });
+    expect(await validated(UpdateFunctionDto, { eventFormat: 'v2' })).toEqual(['eventFormat must be one of the following values: lambda, wrapped']);
+  });
+
+  it('takes any JSON value as invoke input, as AWS Lambda takes a payload', async () => {
+    const pipe = new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true });
+    for (const input of ['text', 42, [1, 'two'], null, true, { a: 1 }]) {
+      expect(await pipe.transform({ input }, { type: 'body', metatype: InvokeFunctionDto })).toEqual({ input });
+    }
+    expect(await pipe.transform({}, { type: 'body', metatype: InvokeFunctionDto })).toEqual({});
   });
 });

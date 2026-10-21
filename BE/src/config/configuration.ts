@@ -297,8 +297,8 @@ const appShape = {
   K8S_CA_FILE: text(`${IN_CLUSTER_SECRETS}/ca.crt`),
   K8S_INVOKE_MODE: z.preprocess(prepare(undefined), oneOf(['direct', 'proxy']).optional()),
   K8S_NAMESPACE_PREFIX: text('ff-t-', namespacePrefix),
-  K8S_RUNTIME_IMAGE_NODEJS: text('ff-runtime-nodejs:24-v2', imageReference),
-  K8S_RUNTIME_IMAGE_PYTHON: text('ff-runtime-python:3.13-v2', imageReference),
+  K8S_RUNTIME_IMAGE_NODEJS: text('ff-runtime-nodejs:24-v3', imageReference),
+  K8S_RUNTIME_IMAGE_PYTHON: text('ff-runtime-python:3.13-v3', imageReference),
   K8S_IMAGE_PULL_POLICY: oneOf(['IfNotPresent', 'Always', 'Never'], 'IfNotPresent'),
   // The sandbox customers' code runs in (gvisor); production requires one, unless K8S_ALLOW_UNSANDBOXED says otherwise.
   K8S_RUNTIME_CLASS: optionalText(dnsSubdomain),
@@ -375,6 +375,16 @@ function appRules(env: AppEnv): string[] {
   }
   for (const name of ['K8S_TENANT_QUOTA_PODS', 'K8S_TENANT_QUOTA_CPU', 'K8S_TENANT_QUOTA_MEMORY'] as const) {
     if (env[name] !== undefined) problems.push(`${name} is no longer read: each account's plan sets its quota (plans.limits.quota); remove it`);
+  }
+  // FF tags its runtime images by their protocol: before 3, a runtime hands every function FF's original wrapper as
+  // its event, which a function made now, given AWS Lambda's, would misread at every call.
+  for (const [name, image] of [['K8S_RUNTIME_IMAGE_NODEJS', env.K8S_RUNTIME_IMAGE_NODEJS], ['K8S_RUNTIME_IMAGE_PYTHON', env.K8S_RUNTIME_IMAGE_PYTHON]] as const) {
+    const protocol = /:[^/:]*-v([12])$/.exec(image)?.[1];
+    if (protocol) {
+      problems.push(
+        `${name} names a runtime of protocol ${protocol} (${image}), which gives functions FF's original event: they now get AWS Lambda's, which takes protocol 3 (-v3)`,
+      );
+    }
   }
   if (env.FF_AUTH_MODE === 'dev') {
     if (production) problems.push('FF_AUTH_MODE=dev is for development only, and is refused when NODE_ENV=production');

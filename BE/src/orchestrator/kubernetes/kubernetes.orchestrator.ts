@@ -493,7 +493,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     return ready;
   }
 
-  async invoke(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<InvokeResult> {
+  async invoke(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<InvokeResult> {
     let initMs: number | undefined;
     try {
       const { desired, ready } = await this.instances(fn);
@@ -518,7 +518,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     }
   }
 
-  private async post(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<KubeResponse> {
+  private async post(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<KubeResponse> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const body = JSON.stringify(payload);

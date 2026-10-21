@@ -171,8 +171,8 @@ stage_security() {
 }
 
 runtime_images() { # the tags the backend runs, which the cluster tests import
-  docker build -q -t ff-runtime-nodejs:24-v2 runtimes/nodejs >/dev/null &&
-    docker build -q -t ff-runtime-python:3.13-v2 runtimes/python >/dev/null
+  docker build -q -t ff-runtime-nodejs:24-v3 runtimes/nodejs >/dev/null &&
+    docker build -q -t ff-runtime-python:3.13-v3 runtimes/python >/dev/null
 }
 
 stage_cluster() {

@@ -30,6 +30,8 @@ e2e_base_env=(
   ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy
   K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" K8S_LOG_STORE_DELETE_KEY_FILE="$FF_LOG_STORE_DELETE_KEY_FILE"
   K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
+  # The images this stack builds and imports, whatever a developer's BE/.env names: ConfigModule reads that file too.
+  K8S_RUNTIME_IMAGE_NODEJS=ff-runtime-nodejs:24-v3 K8S_RUNTIME_IMAGE_PYTHON=ff-runtime-python:3.13-v3
   # No operator's metrics port: the development backend may hold the default one. A test that reads them gives a free port.
   FF_METRICS_PORT=0
 )
@@ -102,11 +104,11 @@ e2e_cluster() {
   kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/logging-up.sh" >/dev/null
   # Closing an account deletes its log lines with the store's key (P-45).
   "$FF_REPO_ROOT/hack/k8s/log-store-key.sh" >/dev/null
-  docker image inspect ff-runtime-nodejs:24-v2 >/dev/null 2>&1 ||
-    docker build -q -t ff-runtime-nodejs:24-v2 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
-  docker image inspect ff-runtime-python:3.13-v2 >/dev/null 2>&1 ||
-    docker build -q -t ff-runtime-python:3.13-v2 "$FF_REPO_ROOT/runtimes/python" >/dev/null
-  "$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v2 ff-runtime-python:3.13-v2 >/dev/null 2>&1
+  docker image inspect ff-runtime-nodejs:24-v3 >/dev/null 2>&1 ||
+    docker build -q -t ff-runtime-nodejs:24-v3 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
+  docker image inspect ff-runtime-python:3.13-v3 >/dev/null 2>&1 ||
+    docker build -q -t ff-runtime-python:3.13-v3 "$FF_REPO_ROOT/runtimes/python" >/dev/null
+  "$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v3 ff-runtime-python:3.13-v3 >/dev/null 2>&1
   echo "  $FF_CLUSTER_NAME ready, runtime images imported"
 }
 

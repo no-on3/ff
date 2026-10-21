@@ -63,7 +63,7 @@ for app in console:FE admin:admin; do
     --build-arg VITE_OIDC_AUTHORITY="https://login.ff.test:$https_port/realms/ff" "$FF_REPO_ROOT/${app#*:}" >/dev/null
 done
 docker build -q -t ff-edge:e2e "$FF_REPO_ROOT/deploy/edge" >/dev/null
-docker image inspect ff-runtime-nodejs:24-v2 >/dev/null 2>&1 || docker build -q -t ff-runtime-nodejs:24-v2 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
+docker image inspect ff-runtime-nodejs:24-v3 >/dev/null 2>&1 || docker build -q -t ff-runtime-nodejs:24-v3 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
 echo "  ff-backend, ff-console, ff-admin and ff-edge built, tagged e2e"
 
 echo "== a cluster of its own"
@@ -84,7 +84,7 @@ kubectl wait --for=condition=Ready node --all --timeout=120s >/dev/null
 # CoreDNS's Deployment a moment after the node is ready.
 for _ in $(seq 1 60); do kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && break; sleep 2; done
 kubectl -n kube-system rollout status deployment/coredns --timeout=180s >/dev/null
-k3d image import -c "$cluster" ff-backend:e2e ff-console:e2e ff-admin:e2e ff-edge:e2e ff-runtime-nodejs:24-v2 >/dev/null 2>&1
+k3d image import -c "$cluster" ff-backend:e2e ff-console:e2e ff-admin:e2e ff-edge:e2e ff-runtime-nodejs:24-v3 >/dev/null 2>&1
 echo "  $cluster: k3s ${FF_K3S_IMAGE#*:}, the images imported"
 
 echo "== outside the cluster: PostgreSQL, S3, Mailpit"
@@ -222,7 +222,7 @@ check "the operator is told by e-mail, through the cluster's SMTP" true "$([ -n 
 as "$operator" "/admin/accounts/$account/approve" -d '{"reason": "e2e: the platform test"}' >/dev/null
 check "the operator approves it" 200 "$(status)"
 code="import * as os from 'node:os';
-export async function handler(event: { body: { name?: string } }) { return { message: \`Hello \${event.body.name ?? 'world'}\`, kernel: os.release() }; }"
+export async function handler(event: { name?: string }) { return { message: \`Hello \${event.name ?? 'world'}\`, kernel: os.release() }; }"
 fn="$(as "$token" /functions -d "$(jq -cn --arg code "$code" '{name: "e2e-platform", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
 check "the customer deploys a function" "201 ACTIVE" "$(status) $(jq -r .status "$work/body")"
 # gVisor answers with a kernel of its own, not the node's.
@@ -240,7 +240,7 @@ check "the audit log names the caller's address, not the edge's" "$client_ip" \
 
 echo "== who reaches whom inside the cluster"
 kubectl create namespace e2e-probe >/dev/null
-kubectl -n e2e-probe run probe --image=ff-runtime-nodejs:24-v2 --image-pull-policy=Never --restart=Never --command -- node -e '
+kubectl -n e2e-probe run probe --image=ff-runtime-nodejs:24-v3 --image-pull-policy=Never --restart=Never --command -- node -e '
 const net = require("node:net");
 const targets = { edge: ["ff-edge.ff-edge.svc", 443], backend: ["ff-backend.ff-system.svc", 80], keycloak: ["keycloak.ff-system.svc", 8080],
   console: ["ff-console.ff-system.svc", 80], function: [process.argv[1], 8080] };

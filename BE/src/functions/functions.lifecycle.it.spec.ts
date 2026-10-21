@@ -25,8 +25,8 @@ const kubeDir = path.resolve(__dirname, '../../../hack/.kube');
 const READY_TIMEOUT_SECONDS = 30;
 
 const greeter = (version: string) => `
-export async function handler(event: { body: { name?: string } }) {
-  return { version: '${version}', message: 'Hello ' + (event.body.name ?? 'world') };
+export async function handler(event: { name?: string }) {
+  return { version: '${version}', message: 'Hello ' + (event.name ?? 'world') };
 }`;
 // Loads, then throws: the pod runs but never becomes ready.
 const broken = 'throw new Error("boom at init");';

@@ -53,9 +53,9 @@ export function transpile(ts: typeof TypeScript, source: string, filename: strin
 export function writeTypeScriptCache(cacheFile?: string): void {
   const handler = [
     'enum Greeting { Hello = "Hello" }',
-    'interface Event { body: { name?: string } }',
+    'interface Event { name?: string }',
     'export async function handler(event: Event): Promise<{ message: string }> {',
-    '  return { message: `${Greeting.Hello} ${event.body?.name ?? "world"}` };',
+    '  return { message: `${Greeting.Hello} ${event?.name ?? "world"}` };',
     '}',
   ].join('\n');
   writeCodeCache((ts) => transpile(ts, handler, '/var/task/function.ts'), cacheFile);

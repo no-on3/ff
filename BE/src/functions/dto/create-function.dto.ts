@@ -2,7 +2,7 @@ import { IsString, IsEnum, IsNumber, IsOptional, Matches, Min, Max, ValidateIf }
 import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
-import { Runtime } from '../entities/function.entity';
+import { EventFormat, Runtime } from '../entities/function.entity';
 import { IsEnvironment, IsSecrets } from '../environment';
 
 /**
@@ -52,6 +52,17 @@ export class CreateFunctionDto {
   @Min(1)
   @Max(PLATFORM_LIMITS.timeoutSeconds)
   timeout: number;
+
+  @ApiPropertyOptional({
+    enum: EventFormat,
+    default: EventFormat.LAMBDA,
+    description:
+      "What the handler gets as its event: lambda, the payload itself, as on AWS Lambda; or wrapped, FF's original { body, headers, " +
+      "method, query, path }, which functions made before have. A change rolls out a new version. Function URLs and schedules need lambda",
+  })
+  @IsOptional()
+  @IsEnum(EventFormat)
+  eventFormat?: EventFormat;
 
   @ApiPropertyOptional({ description: 'Additional metadata', type: 'object', additionalProperties: true })
   @IsOptional()

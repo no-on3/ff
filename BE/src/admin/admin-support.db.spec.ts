@@ -59,7 +59,7 @@ run('support, for operators (L2)', () => {
       name,
       accountId,
       runtime: Runtime.NODEJS,
-      code: 'export const handler = async (event) => ({ hello: event.body.email });',
+      code: 'export const handler = async (event) => ({ hello: event.email });',
       memory: 256,
       timeout: 10,
       minInstances: 1,

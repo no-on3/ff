@@ -205,6 +205,45 @@ describe('successful invocations', () => {
     await rt.stop();
   });
 
+  it('hands the payload to the handler as the event itself, any JSON value, as on AWS Lambda', async () => {
+    const rt = await startRuntime('js-function');
+    await readyz(rt, 200);
+
+    for (const payload of [{ a: 1 }, 'text', 42, [1, 'two'], null, true]) {
+      const res = await invoke(rt, JSON.stringify(payload));
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.json.echo, payload);
+    }
+    await rt.stop();
+  });
+
+  it("wraps the payload in FF's original event for a function made before protocol 3 (FF_EVENT_FORMAT=wrapped)", async () => {
+    const rt = await startRuntime('js-function', { FF_EVENT_FORMAT: 'wrapped' });
+    await readyz(rt, 200);
+
+    const res = await invoke(rt, { name: 'old' }, { 'x-ff-request-id': 'req-wrapped' });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.echo.body, { name: 'old' });
+    assert.deepEqual([res.json.echo.method, res.json.echo.path, res.json.echo.query], ['POST', '/invoke', {}]);
+    assert.equal(res.json.echo.headers['x-ff-request-id'], 'req-wrapped');
+    await rt.stop();
+  });
+
+  it('refuses to start with an event format it does not know, rather than misread every call', async () => {
+    const proc = spawn(process.execPath, [path.join(root, 'dist/main.js')], {
+      env: { PATH: process.env.PATH, PORT: String(await freePort()), LAMBDA_TASK_ROOT: path.join(root, 'test/fixtures/js-function'), FF_EVENT_FORMAT: 'v2' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    proc.stdout.on('data', (chunk) => (out += chunk));
+
+    const [code] = await once(proc, 'exit');
+
+    assert.equal(code, 1);
+    assert.match(out, /"msg":"unknown FF_EVENT_FORMAT","expected":\["lambda","wrapped"\]/);
+  });
+
   it('serializes concurrent invocations: one at a time, as on Lambda', async () => {
     const rt = await startRuntime('slow-echo');
     await readyz(rt, 200);

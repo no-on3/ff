@@ -7,6 +7,6 @@ if (fs.existsSync(marker)) throw new Error('reload fails');
 fs.writeFileSync(marker, 'loaded');
 
 exports.handler = async (event) => {
-  if (event.body.crash) process.exit(3);
+  if (event.crash) process.exit(3);
   return 'ok';
 };

@@ -151,7 +151,7 @@ echo "$ID"
 
 **A name belongs to one function of the account.** It follows AWS Lambda's rule: 1 to 64 letters, digits, hyphens or underscores, compared exactly, so `Hello` and `hello` are two names. A name outside the rule answers 400, `name must be 1 to 64 letters, digits, hyphens or underscores, as an AWS Lambda function's name`; one given before 2026-10-21 that breaks it is kept until the function is renamed. Another create or rename with a name in use answers 409, `A function named "hello" already exists in this account: choose another name, or change that function`, and changes nothing: run the command above twice and the second `ID` is `null`. Delete the first one (`curl -s -X DELETE "$FF/functions/$ID"`), or choose another name. Names weren't unique before 2026-10-21 either: the migration that made them so kept the name of the oldest of an account's functions with one name, and added the first 8 characters of their ID to the others' (`hello-3f9c2a1e`). The account's audit log records each of these renames, as FF's.
 
-**Invoke it.** `input` becomes `event.body` in the handler, and `duration` is the execution time in milliseconds, as the runtime measured it:
+**Invoke it.** `input` is the handler's event, as a payload is on AWS Lambda: any JSON value, `{}` when there is none. `duration` is the execution time in milliseconds, as the runtime measured it:
 
 ```bash
 curl -s -X POST "$FF/functions/$ID/invoke" -H 'content-type: application/json' \
@@ -284,6 +284,8 @@ curl -s -X PUT "$FF/functions/$ID" -H 'content-type: application/json' -d '{"mem
 for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$FF/functions/$f"; done
 ```
 
+**Functions made before 2026-10-21** get FF's original event: the input in `event.body`, inside the request FF sent them (`{ body, headers, method, query, path }`). Each keeps it until its owner moves it, with an update that changes its handler to read `event` and sets `"eventFormat": "lambda"` together; the console's edit form offers the choice on such a function's page. Only functions with AWS Lambda's event can have a web address or a schedule ([ADR 0007](adr/0007-function-events.md)). A function's `eventFormat` says which it has, and `"eventFormat": "wrapped"` on a create makes a new one the old way, for code not moved yet.
+
 **What a function can be, today:**
 - one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
 - up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
@@ -343,7 +345,7 @@ curl -s "$FF/functions/$ID/logs?q=greeting&sinceSeconds=3600" | jq -r '.lines[].
 curl -s "$FF/functions/$ID/logs?limit=100&cursor=$NEXT" | jq -c '.next'                    # the page before the one whose next was $NEXT
 ```
 
-**Call a runtime directly**, without the backend, to see its raw response and headers. Here the request body *is* the event body:
+**Call a runtime directly**, without the backend, to see its raw response and headers. Here the request body *is* the event:
 
 ```bash
 kubectl -n "$NS" port-forward svc/fn-$ID 18080:8080 >/dev/null &

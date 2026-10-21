@@ -8,7 +8,9 @@
 # code archive, read through SeaweedFS's filer), then the same lifecycle
 # for a Python function, a function's environment variables (delivered through
 # a Secret, replaced by an update, sealed in the database) and its secrets
-# (never in an answer or the audit log, set and removed by name). Then plans:
+# (never in an answer or the audit log, set and removed by name), and the
+# event a function receives (the payload itself, or the old wrapper until
+# switched). Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -75,8 +77,8 @@ e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 check "backend answers on $api" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")"
 
 echo "== scenario (tenant $tenant → namespace $tenant_ns)"
-v1='export async function handler(event: { body: { name?: string } }) {
-  return { version: 1, message: `Hello ${event.body.name ?? "world"}` };
+v1='export async function handler(event: { name?: string }) {
+  return { version: 1, message: `Hello ${event.name ?? "world"}` };
 }'
 created="$(http POST /functions "$(jq -n --arg code "$v1" '{name: "e2e-hello", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
 check "create returns 201" 201 "$(status)"
@@ -157,7 +159,7 @@ check "the function record is gone" 404 "$(status)"
 
 echo "== python function"
 py='def handler(event, context):
-    return {"message": "Hello " + event["body"].get("name", "world"), "memory": context.memory_limit_in_mb}
+    return {"message": "Hello " + event.get("name", "world"), "memory": context.memory_limit_in_mb}
 '
 created="$(http POST /functions "$(jq -n --arg code "$py" '{name: "e2e-python", runtime: "python", code: $code, memory: 128, timeout: 5}')")"
 check "create returns 201" 201 "$(status)"
@@ -241,6 +243,27 @@ check "the audit log names the secrets changed" '{"added":["API_TOKEN"],"changed
 http DELETE "/functions/$sec_fn" >/dev/null
 check "deleting the function deletes its Secrets" "200 " "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$sec_fn" -o name)"
 
+echo "== the event a function receives"
+echo_code='export const handler = async (event: unknown) => ({ event });'
+created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-event", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+check "a new function gets AWS Lambda's event, the payload itself" "201 lambda" "$(status) $(jq -r .eventFormat <<<"$created")"
+event_fn="$(jq -r .id <<<"$created")"
+echoed() { http POST "/functions/$1/invoke" "$(jq -cn --argjson input "$2" '{input: $input}')" | jq -c .output.event; }
+check "any JSON value is the event: an object, a string, a number, an array, null" '{"name":"Tunis"} "Tunis" 42 [1,"two"] null' \
+  "$(echoed "$event_fn" '{"name":"Tunis"}') $(echoed "$event_fn" '"Tunis"') $(echoed "$event_fn" 42) $(echoed "$event_fn" '[1,"two"]') $(echoed "$event_fn" null)"
+check "its pods are told so" lambda \
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$event_fn" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FF_EVENT_FORMAT")].value}')"
+created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-wrapped", runtime: "nodejs", code: $code, memory: 128, timeout: 5, eventFormat: "wrapped"}')")"
+wrapped_fn="$(jq -r .id <<<"$created")"
+check "a function made before gets FF's original wrapper, the payload in body" '201 {"name":"Sfax"} POST /invoke' \
+  "$(status) $(http POST "/functions/$wrapped_fn/invoke" '{"input": {"name": "Sfax"}}' | jq -cr '.output.event | "\(.body | tojson) \(.method) \(.path)"')"
+http PUT "/functions/$wrapped_fn" '{"eventFormat": "lambda"}' >/dev/null
+check "switching it is an update, rolled out, after which it gets the payload itself" '200 lambda {"name":"Sfax"}' \
+  "$(status) $(jq -r .eventFormat "$work/body") $(echoed "$wrapped_fn" '{"name":"Sfax"}')"
+http PUT "/functions/$wrapped_fn" '{"eventFormat": "v2"}' >/dev/null
+check "an unknown format is refused" "400 eventFormat must be one of the following values: lambda, wrapped" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+for f in "$event_fn" "$wrapped_fn"; do http DELETE "/functions/$f" >/dev/null; done
+
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account
 # that development mode creates on its first call.
@@ -286,9 +309,9 @@ check "another account, from the same address, isn't slowed: its own count, and 
 echo "== usage records (P-20)"
 # q <sql>: one value, or a row with its columns separated by spaces.
 q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F ' ' -c "$1"; }
-meter='export async function handler(event: { body: { sleepMs?: number; fail?: boolean } }, context: { awsRequestId: string }) {
-  if (event.body.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.body.sleepMs));
-  if (event.body.fail) throw new Error("failed on purpose");
+meter='export async function handler(event: { sleepMs?: number; fail?: boolean }, context: { awsRequestId: string }) {
+  if (event.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.sleepMs));
+  if (event.fail) throw new Error("failed on purpose");
   return { requestId: context.awsRequestId };
 }'
 created="$(http POST /functions "$(jq -n --arg code "$meter" '{name: "e2e-meter", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')")"
@@ -467,8 +490,8 @@ PY
 : >"$work/webhooks.jsonl"
 python3 "$work/receiver.py" "$receiver_port" "$work/webhooks.jsonl" &
 e2e_pids+=("$!")
-failing='export async function handler(event: { body: { fail?: boolean } }) {
-  if (event.body.fail) throw new Error("asked to fail");
+failing='export async function handler(event: { fail?: boolean }) {
+  if (event.fail) throw new Error("asked to fail");
   return { ok: true };
 }'
 alarmed_id="$(http POST /functions "$(jq -n --arg code "$failing" '{name: "e2e-alarmed", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"

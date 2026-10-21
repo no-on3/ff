@@ -10,10 +10,10 @@ export const MAX_FUNCTION_NAME_LENGTH = 64;
 /** The rule in words, for the forms. */
 export const FUNCTION_NAME_RULE = '1 to 64 letters, digits, hyphens or underscores';
 
-/** The fields the console's edit form changes. */
-export type EditableFields = Pick<Function, 'name' | 'code' | 'memory' | 'timeout'>;
+/** The fields the console's edit form changes. The event format, only for a function that still gets FF's original event. */
+export type EditableFields = Pick<Function, 'name' | 'code' | 'memory' | 'timeout' | 'eventFormat'>;
 
-const EDITABLE: ReadonlyArray<keyof EditableFields> = ['name', 'code', 'memory', 'timeout'];
+const EDITABLE: ReadonlyArray<keyof EditableFields> = ['name', 'code', 'memory', 'timeout', 'eventFormat'];
 
 /**
  * The body of PUT /functions/:id for an edit: only the editable fields that
@@ -59,21 +59,23 @@ export function createFailure(error: unknown): CreateFailure {
   return { message: apiErrorMessage(error), ...(typeof saved === 'string' && saved ? { functionId: saved } : {}) };
 }
 
-export type ParsedInput = { ok: true; input: Record<string, unknown> } | { ok: false; error: string };
+export type ParsedInput = { ok: true; input: unknown } | { ok: false; error: string };
 
-/** The invoke form's text as the API's `input`: empty means {}, and it must be a JSON object. */
+/** The invoke form's text as the API's `input`: empty means {}, else any JSON value, as AWS Lambda takes a payload. */
 export function parseInvokeInput(text: string): ParsedInput {
   if (text.trim() === '') return { ok: true, input: {} };
-  let value: unknown;
   try {
-    value = JSON.parse(text);
+    return { ok: true, input: JSON.parse(text) as unknown };
   } catch {
     return { ok: false, error: 'The input is not valid JSON' };
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return { ok: false, error: 'The input must be a JSON object, such as {"name": "FF"}' };
-  }
-  return { ok: true, input: value as Record<string, unknown> };
+}
+
+/** What a function's handler gets, said for its page: its event format, in words. */
+export function eventFormatText(func: Pick<Function, 'eventFormat'>): string {
+  return func.eventFormat === 'wrapped'
+    ? "FF's original event: the input in event.body, inside the request FF sent the function"
+    : "AWS Lambda's event: the input itself";
 }
 
 /**

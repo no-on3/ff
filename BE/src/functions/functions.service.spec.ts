@@ -25,7 +25,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
-import { Function, FunctionStatus, Runtime } from './entities/function.entity';
+import { EventFormat, Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
 import { memoryEnvironments } from './test-fixtures';
@@ -377,6 +377,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       ['memory', { memory: 256 }],
       ['timeout', { timeout: 30 }],
       ['runtime', { runtime: Runtime.PYTHON }],
+      ["event format's", { eventFormat: EventFormat.WRAPPED }],
     ])('rolls out a %s change', async (_field, change) => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
 
@@ -535,6 +536,17 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(credit.admit).toHaveBeenCalledWith('user-1');
       expect([invocationsRepo.save.mock.calls.length, orchestrator.invoke.mock.calls.length, usage.record.mock.calls.length]).toEqual([0, 0, 0]);
       expect(refusal.getStatus()).toBe(HttpStatus.PAYMENT_REQUIRED);
+    });
+
+    it('hands the function its input as the event, any JSON value, as AWS Lambda takes a payload; {} without one', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: null, durationMs: 1, memoryUsedMb: 1 });
+
+      for (const input of ['text', 42, [1, 'two'], null, false, { a: 1 }]) await service.invoke('user-1', 'fn-1', input);
+      await service.invoke('user-1', 'fn-1');
+
+      expect(orchestrator.invoke.mock.calls.map(([, payload]) => payload)).toEqual(['text', 42, [1, 'two'], null, false, { a: 1 }, {}]);
+      expect(invocationsRepo.create.mock.calls.map(([row]) => row.input)).toEqual(['text', 42, [1, 'two'], null, false, { a: 1 }, {}]);
     });
 
     it('stores output, runtime-reported duration and memory on a COMPLETED invocation', async () => {

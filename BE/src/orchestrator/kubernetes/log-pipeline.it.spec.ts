@@ -47,7 +47,7 @@ function reachable(host: string, port: number): Promise<boolean> {
 }
 
 export async function handler(event: Event) {
-  const { nonce = '', lines = 0, stderr = false, text, probe = false } = event.body;
+  const { nonce = '', lines = 0, stderr = false, text, probe = false } = event;
   if (probe) return { victoriaLogs: await reachable('victoria-logs.ff-system.svc.cluster.local', 9428) };
   for (let i = 1; i <= lines; i++) console.log(nonce + ' ' + i);
   if (stderr) console.error(nonce + ' on stderr');
@@ -57,7 +57,7 @@ export async function handler(event: Event) {
 
 const pythonPrinter = `
 def handler(event, context):
-    print("hello from python " + event["body"]["nonce"])
+    print("hello from python " + event["nonce"])
     return "ok"
 `;
 
@@ -130,7 +130,7 @@ async function reachesTheStoreFrom(labels: Record<string, string>): Promise<bool
       containers: [
         {
           name: 'probe',
-          image: 'ff-runtime-nodejs:24-v2',
+          image: 'ff-runtime-nodejs:24-v3',
           imagePullPolicy: 'IfNotPresent',
           command: ['node', '-e', storeProbe],
           resources: { requests: { cpu: '10m', memory: '32Mi' }, limits: { memory: '64Mi' } },

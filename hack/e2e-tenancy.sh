@@ -209,8 +209,8 @@ e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 
 echo "== account A's function"
-code='export async function handler(event: { body: { name?: string } }) {
-  return { message: `Hello ${event.body.name ?? "world"}` };
+code='export async function handler(event: { name?: string }) {
+  return { message: `Hello ${event.name ?? "world"}` };
 }'
 function_body() { jq -cn --arg code "$code" --arg name "$1" '{name: $name, runtime: "nodejs", code: $code, memory: 128, timeout: 5}'; }
 created="$(as_a POST /functions "$(function_body l5-a)")"

@@ -15,6 +15,7 @@
 | [ADR 0004](adr/0004-identity-and-tenancy.md) | Accounts, Keycloak login, API keys, account-scoped access, plans, and the operators' separate login. ADR 0002 and 0003 are reserved by the CLI plan |
 | [ADR 0005](adr/0005-log-pipeline.md) | The log pipeline: Fluent Bit collects, VictoriaLogs stores, measured against Vector in the P-41 spike; request IDs, the per-namespace limit, deletion and retention |
 | [ADR 0006](adr/0006-operator-monitoring.md) | The operator's monitoring: the backend's metrics, VictoriaMetrics, alert rules e-mailed through Alertmanager, Grafana's dashboards |
+| [ADR 0007](adr/0007-function-events.md) | The event a function receives: AWS Lambda's, the payload itself, built by the backend for every way in; functions made before keep FF's original wrapper until switched |
 | [Backup drills](backup-drills.md) | The record of each monthly restore drill |
 
 Elsewhere in the repository:

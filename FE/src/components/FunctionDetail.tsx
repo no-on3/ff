@@ -5,6 +5,7 @@ import { Tabs, Tab, Box } from '@mui/material';
 import {
   EditableFields,
   FUNCTION_NAME_PATTERN,
+  eventFormatText,
   FUNCTION_NAME_RULE,
   MAX_FUNCTION_NAME_LENGTH,
   TRUNCATED_NOTE,
@@ -95,7 +96,7 @@ const FunctionDetail: React.FC = () => {
         setLoading(true);
         const { data } = await functionsApi.getFunction(id);
         setFunc(data);
-        setForm({ name: data.name, code: data.code, memory: data.memory, timeout: data.timeout });
+        setForm({ name: data.name, code: data.code, memory: data.memory, timeout: data.timeout, eventFormat: data.eventFormat });
         await loadHistory();
       } catch (err) {
         setLoadError(apiErrorMessage(err));
@@ -185,6 +186,18 @@ const FunctionDetail: React.FC = () => {
 
           <FunctionAlarms functionId={func.id} mayChange={mayChange} />
 
+          {func.eventFormat === 'wrapped' && (
+            <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded mb-4">
+              <p className="font-medium">This function gets {eventFormatText(func)}.</p>
+              <p className="text-sm mt-1">
+                It was made before functions got AWS Lambda&apos;s event, the input itself, which every new function gets, and which a web
+                address or a schedule needs. To move it, change its handler to read <code>event</code> where it reads{' '}
+                <code>event.body</code>, and choose AWS Lambda&apos;s event below, in the same update: the new version rolls out, and the
+                previous one stays if it can&apos;t start.
+              </p>
+            </div>
+          )}
+
           {func.status === 'ERROR' && func.error && (
             <div className="bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded mb-4">
               <p className="font-medium">This function can't run:</p>
@@ -250,6 +263,19 @@ const FunctionDetail: React.FC = () => {
             <p className="text-sm text-gray-500">
               The {plan.name} plan allows up to {plan.limits.memoryMb} MB and {plan.limits.timeoutSeconds} s per function.
             </p>
+            {func.eventFormat === 'wrapped' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Event</label>
+                <select
+                  value={form.eventFormat}
+                  onChange={(e) => setForm({ ...form, eventFormat: e.target.value as EditableFields['eventFormat'] })}
+                  className="input mt-1"
+                >
+                  <option value="wrapped">FF&apos;s original: the input in event.body</option>
+                  <option value="lambda">AWS Lambda&apos;s: the input itself</option>
+                </select>
+              </div>
+            )}
             </fieldset>
 
             {mayChange ? (
@@ -277,7 +303,11 @@ const FunctionDetail: React.FC = () => {
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder='JSON object, e.g. {"name": "Tunis"}; empty means {}'
+              placeholder={
+                func.eventFormat === 'wrapped'
+                  ? 'Any JSON value, which the handler gets as event.body, e.g. {"name": "Tunis"}; empty means {}'
+                  : 'The event: any JSON value, e.g. {"name": "Tunis"}; empty means {}'
+              }
               className="input flex-grow font-mono"
               rows={3}
             />

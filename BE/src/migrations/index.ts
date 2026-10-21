@@ -22,6 +22,7 @@ import { Notifications1792424270622 } from './1792424270622-Notifications';
 import { Alarms1792462186640 } from './1792462186640-Alarms';
 import { UniqueFunctionNames1792545248288 } from './1792545248288-UniqueFunctionNames';
 import { FunctionEnvironments1792555028887 } from './1792555028887-FunctionEnvironments';
+import { EventFormat1792558201826 } from './1792558201826-EventFormat';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -53,4 +54,5 @@ export const MIGRATIONS: Array<new () => object> = [
   Alarms1792462186640,
   UniqueFunctionNames1792545248288,
   FunctionEnvironments1792555028887,
+  EventFormat1792558201826,
 ];

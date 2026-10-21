@@ -1,4 +1,4 @@
-"""FF Python runtime, protocol v2 (the same contract as runtimes/nodejs).
+"""FF Python runtime, protocol v3 (the same contract as runtimes/nodejs).
 
 The main process serves HTTP and supervises one worker process that runs user
 code (worker.py):
@@ -281,7 +281,7 @@ def reject_constant(name):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ff-runtime-python/2"
+    server_version = "ff-runtime-python/3"
     protocol_version = "HTTP/1.1"
     timeout = 60  # seconds a connection may sit idle or stall mid-request
 
@@ -343,21 +343,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(*refusal)
             return
         try:
-            headers = {}
-            for name, value in self.headers.items():
-                key = name.lower()
-                headers[key] = f"{headers[key]},{value}" if key in headers else value
-            event = {
-                "body": body,
-                "headers": headers,
-                "method": self.command,
-                "query": dict(parse_qsl(url.query, keep_blank_values=True)),
-                "path": url.path,
-            }
+            event = body if protocol.EVENT_FORMAT == "lambda" else self.wrapped(body, url)
             request_id = self.headers.get("x-ff-request-id") or str(uuid.uuid4())
             self.send_json(*SUPERVISOR.invoke(request_id, event))
         finally:
             SUPERVISOR.release()
+
+    def wrapped(self, body, url):
+        """FF's original event, for a function made before protocol 3: the payload in body, the request around it."""
+        headers = {}
+        for name, value in self.headers.items():
+            key = name.lower()
+            headers[key] = f"{headers[key]},{value}" if key in headers else value
+        return {
+            "body": body,
+            "headers": headers,
+            "method": self.command,
+            "query": dict(parse_qsl(url.query, keep_blank_values=True)),
+            "path": url.path,
+        }
 
     def read_body(self):
         """The request body, or None when it exceeds the payload limit. ValueError if malformed."""
@@ -444,6 +448,10 @@ def listen(port):
 
 def main():
     global SUPERVISOR
+    if protocol.EVENT_FORMAT not in protocol.EVENT_FORMATS:
+        # A function given the wrong event would fail at every call, or worse, misread it: refuse to start instead.
+        log(level="error", msg="unknown FF_EVENT_FORMAT", expected=list(protocol.EVENT_FORMATS))
+        sys.exit(1)
     server = listen(protocol.PORT)
     SUPERVISOR = Supervisor()
 
@@ -461,7 +469,7 @@ def main():
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     log(level="info", msg="runtime listening", port=protocol.PORT, timeoutMs=TIMEOUT_MS, maxQueueWaitMs=MAX_QUEUE_WAIT_MS,
-        memoryLimitMb=MEMORY_MB, handler=HANDLER, protocol=2)
+        memoryLimitMb=MEMORY_MB, handler=HANDLER, protocol=3, eventFormat=protocol.EVENT_FORMAT)
     server.serve_forever()
     SUPERVISOR.drain(TIMEOUT_MS / 1000 + 1)
     with SUPERVISOR.lock:

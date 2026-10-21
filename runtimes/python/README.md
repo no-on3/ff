@@ -1,11 +1,11 @@
-# ff-runtime-python (runtime protocol v2)
+# ff-runtime-python (runtime protocol v3)
 
 The image that runs every Python function on FF. It speaks the same HTTP protocol as [ff-runtime-nodejs](../nodejs/README.md), so the backend treats both runtimes alike. User code is mounted read-only at `/var/task`. Nothing is installed when a function starts.
 
 | | |
 |---|---|
-| Image | `ff-runtime-python:3.13-v2` (`3.13` = Python 3.13, as in Lambda's `python3.13`; `v2` = runtime protocol, see [What changed in v2](#what-changed-in-v2)) |
-| Base | `python:3.13-slim` (Debian, glibc 2.41). First built 2026-10-16 from `sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` (Python 3.13.16); `3.13-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (pip removed), still on Python 3.13.16. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Image | `ff-runtime-python:3.13-v3` (`3.13` = Python 3.13, as in Lambda's `python3.13`; `v3` = runtime protocol, see [What changed in v3](#what-changed-in-v3)) |
+| Base | `python:3.13-slim` (Debian, glibc 2.41). First built 2026-10-16 from `sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` (Python 3.13.16); `3.13-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (pip removed), still on Python 3.13.16; `3.13-v3` on 2026-10-21, on the same base. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
 | Size | about 122 MB. pip is removed: functions ship their dependencies, nothing can be installed on a read-only root, and the packages pip vendors had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependencies | None: the runtime uses only the standard library |
@@ -64,13 +64,15 @@ AWS Lambda's signature:
 ```python
 def handler(event, context):
     ...
-# event:   {"body", "headers", "method", "query", "path"}    body = the invoke payload
+# event:   the payload of POST /invoke itself, any JSON value, as on AWS Lambda; or, with
+#          FF_EVENT_FORMAT=wrapped, {"body", "headers", "method", "query", "path"}, body = the payload
 # context: function_name, function_version, invoked_function_arn (""),
 #          memory_limit_in_mb (a string, as on Lambda), aws_request_id,
 #          log_group_name (""), log_stream_name (""), identity (None),
 #          client_context (None), get_remaining_time_in_millis()
 ```
 
+- **The event is the payload,** as on Lambda: `POST /invoke` with `{"name": "Sfax"}` calls the handler with `event["name"] == "Sfax"`. FF's backend builds every event a function gets ([ADR 0007](../../docs/adr/0007-function-events.md)). A function made before protocol 3 keeps FF's original wrapper, which the runtime builds when `FF_EVENT_FORMAT=wrapped`.
 - `get_remaining_time_in_millis()` counts down from the start of *this* invocation, not from process start.
 - The working directory is the task root (`/var/task`), as on Lambda, so relative paths such as `open("config.json")` work.
 - Module-level code runs once per worker, so clients created at import time (database pools, SDK clients) are reused across invocations.
@@ -101,6 +103,7 @@ On Kubernetes the container's memory limit equals the function's memory, as on L
 | `FF_MAX_QUEUE` | `32` | Invocations allowed to wait behind the running one |
 | `FF_MAX_QUEUE_WAIT_MS` | `FUNCTION_TIMEOUT` | How long an invocation may wait for its turn before it gets 429. The backend's own timeout covers this wait plus the run, so it never gives up on a call that is only waiting |
 | `PORT` | `8080` | HTTP port (all IPv6 and IPv4 addresses) |
+| `FF_EVENT_FORMAT` | `lambda` | `lambda`: the payload is the event; `wrapped`: FF's original wrapper around it. Anything else stops the runtime at start, with `unknown FF_EVENT_FORMAT` |
 
 The function's own environment variables reach user code unchanged.
 
@@ -124,6 +127,10 @@ REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 12
 
 A worker replaced after `Runtime.OutOfMemory` is logged as `function worker crashed; restarting`, with the request ID, as on the Node.js runtime. **Environment variables are never logged.** On `SIGTERM` the runtime stops accepting connections, finishes the invocations in flight, and exits with status 0.
 
+## What changed in v3
+
+Protocol v3 (2026-10-21, step-1 plan U-03, [ADR 0007](../../docs/adr/0007-function-events.md)) changes the event, as for Node.js, and nothing else: the handler gets the payload itself, any JSON value, unless `FF_EVENT_FORMAT=wrapped`, which every function made before v3 has, and which builds v2's wrapper. The startup line says `"protocol": 3`, with `"eventFormat"`, and the server header `ff-runtime-python/3`.
+
 ## What changed in v2
 
 Protocol v2 (2026-10-17, client-readiness plan P-04) keeps v1's HTTP interface, so the backend works with both; a function moves to v2 at its next update. For Python, three things changed, as for Node.js: the out-of-memory replacement is logged; a reload that fails after a crash makes the runtime exit, so that Kubernetes restarts the container, instead of leaving the pod unready for good; and a call waits at most `FF_MAX_QUEUE_WAIT_MS` (one timeout by default) for its turn, then gets 429. The startup line says `"protocol": 2`, and the server header `ff-runtime-python/2`.
@@ -132,7 +139,7 @@ Protocol v2 (2026-10-17, client-readiness plan P-04) keeps v1's HTTP interface, 
 
 ```bash
 cd runtimes/python
-python3 -m unittest discover -s tests -v   # L1: 29 protocol tests on real processes, ~10 s, no Docker, no packages
+python3 -m unittest discover -s tests -v   # L1: 31 protocol tests on real processes, ~10 s, no Docker, no packages
 tests/container-smoke.sh                   # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```
 

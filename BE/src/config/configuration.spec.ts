@@ -75,7 +75,7 @@ describe('configuration', () => {
         caFile: '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt',
         invokeMode: '',
         namespacePrefix: 'ff-t-',
-        runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v2', python: 'ff-runtime-python:3.13-v2' },
+        runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v3', python: 'ff-runtime-python:3.13-v3' },
         imagePullPolicy: 'IfNotPresent',
         runtimeClass: '',
         readyTimeoutSeconds: 90,
@@ -248,6 +248,26 @@ describe('configuration', () => {
       expect(message).toContain('MINIO_SECRET_KEY');
       expect(message).not.toContain('ffdevsecretkey-local-only');
       expect(message).not.toMatch(/"postgres"|: postgres/);
+    });
+  });
+
+  describe('the runtime images', () => {
+    it('run protocol 3 by default, which hands a function the payload as its event', () => {
+      expect(configuration(dev).kubernetes.runtimeImages).toEqual({ nodejs: 'ff-runtime-nodejs:24-v3', python: 'ff-runtime-python:3.13-v3' });
+    });
+
+    it('refuses an image of protocol 1 or 2, which would hand functions the old wrapper, in every environment', () => {
+      expect(problems({ ...dev, K8S_RUNTIME_IMAGE_NODEJS: 'ff-runtime-nodejs:24-v2', K8S_RUNTIME_IMAGE_PYTHON: 'registry.local:5000/ff/ff-runtime-python:3.13-v1' })).toEqual([
+        "K8S_RUNTIME_IMAGE_NODEJS names a runtime of protocol 2 (ff-runtime-nodejs:24-v2), which gives functions FF's original event: they now get AWS Lambda's, which takes protocol 3 (-v3)",
+        "K8S_RUNTIME_IMAGE_PYTHON names a runtime of protocol 1 (registry.local:5000/ff/ff-runtime-python:3.13-v1), which gives functions FF's original event: they now get AWS Lambda's, which takes protocol 3 (-v3)",
+      ]);
+      expect(problems({ ...production, K8S_RUNTIME_IMAGE_NODEJS: 'ff-runtime-nodejs:24-v2' })).toHaveLength(1);
+    });
+
+    it('takes any other image: a registry with a port, a digest, a later protocol', () => {
+      for (const image of ['registry.local:5000/ff-runtime-nodejs:24-v3', 'ff-runtime-nodejs@sha256:' + 'a'.repeat(64), 'ff-runtime-nodejs:24-v4']) {
+        expect(configuration({ ...dev, K8S_RUNTIME_IMAGE_NODEJS: image }).kubernetes.runtimeImages.nodejs).toBe(image);
+      }
     });
   });
 

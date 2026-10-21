@@ -1,4 +1,4 @@
-import { Runtime } from '../functions/entities/function.entity';
+import { EventFormat, Runtime } from '../functions/entities/function.entity';
 
 /** Injection token for the active scheduler driver (see OrchestratorModule). */
 export const ORCHESTRATOR = Symbol('ORCHESTRATOR');
@@ -22,6 +22,8 @@ export interface FunctionWorkload {
   timeout: number;
   minInstances: number;
   maxInstances: number;
+  /** What its handler gets as its event: the payload itself, or FF's original wrapper around it. */
+  eventFormat: EventFormat;
   /** Its variables and secrets; none when absent or empty. */
   environment?: WorkloadEnvironment;
 }
@@ -130,7 +132,7 @@ export interface Orchestrator {
    * invocation, its usage record and its log lines share one ID (D6). An error
    * after a cold start carries its duration: initMsOf().
    */
-  invoke(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<InvokeResult>;
+  invoke(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<InvokeResult>;
   scale(fn: FunctionWorkload, replicas: number): Promise<void>;
   /** Instances that can serve now. */
   readyInstances(fn: FunctionWorkload): Promise<number>;

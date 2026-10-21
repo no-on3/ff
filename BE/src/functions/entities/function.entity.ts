@@ -25,6 +25,16 @@ export enum Runtime {
 }
 
 /**
+ * What the function's handler gets as its event: the payload itself, as on AWS
+ * Lambda, the default; or FF's original wrapper around it, { body, headers,
+ * method, query, path }, which every function made before has.
+ */
+export enum EventFormat {
+  LAMBDA = 'lambda',
+  WRAPPED = 'wrapped',
+}
+
+/**
  * A name belongs to one function of its account, as on AWS Lambda, compared
  * exactly: "Hello" and "hello" are two names. The index also serves every
  * query by account, which all start with its column.
@@ -68,6 +78,10 @@ export class Function {
     default: FunctionStatus.CREATING,
   })
   status: FunctionStatus;
+
+  /** What its handler gets: AWS Lambda's event, or FF's original wrapper (EventFormat). Its pods are told with FF_EVENT_FORMAT. */
+  @Column({ type: 'enum', enum: EventFormat, default: EventFormat.LAMBDA })
+  eventFormat: EventFormat;
 
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, unknown>;

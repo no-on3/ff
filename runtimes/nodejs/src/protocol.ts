@@ -1,6 +1,6 @@
 /**
  * Messages between the HTTP main thread (main.ts) and the worker thread that
- * hosts user code (worker.ts). Runtime protocol v2.
+ * hosts user code (worker.ts). Runtime protocol v3.
  */
 
 /**
@@ -12,8 +12,16 @@
  */
 export const END_OF_CALL = '\u0000ff-end-of-call:';
 
-/** The event passed to handlers. Unchanged from the original FF wrapper. */
-export interface FunctionEvent {
+/**
+ * How the payload of POST /invoke reaches the handler (FF_EVENT_FORMAT):
+ * - `lambda`, the default: the payload is the event itself, any JSON value, as on AWS Lambda;
+ * - `wrapped`: inside FF's original wrapper (WrappedEvent), for functions made before protocol 3.
+ */
+export const EVENT_FORMATS = ['lambda', 'wrapped'] as const;
+export type EventFormat = (typeof EVENT_FORMATS)[number];
+
+/** FF's original wrapper: the payload in `body`, and the request to the runtime around it. Protocol 2's only event. */
+export interface WrappedEvent {
   body: unknown;
   headers: Record<string, string>;
   method: string;
@@ -34,7 +42,8 @@ export interface InvokeMessage {
   type: 'invoke';
   id: number;
   requestId: string;
-  event: FunctionEvent;
+  /** The payload itself, or the wrapper around it (EventFormat). */
+  event: unknown;
   /** Epoch milliseconds at which the invocation times out. */
   deadlineMs: number;
 }

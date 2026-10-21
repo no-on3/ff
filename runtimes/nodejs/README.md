@@ -1,11 +1,11 @@
-# ff-runtime-nodejs (runtime protocol v2)
+# ff-runtime-nodejs (runtime protocol v3)
 
 The image that runs every Node.js function on FF. User code is mounted read-only at `/var/task`, which is also the working directory. Nothing is installed when a function starts: the image already contains the compiled runtime, TypeScript (used to transpile `.ts` files), and a code cache of TypeScript (see "Start-up").
 
 | | |
 |---|---|
-| Image | `ff-runtime-nodejs:24-v2` (`24` = Node.js 24 LTS, as in Lambda's `nodejs24.x`; `v2` = runtime protocol, see [What changed in v2](#what-changed-in-v2)) |
-| Base | `node:24-alpine`. First built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0); `24-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (the TypeScript code cache, npm removed), still on Node v24.22.0. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Image | `ff-runtime-nodejs:24-v3` (`24` = Node.js 24 LTS, as in Lambda's `nodejs24.x`; `v3` = runtime protocol, see [What changed in v3](#what-changed-in-v3)) |
+| Base | `node:24-alpine`. First built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0); `24-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (the TypeScript code cache, npm removed), still on Node v24.22.0; `24-v3` on 2026-10-21, on the same base. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
 | Size | about 198 MB, with the code cache of TypeScript. npm, npx, corepack and yarn are removed: nothing runs them, and npm's own dependencies had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependency | `typescript` 5.7.3, and nothing else (no Express, no ts-node) |
@@ -64,10 +64,13 @@ The error names follow AWS Lambda's, so code and tooling port across.
 
 ```ts
 export async function handler(event, context) { … }
-// event:   { body, headers, method, query, path }        body = the invoke payload
+// event:   the payload of POST /invoke itself, any JSON value, as on AWS Lambda; or, with
+//          FF_EVENT_FORMAT=wrapped, { body, headers, method, query, path } with body = the payload
 // context: { functionName, functionVersion, memoryLimitInMB (string), awsRequestId,
 //            getRemainingTimeInMillis() }
 ```
+
+- **The event is the payload,** as on Lambda: `POST /invoke` with `{"name": "Tunis"}` calls the handler with `event.name === 'Tunis'`. FF's backend builds every event a function gets: an invoke's input, a function URL's HTTP event, a schedule's ([ADR 0007](../../docs/adr/0007-function-events.md)). A function made before protocol 3 keeps FF's original wrapper, which the runtime builds from its own request when `FF_EVENT_FORMAT=wrapped`.
 
 - `getRemainingTimeInMillis()` counts down from the start of *this* invocation, not from process start.
 - **The working directory is the task root** (`/var/task`), as on Lambda, so relative paths such as `fs.readFileSync('config.json')` find the files next to the code.
@@ -88,6 +91,7 @@ export async function handler(event, context) { … }
 | `FF_MAX_QUEUE` | `32` | Invocations allowed to wait behind the running one |
 | `FF_MAX_QUEUE_WAIT_MS` | `FUNCTION_TIMEOUT` | How long an invocation may wait for its turn before it gets 429. The backend's own timeout covers this wait plus the run, so it never gives up on a call that is only waiting |
 | `PORT` | `8080` | HTTP port |
+| `FF_EVENT_FORMAT` | `lambda` | `lambda`: the payload is the event; `wrapped`: FF's original wrapper around it. Anything else stops the runtime at start, with `unknown FF_EVENT_FORMAT` |
 
 ## Memory
 
@@ -128,6 +132,17 @@ The stack trace points at the lines of the TypeScript source (source maps are on
 
 The Python runtime needs none of this: its worker is a process that writes to the same stdout and stderr, unbuffered (`PYTHONUNBUFFERED`), before it sends its result.
 
+## What changed in v3
+
+Protocol v3 (2026-10-21, step-1 plan U-03, [ADR 0007](../../docs/adr/0007-function-events.md)) changes the event, and nothing else: the probes, the `X-FF-*` headers, the errors and the logs are v2's.
+
+| | v2 | v3 |
+|---|---|---|
+| The event | `{ body, headers, method, query, path }`, built from the backend's request to the pod, `body` the payload | the payload itself, any JSON value, as on Lambda; the wrapper only with `FF_EVENT_FORMAT=wrapped` |
+| The startup line | `"protocol": 2` | `"protocol": 3`, with `"eventFormat"` |
+
+The backend tells each function's pods which format they get. Every function made before v3 is `wrapped`, and gets from v3 the same event as from v2.
+
 ## What changed in v2
 
 Protocol v2 (2026-10-17, client-readiness plan P-04; the order of the logs, P-42) keeps v1's HTTP interface, so the backend works with both. A function moves to v2 at its next update. What changed:
@@ -149,6 +164,6 @@ Protocol v2 (2026-10-17, client-readiness plan P-04; the order of the logs, P-42
 ```bash
 cd runtimes/nodejs
 npm install
-npm test                       # L1: 38 protocol tests on real processes, 4 for the output relay, 3 for the code cache, ~20 s, no Docker
+npm test                       # L1: 41 protocol tests on real processes, 4 for the output relay, 3 for the code cache, ~20 s, no Docker
 test/container-smoke.sh        # L2: builds the image and runs it hardened (read-only, uid 10001, no capabilities)
 ```

@@ -27,8 +27,8 @@ const kubeDir = path.resolve(__dirname, '../../../hack/.kube');
 // Sleeps, then says which instance served the call.
 const sleeper = `
 import * as os from 'node:os';
-export async function handler(event: { body: { ms?: number } }) {
-  await new Promise((resolve) => setTimeout(resolve, event.body.ms ?? 0));
+export async function handler(event: { ms?: number }) {
+  await new Promise((resolve) => setTimeout(resolve, event.ms ?? 0));
   return { pod: os.hostname() };
 }`;
 

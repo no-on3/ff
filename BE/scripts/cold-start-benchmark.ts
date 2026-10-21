@@ -14,7 +14,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { describeError } from '../src/common/describe-error';
-import { Runtime } from '../src/functions/entities/function.entity';
+import { EventFormat, Runtime } from '../src/functions/entities/function.entity';
 import { FunctionWorkload } from '../src/orchestrator/orchestrator.types';
 import { KubeClient, paths } from '../src/orchestrator/kubernetes/kube-client';
 import { KubernetesOrchestrator } from '../src/orchestrator/kubernetes/kubernetes.orchestrator';
@@ -22,10 +22,10 @@ import { KubernetesSettings } from '../src/orchestrator/kubernetes/kubernetes.se
 import { LABELS, accountNamespace } from '../src/orchestrator/kubernetes/naming';
 
 const CODE: Record<Runtime, string> = {
-  [Runtime.NODEJS]: `export async function handler(event: { body: { name?: string } }) {
-  return { message: 'Hello ' + (event.body.name ?? 'world') };
+  [Runtime.NODEJS]: `export async function handler(event: { name?: string }) {
+  return { message: 'Hello ' + (event.name ?? 'world') };
 }`,
-  [Runtime.PYTHON]: 'def handler(event, context):\n    return {"message": "Hello " + event["body"].get("name", "world")}\n',
+  [Runtime.PYTHON]: 'def handler(event, context):\n    return {"message": "Hello " + event.get("name", "world")}\n',
 };
 
 interface Options {
@@ -101,6 +101,7 @@ async function round(orchestrator: KubernetesOrchestrator, ns: string, accountId
     timeout: 3,
     minInstances: 0,
     maxInstances: 1,
+    eventFormat: EventFormat.LAMBDA,
   }));
   const tenant = { quota: { pods: 10, cpu: '8', memory: '8Gi' }, internetEgress: false };
   try {
@@ -132,8 +133,8 @@ async function main(): Promise<void> {
     namespacePrefix: 'ff-t-',
     // Another image can be measured against the current one, as the backend would be set.
     runtimeImages: {
-      nodejs: process.env.K8S_RUNTIME_IMAGE_NODEJS ?? 'ff-runtime-nodejs:24-v2',
-      python: process.env.K8S_RUNTIME_IMAGE_PYTHON ?? 'ff-runtime-python:3.13-v2',
+      nodejs: process.env.K8S_RUNTIME_IMAGE_NODEJS ?? 'ff-runtime-nodejs:24-v3',
+      python: process.env.K8S_RUNTIME_IMAGE_PYTHON ?? 'ff-runtime-python:3.13-v3',
     },
     imagePullPolicy: 'IfNotPresent',
     runtimeClass: options.runtimeClass,

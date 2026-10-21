@@ -171,15 +171,36 @@ class SuccessfulInvocations(RuntimeTest):
         self.assertRegex(logs, r"END RequestId: req-123")
         self.assertRegex(logs, r"REPORT RequestId: req-123\tDuration: [\d.]+ ms\tBilled Duration: \d+ ms\tMemory Size: 128 MB")
 
-    def test_generates_a_request_id_and_passes_method_path_and_query(self):
+    def test_hands_the_payload_to_the_handler_as_the_event_itself_any_json_value(self):
         rt = self.start("echo")
         rt.ready()
 
-        res = rt.invoke({"a": 1}, path="/invoke?x=1&empty=")
+        for payload in ({"a": 1}, "text", 42, [1, "two"], None, True):
+            res = rt.invoke(json.dumps(payload))
+            self.assertEqual(res.status, 200, res.text)
+            self.assertEqual(res.json, {"echo": payload})
+        self.assertRegex(res.headers["x-ff-request-id"], r"^[0-9a-f-]{36}$")
+
+    def test_wraps_the_payload_in_the_original_event_for_a_function_made_before_protocol_3(self):
+        rt = self.start("echo", FF_EVENT_FORMAT="wrapped")
+        rt.ready()
+
+        res = rt.invoke({"a": 1}, {"x-ff-request-id": "req-wrapped"}, path="/invoke?x=1&empty=")
 
         self.assertEqual(res.status, 200)
-        self.assertEqual(res.json, {"echo": {"a": 1}, "method": "POST", "path": "/invoke", "query": {"x": "1", "empty": ""}})
-        self.assertRegex(res.headers["x-ff-request-id"], r"^[0-9a-f-]{36}$")
+        echo = res.json["echo"]
+        self.assertEqual(
+            (echo["body"], echo["method"], echo["path"], echo["query"]), ({"a": 1}, "POST", "/invoke", {"x": "1", "empty": ""})
+        )
+        self.assertEqual(echo["headers"]["x-ff-request-id"], "req-wrapped")
+
+    def test_refuses_to_start_with_an_event_format_it_does_not_know(self):
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(ROOT), "PORT": str(free_port()),
+               "LAMBDA_TASK_ROOT": str(FIXTURES / "echo"), "FF_EVENT_FORMAT": "v2"}
+        done = subprocess.run([sys.executable, "-P", "-m", "ff_runtime.main"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
+
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('"msg": "unknown FF_EVENT_FORMAT", "expected": ["lambda", "wrapped"]', done.stdout)
 
     def test_returns_json_null_when_the_handler_returns_none(self):
         rt = self.start("void")

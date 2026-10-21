@@ -56,11 +56,11 @@ It is safe to re-run.
 
 ## Runtime images and integration tests
 
-Function pods use the FF runtime images `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2` (protocol and handler contracts in [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md)). In development they are built locally and imported into the cluster, so no registry is needed:
+Function pods use the FF runtime images `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3` (protocol and handler contracts in [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md)). In development they are built locally and imported into the cluster, so no registry is needed:
 
 ```bash
-runtimes/nodejs/test/container-smoke.sh    # builds ff-runtime-nodejs:24-v2 and checks it hardened
-runtimes/python/tests/container-smoke.sh   # builds ff-runtime-python:3.13-v2 and checks it hardened
+runtimes/nodejs/test/container-smoke.sh    # builds ff-runtime-nodejs:24-v3 and checks it hardened
+runtimes/python/tests/container-smoke.sh   # builds ff-runtime-python:3.13-v3 and checks it hardened
 hack/k8s/load-images.sh                    # imports every local ff-runtime-* image into ff-dev
 hack/k8s/test-it.sh                        # L3: re-imports the images, then runs BE `npm run test:it` (~6 min)
 hack/k8s/test-it.sh functions.lifecycle    # only the suites whose path matches

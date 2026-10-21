@@ -23,8 +23,8 @@ const itOnline = process.env.K8S_IT_INTERNET === '1' ? it : it.skip;
 const kubeDir = path.resolve(__dirname, '../../../../hack/.kube');
 
 const greeter = (version: number) => `
-export async function handler(event: { body: { name?: string } }) {
-  return { version: ${version}, message: 'Hello ' + (event.body.name ?? 'world') };
+export async function handler(event: { name?: string }) {
+  return { version: ${version}, message: 'Hello ' + (event.name ?? 'world') };
 }`;
 
 const pythonGreeter = `
@@ -32,10 +32,10 @@ import os
 
 
 def handler(event, context):
-    if event["body"].get("fail"):
+    if event.get("fail"):
         raise ValueError("no thanks")
     return {
-        "message": "Hello " + event["body"].get("name", "world"),
+        "message": "Hello " + event.get("name", "world"),
         "memoryLimitInMB": context.memory_limit_in_mb,
         "cwd": os.getcwd(),
     }
@@ -45,15 +45,15 @@ def handler(event, context):
 const pythonHog = `
 def handler(event, context):
     hoard = []
-    while event["body"].get("hog"):
+    while event.get("hog"):
         hoard.append(bytearray(4 * 1024 * 1024))
     return "ok"
 `;
 
 const nodeHog = `
 const hoard: string[][] = [];
-export async function handler(event: { body: { hog?: boolean } }) {
-  while (event.body.hog) hoard.push(new Array(100_000).fill('x'.repeat(8)));
+export async function handler(event: { hog?: boolean }) {
+  while (event.hog) hoard.push(new Array(100_000).fill('x'.repeat(8)));
   return 'ok';
 }`;
 

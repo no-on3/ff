@@ -3,6 +3,6 @@
 // allocation could get past it.
 exports.handler = async (event) => {
   const chunks = [];
-  for (let i = 0; i < event.body.mb; i++) chunks.push(new Array(131072).fill(i));
+  for (let i = 0; i < event.mb; i++) chunks.push(new Array(131072).fill(i));
   return chunks.length;
 };

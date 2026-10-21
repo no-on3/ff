@@ -291,6 +291,8 @@ export function deploymentManifest(
                 { name: 'FF_MAX_QUEUE_WAIT_MS', value: String(maxQueueWaitMs(fn)) },
                 { name: 'LAMBDA_TASK_ROOT', value: '/var/task' },
                 { name: 'FF_HANDLER', value: 'function.handler' },
+                // The payload as the event, as on AWS Lambda, or FF's original wrapper for a function made before.
+                { name: 'FF_EVENT_FORMAT', value: fn.eventFormat },
                 { name: 'PORT', value: String(RUNTIME_PORT) },
                 ...timeZone,
               ],

@@ -442,7 +442,7 @@
 <section id="runtime">
   <div class="wrap">
     <h2>Inside the runtime</h2>
-    <p class="lead">Every function pod runs one of two images, <code>ff-runtime-nodejs:24-v2</code> or <code>ff-runtime-python:3.13-v2</code>, which speak the same protocol (version 2). Your code never runs in the main process: Node.js uses a worker thread with V8 heap limits, and Python a separate worker process with a memory budget. The main process therefore keeps answering probes, enforces the timeout, and replaces the worker after a timeout, an out-of-memory error, or a crash, without restarting the container. If that replacement can't load code that loaded before, the environment is broken, so the runtime exits and Kubernetes restarts the container. Your code runs in <code>/var/task</code>, as on Lambda.</p>
+    <p class="lead">Every function pod runs one of two images, <code>ff-runtime-nodejs:24-v3</code> or <code>ff-runtime-python:3.13-v3</code>, which speak the same protocol (version 2). Your code never runs in the main process: Node.js uses a worker thread with V8 heap limits, and Python a separate worker process with a memory budget. The main process therefore keeps answering probes, enforces the timeout, and replaces the worker after a timeout, an out-of-memory error, or a crash, without restarting the container. If that replacement can't load code that loaded before, the environment is broken, so the runtime exits and Kubernetes restarts the container. Your code runs in <code>/var/task</code>, as on Lambda.</p>
     <div class="grid2">
       <div class="card pad scrollx"><div id="runtimeDiagram"></div></div>
       <div class="card pad">
@@ -581,9 +581,9 @@ const HASH_V2 = '9c9e249cb76d185984d6cf076a57c17a0221e5034e5e9e283e504b0060e40bc
 const HASH_PY = 'c38dc02399da3a28e683be106277c9888de99cbfae257cf053a8273b8a665c66';
 const HASH_SLOW = '16a2f390332cf9c1dd1e9b57fa8f5a3362e596a035e71b494dcd1b42a2914662';
 const HASH_BAD = '93201b57673588061bb0e87ed85bad5728d55391e96ceb14c8c95d9e4cee3084';
-const CODE_TS = "// A Node.js function in TypeScript. FF calls handler(event, context), as AWS Lambda does.\n// event.body is the \"input\" sent to POST /functions/:id/invoke.\nexport async function handler(event: { body: { name?: string } }, context: { awsRequestId: string }) {\n  const name = event.body.name ?? 'world';\n  console.log(`greeting ${name}`); // shows up in the function pod's logs\n  return { message: `Hello ${name}`, requestId: context.awsRequestId };\n}\n";
+const CODE_TS = "// A Node.js function in TypeScript. FF calls handler(event, context), as AWS Lambda does.\n// The event is the \"input\" sent to POST /functions/:id/invoke, as a payload is on AWS Lambda.\nexport async function handler(event: { name?: string }, context: { awsRequestId: string }) {\n  const name = event.name ?? 'world';\n  console.log(`greeting ${name}`); // shows up in the function pod's logs\n  return { message: `Hello ${name}`, requestId: context.awsRequestId };\n}\n";
 const CODE_TS_V2 = CODE_TS.replace('Hello ', 'Marhba ');
-const CODE_PY = "# A Python function. FF calls handler(event, context), as AWS Lambda does.\n# event[\"body\"] is the \"input\" sent to POST /functions/:id/invoke.\ndef handler(event, context):\n    name = event[\"body\"].get(\"name\", \"world\")\n    if name == \"error\":\n        raise ValueError(\"this name is not allowed\")  # the invocation ends as ERROR\n    print(f\"greeting {name}\")  # shows up in the function pod's logs\n    return {\"message\": f\"Hello {name}\", \"requestId\": context.aws_request_id}\n";
+const CODE_PY = "# A Python function. FF calls handler(event, context), as AWS Lambda does.\n# The event is the \"input\" sent to POST /functions/:id/invoke, as a payload is on AWS Lambda.\ndef handler(event, context):\n    name = event.get(\"name\", \"world\")\n    if name == \"error\":\n        raise ValueError(\"this name is not allowed\")  # the invocation ends as ERROR\n    print(f\"greeting {name}\")  # shows up in the function pod's logs\n    return {\"message\": f\"Hello {name}\", \"requestId\": context.aws_request_id}\n";
 const CODE_SLOW = "import time\n\n\n# Sleeps for event[\"body\"][\"seconds\"]. Longer than the function's timeout ends as TIMEOUT.\ndef handler(event, context):\n    seconds = event[\"body\"].get(\"seconds\", 1)\n    time.sleep(seconds)\n    return {\"slept\": seconds, \"remainingMs\": context.get_remaining_time_in_millis()}\n";
 const CODE_BAD = "export async function handler() {\n  return {{{;\n}\n";
 const fn = (id) => 'fn-' + id;
@@ -614,8 +614,8 @@ const mDeployment = (hash, replicas) => ({ apiVersion: 'apps/v1', kind: 'Deploym
     template: { metadata: { labels: FN_LABELS, annotations: { 'ff.dev/code-sha256': hash } },
       spec: { automountServiceAccountToken: false, enableServiceLinks: false, terminationGracePeriodSeconds: 10,
         securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: 'RuntimeDefault' } },
-        containers: [{ name: 'function', image: 'ff-runtime-nodejs:24-v2', imagePullPolicy: 'IfNotPresent', ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
-          env: [{ name: 'FUNCTION_NAME', value: 'hello' }, { name: 'FUNCTION_VERSION', value: '$LATEST' }, { name: 'FUNCTION_MEMORY_LIMIT', value: '128' }, { name: 'FUNCTION_TIMEOUT', value: '5000' }, { name: 'LAMBDA_TASK_ROOT', value: '/var/task' }, { name: 'FF_HANDLER', value: 'function.handler' }, { name: 'PORT', value: '8080' }, { name: 'TZ', value: 'UTC' }],
+        containers: [{ name: 'function', image: 'ff-runtime-nodejs:24-v3', imagePullPolicy: 'IfNotPresent', ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
+          env: [{ name: 'FUNCTION_NAME', value: 'hello' }, { name: 'FUNCTION_VERSION', value: '$LATEST' }, { name: 'FUNCTION_MEMORY_LIMIT', value: '128' }, { name: 'FUNCTION_TIMEOUT', value: '5000' }, { name: 'LAMBDA_TASK_ROOT', value: '/var/task' }, { name: 'FF_HANDLER', value: 'function.handler' }, { name: 'FF_EVENT_FORMAT', value: 'lambda' }, { name: 'PORT', value: '8080' }, { name: 'TZ', value: 'UTC' }],
           resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '100m', memory: '128Mi' } },
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } },
           readinessProbe: { httpGet: { path: '/readyz', port: 'http' }, periodSeconds: 2, failureThreshold: 3 },
@@ -767,7 +767,7 @@ const SCENARIOS = [
     initial: activeState(FN, HASH_V1, 'code.ts'),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'You invoke the function',
-        text: 'The body has one field, input, holding any JSON object. It becomes event.body in your handler.',
+        text: 'The body has one field, input, holding any JSON value. It is the event your handler gets, as a payload is on AWS Lambda (a function made before 2026-10-21 gets it as event.body until it is switched).',
         code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(FN, { name: 'Tunis' }) },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT the function · ACTIVE?', title: 'The function must be ACTIVE',
         text: 'A function that doesn\'t exist gets 404; one that isn\'t ACTIVE gets 400 "Function is not active".',
@@ -801,7 +801,7 @@ const SCENARIOS = [
       { from: 'pod', to: 'worker', kind: 'req', label: 'event · deadline', title: 'The event reaches the worker',
         text: 'The event wraps your input with the details of the HTTP request; headers holds every request header, lowercased. The deadline lets context.getRemainingTimeInMillis() count down.',
         code: 'runtimes/nodejs/src/main.ts dispatch() → worker.ts',
-        msg: { kind: 'ipc', title: 'worker.postMessage(…), headers abridged', body: { type: 'invoke', id: 1, requestId: REQ, event: { body: { name: 'Tunis' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }, deadlineMs: 1792159335240 } } },
+        msg: { kind: 'ipc', title: 'worker.postMessage(…)', body: { type: 'invoke', id: 1, requestId: REQ, event: { name: 'Tunis' }, deadlineMs: 1792159335240 } } },
       { from: 'worker', to: 'worker', kind: 'int', label: 'handler(event, context)', title: 'Your handler runs',
         text: 'context uses Lambda\'s names: functionName, functionVersion, memoryLimitInMB (a string), awsRequestId, getRemainingTimeInMillis(). console.log writes to the worker\'s stdout, which the main thread forwards to the pod\'s log as it comes.',
         code: 'runtimes/nodejs/src/worker.ts · your function.ts', t: '⏱ 1.09 ms',
@@ -893,7 +893,7 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', '…': '…' }, body: { name: 'error' } } },
       { from: 'pod', to: 'worker', kind: 'req', label: '["invoke", id, event, deadline]', title: 'The Python worker gets the event',
         text: 'In Python the main process and the worker process talk over a socket pair, in JSON messages with a 4-byte length prefix.', code: 'runtimes/python/ff_runtime/protocol.py · main.py Supervisor._run()',
-        msg: { kind: 'ipc', title: 'a message on the socket (a JSON array), headers abridged', body: ['invoke', REQ, { body: { name: 'error' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }, 1792159355230] },
+        msg: { kind: 'ipc', title: 'a message on the socket (a JSON array)', body: ['invoke', REQ, { name: 'error' }, 1792159355230] },
         set: { 'Runtime.worker': 'busy' } },
       { from: 'worker', to: 'worker', kind: 'int', label: 'raise ValueError(…)', title: 'The handler raises',
         text: 'The worker catches the exception and logs it as one JSON line, with the stack trace.', code: 'runtimes/python/ff_runtime/worker.py run_once(), log_error()',
@@ -1741,7 +1741,7 @@ const TRACE = [
   ['1. What you send', 'POST /functions/:id/invoke', { input: { name: 'Tunis' } }],
   ['2. What the backend forwards', 'kubernetes.orchestrator.ts post()', { name: 'Tunis' }],
   ['3. What the runtime receives', 'POST /invoke, through the API server\'s proxy', 'POST /invoke HTTP/1.1\ncontent-type: application/json\nx-ff-request-id: ' + INV + '\n…\n\n{"name":"Tunis"}'],
-  ['4. The event your handler gets', 'runtime main → worker (headers abridged)', { body: { name: 'Tunis' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }],
+  ['4. The event your handler gets', 'runtime main → worker: the payload itself, as on AWS Lambda', { name: 'Tunis' }],
   ['5. The context', 'worker.ts (Python: worker.py)', 'functionName: "hello"\nfunctionVersion: "$LATEST"\nmemoryLimitInMB: "128"\nawsRequestId: "' + REQ + '"\ngetRemainingTimeInMillis() → 4998'],
   ['6. What your handler returns', 'your function.ts', { message: 'Hello Tunis', requestId: REQ }],
   ['7. What the runtime answers', 'main.ts', 'HTTP/1.1 200 OK\ncontent-type: application/json\nx-ff-request-id: ' + REQ + '\nx-ff-duration-ms: 1.09\nx-ff-max-memory-used-mb: 98\n\n{"message":"Hello Tunis","requestId":"…"}'],

@@ -68,6 +68,8 @@ export interface Function {
   minInstances: number;
   maxInstances: number;
   scaleToZero: boolean;
+  /** What its handler gets: AWS Lambda's event, the input itself; or, for a function made before, FF's original wrapper. */
+  eventFormat: EventFormat;
   metadata?: Record<string, unknown> | null;
   /**
    * Its environment variables, by name: in the answers of GET /functions/:id, a create and an update; not in the
@@ -86,8 +88,12 @@ export type NewFunction = Pick<Function, 'name' | 'runtime' | 'code' | 'memory' 
   secrets?: Record<string, string>;
 };
 
+/** What a function's handler gets as its event. contract.test.ts checks them against the API's. */
+export const EVENT_FORMATS = ['lambda', 'wrapped'] as const;
+export type EventFormat = (typeof EVENT_FORMATS)[number];
+
 /** What PUT /functions/:id accepts: any subset of these. `environment` replaces all the variables, and rolls out. */
-export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'>> & {
+export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout' | 'eventFormat'>> & {
   environment?: Record<string, string>;
 };
 
@@ -189,8 +195,8 @@ export const functionsApi = {
 
   deleteFunction: (id: string) => api.delete(`/functions/${id}`),
 
-  /** `input` becomes the handler's event.body. */
-  invokeFunction: (id: string, input: Record<string, unknown>) =>
+  /** `input` is the handler's event, any JSON value; for a function made before, its event.body. */
+  invokeFunction: (id: string, input: unknown) =>
     api.post<FunctionInvocation>(`/functions/${id}/invoke`, { input }),
 
   getFunctionInvocations: (id: string, limit = 20) =>

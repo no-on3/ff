@@ -17,7 +17,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
   - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy: its functions reach the internet only once you turn the account's egress on, and never FF's own network;
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
   - code is stored in immutable ConfigMaps, up to 900 KiB. The API currently accepts requests of about 100 KB at most, which is task C-03 of the [CLI plan](docs/cli-plan.md).
-- **Runtimes** `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2`, runtime protocol 2 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
+- **Runtimes** `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`, runtime protocol 3 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
   - Lambda's `handler(event, context)`, error names, and log lines, with the code's directory as the working directory and the peak memory as `Max Memory Used`;
   - real timeouts;
   - out-of-memory and crashes are handled per invocation, without restarting the container; a replacement that can't load the code again restarts it;
@@ -48,7 +48,7 @@ Nomad is no longer used; its development VM was removed.
 | `BE/` | Backend: functions API, metrics, scaling, and the orchestrator (`src/orchestrator/kubernetes`) |
 | `FE/` | Console (React, Vite, Tailwind) |
 | `admin/` | Admin dashboard for FF's operators (React, Vite, Tailwind): a separate app, behind its own login (P-70) |
-| `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol 2 |
+| `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol 3 |
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs), `logging/` (the log pipeline), `monitoring/` (the operator's metrics, alerts and dashboards), `platform/` (the backend, the apps, Keycloak and the edge proxy, with their deploy script), `backup/` (the legal records' mirror) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
 | `infrastructure/` | SeaweedFS (S3) identities for `docker-compose.yml` |
@@ -64,8 +64,8 @@ You need Docker 24+, Node.js 24.15 or newer, Python 3.11+ (for the Python runtim
 ```bash
 docker compose up -d --wait                 # PostgreSQL (127.0.0.1:5432) + SeaweedFS S3 (127.0.0.1:9003)
 hack/k8s/cluster-up.sh                      # k3d cluster (k3s v1.37.1), RBAC, admission policy, credentials
-runtimes/nodejs/test/container-smoke.sh     # builds ff-runtime-nodejs:24-v2 and checks it
-runtimes/python/tests/container-smoke.sh    # builds ff-runtime-python:3.13-v2 and checks it
+runtimes/nodejs/test/container-smoke.sh     # builds ff-runtime-nodejs:24-v3 and checks it
+runtimes/python/tests/container-smoke.sh    # builds ff-runtime-python:3.13-v3 and checks it
 hack/k8s/load-images.sh                     # imports the runtime images into the cluster
 cp BE/.env.example BE/.env                  # first time only; the defaults match the steps above
 cd BE && npm install && npm run migration:run   # the database schema comes from migrations
@@ -77,7 +77,7 @@ Create a function and invoke it:
 ```bash
 curl -s localhost:3000/functions -H 'content-type: application/json' -d @- <<'EOF'
 {"name": "hello", "runtime": "nodejs", "memory": 128, "timeout": 5,
- "code": "export async function handler(event) { return { message: `Hello ${event.body.name ?? 'world'}` }; }"}
+ "code": "export async function handler(event) { return { message: `Hello ${event.name ?? 'world'}` }; }"}
 EOF
 curl -s -X POST localhost:3000/functions/<id>/invoke -H 'content-type: application/json' -d '{"input": {"name": "FF"}}'
 # → {"status": "COMPLETED", "output": {"message": "Hello FF"}, "duration": 0.48, …}

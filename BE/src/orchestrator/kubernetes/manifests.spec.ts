@@ -1,4 +1,4 @@
-import { Runtime } from '../../functions/entities/function.entity';
+import { EventFormat, Runtime } from '../../functions/entities/function.entity';
 import { CodeTooLargeError } from '../orchestrator.errors';
 import {
   BLOCKED_EGRESS_CIDRS,
@@ -100,8 +100,15 @@ describe('Kubernetes manifests', () => {
         FUNCTION_MEMORY_LIMIT: '512',
         LAMBDA_TASK_ROOT: '/var/task',
         FF_HANDLER: 'function.handler',
+        FF_EVENT_FORMAT: 'lambda',
         PORT: '8080',
       });
+    });
+
+    it("tells the runtime a function made before still gets FF's original event", () => {
+      const env = Object.fromEntries(container(build({ eventFormat: EventFormat.WRAPPED })).env.map((e: any) => [e.name, e.value]));
+
+      expect(env.FF_EVENT_FORMAT).toBe('wrapped');
     });
 
     describe("the function's own variables and secrets", () => {
@@ -160,7 +167,7 @@ describe('Kubernetes manifests', () => {
     });
 
     it('picks the image for the runtime and rejects unconfigured runtimes', () => {
-      expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v2');
+      expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v3');
       expect(() => build({ runtime: 'cobol' })).toThrow('No runtime image configured for runtime "cobol"');
     });
   });

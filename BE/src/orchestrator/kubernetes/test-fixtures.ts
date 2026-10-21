@@ -1,5 +1,5 @@
 // Shared fixtures for the Kubernetes driver specs (not part of the build output's runtime paths).
-import { Runtime } from '../../functions/entities/function.entity';
+import { EventFormat, Runtime } from '../../functions/entities/function.entity';
 import { FunctionWorkload, TenantLimits } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
 
@@ -9,7 +9,7 @@ export const settings = (overrides: Partial<KubernetesSettings> = {}): Kubernete
   caFile: '',
   invokeMode: 'proxy',
   namespacePrefix: 'ff-t-',
-  runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v2', python: 'ff-runtime-python:3.13-v2' },
+  runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v3', python: 'ff-runtime-python:3.13-v3' },
   imagePullPolicy: 'IfNotPresent',
   runtimeClass: '',
   readyTimeoutSeconds: 5,
@@ -35,5 +35,6 @@ export const workload = (overrides: Partial<FunctionWorkload> = {}): FunctionWor
   timeout: 10,
   minInstances: 0,
   maxInstances: 3,
+  eventFormat: EventFormat.LAMBDA,
   ...overrides,
 });

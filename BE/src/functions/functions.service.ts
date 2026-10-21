@@ -63,7 +63,7 @@ import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
-const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout'] as const;
+const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout', 'eventFormat'] as const;
 
 /** A function as the API answers it: its record and its variables. Its secrets' values are never part of it. */
 export type FunctionView = Function & { environment: Record<string, string> };
@@ -539,7 +539,8 @@ export class FunctionsService {
     await this.audit.record({ accountId, action: 'function.delete', resource: `function:${id}`, details: { name: function_.name } });
   }
 
-  async invoke(accountId: string, id: string, input?: Record<string, unknown>): Promise<FunctionInvocation> {
+  /** Calls the function with `input` as its event, any JSON value, as AWS Lambda's Invoke does; {} when there is none. */
+  async invoke(accountId: string, id: string, input?: unknown): Promise<FunctionInvocation> {
     const function_ = await this.findOne(accountId, id);
     if (function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
@@ -547,7 +548,7 @@ export class FunctionsService {
     // D9: 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
     await this.credit.admit(accountId);
 
-    const payload = input || {};
+    const payload = input === undefined ? {} : input;
     // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
     const keptInput = keptJson(payload);
     const invocation = this.invocationsRepository.create({
