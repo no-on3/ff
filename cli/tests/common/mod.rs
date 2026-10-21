@@ -90,6 +90,15 @@ impl Reply {
         Reply { status, headers: vec![("content-type".into(), "application/json".into())], body: body.to_string() }
     }
 
+    /// Server-Sent Events, as the live tail sends them: the stream ends with the reply.
+    pub fn events(events: &str) -> Reply {
+        Reply {
+            status: 200,
+            headers: vec![("content-type".into(), "text/event-stream".into())],
+            body: events.to_owned(),
+        }
+    }
+
     pub fn header(mut self, name: &str, value: &str) -> Reply {
         self.headers.push((name.into(), value.into()));
         self

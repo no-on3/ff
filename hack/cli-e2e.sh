@@ -3,8 +3,8 @@
 #   PostgreSQL + S3 (compose project "ff-cli-e2e", ports 55436 / 59007) + the k3d dev cluster
 #   + the backend (built, started on a free port in development mode, which acts as the account
 #   a profile names, as hack/e2e.sh's requests do).
-# For examples/hello.ts and examples/hello.py: deploy, invoke, deploy again unchanged, scale,
-# update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
+# For examples/hello.ts and examples/hello.py: deploy, invoke, the handler's line in ff logs and
+# in ff logs --follow, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
 # exit 5 with the call's ID, which the history shows; code that fails to load exits 4, and the
 # function is kept, in ERROR, with its error. A second account finds none of the first's.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -66,6 +66,32 @@ for example in hello.ts hello.py; do
   request_id="$(out | tail -1 | cut -d' ' -f2)"
   check "invoke prints the answer, and the request ID the function saw" "0 Hello Tunis $request_id" \
     "$(code) $(out | sed '$d' | jq -r '"\(.message) \(.requestId)"')"
+  # The handler's print reaches the log store within seconds, under the call's request ID.
+  found=false
+  for _ in $(seq 1 30); do
+    ff logs "$name" --request-id "$request_id"
+    if out | grep -q ' greeting Tunis$'; then
+      found=true
+      break
+    fi
+    sleep 1
+  done
+  check "ff logs shows the handler's line, found by the call's request ID" true "$found"
+  "$ff_bin" logs "$name" --follow --tail 1 --output json >"$work/follow.out" 2>"$work/follow.err" &
+  follower=$!
+  sleep 2
+  ff invoke "$name" --data '{"name": "Follow"}'
+  followed=false
+  for _ in $(seq 1 20); do
+    if grep -q '"message":"greeting Follow"' "$work/follow.out"; then
+      followed=true
+      break
+    fi
+    sleep 1
+  done
+  kill "$follower" 2>/dev/null || true
+  wait "$follower" 2>/dev/null || true
+  check "ff logs --follow prints a new call's line as it comes, within 20 s" true "$followed"
   ff invoke "$name" --data '{"name": "raw"}' --raw
   check "--raw prints the answer only, for a pipe" "0 Hello raw" "$(code) $(out | jq -r .message)"
   ff deploy "$FF_REPO_ROOT/examples/$example" --name "$name"
@@ -80,7 +106,7 @@ for example in hello.ts hello.py; do
   check "the new code answers" "0 Ahlan Sfax" "$(code) $(out | sed '$d' | jq -r .message)"
   last_id="$(out | tail -1 | cut -d' ' -f2)"
   ff history "$name" --limit 2 --output json
-  check "history lists its calls, newest first, by the IDs invoke printed" "0 3 $last_id COMPLETED" \
+  check "history lists its calls, newest first, by the IDs invoke printed" "0 4 $last_id COMPLETED" \
     "$(code) $(out | jq -r '"\(.total) \(.invocations[0].id) \(.invocations[0].status)"')"
   ff get "$name" --output json
   check "get shows it, its code's size rather than its code" "0 256 0 2 null true" \

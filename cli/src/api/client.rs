@@ -1,7 +1,7 @@
 //! The API client: one request at a time, with the caller's token and account, ff's user agent,
 //! and timeouts fit for each call.
 
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::thread;
 use std::time::Duration;
 
@@ -11,6 +11,7 @@ use ureq::http::Response;
 use ureq::tls::{RootCerts, TlsConfig};
 
 use super::error::{api_error, retry_after};
+use super::events::Events;
 use crate::auth;
 use crate::config::{Endpoint, Settings};
 use crate::error::{Error, Kind};
@@ -118,6 +119,19 @@ impl Client {
                 format!("The API at {} answered {status} with what isn't the JSON expected: {error}", self.endpoint),
             )
         })
+    }
+
+    /// A stream of Server-Sent Events, as the live tail's, once the API has taken the call.
+    pub fn events(&self, call: &Call) -> Result<Events<BufReader<ureq::BodyReader<'static>>>, Error> {
+        let mut response = self.send(call)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let request_id =
+                response.headers().get("x-ff-request-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
+            let body = self.read_body(&mut response)?;
+            return Err(api_error(status, &body, request_id, self.api_key));
+        }
+        Ok(Events::new(BufReader::new(response.into_body().into_reader())))
     }
 
     /// A call whose answer has nothing to read, such as a delete's.

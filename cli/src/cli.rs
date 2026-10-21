@@ -99,6 +99,9 @@ pub enum Command {
         name: String,
     },
 
+    /// Show a function's log lines: the newest of a window, every page of it, or the live tail
+    Logs(LogsArgs),
+
     /// Show a function's recent calls, newest first, with their request IDs
     History {
         /// The function's name
@@ -207,6 +210,48 @@ pub struct InvokeArgs {
     /// Print the answer only, as compact JSON, for a pipe
     #[arg(long)]
     pub raw: bool,
+}
+
+#[derive(Args)]
+pub struct LogsArgs {
+    /// The function's name
+    pub name: String,
+
+    /// How many lines: the newest of the window
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    pub tail: u32,
+
+    /// The window starts this long ago: 30s, 15m, 2h, 1d
+    #[arg(long, conflicts_with = "start")]
+    pub since: Option<String>,
+
+    /// The window's start, RFC 3339, such as 2026-10-21T09:00:00Z
+    #[arg(long)]
+    pub start: Option<String>,
+
+    /// The window's end, RFC 3339 [default: now]
+    #[arg(long)]
+    pub end: Option<String>,
+
+    /// Only the lines with this phrase, as whole words, case included
+    #[arg(long)]
+    pub grep: Option<String>,
+
+    /// Only one call's lines: the request ID that ff invoke and ff history show
+    #[arg(long)]
+    pub request_id: Option<String>,
+
+    /// Every line of the window, page after page, rather than the newest
+    #[arg(long)]
+    pub all: bool,
+
+    /// Then each new line as it comes, until Ctrl-C
+    #[arg(long, short)]
+    pub follow: bool,
+
+    /// With --follow, ask every 2 s rather than hold a stream open, through a proxy that holds streams back
+    #[arg(long, requires = "follow")]
+    pub poll: bool,
 }
 
 #[derive(Subcommand)]

@@ -5,6 +5,7 @@ mod config;
 mod deploy;
 mod functions;
 mod invoke;
+mod logs;
 mod version;
 mod whoami;
 
@@ -36,6 +37,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Invoke(args) => invoke::run(args, context),
         Command::List => functions::list(context),
         Command::Get { name } => functions::get(&name, context),
+        Command::Logs(args) => logs::run(args, context),
         Command::History { name, limit } => functions::history(&name, limit, context),
         Command::Scale { name, min, max } => functions::scale(&name, min, max, context),
         Command::Delete { name, yes } => functions::delete(&name, yes, context),
