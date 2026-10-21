@@ -255,7 +255,33 @@ fn run(mut command: Command, doing: &str, missing: &str, out: &Output) -> Result
             [tail(&output.stderr), tail(&output.stdout)].into_iter().find(|text| !text.is_empty()).unwrap_or_default();
         return Err(failed(format!("{doing} failed ({}):\n{said}", output.status)));
     }
+    if let Some(skipped) = skipped_scripts(&String::from_utf8_lossy(&output.stderr)) {
+        out.warn(&skipped);
+    }
     Ok(())
+}
+
+/// npm's notice of the dependencies' install scripts it didn't run, as the folder's package.json
+/// doesn't allow them (`allowScripts`, which npm 11.19 reads), said again: ff shows what npm
+/// writes only when it fails, and a library that builds itself when installed may not work.
+fn skipped_scripts(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("npm warn install-scripts"))
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    // The packages are the indented lines, between npm's count of them and its advice.
+    let packages: Vec<&str> = lines.iter().filter(|line| line.starts_with("  ")).map(|line| line.trim()).collect();
+    if packages.is_empty() {
+        return Some(format!("npm: {}", lines.iter().map(|line| line.trim()).collect::<Vec<_>>().join("\n")));
+    }
+    Some(format!(
+        "npm didn't run the install scripts of {}, which the folder's package.json doesn't allow (allowScripts): a library that builds itself when installed may not work; `npm install-scripts approve <package>` in the folder allows one",
+        packages.join(", ")
+    ))
 }
 
 /// Runs the build's steps in the copy: here, or in a container of the runtime's base, the copy
@@ -534,6 +560,27 @@ mod tests {
             no_tsconfig.starts_with("--compile runs tsc on the project's tsconfig.json, which ")
                 && no_tsconfig.ends_with(" hasn't"),
             "{no_tsconfig}"
+        );
+    }
+
+    #[test]
+    fn says_again_which_install_scripts_npm_didnt_run() {
+        let npm = "npm warn deprecated inflight@1.0.6: This module is not supported\n\
+            npm warn install-scripts 2 packages have install scripts not yet covered by allowScripts:\n\
+            npm warn install-scripts   bcrypt@6.0.0 (install: node-gyp-build)\n\
+            npm warn install-scripts   esbuild@0.25.0 (postinstall: node install.js)\n\
+            npm warn install-scripts\n\
+            npm warn install-scripts Run `npm install-scripts ls` to review, or `npm install-scripts approve <pkg>` to allow.\n";
+
+        assert_eq!(
+            skipped_scripts(npm).unwrap(),
+            "npm didn't run the install scripts of bcrypt@6.0.0 (install: node-gyp-build), esbuild@0.25.0 (postinstall: node install.js), which the folder's package.json doesn't allow (allowScripts): a library that builds itself when installed may not work; `npm install-scripts approve <package>` in the folder allows one"
+        );
+        assert_eq!(skipped_scripts("npm warn deprecated inflight@1.0.6\nadded 3 packages in 229ms\n"), None);
+        // Said another way by another npm: its lines as they are.
+        assert_eq!(
+            skipped_scripts("npm warn install-scripts some scripts were skipped\n").unwrap(),
+            "npm: some scripts were skipped"
         );
     }
 

@@ -186,7 +186,9 @@ case "$1" in
   ci|install)
     mkdir -p node_modules/greet node_modules/typescript
     printf 'module.exports = () => "hi";\n' > node_modules/greet/index.js
-    printf 'tsc\n' > node_modules/typescript/index.js ;;
+    printf 'tsc\n' > node_modules/typescript/index.js
+    echo "npm warn install-scripts 1 package has install scripts not yet covered by allowScripts:" >&2
+    echo "npm warn install-scripts   greet@1.0.0 (install: node-gyp-build)" >&2 ;;
   prune) rm -rf node_modules/typescript ;;
 esac
 "#;
@@ -224,6 +226,12 @@ fn npm_installs_builds_and_prunes_in_a_copy_never_in_the_folder() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    // What npm says only when it works, ff says again: the scripts it didn't run.
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("warning: npm didn't run the install scripts of greet@1.0.0 (install: node-gyp-build), which the folder's package.json doesn't allow (allowScripts)"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let ran = std::fs::read_to_string(log.path()).unwrap();
     let steps: Vec<&str> = ran.lines().map(|line| line.split(" in ").next().unwrap()).collect();

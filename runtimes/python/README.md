@@ -17,7 +17,7 @@ glibc rather than Alpine's musl, so `manylinux` wheels built for AWS Lambda also
 
 ```
 main process (main.py)                        worker process (worker.py)
- HTTP :8080  /healthz /readyz /invoke ──────▶ imports /var/task/function.py once
+ HTTP :8080  /healthz /readyz /invoke ──────▶ imports the handler's module once
  one invocation at a time (lock + queue)        runs handler(event, context)
  deadline per invocation ── timeout/OOM/exit ─▶ kill + start a fresh worker
 ```
@@ -78,7 +78,15 @@ def handler(event, context):
 - Module-level code runs once per worker, so clients created at import time (database pools, SDK clients) are reused across invocations.
 - Return values are serialized with `json.dumps`. `decimal.Decimal` becomes a JSON number (boto3 returns DynamoDB numbers as `Decimal`), and non-ASCII text is sent as UTF-8.
 - **Differences from Lambda.** `NaN` and `Infinity` are refused with `Runtime.MarshalError`; Lambda sends them, which is not valid JSON. `async def` handlers are not supported, the same as on Lambda: the coroutine is not JSON-serializable.
-- **Code size.** FF currently delivers a single `function.py`, stored in a Kubernetes ConfigMap (900 KiB limit). Packages with vendored dependencies wait for the zip artifact pipeline (parent plan R-02).
+- **Code size.** Inline code is one `function.py`, in a Kubernetes ConfigMap (900 KiB at most); a package, below, may have 250 MB unpacked.
+
+### Packages
+
+A function made from a package, a zip as AWS Lambda takes one (`ff deploy <folder>`, or the API's `codeSha256`), has its files at `/var/task`, read-only: an image of them that its pod mounts on this image, where inline code has its one `function.py` ([ADR 0003](../../docs/adr/0003-code-delivery.md)).
+- **The handler's module** is a file at the root or in folders, as `FF_HANDLER` names it: `lambda_function.lambda_handler` is `lambda_function.py`, `app/handlers.create` and `app.handlers.create` are `app/handlers.py`, a folder with or without `__init__.py`.
+- **Libraries at the root:** `/var/task` comes first on `sys.path`, so the packages `pip install -t` puts at the package's root import, before the image's own; `ff package` installs them so.
+- **Compiled extensions** load when built for CPython 3.13 on Linux x86_64, glibc 2.41 or older (`*.cpython-313-x86_64-linux-gnu.so`): manylinux wheels, as Lambda's are; numpy's `manylinux_2_28` wheels import and compute (`hack/cli-e2e.sh` checks it).
+- **Read-only:** a function writes to `/tmp`, 512 MiB, as on Lambda.
 
 ## Memory
 

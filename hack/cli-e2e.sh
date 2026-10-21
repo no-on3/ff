@@ -9,7 +9,9 @@
 # function is kept, in ERROR, with its error. A second account finds none of the first's. Then
 # ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
-# pyproject.toml), uploaded once, and one built in Docker with --container; and ff local, in
+# pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
+# an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
+# ff package --compile, whose zip runs on FF as it is; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -355,6 +357,60 @@ check "pyproject.toml's dependencies, numpy's native wheels among them, deployed
 ff invoke cli-pkg-numpy --data '{"values": [1, 2, 3, 4]}'
 check "its native code loads in the runtime and answers" "0 2.5 2.3.4" "$(code) $(out | sed '$d' | jq -r '"\(.mean) \(.numpy)"')"
 ff delete cli-pkg-numpy --yes
+
+native_pkg="$work/cli-pkg-native"
+rm -rf "$native_pkg" && mkdir -p "$native_pkg"
+echo '{ "name": "cli-pkg-native", "private": true, "dependencies": { "bcrypt": "6.0.0" } }' >"$native_pkg/package.json"
+cat >"$native_pkg/index.js" <<'EOF'
+const bcrypt = require('bcrypt');
+exports.handler = async (event) => ({ matches: bcrypt.compareSync(event.password, bcrypt.hashSync(event.password, 4)) });
+EOF
+ff deploy "$native_pkg"
+check "an npm library with native code, bcrypt's binary for Linux x86_64, deployed" "0 created cli-pkg-native (nodejs, 128 MB, 5 s): ACTIVE" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff invoke cli-pkg-native --data '{"password": "hunter2"}'
+check "its native code loads on the runtime's glibc and answers" "0 true" "$(code) $(out | sed '$d' | jq -r .matches)"
+ff delete cli-pkg-native --yes
+
+esm_pkg="$work/cli-pkg-esm"
+rm -rf "$esm_pkg" && mkdir -p "$esm_pkg/src/handlers" "$esm_pkg/test"
+echo '{ "name": "cli-pkg-esm", "private": true, "type": "module" }' >"$esm_pkg/package.json"
+cat >"$esm_pkg/src/handlers/orders.js" <<'EOF'
+export const create = async (event) => ({ order: event.id, status: 'created', module: import.meta.url });
+EOF
+echo "throw new Error('tests stay home');" >"$esm_pkg/test/orders.test.js"
+echo 'test/' >"$esm_pkg/.ffignore"
+ff deploy "$esm_pkg" --handler src/handlers/orders.create
+check "an ES module in a folder, its handler named with --handler, deployed" "0 created cli-pkg-esm (nodejs, 128 MB, 5 s): ACTIVE" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff invoke cli-pkg-esm --data '{"id": 7}'
+check "the runtime imports it from the package, at /var/task" "0 7 created file:///var/task/src/handlers/orders.js" \
+  "$(code) $(out | sed '$d' | jq -r '"\(.order) \(.status) \(.module)"')"
+ff package "$esm_pkg" --zip "$work/esm.zip"
+check "what .ffignore names isn't in the package" "0 true false" \
+  "$(code) $(python3 -I -m zipfile -l "$work/esm.zip" | grep -q '^src/handlers/orders.js ' && echo true || echo false) $(python3 -I -m zipfile -l "$work/esm.zip" | grep -q '^test/' && echo true || echo false)"
+ff delete cli-pkg-esm --yes
+
+ts_pkg="$work/cli-pkg-ts"
+rm -rf "$ts_pkg" && mkdir -p "$ts_pkg/src"
+echo '{ "name": "cli-pkg-ts", "private": true, "dependencies": { "ms": "2.1.3" }, "devDependencies": { "typescript": "5.9.3", "@types/ms": "2.1.0" } }' >"$ts_pkg/package.json"
+echo '{ "compilerOptions": { "target": "es2022", "module": "commonjs", "outDir": "dist", "rootDir": "src", "strict": true, "esModuleInterop": true } }' >"$ts_pkg/tsconfig.json"
+cat >"$ts_pkg/src/index.ts" <<'EOF'
+import ms from 'ms';
+
+export const handler = async (event: { ms: number }) => ({ took: ms(event.ms) });
+EOF
+ff package "$ts_pkg" --compile --zip "$work/ts.zip" --output json
+ts_sha="$(out | jq -r .codeSha256)"
+check "ff package --compile makes it JavaScript for AWS Lambda: its tsc's output, no TypeScript, no build tools" "0 true 0" \
+  "$(code) $(python3 -I -m zipfile -l "$work/ts.zip" | grep -q '^dist/index.js ' && echo true || echo false) $(python3 -I -m zipfile -l "$work/ts.zip" | grep -cE '^[^ ]+\.ts |^node_modules/typescript/')"
+rm -rf "$work/ts-built" && mkdir -p "$work/ts-built" && python3 -I -m zipfile -e "$work/ts.zip" "$work/ts-built"
+ff deploy "$work/ts-built" --name cli-pkg-ts --no-build --handler dist/index.handler --output json
+check "that zip's files, deployed as they are with --no-build, are the same package" "0 created $ts_sha" \
+  "$(code) $(out | jq -r '"\(.action) \(.package.codeSha256)"')"
+ff invoke cli-pkg-ts --data '{"ms": 60000}'
+check "and run on FF as they would on Lambda" "0 1m" "$(code) $(out | sed '$d' | jq -r .took)"
+ff delete cli-pkg-ts --yes
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts

@@ -350,23 +350,48 @@ The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runt
 
 **Another name for it.** A function's `handler` says which one its runtime calls, as AWS Lambda's handler does: `function.handler` unless you name another on a create or an update, such as `"handler": "function.lambda_handler"` for Python code written for Lambda. The code you send is the file `function` (`function.ts` or `function.py`), so its handler is `function.<name>`; another file, `lambda_function.lambda_handler` for example, answers 400. A function also says how its code came, `packageType` (`inline`: the one file you send), and gives its code's SHA-256 in base64 and its size in bytes, `codeSha256` and `codeSize`, in the form of Lambda's `CodeSha256` and `CodeSize`, which describe a package: for code sent inline, they are its text's.
 
-**Functions with libraries: packages.** A package is a zip as AWS Lambda takes one: the handler's file and its libraries, `node_modules/` beside it for Node.js, the packages at its root for Python (`pip install -t`). `ff deploy <folder>` makes one from a function's folder, its libraries installed, and does what follows itself (below, "With the `ff` command"). With the API, upload it, then name it by the SHA-256 the upload answers, in place of `code`, with the handler it holds:
+**Functions with dependencies.** A real function needs libraries: a database driver, an SDK. It comes as a package, a zip as AWS Lambda takes one: the handler's file, in a folder if need be, and its libraries, `node_modules/` beside it for Node.js, the packages at its root for Python (`pip install -t`). `ff deploy <folder>` makes it from the function's folder, its libraries installed, and deploys it, once `ff` is set up ("With the `ff` command", below):
 
 ```bash
 mkdir -p orders/lib && cd orders
+echo '{ "name": "orders", "private": true, "dependencies": { "ms": "2.1.3" } }' > package.json
+echo 'module.exports = (name) => `Hello ${name}`;' > lib/greet.js
+cat > index.js <<'EOF'
+const ms = require('ms');
+const greet = require('./lib/greet');
+exports.handler = async (event) => ({ message: greet(event.name ?? 'world'), in: ms(event.ms ?? 90000) });
+EOF
+ff deploy .                       # npm installs ms in a copy of the folder; "created orders (nodejs, 128 MB, 5 s): ACTIVE …"
+ff invoke orders --data '{"name": "Tunis"}'    # {"message": "Hello Tunis", "in": "2m"}
+ff deploy .                       # "orders: no changes": the same files make the same zip, the same SHA-256
+cd .. && mkdir report && cd report
+echo 'requests==2.32.5' > requirements.txt     # or pyproject.toml's [project] dependencies
+printf 'import requests\n\n\ndef lambda_handler(event, context):\n    return {"requests": requests.__version__}\n' > lambda_function.py
+ff deploy .                       # pip's wheels for the runtime; the handler is AWS Lambda's default
+```
+
+- **The handler** is `--handler` if you name one (`--handler src/handlers/orders.create`), else the function's while the package has its file, else `function.handler` where ff's own `function.*` is, then AWS Lambda's defaults, `index.handler` for Node.js and `lambda_function.lambda_handler` for Python. The Node.js runtime loads `.js`, `.mjs` (an ES module), `.cjs` or `.ts`, and a `.js` as an ES module where its `package.json` says `"type": "module"`, as Lambda's does.
+- **ff builds in a copy of the folder,** never in it: `npm ci` (`npm install` without a lockfile), the `build` script if there is one, then `npm prune --omit=dev`; for Python, pip's wheels for the runtimes' platform, Linux x86_64 with glibc 2.28 or older and CPython 3.13, whatever your machine is. npm 11.19 doesn't run the install scripts of dependencies that `package.json`'s `allowScripts` doesn't allow, and ff says which it skipped: `npm install-scripts approve <package>` in the folder allows one.
+- **Native libraries** (bcrypt, numpy) need the runtimes' platform: Linux x86_64 with glibc 2.41, Debian 13's, for both runtimes. Built as AWS Lambda's builds are, they load: npm's prebuilt `linux-x64-glibc` binaries, pip's manylinux wheels. npm installs your machine's binaries, the right ones on Linux x86_64; elsewhere, or for a Python library published as source alone, `--container` builds in the runtime's base image, in Docker.
+- **Left out of the package:** version control, `__pycache__`, `.env` files, which usually hold secrets (ff says so: `ff secrets set` gives a function its secrets), and what a `.ffignore` names, in `.gitignore`'s syntax without `!`. `--no-build` packages the folder as it is, its `node_modules` included.
+- **For AWS Lambda too:** `ff package` writes the same zip to the folder's `.ff/<name>.zip` and prints its SHA-256, Lambda's `CodeSha256`; `aws lambda create-function --zip-file fileb://.ff/orders.zip --handler index.handler --runtime nodejs24.x …` takes it. FF runs `.ts` files as they are, Lambda doesn't: `ff package --compile` runs the project's own `tsc` and leaves the TypeScript out. [`cli/README.md`](../cli/README.md#packages) has the details.
+
+**Packages through the API.** Upload the zip, then name it by the SHA-256 the upload answers, in place of `code`, with the handler it holds; `ff deploy` does the same:
+
+```bash
+mkdir -p greet/lib && cd greet
 printf 'exports.handler = async (event) => require("./lib/greet")(event.name ?? "world");\n' > index.js
 printf 'module.exports = (name) => "Hello " + name;\n' > lib/greet.js
-python3 -c 'import shutil; shutil.make_archive("../orders", "zip", ".")' && cd ..
-SHA=$(curl -s -X POST "$FF/packages" -H 'content-type: application/zip' --data-binary @orders.zip | jq -r .codeSha256)
-jq -n --arg sha "$SHA" '{name: "orders", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}' \
+python3 -c 'import shutil; shutil.make_archive("../greet", "zip", ".")' && cd ..
+SHA=$(curl -s -X POST "$FF/packages" -H 'content-type: application/zip' --data-binary @greet.zip | jq -r .codeSha256)
+jq -n --arg sha "$SHA" '{name: "greet", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}' \
   | curl -s -X POST "$FF/functions" -H 'content-type: application/json' -d @- | jq '{status, packageType, codeSha256, codeSize}'
 ```
 
 - **The upload** is checked entry by entry: a name that leaves the zip, a link, an encrypted file, a size or a checksum that lies are refused, saying which entry. The answer is 201 for a new package, 200 for one the account has already, which is stored once; `GET /packages?codeSha256=<SHA, URL-encoded>` says whether to upload at all.
-- **The handler** names a file of the package, in a folder if need be (`src/app.handler`), which the create or update looks for: one the package lacks answers 400, saying which file. The Node.js runtime loads `.js`, `.mjs` (an ES module), `.cjs` or `.ts`, and a `.js` as an ES module where its `package.json` says `"type": "module"`, as Lambda's does.
+- **The handler** names a file of the package, which the create or update looks for: one the package lacks answers 400, saying which file.
 - **An update** names another package, with the settings that change, in one rollout; `code` makes the function inline again. A package that no function names is deleted an hour after its upload or its last use; an account keeps 20 unused at most.
-- **It runs as an image:** FF makes one from the package, once, pushes it to the cluster's registry, and the function's pods mount it at `/var/task` on their runtime's image ([ADR 0003](adr/0003-code-delivery.md)). In development the registry runs next to the cluster (`hack/k8s/registry-up.sh`, which `cluster-up.sh` runs), and `BE/.env` names it, as `BE/.env.example` does: `FF_CODE_REGISTRY=http://127.0.0.1:5056` and `FF_CODE_REGISTRY_PULL=ff-dev-registry:5000`. Without them, a function naming a package answers 503.
-- **Native libraries** (bcrypt, numpy) need the runtimes' platform: Linux x86_64 with glibc 2.41, Debian 13's, for both runtimes. Built as AWS Lambda's builds are, they load: npm's prebuilt `linux-x64-glibc` binaries, pip's manylinux wheels. `ff package` and `ff deploy <folder>` build packages for that platform: pip takes those wheels on any machine, and npm installs this machine's binaries, Linux x86_64's on a developer's Linux; elsewhere, and for a Python library published as source alone, `--container` builds in the runtime's base image, in Docker.
+- **It runs as an image:** FF makes one from the package, once, pushes it to the cluster's registry, and the function's pods mount it at `/var/task` on their runtime's image, read-only ([ADR 0003](adr/0003-code-delivery.md)). In development the registry runs next to the cluster (`hack/k8s/registry-up.sh`, which `cluster-up.sh` runs), and `BE/.env` names it, as `BE/.env.example` does: `FF_CODE_REGISTRY=http://127.0.0.1:5056` and `FF_CODE_REGISTRY_PULL=ff-dev-registry:5000`. Without them, a function naming a package answers 503.
 
 **If a function cannot load** (a syntax error, a missing handler, an exception at import), the create call answers 400 as soon as the runtime has said why, in about 10 s: the runtime logs it at start, and the backend reads it in the log store, which has it about 5 s later. Without the log pipeline (`--no-logging`), the backend can't read it, and waits for the readiness timeout instead (90 s, `FF_READY_TIMEOUT_SECONDS` in `BE/.env`). The answer gives the runtime's reason, for example `The function failed to load: Runtime.UserCodeSyntaxError: SyntaxError: function.ts:2:11 Property assignment expected.`, and `functionId`: the function is saved all the same, listed with status `ERROR` and that reason, and its pod is released. Creating it again would only answer 409, since the name is taken: the console opens the saved function's page instead of keeping its form. **Fix it with an update:** send the corrected code (`PUT /functions/<id>`), and the function becomes `ACTIVE`, keeping its ID. An update of an `ERROR` function always rolls out, even without changes, so `PUT` with `{}` retries the same code after a passing failure such as a full quota. Without the log pipeline, a lower timeout such as 30 gives faster feedback.
 

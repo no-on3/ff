@@ -89,6 +89,14 @@ export async function handler(event, context) { … }
 - **Refused:** a handler without a dot in its last part, or with `..` anywhere, as Lambda refuses it (`Runtime.MalformedHandlerName`); a file that isn't there (`Runtime.ImportModuleError`, naming the extensions tried); an export that is missing (`… is undefined or not exported`) or isn't a function (`… is not a function`), both `Runtime.HandlerNotFound`.
 - **Not taken from Lambda:** its last resort, a package of `node_modules` named alone (`some-package.handler`); and a handler outside the package, such as an absolute path into a layer, which FF's API refuses: FF has no layers.
 
+### Packages
+
+A function made from a package, a zip as AWS Lambda takes one (`ff deploy <folder>`, or the API's `codeSha256`), has its files at `/var/task`, read-only: an image of them that its pod mounts on this image, where inline code has its one `function.ts` ([ADR 0003](../../docs/adr/0003-code-delivery.md)).
+- **The handler's file** is at the root or in folders, as `FF_HANDLER` names it: `index.handler` is `index.js`, `src/handlers/orders.create` is `src/handlers/orders.js` (or `.mjs`, `.cjs`, `.ts`), loaded as above.
+- **`node_modules/` at the root:** `require` and `import` look for a library from the importing file's folder upward, as Node.js does, so `/var/task/node_modules` serves every file of the package.
+- **Native modules** load when built for Linux x86_64 and glibc 2.41 or older, as npm installs prebuilt `linux-x64-glibc` binaries: bcrypt's hashes here (`hack/cli-e2e.sh` checks it). One built for musl, or another system, doesn't load.
+- **Read-only:** a function writes to `/tmp`, 512 MiB, as on Lambda.
+
 ## Environment
 
 | Variable | Default | Meaning |
