@@ -154,6 +154,27 @@ check "and another account none of them" "0 No function yet: \`ff deploy <file>\
 for name in cli-raises cli-slow cli-broken; do ff delete "$name" --yes; done
 check "the last one deleted" "0 deleted cli-broken" "$(code) $(out)"
 
+echo "== environment variables: --env, ff env, and on this machine"
+printf 'import os\n\ndef handler(event, context):\n    return {"greeting": os.environ.get("GREETING", "none"), "token": os.environ.get("TOKEN", "none")}\n' >"$work/env-reader.py"
+ff deploy "$work/env-reader.py" --name cli-env --env GREETING=Ahlan
+check "deploy --env makes a function with its variable" "0 created" "$(code) $(out | cut -d' ' -f1)"
+ff invoke cli-env --raw
+check "which the function reads" "0 Ahlan" "$(code) $(out | jq -r .greeting)"
+ff env set cli-env GREETING=Salam
+echo "from-stdin" | "$ff_bin" env set cli-env TOKEN >"$work/out" 2>"$work/err"
+ff invoke cli-env --raw
+check "ff env set changes one, and reads a value from stdin, both live once it answers" "0 Salam from-stdin" "$(code) $(out | jq -r '"\(.greeting) \(.token)"')"
+ff env list cli-env
+check "ff env list names them, without their values" "0 GREETING TOKEN" "$(code) $(out | paste -sd' ')"
+ff env unset cli-env GREETING
+ff invoke cli-env --raw
+check "ff env unset removes one" "0 none from-stdin" "$(code) $(out | jq -r '"\(.greeting) \(.token)"')"
+ff delete cli-env --yes
+ff local invoke "$work/env-reader.py" --env GREETING=Local --raw
+check "ff local invoke --env gives the run its variables" "0 Local" "$(code) $(out | jq -r .greeting)"
+ff local invoke "$work/env-reader.py" --env FUNCTION_TIMEOUT=1
+check "and refuses the names the runtime sets itself, as the API does" "2 error: FUNCTION_TIMEOUT is reserved: AWS Lambda or FF's runtime sets it" "$(code) $(err)"
+
 echo "== ff init: a new function's folder, run locally, then deployed"
 for runtime in python nodejs; do
   name="cli-init-$runtime"

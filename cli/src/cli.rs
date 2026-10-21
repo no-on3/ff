@@ -158,6 +158,10 @@ pub enum Command {
     #[command(subcommand)]
     Local(LocalCommand),
 
+    /// A function's environment variables, as AWS Lambda's: readable like its code
+    #[command(subcommand)]
+    Env(EnvCommand),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -237,6 +241,10 @@ pub struct DeployArgs {
     /// The most instances it runs at once
     #[arg(long)]
     pub max_instances: Option<u32>,
+
+    /// Its environment variables, KEY=value, repeated: all of them, as on Lambda, those not named removed
+    #[arg(long = "env", value_name = "KEY=value")]
+    pub env: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
@@ -361,6 +369,43 @@ pub struct LocalArgs {
     /// Timeout in seconds
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=900))]
     pub timeout: u32,
+
+    /// Environment variables for the run, KEY=value, repeated
+    #[arg(long = "env", value_name = "KEY=value")]
+    pub env: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum EnvCommand {
+    /// List its variables' names, and with --show their values
+    List {
+        /// The function's name
+        name: String,
+
+        /// Their values too
+        #[arg(long)]
+        show: bool,
+    },
+
+    /// Set variables, KEY=value; a KEY alone reads its value from stdin, or a prompt, which the shell doesn't keep
+    Set {
+        /// The function's name
+        name: String,
+
+        /// KEY=value, or KEY
+        #[arg(required = true)]
+        variables: Vec<String>,
+    },
+
+    /// Remove variables
+    Unset {
+        /// The function's name
+        name: String,
+
+        /// Their names
+        #[arg(required = true)]
+        keys: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]

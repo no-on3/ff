@@ -4,6 +4,7 @@ mod account;
 mod completion;
 mod config;
 mod deploy;
+mod env;
 mod functions;
 mod init;
 mod invoke;
@@ -12,7 +13,7 @@ mod logs;
 mod version;
 mod whoami;
 
-use crate::cli::{Command, ConnectionArgs, LocalCommand};
+use crate::cli::{Command, ConnectionArgs, EnvCommand, LocalCommand};
 use crate::config::Settings;
 use crate::error::Error;
 use crate::output::Output;
@@ -49,6 +50,9 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             local::invoke(&function, data.as_deref(), raw, context)
         }
         Command::Local(LocalCommand::Start { function, port, watch }) => local::start(&function, port, watch, context),
+        Command::Env(EnvCommand::List { name, show }) => env::list(&name, show, context),
+        Command::Env(EnvCommand::Set { name, variables }) => env::set(&name, &variables, context),
+        Command::Env(EnvCommand::Unset { name, keys }) => env::unset(&name, &keys, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),

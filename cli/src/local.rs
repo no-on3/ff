@@ -28,6 +28,8 @@ pub struct LocalFunction {
     pub memory: u32,
     pub timeout: u32,
     pub code: Code,
+    /// The function's own variables.
+    pub environment: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,9 +110,16 @@ pub fn run_args(function: &LocalFunction, container: &str, image: &str, port: Op
         ("FF_HANDLER", "function.handler".to_owned()),
         ("FF_EVENT_FORMAT", "lambda".to_owned()),
         ("PORT", RUNTIME_PORT.to_string()),
-        ("TZ", "UTC".to_owned()),
     ];
     for (name, value) in variables {
+        args.push("--env".to_owned());
+        args.push(format!("{name}={value}"));
+    }
+    // UTC, as on Lambda, unless the function sets its own, as the backend does for a pod.
+    if !function.environment.contains_key("TZ") {
+        args.extend(["--env".to_owned(), "TZ=UTC".to_owned()]);
+    }
+    for (name, value) in &function.environment {
         args.push("--env".to_owned());
         args.push(format!("{name}={value}"));
     }
@@ -323,7 +332,14 @@ mod tests {
     use super::*;
 
     fn hello(code: Code) -> LocalFunction {
-        LocalFunction { name: "hello".into(), runtime: Runtime::Python, memory: 128, timeout: 5, code }
+        LocalFunction {
+            name: "hello".into(),
+            runtime: Runtime::Python,
+            memory: 128,
+            timeout: 5,
+            code,
+            environment: Default::default(),
+        }
     }
 
     #[test]

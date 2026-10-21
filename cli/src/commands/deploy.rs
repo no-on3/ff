@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::Context;
+use super::{Context, env};
 use crate::api::types::{Function, FunctionView, Scaling, find};
 use crate::api::{Call, Client};
 use crate::cli::{DeployArgs, Runtime};
@@ -16,7 +16,7 @@ use crate::error::{Error, Kind};
 use crate::progress::Progress;
 
 /// A deploy waits for its rollout: the API waits up to 90 s for the new version, then answers.
-const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
+pub const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
 /// A new function's settings when the command names none: the getting-started guide's.
 const DEFAULT_MEMORY: u32 = 128;
 const DEFAULT_TIMEOUT: u32 = 5;
@@ -97,7 +97,7 @@ pub fn changes(
 
 /// A refusal that names the function the API kept, which the new version never served: the
 /// deploy failed (4), and the API's message is the diagnosis.
-fn deploy_failed(mut error: Error) -> Error {
+pub fn deploy_failed(mut error: Error) -> Error {
     let named = error.details.as_ref().and_then(|details| details.get("functionId")).is_some();
     if named && error.kind == Kind::Failed {
         error.kind = Kind::DeployFailed;
@@ -120,16 +120,20 @@ pub fn run(args: DeployArgs, context: &Context) -> Result<(), Error> {
         .map_err(|error| usage(format!("Couldn't read {} as UTF-8 text: {error}", args.file.display())))?;
     let name = name_of(&args.file, args.name.as_deref())?;
     let runtime = runtime_of(&args.file, args.runtime)?;
+    let environment = (!args.env.is_empty()).then(|| env::variables(&args.env)).transpose()?;
     let settings = context.settings()?;
     let client = Client::new(&settings)?;
     let started = Instant::now();
 
     let (action, changed, function) = match find(&client, &name)? {
-        Some(function) => update(&client, context, function, &code, runtime, &args)?,
+        Some(function) => update(&client, context, function, &code, runtime, environment.as_ref(), &args)?,
         None => {
             let memory = args.memory.unwrap_or(DEFAULT_MEMORY);
             let timeout = args.timeout.unwrap_or(DEFAULT_TIMEOUT);
-            let body = json!({ "name": name, "runtime": runtime.as_str(), "code": code, "memory": memory, "timeout": timeout });
+            let mut body = json!({ "name": name, "runtime": runtime.as_str(), "code": code, "memory": memory, "timeout": timeout });
+            if let Some(environment) = &environment {
+                body["environment"] = json!(environment);
+            }
             let progress = Progress::start(
                 context.out,
                 &format!("creating {name} ({}, {memory} MB, {timeout} s)", runtime.as_str()),
@@ -140,7 +144,7 @@ pub fn run(args: DeployArgs, context: &Context) -> Result<(), Error> {
                 Ok(function) => ("created", vec!["code", "runtime", "memory", "timeout"], function),
                 // Another deploy took the name meanwhile: this one updates that function.
                 Err(error) if error.status == Some(409) => match find(&client, &name)? {
-                    Some(function) => update(&client, context, function, &code, runtime, &args)?,
+                    Some(function) => update(&client, context, function, &code, runtime, environment.as_ref(), &args)?,
                     None => return Err(error),
                 },
                 Err(error) => return Err(deploy_failed(error)),
@@ -186,21 +190,31 @@ pub fn run(args: DeployArgs, context: &Context) -> Result<(), Error> {
     })
 }
 
-/// The function updated with what changed, or left as it is.
+/// The function updated with what changed, or left as it is. Variables given replace them all,
+/// as on Lambda; their values are read first, as the list of functions doesn't hold them.
 fn update<'a>(
     client: &Client,
     context: &Context,
     function: Function,
     code: &str,
     runtime: Runtime,
+    environment: Option<&env::Variables>,
     args: &DeployArgs,
 ) -> Result<(&'a str, Vec<&'a str>, Function), Error> {
-    let changes = changes(&function, code, runtime, args.memory, args.timeout);
+    let mut changes = changes(&function, code, runtime, args.memory, args.timeout);
+    if let Some(environment) = environment {
+        let current = env::current(&client.json::<Function>(&Call::get(format!("/functions/{}", function.id)))?);
+        if &current != environment {
+            changes.insert("environment".into(), json!(environment));
+        }
+    }
     if changes.is_empty() {
         return Ok(("unchanged", Vec::new(), function));
     }
-    let changed: Vec<&'a str> =
-        ["code", "runtime", "memory", "timeout"].into_iter().filter(|field| changes.contains_key(*field)).collect();
+    let changed: Vec<&'a str> = ["code", "runtime", "memory", "timeout", "environment"]
+        .into_iter()
+        .filter(|field| changes.contains_key(*field))
+        .collect();
     let progress = Progress::start(context.out, &format!("updating {} ({})", function.name, changed.join(", ")));
     let updated = client.json::<Function>(
         &Call::put(format!("/functions/{}", function.id), Value::Object(changes)).timeout(DEPLOY_TIMEOUT),

@@ -32,12 +32,17 @@ pub fn local_function(args: &LocalArgs) -> Result<LocalFunction, Error> {
     let path = match &code {
         Code::File { path, .. } | Code::Folder(path) => path.clone(),
     };
+    let environment = super::env::variables(&args.env)?;
+    if let Some(problem) = environment.keys().find_map(|name| super::env::reserved(name)) {
+        return Err(Error::new(Kind::Usage, problem));
+    }
     Ok(LocalFunction {
         name: name_of(&path, args.name.as_deref())?,
         runtime,
         memory: args.memory,
         timeout: args.timeout,
         code,
+        environment,
     })
 }
 
@@ -245,7 +250,7 @@ mod tests {
     use super::*;
 
     fn args(path: &Path) -> LocalArgs {
-        LocalArgs { path: path.to_owned(), name: None, runtime: None, memory: 128, timeout: 5 }
+        LocalArgs { path: path.to_owned(), name: None, runtime: None, memory: 128, timeout: 5, env: Vec::new() }
     }
 
     #[test]
