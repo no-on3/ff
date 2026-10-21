@@ -6,6 +6,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parentPort, workerData } from 'node:worker_threads';
 import { END_OF_CALL } from './protocol';
 import type { FunctionError, InvokeMessage, WorkerConfig, WorkerMessage } from './protocol';
@@ -37,44 +38,87 @@ function toError(value: unknown): Error {
 // Stack traces point at the lines of the user's TypeScript, not at its transpiled output.
 process.setSourceMapsEnabled(true);
 
-function loadHandler(): Handler {
-  const separator = config.handler.lastIndexOf('.');
-  if (separator <= 0) {
-    throw new InitError('Runtime.MalformedHandlerName', `Bad handler "${config.handler}": expected <file>.<export>`);
-  }
-  const file = config.handler.slice(0, separator);
-  const exportName = config.handler.slice(separator + 1);
+/**
+ * Node's own import(), which tsc turns into require() in CommonJS output: an ES module needs it, its
+ * top-level await for one.
+ */
+const importModule = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<Record<string, unknown>>;
 
-  const base = path.resolve(config.taskRoot, file);
-  const found = ['.ts', '.js', '.cjs'].map((ext) => base + ext).find((candidate) => fs.existsSync(candidate));
+/**
+ * Whether Node takes the .js files of this folder for ES modules: the nearest package.json says
+ * "type": "module", as AWS Lambda's runtime reads it, going no higher than a node_modules folder.
+ */
+function inModuleScope(folder: string): boolean {
+  for (let dir = folder; !dir.endsWith(`${path.sep}node_modules`); dir = path.dirname(dir)) {
+    const manifest = path.join(dir, 'package.json');
+    if (fs.existsSync(manifest)) {
+      try {
+        return JSON.parse(fs.readFileSync(manifest, 'utf8'))?.type === 'module';
+      } catch {
+        return false;
+      }
+    }
+    if (dir === path.dirname(dir)) return false;
+  }
+  return false;
+}
+
+/**
+ * The module's exports, from its first file that exists, in the order of AWS Lambda's Node.js runtime: the
+ * name itself, then .js, an ES module where its package says so, then .mjs, then .cjs. FF takes .ts last,
+ * transpiled. ES modules are imported, the rest required.
+ */
+async function loadModule(base: string, shown: string): Promise<Record<string, unknown>> {
+  const candidates: Array<[string, 'require' | 'import']> = [
+    [base, 'require'],
+    [`${base}.js`, inModuleScope(path.dirname(base)) ? 'import' : 'require'],
+    [`${base}.mjs`, 'import'],
+    [`${base}.cjs`, 'require'],
+    [`${base}.ts`, 'require'],
+  ];
+  const found = candidates.find(([file]) => fs.existsSync(file));
   if (!found) {
-    throw new InitError(
-      'Runtime.ImportModuleError',
-      `Cannot find module '${file}' in ${config.taskRoot} (tried .ts, .js, .cjs)`,
-    );
+    throw new InitError('Runtime.ImportModuleError', `Cannot find module '${shown}' in ${config.taskRoot}: no ${shown}.js, .mjs, .cjs or .ts there`);
   }
-
+  const [file, how] = found;
   registerTypeScript();
-  let exported: Record<string, unknown>;
   try {
-    exported = require(found);
+    return how === 'import' ? await importModule(pathToFileURL(file).href) : require(file);
   } catch (err) {
     const error = toError(err);
     const type = error instanceof SyntaxError ? 'Runtime.UserCodeSyntaxError' : 'Runtime.ImportModuleError';
     throw new InitError(type, `${error.name}: ${error.message}`);
   }
+}
 
-  const handler = exported[exportName];
-  if (typeof handler !== 'function') {
-    throw new InitError('Runtime.HandlerNotFound', `${file}.${exportName} is undefined or not exported`);
+/**
+ * The handler, as AWS Lambda's Node.js runtime finds it: `[<folders>/]<module>.<export>`, the module's
+ * name up to the first dot after the last slash, and what follows a path through its exports, so that
+ * `src/api.handlers.get` is `handlers.get` of src/api.js.
+ */
+async function loadHandler(): Promise<Handler> {
+  const name = config.handler;
+  if (name.includes('..')) {
+    throw new InitError('Runtime.MalformedHandlerName', `Bad handler "${name}": '..' is not allowed, the file is in the package`);
   }
+  const moduleAndExport = path.basename(name);
+  const folders = name.slice(0, name.length - moduleAndExport.length);
+  const [, moduleName, exportPath] = /^([^.]+)\.(.+)$/.exec(moduleAndExport) ?? [];
+  if (!moduleName || !exportPath) {
+    throw new InitError('Runtime.MalformedHandlerName', `Bad handler "${name}": expected <file>.<export>`);
+  }
+
+  const exported = await loadModule(path.resolve(config.taskRoot, folders, moduleName), `${folders}${moduleName}`);
+  const handler = exportPath.split('.').reduce<unknown>((value, key) => (value as Record<string, unknown> | null | undefined)?.[key], exported);
+  if (handler === undefined) throw new InitError('Runtime.HandlerNotFound', `${name} is undefined or not exported`);
+  if (typeof handler !== 'function') throw new InitError('Runtime.HandlerNotFound', `${name} is not a function`);
   // As on AWS Lambda's Node.js 24 runtime, which refuses them with this error type.
   // AWS doesn't document whether an async handler with a third parameter is spared:
   // FF refuses any handler that declares one, at load, so the deploy fails with this message.
   if (handler.length >= 3) {
     throw new InitError(
       'Runtime.CallbackHandlerDeprecated',
-      `${file}.${exportName} declares a third parameter, a callback. Callback-based handlers are not ` +
+      `${name} declares a third parameter, a callback. Callback-based handlers are not ` +
         'supported from Node.js 24 on, as on AWS Lambda: use an async handler that returns its ' +
         'result or throws, async (event, context) => result.',
     );
@@ -98,13 +142,16 @@ function marshal(value: unknown): string {
 }
 
 let handler: Handler | undefined;
-try {
-  handler = loadHandler();
-  send({ type: 'ready' });
-} catch (err) {
-  const error = err instanceof InitError ? err : new InitError('Runtime.ImportModuleError', toError(err).message);
-  send({ type: 'init_error', errorType: error.errorType, errorMessage: error.message });
-}
+loadHandler().then(
+  (loaded) => {
+    handler = loaded;
+    send({ type: 'ready' });
+  },
+  (err: unknown) => {
+    const error = err instanceof InitError ? err : new InitError('Runtime.ImportModuleError', toError(err).message);
+    send({ type: 'init_error', errorType: error.errorType, errorMessage: error.message });
+  },
+);
 
 port.on('message', async (message: InvokeMessage) => {
   if (message.type !== 'invoke' || !handler) return;

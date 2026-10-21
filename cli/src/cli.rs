@@ -379,7 +379,7 @@ pub enum LocalCommand {
 
 #[derive(Args)]
 pub struct LocalArgs {
-    /// The function's file, or its folder with a function.ts, .js, .cjs or .py
+    /// The function's file, or its folder with a function.ts, .js, .mjs, .cjs or .py
     pub path: PathBuf,
 
     /// Its name, as its context gives it, else the file's or the folder's

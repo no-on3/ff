@@ -5,8 +5,9 @@
 # The backend first refuses the new database, then the migrations run from the
 # build, as a deploy step would. Scenario: create → invoke → history → update →
 # invoke → delete, with checks on the Kubernetes side and in object storage (the
-# code archive, read through SeaweedFS's filer), then the same lifecycle
-# for a Python function, a function's environment variables (delivered through
+# code archive, read through SeaweedFS's filer), and on the code's hash and size
+# as AWS Lambda gives them; then the same lifecycle for a Python function (its
+# handler then renamed lambda_handler), a function's environment variables (delivered through
 # a Secret, replaced by an update, sealed in the database) and its secrets
 # (never in an answer or the audit log, set and removed by name), and the
 # event a function receives (the payload itself, or the old wrapper until
@@ -50,6 +51,8 @@ tenant="$(random_account)"
 tenant_ns="$(tenant_namespace "$tenant")"
 e2e_namespaces+=("$tenant_ns")
 http() { http_at "$api" "$@"; }
+# A text's SHA-256 in base64 and its size, as AWS Lambda's CodeSha256 and CodeSize give a function's code.
+code_facts() { printf '%s' "$1" | python3 -c 'import base64, hashlib, sys; code = sys.stdin.buffer.read(); print(base64.b64encode(hashlib.sha256(code).digest()).decode(), len(code))'; }
 
 e2e_dependencies
 e2e_cluster
@@ -96,6 +99,8 @@ created="$(http POST /functions "$(jq -n --arg code "$v1" '{name: "e2e-hello", r
 check "create returns 201" 201 "$(status)"
 check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
 id="$(jq -r .id <<<"$created")"
+check "its code is inline, its handler function.handler, with its SHA-256 and size as AWS Lambda's CodeSha256 and CodeSize" \
+  "inline function.handler $(code_facts "$v1")" "$(jq -r '"\(.packageType) \(.handler) \(.codeSha256) \(.codeSize)"' <<<"$created")"
 check "its code is archived in object storage" "$v1" "$(archived "$id/code.ts")"
 check "its Deployment runs in the tenant namespace" "fn-$id" \
   "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.metadata.name}' 2>/dev/null)"
@@ -152,6 +157,7 @@ http PUT "/functions/$id" "$(jq -n --arg code "$v2" '{code: $code}')" >/dev/null
 check "update returns 200" 200 "$(status)"
 check "the new code is live after the update" 2 \
   "$(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.version)"
+check "the record has the new code's SHA-256 and size" "$(code_facts "$v2")" "$(http GET "/functions/$id" | jq -r '"\(.codeSha256) \(.codeSize)"')"
 check "the archive holds the new code" "$v2" "$(archived "$id/code.ts")"
 
 http DELETE "/functions/$id" >/dev/null
@@ -181,6 +187,19 @@ invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"Python"}}')"
 check "invocation is COMPLETED" COMPLETED "$(jq -r .status <<<"$invoked")"
 check "handler output is returned, with the Lambda context" "Hello Python 128" \
   "$(jq -r '"\(.output.message) \(.output.memory)"' <<<"$invoked")"
+# AWS Lambda's Python functions are often lambda_handler: naming it is enough.
+py_aws='def lambda_handler(event, context):
+    return {"message": "Hello from lambda_handler"}
+'
+http PUT "/functions/$id" "$(jq -n --arg code "$py_aws" '{code: $code, handler: "function.lambda_handler"}')" >/dev/null
+check "a handler named by an update rolls out, and the runtime calls it" "200 function.lambda_handler Hello from lambda_handler" \
+  "$(status) $(http GET "/functions/$id" | jq -r .handler) $(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.message)"
+check "its pods are told it" function.lambda_handler \
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FF_HANDLER")].value}')"
+http PUT "/functions/$id" '{"handler": "lambda_function.lambda_handler"}' >/dev/null
+check "a handler in another file than inline code's is refused, naming its file, and the function keeps its own" \
+  "400 handler must be function.<name> for inline code, which is the file function.py: function.handler, for example function.lambda_handler" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$id" | jq -r .handler)"
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
 
@@ -616,7 +635,8 @@ check "the account's totals are its records' own sums" \
   "$(q "SELECT count(*) FILTER (WHERE $billed), sum(billed_ms), trim_scale(sum(billed_ms::numeric * memory_mb) / 1024000)
           FROM usage_records WHERE account_id = '$tenant' AND started_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'")" \
   "$(jq -r '.totals | "\(.requests) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
-check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 1" \
+# Its two calls: handler's, then lambda_handler's.
+check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 2" \
   "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
 check "as CSV: a download, its header, and the meter function's line" \

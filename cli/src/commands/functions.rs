@@ -58,10 +58,15 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
             format!("name         {}", function.name),
             format!("id           {}", function.id),
             format!("runtime      {}", function.runtime),
+        ];
+        if let Some(handler) = &function.handler {
+            lines.push(format!("handler      {handler}"));
+        }
+        lines.extend([
             format!("memory       {} MB", function.memory),
             format!("timeout      {} s", function.timeout),
             format!("status       {}", function.status),
-        ];
+        ]);
         if let Some(error) = &function.error {
             lines.push(format!("error        {error}"));
         }
@@ -72,7 +77,7 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
             "instances    {}",
             instances(function.min_instances, function.max_instances, function.scale_to_zero)
         ));
-        lines.push(format!("code         {} bytes", function.code.len()));
+        lines.push(format!("code         {}", code(&function)));
         if let Some(environment) = function.environment.as_ref().filter(|environment| !environment.is_empty()) {
             lines.push(format!("environment  {}", environment.keys().cloned().collect::<Vec<_>>().join(", ")));
         }
@@ -80,6 +85,14 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
         lines.push(format!("updated      {} UTC", time(&function.updated_at)));
         lines.join("\n")
     })
+}
+
+/// Its code: how it comes, its size and its SHA-256, as AWS Lambda gives them, where the API does.
+fn code(function: &Function) -> String {
+    match (&function.package_type, &function.code_sha256) {
+        (Some(package), Some(sha256)) => format!("{package}, {} bytes, SHA-256 {sha256}", function.code_size()),
+        _ => format!("{} bytes", function.code_size()),
+    }
 }
 
 pub fn history(name: &str, limit: u32, context: &Context) -> Result<(), Error> {

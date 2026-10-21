@@ -31,6 +31,7 @@ export const workload = (overrides: Partial<FunctionWorkload> = {}): FunctionWor
   accountId: '123456789012',
   runtime: Runtime.NODEJS,
   code: 'export const handler = async () => 1;',
+  handler: 'function.handler',
   memory: 512,
   timeout: 10,
   minInstances: 0,

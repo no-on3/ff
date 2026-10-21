@@ -160,6 +160,54 @@ describe("a function's secrets, as the API takes them", () => {
   });
 });
 
+describe("a function's handler, as the API takes it: AWS Lambda's", () => {
+  const create = { name: 'hello', runtime: Runtime.PYTHON, code: 'def main(event, context):\n    return 1\n', memory: 128, timeout: 5 };
+
+  it('takes one on create and on update, or none, which keeps function.handler or the one the function has', async () => {
+    expect(await validated(CreateFunctionDto, { ...create, handler: 'function.main' })).toMatchObject({ handler: 'function.main' });
+    // A file in a folder is a package's: the function's own package type decides.
+    expect(await validated(UpdateFunctionDto, { handler: 'src/app.handler' })).toMatchObject({ handler: 'src/app.handler' });
+    expect(await validated(CreateFunctionDto, create)).toMatchObject({ handler: undefined });
+    expect(await validated(UpdateFunctionDto, { memory: 256 })).not.toHaveProperty('handler');
+  });
+
+  it('refuses one no runtime takes, saying why, and what is not a string, null included', async () => {
+    expect(await validated(CreateFunctionDto, { ...create, handler: 'function. main' })).toEqual(['handler must not contain whitespace, as on AWS Lambda']);
+    expect(await validated(UpdateFunctionDto, { handler: '../app.handler' })).toEqual([
+      'handler must name a file inside the package, from its root: no leading /, no backslash, no . or .. folder',
+    ]);
+    expect(await validated(UpdateFunctionDto, { handler: 'main' })).toEqual([
+      'handler must be <file>.<function>, as on AWS Lambda: function.handler, or src/app.handler for a file in a folder',
+    ]);
+    expect(await validated(UpdateFunctionDto, { handler: null })).toEqual(['handler must be a string']);
+    expect(await validated(UpdateFunctionDto, { handler: 42 })).toEqual(['handler must be a string']);
+  });
+});
+
+describe('an update, as the API takes it', () => {
+  // Null used to pass for each, as if it were a value, and failed further on.
+  it.each([
+    ['name', 'name must be a string'],
+    ['runtime', 'runtime must be one of the following values: nodejs, python'],
+    ['code', 'code must be a string'],
+    ['memory', 'memory must be a number conforming to the specified constraints'],
+    ['timeout', 'timeout must be a number conforming to the specified constraints'],
+    ['eventFormat', 'eventFormat must be one of the following values: lambda, wrapped'],
+  ])('refuses null for %s: no value, rather than "unchanged", which leaving it out says', async (field, message) => {
+    expect(await validated(UpdateFunctionDto, { [field]: null })).toEqual(expect.arrayContaining([message]));
+  });
+
+  it('takes null for metadata, which it removes', async () => {
+    expect(await validated(UpdateFunctionDto, { metadata: null })).toMatchObject({ metadata: null });
+  });
+
+  it('refuses null for the event format on create too, where the database would have refused it', async () => {
+    const create = { name: 'hello', runtime: Runtime.NODEJS, code: 'exports.handler = async () => 1;', memory: 128, timeout: 5 };
+
+    expect(await validated(CreateFunctionDto, { ...create, eventFormat: null })).toEqual(['eventFormat must be one of the following values: lambda, wrapped']);
+  });
+});
+
 describe("the event a function receives, as the API takes it", () => {
   const create = { name: 'hello', runtime: Runtime.NODEJS, code: 'exports.handler = async () => 1;', memory: 128, timeout: 5 };
 

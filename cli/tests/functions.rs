@@ -287,11 +287,51 @@ fn get_shows_the_function_with_its_error_and_its_variables_names() {
     broken["environment"] = json!({ "TABLE_NAME": "orders", "LOG_LEVEL": "info" });
     let api = Server::start(vec![Reply::json(200, json!([function(CODE)])), Reply::json(200, broken)]);
 
-    ff(&with_key(&api.url)).args(["get", "hello"]).assert().success().stdout(predicate::str::contains(
-        "status       ERROR\nerror        The function failed to load: NameError: name 'x' is not defined\nevent        lambda\n\
-         instances    0 to 3, to zero when idle\n",
-    ).and(predicate::str::contains("environment  LOG_LEVEL, TABLE_NAME\n")));
+    ff(&with_key(&api.url)).args(["get", "hello"]).assert().success().stdout(
+        predicate::str::contains(
+            "status       ERROR\nerror        The function failed to load: NameError: name 'x' is not defined\nevent        lambda\n\
+             instances    0 to 3, to zero when idle\n",
+        )
+        .and(predicate::str::contains("environment  LOG_LEVEL, TABLE_NAME\n"))
+        // From an API before packages, which gives neither the handler nor the code's hash: its inline code's size.
+        .and(predicate::str::contains(format!("code         {} bytes\n", CODE.len())))
+        .and(predicate::str::contains("handler").not()),
+    );
     assert_eq!(api.requests()[1].path, "/functions/f1");
+}
+
+#[test]
+fn get_shows_the_handler_and_the_code_as_aws_lambda_describes_them() {
+    let mut described = function(CODE);
+    described["packageType"] = json!("inline");
+    described["handler"] = json!("function.lambda_handler");
+    described["codeSha256"] = json!("47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=");
+    described["codeSize"] = json!(4096);
+    let api = Server::start(vec![
+        Reply::json(200, json!([function(CODE)])),
+        Reply::json(200, described.clone()),
+        Reply::json(200, json!([function(CODE)])),
+        Reply::json(200, described),
+    ]);
+    let dir = with_key(&api.url);
+
+    ff(&dir).args(["get", "hello"]).assert().success().stdout(
+        predicate::str::contains("runtime      python\nhandler      function.lambda_handler\nmemory       128 MB\n")
+            .and(predicate::str::contains(
+                "code         inline, 4096 bytes, SHA-256 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n",
+            )),
+    );
+    let output = ff(&dir).args(["get", "hello", "--output", "json"]).output().unwrap();
+    let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        [&printed["packageType"], &printed["handler"], &printed["codeSize"], &printed["codeSha256"]],
+        [
+            &json!("inline"),
+            &json!("function.lambda_handler"),
+            &json!(4096),
+            &json!("47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=")
+        ]
+    );
 }
 
 #[test]

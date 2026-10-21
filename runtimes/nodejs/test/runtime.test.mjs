@@ -184,6 +184,50 @@ describe('successful invocations', () => {
     await rt.stop();
   });
 
+  // As AWS Lambda's Node.js runtime finds a handler, so that a package made for it runs unchanged.
+  describe("finds the handler as AWS Lambda's runtime does", () => {
+    it('imports a .mjs handler as an ES module, its top-level await run before the first call', async () => {
+      const rt = await startRuntime('esm-mjs');
+      await readyz(rt, 200);
+
+      const res = await invoke(rt, { name: 'Tunis' });
+
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.json, { message: 'Hello Tunis', esModule: true });
+      await rt.stop();
+    });
+
+    it('imports a .js handler as an ES module where its package.json says "type": "module"', async () => {
+      const rt = await startRuntime('esm-js');
+      await readyz(rt, 200);
+
+      const res = await invoke(rt, {});
+
+      assert.deepEqual(res.json, { message: 'Hello', esModule: true });
+      await rt.stop();
+    });
+
+    it('takes a file in a folder of the package, and a path through its exports', async () => {
+      const created = await startRuntime('subfolder', { FF_HANDLER: 'src/handlers/orders.create' });
+      const nested = await startRuntime('subfolder', { FF_HANDLER: 'src/handlers/orders.api.v1.get' });
+      await readyz(created, 200);
+      await readyz(nested, 200);
+
+      assert.deepEqual((await invoke(created, { id: 7 })).json, { created: 7, file: 'src/handlers/orders.js' });
+      assert.equal((await invoke(nested, {})).json, 'got');
+      await created.stop();
+      await nested.stop();
+    });
+
+    it('loads .js before .ts, as Lambda would, which knows no .ts', async () => {
+      const rt = await startRuntime('order');
+      await readyz(rt, 200);
+
+      assert.equal((await invoke(rt, {})).json, 'js');
+      await rt.stop();
+    });
+  });
+
   it('returns JSON null when the handler returns nothing', async () => {
     const rt = await startRuntime('void');
     await readyz(rt, 200);
@@ -452,7 +496,10 @@ describe('initialization failures keep the pod unready', () => {
     // The TypeScript transpiler would recover from this and run `return {}`.
     ['ts-syntax-error', 'Runtime.UserCodeSyntaxError', /function\.ts:3:\d+ Property assignment expected/],
     ['no-handler', 'Runtime.HandlerNotFound', /function\.handler is undefined/],
-    ['empty', 'Runtime.ImportModuleError', /Cannot find module 'function'/],
+    ['not-a-function', 'Runtime.HandlerNotFound', /^function\.handler is not a function$/],
+    ['esm-syntax-error', 'Runtime.UserCodeSyntaxError', /SyntaxError/],
+    ['esm-missing-import', 'Runtime.ImportModuleError', /Cannot find package 'ff-test-not-installed'/],
+    ['empty', 'Runtime.ImportModuleError', /^Cannot find module 'function' in .*: no function\.js, \.mjs, \.cjs or \.ts there$/],
     ['callback', 'Runtime.CallbackHandlerDeprecated', /function\.handler declares a third parameter, a callback.*async \(event, context\)/],
   ];
   for (const [fixture, errorType, message] of cases) {
@@ -473,6 +520,21 @@ describe('initialization failures keep the pod unready', () => {
       await rt.stop();
     });
   }
+
+  it("refuses a handler that isn't <file>.<export>, or that leaves the package, with Runtime.MalformedHandlerName", async () => {
+    for (const [handler, errorMessage] of [
+      ['handler', 'Bad handler "handler": expected <file>.<export>'],
+      ['src/.handler', 'Bad handler "src/.handler": expected <file>.<export>'],
+      ['../hello/function.handler', `Bad handler "../hello/function.handler": '..' is not allowed, the file is in the package`],
+    ]) {
+      const rt = await startRuntime('hello', { FF_HANDLER: handler });
+
+      const ready = await readyzUntil(rt, (r) => r.body.status === 'failed');
+
+      assert.deepEqual(ready.body.error, { errorType: 'Runtime.MalformedHandlerName', errorMessage });
+      await rt.stop();
+    }
+  });
 
   it('exits, so the container restarts, when a replacement worker cannot load code that loaded before', async () => {
     const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ff-rt-')), 'loaded');

@@ -11,6 +11,7 @@ import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { LedgerTransactionKind } from '../billing/ledger/ledger-transaction.entity';
 import { LedgerService } from '../billing/ledger/ledger.service';
 import { databaseConfiguration } from '../config/configuration';
+import { inlineCodeFacts } from '../functions/code-package';
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
@@ -50,6 +51,7 @@ const INVOCATION_HISTORY = migrationNames.find((name) => name.startsWith('Invoca
 const CLOSED_ACCOUNT_DELETION = migrationNames.find((name) => name.startsWith('ClosedAccountDeletion')) as string;
 const ALARMS = migrationNames.find((name) => name.startsWith('Alarms')) as string;
 const FUNCTION_ENVIRONMENTS = migrationNames.find((name) => name.startsWith('FunctionEnvironments')) as string;
+const SCHEDULES = migrationNames.find((name) => name.startsWith('Schedules')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -227,8 +229,8 @@ run('database schema (L2, real PostgreSQL)', () => {
   it("the capacity-samples migration replaces P-20's partition function, and reverts with samples present (P-21)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      // P-30's price book guard, P-31's ledger check and P-33's NOTIFY too, which reverting their migrations removes.
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_notify_ledger', 'ff_refuse_change']);
+      // P-30's price book guard, P-31's ledger check, P-33's NOTIFY and inline code's hash too, which reverting their migrations removes.
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_refuse_change']);
       expect(await partitionsOf(dataSource, 'capacity_samples')).toEqual([
         { relname: monthPartition('capacity_samples', 0) },
         { relname: monthPartition('capacity_samples', 1) },
@@ -247,7 +249,7 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_notify_ledger', 'ff_refuse_change']);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_refuse_change']);
     });
   });
 
@@ -473,6 +475,65 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the function-packages migration gives every function that exists its code's hash and size as the backend computes them, inline with function.handler, and reverts keeping the code", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, SCHEDULES);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ('000000000001', 'A', 'active', 'beta')`);
+      // A letter outside ASCII: the size counts the bytes of its UTF-8, two.
+      const code = "export const handler = async () => 'café';\n";
+      await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('made-before', '000000000001', 'nodejs', $1, 128, 5)`, [code]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const { codeSha256, codeSize } = inlineCodeFacts(code);
+      expect(codeSize).toBe(code.length + 1);
+      expect(await dataSource.query(`SELECT package_type, handler, code_sha256, code_size FROM functions`)).toEqual([
+        { package_type: 'inline', handler: 'function.handler', code_sha256: codeSha256, code_size: codeSize },
+      ]);
+
+      await migrateDownTo(dataSource, SCHEDULES);
+      expect(await dataSource.query(`SELECT code FROM functions`)).toEqual([{ code }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("keeps inline code's hash and size with its code, whatever writes the row, and a package's as the backend gives them", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ('000000000001', 'A', 'active', 'beta')`);
+      const facts = async (name: string) => (await dataSource.query(`SELECT code_sha256, code_size FROM functions WHERE name = $1`, [name]))[0];
+      const of = (code: string) => {
+        const { codeSha256, codeSize } = inlineCodeFacts(code);
+        return { code_sha256: codeSha256, code_size: codeSize };
+      };
+
+      // Written without them, or with others: inline code's are its code's.
+      await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('raw', '000000000001', 'nodejs', 'v1', 128, 5)`);
+      await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, code_sha256, code_size, memory, timeout) VALUES ('wrong', '000000000001', 'nodejs', 'v1', 'not it', 7, 128, 5)`,
+      );
+      expect(await facts('raw')).toEqual(of('v1'));
+      expect(await facts('wrong')).toEqual(of('v1'));
+      await dataSource.query(`UPDATE functions SET code = 'é' WHERE name = 'raw'`);
+      await dataSource.query(`UPDATE functions SET code_size = 0 WHERE name = 'wrong'`);
+      expect(await facts('raw')).toEqual(of('é'));
+      expect(await facts('wrong')).toEqual(of('v1'));
+
+      // A package's are the backend's, from the package: its inline code, if any, says nothing of them.
+      const zip = { code_sha256: 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=', code_size: 4_096 };
+      await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, package_type, code_sha256, code_size, memory, timeout) VALUES ('zipped', '000000000001', 'python', '', 'zip', $1, $2, 128, 5)`,
+        [zip.code_sha256, zip.code_size],
+      );
+      expect(await facts('zipped')).toEqual(zip);
+      // Back to inline code: its code's again.
+      await dataSource.query(`UPDATE functions SET package_type = 'inline', code = 'v2' WHERE name = 'zipped'`);
+      expect(await facts('zipped')).toEqual(of('v2'));
+    });
+  });
+
   it('the bank-transfers migration reverts with a pro-forma present, unless a withholding receivable exists, which the ledger keeps (P-35)', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -689,12 +750,15 @@ run('database schema (L2, real PostgreSQL)', () => {
         minInstances: 0,
         maxInstances: 3,
         scaleToZero: true,
+        packageType: 'inline',
+        handler: 'function.handler',
+        codeSize: 42,
       });
       const [raw] = await db.dataSource.query(
-        'SELECT account_id, min_instances, scale_to_zero FROM functions WHERE id = $1',
+        'SELECT account_id, min_instances, scale_to_zero, code_size FROM functions WHERE id = $1',
         [fn.id],
       );
-      expect(raw).toEqual({ account_id: ACCOUNT, min_instances: 0, scale_to_zero: true });
+      expect(raw).toEqual({ account_id: ACCOUNT, min_instances: 0, scale_to_zero: true, code_size: 42 });
     });
 
     it('deletes a function with its invocations and metrics, and keeps its usage records (P-20)', async () => {

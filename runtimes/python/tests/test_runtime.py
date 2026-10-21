@@ -202,6 +202,15 @@ class SuccessfulInvocations(RuntimeTest):
         self.assertEqual(done.returncode, 1)
         self.assertIn('"msg": "unknown FF_EVENT_FORMAT", "expected": ["lambda", "wrapped"]', done.stdout)
 
+    def test_imports_a_handler_in_a_folder_of_the_package_as_aws_lambda_does(self):
+        rt = self.start("subfolder", FF_HANDLER="src/handlers/orders.create")
+        rt.ready()
+
+        res = rt.invoke({"id": 7})
+
+        self.assertEqual(res.status, 200, res.text)
+        self.assertEqual(res.json, {"created": 7, "module": "src.handlers.orders"})
+
     def test_returns_json_null_when_the_handler_returns_none(self):
         rt = self.start("void")
         rt.ready()
@@ -382,6 +391,7 @@ class InitFailures(RuntimeTest):
         ("empty", {}, "Runtime.ImportModuleError", r"No module named 'function'"),
         ("missing-dep", {}, "Runtime.ImportModuleError", r"No module named 'ff_missing_dependency'"),
         ("hello", {"FF_HANDLER": "handler"}, "Runtime.MalformedHandlerName", r"Bad handler 'handler'"),
+        ("hello", {"FF_HANDLER": "sys.handler"}, "Runtime.BuiltInModuleConflict", r"^Cannot use built-in module sys as a handler module$"),
     ]
 
     def test_reports_the_error_on_readyz_and_invoke(self):

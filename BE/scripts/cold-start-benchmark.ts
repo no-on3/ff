@@ -97,6 +97,7 @@ async function round(orchestrator: KubernetesOrchestrator, ns: string, accountId
     accountId,
     runtime: options.runtime,
     code: CODE[options.runtime],
+    handler: 'function.handler',
     memory: options.memory,
     timeout: 3,
     minInstances: 0,

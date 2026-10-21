@@ -35,6 +35,16 @@ export enum EventFormat {
 }
 
 /**
+ * How the function's code comes, as AWS Lambda's PackageType says it: inline,
+ * the one file of `code`, which FF writes as function.ts or function.py; or
+ * zip, a package uploaded, its libraries inside.
+ */
+export enum PackageType {
+  INLINE = 'inline',
+  ZIP = 'zip',
+}
+
+/**
  * A name belongs to one function of its account, as on AWS Lambda, compared
  * exactly: "Hello" and "hello" are two names. The index also serves every
  * query by account, which all start with its column.
@@ -65,6 +75,21 @@ export class Function {
 
   @Column('text')
   code: string;
+
+  @Column({ type: 'enum', enum: PackageType, default: PackageType.INLINE })
+  packageType: PackageType;
+
+  /** What its runtime calls, as AWS Lambda's Handler: `<file>.<export>` or `<module>.<function>` (code-package.ts). Its pods are told with FF_HANDLER. */
+  @Column({ type: 'varchar', length: 128, default: 'function.handler' })
+  handler: string;
+
+  /** The SHA-256 of its code, in base64, as AWS Lambda's CodeSha256: of the package, or of inline code's UTF-8. */
+  @Column({ type: 'varchar', length: 44 })
+  codeSha256: string;
+
+  /** Its code's size in bytes, as AWS Lambda's CodeSize: the package's, or inline code's UTF-8. */
+  @Column({ type: 'integer' })
+  codeSize: number;
 
   @Column()
   memory: number;

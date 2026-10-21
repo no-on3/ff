@@ -5,7 +5,7 @@ The image that runs every Node.js function on FF. User code is mounted read-only
 | | |
 |---|---|
 | Image | `ff-runtime-nodejs:24-v3` (`24` = Node.js 24 LTS, as in Lambda's `nodejs24.x`; `v3` = runtime protocol, see [What changed in v3](#what-changed-in-v3)) |
-| Base | `node:24-alpine`. First built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0); `24-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (the TypeScript code cache, npm removed), still on Node v24.22.0; `24-v3` on 2026-10-21, on the same base. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Base | `node:24-alpine`. First built 2026-10-16 from `sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f` (Node v24.22.0); `24-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (the TypeScript code cache, npm removed), still on Node v24.22.0; `24-v3` on 2026-10-21, on the same base, and rebuilt the same day for AWS Lambda's handler resolution (below). The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
 | Size | about 198 MB, with the code cache of TypeScript. npm, npx, corepack and yarn are removed: nothing runs them, and npm's own dependencies had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependency | `typescript` 5.7.3, and nothing else (no Express, no ts-node) |
@@ -14,7 +14,7 @@ The image that runs every Node.js function on FF. User code is mounted read-only
 
 ```
 main thread (main.ts)                        worker thread (worker.ts)
- HTTP :8080  /healthz /readyz /invoke ──────▶ loads /var/task/function.(ts|js|cjs) once
+ HTTP :8080  /healthz /readyz /invoke ──────▶ loads the handler's file once (.js .mjs .cjs .ts)
  queue: one invocation at a time               runs handler(event, context)
  timer per invocation ── timeout/OOM/crash ──▶ terminate + start a fresh worker
  forwards output (relay.ts); END last ◀────── stdout, stderr; marks each call's end
@@ -29,7 +29,7 @@ If that new worker can't load code that loaded before, the environment is broken
 Loading the code must fit in the start-up limit, 10 s (or the function's timeout if longer), as on Lambda. At the smallest size, 128 MB, a pod gets 0.1 CPU, and in gVisor every step is slower. The longest step was TypeScript: compiling the compiler, about 9 MB of JavaScript, then the functions its first transpile runs, took 7 to 10 s of the limit (client-readiness plan, P-62).
 
 - **The image keeps a V8 code cache of TypeScript** (`/opt/ff/typescript.codecache`, `src/typescript-cache.ts`), written at the build after a transpile, so that it holds the transpile's code too. The worker loads TypeScript with it. In gVisor at 0.1 CPU that takes 2.0 to 2.2 s, and the first transpile 0.2 to 0.4 s; a 128 MB function's code now loads in 2 to 5 s.
-- **Only a `.ts` handler loads TypeScript.** A `.js` or `.cjs` one never does.
+- **Only a `.ts` handler loads TypeScript.** A `.js`, `.mjs` or `.cjs` one never does.
 - **The cache only speeds things up.** Without it, or if V8 refuses it (made by another Node.js version), TypeScript is compiled as before, only slower. `test/container-smoke.sh` checks that the image's cache is taken in a worker thread.
 - `hack/k8s/cold-start-benchmark.sh` measures it on the dev cluster, any size and RuntimeClass, several functions at once.
 
@@ -78,12 +78,21 @@ export async function handler(event, context) { … }
 
 `.ts` files are transpiled without type checking, so type errors don't stop a function. Syntax errors do: they fail initialization with `Runtime.UserCodeSyntaxError` and the position, for example `function.ts:2:11 Property assignment expected.`. The first version let the transpiler recover and run different code instead.
 
+### Finding the handler
+
+`FF_HANDLER` names it as AWS Lambda's does, and the runtime finds it as Lambda's Node.js runtime does, so a package made for Lambda runs unchanged:
+- **`[<folders>/]<file>.<export>`:** the file's name runs to the first dot after the last slash, and what follows is a path through its exports. `src/api.handlers.get` is `handlers.get` of `src/api.js`, and `index.default` is an ES module's default export.
+- **The file:** the name itself, then `.js`, `.mjs`, `.cjs`, as Lambda looks for them, and `.ts` last, which Lambda doesn't know: next to `app.ts`, `app.js` is the one loaded. Inline code is `function.ts`.
+- **ES modules are imported:** a `.mjs` file, and a `.js` file whose nearest `package.json` says `"type": "module"`, as Lambda reads it. Their top-level `await` runs once, before the first call. The rest is required, as CommonJS.
+- **Refused:** a handler without a dot in its last part, or with `..` anywhere, as Lambda refuses it (`Runtime.MalformedHandlerName`); a file that isn't there (`Runtime.ImportModuleError`, naming the extensions tried); an export that is missing (`… is undefined or not exported`) or isn't a function (`… is not a function`), both `Runtime.HandlerNotFound`.
+- **Not taken from Lambda:** its last resort, a package of `node_modules` named alone (`some-package.handler`); and a handler outside the package, such as an absolute path into a layer, which FF's API refuses: FF has no layers.
+
 ## Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `LAMBDA_TASK_ROOT` | `/var/task` | Where the user code lives |
-| `FF_HANDLER` | `function.handler` | `<file>.<export>`; subdirectories allowed (`src/app.handler`) |
+| `FF_HANDLER` | `function.handler` | `<file>.<export>`, as AWS Lambda's handler: see [Finding the handler](#finding-the-handler) |
 | `FUNCTION_TIMEOUT` | `30000` | Invocation timeout in **ms** |
 | `FUNCTION_MEMORY_LIMIT` | `128` | MB; sizes the worker heap limit and sets `context.memoryLimitInMB` |
 | `FUNCTION_NAME`, `FUNCTION_VERSION` | `unknown`, `$LATEST` | Reported in `context` and the logs |

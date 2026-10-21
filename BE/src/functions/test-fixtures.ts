@@ -2,7 +2,7 @@
 // (not part of the build: tsconfig.build.json excludes test-fixtures.ts).
 import { randomUUID } from 'node:crypto';
 import { FindOperator } from 'typeorm';
-import { EventFormat, Function, FunctionStatus } from './entities/function.entity';
+import { EventFormat, Function, FunctionStatus, PackageType } from './entities/function.entity';
 import { FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty } from './environment';
 import type { EnvironmentStore } from './environment.store';
 
@@ -13,7 +13,10 @@ export const FUNCTION_DEFAULTS: Partial<Function> = {
   maxInstances: 3,
   scaleToZero: true,
   eventFormat: EventFormat.LAMBDA,
+  packageType: PackageType.INLINE,
+  handler: 'function.handler',
 };
+
 
 /**
  * A repository that keeps rows in memory and, like a database, hands out copies

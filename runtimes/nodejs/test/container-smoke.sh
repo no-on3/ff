@@ -13,7 +13,7 @@ name="ff-runtime-smoke-$$"
 docker build -q -t "$image" "$here/.." >/dev/null
 echo "built $image ($(docker image inspect "$image" --format '{{.Size}}' | awk '{ printf "%d MB", $1 / 1e6 }'))"
 
-trap 'docker rm -f "$name" "$name-cwd" >/dev/null 2>&1 || true' EXIT
+trap 'docker rm -f "$name" "$name-cwd" "$name-esm" >/dev/null 2>&1 || true' EXIT
 docker run -d --name "$name" \
   --read-only --tmpfs /tmp:rw,size=64m \
   --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
@@ -67,5 +67,21 @@ for _ in $(seq 1 50); do
 done
 check "runs in /var/task and reads a file next to the code" "/var/task next to the code" \
   "$(curl -s -X POST -d '{}' "http://127.0.0.1:$port/invoke" | jq -r '"\(.cwd) \(.data)"')"
+
+# An ES module, as AWS Lambda's runtime imports a .mjs handler, its top-level await included, under the same hardening.
+docker run -d --name "$name-esm" \
+  --read-only --tmpfs /tmp:rw,size=64m \
+  --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
+  --memory 256m --cpus 0.5 \
+  -e FUNCTION_NAME=esm -e FUNCTION_TIMEOUT=3000 -e FUNCTION_MEMORY_LIMIT=128 \
+  -v "$here/fixtures/esm-mjs:/var/task:ro" \
+  -p 127.0.0.1::8080 "$image" >/dev/null
+port="$(docker port "$name-esm" 8080/tcp | head -1 | sed 's/.*://')"
+for _ in $(seq 1 50); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/readyz")" = 200 ] && break
+  sleep 0.2
+done
+check "imports a .mjs handler as an ES module, its top-level await run" "Hello container true" \
+  "$(curl -s -X POST -d '{"name":"container"}' "http://127.0.0.1:$port/invoke" | jq -r '"\(.message) \(.esModule)"')"
 
 echo "container smoke: $passed passed"

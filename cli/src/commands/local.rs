@@ -52,7 +52,7 @@ pub fn local_function(args: &LocalArgs) -> Result<LocalFunction, Error> {
 
 fn folder_runtime(dir: &Path) -> Result<Runtime, Error> {
     let has = |file: &str| dir.join(file).is_file();
-    if ["function.ts", "function.js", "function.cjs"].into_iter().any(has) {
+    if ["function.ts", "function.js", "function.mjs", "function.cjs"].into_iter().any(has) {
         Ok(Runtime::Nodejs)
     } else if has("function.py") {
         Ok(Runtime::Python)
@@ -60,7 +60,7 @@ fn folder_runtime(dir: &Path) -> Result<Runtime, Error> {
         Err(Error::new(
             Kind::Usage,
             format!(
-                "{} has no function.ts, function.js, function.cjs or function.py, which the runtime loads: name a file, or the runtime with --runtime",
+                "{} has no function.ts, function.js, function.mjs, function.cjs or function.py, which the runtime loads: name a file, or the runtime with --runtime",
                 dir.display()
             ),
         ))
@@ -297,6 +297,11 @@ mod tests {
         assert!(matches!(from_file.code, Code::File { ref extension, .. } if extension == "py"));
         assert_eq!((from_folder.name.as_str(), from_folder.runtime), ("orders-api", Runtime::Nodejs));
         assert!(matches!(from_folder.code, Code::Folder(_)));
+        // An ES module, which the runtime imports as AWS Lambda's does.
+        let module = dir.path().join("module");
+        std::fs::create_dir(&module).unwrap();
+        std::fs::write(module.join("function.mjs"), "export const handler = async () => 1;\n").unwrap();
+        assert_eq!(local_function(&args(&module)).unwrap().runtime, Runtime::Nodejs);
         let empty = dir.path().join("empty");
         std::fs::create_dir(&empty).unwrap();
         assert_eq!(local_function(&args(&empty)).unwrap_err().exit_code(), 2);

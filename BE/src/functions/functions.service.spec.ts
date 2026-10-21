@@ -27,7 +27,8 @@ import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { FunctionUrl } from './entities/function-url.entity';
 import { Schedule } from '../schedules/schedule.entity';
-import { EventFormat, Function, FunctionStatus, Runtime } from './entities/function.entity';
+import { inlineCodeFacts } from './code-package';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
 import { memoryEnvironments } from './test-fixtures';
@@ -78,6 +79,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       accountId: 'user-1',
       runtime: Runtime.NODEJS,
       code: 'export const handler = async () => 1;',
+      packageType: PackageType.INLINE,
+      handler: 'function.handler',
+      ...inlineCodeFacts('export const handler = async () => 1;'),
       memory: 128,
       timeout: 5,
       minInstances: 0,
@@ -255,6 +259,27 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(failure.getResponse()).not.toHaveProperty('functionId');
       expect(functionsRepo.save).not.toHaveBeenCalled();
     });
+
+    it("keeps its code's hash and size, as AWS Lambda's CodeSha256 and CodeSize, and its handler, function.handler unless it names another", async () => {
+      const result = await service.create('user-42', dto);
+
+      expect(result).toMatchObject({ packageType: PackageType.INLINE, handler: 'function.handler', codeSha256: 'LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=', codeSize: 1 });
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ handler: 'function.handler' }), TENANT);
+
+      await service.create('user-42', { ...dto, name: 'main', handler: 'function.main' });
+      expect(orchestrator.deploy).toHaveBeenLastCalledWith(expect.objectContaining({ handler: 'function.main' }), TENANT);
+    });
+
+    it('refuses a handler outside the one file inline code is, before saving anything', async () => {
+      const failure = (await service.create('user-1', { ...dto, handler: 'src/app.handler' }).catch((err: unknown) => err)) as HttpException;
+
+      expect(failure).toBeInstanceOf(BadRequestException);
+      expect(failure.getResponse()).toMatchObject({
+        message: ['handler must be function.<name> for inline code, which is the file function.ts: function.handler, for example'],
+      });
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+    });
   });
 
   describe('names, unique within an account', () => {
@@ -376,10 +401,20 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(result).toMatchObject({ code: 'v2', status: FunctionStatus.ACTIVE, error: null });
     });
 
+    it("keeps the new code's hash and size with it, in the version rolled out and in the record", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      const result = await service.update('user-1', 'fn-1', { code: 'é' });
+
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: 'é', ...inlineCodeFacts('é') }), TENANT);
+      expect(result).toMatchObject({ code: 'é', codeSize: 2, codeSha256: inlineCodeFacts('é').codeSha256 });
+    });
+
     it.each([
       ['memory', { memory: 256 }],
       ['timeout', { timeout: 30 }],
       ['runtime', { runtime: Runtime.PYTHON }],
+      ['handler', { handler: 'function.main' }],
       ["event format's", { eventFormat: EventFormat.WRAPPED }],
     ])('rolls out a %s change', async (_field, change) => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
@@ -412,6 +447,22 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         "The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/fn-1/schedules/{scheduleId}) first, or keep eventFormat lambda",
       );
       expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses a handler its runtime can't find in inline code, checking the runtime the function will have", async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), handler: 'function.handlers.main' });
+      const refusal = (change: object) => service.update('user-1', 'fn-1', change).catch((err: unknown) => (err as HttpException).getResponse());
+
+      expect(await refusal({ runtime: Runtime.PYTHON })).toMatchObject({
+        message: ['handler must be function.<name> for inline code, which is the file function.py: function.handler, for example'],
+      });
+      expect(await refusal({ handler: 'app.handler' })).toMatchObject({
+        message: ['handler must be function.<name> for inline code, which is the file function.ts: function.handler, for example'],
+      });
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      // With a handler Python finds, the change goes through.
+      await service.update('user-1', 'fn-1', { runtime: Runtime.PYTHON, handler: 'function.main' });
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ runtime: Runtime.PYTHON, handler: 'function.main' }), TENANT);
     });
 
     it('moves the archived copy when the runtime changes', async () => {
@@ -1189,7 +1240,15 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.update('user-1', 'fn-1', { environment: { TABLE: 'orders', API_TOKEN: 'tok-456', NEW: 'v' } });
 
       const [created, updated] = audit.record.mock.calls.map(([event]) => event);
-      expect(created.details).toEqual({ name: 'hello', runtime: 'nodejs', memory: 128, timeout: 5, environment: ['API_TOKEN', 'TABLE'] });
+      expect(created.details).toEqual({
+        name: 'hello',
+        runtime: 'nodejs',
+        handler: 'function.handler',
+        codeSha256: inlineCodeFacts('x').codeSha256,
+        memory: 128,
+        timeout: 5,
+        environment: ['API_TOKEN', 'TABLE'],
+      });
       expect(updated.details).toEqual({ changed: ['environment'], environment: { added: ['NEW'], changed: ['API_TOKEN'], removed: ['OLD'] }, outcome: 'live' });
       expect(JSON.stringify(audit.record.mock.calls)).not.toMatch(/tok-123|tok-456|orders/);
     });
@@ -1350,19 +1409,24 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
           accountId: 'user-1',
           action: 'function.create',
           resource: 'function:fn-1',
-          details: { name: 'hello', runtime: 'nodejs', memory: 128, timeout: 5 },
+          details: { name: 'hello', runtime: 'nodejs', handler: 'function.handler', codeSha256: inlineCodeFacts('x').codeSha256, memory: 128, timeout: 5 },
         },
         transaction,
       );
     });
 
-    it('records the fields an update changed, with their new values but never the code', async () => {
+    it("records the fields an update changed, with their new values, but the code's hash rather than the code", async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
 
       await service.update('user-1', 'fn-1', { code: 'v2', memory: 256, timeout: 5 });
 
       expect(recorded()).toEqual([
-        { accountId: 'user-1', action: 'function.update', resource: 'function:fn-1', details: { changed: ['code', 'memory'], memory: 256, outcome: 'live' } },
+        {
+          accountId: 'user-1',
+          action: 'function.update',
+          resource: 'function:fn-1',
+          details: { changed: ['code', 'memory'], memory: 256, codeSha256: inlineCodeFacts('v2').codeSha256, outcome: 'live' },
+        },
       ]);
     });
 
@@ -1385,7 +1449,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR });
       orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Error', 'boom'));
       await service.update('user-1', 'fn-1', { code: 'still broken' }).catch(() => undefined);
-      expect(recorded()).toEqual([expect.objectContaining({ action: 'function.update', details: { changed: ['code'], outcome: 'failed, kept: ERROR' } })]);
+      expect(recorded()).toEqual([
+        expect.objectContaining({
+          action: 'function.update',
+          details: { changed: ['code'], codeSha256: inlineCodeFacts('still broken').codeSha256, outcome: 'failed, kept: ERROR' },
+        }),
+      ]);
     });
 
     it('records a deletion and a scaling change', async () => {

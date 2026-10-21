@@ -16,6 +16,8 @@ export interface FunctionWorkload {
   accountId: string;
   runtime: Runtime;
   code: string;
+  /** What its runtime calls: AWS Lambda's handler, function.handler unless it names another. */
+  handler: string;
   /** Memory in MB. */
   memory: number;
   /** Timeout in seconds. */

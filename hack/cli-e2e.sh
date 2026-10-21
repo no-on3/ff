@@ -53,6 +53,8 @@ ff() {
 out() { cat "$work/out"; }
 err() { cat "$work/err"; }
 code() { cat "$work/code"; }
+# A file's SHA-256 in base64 and its size, as AWS Lambda's CodeSha256 and CodeSize give a function's code.
+file_facts() { python3 -c 'import base64, hashlib, sys; code = open(sys.argv[1], "rb").read(); print(base64.b64encode(hashlib.sha256(code).digest()).decode(), len(code))' "$1"; }
 
 ff config set endpoint "$api"
 ff config set dev_account "$account_a"
@@ -115,8 +117,9 @@ for example in hello.ts hello.py; do
   check "history lists its calls, newest first, by the IDs invoke printed" "0 4 $last_id COMPLETED" \
     "$(code) $(out | jq -r '"\(.total) \(.invocations[0].id) \(.invocations[0].status)"')"
   ff get "$name" --output json
-  check "get shows it, its code's size rather than its code" "0 256 0 2 null true" \
-    "$(code) $(out | jq -r '"\(.memory) \(.minInstances) \(.maxInstances) \(.code) \(.codeSize > 0)"')"
+  check "get shows it: its handler, and its code's package, SHA-256 and size rather than its code" \
+    "0 256 0 2 null function.handler inline $(file_facts "$work/$example")" \
+    "$(code) $(out | jq -r '"\(.memory) \(.minInstances) \(.maxInstances) \(.code) \(.handler) \(.packageType) \(.codeSha256) \(.codeSize)"')"
   ff --profile b get "$name"
   check "another account doesn't find it" "3 error: There is no function named \"$name\" in the account: \`ff list\` shows its functions" "$(code) $(err)"
   ff delete "$name" </dev/null

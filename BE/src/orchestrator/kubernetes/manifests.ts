@@ -2,7 +2,7 @@
  * Pure builders for every Kubernetes object FF creates. Conventions are
  * documented in docs/kubernetes-migration-plan.md §4.
  */
-import { Runtime } from '../../functions/entities/function.entity';
+import { codeFileName } from '../../functions/code-package';
 import { MAX_CODE_BYTES } from '../../functions/limits';
 import { CodeTooLargeError } from '../orchestrator.errors';
 import { FunctionWorkload, TenantLimits, WorkloadEnvironment } from '../orchestrator.types';
@@ -50,10 +50,6 @@ export function maxQueueWaitMs(fn: Pick<FunctionWorkload, 'timeout'>): number {
 /** Lambda-like proportional CPU: 1,769 MB ≈ 1 vCPU, never below 100m. */
 export function cpuMillicores(memoryMb: number): number {
   return Math.max(100, Math.round((memoryMb / 1769) * 1000));
-}
-
-export function codeFileName(runtime: Runtime): string {
-  return runtime === Runtime.PYTHON ? 'function.py' : 'function.ts';
 }
 
 function managedLabels(extra: Record<string, string> = {}): Record<string, string> {
@@ -291,7 +287,7 @@ export function deploymentManifest(
                 { name: 'FUNCTION_TIMEOUT', value: String(fn.timeout * 1000) },
                 { name: 'FF_MAX_QUEUE_WAIT_MS', value: String(maxQueueWaitMs(fn)) },
                 { name: 'LAMBDA_TASK_ROOT', value: '/var/task' },
-                { name: 'FF_HANDLER', value: 'function.handler' },
+                { name: 'FF_HANDLER', value: fn.handler },
                 // The payload as the event, as on AWS Lambda, or FF's original wrapper for a function made before.
                 { name: 'FF_EVENT_FORMAT', value: fn.eventFormat },
                 { name: 'PORT', value: String(RUNTIME_PORT) },

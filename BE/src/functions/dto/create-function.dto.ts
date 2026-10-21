@@ -1,9 +1,10 @@
-import { IsString, IsEnum, IsNumber, IsObject, IsOptional, Matches, Min, Max, ValidateIf } from 'class-validator';
+import { IsString, IsEnum, IsNumber, IsObject, IsOptional, Matches, Min, Max, ValidateBy, ValidateIf } from 'class-validator';
 import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { MaxJsonBytes, MaxUtf8Bytes } from '../../common/byte-limits';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
 import { MAX_CODE_BYTES, MAX_METADATA_BYTES } from '../limits';
+import { DEFAULT_HANDLER, MAX_HANDLER_LENGTH, handlerSyntaxProblem } from '../code-package';
 import { EventFormat, Runtime } from '../entities/function.entity';
 import { IsEnvironment, IsSecrets } from '../environment';
 
@@ -13,6 +14,17 @@ import { IsEnvironment, IsSecrets } from '../environment';
  * until the function is renamed, since only a name sent is checked.
  */
 export const FUNCTION_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** A handler as AWS Lambda writes one, whatever the runtime: the service checks it against the function's runtime and package. */
+function IsHandler(): PropertyDecorator {
+  return ValidateBy({
+    name: 'isHandler',
+    validator: {
+      validate: (value: unknown) => typeof value !== 'string' || handlerSyntaxProblem(value) === undefined,
+      defaultMessage: (args) => handlerSyntaxProblem(String(args?.value)) ?? '',
+    },
+  });
+}
 
 export class CreateFunctionDto {
   @ApiProperty({
@@ -57,13 +69,26 @@ export class CreateFunctionDto {
   timeout: number;
 
   @ApiPropertyOptional({
+    default: DEFAULT_HANDLER,
+    maxLength: MAX_HANDLER_LENGTH,
+    description:
+      "What its runtime calls, as AWS Lambda's Handler: <file>.<export> for Node.js, <module>.<function> for Python, the file in a folder " +
+      'of the package if need be (src/app.handler). Inline code is the file function.ts or function.py, so its handler is ' +
+      'function.<name>. A change rolls out a new version',
+  })
+  @ValidateIf((_dto, value) => value !== undefined)
+  @IsString()
+  @IsHandler()
+  handler?: string;
+
+  @ApiPropertyOptional({
     enum: EventFormat,
     default: EventFormat.LAMBDA,
     description:
       "What the handler gets as its event: lambda, the payload itself, as on AWS Lambda; or wrapped, FF's original { body, headers, " +
       "method, query, path }, which functions made before have. A change rolls out a new version. Function URLs and schedules need lambda",
   })
-  @IsOptional()
+  @ValidateIf((_dto, value) => value !== undefined)
   @IsEnum(EventFormat)
   eventFormat?: EventFormat;
 
@@ -93,8 +118,8 @@ export class CreateFunctionDto {
 
 /**
  * The environment property, as create and update take it: optional, but null
- * is no map, so it is refused rather than taken for "unchanged" (an update's
- * other fields are optional in the way that lets null through).
+ * is no map, so it is refused rather than taken for "unchanged", as an
+ * update's other fields refuse it.
  */
 export function EnvironmentProperty(): PropertyDecorator {
   return applyDecorators(

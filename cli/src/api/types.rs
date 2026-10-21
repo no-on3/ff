@@ -14,6 +14,18 @@ pub struct Function {
     pub runtime: String,
     #[serde(default)]
     pub code: String,
+    /// How its code comes, `inline` or `zip`; this and the three below are absent from an API before packages.
+    #[serde(default)]
+    pub package_type: Option<String>,
+    /// What its runtime calls, as AWS Lambda's handler: `function.handler` unless it names another.
+    #[serde(default)]
+    pub handler: Option<String>,
+    /// The SHA-256 of its code, in base64, as AWS Lambda's CodeSha256.
+    #[serde(default)]
+    pub code_sha256: Option<String>,
+    /// Its code's size in bytes, as AWS Lambda's CodeSize.
+    #[serde(default)]
+    pub code_size: Option<u64>,
     pub memory: u32,
     pub timeout: u32,
     pub status: String,
@@ -39,6 +51,8 @@ pub struct FunctionView<'a> {
     pub id: &'a str,
     pub name: &'a str,
     pub runtime: &'a str,
+    pub package_type: Option<&'a str>,
+    pub handler: Option<&'a str>,
     pub memory: u32,
     pub timeout: u32,
     pub status: &'a str,
@@ -47,7 +61,8 @@ pub struct FunctionView<'a> {
     pub min_instances: u32,
     pub max_instances: u32,
     pub scale_to_zero: bool,
-    pub code_size: usize,
+    pub code_size: u64,
+    pub code_sha256: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<&'a serde_json::Map<String, serde_json::Value>>,
     pub created_at: &'a str,
@@ -55,11 +70,18 @@ pub struct FunctionView<'a> {
 }
 
 impl Function {
+    /// Its code's size: the API's, or its inline code's from an API before packages.
+    pub fn code_size(&self) -> u64 {
+        self.code_size.unwrap_or(self.code.len() as u64)
+    }
+
     pub fn view(&self) -> FunctionView<'_> {
         FunctionView {
             id: &self.id,
             name: &self.name,
             runtime: &self.runtime,
+            package_type: self.package_type.as_deref(),
+            handler: self.handler.as_deref(),
             memory: self.memory,
             timeout: self.timeout,
             status: &self.status,
@@ -68,7 +90,8 @@ impl Function {
             min_instances: self.min_instances,
             max_instances: self.max_instances,
             scale_to_zero: self.scale_to_zero,
-            code_size: self.code.len(),
+            code_size: self.code_size(),
+            code_sha256: self.code_sha256.as_deref(),
             environment: self.environment.as_ref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,

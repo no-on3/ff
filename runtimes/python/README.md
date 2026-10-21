@@ -5,7 +5,7 @@ The image that runs every Python function on FF. It speaks the same HTTP protoco
 | | |
 |---|---|
 | Image | `ff-runtime-python:3.13-v3` (`3.13` = Python 3.13, as in Lambda's `python3.13`; `v3` = runtime protocol, see [What changed in v3](#what-changed-in-v3)) |
-| Base | `python:3.13-slim` (Debian, glibc 2.41). First built 2026-10-16 from `sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` (Python 3.13.16); `3.13-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (pip removed), still on Python 3.13.16; `3.13-v3` on 2026-10-21, on the same base. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
+| Base | `python:3.13-slim` (Debian, glibc 2.41). First built 2026-10-16 from `sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` (Python 3.13.16); `3.13-v2` was built on 2026-10-17, and last rebuilt on 2026-10-20 (pip removed), still on Python 3.13.16; `3.13-v3` on 2026-10-21, on the same base, and rebuilt the same day to refuse a built-in module as the handler's, as Lambda does. The tag is deliberately not pinned to a digest, so rebuilds pick up security patches; rebuild regularly. |
 | Size | about 122 MB. pip is removed: functions ship their dependencies, nothing can be installed on a read-only root, and the packages pip vendors had advisories |
 | User | `10001:10001` (numeric, so Kubernetes `runAsNonRoot` can verify it) |
 | Dependencies | None: the runtime uses only the standard library |
@@ -50,7 +50,7 @@ Each connection gets its own thread, started with the low-level `_thread` call. 
 | 500 | `Runtime.ExitError` | User code exited (`sys.exit`, `os._exit`) or crashed the worker: `Runtime exited with error: exit status 3`; recycled |
 | 500 | `Runtime.MarshalError` | The return value is not JSON-serializable (a `set`, an object, `NaN`) |
 | 500 | `Function.ResponseSizeTooLarge` | Return value above 6 MB |
-| 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
+| 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Runtime.BuiltInModuleConflict`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
 | 400 | `InvalidRequestContentException` | Body is not JSON |
 | 413 | `RequestEntityTooLargeException` | Body above 6 MB |
 | 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting, or one waited longer than `FF_MAX_QUEUE_WAIT_MS` for its turn: `Rate exceeded: no instance was free within X.XX seconds` |
@@ -95,7 +95,7 @@ On Kubernetes the container's memory limit equals the function's memory, as on L
 | Variable | Default | Meaning |
 |---|---|---|
 | `LAMBDA_TASK_ROOT` | `/var/task` | Where the user code lives; also the worker's working directory |
-| `FF_HANDLER` | `function.handler` | `<module>.<function>`. Subdirectories are allowed: `src/app.handler` imports `src.app` |
+| `FF_HANDLER` | `function.handler` | `<module>.<function>`, as AWS Lambda's handler. Subdirectories are allowed: `src/app.handler` imports `src.app`. A module compiled into Python, such as `sys` or `time`, is refused with `Runtime.BuiltInModuleConflict`, as on Lambda: it would be imported instead of the function's |
 | `FUNCTION_TIMEOUT` | `30000` | Invocation timeout in **ms** |
 | `FUNCTION_MEMORY_LIMIT` | `128` | MB; sizes the worker's memory limit and sets `context.memory_limit_in_mb` |
 | `FUNCTION_NAME`, `FUNCTION_VERSION` | `unknown`, `$LATEST` | Reported in `context` and the logs |

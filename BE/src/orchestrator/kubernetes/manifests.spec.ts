@@ -105,6 +105,12 @@ describe('Kubernetes manifests', () => {
       });
     });
 
+    it('tells the runtime the handler the function names', () => {
+      const env = Object.fromEntries(container(build({ handler: 'function.main' })).env.map((e: any) => [e.name, e.value]));
+
+      expect(env.FF_HANDLER).toBe('function.main');
+    });
+
     it("tells the runtime a function made before still gets FF's original event", () => {
       const env = Object.fromEntries(container(build({ eventFormat: EventFormat.WRAPPED })).env.map((e: any) => [e.name, e.value]));
 

@@ -43,7 +43,7 @@ import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { SecretsView } from './dto/secrets.dto';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
-import { EventFormat, Function, FunctionStatus } from './entities/function.entity';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { FunctionUrl } from './entities/function-url.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import {
@@ -62,6 +62,7 @@ import {
   withSecrets,
 } from './environment';
 import { EnvironmentStore } from './environment.store';
+import { DEFAULT_HANDLER, handlerProblem, inlineCodeFacts } from './code-package';
 import { callersFailure, failureResponse, platformFailure } from './failures';
 import { keptJson, keptText } from './history';
 import { liveTail } from './live-tail';
@@ -69,7 +70,7 @@ import { logsQuery } from './logs-window';
 import { MAX_INPUT_BYTES } from './limits';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
-const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout', 'eventFormat'] as const;
+const ROLLOUT_FIELDS = ['code', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat'] as const;
 
 /** A function as the API answers it: its record and its variables. Its secrets' values are never part of it. */
 export type FunctionView = Function & { environment: Record<string, string> };
@@ -99,14 +100,20 @@ function refuseCombined(environment: FunctionEnvironmentValues): void {
   if (problems.length) throw new BadRequestException(problems);
 }
 
+/** A handler its function can't have, for its runtime and package: 400, before anything changes. */
+function refuseHandler(handler: string, runtime: Runtime, packageType: PackageType): void {
+  const problem = handlerProblem(handler, runtime, packageType);
+  if (problem) throw new BadRequestException([problem]);
+}
+
 /** A function's environment before a change, and after it: the same object when the change leaves it alone. */
 interface EnvironmentChange {
   before: FunctionEnvironmentValues;
   after: FunctionEnvironmentValues;
 }
 
-/** The fields of a function a change asks for, without its environment. */
-type FieldChanges = Omit<UpdateFunctionDto, 'environment'>;
+/** The fields of a function a change asks for, without its environment; with new code, its hash and size. */
+type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<Pick<Function, 'codeSha256' | 'codeSize'>>;
 
 /** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
 const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
@@ -220,10 +227,15 @@ export class FunctionsService {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, createFunctionDto);
     const { environment: variables, secrets, ...fields } = createFunctionDto;
+    const handler = fields.handler ?? DEFAULT_HANDLER;
+    refuseHandler(handler, fields.runtime, PackageType.INLINE);
     const environment = withSecrets(withVariables(NO_ENVIRONMENT, variables ?? {}), storedSecrets(secrets ?? {}, new Date()));
     refuseCombined(environment);
     const function_ = this.functionsRepository.create({
       ...fields,
+      handler,
+      packageType: PackageType.INLINE,
+      ...inlineCodeFacts(fields.code),
       accountId,
       status: FunctionStatus.CREATING,
     });
@@ -281,6 +293,8 @@ export class FunctionsService {
           details: {
             name: saved.name,
             runtime: saved.runtime,
+            handler: saved.handler,
+            codeSha256: saved.codeSha256,
             memory: saved.memory,
             timeout: saved.timeout,
             ...(variables.length ? { environment: variables } : {}),
@@ -294,9 +308,9 @@ export class FunctionsService {
   }
 
   /**
-   * The fields an update changes, for the audit log: their names, and the new
-   * values but the code's; the variables and the secrets by name only, never
-   * their values.
+   * The fields an update changes, for the audit log: their names, and their
+   * new values, the code's hash rather than the code; the variables and the
+   * secrets by name only, never their values.
    */
   private recordUpdate(function_: Function, changed: string[], outcome: string, environment?: EnvironmentChange): Promise<void> {
     const values = Object.fromEntries(
@@ -312,7 +326,7 @@ export class FunctionsService {
       accountId: function_.accountId,
       action: 'function.update',
       resource: `function:${function_.id}`,
-      details: { changed, ...values, ...names, outcome },
+      details: { changed, ...values, ...(changed.includes('code') ? { codeSha256: function_.codeSha256 } : {}), ...names, outcome },
     });
   }
 
@@ -344,6 +358,9 @@ export class FunctionsService {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
     const { environment: variables, ...changes } = updateFunctionDto;
+    if (changes.handler !== undefined || changes.runtime !== undefined) {
+      refuseHandler(changes.handler ?? function_.handler, changes.runtime ?? function_.runtime, function_.packageType);
+    }
     if (changes.eventFormat === EventFormat.WRAPPED && function_.eventFormat !== EventFormat.WRAPPED) await this.refuseWrappedWhileSent(id);
     const newName = changes.name !== undefined && changes.name !== function_.name ? changes.name : undefined;
     // Refused before anything changes. The save claims the name again, under the account's lock:
@@ -354,11 +371,12 @@ export class FunctionsService {
     const environmentChanges = variables !== undefined && !sameVariables(variables, before.variables);
     const after = environmentChanges ? withVariables(before, variables) : before;
     if (environmentChanges) refuseCombined(after);
-    const changed: string[] = (Object.keys(changes) as Array<keyof FieldChanges>).filter(
+    const changed: string[] = (Object.keys(changes) as Array<keyof typeof changes>).filter(
       (field) => changes[field] !== undefined && changes[field] !== function_[field],
     );
     if (environmentChanges) changed.push('environment');
-    const { saved, environment } = await this.change(function_, changes, { before, after }, changed);
+    const fieldChanges: FieldChanges = changes.code === undefined ? changes : { ...changes, ...inlineCodeFacts(changes.code) };
+    const { saved, environment } = await this.change(function_, fieldChanges, { before, after }, changed);
     return viewOf(saved, environment);
   }
 
