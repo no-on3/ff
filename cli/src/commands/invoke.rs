@@ -37,6 +37,25 @@ pub fn input_of(data: Option<&str>) -> Result<Option<Value>, Error> {
         .map_err(|error| Error::new(Kind::Usage, format!("The event in {from} isn't JSON: {error}")))
 }
 
+/// A request's body, as given: inline text, `@file`, or `-` for stdin, not necessarily JSON.
+pub fn raw_data(data: &str) -> Result<Vec<u8>, Error> {
+    match data {
+        "-" => {
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut bytes)
+                .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read the body from stdin: {error}")))?;
+            Ok(bytes)
+        }
+        _ => match data.strip_prefix('@') {
+            Some(path) => {
+                std::fs::read(path).map_err(|error| Error::new(Kind::Usage, format!("Couldn't read {path}: {error}")))
+            }
+            None => Ok(data.as_bytes().to_vec()),
+        },
+    }
+}
+
 /// How long the answer may take: a wait for a free instance and the call, each up to the
 /// function's timeout, as the API waits; a cold start; and a margin.
 pub fn timeout_for(function_timeout: u32) -> Duration {
@@ -71,6 +90,9 @@ fn summary(invocation: &Invocation) -> String {
 }
 
 pub fn run(args: InvokeArgs, context: &Context) -> Result<(), Error> {
+    if let Some(http) = &args.http {
+        return super::url::invoke_http(&args.name, &http[0], &http[1], &args.headers, args.data.as_deref(), context);
+    }
     let input = input_of(args.data.as_deref())?;
     let settings = context.settings()?;
     let client = Client::new(&settings)?;

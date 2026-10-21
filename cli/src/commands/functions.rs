@@ -134,7 +134,7 @@ pub fn scale(name: &str, min: Option<u32>, max: Option<u32>, context: &Context) 
 }
 
 /// Whether to go on: asked in a terminal; a script says `--yes`.
-fn confirmed(question: &str, yes: bool) -> Result<bool, Error> {
+pub fn confirmed(question: &str, yes: bool) -> Result<bool, Error> {
     if yes {
         return Ok(true);
     }

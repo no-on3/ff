@@ -33,7 +33,10 @@ echo "== ff and the backend"
 (cd "$FF_REPO_ROOT/cli" && cargo build --release --locked -q)
 ff_bin="$FF_REPO_ROOT/cli/target/release/ff"
 e2e_build
-be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a")
+# Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which ff reaches on 127.0.0.1.
+url_port="$(free_port)"
+be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -191,6 +194,38 @@ ff secrets unset cli-secrets DB_PASSWORD
 ff invoke cli-secrets --raw
 check "ff secrets unset removes it" "0 none" "$(code) $(out | jq -r .password)"
 ff delete cli-secrets --yes
+
+echo "== a function's URL: ff url, ff invoke --http, ff domains"
+printf '%s\n' 'export async function handler(event: { rawPath: string; queryStringParameters?: Record<string, string> }) {' \
+  '  return { statusCode: 200, headers: { "content-type": "text/plain" }, body: `Ahlan ${event.queryStringParameters?.name ?? "world"} at ${event.rawPath}` };' \
+  '}' >"$work/web.ts"
+ff deploy "$work/web.ts" --name cli-url
+ff url enable cli-url
+check "a new URL needs who may call it" "2" "$(code)"
+ff url enable cli-url --auth none
+address="$(out | head -1 | sed 's/^cli-url has a URL: //')"
+check "ff url enable gives it its address, open to anyone" "0 true" "$(code) $([[ $address =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
+ff invoke cli-url --http GET "/hello?name=Browser"
+check "ff invoke --http calls it there, with AWS Lambda's URL event" "0 HTTP 200 Ahlan Browser at /hello" "$(code) $(out | head -1) $(out | tail -1)"
+ff url enable cli-url --auth key
+ff invoke cli-url --http GET /
+check "once it takes API keys, a call without one is refused there" "0 HTTP 403" "$(code) $(out | head -1)"
+ff url show cli-url
+check "ff url show says its address and who may call it" "0 $address callers need an API key of the account with functions:invoke" \
+  "$(code) $(out | head -1) $(out | sed -n 2p | cut -d';' -f1)"
+ff domains add cli-url shop.cli-e2e.test
+check "ff domains add says the records that prove it" "0 shop.cli-e2e.test: pending true" \
+  "$(code) $(out | head -1) $(out | grep -q "CNAME shop.cli-e2e.test ${address:7:32}.fn.localhost" && echo true || echo false)"
+ff domains verify cli-url shop.cli-e2e.test
+check "which, until they exist, leave it pending" "0 shop.cli-e2e.test: pending" "$(code) $(out | head -1)"
+ff domains list cli-url --output json
+check "ff domains list has it" "0 shop.cli-e2e.test pending" "$(code) $(out | jq -r '.[0] | "\(.domain) \(.status)"')"
+ff domains remove cli-url shop.cli-e2e.test --yes
+ff url disable cli-url --yes
+check "ff url disable deletes the URL" "0 cli-url's URL deleted: $address answers 404" "$(code) $(out)"
+ff invoke cli-url --http GET /
+check "after which ff invoke --http has nowhere to call" "3 error: cli-url has no URL: \`ff url enable cli-url --auth none|key\` gives it one" "$(code) $(err)"
+ff delete cli-url --yes
 
 echo "== ff init: a new function's folder, run locally, then deployed"
 for runtime in python nodejs; do

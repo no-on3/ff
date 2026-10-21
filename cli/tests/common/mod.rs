@@ -119,8 +119,35 @@ impl Server {
     /// Answers each connection's request with the next reply, then closes it; then stops
     /// listening, so that a request too many finds nobody.
     pub fn start(replies: Vec<Reply>) -> Server {
+        Server::bind().serve(replies)
+    }
+
+    /// A server whose address is known before its replies are: for a reply that names it.
+    pub fn bind() -> Bound {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        Bound { listener, url }
+    }
+
+    /// What it was sent so far.
+    pub fn requests(&self) -> Vec<Request> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+/// A server listening, without its replies yet.
+pub struct Bound {
+    listener: TcpListener,
+    pub url: String,
+}
+
+impl Bound {
+    pub fn port(&self) -> u16 {
+        self.listener.local_addr().unwrap().port()
+    }
+
+    pub fn serve(self, replies: Vec<Reply>) -> Server {
+        let Bound { listener, url } = self;
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
         thread::spawn(move || {
@@ -132,11 +159,6 @@ impl Server {
             }
         });
         Server { url, requests }
-    }
-
-    /// What it was sent so far.
-    pub fn requests(&self) -> Vec<Request> {
-        self.requests.lock().unwrap().clone()
     }
 }
 

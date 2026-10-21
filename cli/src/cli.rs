@@ -166,6 +166,14 @@ pub enum Command {
     #[command(subcommand)]
     Secrets(SecretsCommand),
 
+    /// A function's web address, as AWS Lambda's function URLs
+    #[command(subcommand)]
+    Url(UrlCommand),
+
+    /// The account's own domains for a function's URL, proved by DNS
+    #[command(subcommand)]
+    Domains(DomainsCommand),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -278,6 +286,14 @@ pub struct InvokeArgs {
     /// Print the answer only, as compact JSON, for a pipe
     #[arg(long)]
     pub raw: bool,
+
+    /// Call it through its URL instead, as a browser or a webhook does: a method and a path, such as GET /orders?status=new
+    #[arg(long, num_args = 2, value_names = ["METHOD", "PATH"])]
+    pub http: Option<Vec<String>>,
+
+    /// With --http, a header of the request, "name: value", repeated
+    #[arg(long = "header", short = 'H', requires = "http")]
+    pub headers: Vec<String>,
 }
 
 #[derive(Args)]
@@ -438,6 +454,93 @@ pub enum SecretsCommand {
         /// The secrets' names
         #[arg(required = true)]
         secrets: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum UrlCommand {
+    /// Show its address, who may call it, its CORS and its domains
+    Show {
+        /// The function's name
+        name: String,
+    },
+
+    /// Give it a URL, or change who may call it and its CORS
+    Enable {
+        /// The function's name
+        name: String,
+
+        /// Who may call it: none, anyone; key, the account's API keys with functions:invoke. Needed for a new URL
+        #[arg(long, value_enum)]
+        auth: Option<UrlAuth>,
+
+        /// A site whose browsers may call it (CORS), such as https://shop.example.tn, repeated
+        #[arg(long = "cors-origin")]
+        cors_origins: Vec<String>,
+
+        /// A method those browsers may use, repeated
+        #[arg(long = "cors-method")]
+        cors_methods: Vec<String>,
+
+        /// A header those browsers may send, repeated
+        #[arg(long = "cors-header")]
+        cors_headers: Vec<String>,
+    },
+
+    /// Delete its URL: it stops answering at once
+    Disable {
+        /// The function's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+pub enum UrlAuth {
+    None,
+    Key,
+}
+
+#[derive(Subcommand)]
+pub enum DomainsCommand {
+    /// List its URL's domains, verified or not
+    List {
+        /// The function's name
+        name: String,
+    },
+
+    /// Add a domain of the account's, and show the DNS records that prove it
+    Add {
+        /// The function's name
+        name: String,
+
+        /// The domain, such as shop.example.tn
+        domain: String,
+    },
+
+    /// Check the domain's DNS records again
+    Verify {
+        /// The function's name
+        name: String,
+
+        /// The domain
+        domain: String,
+    },
+
+    /// Remove a domain: the URL stops answering there
+    Remove {
+        /// The function's name
+        name: String,
+
+        /// The domain
+        domain: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
     },
 }
 

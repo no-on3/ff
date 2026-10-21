@@ -11,10 +11,11 @@ mod invoke;
 mod local;
 mod logs;
 mod secrets;
+mod url;
 mod version;
 mod whoami;
 
-use crate::cli::{Command, ConnectionArgs, EnvCommand, LocalCommand, SecretsCommand};
+use crate::cli::{Command, ConnectionArgs, DomainsCommand, EnvCommand, LocalCommand, SecretsCommand, UrlCommand};
 use crate::config::Settings;
 use crate::error::Error;
 use crate::output::Output;
@@ -57,6 +58,17 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Secrets(SecretsCommand::List { name }) => secrets::list(&name, context),
         Command::Secrets(SecretsCommand::Set { name, secrets }) => secrets::set(&name, &secrets, context),
         Command::Secrets(SecretsCommand::Unset { name, secrets }) => secrets::unset(&name, &secrets, context),
+        Command::Url(UrlCommand::Show { name }) => url::show(&name, context),
+        Command::Url(UrlCommand::Enable { name, auth, cors_origins, cors_methods, cors_headers }) => {
+            url::enable(&name, auth, url::cors(&cors_origins, &cors_methods, &cors_headers), context)
+        }
+        Command::Url(UrlCommand::Disable { name, yes }) => url::disable(&name, yes, context),
+        Command::Domains(DomainsCommand::List { name }) => url::domains_list(&name, context),
+        Command::Domains(DomainsCommand::Add { name, domain }) => url::domains_add(&name, &domain, context),
+        Command::Domains(DomainsCommand::Verify { name, domain }) => url::domains_verify(&name, &domain, context),
+        Command::Domains(DomainsCommand::Remove { name, domain, yes }) => {
+            url::domains_remove(&name, &domain, yes, context)
+        }
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),
