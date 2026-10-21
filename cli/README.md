@@ -14,6 +14,8 @@ One Rust binary that deploys, invokes and reads FF's functions, through FF's API
 | `ff history <name> [--limit N]` | Its last calls, newest first: time, request ID, status, duration, how it came, the error's first line |
 | `ff scale <name> [--min N] [--max N]` | The instances it keeps running when idle (billed as AWS bills provisioned concurrency), and the most it runs |
 | `ff delete <name> [--yes]` | Deletes it, with its history and its logs, after asking; a script says `--yes` |
+| `ff local invoke <file\|folder> [--data …] [--raw] [--name] [--runtime] [--memory] [--timeout]` | Runs it once on this machine, in Docker, in the runtime image production uses and with the pod's hardening: a read-only root with a 512 MiB `/tmp`, uid 10001, no capability, no new privileges, its memory as the limit and CPU by Lambda's ratio, the variables the backend gives a pod, the code mounted read-only (a file as `/var/task/function.<extension>`, a folder as `/var/task`), the port on `127.0.0.1` only. It prints the answer and the call's log; a load that fails exits 4 with the runtime's reason, a call that raised, timed out or ran out of memory exits 5. The container is removed after, Ctrl-C too |
+| `ff local start <file\|folder> [--port N] [--watch]` | Keeps it running on `127.0.0.1` (any free port unless `--port`): it prints the address to `POST` events to, then its log on stderr as it comes, until Ctrl-C. `--watch` starts it again when its code changes: its file, even replaced by an editor, or anything in its folder |
 | `ff whoami` | Who the token is, an API key (its name, ID and scopes) or a user (their accounts, and which one acts), and the account it acts for: `GET /me`. The first check of a new key |
 | `ff config set <key> <value>` | Set one of the profile's settings: `endpoint`, `account`, `dev_account` or `allow_http` |
 | `ff config unset <key>` | Remove one of them, or the profile's `token` |
@@ -61,6 +63,10 @@ dev_account = "123456789012"     # a development stack (FF_AUTH_MODE=dev) acts a
 **Plain `http://`** sends the token in clear, so ff uses it only to this machine (`localhost`, `127.0.0.1`, `[::1]`), unless `--allow-http` or `allow_http = true` says otherwise, for a development stack elsewhere.
 
 **Without a token**, nor a development account, ff says how to get a key, and calls nothing.
+
+## Running functions on this machine
+
+`ff local` needs Docker, and the runtime images: `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`, built from this repository (`docker build -t ff-runtime-python:3.13-v3 runtimes/python`, or any end-to-end script's run), or others named by `FF_RUNTIME_IMAGE_NODEJS` and `FF_RUNTIME_IMAGE_PYTHON`. It speaks to the runtime as the backend does (`/readyz`, then `POST /invoke` with the event), so a function behaves on this machine as in its pod, but for its variables and secrets, which stay on FF.
 
 ## What ff sends
 

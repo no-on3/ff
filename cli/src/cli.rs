@@ -136,6 +136,10 @@ pub enum Command {
         yes: bool,
     },
 
+    /// Run a function on this machine, in Docker, as production runs it
+    #[command(subcommand)]
+    Local(LocalCommand),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -252,6 +256,59 @@ pub struct LogsArgs {
     /// With --follow, ask every 2 s rather than hold a stream open, through a proxy that holds streams back
     #[arg(long, requires = "follow")]
     pub poll: bool,
+}
+
+#[derive(Subcommand)]
+pub enum LocalCommand {
+    /// Run it once, and print its answer and its log; the container is removed after
+    Invoke {
+        #[command(flatten)]
+        function: LocalArgs,
+
+        /// The event: JSON, @file for a file's, or - for stdin's [default: {}]
+        #[arg(long, short)]
+        data: Option<String>,
+
+        /// Print the answer only, as compact JSON, for a pipe
+        #[arg(long)]
+        raw: bool,
+    },
+
+    /// Keep it running on a port of this machine, its log as it comes, until Ctrl-C
+    Start {
+        #[command(flatten)]
+        function: LocalArgs,
+
+        /// The port on 127.0.0.1 [default: any free one]
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Start it again when its code changes
+        #[arg(long)]
+        watch: bool,
+    },
+}
+
+#[derive(Args)]
+pub struct LocalArgs {
+    /// The function's file, or its folder with a function.ts, .js, .cjs or .py
+    pub path: PathBuf,
+
+    /// Its name, as its context gives it, else the file's or the folder's
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Its runtime, else the file's extension says
+    #[arg(long, value_enum)]
+    pub runtime: Option<Runtime>,
+
+    /// Memory in MB, the container's limit
+    #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u32).range(128..=10240))]
+    pub memory: u32,
+
+    /// Timeout in seconds
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=900))]
+    pub timeout: u32,
 }
 
 #[derive(Subcommand)]

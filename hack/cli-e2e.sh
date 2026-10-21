@@ -6,7 +6,9 @@
 # For examples/hello.ts and examples/hello.py: deploy, invoke, the handler's line in ff logs and
 # in ff logs --follow, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
 # exit 5 with the call's ID, which the history shows; code that fails to load exits 4, and the
-# function is kept, in ERROR, with its error. A second account finds none of the first's.
+# function is kept, in ERROR, with its error. A second account finds none of the first's. Then
+# ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and
+# ff local start answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
 #   hack/cli-e2e.sh
 set -euo pipefail
@@ -150,5 +152,37 @@ ff --profile b list
 check "and another account none of them" "0 No function yet: \`ff deploy <file>\` makes one" "$(code) $(out)"
 for name in cli-raises cli-slow cli-broken; do ff delete "$name" --yes; done
 check "the last one deleted" "0 deleted cli-broken" "$(code) $(out)"
+
+echo "== ff local: on this machine, in Docker, as production runs it"
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }
+for example in hello.ts hello.py; do
+  ff local invoke "$FF_REPO_ROOT/examples/$example" --data '{"name": "Local"}'
+  check "local invoke of $example answers, in its runtime image, and says how it went" "0 Hello Local true" \
+    "$(code) $(out | sed '$d' | jq -r .message) $(out | tail -1 | grep -qE '^request [0-9a-f-]{36} · [0-9.]+ ms · [0-9.]+ MB, on this machine$' && echo true || echo false)"
+done
+check "with the handler's line and the runtime's report in its log" "true true" \
+  "$(err | grep -q '^greeting Local$' && echo true || echo false) $(err | grep -q '^REPORT RequestId: ' && echo true || echo false)"
+ff local invoke "$work/broken.py"
+check "code that fails to load exits 4, with the runtime's reason" "4 error: The function failed to load: Runtime.UserCodeSyntaxError" \
+  "$(code) $(err | grep '^error:' | cut -d: -f1-3)"
+ff local invoke "$FF_REPO_ROOT/examples/slow.py" --timeout 1 --data '{"seconds": 3}'
+check "a call past its timeout exits 5" "5 error: Sandbox.Timedout: Task timed out after 1.00 seconds" "$(code) $(err | grep '^error:')"
+printf 'def handler(event, context):\n    hoard = []\n    while True:\n        hoard.append(bytearray(10 * 1024 * 1024))\n' >"$work/hog.py"
+ff local invoke "$work/hog.py" --memory 128
+check "a call over its memory exits 5, as the runtime reports it" "5 error: Runtime.OutOfMemory: Runtime exceeded its memory limit" "$(code) $(err | grep '^error:')"
+check "no container is left behind" 0 "$(leftover)"
+local_port="$(free_port)"
+"$ff_bin" local start "$FF_REPO_ROOT/examples/hello.py" --port "$local_port" >"$work/start.out" 2>"$work/start.err" &
+starter=$!
+for _ in $(seq 1 60); do
+  grep -q 'runs at' "$work/start.out" 2>/dev/null && break
+  sleep 0.5
+done
+check "local start says where it runs" "hello (python) runs at http://127.0.0.1:$local_port/invoke: POST an event to it. Ctrl-C stops it" "$(cat "$work/start.out")"
+check "and answers there, as the runtime answers the backend" "Hello Port" \
+  "$(curl -s -X POST "http://127.0.0.1:$local_port/invoke" -d '{"name": "Port"}' | jq -r .message)"
+kill -INT "$starter"
+wait "$starter" 2>/dev/null || true
+check "Ctrl-C stops it and removes its container" 0 "$(leftover)"
 
 echo "cli-e2e: $passed checks passed"

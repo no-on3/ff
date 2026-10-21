@@ -5,11 +5,12 @@ mod config;
 mod deploy;
 mod functions;
 mod invoke;
+mod local;
 mod logs;
 mod version;
 mod whoami;
 
-use crate::cli::{Command, ConnectionArgs};
+use crate::cli::{Command, ConnectionArgs, LocalCommand};
 use crate::config::Settings;
 use crate::error::Error;
 use crate::output::Output;
@@ -41,6 +42,10 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::History { name, limit } => functions::history(&name, limit, context),
         Command::Scale { name, min, max } => functions::scale(&name, min, max, context),
         Command::Delete { name, yes } => functions::delete(&name, yes, context),
+        Command::Local(LocalCommand::Invoke { function, data, raw }) => {
+            local::invoke(&function, data.as_deref(), raw, context)
+        }
+        Command::Local(LocalCommand::Start { function, port, watch }) => local::start(&function, port, watch, context),
         Command::Whoami => whoami::run(context),
         Command::Config(command) => config::run(command, context),
         Command::Version => version::run(context.out),
