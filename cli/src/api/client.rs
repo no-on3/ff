@@ -23,7 +23,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[expect(dead_code, reason = "the commands that change functions make the writes")]
+#[expect(dead_code, reason = "PATCH comes with the command for secrets")]
 pub enum Method {
     Get,
     Post,
@@ -56,6 +56,30 @@ impl Call {
     pub fn get(path: impl Into<String>) -> Call {
         Call::new(Method::Get, path)
     }
+
+    pub fn post(path: impl Into<String>, body: serde_json::Value) -> Call {
+        Call { body: Some(body), ..Call::new(Method::Post, path) }
+    }
+
+    pub fn put(path: impl Into<String>, body: serde_json::Value) -> Call {
+        Call { body: Some(body), ..Call::new(Method::Put, path) }
+    }
+
+    pub fn delete(path: impl Into<String>) -> Call {
+        Call::new(Method::Delete, path)
+    }
+
+    /// A query parameter, encoded as it goes.
+    pub fn query(mut self, name: &str, value: impl ToString) -> Call {
+        self.query.push((name.to_owned(), value.to_string()));
+        self
+    }
+
+    /// How long the answer may take: a deploy waits for its rollout, an invocation for its function.
+    pub fn timeout(mut self, timeout: Duration) -> Call {
+        self.timeout = timeout;
+        self
+    }
 }
 
 pub struct Client {
@@ -85,8 +109,25 @@ impl Client {
         })
     }
 
-    /// The call's JSON answer. A read refused with 429 is tried once more after its Retry-After.
+    /// The call's JSON answer.
     pub fn json<T: DeserializeOwned>(&self, call: &Call) -> Result<T, Error> {
+        let (status, body) = self.answer(call)?;
+        serde_json::from_str(&body).map_err(|error| {
+            Error::new(
+                Kind::Failed,
+                format!("The API at {} answered {status} with what isn't the JSON expected: {error}", self.endpoint),
+            )
+        })
+    }
+
+    /// A call whose answer has nothing to read, such as a delete's.
+    pub fn done(&self, call: &Call) -> Result<(), Error> {
+        self.answer(call).map(|_| ())
+    }
+
+    /// A 2xx answer's status and body, or the API's refusal as ff's error. A read refused with
+    /// 429 is tried once more after its Retry-After.
+    fn answer(&self, call: &Call) -> Result<(u16, String), Error> {
         let mut response = self.send(call)?;
         if response.status() == 429 && call.method.is_read() {
             let wait = retry_after(response.headers().get("retry-after").and_then(|value| value.to_str().ok()));
@@ -102,12 +143,7 @@ impl Client {
         if !(200..300).contains(&status) {
             return Err(api_error(status, &body, request_id, self.api_key));
         }
-        serde_json::from_str(&body).map_err(|error| {
-            Error::new(
-                Kind::Failed,
-                format!("The API at {} answered {status} with what isn't the JSON expected: {error}", self.endpoint),
-            )
-        })
+        Ok((status, body))
     }
 
     fn send(&self, call: &Call) -> Result<Response<ureq::Body>, Error> {

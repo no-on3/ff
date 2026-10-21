@@ -27,6 +27,7 @@ enum Message {
 /// The error for an answer outside 2xx: 402, 403 and 429 are the account's (6), anything else a
 /// failure (3). A 401's message says why the token was refused, and what to do.
 pub fn api_error(status: u16, body: &str, request_id: Option<String>, api_key: bool) -> Error {
+    let details = serde_json::from_str::<serde_json::Value>(body).ok().filter(serde_json::Value::is_object);
     let parsed = serde_json::from_str::<ErrorBody>(body).ok();
     let (message, error, body_request_id) = match parsed {
         Some(body) => (body.message, body.error, body.request_id),
@@ -63,6 +64,7 @@ pub fn api_error(status: u16, body: &str, request_id: Option<String>, api_key: b
     let mut error = Error::new(kind, message);
     error.status = Some(status);
     error.request_id = body_request_id.or(request_id);
+    error.details = details;
     error
 }
 

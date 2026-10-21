@@ -12,6 +12,7 @@ use crate::error::Error;
 pub struct Output {
     pub format: Format,
     pub verbose: bool,
+    pub quiet: bool,
     /// Colors on stderr: a terminal, and neither `--no-color` nor `NO_COLOR`.
     color: bool,
 }
@@ -19,7 +20,12 @@ pub struct Output {
 impl Output {
     pub fn new(global: &GlobalArgs) -> Self {
         let no_color = global.no_color || std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
-        Output { format: global.output, verbose: global.verbose, color: !no_color && io::stderr().is_terminal() }
+        Output {
+            format: global.output,
+            verbose: global.verbose,
+            quiet: global.quiet,
+            color: !no_color && io::stderr().is_terminal(),
+        }
     }
 
     /// The command's result: the text, or the value as one JSON document.

@@ -6,6 +6,13 @@ One Rust binary that deploys, invokes and reads FF's functions, through FF's API
 
 | Command | What it does |
 |---|---|
+| `ff deploy <file> [--name] [--runtime] [--memory] [--timeout] [--min-instances] [--max-instances]` | Creates the function of the file's name (or `--name`), its runtime from the extension (`.ts`, `.js`, `.cjs`: nodejs; `.py`: python), 128 MB and 5 s unless said; or updates the function of that name with only what changed, and says "no changes" when nothing did. It returns once the new version is live, and sets the instances after. Code that fails to load exits 4 with the diagnosis: a new function is kept, in `ERROR`, and a working one keeps its previous version |
+| `ff invoke <name> [--data JSON\|@file\|-] [--raw]` | Calls it with the event (`{}` by default) and prints its answer, then `request <ID> · <duration> · <memory>`; the request ID finds the call's log lines. `--raw` prints the answer only. A function that raised or timed out exits 5, with the call's ID |
+| `ff list` | The account's functions: runtime, memory, timeout, status, instances, last update |
+| `ff get <name>` | One function: its settings and state, its error when it is in `ERROR`, its variables' names |
+| `ff history <name> [--limit N]` | Its last calls, newest first: time, request ID, status, duration, how it came, the error's first line |
+| `ff scale <name> [--min N] [--max N]` | The instances it keeps running when idle (billed as AWS bills provisioned concurrency), and the most it runs |
+| `ff delete <name> [--yes]` | Deletes it, with its history and its logs, after asking; a script says `--yes` |
 | `ff whoami` | Who the token is, an API key (its name, ID and scopes) or a user (their accounts, and which one acts), and the account it acts for: `GET /me`. The first check of a new key |
 | `ff config set <key> <value>` | Set one of the profile's settings: `endpoint`, `account`, `dev_account` or `allow_http` |
 | `ff config unset <key>` | Remove one of them, or the profile's `token` |
@@ -14,7 +21,7 @@ One Rust binary that deploys, invokes and reads FF's functions, through FF's API
 | `ff version` | The version, and the commit it was built from; with `--verbose`, the platform it was built for |
 | `ff completion <shell>` | A completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` |
 
-Every command takes `--output text|json` (one JSON document per command, for scripts), `--verbose` and `--no-color` (`NO_COLOR` in the environment says the same), and the connection's flags below.
+Every command takes `--output text|json` (one JSON document per command, for scripts: a function's code is left out, its size given), `--quiet` (no progress or notes on stderr), `--verbose` and `--no-color` (`NO_COLOR` in the environment says the same), and the connection's flags below. Functions are named as on AWS Lambda: 1 to 64 letters, digits, hyphens or underscores, which `ff deploy` checks before sending anything.
 
 ## Settings
 

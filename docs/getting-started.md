@@ -170,11 +170,11 @@ PY=$(jq -n --rawfile code examples/hello.py \
 curl -s -X POST "$FF/functions/$PY/invoke" -H 'content-type: application/json' -d '{"input": {"name": "Sfax"}}' | jq .output
 ```
 
-**Errors and timeouts.** A function that raises, or runs past its timeout, answers HTTP 400 with the error. The invocation is recorded as `ERROR` or `TIMEOUT`. `examples/hello.py` raises for the name `error`, and `examples/slow.py` sleeps:
+**Errors and timeouts.** A function that raises, or runs past its timeout, answers HTTP 400 with the error, and with the call as the history keeps it: `invocation`, its `id` (the request ID of its log lines), `status` `ERROR` or `TIMEOUT`, `duration` and `memoryUsed`. `examples/hello.py` raises for the name `error`, and `examples/slow.py` sleeps:
 
 ```bash
-curl -s -X POST "$FF/functions/$PY/invoke" -H 'content-type: application/json' -d '{"input": {"name": "error"}}' | jq .message
-# "ValueError: this name is not allowed"
+curl -s -X POST "$FF/functions/$PY/invoke" -H 'content-type: application/json' -d '{"input": {"name": "error"}}' | jq -c '{message, invocation}'
+# {"message":"ValueError: this name is not allowed","invocation":{"id":"9b2e…","status":"ERROR","duration":2,"memoryUsed":36}}
 
 SLOW=$(jq -n --rawfile code examples/slow.py \
          '{name: "slow", runtime: "python", memory: 128, timeout: 2, code: $code}' \
@@ -993,7 +993,7 @@ cd BE && FF_LOG_FORMAT=json npm run start:dev 2>&1 | jq -rR --unbuffered '(fromj
 | 400 `name must be 1 to 64 letters, digits, hyphens or underscores…` | Function names follow AWS Lambda's rule: no spaces, dots or accented letters, and 64 characters at most. `my-function` or `my_function`, rather than `my function`. |
 | 409 `A function named "…" already exists in this account` | Names are unique within an account: choose another name, or change the function that has it (`PUT /functions/<id>`). One whose code failed to load was saved all the same: fix it rather than create it again. |
 | 409 `The new version is live, but the function keeps its name …` | Another create or rename took the new name while the update rolled out. The rest of the update went through; rename the function again with a free name. |
-| An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first. The previous version still serves, and the record is unchanged. |
+| An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first, and `functionId` names the function, as a failed create's answer does. The previous version still serves, and the record is unchanged. |
 | An invocation stays `RUNNING`, then becomes `LOST` | The backend stopped during the call, so its answer is unknown; it isn't billed. Invoke again. See "Lost calls" in section 5. |
 | The backend logs `Could not create the monthly partitions` | The migrations haven't run (`cd BE && npm run migration:run`), or the database refused: the message says why. An invocation in a month without a partition fails with `no partition of relation "usage_records" found for row`. |
 | The backend logs `Could not sample capacity` | The Kubernetes API didn't answer the list of Deployments, or the database refused the samples: the message says why. That minute has no sample; the next minute is sampled as usual. |

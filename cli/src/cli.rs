@@ -1,5 +1,7 @@
 //! The commands and flags, as clap reads them.
 
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
@@ -30,8 +32,12 @@ pub struct GlobalArgs {
     pub output: Format,
 
     /// More detail
-    #[arg(long, short, global = true)]
+    #[arg(long, short, global = true, conflicts_with = "quiet")]
     pub verbose: bool,
+
+    /// The result only: no progress or notes on stderr
+    #[arg(long, short, global = true)]
+    pub quiet: bool,
 
     /// No colors (NO_COLOR in the environment says the same)
     #[arg(long, global = true)]
@@ -78,6 +84,55 @@ pub enum Format {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Create a function from a file, or update the function of that name with what changed
+    Deploy(DeployArgs),
+
+    /// Call a function with an event, and print its answer
+    Invoke(InvokeArgs),
+
+    /// List the account's functions
+    List,
+
+    /// Show a function: its settings, its state, and its error when it has one
+    Get {
+        /// The function's name
+        name: String,
+    },
+
+    /// Show a function's recent calls, newest first, with their request IDs
+    History {
+        /// The function's name
+        name: String,
+
+        /// How many calls
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+    },
+
+    /// Set how many instances a function keeps running when idle, and runs at most
+    Scale {
+        /// The function's name
+        name: String,
+
+        /// Instances kept running when idle, billed as AWS bills provisioned concurrency; 0 scales to zero
+        #[arg(long)]
+        min: Option<u32>,
+
+        /// The most instances it runs at once, within the plan's limit
+        #[arg(long)]
+        max: Option<u32>,
+    },
+
+    /// Delete a function, with its history and its logs
+    Delete {
+        /// The function's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -93,6 +148,65 @@ pub enum Command {
         /// The shell
         shell: Shell,
     },
+}
+
+#[derive(Args)]
+pub struct DeployArgs {
+    /// The function's file: .ts, .js or .cjs for Node.js, .py for Python
+    pub file: PathBuf,
+
+    /// Its name, else the file's without its extension
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Its runtime, else the file's extension says
+    #[arg(long, value_enum)]
+    pub runtime: Option<Runtime>,
+
+    /// Memory in MB [default for a new function: 128]
+    #[arg(long)]
+    pub memory: Option<u32>,
+
+    /// Timeout in seconds [default for a new function: 5]
+    #[arg(long)]
+    pub timeout: Option<u32>,
+
+    /// Instances kept running when idle, once it is live
+    #[arg(long)]
+    pub min_instances: Option<u32>,
+
+    /// The most instances it runs at once
+    #[arg(long)]
+    pub max_instances: Option<u32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+pub enum Runtime {
+    Nodejs,
+    Python,
+}
+
+impl Runtime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Runtime::Nodejs => "nodejs",
+            Runtime::Python => "python",
+        }
+    }
+}
+
+#[derive(Args)]
+pub struct InvokeArgs {
+    /// The function's name
+    pub name: String,
+
+    /// The event: JSON, @file for a file's, or - for stdin's [default: {}]
+    #[arg(long, short)]
+    pub data: Option<String>,
+
+    /// Print the answer only, as compact JSON, for a pipe
+    #[arg(long)]
+    pub raw: bool,
 }
 
 #[derive(Subcommand)]

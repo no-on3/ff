@@ -7,6 +7,8 @@ mod commands;
 mod config;
 mod error;
 mod output;
+mod progress;
+mod table;
 
 use std::process::ExitCode;
 

@@ -502,9 +502,10 @@ export class FunctionsService {
       await this.functionsRepository.save(previous);
       await this.recordUpdate(previous, changed, 'failed, and so did the rollback: ERROR');
       await this.releaseInstances(previous);
-      throw new InternalServerErrorException(previous.error);
+      throw new InternalServerErrorException({ statusCode: 500, error: 'Internal Server Error', message: previous.error, functionId: previous.id });
     }
-    throw failureResponse(error, `${clause(failure)}. The update was rolled back: the previous version is still live.`);
+    // The function the new version never served is named, as a failed create names the one it saved.
+    throw failureResponse(error, `${clause(failure)}. The update was rolled back: the previous version is still live.`, { functionId: previous.id });
   }
 
   /**
@@ -531,7 +532,7 @@ export class FunctionsService {
     await this.releaseInstances(saved);
     await this.archiveCode(saved, previousCodePath);
     const keptName = ` The function keeps its name "${previousName}": another function was given the name "${changes.name}" meanwhile.`;
-    throw failureResponse(error, nameLost ? `${clause(failure)}.${keptName}` : failure);
+    throw failureResponse(error, nameLost ? `${clause(failure)}.${keptName}` : failure, { functionId: saved.id });
   }
 
   /**
@@ -599,7 +600,11 @@ export class FunctionsService {
     await this.credit.admit(accountId);
 
     const outcome = await this.call(function_, payload, { source: InvocationSource.API });
-    if (!outcome.ok) throw failureResponse(outcome.error, outcome.visible);
+    // A call that failed is named, as the history keeps it: its ID finds its logs, its status says how it ended.
+    if (!outcome.ok) {
+      const { id: invocationId, status, duration, memoryUsed } = outcome.invocation;
+      throw failureResponse(outcome.error, outcome.visible, { invocation: { id: invocationId, status, duration, memoryUsed: memoryUsed ?? null } });
+    }
     // The answer: the invocation as kept, with the input and output whole.
     return Object.assign(outcome.invocation, { input: payload, output: outcome.output });
   }

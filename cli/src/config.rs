@@ -26,6 +26,13 @@ pub fn is_account_id(text: &str) -> bool {
     text.len() == 12 && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// AWS Lambda's rule for a function's name, which the API follows: 1 to 64 letters, digits,
+/// hyphens or underscores.
+pub fn is_function_name(text: &str) -> bool {
+    (1..=64).contains(&text.len())
+        && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 /// A profile's name: letters, digits, `-` and `_`, so it is a plain key in the files.
 pub fn is_profile_name(text: &str) -> bool {
     (1..=64).contains(&text.len())

@@ -2,6 +2,9 @@
 
 mod completion;
 mod config;
+mod deploy;
+mod functions;
+mod invoke;
 mod version;
 mod whoami;
 
@@ -29,6 +32,13 @@ impl Context<'_> {
 
 pub fn run(command: Command, context: &Context) -> Result<(), Error> {
     match command {
+        Command::Deploy(args) => deploy::run(args, context),
+        Command::Invoke(args) => invoke::run(args, context),
+        Command::List => functions::list(context),
+        Command::Get { name } => functions::get(&name, context),
+        Command::History { name, limit } => functions::history(&name, limit, context),
+        Command::Scale { name, min, max } => functions::scale(&name, min, max, context),
+        Command::Delete { name, yes } => functions::delete(&name, yes, context),
         Command::Whoami => whoami::run(context),
         Command::Config(command) => config::run(command, context),
         Command::Version => version::run(context.out),

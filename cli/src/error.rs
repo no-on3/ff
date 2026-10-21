@@ -5,7 +5,6 @@ use std::io;
 
 /// Why a command failed, as a script sees it: one exit code per kind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the commands that talk to the API produce the kinds not made yet"))]
 pub enum Kind {
     /// A bad argument that clap couldn't see, such as JSON that doesn't parse.
     Usage,
@@ -40,12 +39,15 @@ pub struct Error {
     pub message: String,
     pub status: Option<u16>,
     pub request_id: Option<String>,
+    /// The API's refusal as it wrote it, for a command that reads more in it, such as the
+    /// invocation that failed.
+    pub details: Option<serde_json::Value>,
     broken_pipe: bool,
 }
 
 impl Error {
     pub fn new(kind: Kind, message: impl Into<String>) -> Self {
-        Error { kind, message: message.into(), status: None, request_id: None, broken_pipe: false }
+        Error { kind, message: message.into(), status: None, request_id: None, details: None, broken_pipe: false }
     }
 
     pub fn exit_code(&self) -> u8 {

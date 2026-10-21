@@ -465,6 +465,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await expect(failure).rejects.toThrow(
         'The function failed to load: Error: boom at init. The update was rolled back: the previous version is still live.',
       );
+      // Named, as a failed create names the function: the new version never served it.
+      expect(((await failure.catch((error: unknown) => error)) as HttpException).getResponse()).toMatchObject({ functionId: 'fn-1' });
       expect(orchestrator.update.mock.calls.map(([fn]) => fn.code)).toEqual(['broken', activeFunction().code]);
       expect(orchestrator.waitUntilReady).toHaveBeenCalledTimes(2);
       expect(functionsRepo.save).not.toHaveBeenCalled();
@@ -485,6 +487,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await expect(failure).rejects.toThrow(
         /^The update failed: The function failed to load: Error: boom at init\. Rolling back to the previous version failed because of an internal error \(request [0-9a-f-]{36}\)\.$/,
       );
+      expect(((await failure.catch((error: unknown) => error)) as HttpException).getResponse()).toMatchObject({ statusCode: 500, functionId: 'fn-1' });
       expect(logged).toHaveBeenCalledWith(expect.stringContaining('no pods were created: exceeded quota'), expect.anything());
       expect(functionsRepo.save).toHaveBeenCalledTimes(1);
       expect(functionsRepo.save).toHaveBeenLastCalledWith(
@@ -498,7 +501,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       functionsRepo.findOne.mockResolvedValue(errored());
       orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
 
-      await expect(service.update('user-1', 'fn-1', { code: 'still broken' })).rejects.toThrow('boom at init');
+      const failure = (await service.update('user-1', 'fn-1', { code: 'still broken' }).catch((error: unknown) => error)) as HttpException;
+
+      expect([failure.message, failure.getResponse()]).toEqual([expect.stringContaining('boom at init'), expect.objectContaining({ functionId: 'fn-1' })]);
 
       expect(orchestrator.update).toHaveBeenCalledTimes(1); // no rollback
       expect(functionsRepo.save).toHaveBeenLastCalledWith(
@@ -708,6 +713,22 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(invocationsRepo.save).toHaveBeenLastCalledWith(
         expect.objectContaining({ status: InvocationStatus.ERROR, error: 'TypeError: bad input' }),
       );
+    });
+
+    it("answers a call that failed with the call: its ID, which finds its logs, how it ended, its duration and memory", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke
+        .mockRejectedValueOnce(new FunctionRuntimeError('Error', 'boom', { durationMs: 12, memoryUsedMb: 61 }))
+        .mockRejectedValueOnce(new FunctionTimeoutError('Task timed out after 5.00 seconds', { durationMs: 5003 }));
+
+      const raised = (await service.invoke('user-1', 'fn-1', {}).catch((error: unknown) => error)) as HttpException;
+      const timedOut = (await service.invoke('user-1', 'fn-1', {}).catch((error: unknown) => error)) as HttpException;
+
+      expect([raised.getStatus(), raised.getResponse()]).toEqual([
+        400,
+        { statusCode: 400, error: 'Bad Request', message: 'Error: boom', invocation: { id: 'inv-1', status: InvocationStatus.ERROR, duration: 12, memoryUsed: 61 } },
+      ]);
+      expect(timedOut.getResponse()).toMatchObject({ invocation: { id: 'inv-1', status: InvocationStatus.TIMEOUT, duration: 5003, memoryUsed: null } });
     });
 
     it('records a platform failure as ERROR with a generic message, in the history too; the details go to the log (D4)', async () => {
