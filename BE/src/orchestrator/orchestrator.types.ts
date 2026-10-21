@@ -18,6 +18,11 @@ export interface FunctionWorkload {
   code: string;
   /** What its runtime calls: AWS Lambda's handler, function.handler unless it names another. */
   handler: string;
+  /**
+   * A package's code image, by digest, as the cluster's nodes pull it (ADR 0003): its pods mount it at /var/task.
+   * None for inline code, which a ConfigMap holds.
+   */
+  codeImage?: string;
   /** Memory in MB. */
   memory: number;
   /** Timeout in seconds. */

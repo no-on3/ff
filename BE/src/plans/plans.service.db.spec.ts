@@ -19,7 +19,7 @@ import { FunctionsService } from '../functions/functions.service';
 import { Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PLAN_CACHE_MS, PlansService } from './plans.service';
 import { BETA_LIMITS } from './test-fixtures';
-import { memoryEnvironments } from '../functions/test-fixtures';
+import { memoryEnvironments, noPackages } from '../functions/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 
@@ -190,6 +190,7 @@ run('plans (L2, P-15)', () => {
       {} as never, // creates only: no usage
       {} as never, // creates only: no balance check
       memoryEnvironments(),
+      ...noPackages(),
     );
     const create = (name: string) => functions.create(id, { name, runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 });
     await create('first');

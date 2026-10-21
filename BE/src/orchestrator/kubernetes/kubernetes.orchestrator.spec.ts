@@ -161,6 +161,16 @@ describe('KubernetesOrchestrator', () => {
       expect(replicas).toEqual([1, 2]);
     });
 
+    it("mounts a package's code image, and writes no ConfigMap for it", async () => {
+      const image = 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'c'.repeat(64);
+
+      await orchestrator.deploy(workload({ codeImage: image, code: '' }), tenant());
+
+      expect(api.applied.map((a) => a.manifest.kind)).toEqual(['Namespace', 'ResourceQuota', 'LimitRange', 'NetworkPolicy', 'Service', 'Deployment']);
+      const deployment = api.applied.find((a) => a.manifest.kind === 'Deployment')!.manifest;
+      expect(deployment.spec.template.spec.volumes[0]).toEqual({ name: 'code', image: { reference: image, pullPolicy: 'IfNotPresent' } });
+    });
+
     it('rejects oversized code before touching the cluster', async () => {
       await expect(orchestrator.deploy(workload({ code: 'x'.repeat(MAX_CODE_BYTES + 1) }), tenant())).rejects.toBeInstanceOf(
         CodeTooLargeError,
@@ -241,6 +251,15 @@ describe('KubernetesOrchestrator', () => {
         `/api/v1/namespaces/${ns}/configmaps/older`,
         `/api/v1/namespaces/${ns}/configmaps/oldest`,
       ]);
+    });
+
+    it("keeps the newest code ConfigMap when the function moves to a package, for the pods of the version it replaces", async () => {
+      const cm = (n: string, ts: string) => ({ metadata: { name: n, creationTimestamp: ts } });
+      api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [cm('inline-now', '2026-10-21T10:00:00Z'), cm('inline-before', '2026-10-21T09:00:00Z')]);
+
+      await orchestrator.update(workload({ codeImage: 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'd'.repeat(64), code: '' }), tenant());
+
+      expect(api.deleted).toEqual([`/api/v1/namespaces/${ns}/configmaps/inline-before`]);
     });
   });
 

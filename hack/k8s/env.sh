@@ -20,6 +20,12 @@ export FF_NODE_MEMORY="${FF_NODE_MEMORY:-2g}"
 export FF_IMAGE_GC_HIGH_THRESHOLD="${FF_IMAGE_GC_HIGH_THRESHOLD:-95}"
 export FF_IMAGE_GC_LOW_THRESHOLD="${FF_IMAGE_GC_LOW_THRESHOLD:-90}"
 
+# The registry functions' code images go to (ADR 0003): hack/k8s/registry-up.sh runs it next to the cluster, on
+# 127.0.0.1:$FF_REGISTRY_PORT for the backend, which pushes, and as $FF_REGISTRY_NAME:5000 for the nodes, which pull.
+export FF_REGISTRY_NAME="${FF_REGISTRY_NAME:-$FF_CLUSTER_NAME-registry}"
+export FF_REGISTRY_PORT="${FF_REGISTRY_PORT:-5056}"
+export FF_REGISTRY_IMAGE="${FF_REGISTRY_IMAGE:-registry:3.1.2}"
+
 export FF_KUBE_DIR="$FF_REPO_ROOT/hack/.kube"
 # Admin credentials (cluster setup and debugging only).
 export KUBECONFIG="$FF_KUBE_DIR/$FF_CLUSTER_NAME.kubeconfig"

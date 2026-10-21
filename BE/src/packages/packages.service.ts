@@ -11,6 +11,7 @@ import { QueryFailedError, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
 import { MinioClientService } from '../minio-client/minio-client.service';
+import { CodeImagesService } from './code-images.service';
 import { PACKAGE_LIMITS, PackageRefused, readPackage } from './package-archive';
 import { Package, packageKey } from './package.entity';
 
@@ -18,8 +19,9 @@ import { Package, packageKey } from './package.entity';
 const ZIP_TYPES = new Set(['application/zip', 'application/x-zip-compressed', 'application/octet-stream']);
 /**
  * How many packages an account keeps that no function names, at most, and how
- * long one is kept unnamed: a package is uploaded to be named at once, by the
- * create or update that follows, and the storage uploads take stays bounded.
+ * long one is kept unnamed after its upload or its last use: a package is
+ * uploaded to be named at once, by the create or update that follows, and the
+ * storage uploads take stays bounded.
  */
 export const MAX_UNUSED_PACKAGES = 20;
 export const UNUSED_PACKAGE_HOURS = 1;
@@ -66,9 +68,11 @@ async function receive(body: Readable, file: string): Promise<{ codeSha256: stri
 /**
  * Functions' packages (CLI plan, C-22): a zip, as AWS Lambda takes one,
  * uploaded once, checked (package-archive.ts), kept in object storage and
- * named by its SHA-256, which a function gives in place of inline code. An
- * account has each package once. A package that no function names is deleted
- * after an hour by the retention job, and a closed account's go with its data.
+ * named by its SHA-256, which a function gives in place of inline code; its
+ * code runs as an image (CodeImagesService). An account has each package once.
+ * A package that no function names is deleted, with its image, by the
+ * retention job an hour after its upload or its last use; a closed account's
+ * go with its data.
  */
 @Injectable()
 export class PackagesService {
@@ -78,6 +82,7 @@ export class PackagesService {
     @InjectRepository(Package) private readonly packages: Repository<Package>,
     private readonly storage: MinioClientService,
     private readonly audit: AuditService,
+    private readonly images: CodeImagesService,
   ) {}
 
   /**
@@ -97,7 +102,11 @@ export class PackagesService {
       const { codeSha256, codeSize } = await receive(body, file);
       if (codeSize === 0) throw new BadRequestException('The body is empty: send the package, a zip archive');
       const existing = await this.find(accountId, codeSha256);
-      if (existing) return { created: false, package: existing };
+      if (existing) {
+        // Sent again to be named: kept another hour.
+        await this.packages.update({ accountId, codeSha256 }, { usedAt: () => 'now()' });
+        return { created: false, package: existing };
+      }
       await this.refuseTooManyUnused(accountId);
       const contents = await readPackage(file).catch((error: unknown) => {
         throw error instanceof PackageRefused ? new BadRequestException(error.message) : error;
@@ -133,6 +142,19 @@ export class PackagesService {
     return found ? viewOf(found) : undefined;
   }
 
+  /**
+   * The package a function names, with its files, which its handler is looked
+   * for in; none when the account hasn't it. Its last use is now: the retention
+   * job keeps it for the rollout under way, and an hour more.
+   */
+  async name(accountId: string, codeSha256: string): Promise<{ codeSize: number; files: string[] } | undefined> {
+    const [rows] = await this.packages.query<[Array<{ code_size: number; files: string[] }>, number]>(
+      `UPDATE "packages" SET "used_at" = now() WHERE "account_id" = $1 AND "code_sha256" = $2 RETURNING "code_size", "files"`,
+      [accountId, codeSha256],
+    );
+    return rows[0] ? { codeSize: rows[0].code_size, files: rows[0].files } : undefined;
+  }
+
   /** The account's packages, newest first; with a SHA-256, the one of it, if any. */
   async list(accountId: string, codeSha256?: string): Promise<PackageView[]> {
     const found = await this.packages.find({ where: codeSha256 === undefined ? { accountId } : { accountId, codeSha256 }, order: { createdAt: 'DESC' } });
@@ -154,11 +176,11 @@ export class PackagesService {
   }
 
   /**
-   * Deletes the packages that no function names, uploaded more than an hour
-   * before `now`, a batch at a time: the rows first, each checked again as it
-   * goes, so that a package a function has just named stays; then their zips.
-   * A zip that can't be deleted is logged: no row names it any more. Returns
-   * how many packages were deleted.
+   * Deletes the packages that no function names, unused for an hour before
+   * `now`, a batch at a time: the rows first, each checked again as it goes, so
+   * that a package a function has just named stays; then their zips and their
+   * images. One that can't be deleted is logged: no row names it any more.
+   * Returns how many packages were deleted.
    */
   async purgeUnused(now = new Date(), batch = 100): Promise<number> {
     const before = new Date(now.getTime() - UNUSED_PACKAGE_HOURS * 3_600_000);
@@ -166,14 +188,14 @@ export class PackagesService {
     for (;;) {
       const gone = await this.packages.manager.transaction(async (manager) => {
         const candidates: Array<{ id: string }> = await manager.query(
-          `SELECT "p"."id" FROM "packages" "p" WHERE "p"."created_at" < $1 AND NOT ${NAMED} ORDER BY "p"."created_at" LIMIT $2 FOR UPDATE OF "p" SKIP LOCKED`,
+          `SELECT "p"."id" FROM "packages" "p" WHERE "p"."used_at" < $1 AND NOT ${NAMED} ORDER BY "p"."used_at" LIMIT $2 FOR UPDATE OF "p" SKIP LOCKED`,
           [before, batch],
         );
-        if (candidates.length === 0) return { rows: [] as Array<{ account_id: string; code_sha256: string }>, full: false };
-        // A statement of its own sees the functions saved since the one above: a package named meanwhile stays.
-        const [rows] = await manager.query<[Array<{ account_id: string; code_sha256: string }>, number]>(
-          `DELETE FROM "packages" "p" WHERE "p"."id" = ANY($1) AND NOT ${NAMED} RETURNING "p"."account_id", "p"."code_sha256"`,
-          [candidates.map((candidate) => candidate.id)],
+        if (candidates.length === 0) return { rows: [] as Array<{ account_id: string; code_sha256: string; image_digest: string | null }>, full: false };
+        // A statement of its own sees the functions saved since the one above, and a use since: a package named meanwhile stays.
+        const [rows] = await manager.query<[Array<{ account_id: string; code_sha256: string; image_digest: string | null }>, number]>(
+          `DELETE FROM "packages" "p" WHERE "p"."id" = ANY($1) AND "p"."used_at" < $2 AND NOT ${NAMED} RETURNING "p"."account_id", "p"."code_sha256", "p"."image_digest"`,
+          [candidates.map((candidate) => candidate.id), before],
         );
         return { rows, full: candidates.length === batch };
       });
@@ -181,6 +203,11 @@ export class PackagesService {
         await this.storage
           .deleteObject(packageKey(row.account_id, row.code_sha256))
           .catch((error: unknown) => this.logger.error(`Could not delete the zip of package ${row.code_sha256} of account ${row.account_id}: ${describeError(error)}`));
+        if (row.image_digest) {
+          await this.images
+            .deleteImage(row.account_id, row.image_digest)
+            .catch((error: unknown) => this.logger.error(`Could not delete the image of package ${row.code_sha256} of account ${row.account_id}: ${describeError(error)}`));
+        }
       }
       deleted += gone.rows.length;
       if (!gone.full) break;
@@ -190,13 +217,16 @@ export class PackagesService {
   }
 
   /**
-   * Deletes all of a closed account's packages: each zip first, so that a run
-   * that fails part way leaves rows for the next to find; then the rows.
-   * Returns how many there were.
+   * Deletes all of a closed account's packages: each zip and each image first,
+   * so that a run that fails part way leaves rows for the next to find; then
+   * the rows. Returns how many there were.
    */
   async deleteAll(accountId: string): Promise<number> {
-    const rows = await this.packages.find({ where: { accountId }, select: { id: true, codeSha256: true } });
-    for (const row of rows) await this.storage.deleteObject(packageKey(accountId, row.codeSha256));
+    const rows = await this.packages.find({ where: { accountId }, select: { id: true, codeSha256: true, imageDigest: true } });
+    for (const row of rows) {
+      await this.storage.deleteObject(packageKey(accountId, row.codeSha256));
+      if (row.imageDigest) await this.images.deleteImage(accountId, row.imageDigest);
+    }
     await this.packages.delete({ accountId });
     return rows.length;
   }

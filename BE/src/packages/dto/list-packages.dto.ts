@@ -1,8 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsOptional, Matches } from 'class-validator';
-
-/** A SHA-256 in base64, as AWS Lambda's CodeSha256 gives one: 43 characters and a =. */
-export const CODE_SHA256 = /^[A-Za-z0-9+/]{43}=$/;
+import { CODE_SHA256, CODE_SHA256_RULE } from '../../functions/code-package';
 
 export class ListPackagesQuery {
   @ApiPropertyOptional({
@@ -10,6 +8,6 @@ export class ListPackagesQuery {
     pattern: CODE_SHA256.source,
   })
   @IsOptional()
-  @Matches(CODE_SHA256, { message: 'codeSha256 must be a SHA-256 in base64, as AWS Lambda gives it: 44 characters ending with =' })
+  @Matches(CODE_SHA256, { message: `codeSha256 ${CODE_SHA256_RULE}` })
   codeSha256?: string;
 }

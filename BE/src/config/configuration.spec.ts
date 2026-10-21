@@ -143,6 +143,39 @@ describe('configuration', () => {
     });
   });
 
+  describe("functions' code images (ADR 0003)", () => {
+    it('has none unless FF_CODE_REGISTRY names a registry: packages then refuse to run', () => {
+      expect(configuration(dev).codeImages).toEqual({ registry: '', pullHost: '', username: '', password: '' });
+    });
+
+    it("pulls from the registry's own host unless FF_CODE_REGISTRY_PULL names the one the nodes reach", () => {
+      expect(configuration({ ...dev, FF_CODE_REGISTRY: 'https://registry.ff.example/' }).codeImages).toMatchObject({
+        registry: 'https://registry.ff.example',
+        pullHost: 'registry.ff.example',
+      });
+      expect(configuration({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_PULL: 'ff-dev-registry:5000' }).codeImages).toMatchObject({
+        registry: 'http://127.0.0.1:5056',
+        pullHost: 'ff-dev-registry:5000',
+      });
+    });
+
+    it('refuses a pull host without a registry, a login without its password, and what is no host', () => {
+      expect(problems({ ...dev, FF_CODE_REGISTRY_PULL: 'ff-dev-registry:5000' })).toEqual([
+        'FF_CODE_REGISTRY_PULL is set, but FF_CODE_REGISTRY is not: the backend pushes code images to FF_CODE_REGISTRY',
+      ]);
+      expect(problems({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_USERNAME: 'ff' })).toEqual([
+        'FF_CODE_REGISTRY_USERNAME and FF_CODE_REGISTRY_PASSWORD go together: set both, or neither for a registry without a login',
+      ]);
+      expect(problems({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_PULL: 'http://ff-dev-registry' })).toEqual([
+        expect.stringContaining('FF_CODE_REGISTRY_PULL'),
+      ]);
+    });
+
+    it('never repeats the password in a refusal', () => {
+      expect(problems({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_PASSWORD: 'hunter2' }).join(' ')).not.toContain('hunter2');
+    });
+  });
+
   it('has no schema synchronization switch: the schema comes only from migrations', () => {
     expect(configuration(dev).database).not.toHaveProperty('synchronize');
   });

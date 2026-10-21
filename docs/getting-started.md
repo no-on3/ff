@@ -337,8 +337,8 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 **Functions made before 2026-10-21** get FF's original event: the input in `event.body`, inside the request FF sent them (`{ body, headers, method, query, path }`). Each keeps it until its owner moves it, with an update that changes its handler to read `event` and sets `"eventFormat": "lambda"` together; the console's edit form offers the choice on such a function's page. Only functions with AWS Lambda's event can have a web address or a schedule ([ADR 0007](adr/0007-function-events.md)). A function's `eventFormat` says which it has, and `"eventFormat": "wrapped"` on a create makes a new one the old way, for code not moved yet.
 
 **What a function can be, today:**
-- one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
-- up to 900 KiB of code (921,600 bytes of UTF-8), what the ConfigMap that holds it can take; more answers 400, saying how many bytes it has;
+- one file, inline (`function.ts` for Node.js, `function.py` for Python), up to 900 KiB of code (921,600 bytes of UTF-8), what the ConfigMap that holds it can take; more answers 400, saying how many bytes it has;
+- or a package with its libraries, a zip as AWS Lambda takes one: 50 MB, 250 MB and 20,000 files unpacked (below);
 - with an input of up to 6 MB as JSON, as AWS Lambda's synchronous calls take, and a request to its URL up to 6 MB; a larger input answers 413 `RequestEntityTooLargeException`, in Lambda's words. A request's body may have 7 MB for a function's create, update and invoke, 100 KB elsewhere, and a larger one answers 413, saying which limit;
 - within the account's plan: on the beta plan, 25 functions, each with 128–1024 MB of memory and a timeout of 1–300 s;
 - with environment variables and secrets, 4 KB at most together, as on Lambda (above);
@@ -349,6 +349,24 @@ A request beyond the plan gets 400 with the plan's limit, for example `memory mu
 The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runtimes/nodejs/README.md) and [Python](../runtimes/python/README.md) runtime READMEs describe `event`, `context`, and the error names. The code must define it: `exports.handler = async (event, context) => { … }` in Node.js, `def handler(event, context):` in Python. Code without one, such as a lone `console.log('hi');`, fails to load with `Runtime.HandlerNotFound: function.handler is undefined or not exported`.
 
 **Another name for it.** A function's `handler` says which one its runtime calls, as AWS Lambda's handler does: `function.handler` unless you name another on a create or an update, such as `"handler": "function.lambda_handler"` for Python code written for Lambda. The code you send is the file `function` (`function.ts` or `function.py`), so its handler is `function.<name>`; another file, `lambda_function.lambda_handler` for example, answers 400. A function also says how its code came, `packageType` (`inline`: the one file you send), and gives its code's SHA-256 in base64 and its size in bytes, `codeSha256` and `codeSize`, in the form of Lambda's `CodeSha256` and `CodeSize`, which describe a package: for code sent inline, they are its text's.
+
+**Functions with libraries: packages.** A package is a zip as AWS Lambda takes one: the handler's file and its libraries, `node_modules/` beside it for Node.js, the packages at its root for Python (`pip install -t`). Upload it, then name it by the SHA-256 the upload answers, in place of `code`, with the handler it holds:
+
+```bash
+mkdir -p orders/lib && cd orders
+printf 'exports.handler = async (event) => require("./lib/greet")(event.name ?? "world");\n' > index.js
+printf 'module.exports = (name) => "Hello " + name;\n' > lib/greet.js
+python3 -c 'import shutil; shutil.make_archive("../orders", "zip", ".")' && cd ..
+SHA=$(curl -s -X POST "$FF/packages" -H 'content-type: application/zip' --data-binary @orders.zip | jq -r .codeSha256)
+jq -n --arg sha "$SHA" '{name: "orders", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}' \
+  | curl -s -X POST "$FF/functions" -H 'content-type: application/json' -d @- | jq '{status, packageType, codeSha256, codeSize}'
+```
+
+- **The upload** is checked entry by entry: a name that leaves the zip, a link, an encrypted file, a size or a checksum that lies are refused, saying which entry. The answer is 201 for a new package, 200 for one the account has already, which is stored once; `GET /packages?codeSha256=<SHA, URL-encoded>` says whether to upload at all.
+- **The handler** names a file of the package, in a folder if need be (`src/app.handler`), which the create or update looks for: one the package lacks answers 400, saying which file. The Node.js runtime loads `.js`, `.mjs` (an ES module), `.cjs` or `.ts`, and a `.js` as an ES module where its `package.json` says `"type": "module"`, as Lambda's does.
+- **An update** names another package, with the settings that change, in one rollout; `code` makes the function inline again. A package that no function names is deleted an hour after its upload or its last use; an account keeps 20 unused at most.
+- **It runs as an image:** FF makes one from the package, once, pushes it to the cluster's registry, and the function's pods mount it at `/var/task` on their runtime's image ([ADR 0003](adr/0003-code-delivery.md)). In development the registry runs next to the cluster (`hack/k8s/registry-up.sh`, which `cluster-up.sh` runs), and `BE/.env` names it, as `BE/.env.example` does: `FF_CODE_REGISTRY=http://127.0.0.1:5056` and `FF_CODE_REGISTRY_PULL=ff-dev-registry:5000`. Without them, a function naming a package answers 503.
+- **Native libraries** (bcrypt, numpy) need the runtime's platform: Linux x86_64, glibc 2.41 for Python (manylinux wheels), musl for Node.js until its runtime moves to glibc (the CLI plan's C-25). `ff package`, coming with the CLI plan's C-26, builds packages for that platform.
 
 **If a function cannot load** (a syntax error, a missing handler, an exception at import), the create call answers 400 as soon as the runtime has said why, in about 10 s: the runtime logs it at start, and the backend reads it in the log store, which has it about 5 s later. Without the log pipeline (`--no-logging`), the backend can't read it, and waits for the readiness timeout instead (90 s, `FF_READY_TIMEOUT_SECONDS` in `BE/.env`). The answer gives the runtime's reason, for example `The function failed to load: Runtime.UserCodeSyntaxError: SyntaxError: function.ts:2:11 Property assignment expected.`, and `functionId`: the function is saved all the same, listed with status `ERROR` and that reason, and its pod is released. Creating it again would only answer 409, since the name is taken: the console opens the saved function's page instead of keeping its form. **Fix it with an update:** send the corrected code (`PUT /functions/<id>`), and the function becomes `ACTIVE`, keeping its ID. An update of an `ERROR` function always rolls out, even without changes, so `PUT` with `{}` retries the same code after a passing failure such as a full quota. Without the log pipeline, a lower timeout such as 30 gives faster feedback.
 
@@ -384,7 +402,7 @@ NS=ff-t-$(printf %s 000000000001 | sha256sum | cut -c1-12)   # the dev account's
 kubectl -n "$NS" get deployments,pods,services,configmaps
 ```
 
-Each function is a Deployment and a Service named `fn-<id>`. Its code is in an immutable ConfigMap `fn-<id>-<hash>`. The previous version's ConfigMap is kept too, because old pods may still use it during a rollout.
+Each function is a Deployment and a Service named `fn-<id>`. Inline code is in an immutable ConfigMap `fn-<id>-<hash>`. The previous version's ConfigMap is kept too, because old pods may still use it during a rollout. A package's function has none: its pods mount its code image, which `kubectl -n "$NS" get deployment fn-<id> -o jsonpath='{.spec.template.spec.volumes[0].image.reference}'` names.
 
 **Logs.** Each function pod logs:
 - Lambda-style `START`, `END`, and `REPORT` lines, with duration and memory, for every invocation;

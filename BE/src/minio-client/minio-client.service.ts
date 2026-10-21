@@ -1,6 +1,8 @@
 import { CreateBucketCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { ConfigService } from '@nestjs/config';
 import { describeError } from '../common/describe-error';
 
@@ -72,6 +74,13 @@ export class MinioClientService implements OnModuleInit, OnModuleDestroy {
     await this.s3.send(
       new PutObjectCommand({ Bucket: this.bucketName, Key: key, Body: createReadStream(file), ContentLength: size, ContentType: contentType }),
     );
+  }
+
+  /** An object, streamed to a file: a package, to make its code image. */
+  async getFile(key: string, file: string): Promise<void> {
+    const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key }));
+    if (!object.Body) throw new Error(`The object ${key} has no body`);
+    await pipeline(object.Body as Readable, createWriteStream(file, { mode: 0o600 }));
   }
 
   /** Removes an object; one already gone is no error, as S3 answers. */

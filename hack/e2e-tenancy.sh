@@ -75,6 +75,17 @@ with_token() {
   http_at "$api_oidc" "$method" "$path" "$body" -H "Authorization: Bearer $token" "$@"
 }
 message() { jq -r .message "$work/body"; }
+# Its messages joined, for an answer that lists them.
+messages() { jq -r '.message | if type == "array" then join("; ") else . end' "$work/body"; }
+# upload_package <base URL> <zip> [curl arguments]: POST /packages, the zip as the body; its answer, its status in $work/status.
+upload_package() {
+  local base=$1 file=$2
+  shift 2
+  curl -sS -o "$work/body" -w '%{http_code}' -X POST -H 'content-type: application/zip' --data-binary @"$file" "$@" "$base/packages" >"$work/status"
+  cat "$work/body"
+}
+sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
+uri() { jq -rn --arg s "$1" '$s | @uri'; }
 # Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer.
 public_routes=("GET /healthz" "GET /readyz")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
@@ -346,6 +357,16 @@ as_a POST /notifications/test "{\"webhookUrl\": \"$receiver/a\"}" >/dev/null
 check "A sends itself a test notification, to the receiver" 202 "$(status)"
 alarm_a="$(as_a POST /alarms "$(alarm_body "$id")" | jq -r .id)"
 check "A makes an alarm on its function's errors" 201 "$(status)"
+# A's package, and another for whoever uploads one in the loops below.
+python3 - "$work/package-a.zip" "$work/package-b.zip" <<'PY'
+import sys, zipfile
+for path, who in zip(sys.argv[1:], 'ab'):
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('index.js', 'exports.handler = async () => "%s";\n' % who)
+PY
+package_a="$(upload_package "$api" "$work/package-a.zip" | jq -r .codeSha256)"
+check "A uploads a package" "201 $(sha256_of "$work/package-a.zip")" "$(status) $package_a"
+package_b="$(sha256_of "$work/package-b.zip")"
 own=""
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
@@ -497,6 +518,19 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b POST /alarms "$(alarm_body)" >/dev/null
       check "  ... but makes its own account's alarm" 201 "$(status)"
       ;;
+    "POST /packages")
+      upload_package "$api" "$work/package-b.zip" -H "X-FF-Dev-Account: $account_b" >/dev/null
+      check "$route: B uploads a package of its own" 201 "$(status)"
+      check "  ... which A's list doesn't show" 0 "$(as_a GET /packages | jq --arg sha "$package_b" 'map(select(.codeSha256 == $sha)) | length')"
+      as_b POST /functions "$(jq -n --arg sha "$package_a" '{name: "l5-not-mine", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}')" >/dev/null
+      check "  ... and B can't name A's package in a function" \
+        "400 The account has no package $package_a: upload it with POST /packages, which answers its SHA-256" "$(status) $(messages)"
+      ;;
+    "GET /packages")
+      listed="$(as_b GET /packages | jq --arg sha "$package_a" 'map(select(.codeSha256 == $sha)) | length')"
+      check "$route: B's list doesn't show A's package, nor finds it by its SHA-256" "200 0 0" \
+        "$(status) $listed $(as_b GET "/packages?codeSha256=$(uri "$package_a")" | jq length)"
+      ;;
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
 done
@@ -593,6 +627,8 @@ grant "$account_1" 5000 "promo:l5-1"
 echo "== account 2, on account 1's function and account, on every route (${#routes[@]})"
 alarm_1="$(as_user_1 POST /alarms "$(alarm_body "$fn_1")" | jq -r .id)"
 check "account 1's owner makes an alarm on its function's errors" 201 "$(status)"
+package_1="$(upload_package "$api_oidc" "$work/package-a.zip" -H "Authorization: Bearer $token_1" | jq -r .codeSha256)"
+check "account 1's owner uploads a package" "201 $package_a" "$(status) $package_1"
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
   template="${route#* }"
@@ -770,6 +806,19 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 POST /alarms "$(alarm_body "$fn_1")" >/dev/null
       check "$route: account 2 can't watch account 1's function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
       ;;
+    "POST /packages")
+      upload_package "$api_oidc" "$work/package-b.zip" -H "Authorization: Bearer $token_2" -H "X-FF-Account: ${account_2:-}" >/dev/null
+      check "$route: account 2's member uploads a package of account 2's" 201 "$(status)"
+      check "  ... which account 1's list doesn't show" 0 "$(as_user_1 GET /packages | jq --arg sha "$package_b" 'map(select(.codeSha256 == $sha)) | length')"
+      as_user_2 POST /functions "$(jq -n --arg sha "$package_1" '{name: "l5-not-mine", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}')" >/dev/null
+      check "  ... and account 2 can't name account 1's package in a function" \
+        "400 The account has no package $package_1: upload it with POST /packages, which answers its SHA-256" "$(status) $(messages)"
+      ;;
+    "GET /packages")
+      listed="$(as_user_2 GET /packages | jq --arg sha "$package_1" 'map(select(.codeSha256 == $sha)) | length')"
+      check "$route: account 2's list doesn't show account 1's package, nor finds it by its SHA-256" "200 0 0" \
+        "$(status) $listed $(as_user_2 GET "/packages?codeSha256=$(uri "$package_1")" | jq length)"
+      ;;
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
 done
@@ -911,7 +960,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

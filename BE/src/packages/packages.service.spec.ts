@@ -15,7 +15,18 @@ const ZIP = zipOf([
   { name: 'node_modules/left-pad/index.js', data: 'module.exports = (s) => s;\n' },
 ]);
 const SHA = createHash('sha256').update(ZIP).digest('base64');
-const SAVED: Package = { id: 'p-1', accountId: ACCOUNT, codeSha256: SHA, codeSize: ZIP.length, unpackedSize: 60, fileCount: 2, files: [], createdAt: new Date('2026-10-21T12:00:00Z') };
+const SAVED: Package = {
+  id: 'p-1',
+  accountId: ACCOUNT,
+  codeSha256: SHA,
+  codeSize: ZIP.length,
+  unpackedSize: 60,
+  fileCount: 2,
+  files: [],
+  imageDigest: null,
+  createdAt: new Date('2026-10-21T12:00:00Z'),
+  usedAt: new Date('2026-10-21T12:00:00Z'),
+};
 
 /** The temporary files of uploads in the system's folder. */
 const temporaryFiles = () => readdirSync(tmpdir()).filter((name) => name.startsWith('ff-package-'));
@@ -29,6 +40,7 @@ describe("PackagesService: a function's package, uploaded", () => {
   const leftovers = () => temporaryFiles().filter((name) => !before.includes(name));
   const insert = jest.fn();
   const repository = {
+    update: jest.fn(),
     findOneBy: jest.fn(async () => found),
     find: jest.fn(async () => (found ? [found] : [])),
     query: jest.fn(async () => [{ unused }]),
@@ -36,6 +48,7 @@ describe("PackagesService: a function's package, uploaded", () => {
   };
   const storage = { putFile: jest.fn(), deleteObject: jest.fn() };
   const audit = { record: jest.fn() };
+  const images = { deleteImage: jest.fn() };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -46,7 +59,7 @@ describe("PackagesService: a function's package, uploaded", () => {
     insert.mockImplementation(async () => {
       found = SAVED;
     });
-    service = new PackagesService(repository as never, storage as never, audit as never);
+    service = new PackagesService(repository as never, storage as never, audit as never, images as never);
   });
 
   const upload = (body: Readable | Buffer, contentType = 'application/zip', contentLength?: number) =>
@@ -86,7 +99,7 @@ describe("PackagesService: a function's package, uploaded", () => {
     expect(leftovers()).toEqual([]);
   });
 
-  it('answers a package the account has already, as it is, without checking or storing it again', async () => {
+  it('answers a package the account has already, as it is, without checking or storing it again, and keeps it another hour', async () => {
     found = SAVED;
 
     const result = await upload(ZIP);
@@ -95,6 +108,7 @@ describe("PackagesService: a function's package, uploaded", () => {
     expect(result.package.codeSha256).toBe(SHA);
     expect(storage.putFile).not.toHaveBeenCalled();
     expect(audit.record).not.toHaveBeenCalled();
+    expect(repository.update).toHaveBeenCalledWith({ accountId: ACCOUNT, codeSha256: SHA }, { usedAt: expect.any(Function) });
   });
 
   it('answers the package another request recorded meanwhile, the same bytes: the account has it once', async () => {

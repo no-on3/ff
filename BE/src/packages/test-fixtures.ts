@@ -1,6 +1,9 @@
 // Shared by the packages' tests (not part of the build: tsconfig.build.json
 // excludes test-fixtures.ts): a zip archive written byte by byte, which can be
 // what no zip tool makes, a name with .., a link, a size or a checksum that lies.
+import { createHash, randomUUID } from 'node:crypto';
+import { Server, createServer } from 'node:http';
+import { AddressInfo } from 'node:net';
 import { crc32, deflateRawSync } from 'node:zlib';
 
 export interface TestEntry {
@@ -86,4 +89,75 @@ export function zipOf(entries: TestEntry[]): Buffer {
   end.writeUInt32LE(offset, 16);
   end.writeUInt16LE(0, 20);
   return Buffer.concat([...locals, directory, end]);
+}
+
+const sha256 = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+
+/**
+ * A registry in the test's process, enough of the OCI distribution API for the
+ * client: blobs uploaded in one request after a POST, manifests by tag and by
+ * digest. It can fail the next uploads with 500, or drop their connection.
+ */
+export class FakeRegistry {
+  readonly blobs = new Map<string, Buffer>();
+  readonly manifests = new Map<string, Buffer>();
+  readonly requests: Array<{ method: string; path: string; authorization?: string; contentType?: string }> = [];
+  /** What the next PUTs of uploads do instead of storing: answer 500, or close the connection. */
+  failUploads: Array<'500' | 'drop'> = [];
+  private readonly uploads = new Set<string>();
+  private server!: Server;
+  url = '';
+
+  async start(): Promise<void> {
+    this.server = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        const url = new URL(request.url ?? '/', 'http://registry');
+        this.requests.push({ method: request.method ?? '', path: url.pathname, authorization: request.headers.authorization, contentType: request.headers['content-type'] });
+        const body = Buffer.concat(chunks);
+        const blob = /^\/v2\/(.+)\/blobs\/(sha256:[0-9a-f]{64})$/.exec(url.pathname);
+        const upload = /^\/v2\/(.+)\/blobs\/uploads\/([0-9a-f-]*)$/.exec(url.pathname);
+        const manifest = /^\/v2\/(.+)\/manifests\/(.+)$/.exec(url.pathname);
+        if (blob && request.method === 'HEAD') return response.writeHead(this.blobs.has(blob[2]) ? 200 : 404).end();
+        if (upload && request.method === 'POST') {
+          const id = randomUUID();
+          this.uploads.add(id);
+          return response.writeHead(202, { location: `/v2/${upload[1]}/blobs/uploads/${id}?_state=opaque` }).end();
+        }
+        if (upload && request.method === 'PUT') {
+          const failure = this.failUploads.shift();
+          // A failed upload is forgotten, as registries may do: the next try must start another.
+          this.uploads.delete(upload[2]);
+          if (failure === 'drop') return request.socket.destroy();
+          if (failure === '500') return response.writeHead(500).end('storage unavailable');
+          const digest = url.searchParams.get('digest') ?? '';
+          if (url.searchParams.get('_state') !== 'opaque') return response.writeHead(400).end('lost the upload state');
+          if (sha256(body) !== digest) return response.writeHead(400).end('DIGEST_INVALID');
+          this.blobs.set(digest, body);
+          return response.writeHead(201).end();
+        }
+        if (upload && request.method === 'GET') return response.writeHead(this.uploads.has(upload[2]) ? 204 : 404).end();
+        if (manifest && request.method === 'PUT') {
+          const digest = sha256(body);
+          this.manifests.set(`${manifest[1]}:${manifest[2]}`, body);
+          this.manifests.set(`${manifest[1]}@${digest}`, body);
+          return response.writeHead(201, { 'docker-content-digest': digest }).end();
+        }
+        if (manifest && request.method === 'HEAD') return response.writeHead(this.manifests.has(`${manifest[1]}@${manifest[2]}`) ? 200 : 404).end();
+        if (manifest && request.method === 'DELETE') {
+          const key = `${manifest[1]}@${manifest[2]}`;
+          if (!this.manifests.delete(key)) return response.writeHead(404).end();
+          return response.writeHead(202).end();
+        }
+        response.writeHead(400).end('unexpected');
+      });
+    });
+    await new Promise<void>((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+    this.url = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
+  }
+
+  stop(): Promise<void> {
+    return new Promise((resolve) => this.server.close(() => resolve()));
+  }
 }

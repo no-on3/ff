@@ -62,7 +62,10 @@ import {
   withSecrets,
 } from './environment';
 import { EnvironmentStore } from './environment.store';
-import { DEFAULT_HANDLER, handlerProblem, inlineCodeFacts } from './code-package';
+import { DEFAULT_HANDLER, handlerProblem, inlineCodeFacts, packageHandlerProblem } from './code-package';
+import { CodeImagesService } from '../packages/code-images.service';
+import { RegistryError } from '../packages/registry';
+import { PackagesService } from '../packages/packages.service';
 import { callersFailure, failureResponse, platformFailure } from './failures';
 import { keptJson, keptText } from './history';
 import { liveTail } from './live-tail';
@@ -70,7 +73,7 @@ import { logsQuery } from './logs-window';
 import { MAX_INPUT_BYTES } from './limits';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
-const ROLLOUT_FIELDS = ['code', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat'] as const;
+const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat'] as const;
 
 /** A function as the API answers it: its record and its variables. Its secrets' values are never part of it. */
 export type FunctionView = Function & { environment: Record<string, string> };
@@ -80,13 +83,17 @@ function viewOf(function_: Function, environment: FunctionEnvironmentValues): Fu
   return { ...function_, environment: { ...environment.variables } };
 }
 
-/** The function as the orchestrator runs it: its record, and the variables and secrets its process gets. */
-function workloadOf(function_: Function, environment: FunctionEnvironmentValues): FunctionWorkload {
+/** The function as the orchestrator runs it: its record, the variables and secrets its process gets, and a package's code image. */
+function workloadOf(function_: Function, environment: FunctionEnvironmentValues, codeImage?: string): FunctionWorkload {
   return {
     ...function_,
     environment: isEmpty(environment) ? undefined : { revision: environment.revision, values: processEnvironment(environment) },
+    ...(codeImage ? { codeImage } : {}),
   };
 }
+
+/** A function's code, as its record keeps it. */
+type CodeFields = Pick<Function, 'packageType' | 'code' | 'codeSha256' | 'codeSize'>;
 
 /** An environment with these variables, and a new revision when there is anything: a change rolls out. */
 function withVariables(environment: FunctionEnvironmentValues, variables: Record<string, string>): FunctionEnvironmentValues {
@@ -112,8 +119,8 @@ interface EnvironmentChange {
   after: FunctionEnvironmentValues;
 }
 
-/** The fields of a function a change asks for, without its environment; with new code, its hash and size. */
-type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<Pick<Function, 'codeSha256' | 'codeSize'>>;
+/** The fields of a function a change asks for, without its environment; with new code, how it comes, its hash and size. */
+type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields>;
 
 /** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
 const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
@@ -217,6 +224,8 @@ export class FunctionsService {
     private usage: UsageService,
     private credit: CreditService,
     private environments: EnvironmentStore,
+    private packages: PackagesService,
+    private codeImages: CodeImagesService,
   ) {}
 
   private readyTimeoutMs(): number {
@@ -228,24 +237,25 @@ export class FunctionsService {
     refuseOverPlan(plan, createFunctionDto);
     const { environment: variables, secrets, ...fields } = createFunctionDto;
     const handler = fields.handler ?? DEFAULT_HANDLER;
-    refuseHandler(handler, fields.runtime, PackageType.INLINE);
+    const code = await this.codeOf(accountId, fields, handler, fields.runtime);
+    // A package's image before anything is saved: without it, there is no function to keep.
+    const codeImage = await this.codeImageOf({ accountId, ...code });
     const environment = withSecrets(withVariables(NO_ENVIRONMENT, variables ?? {}), storedSecrets(secrets ?? {}, new Date()));
     refuseCombined(environment);
     const function_ = this.functionsRepository.create({
       ...fields,
       handler,
-      packageType: PackageType.INLINE,
-      ...inlineCodeFacts(fields.code),
+      ...code,
       accountId,
       status: FunctionStatus.CREATING,
     });
 
     const savedFunction = await this.insertWithinPlan(plan, function_, environment);
     try {
-      // Archive the code in object storage (the cluster gets it via an immutable ConfigMap).
-      await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
+      // Archive inline code in object storage (the cluster gets it via an immutable ConfigMap); a package is there already.
+      if (savedFunction.packageType === PackageType.INLINE) await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
 
-      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workloadOf(savedFunction, environment), tenant));
+      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workloadOf(savedFunction, environment, codeImage), tenant));
       // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
       await this.orchestrator.waitUntilReady(savedFunction, this.readyTimeoutMs());
 
@@ -262,6 +272,48 @@ export class FunctionsService {
       if (!(error instanceof CodeTooLargeError)) await this.releaseInstances(savedFunction);
       // The function exists all the same: its ID lets the caller open it to fix it, rather than create it again.
       throw failureResponse(error, failure, { functionId: savedFunction.id });
+    }
+  }
+
+  /**
+   * The code a create or an update sends, as the function keeps it: inline, its
+   * text, hash and size; or a package of the account, named by its SHA-256, its
+   * handler looked for in its files. 400 for both, a package the account
+   * hasn't, or a handler it can't run; 503 where no registry runs packages.
+   */
+  private async codeOf(accountId: string, sent: { code?: string; codeSha256?: string }, handler: string, runtime: Runtime): Promise<CodeFields> {
+    if (sent.code !== undefined && sent.codeSha256 !== undefined) {
+      throw new BadRequestException(['Send code or codeSha256, not both: inline code, or a package uploaded with POST /packages']);
+    }
+    if (sent.codeSha256 === undefined) {
+      refuseHandler(handler, runtime, PackageType.INLINE);
+      const code = sent.code as string;
+      return { packageType: PackageType.INLINE, code, ...inlineCodeFacts(code) };
+    }
+    refuseHandler(handler, runtime, PackageType.ZIP);
+    this.codeImages.assertAvailable();
+    const named = await this.packages.name(accountId, sent.codeSha256);
+    if (!named) {
+      throw new BadRequestException([`The account has no package ${sent.codeSha256}: upload it with POST /packages, which answers its SHA-256`]);
+    }
+    const problem = packageHandlerProblem(named.files, handler, runtime);
+    if (problem) throw new BadRequestException([problem]);
+    return { packageType: PackageType.ZIP, code: '', codeSha256: sent.codeSha256, codeSize: named.codeSize };
+  }
+
+  /**
+   * The code image a function's pods mount, for a package; none for inline
+   * code, which a ConfigMap holds. 503 when the registry can't be reached: the
+   * caller tries again, nothing having changed.
+   */
+  private async codeImageOf(function_: Pick<Function, 'accountId' | 'packageType' | 'codeSha256'>): Promise<string | undefined> {
+    if (function_.packageType !== PackageType.ZIP) return undefined;
+    try {
+      return await this.codeImages.imageFor(function_.accountId, function_.codeSha256);
+    } catch (error) {
+      if (!(error instanceof RegistryError)) throw error;
+      this.logger.error(`The code registry failed for package ${function_.codeSha256} of account ${function_.accountId}: ${error.message}`);
+      throw new ServiceUnavailableException("The code registry can't be reached: nothing changed, try again in a moment");
     }
   }
 
@@ -358,8 +410,15 @@ export class FunctionsService {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
     const { environment: variables, ...changes } = updateFunctionDto;
-    if (changes.handler !== undefined || changes.runtime !== undefined) {
-      refuseHandler(changes.handler ?? function_.handler, changes.runtime ?? function_.runtime, function_.packageType);
+    const handler = changes.handler ?? function_.handler;
+    const runtime = changes.runtime ?? function_.runtime;
+    // New code, inline or a package, with its handler; or the handler and runtime checked against the code there.
+    let code: CodeFields | undefined;
+    if (changes.code !== undefined || changes.codeSha256 !== undefined) {
+      code = await this.codeOf(accountId, changes, handler, runtime);
+    } else if (changes.handler !== undefined || changes.runtime !== undefined) {
+      if (function_.packageType === PackageType.ZIP) await this.codeOf(accountId, { codeSha256: function_.codeSha256 }, handler, runtime);
+      else refuseHandler(handler, runtime, PackageType.INLINE);
     }
     if (changes.eventFormat === EventFormat.WRAPPED && function_.eventFormat !== EventFormat.WRAPPED) await this.refuseWrappedWhileSent(id);
     const newName = changes.name !== undefined && changes.name !== function_.name ? changes.name : undefined;
@@ -375,7 +434,7 @@ export class FunctionsService {
       (field) => changes[field] !== undefined && changes[field] !== function_[field],
     );
     if (environmentChanges) changed.push('environment');
-    const fieldChanges: FieldChanges = changes.code === undefined ? changes : { ...changes, ...inlineCodeFacts(changes.code) };
+    const fieldChanges: FieldChanges = code ? { ...changes, ...code } : changes;
     const { saved, environment } = await this.change(function_, fieldChanges, { before, after }, changed);
     return viewOf(saved, environment);
   }
@@ -454,8 +513,10 @@ export class FunctionsService {
       return { saved, environment: environment.before };
     }
 
+    // The code image first: without it, nothing has changed, and nothing needs rolling back.
+    const workload = workloadOf(updated, environment.after, await this.codeImageOf(updated));
     try {
-      await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.update(workloadOf(updated, environment.after), tenant));
+      await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       // The old version keeps serving during the rollout; record the change only once it's live.
       await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
     } catch (error) {
@@ -512,7 +573,8 @@ export class FunctionsService {
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
-      await this.plans.withTenant(previous.accountId, (tenant) => this.orchestrator.update(workloadOf(previous, previousEnvironment), tenant));
+      const workload = workloadOf(previous, previousEnvironment, await this.codeImageOf(previous));
+      await this.plans.withTenant(previous.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {
       previous.status = FunctionStatus.ERROR;
@@ -566,13 +628,18 @@ export class FunctionsService {
   }
 
   /**
-   * Object storage keeps a copy of the record's code. It is written after the
+   * Object storage keeps a copy of the record's inline code; a package's zip is
+   * there already, and an inline copy from before goes. It is written after the
    * record, and a failure is only logged: nothing reads the copy yet, and the
    * record and the Deployment already agree.
    */
   private async archiveCode(function_: Function, previousCodePath: string): Promise<void> {
     const codePath = this.codePath(function_);
     try {
+      if (function_.packageType === PackageType.ZIP) {
+        await this.minioClientService.deleteCode(previousCodePath);
+        return;
+      }
       await this.minioClientService.uploadCode(codePath, function_.code);
       // A runtime change moves the copy (code.ts ↔ code.py).
       if (previousCodePath !== codePath) await this.minioClientService.deleteCode(previousCodePath);

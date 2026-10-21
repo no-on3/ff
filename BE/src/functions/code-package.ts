@@ -1,10 +1,15 @@
 import { createHash } from 'node:crypto';
+import * as path from 'node:path/posix';
 import { PackageType, Runtime } from './entities/function.entity';
 
 /**
  * A function's code as AWS Lambda describes it: how it comes (PackageType), what
  * its runtime calls (Handler), and its CodeSha256 and CodeSize.
  */
+
+/** A SHA-256 in base64, as AWS Lambda's CodeSha256 gives one, which names a package: 43 characters and a =. */
+export const CODE_SHA256 = /^[A-Za-z0-9+/]{43}=$/;
+export const CODE_SHA256_RULE = 'must be a SHA-256 in base64, as AWS Lambda gives it: 44 characters ending with =';
 
 /** The handler of a function that names none: `handler` in the file `function`, where inline code is. */
 export const DEFAULT_HANDLER = 'function.handler';
@@ -54,6 +59,29 @@ const INLINE_HANDLER: Record<Runtime, RegExp> = {
   [Runtime.NODEJS]: /^function(\.[^./\\\s]+)+$/,
   [Runtime.PYTHON]: /^function\.[\p{XID_Start}_][\p{XID_Continue}]*$/u,
 };
+
+/**
+ * What is wrong with a handler for a package of these files, or nothing: its
+ * module must be in it, as its runtime looks for it. Node.js's is the name to
+ * the first dot after the last slash: that file, with .js, .mjs, .cjs or .ts,
+ * or without an extension, or a folder. Python's has every dot but the last as
+ * a folder: a module (.py), a compiled extension (.so), or a package's folder.
+ * Not more: the runtime says the rest when it loads the code, within seconds of
+ * the rollout.
+ */
+export function packageHandlerProblem(files: readonly string[], handler: string, runtime: Runtime): string | undefined {
+  const name = path.basename(handler);
+  const folders = handler.slice(0, handler.length - name.length);
+  const module =
+    runtime === Runtime.PYTHON ? `${folders}${name.slice(0, name.lastIndexOf('.'))}`.replace(/\./g, '/') : `${folders}${name.slice(0, name.indexOf('.'))}`;
+  const isModule =
+    runtime === Runtime.PYTHON
+      ? (file: string) => file === `${module}.py` || (file.startsWith(`${module}.`) && file.endsWith('.so')) || file.startsWith(`${module}/`)
+      : (file: string) => file === module || ['.js', '.mjs', '.cjs', '.ts'].some((extension) => file === `${module}${extension}`) || file.startsWith(`${module}/`);
+  if (files.some(isModule)) return undefined;
+  const wanted = runtime === Runtime.PYTHON ? `${module}.py, nor a package ${module}/` : `${module}.js, .mjs, .cjs or .ts, nor a folder ${module}/`;
+  return `The package has no ${wanted}, which the handler ${handler} names`;
+}
 
 /** What is wrong with a handler for a function of this runtime and package, or nothing. */
 export function handlerProblem(handler: string, runtime: Runtime, packageType: PackageType): string | undefined {

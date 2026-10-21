@@ -41,7 +41,8 @@ kubectl get pods -A
 hack/k8s/cluster-up.sh             # create (or start) the cluster, apply deploy/k8s/dev, install the log pipeline, mint credentials
 hack/k8s/cluster-up.sh --monitoring    # the same, and the operator's monitoring (below)
 hack/k8s/test-rbac.sh              # verify RBAC, the production manifests and the admission policy (35 checks)
-hack/k8s/cluster-down.sh           # delete the cluster and the local credentials
+hack/k8s/registry-up.sh            # the code registry, for a cluster made before it (cluster-up.sh runs it)
+hack/k8s/cluster-down.sh           # delete the cluster, its registry's container, and the local credentials
 ```
 
 `cluster-up.sh` creates k3s v1.37.1 with:
@@ -50,7 +51,8 @@ hack/k8s/cluster-down.sh           # delete the cluster and the local credential
 - a 2 GB node memory cap;
 - Traefik and metrics-server disabled;
 - the log pipeline (below), unless `--no-logging`;
-- the operator's monitoring (below), with `--monitoring` only.
+- the operator's monitoring (below), with `--monitoring` only;
+- the registry of functions' code images ([ADR 0003](adr/0003-code-delivery.md)), `ff-dev-registry` (`registry:3.1.2`), on the cluster's Docker network: the backend pushes to `127.0.0.1:5056`, and the node pulls from `ff-dev-registry:5000` over HTTP. `registry-up.sh` tells the node's containerd so in a `hosts.toml`, which containerd reads at each pull, and in `/etc/rancher/k3s/registries.yaml`, which has k3s write it again when it starts: a cluster made before the registry gets it without a restart. Its images are in the volume `ff-dev-registry`, which `cluster-down.sh` keeps; the backend makes an image again when the registry has lost it.
 
 It is safe to re-run.
 

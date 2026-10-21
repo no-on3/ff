@@ -42,8 +42,20 @@ export class Package {
   @Column({ type: 'text', array: true, select: false })
   files: string[];
 
+  /** Its code image's manifest digest, once made (ADR 0003): sha256:<hex>. */
+  @Column({ type: 'varchar', length: 71, nullable: true })
+  imageDigest: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
+
+  /**
+   * Its upload, or the last time a function named it: the retention job deletes
+   * a package that no function names an hour after this, so that one named for
+   * a rollout under way is kept until its function's record names it.
+   */
+  @Column({ type: 'timestamptz', default: () => 'now()' })
+  usedAt: Date;
 }
 
 /** Where object storage keeps a package's zip: under its account, named by its SHA-256 in hex. */

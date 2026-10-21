@@ -82,6 +82,21 @@ describe('Kubernetes manifests', () => {
       ]);
     });
 
+    it("mounts a package's code image, read-only, where inline code's ConfigMap would be, and names its version by it", () => {
+      const image = 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'e'.repeat(64);
+      const d = deploymentManifest(workload({ codeImage: image, code: '' }), 'ff-t-abc', undefined, 'image-hash', settings(), 1) as any;
+
+      expect(podSpec(d).volumes).toEqual([
+        { name: 'code', image: { reference: image, pullPolicy: 'IfNotPresent' } },
+        { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } },
+      ]);
+      expect(container(d).volumeMounts).toEqual([
+        { name: 'code', mountPath: '/var/task', readOnly: true },
+        { name: 'tmp', mountPath: '/tmp' },
+      ]);
+      expect(d.spec.template.metadata.annotations['ff.dev/code-sha256']).toBe('image-hash');
+    });
+
     it('sets equal requests and limits from the configured memory', () => {
       expect(container(build()).resources).toEqual({
         requests: { cpu: '289m', memory: '512Mi' },

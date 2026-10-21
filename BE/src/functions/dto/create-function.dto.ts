@@ -4,7 +4,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { MaxJsonBytes, MaxUtf8Bytes } from '../../common/byte-limits';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
 import { MAX_CODE_BYTES, MAX_METADATA_BYTES } from '../limits';
-import { DEFAULT_HANDLER, MAX_HANDLER_LENGTH, handlerSyntaxProblem } from '../code-package';
+import { CODE_SHA256, CODE_SHA256_RULE, DEFAULT_HANDLER, MAX_HANDLER_LENGTH, handlerSyntaxProblem } from '../code-package';
 import { EventFormat, Runtime } from '../entities/function.entity';
 import { IsEnvironment, IsSecrets } from '../environment';
 
@@ -43,10 +43,27 @@ export class CreateFunctionDto {
   @IsEnum(Runtime)
   runtime: Runtime;
 
-  @ApiProperty({ description: "The function's code, one file: 900 KiB (921,600 bytes) of UTF-8 at most, what its ConfigMap holds", maxLength: MAX_CODE_BYTES })
+  @ApiPropertyOptional({
+    description:
+      "The function's code, one file, inline: 900 KiB (921,600 bytes) of UTF-8 at most, what its ConfigMap holds. Required unless " +
+      'codeSha256 names a package; sent to a function made from a package, it makes the function inline',
+    maxLength: MAX_CODE_BYTES,
+  })
+  // Required unless a package is named; with one, refused by the service, which says why.
+  @ValidateIf((dto: { codeSha256?: unknown; code?: unknown }) => dto.codeSha256 === undefined || dto.code !== undefined)
   @IsString()
   @MaxUtf8Bytes(MAX_CODE_BYTES, "what a function's ConfigMap holds (900 KiB)")
-  code: string;
+  code?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "A package of the account, in place of code: its SHA-256 in base64, as POST /packages answered it. The function runs the " +
+      'package (packageType zip), whose files must hold the module its handler names. A change rolls out a new version',
+    pattern: CODE_SHA256.source,
+  })
+  @ValidateIf((_dto, value) => value !== undefined)
+  @Matches(CODE_SHA256, { message: `codeSha256 ${CODE_SHA256_RULE}` })
+  codeSha256?: string;
 
   @ApiProperty({
     description: "Memory allocation in MB. The account's plan sets a lower maximum: 1,024 MB on the beta plan",

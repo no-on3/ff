@@ -44,6 +44,7 @@ import { FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } fr
 import {
   ALARM_FIELDS,
   EVENT_FORMATS,
+  PACKAGE_TYPES,
   SECRET_FIELDS,
   ALARM_STATES,
   BALANCE_FIELDS,
@@ -357,6 +358,14 @@ describe('the event a function receives', () => {
   it("is one of the API's formats", () => {
     const body = /export enum EventFormat \{([\s\S]*?)\n\}/.exec(functionEntitySource)![1];
     expect([...body.matchAll(/= '(\w+)'/g)].map((m) => m[1])).toEqual([...EVENT_FORMATS]);
+  });
+});
+
+describe("a function's code", () => {
+  it("comes as one of the API's package types, with the handler, hash and size the page shows", () => {
+    const types = /export enum PackageType \{([\s\S]*?)\n\}/.exec(functionEntitySource)![1];
+    expect([...types.matchAll(/= '(\w+)'/g)].map((m) => m[1])).toEqual([...PACKAGE_TYPES]);
+    for (const field of ['packageType', 'handler', 'codeSha256', 'codeSize']) expect(functionEntitySource).toMatch(new RegExp(`^  ${field}: `, 'm'));
   });
 });
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DEFAULT_HANDLER, codeFileName, handlerProblem, handlerSyntaxProblem, inlineCodeFacts } from './code-package';
+import { DEFAULT_HANDLER, codeFileName, handlerProblem, handlerSyntaxProblem, inlineCodeFacts, packageHandlerProblem } from './code-package';
 import { PackageType, Runtime } from './entities/function.entity';
 
 describe("inline code's CodeSha256 and CodeSize, as AWS Lambda gives a package's", () => {
@@ -100,5 +100,42 @@ describe("a handler for a function's runtime and package", () => {
     expect(handlerProblem('../function.handler', Runtime.NODEJS, PackageType.INLINE)).toBe(
       'handler must name a file inside the package, from its root: no leading /, no backslash, no . or .. folder',
     );
+  });
+});
+
+describe("a handler's module, looked for in a package's files", () => {
+  const NODE = ['index.mjs', 'src/handlers/orders.js', 'lib/greet/index.js', 'node_modules/left-pad/index.js'];
+  const PYTHON = ['lambda_function.py', 'app/__init__.py', 'app/api.py', 'fast.cpython-313-x86_64-linux-gnu.so', 'numpy/__init__.py'];
+
+  it.each([
+    ['index.handler', 'an ES module'],
+    ['src/handlers/orders.create', 'a file in a folder'],
+    ['src/handlers/orders.api.v1.get', 'a path through its exports'],
+    ['lib/greet.handler', 'a folder, which Node.js loads index.js of'],
+  ])('finds Node.js handler %s: %s', (handler) => {
+    expect(packageHandlerProblem(NODE, handler, Runtime.NODEJS)).toBeUndefined();
+  });
+
+  it.each([
+    ['lambda_function.lambda_handler', 'a module'],
+    ['app.handler', "a package's __init__.py"],
+    ['app/api.handler', 'a module in a package, written with a slash'],
+    ['app.api.handler', 'the same, with a dot'],
+    ['fast.handler', 'a compiled extension'],
+  ])('finds Python handler %s: %s', (handler) => {
+    expect(packageHandlerProblem(PYTHON, handler, Runtime.PYTHON)).toBeUndefined();
+  });
+
+  it('says which file it looked for, and how the runtime would have taken it', () => {
+    expect(packageHandlerProblem(NODE, 'function.handler', Runtime.NODEJS)).toBe(
+      'The package has no function.js, .mjs, .cjs or .ts, nor a folder function/, which the handler function.handler names',
+    );
+    expect(packageHandlerProblem(PYTHON, 'src/app.handler', Runtime.PYTHON)).toBe(
+      'The package has no src/app.py, nor a package src/app/, which the handler src/app.handler names',
+    );
+    // A name that only starts like the module is another module, and another runtime's file is no module of this one.
+    expect(packageHandlerProblem(['indexes.js', 'index.json'], 'index.handler', Runtime.NODEJS)).toMatch(/^The package has no index\.js/);
+    expect(packageHandlerProblem(['src/app.js'], 'src/app.handler', Runtime.PYTHON)).toMatch(/^The package has no src\/app\.py/);
+    expect(packageHandlerProblem(['src/app.py'], 'src/app.handler', Runtime.NODEJS)).toMatch(/^The package has no src\/app\.js/);
   });
 });

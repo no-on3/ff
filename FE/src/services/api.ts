@@ -52,6 +52,9 @@ api.interceptors.response.use(undefined, (error: unknown) => {
 
 export type Runtime = 'nodejs' | 'python';
 export type FunctionStatus = 'CREATING' | 'ACTIVE' | 'ERROR' | 'DELETED';
+/** How a function's code comes: inline, the one file of `code`; or zip, a package uploaded. contract.test.ts checks them against the API's. */
+export const PACKAGE_TYPES = ['inline', 'zip'] as const;
+export type PackageType = (typeof PACKAGE_TYPES)[number];
 
 /** A function, as the API returns it. */
 export interface Function {
@@ -60,7 +63,14 @@ export interface Function {
   /** The account that owns the function (D1). */
   accountId: string;
   runtime: Runtime;
+  /** Inline code; empty for a package, which the console doesn't edit. */
   code: string;
+  packageType: PackageType;
+  /** What its runtime calls, as AWS Lambda's handler: function.handler unless it names another. */
+  handler: string;
+  /** Its code's SHA-256 in base64, and its size in bytes, as AWS Lambda's CodeSha256 and CodeSize. */
+  codeSha256: string;
+  codeSize: number;
   /** MB */
   memory: number;
   /** Seconds */

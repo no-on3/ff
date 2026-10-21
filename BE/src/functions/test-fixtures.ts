@@ -5,6 +5,8 @@ import { FindOperator } from 'typeorm';
 import { EventFormat, Function, FunctionStatus, PackageType } from './entities/function.entity';
 import { FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty } from './environment';
 import type { EnvironmentStore } from './environment.store';
+import type { CodeImagesService } from '../packages/code-images.service';
+import type { PackagesService } from '../packages/packages.service';
 
 /** The column defaults of a new function, as the database sets them (see the migrations). */
 export const FUNCTION_DEFAULTS: Partial<Function> = {
@@ -112,4 +114,15 @@ export function memoryEnvironments(): EnvironmentStore & { saved: Map<string, Fu
     },
   };
   return store as unknown as EnvironmentStore & { saved: Map<string, FunctionEnvironmentValues> };
+}
+
+/**
+ * The packages and code images of a FunctionsService that a test runs inline
+ * code with: none of its functions names a package, and asking for one says so.
+ */
+export function noPackages(): [PackagesService, CodeImagesService] {
+  const none = () => {
+    throw new Error('this test runs no package');
+  };
+  return [{ name: none } as unknown as PackagesService, { assertAvailable: none, imageFor: none } as unknown as CodeImagesService];
 }

@@ -18,7 +18,8 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
   - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy: its functions reach the internet only once you turn the account's egress on, and never FF's own network;
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
-  - code is stored in immutable ConfigMaps, up to 900 KiB, which the API checks when it is sent; an invocation's input may have 6 MB as JSON, as on AWS Lambda.
+  - inline code is stored in immutable ConfigMaps, up to 900 KiB, which the API checks when it is sent; an invocation's input may have 6 MB as JSON, as on AWS Lambda;
+  - a package, a zip with its libraries as AWS Lambda takes one (50 MB, 250 MB unpacked), is checked entry by entry when it is uploaded, and runs as an image in the cluster's registry that its pods mount at `/var/task` ([ADR 0003](docs/adr/0003-code-delivery.md)).
 - **Runtimes** `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`, runtime protocol 3 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
   - Lambda's `handler(event, context)`, error names, and log lines, with the code's directory as the working directory and the peak memory as `Max Memory Used`;
   - real timeouts;

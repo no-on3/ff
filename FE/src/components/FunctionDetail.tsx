@@ -11,6 +11,7 @@ import {
   TRUNCATED_NOTE,
   apiErrorMessage,
   changedFields,
+  codeText,
   formatDuration,
   formatMemory,
   historyText,
@@ -194,6 +195,9 @@ const FunctionDetail: React.FC = () => {
               {func.runtime} · {func.memory} MB · {func.timeout} s
             </span>
           </div>
+          <p className="text-sm text-gray-600 mb-4 break-all">
+            Handler <code>{func.handler}</code> · {codeText(func)}
+          </p>
 
           <FunctionAlarms functionId={func.id} mayChange={mayChange} />
 
@@ -237,15 +241,25 @@ const FunctionDetail: React.FC = () => {
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Code</label>
-              <textarea
-                value={form.code}
-                onChange={(e) => setForm({ ...form, code: e.target.value })}
-                className="input mt-1 font-mono"
-                rows={10}
-              />
-            </div>
+            {func.packageType === 'zip' ? (
+              <div className="bg-gray-50 border border-gray-200 px-4 py-3 rounded text-sm text-gray-700">
+                <p className="font-medium">This function runs a package, its libraries in it: its code isn&apos;t edited here.</p>
+                <p className="mt-1">
+                  A new version is a new package: <code>ff deploy</code> with its folder, or <code>POST /packages</code> with its zip, then an
+                  update naming its SHA-256 in <code>codeSha256</code>.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Code</label>
+                <textarea
+                  value={form.code}
+                  onChange={(e) => setForm({ ...form, code: e.target.value })}
+                  className="input mt-1 font-mono"
+                  rows={10}
+                />
+              </div>
+            )}
 
             <div className="flex gap-4">
               <div>

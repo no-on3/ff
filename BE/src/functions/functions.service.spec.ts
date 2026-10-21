@@ -30,6 +30,9 @@ import { Schedule } from '../schedules/schedule.entity';
 import { inlineCodeFacts } from './code-package';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
+import { CodeImagesService } from '../packages/code-images.service';
+import { PackagesService } from '../packages/packages.service';
+import { RegistryError } from '../packages/registry';
 import { FunctionsService } from './functions.service';
 import { memoryEnvironments } from './test-fixtures';
 import { TAIL_ENDED, TAIL_UNAVAILABLE } from './live-tail';
@@ -67,6 +70,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const usage = { record: jest.fn() };
   /** D9's balance check (P-33): every account may invoke unless a test says otherwise. */
   const credit = { admit: jest.fn(async (_accountId: string) => undefined) };
+  /** The account's packages, and the registry their images go to. */
+  const packages = { name: jest.fn() };
+  const codeImages = { assertAvailable: jest.fn(), imageFor: jest.fn() };
   /** The transaction that ends an invocation: it locks the row, saves the final state, then writes the usage record (D6). */
   const ending = { findOne: jest.fn(), save: jest.fn() };
   /** Each function's variables and secrets, as the service saved them. */
@@ -165,6 +171,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { provide: UsageService, useValue: usage },
         { provide: CreditService, useValue: credit },
         { provide: EnvironmentStore, useValue: environments },
+        { provide: PackagesService, useValue: packages },
+        { provide: CodeImagesService, useValue: codeImages },
       ],
     }).compile();
     service = moduleRef.get(FunctionsService);
@@ -279,6 +287,114 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       });
       expect(functionsRepo.save).not.toHaveBeenCalled();
       expect(orchestrator.deploy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a function made from a package (CLI plan, C-23)", () => {
+    const PACKAGE = 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=';
+    const IMAGE = 'ff-dev-registry:5000/ff-code/user-1@sha256:' + 'f'.repeat(64);
+    const dto = { name: 'orders', runtime: Runtime.NODEJS, memory: 128, timeout: 5, codeSha256: PACKAGE, handler: 'src/orders.create' };
+    const refusal = async (attempt: Promise<unknown>) => {
+      const error = (await attempt.catch((err: unknown) => err)) as HttpException;
+      return [error.getStatus(), (error.getResponse() as { message: unknown }).message];
+    };
+
+    beforeEach(() => {
+      packages.name.mockResolvedValue({ codeSize: 4096, files: ['node_modules/left-pad/index.js', 'src/orders.js'] });
+      codeImages.imageFor.mockResolvedValue(IMAGE);
+    });
+
+    it("runs the account's package: zip, its size, its handler found in its files, its pods mounting its image, no inline copy", async () => {
+      const result = await service.create('user-1', dto);
+
+      expect(packages.name).toHaveBeenCalledWith('user-1', PACKAGE);
+      expect(codeImages.imageFor).toHaveBeenCalledWith('user-1', PACKAGE);
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ codeImage: IMAGE, packageType: PackageType.ZIP, handler: 'src/orders.create' }), TENANT);
+      expect(result).toMatchObject({ packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, status: FunctionStatus.ACTIVE });
+      expect(storage.uploadCode).not.toHaveBeenCalled();
+    });
+
+    it('refuses, before saving anything: code and a package both, a package the account hasn\'t, a handler the package lacks', async () => {
+      expect(await refusal(service.create('user-1', { ...dto, code: 'exports.handler = 1' }))).toEqual([
+        400,
+        ['Send code or codeSha256, not both: inline code, or a package uploaded with POST /packages'],
+      ]);
+      expect(await refusal(service.create('user-1', { ...dto, handler: 'index.handler' }))).toEqual([
+        400,
+        ['The package has no index.js, .mjs, .cjs or .ts, nor a folder index/, which the handler index.handler names'],
+      ]);
+      packages.name.mockResolvedValue(undefined);
+      expect(await refusal(service.create('user-1', dto))).toEqual([
+        400,
+        [`The account has no package ${PACKAGE}: upload it with POST /packages, which answers its SHA-256`],
+      ]);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+    });
+
+    it('refuses with 503 where this FF has no registry to run packages from, before saving anything', async () => {
+      codeImages.assertAvailable.mockImplementation(() => {
+        throw new ServiceUnavailableException("This FF has no code registry, so it can't run a package: its operator sets FF_CODE_REGISTRY (ADR 0003)");
+      });
+
+      expect((await refusal(service.create('user-1', dto)))[0]).toBe(503);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('moves an inline function to a package in one rollout with its handler, its inline copy deleted; and back with code', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      const zipped = await service.update('user-1', 'fn-1', { codeSha256: PACKAGE, handler: 'src/orders.create', memory: 256 });
+
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+      expect(orchestrator.update).toHaveBeenLastCalledWith(expect.objectContaining({ codeImage: IMAGE, handler: 'src/orders.create', memory: 256 }), TENANT);
+      expect(zipped).toMatchObject({ packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096 });
+      expect(storage.deleteCode).toHaveBeenCalledWith('fn-1/code.ts');
+      expect(storage.uploadCode).not.toHaveBeenCalled();
+
+      functionsRepo.findOne.mockResolvedValue({ ...zipped });
+      const inline = await service.update('user-1', 'fn-1', { code: 'export const main = async () => 2;', handler: 'function.main' });
+
+      const workload = orchestrator.update.mock.calls.at(-1)?.[0];
+      expect(workload).not.toHaveProperty('codeImage');
+      expect(inline).toMatchObject({ packageType: PackageType.INLINE, ...inlineCodeFacts('export const main = async () => 2;') });
+      expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'export const main = async () => 2;');
+    });
+
+    it("checks a new handler or runtime against the package's files, keeping the package another hour", async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, handler: 'src/orders.create' });
+
+      expect(await refusal(service.update('user-1', 'fn-1', { runtime: Runtime.PYTHON }))).toEqual([
+        400,
+        ['The package has no src/orders.py, nor a package src/orders/, which the handler src/orders.create names'],
+      ]);
+      await service.update('user-1', 'fn-1', { handler: 'src/orders.list' });
+      expect(packages.name).toHaveBeenLastCalledWith('user-1', PACKAGE);
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ handler: 'src/orders.list', codeImage: IMAGE }), TENANT);
+    });
+
+    it("answers 503 when the registry can't be reached, and changes nothing: no function saved, no rollout, no rollback", async () => {
+      codeImages.imageFor.mockRejectedValue(new RegistryError('HEAD /v2/ff-code/user-1/manifests/sha256:… got no answer: connect ECONNREFUSED'));
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      expect(await refusal(service.create('user-1', dto))).toEqual([503, "The code registry can't be reached: nothing changed, try again in a moment"]);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+
+      const working = { ...activeFunction(), packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, handler: 'src/orders.create' };
+      functionsRepo.findOne.mockResolvedValue(working);
+      expect((await refusal(service.update('user-1', 'fn-1', { memory: 256 })))[0]).toBe(503);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rolls a failed update back to the version before, its code image included', async () => {
+      const before = { ...activeFunction(), packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, handler: 'src/orders.create' };
+      functionsRepo.findOne.mockResolvedValue(before);
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Runtime.ImportModuleError', 'boom'));
+
+      await service.update('user-1', 'fn-1', { code: 'broken', handler: 'function.handler' }).catch(() => undefined);
+
+      expect(orchestrator.update.mock.calls.map(([workload]) => (workload as { codeImage?: string }).codeImage)).toEqual([undefined, IMAGE]);
     });
   });
 

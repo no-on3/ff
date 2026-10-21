@@ -71,6 +71,19 @@ export function parseInvokeInput(text: string): ParsedInput {
   }
 }
 
+/** A size in bytes, as people read one: bytes, KB or MB, decimal, as the API's limits say them. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1000) return `${bytes} bytes`;
+  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(1)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+/** A function's code, said for its page: inline or a package, its size, and the hash that names it. */
+export function codeText(func: Pick<Function, 'packageType' | 'codeSize' | 'codeSha256'>): string {
+  const kind = func.packageType === 'zip' ? 'A package' : 'Inline code';
+  return `${kind}, ${formatBytes(func.codeSize)}, SHA-256 ${func.codeSha256}`;
+}
+
 /** What a function's handler gets, said for its page: its event format, in words. */
 export function eventFormatText(func: Pick<Function, 'eventFormat'>): string {
   return func.eventFormat === 'wrapped'

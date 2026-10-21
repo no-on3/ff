@@ -126,8 +126,9 @@ export function isRolledOut(deployment: Deployment): boolean {
 
 /**
  * Runs each function as a Deployment in its account's namespace (one namespace
- * per user), with code in an immutable ConfigMap and a ClusterIP Service in
- * front. See docs/kubernetes-migration-plan.md, K-06.
+ * per user), with inline code in an immutable ConfigMap, or a package's code
+ * image mounted (ADR 0003), and a ClusterIP Service in front. See
+ * docs/kubernetes-migration-plan.md, K-06.
  */
 export class KubernetesOrchestrator implements Orchestrator {
   private readonly logger = new Logger(KubernetesOrchestrator.name);
@@ -187,12 +188,13 @@ export class KubernetesOrchestrator implements Orchestrator {
   private async apply(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
-    const hash = codeHash(fn.runtime, fn.code);
-    const configMap = codeConfigMapName(fn.id, hash);
-    const configMapManifest = codeConfigMapManifest(fn, ns, configMap, hash); // validates size first
+    // A package's code is its image, which names its version; inline code goes in a ConfigMap named by its hash.
+    const hash = codeHash(fn.runtime, fn.codeImage ?? fn.code);
+    const configMap = fn.codeImage ? undefined : codeConfigMapName(fn.id, hash);
+    const configMapManifest = configMap ? codeConfigMapManifest(fn, ns, configMap, hash) : undefined; // validates size first
 
     await this.ensureTenant(fn, ns, tenant);
-    await this.api.apply(paths.core(ns, 'configmaps', configMap), configMapManifest);
+    if (configMap && configMapManifest) await this.api.apply(paths.core(ns, 'configmaps', configMap), configMapManifest);
     await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
 
     // Keep the current replica count (it may have been scaled since), never below
@@ -245,8 +247,8 @@ export class KubernetesOrchestrator implements Orchestrator {
     }
   }
 
-  /** Keeps the current code ConfigMap and the newest previous one (still used during rollouts). */
-  private async collectOldConfigMaps(fn: FunctionWorkload, ns: string, current: string): Promise<void> {
+  /** Keeps the current code ConfigMap and the newest previous one (still used during rollouts); a package has none of its own. */
+  private async collectOldConfigMaps(fn: FunctionWorkload, ns: string, current: string | undefined): Promise<void> {
     const configMaps = await this.api.list<Listed>(paths.core(ns, 'configmaps'), `${LABELS.functionId}=${fn.id}`);
     const older = configMaps
       .filter((cm) => cm.metadata.name !== current)

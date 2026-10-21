@@ -8,7 +8,9 @@
 # code archive, read through SeaweedFS's filer), and on the code's hash and size
 # as AWS Lambda gives them; then the same lifecycle for a Python function (its
 # handler then renamed lambda_handler), a package uploaded (named by its SHA-256,
-# kept once, refused when a name leaves it), a function's environment variables (delivered through
+# kept once, refused when a name leaves it) and a function made from it (its code
+# an image from the cluster's registry, then a Python package, then inline code
+# again), a function's environment variables (delivered through
 # a Secret, replaced by an update, sealed in the database) and its secrets
 # (never in an answer or the audit log, set and removed by name), and the
 # event a function receives (the payload itself, or the old wrapper until
@@ -283,6 +285,48 @@ check "a package whose name leaves it is refused, saying which, and nothing is k
 upload "$work/package.zip" text/plain >/dev/null
 check "a body not sent as a zip is refused with 415" "415 Send the package as the body, a zip archive, with Content-Type: application/zip, not text/plain" \
   "$(status) $(jq -r .message "$work/body")"
+
+echo "== a function made from a package"
+created="$(http POST /functions "$(jq -n --arg sha "$package_sha" '{name: "e2e-package", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}')")"
+check "a function made from the package is ACTIVE: zip, the package's hash and size, no inline code" \
+  "201 ACTIVE zip $package_sha $(stat -c %s "$work/package.zip") 0" \
+  "$(status) $(jq -r '"\(.status) \(.packageType) \(.codeSha256) \(.codeSize) \(.code | length)"' <<<"$created")"
+pkg_fn="$(jq -r .id <<<"$created")"
+check "it runs the package's code, its library in a folder included" "Hello e2e" "$(http POST "/functions/$pkg_fn/invoke" '{"input":{}}' | jq -r .output)"
+code_image="$(kubectl -n "$tenant_ns" get deployment "fn-$pkg_fn" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}')"
+check "its pods mount the package's code image at /var/task, from the registry, by digest" true \
+  "$([[ "$code_image" == "$FF_REGISTRY_NAME:5000/ff-code/$tenant@sha256:"* ]] && echo true || echo false)"
+check "the registry has that image, and the function no code ConfigMap" "200 0" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -I -H 'accept: application/vnd.oci.image.manifest.v1+json' "http://127.0.0.1:$FF_REGISTRY_PORT/v2/ff-code/$tenant/manifests/${code_image##*@}") $(kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$pkg_fn" -o name | wc -l)"
+http POST /functions "$(jq -n --arg sha "$package_sha" '{name: "e2e-wrong-handler", runtime: "nodejs", codeSha256: $sha, handler: "src/app.handler", memory: 128, timeout: 5}')" >/dev/null
+check "a handler the package lacks is refused, saying which file, and nothing is made" \
+  "400 The package has no src/app.js, .mjs, .cjs or .ts, nor a folder src/app/, which the handler src/app.handler names 0" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET '/functions?name=e2e-wrong-handler' | jq length)"
+unknown_sha='n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg='
+http POST /functions "$(jq -n --arg sha "$unknown_sha" '{name: "e2e-no-package", runtime: "nodejs", codeSha256: $sha, memory: 128, timeout: 5}')" >/dev/null
+check "a package the account hasn't is refused, saying how to upload one" \
+  "400 The account has no package $unknown_sha: upload it with POST /packages, which answers its SHA-256" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+# A Python package: its handler's module at the root, a helper in a folder without __init__.py, as Python 3 imports one.
+zip_of "$work/python.zip" 'lambda_function.py=from helpers.greet import greet
+
+
+def lambda_handler(event, context):
+    return greet(event.get("name", "world"))
+' 'helpers/greet.py=def greet(name):
+    return "Ahlan " + name
+'
+upload "$work/python.zip" >/dev/null
+python_sha="$(sha256_of "$work/python.zip")"
+http PUT "/functions/$pkg_fn" "$(jq -n --arg sha "$python_sha" '{runtime: "python", codeSha256: $sha, handler: "lambda_function.lambda_handler", memory: 256}')" >/dev/null
+check "one update moves it to a Python package, with its handler, runtime and memory, in one rollout" "200 python 256 Ahlan Sfax" \
+  "$(status) $(http GET "/functions/$pkg_fn" | jq -r '"\(.runtime) \(.memory)"') $(http POST "/functions/$pkg_fn/invoke" '{"input":{"name":"Sfax"}}' | jq -r .output)"
+http PUT "/functions/$pkg_fn" "$(jq -n --arg code 'def handler(event, context):
+    return "inline again"
+' '{code: $code, handler: "function.handler"}')" >/dev/null
+check "and back to inline code: a code ConfigMap again, which answers" "200 inline inline again 1" \
+  "$(status) $(http GET "/functions/$pkg_fn" | jq -r .packageType) $(http POST "/functions/$pkg_fn/invoke" '{"input":{}}' | jq -r .output) $(kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$pkg_fn" -o name | wc -l)"
+http DELETE "/functions/$pkg_fn" >/dev/null
+check "delete returns 200" 200 "$(status)"
 
 echo "== environment variables"
 # A variable of its own for the function: the sections below still read $id, the Python function's.

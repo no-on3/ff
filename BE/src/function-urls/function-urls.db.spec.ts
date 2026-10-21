@@ -16,7 +16,7 @@ import { FunctionInvocation, InvocationSource, InvocationStatus } from '../funct
 import { FunctionUrl, UrlAuthType } from '../functions/entities/function-url.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
-import { memoryEnvironments } from '../functions/test-fixtures';
+import { memoryEnvironments, noPackages } from '../functions/test-fixtures';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { onePlan } from '../plans/test-fixtures';
 import { UsageRecord } from '../usage/usage-record.entity';
@@ -61,6 +61,7 @@ run("functions' URLs, in the database (L2)", () => {
       { record: async (record: UsageRecord) => usageRecords.push(record) } as never,
       { admit: async () => undefined } as never,
       memoryEnvironments(),
+      ...noPackages(),
     );
     urls = new FunctionUrlsService(
       db.dataSource.getRepository(FunctionUrl),

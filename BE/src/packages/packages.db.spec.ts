@@ -31,6 +31,7 @@ run("functions' packages (L2)", () => {
     putFile: jest.fn(async (key: string, _file: string, size: number) => void stored.set(key, size)),
     deleteObject: jest.fn(async (key: string) => void stored.delete(key)),
   };
+  const images = { deleteImage: jest.fn(async (_accountId: string, _digest: string) => undefined) };
 
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
   /** A new account of its own for each test. */
@@ -52,13 +53,16 @@ run("functions' packages (L2)", () => {
       `INSERT INTO functions (name, account_id, runtime, code, package_type, code_sha256, code_size, memory, timeout) VALUES ($1, $2, 'nodejs', '', 'zip', $3, 100, 128, 5)`,
       [name, accountId, codeSha256],
     );
-  const uploadedAgo = (accountId: string, codeSha256: string, minutes: number) =>
-    query(`UPDATE packages SET created_at = now() - make_interval(mins => $3) WHERE account_id = $1 AND code_sha256 = $2`, [accountId, codeSha256, minutes]);
+  /** Uploaded, or last named by a function, `minutes` ago. */
+  const usedAgo = (accountId: string, codeSha256: string, minutes: number) =>
+    query(`UPDATE packages SET used_at = now() - make_interval(mins => $3) WHERE account_id = $1 AND code_sha256 = $2`, [accountId, codeSha256, minutes]);
+  const usedAt = async (accountId: string, codeSha256: string) =>
+    (await query<Array<{ minutes: number }>>(`SELECT extract(epoch FROM now() - used_at)::int / 60 AS minutes FROM packages WHERE account_id = $1 AND code_sha256 = $2`, [accountId, codeSha256]))[0].minutes;
 
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    packages = new PackagesService(db.dataSource.getRepository(Package), storage as never, new AuditService(db.dataSource.getRepository(AuditEntry)));
+    packages = new PackagesService(db.dataSource.getRepository(Package), storage as never, new AuditService(db.dataSource.getRepository(AuditEntry)), images as never);
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
 
@@ -123,27 +127,48 @@ run("functions' packages (L2)", () => {
     expect((await upload(a, zip('exports.handler = async () => "one more";'))).created).toBe(true);
   });
 
-  it('purges the packages no function named for an hour, and their zips; keeps one a function names, and one uploaded since', async () => {
+  it('purges the packages unused for an hour, their zips and their images; keeps one a function names, and one used since', async () => {
     const a = await account();
     const [old, used, recent] = ['old', 'used', 'recent'].map((code) => zip(`exports.handler = async () => "${code}";`));
     for (const bytes of [old, used, recent]) await upload(a, bytes);
-    await uploadedAgo(a, sha(old), 61);
-    await uploadedAgo(a, sha(used), 120);
-    await uploadedAgo(a, sha(recent), 59);
+    await usedAgo(a, sha(old), 61);
+    await usedAgo(a, sha(used), 120);
+    await usedAgo(a, sha(recent), 59);
     await named(a, sha(used));
+    const image = `sha256:${'a'.repeat(64)}`;
+    await query(`UPDATE packages SET image_digest = $3 WHERE account_id = $1 AND code_sha256 = $2`, [a, sha(old), image]);
 
     await expect(packages.purgeUnused()).resolves.toBe(1);
 
     expect(await rowsOf(a)).toEqual([sha(used), sha(recent)].sort());
     expect(storage.deleteObject.mock.calls).toEqual([[packageKey(a, sha(old))]]);
+    expect(images.deleteImage.mock.calls).toEqual([[a, image]]);
     expect(stored.has(packageKey(a, sha(old)))).toBe(false);
     // A batch at a time, until one comes back short.
     for (const bytes of [old, recent]) {
       await upload(a, bytes);
-      await uploadedAgo(a, sha(bytes), 90);
+      await usedAgo(a, sha(bytes), 90);
     }
     await expect(packages.purgeUnused(new Date(), 1)).resolves.toBe(2);
     expect(await rowsOf(a)).toEqual([sha(used)]);
+  });
+
+  it('keeps a package an hour from when a function named it, or it was sent again, whatever its age', async () => {
+    const a = await account();
+    const [named, resent, forgotten] = ['named', 'resent', 'forgotten'].map((code) => zip(`exports.handler = async () => "${code}";`));
+    for (const bytes of [named, resent, forgotten]) {
+      await upload(a, bytes);
+      await usedAgo(a, sha(bytes), 600);
+    }
+
+    expect(await packages.name(a, sha(named))).toEqual({ codeSize: named.length, files: ['app.js', 'lib/util.js'] });
+    expect((await upload(a, resent)).created).toBe(false);
+    expect([await usedAt(a, sha(named)), await usedAt(a, sha(resent)), await usedAt(a, sha(forgotten))]).toEqual([0, 0, 600]);
+
+    await expect(packages.purgeUnused()).resolves.toBe(1);
+    expect(await rowsOf(a)).toEqual([sha(named), sha(resent)].sort());
+    // Another account's package, or none: nothing to name.
+    expect(await packages.name(await account(), sha(named))).toBeUndefined();
   });
 
   it("deletes all of an account's packages and their zips, and no other account's", async () => {
@@ -153,9 +178,13 @@ run("functions' packages (L2)", () => {
     await upload(closed, bytes);
     await upload(other, bytes);
 
+    const image = `sha256:${'b'.repeat(64)}`;
+    await query(`UPDATE packages SET image_digest = $2 WHERE account_id = $1`, [closed, image]);
+
     await expect(packages.deleteAll(closed)).resolves.toBe(1);
 
     expect([await rowsOf(closed), await rowsOf(other)]).toEqual([[], [sha(bytes)]]);
     expect(storage.deleteObject.mock.calls).toEqual([[packageKey(closed, sha(bytes))]]);
+    expect(images.deleteImage.mock.calls).toEqual([[closed, image]]);
   });
 });

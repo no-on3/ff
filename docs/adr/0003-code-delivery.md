@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Proposed on 2026-10-21, for you to confirm: it adds a registry to the platform, which the [CLI plan](../cli-plan.md)'s question 2 asks you about |
 | **Supersedes** | For packages, the code ConfigMap of the [Kubernetes migration](../kubernetes-migration-plan.md) (K-03); inline code moves to the same path once this is built (the CLI plan's C-24) |
-| **Implementation** | The CLI plan's C-21 to C-26, the [step-1 plan](../step-1-plan.md)'s U-08 |
+| **Implementation** | The CLI plan's C-21 to C-26, the [step-1 plan](../step-1-plan.md)'s U-08; as built in development by C-23 (below); the registry of the production manifests waits for this ADR's confirmation |
 | **Evidence** | The spike `hack/spikes/code-delivery/run.sh` (the CLI plan's C-20), measured on 2026-10-21 |
 | **Related** | [ADR 0001](0001-orchestrator-kubernetes.md) (Kubernetes), [ADR 0002](0002-cli.md) (the CLI and Lambda's packaging rules), the [parent plan](../local-markets-and-aws-portability-plan.md)'s §6.1 (packaging; customers' own images later) |
 
@@ -70,3 +70,11 @@ On a k3d cluster of its own, k3s v1.37.1, with a registry of its own: a Python h
 - **A, one image per version.** Measured as good as C. But every runtime release means making every function's image again, and the push must mount the runtime's layers and rewrite its configuration; the version ties its code to one build of its runtime.
 - **B, an init container fetching the zip.** A presigned URL in the pod's spec expires within 7 days, so a pod made later can't fetch its code, unless the tenant holds object-store credentials, which the backend deliberately can't manage; the tenant's policy would need an exception to reach the store; and every start copies the package to an `emptyDir`. Not measured: each of these rules it out.
 - **D, several ConfigMaps.** A ConfigMap holds 1 MiB, so a 100 MB package is a hundred objects in etcd, which isn't a file store. Not measured.
+
+## As built (C-23, 2026-10-21)
+
+- **Images per account and package:** repository `ff-code/<account>`, tagged with the package's SHA-256 in hex, so that two functions of an account running one package share its image, and nothing crosses accounts. The configuration names the account and the package in its labels; no time and no history, so the same package makes the same digest.
+- **Made when needed:** the first create or update that names a package makes its image, from the zip in object storage, and keeps its digest with the package. Each later one asks the registry for it, and makes it again when the registry has lost it: the zip stays the source.
+- **What is kept:** a package's image goes with the package, which the retention job deletes an hour after its upload or its last use once no function names it. A function's previous package is still named while an update rolls out, and while a failed one rolls back, so the image a rollback needs is there.
+- **In development:** not `k3d registry create` but a `registry:3.1.2` container on the cluster's network (`hack/k8s/registry-up.sh`). k3d connects its own registries to a cluster only when it creates the cluster; this one is told to the node through containerd's `hosts.toml`, which containerd reads at each pull, so the developer's cluster takes it without being made again or restarted.
+- **The production registry** (Zot in `deploy/k8s/platform`, and the nodes' containerd told where it is) waits for this ADR's confirmation: until then, a production backend without `FF_CODE_REGISTRY` refuses a function naming a package with 503, saying so.

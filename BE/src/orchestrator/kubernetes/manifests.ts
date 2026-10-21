@@ -228,7 +228,8 @@ export function serviceManifest(fn: FunctionWorkload, namespace: string): K8sObj
 export function deploymentManifest(
   fn: FunctionWorkload,
   namespace: string,
-  configMapName: string,
+  /** The ConfigMap of inline code; none for a package, whose code image the pods mount (fn.codeImage). */
+  configMapName: string | undefined,
   hash: string,
   settings: KubernetesSettings,
   replicas: number,
@@ -318,7 +319,10 @@ export function deploymentManifest(
             },
           ],
           volumes: [
-            { name: 'code', configMap: { name: configMapName, defaultMode: 0o444 } },
+            // A package's image, read-only, pulled by the node like the runtime's; or inline code's ConfigMap.
+            fn.codeImage
+              ? { name: 'code', image: { reference: fn.codeImage, pullPolicy: 'IfNotPresent' } }
+              : { name: 'code', configMap: { name: configMapName, defaultMode: 0o444 } },
             { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } },
           ],
         },

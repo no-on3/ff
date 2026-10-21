@@ -5,6 +5,7 @@
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
+import { noPackages } from './test-fixtures';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
@@ -65,6 +66,7 @@ run("functions' environments, sealed in the database (L2)", () => {
       {} as never, // no invocations: no usage records
       {} as never, // nor a balance check
       store,
+      ...noPackages(),
     );
   });
 

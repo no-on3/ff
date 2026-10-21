@@ -98,6 +98,11 @@ function secret(fallback?: string) {
   return z.preprocess(prepare(fallback, false), z.string({ error: 'is required' }));
 }
 
+/** A credential that may be unset: never trimmed, and never repeated in an error message. */
+function optionalSecret() {
+  return z.preprocess(prepare(undefined, false), z.string().optional());
+}
+
 /** A URL that may hold a password: may be unset, and is never repeated in an error message. */
 function optionalSecretUrl(rule: { test: (value: string) => boolean; expected: string }) {
   return z.preprocess(prepare(undefined), z.string().refine(rule.test, { error: `must be ${rule.expected}` }).optional());
@@ -212,6 +217,11 @@ const namespacePrefix = {
   expected: 'ff-t-, the only prefix the admission policy allows (deploy/k8s/base/40-admission-policy.yaml)',
 };
 const imageReference = { test: (v: string) => /^\S+$/.test(v), expected: 'a container image reference' };
+/** A registry as an image reference names it: a host, and a port if any. */
+const registryHost = {
+  test: (v: string) => /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/i.test(v),
+  expected: 'a registry host, and its port if any, such as ff-dev-registry:5000',
+};
 const bucketName = {
   test: (v: string) => /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(v),
   expected: 'an S3 bucket name (3 to 63 lowercase letters, digits, "." and "-")',
@@ -375,6 +385,13 @@ const appShape = {
   // The keys that encrypt functions' environment variables and secrets at rest: one a line, <id>:<32 bytes in base64>,
   // the first sealing. Unset: the development key, which production refuses.
   FF_ENCRYPTION_KEYS_FILE: optionalText(),
+
+  // Functions' code images (ADR 0003): the registry the backend pushes them to (unset: packages can't run here), the
+  // host the cluster's nodes pull them from (the registry's own by default), and a push's credentials, if it needs any.
+  FF_CODE_REGISTRY: optionalText(httpUrl),
+  FF_CODE_REGISTRY_PULL: optionalText(registryHost),
+  FF_CODE_REGISTRY_USERNAME: optionalText(),
+  FF_CODE_REGISTRY_PASSWORD: optionalSecret(),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -407,6 +424,13 @@ function databaseRules(env: DatabaseEnv): string[] {
 function appRules(env: AppEnv): string[] {
   const problems = databaseRules(env);
   const production = env.NODE_ENV === 'production';
+
+  if (!env.FF_CODE_REGISTRY && env.FF_CODE_REGISTRY_PULL) {
+    problems.push('FF_CODE_REGISTRY_PULL is set, but FF_CODE_REGISTRY is not: the backend pushes code images to FF_CODE_REGISTRY');
+  }
+  if (!!env.FF_CODE_REGISTRY_USERNAME !== !!env.FF_CODE_REGISTRY_PASSWORD) {
+    problems.push('FF_CODE_REGISTRY_USERNAME and FF_CODE_REGISTRY_PASSWORD go together: set both, or neither for a registry without a login');
+  }
 
   if (env.FF_DEV_USER_ID !== undefined) {
     problems.push(
@@ -647,6 +671,13 @@ export default function configuration(env: Env = process.env) {
       base: parsed.FF_FUNCTION_URL_BASE.replace(/\/$/, ''),
       edgeAddresses: parsed.FF_EDGE_ADDRESSES,
       domainResolvers: parsed.FF_DOMAIN_RESOLVERS,
+    },
+    // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
+    codeImages: {
+      registry: parsed.FF_CODE_REGISTRY?.replace(/\/$/, '') ?? '',
+      pullHost: parsed.FF_CODE_REGISTRY_PULL ?? (parsed.FF_CODE_REGISTRY ? new URL(parsed.FF_CODE_REGISTRY).host : ''),
+      username: parsed.FF_CODE_REGISTRY_USERNAME ?? '',
+      password: parsed.FF_CODE_REGISTRY_PASSWORD ?? '',
     },
     // What FF keeps encrypted at rest (functions' environments) is sealed with these keys, the first sealing.
     encryption: {

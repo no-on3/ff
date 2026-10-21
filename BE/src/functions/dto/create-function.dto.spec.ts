@@ -184,6 +184,27 @@ describe("a function's handler, as the API takes it: AWS Lambda's", () => {
   });
 });
 
+describe("a function's code, inline or a package, as the API takes it", () => {
+  const create = { name: 'orders', runtime: Runtime.NODEJS, memory: 128, timeout: 5 };
+  const SHA = 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=';
+
+  it('takes a package named by its SHA-256 in place of code, on create and on update', async () => {
+    expect(await validated(CreateFunctionDto, { ...create, codeSha256: SHA })).toMatchObject({ codeSha256: SHA });
+    expect(await validated(UpdateFunctionDto, { codeSha256: SHA })).toMatchObject({ codeSha256: SHA });
+  });
+
+  it('wants code when no package is named, and a SHA-256 in base64 as Lambda gives it', async () => {
+    expect(await validated(CreateFunctionDto, create)).toEqual(['code must be a string']);
+    for (const codeSha256 of ['abc', SHA.replace('=', ''), Buffer.alloc(32).toString('hex'), null]) {
+      expect(await validated(UpdateFunctionDto, { codeSha256 })).toEqual(['codeSha256 must be a SHA-256 in base64, as AWS Lambda gives it: 44 characters ending with =']);
+    }
+  });
+
+  it('lets both through to the service, which says to send one', async () => {
+    expect(await validated(CreateFunctionDto, { ...create, code: 'x', codeSha256: SHA })).toMatchObject({ code: 'x', codeSha256: SHA });
+  });
+});
+
 describe('an update, as the API takes it', () => {
   // Null used to pass for each, as if it were a value, and failed further on.
   it.each([
