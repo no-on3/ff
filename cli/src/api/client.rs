@@ -39,12 +39,18 @@ impl Method {
     }
 }
 
-/// One call: its method and path, its query and JSON body, and how long it may take.
+/// What a call sends: JSON, or bytes of a media type, such as a package's zip.
+enum Body {
+    Json(serde_json::Value),
+    Bytes(Vec<u8>, &'static str),
+}
+
+/// One call: its method and path, its query and body, and how long it may take.
 pub struct Call {
     method: Method,
     path: String,
     query: Vec<(String, String)>,
-    body: Option<serde_json::Value>,
+    body: Option<Body>,
     timeout: Duration,
     accept: &'static str,
 }
@@ -66,15 +72,20 @@ impl Call {
     }
 
     pub fn post(path: impl Into<String>, body: serde_json::Value) -> Call {
-        Call { body: Some(body), ..Call::new(Method::Post, path) }
+        Call { body: Some(Body::Json(body)), ..Call::new(Method::Post, path) }
+    }
+
+    /// A post of bytes, sent as `content_type`.
+    pub fn post_bytes(path: impl Into<String>, bytes: Vec<u8>, content_type: &'static str) -> Call {
+        Call { body: Some(Body::Bytes(bytes, content_type)), ..Call::new(Method::Post, path) }
     }
 
     pub fn put(path: impl Into<String>, body: serde_json::Value) -> Call {
-        Call { body: Some(body), ..Call::new(Method::Put, path) }
+        Call { body: Some(Body::Json(body)), ..Call::new(Method::Put, path) }
     }
 
     pub fn patch(path: impl Into<String>, body: serde_json::Value) -> Call {
-        Call { body: Some(body), ..Call::new(Method::Patch, path) }
+        Call { body: Some(Body::Json(body)), ..Call::new(Method::Patch, path) }
     }
 
     pub fn delete(path: impl Into<String>) -> Call {
@@ -200,7 +211,10 @@ impl Client {
         }
         let request = request.config().timeout_global(Some(call.timeout)).build();
         let sent = match &call.body {
-            Some(body) => request.header("content-type", "application/json").send(body.to_string()),
+            Some(Body::Json(body)) => request.header("content-type", "application/json").send(body.to_string()),
+            Some(Body::Bytes(bytes, content_type)) => {
+                request.header("content-type", *content_type).send(bytes.as_slice())
+            }
             None => request.send_empty(),
         };
         sent.map_err(|error| self.transport_error(error, call.timeout))

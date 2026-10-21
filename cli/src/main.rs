@@ -9,6 +9,7 @@ mod error;
 mod local;
 mod local_url;
 mod output;
+mod package;
 mod progress;
 mod table;
 

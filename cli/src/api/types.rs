@@ -43,6 +43,14 @@ pub struct Function {
     pub updated_at: String,
 }
 
+/// A package the account has, as `POST /packages` and `GET /packages` answer it: its SHA-256
+/// is what ff reads.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredPackage {
+    pub code_sha256: String,
+}
+
 /// A function as ff prints it for scripts: its settings and state, its code's size rather than
 /// its code.
 #[derive(Serialize)]

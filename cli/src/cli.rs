@@ -102,8 +102,11 @@ pub enum Command {
         runtime: Runtime,
     },
 
-    /// Create a function from a file, or update the function of that name with what changed
+    /// Create a function from a file or a folder, or update the function of that name with what changed
     Deploy(DeployArgs),
+
+    /// Make a function's folder a zip with its libraries, as AWS Lambda takes one; ff deploy makes its own
+    Package(PackageArgs),
 
     /// Call a function with an event, and print its answer
     Invoke(InvokeArgs),
@@ -231,16 +234,23 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct DeployArgs {
-    /// The function's file: .ts, .js or .cjs for Node.js, .py for Python
-    pub file: PathBuf,
+    /// The function's file, its code alone: .ts, .js or .cjs for Node.js, .py for Python; or its folder, which ff packages with its libraries
+    pub path: PathBuf,
 
-    /// Its name, else the file's without its extension, or for function.ts or .py, its folder's
+    /// Its name, else the file's without its extension, or for function.ts or .py, its folder's; a folder's own
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Its runtime, else the file's extension says
+    /// Its runtime, else the file's extension says, or a folder's package.json (nodejs), requirements.txt or pyproject.toml (python)
     #[arg(long, value_enum)]
     pub runtime: Option<Runtime>,
+
+    /// What the runtime calls, as AWS Lambda's handler: <file>.<function>, such as src/app.handler [default: the function's, else function.handler; for a folder, index.handler or lambda_function.lambda_handler when it has that file]
+    #[arg(long)]
+    pub handler: Option<String>,
+
+    #[command(flatten)]
+    pub build: BuildArgs,
 
     /// Memory in MB [default for a new function: 128]
     #[arg(long)]
@@ -261,6 +271,44 @@ pub struct DeployArgs {
     /// Its environment variables, KEY=value, repeated: all of them, as on Lambda, those not named removed
     #[arg(long = "env", value_name = "KEY=value")]
     pub env: Vec<String>,
+}
+
+/// How a folder's libraries go into its package.
+#[derive(Args)]
+pub struct BuildArgs {
+    /// Install the libraries in a container of the runtime's base, for its platform exactly, as sam build --use-container: Docker
+    #[arg(long, conflicts_with = "no_build")]
+    pub container: bool,
+
+    /// Install nothing: the folder as it is, its node_modules included
+    #[arg(long)]
+    pub no_build: bool,
+}
+
+#[derive(Args)]
+pub struct PackageArgs {
+    /// The function's folder
+    #[arg(default_value = ".")]
+    pub folder: PathBuf,
+
+    /// The zip to write [default: the folder's .ff/<name>.zip, which no package holds]
+    #[arg(long, value_name = "FILE")]
+    pub zip: Option<PathBuf>,
+
+    /// Its runtime, else package.json says nodejs, requirements.txt or pyproject.toml python
+    #[arg(long, value_enum)]
+    pub runtime: Option<Runtime>,
+
+    /// The handler to look for in the package [default: function.handler, else index.handler or lambda_function.lambda_handler when it has that file]
+    #[arg(long)]
+    pub handler: Option<String>,
+
+    #[command(flatten)]
+    pub build: BuildArgs,
+
+    /// Compile TypeScript with the project's own tsc, leaving out its sources, for AWS Lambda, which runs JavaScript alone
+    #[arg(long, conflicts_with = "no_build")]
+    pub compile: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]

@@ -10,6 +10,7 @@ mod init;
 mod invoke;
 mod local;
 mod logs;
+mod package;
 mod schedule;
 mod secrets;
 mod url;
@@ -44,6 +45,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
     match command {
         Command::Init { name, runtime } => init::run(&name, runtime, context),
         Command::Deploy(args) => deploy::run(args, context),
+        Command::Package(args) => package::run(args, context),
         Command::Invoke(args) => invoke::run(args, context),
         Command::List => functions::list(context),
         Command::Get { name } => functions::get(&name, context),

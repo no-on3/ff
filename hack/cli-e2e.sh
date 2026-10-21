@@ -7,7 +7,9 @@
 # in ff logs --follow, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
 # exit 5 with the call's ID, which the history shows; code that fails to load exits 4, and the
 # function is kept, in ERROR, with its error. A second account finds none of the first's. Then
-# ff init for both runtimes, its folder run locally, deployed and invoked; and ff local, in
+# ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
+# packages with their libraries (an npm library, requests, numpy's native wheels from
+# pyproject.toml), uploaded once, and one built in Docker with --container; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -274,6 +276,85 @@ for runtime in python nodejs; do
   check "and answers on FF" "0 Hello Tunis" "$(code) $(out | sed '$d' | jq -r .message)"
   ff delete "$name" --yes
 done
+
+echo "== packages: a folder with its libraries, packaged, uploaded once, deployed"
+# npm and pip fetch the libraries: this part needs the network, or their caches.
+node_pkg="$work/cli-pkg-node"
+rm -rf "$node_pkg" && mkdir -p "$node_pkg/lib"
+echo '{ "name": "cli-pkg-node", "private": true, "dependencies": { "ms": "2.1.3" } }' >"$node_pkg/package.json"
+cat >"$node_pkg/index.js" <<'EOF'
+const ms = require('ms');
+const { greet } = require('./lib/greet');
+exports.handler = async (event) => ({ took: ms(event.ms), greeting: greet(event.name) });
+EOF
+echo 'exports.greet = (name) => `Hello ${name}`;' >"$node_pkg/lib/greet.js"
+echo 'DB_PASSWORD=hunter2' >"$node_pkg/.env"
+ff deploy "$node_pkg"
+check "deploy of a folder installs its npm library, uploads its package, and makes it live" \
+  "0 created cli-pkg-node (nodejs, 128 MB, 5 s): ACTIVE uploaded" "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//') $(out | tail -1 | awk '{ print $NF }')"
+check "leaving out its .env, and saying so" true "$(err | grep -q '^warning: not packaged: .env, which usually hold secrets' && echo true || echo false)"
+ff invoke cli-pkg-node --data '{"ms": 90000, "name": "Tunis"}'
+check "it answers through its library and its own module" "0 2m Hello Tunis" "$(code) $(out | sed '$d' | jq -r '"\(.took) \(.greeting)"')"
+ff package "$node_pkg" --output json
+node_sha="$(out | jq -r .codeSha256)"
+ff get cli-pkg-node --output json
+check "ff get shows the package ff package makes, by its SHA-256, and the handler ff found" "0 zip index.handler $node_sha" \
+  "$(code) $(out | jq -r '"\(.packageType) \(.handler) \(.codeSha256)"')"
+ff deploy "$node_pkg"
+check "deploy again, the folder unchanged, sends nothing" "0 cli-pkg-node: no changes (nodejs, 128 MB, 5 s, ACTIVE)" "$(code) $(out)"
+sed -i 's/Hello/Ahlan/' "$node_pkg/lib/greet.js"
+ff deploy "$node_pkg"
+check "a change uploads the new package, in one rollout" "0 updated cli-pkg-node (nodejs, 128 MB, 5 s): ACTIVE, changed: code uploaded" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s,/,/') $(out | tail -1 | awk '{ print $NF }')"
+sed -i 's/Ahlan/Hello/' "$node_pkg/lib/greet.js"
+ff deploy "$node_pkg"
+check "and back uploads nothing: the account has that package" "0 which the account had" "$(code) $(out | tail -1 | sed 's/.*, //')"
+ff deploy "$FF_REPO_ROOT/examples/hello.ts" --name cli-pkg-node
+check "a file deployed over it makes it inline code again, with inline code's handler, saying so" \
+  "0 changed: code, handler true" \
+  "$(code) $(out | sed 's/.*, changed/changed/') $(err | grep -q '^warning: cli-pkg-node ran a package: it becomes inline code, .*hello.ts alone, its handler function.handler$' && echo true || echo false)"
+ff invoke cli-pkg-node --data '{"name": "Inline"}'
+check "which answers" "0 Hello Inline" "$(code) $(out | sed '$d' | jq -r .message)"
+ff delete cli-pkg-node --yes
+
+requests_pkg="$work/cli-pkg-requests"
+rm -rf "$requests_pkg" && mkdir -p "$requests_pkg"
+echo 'requests==2.32.5' >"$requests_pkg/requirements.txt"
+cat >"$requests_pkg/lambda_function.py" <<'EOF'
+import requests
+
+
+def lambda_handler(event, context):
+    prepared = requests.Request("GET", "https://example.tn/search", params={"q": event["q"]}).prepare()
+    return {"requests": requests.__version__, "url": prepared.url}
+EOF
+ff deploy "$requests_pkg" --name cli-pkg-requests
+check "a Python folder's requirements, installed as wheels for the runtime, deployed" "0 created cli-pkg-requests (python, 128 MB, 5 s): ACTIVE" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff invoke cli-pkg-requests --data '{"q": "ff"}'
+check "it answers through requests, its handler AWS Lambda's default" "0 2.32.5 https://example.tn/search?q=ff lambda_function.lambda_handler" \
+  "$(code) $(out | sed '$d' | jq -r '"\(.requests) \(.url)"') $("$ff_bin" get cli-pkg-requests --output json | jq -r .handler)"
+ff package "$requests_pkg" --container --zip "$work/requests-container.zip"
+check "ff package --container installs them in the runtime's base, in Docker" "0 true" \
+  "$(code) $(python3 -I -m zipfile -l "$work/requests-container.zip" | grep -q '^requests/__init__.py ' && echo true || echo false)"
+ff delete cli-pkg-requests --yes
+
+numpy_pkg="$work/cli-pkg-numpy"
+rm -rf "$numpy_pkg" && mkdir -p "$numpy_pkg"
+printf '[project]\nname = "cli-pkg-numpy"\nversion = "1.0.0"\ndependencies = ["numpy==2.3.4"]\n' >"$numpy_pkg/pyproject.toml"
+cat >"$numpy_pkg/function.py" <<'EOF'
+import numpy as np
+
+
+def handler(event, context):
+    return {"mean": float(np.array(event["values"], dtype=float).mean()), "numpy": np.__version__}
+EOF
+ff deploy "$numpy_pkg" --name cli-pkg-numpy
+check "pyproject.toml's dependencies, numpy's native wheels among them, deployed" "0 created cli-pkg-numpy (python, 128 MB, 5 s): ACTIVE" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff invoke cli-pkg-numpy --data '{"values": [1, 2, 3, 4]}'
+check "its native code loads in the runtime and answers" "0 2.5 2.3.4" "$(code) $(out | sed '$d' | jq -r '"\(.mean) \(.numpy)"')"
+ff delete cli-pkg-numpy --yes
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts

@@ -70,7 +70,9 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
+    /// The body as text, for JSON; `bytes` holds it as sent, for a zip.
     pub body: String,
+    pub bytes: Vec<u8>,
 }
 
 impl Request {
@@ -185,9 +187,9 @@ fn read_request(stream: &TcpStream) -> Request {
         .find(|(name, _)| name == "content-length")
         .and_then(|(_, value)| value.parse().ok())
         .unwrap_or(0);
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).unwrap();
-    Request { method, path, headers, body: String::from_utf8(body).unwrap() }
+    let mut bytes = vec![0; length];
+    reader.read_exact(&mut bytes).unwrap();
+    Request { method, path, headers, body: String::from_utf8_lossy(&bytes).into_owned(), bytes }
 }
 
 fn write_reply(mut stream: TcpStream, reply: &Reply) {

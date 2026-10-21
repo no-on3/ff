@@ -28,6 +28,12 @@ impl Output {
         }
     }
 
+    /// An output for tests: JSON, nothing on stderr but warnings.
+    #[cfg(test)]
+    pub fn quiet() -> Self {
+        Output { format: Format::Json, verbose: false, quiet: true, color: false }
+    }
+
     /// The command's result: the text, or the value as one JSON document.
     pub fn result<T: Serialize>(&self, value: &T, text: impl FnOnce() -> String) -> Result<(), Error> {
         let mut stdout = io::stdout().lock();
