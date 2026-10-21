@@ -174,6 +174,10 @@ pub enum Command {
     #[command(subcommand)]
     Domains(DomainsCommand),
 
+    /// A function's schedules: runs at the times an EventBridge expression names, in UTC
+    #[command(subcommand)]
+    Schedule(ScheduleCommand),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -545,6 +549,74 @@ pub enum DomainsCommand {
         /// Don't ask first: a script must say it
         #[arg(long, short)]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScheduleCommand {
+    /// List its schedules: each one's expression, whether it runs, its next run and how its last went
+    List {
+        /// The function's name
+        name: String,
+    },
+
+    /// Make a schedule, or change its expression, input or description; then say its next runs
+    Set {
+        /// The function's name
+        name: String,
+
+        /// EventBridge's, in UTC: rate(5 minutes), rate(1 hour), cron(0 2 * * ? *)…
+        expression: String,
+
+        /// The schedule's name, unique within the function
+        #[arg(long = "name", default_value = "schedule")]
+        schedule: String,
+
+        /// The function's event: JSON, @file or - for stdin [default: EventBridge's Scheduled Event]
+        #[arg(long)]
+        input: Option<String>,
+
+        /// Back to EventBridge's Scheduled Event, rather than the input it has
+        #[arg(long)]
+        no_input: bool,
+
+        /// What it is for
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Made, or kept, without running
+        #[arg(long)]
+        disabled: bool,
+    },
+
+    /// Let a schedule run again, from now
+    Enable {
+        /// The function's name
+        name: String,
+
+        /// The schedule's name
+        #[arg(long = "name", default_value = "schedule")]
+        schedule: String,
+    },
+
+    /// Stop a schedule's runs, keeping it
+    Disable {
+        /// The function's name
+        name: String,
+
+        /// The schedule's name
+        #[arg(long = "name", default_value = "schedule")]
+        schedule: String,
+    },
+
+    /// Remove a schedule: it runs no more
+    Remove {
+        /// The function's name
+        name: String,
+
+        /// The schedule's name
+        #[arg(long = "name", default_value = "schedule")]
+        schedule: String,
     },
 }
 

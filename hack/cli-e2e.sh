@@ -227,6 +227,34 @@ ff invoke cli-url --http GET /
 check "after which ff invoke --http has nowhere to call" "3 error: cli-url has no URL: \`ff url enable cli-url --auth none|key\` gives it one" "$(code) $(err)"
 ff delete cli-url --yes
 
+echo "== schedules: ff schedule set, its run, list, disable, remove"
+ff deploy "$FF_REPO_ROOT/examples/hello.py" --name cli-sched
+ff schedule set cli-sched "rate(1 minute)" --input '{"name": "Schedule"}'
+check "ff schedule set makes it, and says its next runs" "0 cli-sched's schedule schedule made: rate(1 minute), with its own input true" \
+  "$(code) $(out | head -1) $(out | sed -n 2p | grep -qE '^next runs \(UTC\): [0-9-]+ [0-9:]+, ' && echo true || echo false)"
+ff schedule set cli-sched "rate(5 minute)"
+check "a wrong expression is said in the API's words, and nothing changes" "3 error: rate(5 minute) must be rate(5 minutes): the unit is plural above 1" "$(code) $(err | head -1)"
+# Its first run comes a minute after it was made, then the scheduler's tick within 5 s.
+ran=false
+for _ in $(seq 1 30); do
+  ff schedule list cli-sched --output json
+  if [ "$(out | jq -r '.[0].lastOutcome')" = success ]; then
+    ran=true
+    break
+  fi
+  sleep 5
+done
+check "within about 70 s it has run, and ff schedule list says it succeeded" true "$ran"
+ff history cli-sched --output json
+check "the history has the call, as a schedule's, with its input" "schedule $(out | jq -r '.invocations[0].id')" \
+  "$(out | jq -r '.invocations[0].source') $(ff schedule list cli-sched --output json; out | jq -r '.[0].lastRequestId')"
+ff schedule disable cli-sched
+check "ff schedule disable stops its runs" "0 cli-sched's schedule schedule disabled: it doesn't run" "$(code) $(out)"
+ff schedule remove cli-sched
+ff schedule list cli-sched
+check "ff schedule remove takes it away" "0 cli-sched has no schedule: \`ff schedule set cli-sched \"rate(1 hour)\"\` makes one" "$(code) $(out)"
+ff delete cli-sched --yes
+
 echo "== ff init: a new function's folder, run locally, then deployed"
 for runtime in python nodejs; do
   name="cli-init-$runtime"

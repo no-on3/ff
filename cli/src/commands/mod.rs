@@ -10,12 +10,15 @@ mod init;
 mod invoke;
 mod local;
 mod logs;
+mod schedule;
 mod secrets;
 mod url;
 mod version;
 mod whoami;
 
-use crate::cli::{Command, ConnectionArgs, DomainsCommand, EnvCommand, LocalCommand, SecretsCommand, UrlCommand};
+use crate::cli::{
+    Command, ConnectionArgs, DomainsCommand, EnvCommand, LocalCommand, ScheduleCommand, SecretsCommand, UrlCommand,
+};
 use crate::config::Settings;
 use crate::error::Error;
 use crate::output::Output;
@@ -71,6 +74,27 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Domains(DomainsCommand::Remove { name, domain, yes }) => {
             url::domains_remove(&name, &domain, yes, context)
         }
+        Command::Schedule(ScheduleCommand::List { name }) => schedule::list(&name, context),
+        Command::Schedule(ScheduleCommand::Set {
+            name,
+            expression,
+            schedule,
+            input,
+            no_input,
+            description,
+            disabled,
+        }) => {
+            let input = schedule::input(input.as_deref())?;
+            let changes = schedule::ScheduleChanges { expression, input, no_input, description, disabled };
+            schedule::set(&name, &schedule, changes, context)
+        }
+        Command::Schedule(ScheduleCommand::Enable { name, schedule }) => {
+            schedule::enable(&name, &schedule, true, context)
+        }
+        Command::Schedule(ScheduleCommand::Disable { name, schedule }) => {
+            schedule::enable(&name, &schedule, false, context)
+        }
+        Command::Schedule(ScheduleCommand::Remove { name, schedule }) => schedule::remove(&name, &schedule, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),
