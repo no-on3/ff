@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed on 2026-10-21. Nothing in it is started. It is a view with an order and reasons, not a plan with tasks. When you pick a step, it gets its own plan, in the format of the [client-readiness plan](client-readiness-plan.md). |
+| **Status** | Proposed on 2026-10-21. It is a view with an order and reasons, not a plan with tasks. When you pick a step, it gets its own plan, in the format of the [client-readiness plan](client-readiness-plan.md). **Step 1 started on 2026-10-21:** its plan is the [step-1 plan](step-1-plan.md), tasks U-00 to U-09, and its progress log says what is done. |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): its Phase 3 (E-01 to E-10), its Phase 4 (S-01 to S-10), §4.6 event sources, §4.7 storage and queues, §6.7 AWS-compatible services, §10 go-to-market |
 | **Builds on** | The [client-readiness plan](client-readiness-plan.md), done up to its pilot-launch tasks, and the [CLI plan](cli-plan.md), not started |
 | **What it is for** | To answer "what do we add after functions?", and to look further ahead |
@@ -50,6 +50,8 @@ One more rule for every service: **a function must reach it over FF's private ne
 ## 4. Step 1: make one function useful
 
 Four gaps stop a customer from running anything real. They come before any new service.
+
+**Under way:** the [step-1 plan](step-1-plan.md) builds this step, in this order: environment variables and secrets; the event a function receives, which must be AWS's before a web address or a schedule can send one; function URLs, their TLS at the edge, and custom domains; schedules; then packages and the `ff` command, as the CLI plan's phases 0 to 2.
 
 | Feature | Why | Parent task | Size |
 |---|---|---|---|
@@ -237,7 +239,7 @@ From the parent plan's non-goals (§1.3, §3.3), with the reason in plain words:
 
 | Order | What | Needs | Size |
 |---|---|---|---|
-| 1 | Step 1: function URLs, secrets, packages and the CLI, schedules | nothing | the CLI plan, plus about 4 weeks |
+| 1 | Step 1: function URLs, secrets, packages and the CLI, schedules. **Under way:** the [step-1 plan](step-1-plan.md) | nothing | the CLI plan, plus about 4 weeks; the step-1 plan says 22 to 32 days besides the CLI (its §10) |
 | 2 | Step 2: managed PostgreSQL, file storage | secrets | medium, plus 2.5 weeks |
 | 3 | Step 3: the queue, as async invoke, SQS queues and bucket notifications | storage | about 6.5 weeks |
 | 4 | Step 4: static sites, e-mail, a cache | storage | medium |

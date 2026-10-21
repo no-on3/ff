@@ -2,12 +2,12 @@
 
 | | |
 |---|---|
-| **Status** | Proposed, not started. Brought up to date on 2026-10-21 with the platform as the [client-readiness plan](client-readiness-plan.md) left it: login and API keys exist, the logs API exists, and unique function names are under way (§1.2). Open questions for you are in §10. |
+| **Status** | Proposed, not started. Brought up to date on 2026-10-21 with the platform as the [client-readiness plan](client-readiness-plan.md) left it: login and API keys exist, the logs API exists, and function names are unique and follow Lambda's rule (§1.2). Its phases 0 to 2 are task U-08 of the [step-1 plan](step-1-plan.md), which also builds this plan's C-31 backend part and answers its question 1. Open questions for you are in §10. |
 | **Replaces** | The plan in `cli/README.md`, which no longer matched the platform (§1). It was removed with the prototypes; git history has it, for example at commit `fb9d833`. |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): finding H-10; tasks R-02 (in part) and R-10; ADR-007 (Rust) and ADR-009 (SAM); §6.1 packaging, §7.1 `ff export`, §7.4 `ff doctor` |
 | **Builds on** | The [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12), the [client-readiness plan](client-readiness-plan.md) (accounts, API keys, logs, metrics, usage) and the [getting-started guide](getting-started.md) |
 | **Decision records** | ADR 0002 (the CLI) in C-00, ADR 0003 (code delivery) in C-20. [ADR 0004](adr/0004-identity-and-tenancy.md) already names the CLI's Keycloak client, `ff-cli`, and its login flow. |
-| **Comes next** | [What to build next](what-to-build-next.md): the CLI side of each new service is phase 5 here |
+| **Comes next** | [What to build next](what-to-build-next.md): the CLI side of each new service is phase 5 here. Step 1's services (environment and secrets, function URLs, schedules) come from the [step-1 plan](step-1-plan.md) |
 
 FF needs one command-line tool for developers. With it you write a function, run it locally in the same runtime it gets in production, deploy it, invoke it, read its logs, and later package it with dependencies, all with the packaging rules of AWS Lambda. That way a project built on FF can move to AWS without changes. Today that work is done with the `curl` commands in the getting-started guide. The two CLI prototypes that were in the repository couldn't do it (§1).
 
@@ -49,7 +49,7 @@ The client-readiness plan ran from 2026-10-17 to 2026-10-20. This plan was writt
 |---|---|---|
 | No login. The tenant came from a development variable. | **Every route needs a Keycloak token or an API key** (P-11, P-13). An API key is `ffk_<key ID>_<secret>`, with scopes (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`, `metrics:read`, `alarms:read`, `alarms:write`, `usage:read`), created in the console by an owner. Roles: `owner`, `developer`, `viewer`; a viewer can't deploy or invoke. A user with several accounts names one in the `X-FF-Account` header. The development stack has `FF_AUTH_MODE=dev`, where `X-FF-Dev-Account` picks the account, as `hack/e2e.sh` does. Both Keycloak realm files already hold a public client `ff-cli` with the device flow turned on and the `ff-api` audience. | Phase 1 works with an API key (D8, C-02). `ff login` (C-40) is no longer blocked; it can move up whenever you want (§10, question 7). New account commands (C-09). |
 | No logs API | **Done by P-40 and P-43:** `GET /functions/:id/logs` (a page, oldest first, with `tail`, `sinceSeconds`, `start`, `end`, `limit`, a phrase `q`, `requestId`, and a `cursor`/`next` pair) and `GET /functions/:id/logs/stream`, the live tail as Server-Sent Events. Lines outlive their instance (the plan's `logRetentionDays`). 503 while the log store is unavailable. | C-05 is CLI-only, and `--follow` streams instead of polling |
-| Names weren't unique | **Under way on 2026-10-21, in the working tree, outside this plan:** a name belongs to one function of its account, 1 to 100 characters, trimmed, compared exactly (`Hello` and `hello` are two names), with `409 Conflict` on a duplicate and a migration that renames existing duplicates. Lambda's character rule isn't enforced, and `GET /functions` has no `name` filter. | D3 and C-03 updated: the CLI resolves a name from the list, warns when a name wouldn't work on Lambda, and `ff export` maps such names (§10, question 6) |
+| Names weren't unique | **Done on 2026-10-21, outside this plan** (commit `1bd102e`): a name belongs to one function of its account and follows Lambda's rule, 1 to 64 letters, digits, hyphens or underscores, compared exactly (`Hello` and `hello` are two names). A name outside the rule answers `400`, another create or rename with a name in use `409 Conflict`, and the migration renamed the duplicates already there. A name given before the rule is kept until the function is renamed. `GET /functions` has no `name` filter. | D3 and C-03 updated: the CLI resolves a name from the list, and checks Lambda's rule before it sends one; `ff export` maps an older name (§10, question 6, decided) |
 | Invoke answered 200, or 400 on a function error | **201 with the invocation record** (P-08): `id`, `status` (`COMPLETED`, `ERROR`, `TIMEOUT`, `THROTTLED`), `duration`, `memoryUsed`, `output`, `error`. A function error or timeout answers 400 with `ErrorType: message`; a function that can't load, 400 "The function failed to load: …"; no free instance in time, 429; a platform failure, 500 with a request ID; no credit, 402 (P-33). **The invocation's ID is the request ID** that the runtime logs (P-20), so `ff invoke` prints it and `ff logs --request-id` finds the call's lines. | C-04 and D7 |
 | No plans | **Plans** (P-15) set the account's limits: functions, memory and timeout per function, instances per function, changes per minute and invocations per second (429 with `Retry-After`), log and history retention, idle time, internet egress (off on `beta`). | C-02 honours `Retry-After` on reads; `ff account` shows the plan and egress |
 | One instance per function | `minInstances` and `maxInstances` per function, `GET`/`PUT /functions/:id/scaling-config` (P-06, D14) | `ff scale` (C-04) |
@@ -109,9 +109,9 @@ Decisions D1–D3, D5, D7 and D8 are recorded in ADR 0002 (task C-00). D4 is dec
 - **TLS:** plain `http://` is accepted only for `localhost` and `127.0.0.1`, unless `--allow-http` is given.
 
 ### D3. Functions are addressed by name, as on Lambda
-`ff invoke hello`, not a UUID. The API is making names unique per account (§1.2), compared exactly and trimmed, so a name always finds one function. The CLI finds it in `GET /functions` (a plan caps the number of functions, so the list is short); a `name` filter on that route is a convenience for later (C-03).
+`ff invoke hello`, not a UUID. Names are unique per account (§1.2), compared exactly, so a name always finds one function. The CLI finds it in `GET /functions` (a plan caps the number of functions, so the list is short); a `name` filter on that route is a convenience for later (C-03).
 
-The API doesn't enforce Lambda's character rule, `^[A-Za-z0-9_-]{1,64}$` (parent M-4). The CLI does what it can for portability: `ff deploy` warns when a name wouldn't work on Lambda, `ff doctor` flags it, and `ff export` derives a logical ID from such a name and says so (§10, question 6).
+The API enforces Lambda's character rule, `^[A-Za-z0-9_-]{1,64}$` (parent M-4), on every name it is sent. A function named before the rule may keep a name outside it until it is renamed: `ff doctor` flags such a name, and `ff export` derives a logical ID from it and says so (§10, question 6).
 
 ### D4. How packaged code reaches the pods (ADR 0003, after the C-20 spike)
 Inline code fits in a ConfigMap today, which is limited to 1 MiB. A zip with `node_modules` does not. The options:
@@ -248,8 +248,8 @@ developer machine                                   FF platform
 | Change | Why | Task | State on 2026-10-21 |
 |---|---|---|---|
 | Raise the API's JSON body limit to 7 MB. Check code against the real 900 KiB limit, and invoke input against Lambda's 6 MB, with clear messages. | The measured 100 KB default blocks both | C-03 | not started |
-| Unique function names per account | Address functions by name (D3) | C-03 | under way outside this plan (§1.2) |
-| Lambda's naming rule, and `GET /functions?name=` | Portability; a shortcut for the CLI | C-03 | open: §10, question 6 |
+| Unique function names per account | Address functions by name (D3) | C-03 | **done** (`1bd102e`, §1.2) |
+| Lambda's naming rule, and `GET /functions?name=` | Portability; a shortcut for the CLI | C-03 | the rule **done** (`1bd102e`); the filter not started |
 | `GET /functions/:id/logs` and `/logs/stream` | `ff logs` without cluster access | C-05 | **done** (P-40, P-43) |
 | Authentication: tokens, API keys, the `ff-cli` client | `ff` for customers and CI | C-02, C-40 | **done** (P-11, P-13; the realm has the client) |
 | Metrics, usage, balance, `/me` and `/accounts/:id` | `ff metrics`, `ff usage`, `ff balance`, `ff whoami` | C-09 | **done** (P-12, P-22, P-31, P-50) |
@@ -257,10 +257,11 @@ developer machine                                   FF platform
 | Upload, validation, and artifact storage | Zip packages, safely | C-22 | not started |
 | Version images and a registry (if ADR 0003 picks option A) | Delivering zips to pods (D4) | C-23 | not started |
 | Node.js runtime on glibc | Native modules (D6) | C-25 | not started |
-| Function environment variables (Lambda limit: 4 KB) | SAM `Environment`, and everyday configuration | C-31 | not started; step 1 of [What to build next](what-to-build-next.md) |
+| Function environment variables (Lambda limit: 4 KB), and secrets | SAM `Environment`, and everyday configuration | C-31, C-53 | under way: the [step-1 plan](step-1-plan.md)'s U-01 and U-02 |
 | `GET /functions/:id/code` (the zip, or the inline file) | `ff export` | C-32 | not started |
-| The Lambda event shape | Portability of handler code (§10, question 1) | Parent R-04 | open |
-| Function URLs, schedules, async invokes, queues, buckets, secrets | Phase 5 | Parent E-01 to E-05 | not started; steps 1 to 3 of [What to build next](what-to-build-next.md) |
+| The Lambda event shape | Portability of handler code (§10, question 1) | Parent R-04 | under way: the [step-1 plan](step-1-plan.md)'s U-03 |
+| Function URLs and schedules | Phase 5 | Parent E-01, E-02 | under way: the [step-1 plan](step-1-plan.md)'s U-04 to U-07 |
+| Async invokes, queues, buckets | Phase 5 | Parent E-03 to E-05 | not started; steps 2 and 3 of [What to build next](what-to-build-next.md) |
 
 ## 7. Working rules
 
@@ -324,9 +325,8 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
   - the JSON body limit raised to 7 MB where the app is set up (`BE/src/app-setup.ts`), on NestJS 12;
   - code limited to 900 KiB (in bytes, checked in the DTO, with a message that names the limit);
   - invoke input limited to 6 MB once serialized, answered with 413 and `RequestEntityTooLargeException`, Lambda's name.
-- **Names.** Unique names per account are under way outside this plan (§1.2): the unique index on `(account_id, name)`, `409 Conflict`, and the migration that renames duplicates. What this task adds, once that lands:
-  - `GET /functions?name=<name>`, so the CLI needn't list to resolve a name;
-  - Lambda's naming rule as the API's rule **only if** you decide so in §10, question 6; otherwise nothing, and the CLI warns.
+- **Names.** Unique names per account, with Lambda's rule, were done outside this plan (§1.2): the unique index on `(account_id, name)`, `400` for a name outside the rule, `409 Conflict`, and the migration that renamed duplicates. What this task adds:
+  - `GET /functions?name=<name>`, so the CLI needn't list to resolve a name.
 - **Tests:**
   - L1: DTO validation, and the conflict on create and on rename.
   - The e2e script gains checks that 150 KB of code is accepted, 1 MB is refused with the clear message, and a 1 MB input is accepted.
@@ -334,7 +334,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 
 #### C-04: Core commands
 - **`ff deploy <file>`:**
-  - the name comes from `--name`, else the file name without its extension, trimmed as the API trims it; a name outside Lambda's rule gets a warning (D3);
+  - the name comes from `--name`, else the file name without its extension; a name outside Lambda's rule is refused before anything is sent, with the rule (D3);
   - the runtime comes from the extension (`.ts`, `.js`, `.cjs` → `nodejs`; `.py` → `python`), or `--runtime`;
   - the CLI looks the name up in the list, then creates the function or updates it with only the changed fields; `--min-instances` and `--max-instances` go to `PUT /functions/:id/scaling-config` after the rollout;
   - "no changes" when the SHA-256 of the code equals the server's;
@@ -497,16 +497,14 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 - **Tests:** L1 for template fixtures (valid, unsupported, malformed); L3 for a `sam init` hello world deployed unchanged; L4 `sam validate` on the fixtures, where available.
 
 #### C-31: Function environment variables (backend and CLI)
-- **Field:** `environment`, a map of names to values, limited to 4 KB in total, as on Lambda.
-- **Names:** must be valid variable names. The reserved prefixes `AWS_`, `LAMBDA_`, `FF_`, and `FUNCTION_` are refused (parent §6.2).
-- **Delivery:** injected into the Deployment. Values are never logged, and the API never returns them to a `viewer`.
+- **The backend part is the [step-1 plan](step-1-plan.md)'s U-01** (its D1, D3 and D4): `environment`, a map of names to values, Lambda's rules for names, the names Lambda reserves and FF's own refused, at most 4 KB as Lambda measures it, encrypted at rest, delivered through a Kubernetes Secret that the backend writes and never reads. Variables are readable like the code; values no one may read back are secrets (U-02, and C-53 here).
 - **CLI:** `--env KEY=value` on `ff deploy` (repeatable), and `ff env list|set|unset <name>`: `list` hides values unless `--show`; `set` reads a value from stdin when none is given, so secrets stay out of the shell's history. `ff local` passes `--env` to the container.
-- **Secrets:** later, from the secrets store (OpenBao, parent §4.10), as step 1 of [What to build next](what-to-build-next.md) says.
+- **Secrets:** `ff secrets`, C-53, on the step-1 plan's U-02.
 - **Tests:** L1 for validation and manifests, and the CLI's parsing; L3 for a function reading its variable, deployed with `--env` and changed with `ff env set`.
 
 #### C-32: `ff export --target aws` (parent §7.1, first slice)
 - For each function, `ff export` writes a SAM `template.yaml`: runtime names mapped back, `Handler`, `MemorySize`, `Timeout`, `Environment` (names only, unless `--with-values`), and `minInstances` as provisioned concurrency.
-- A name outside Lambda's rule becomes a logical ID made of its letters, digits, `_` and `-`, and the export's checklist lists each such rename (D3).
+- A name from before Lambda's rule became the API's, outside it, becomes a logical ID made of its letters, digits, `_` and `-`, and the export's checklist lists each such rename (D3).
 - It also writes the code zips, compiled to JavaScript for Node.js. The backend gains `GET /functions/:id/code` for this.
 - It adds a `MIGRATION.md` checklist. Terraform output comes later.
 - **Tests:** L1 for the generated template against fixtures, including a renamed function; L4 `sam validate` on the output; L3 for an export after a deploy.
@@ -514,7 +512,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 #### C-33: `ff doctor` (parent §7.4, first slice)
 - **Static checks on a project:**
   - memory, timeout, and payload beyond Lambda's limits;
-  - a function name outside Lambda's rule (D3);
+  - a function name from before the API took Lambda's rule, outside it (D3);
   - writes outside `/tmp` (heuristic);
   - FF-only environment variables and hard-coded FF endpoints;
   - deprecated runtimes;
@@ -572,8 +570,8 @@ The CLI side of steps 1 to 3 of [What to build next](what-to-build-next.md). Eac
 |---|---|
 | The registry (option A) adds an operated component | The C-20 spike measures it first. Zot is a single binary with built-in GC. It also fixes the dev cluster's image GC problem. |
 | Native modules built for the wrong platform | D6 (glibc Node.js runtime), `--container` builds, and pip's `--platform` wheels |
-| Portability is only skin-deep while handlers read `event.body` | §10, question 1; `ff doctor` flags it meanwhile |
-| Function names outside Lambda's rule reach AWS and `sam deploy` fails | `ff deploy` warns, `ff doctor` flags, `ff export` renames and says so (D3); or the API adopts Lambda's rule (§10, question 6) |
+| Portability is only skin-deep while handlers read `event.body` | §10, question 1, answered by the step-1 plan's U-03; `ff doctor` flags functions still on the wrapper |
+| Function names outside Lambda's rule reach AWS and `sam deploy` fails | The API refuses them since `1bd102e`; for a name from before, `ff doctor` flags it and `ff export` renames it and says so (D3) |
 | A token lands in the shell history or in logs | No `--token` flag (D2); `set-token` and `env set` read from stdin; `config show` masks the token; `--verbose` never prints headers |
 | Cold starts at the smallest size (6 to 11 s under gVisor, client-readiness P-62) make `deploy` and `local` feel slow | `ff local start` keeps a container warm while developing; the migration plan's K-13 continues on the platform side |
 | The live tail doesn't work through a proxy that buffers responses | `--follow --poll` falls back to polling (C-05) |
@@ -583,12 +581,12 @@ The CLI side of steps 1 to 3 of [What to build next](what-to-build-next.md). Eac
 
 ## 10. Open questions for you
 
-1. **Event shape.** Today both runtimes hand the payload to the handler as `event.body`, inside `{body, headers, method, query, path}` built from the HTTP request to `/invoke`. That is the old wrapper's format, kept in K-05. On AWS Lambda, a direct invoke passes the payload as `event` itself, and the parent plan's runtime contract (§6.2, task R-04) follows Lambda. Code written for FF today therefore needs changes on Lambda. Function URLs (step 1 of [What to build next](what-to-build-next.md)) will need the API Gateway v2 shape too, where `body` is a string and `isBase64Encoded` says how to read it. **Recommendation:** add runtime protocol v3, where the payload is the event for direct invokes and the API Gateway v2 shape for URLs, as the default for new functions, and keep the wrapper per function for existing ones. `ff init` templates follow it, which is why this question comes before C-07.
+1. **Event shape.** Today both runtimes hand the payload to the handler as `event.body`, inside `{body, headers, method, query, path}` built from the HTTP request to `/invoke`. That is the old wrapper's format, kept in K-05. On AWS Lambda, a direct invoke passes the payload as `event` itself, and the parent plan's runtime contract (§6.2, task R-04) follows Lambda. Code written for FF today therefore needs changes on Lambda. Function URLs (step 1 of [What to build next](what-to-build-next.md)) will need the API Gateway v2 shape too, where `body` is a string and `isBase64Encoded` says how to read it. **Recommendation:** add runtime protocol v3, where the payload is the event for direct invokes and the API Gateway v2 shape for URLs, as the default for new functions, and keep the wrapper per function for existing ones. `ff init` templates follow it, which is why this question comes before C-07. **Taken up by the [step-1 plan](step-1-plan.md)** (its D5, task U-03, ADR 0007), with this recommendation; its §9 asks you to confirm it.
 2. **Code delivery.** May the C-20 spike go ahead with option A? It adds a registry to the platform.
 3. **Where releases and images live.** Which domain or registry should host the CLI downloads and the public runtime images, given that customers may not rely on GitHub?
 4. **Inline code long-term.** Should the API's `code` field stay as a convenience for the console, with C-24 making it a zip internally? That is the recommendation.
 5. **Windows.** Is it needed in phase 4, or only when a customer asks?
-6. **Function names.** The API is adopting unique names of 1 to 100 characters, any characters. Lambda allows 1 to 64 of `A-Z a-z 0-9 _ -`. Should the API adopt Lambda's rule (which refuses names the console accepts today, and needs a renaming migration), or keep its rule while the CLI warns and `ff export` renames? **Recommendation:** keep the API's rule, warn in the CLI. Nothing on FF breaks with a longer name, and the export handles the rest.
+6. **Function names.** ~~Should the API adopt Lambda's rule, or keep its own while the CLI warns?~~ **Decided on 2026-10-21:** the API adopted Lambda's rule, 1 to 64 letters, digits, hyphens or underscores, with unique names per account (commit `1bd102e`). A name given before is kept until the function is renamed, which `ff doctor` and `ff export` handle (D3).
 7. **`ff login` sooner.** Its Keycloak client exists, and nothing blocks it. Phase 1 works with API keys. Should C-40 move right after C-09, so the first customers never paste a key? **Recommendation:** yes, if the first pilot customers are teams that log in to the console anyway; otherwise keep the order.
 
 ## 11. Effort (rough estimates)
@@ -609,7 +607,7 @@ The CLI side of steps 1 to 3 of [What to build next](what-to-build-next.md). Eac
 | C-00 Preparation and ADR 0002 | ⏳ Planned | | |
 | C-01 One CLI | ⏳ Planned | | |
 | C-02 Configuration, authentication and API client | ⏳ Planned | | |
-| C-03 Backend: request limits and names | 🔶 Names under way outside this plan (2026-10-21, uncommitted in the working tree); the limits are not started | | |
+| C-03 Backend: request limits and names | 🔶 Names done outside this plan (unique, with Lambda's rule) | `1bd102e` | The limits and the `name` filter are not started |
 | C-04 Core commands | ⏳ Planned | | |
 | C-05 Logs | 🔶 Backend done (client-readiness P-40, P-43); the CLI part is planned | | |
 | C-06 Local runs | ⏳ Planned | | |
@@ -625,14 +623,14 @@ The CLI side of steps 1 to 3 of [What to build next](what-to-build-next.md). Eac
 | C-26 `ff package` and zip deploys | ⏳ Planned | | |
 | C-27 Phase-2 docs and e2e | ⏳ Planned | | |
 | C-30 SAM `template.yaml` | ⏳ Planned | | |
-| C-31 Environment variables | ⏳ Planned | | |
+| C-31 Environment variables | ⏳ Planned; its backend part is the step-1 plan's U-01 | | |
 | C-32 `ff export --target aws` | ⏳ Planned | | |
 | C-33 `ff doctor` | ⏳ Planned | | |
 | C-40 `ff login` and API keys | ⏳ Planned, unblocked (the `ff-cli` client exists) | | |
 | C-41 Distribution | ⏳ Planned | | |
 | C-42 Published runtime images | ⏳ Planned | | |
 | C-43 CI usage | ⏳ Planned | | |
-| C-50 Function URLs and custom domains | ⏳ Waits for the platform (parent E-01) | | |
-| C-51 Schedules | ⏳ Waits for the platform (parent E-02) | | |
+| C-50 Function URLs and custom domains | ⏳ Waits for the platform: the step-1 plan's U-04 and U-06 | | |
+| C-51 Schedules | ⏳ Waits for the platform: the step-1 plan's U-07 | | |
 | C-52 Async invokes, queues and event sources | ⏳ Waits for the platform (parent E-03, E-05) | | |
-| C-53 Buckets and secrets | ⏳ Waits for the platform (parent E-04) | | |
+| C-53 Buckets and secrets | ⏳ Waits for the platform: secrets, the step-1 plan's U-02; buckets, step 2 (parent E-04) | | |

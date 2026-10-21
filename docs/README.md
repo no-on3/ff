@@ -6,9 +6,10 @@
 | [How FF works](how-it-works.html) | Every feature from request to result, as step-by-step simulations with the messages, records, and Kubernetes objects at each hop. Open it in a browser |
 | [Kubernetes dev guide](kubernetes-dev-guide.md) | The local cluster, runtime images, tests, the gVisor sandbox, the log pipeline, troubleshooting |
 | [Kubernetes migration plan](kubernetes-migration-plan.md) | How FF moved from Nomad to Kubernetes, task by task (K-00 to K-13) |
-| [CLI plan](cli-plan.md) | The `ff` command-line tool, in six phases (proposed; brought up to date on 2026-10-21 with login, API keys, the logs API and unique names) |
+| [CLI plan](cli-plan.md) | The `ff` command-line tool, in six phases (proposed; brought up to date on 2026-10-21 with login, API keys, the logs API and unique names). Its phases 0 to 2 are step 1's U-08 |
 | [Client-readiness plan](client-readiness-plan.md) | Accounts and isolation, metering, prepaid credit at AWS prices in dinars, customer logs, metrics and alarms, the admin dashboard, the production setup, and the pilot launch. Under way: its progress log (section 11) says what is done |
 | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md) | The product and portability roadmap |
+| [Step 1 plan](step-1-plan.md) | Make one function useful: environment variables and secrets, AWS's events, function URLs with TLS and custom domains, schedules, then packages and the CLI. Under way: its progress log (section 11) says what is done |
 | [What to build next](what-to-build-next.md) | What to add after functions, in which order and why: the next five steps (web addresses, secrets, packages, schedules; a database and file storage; queues; sites, e-mail, a cache; the way out to AWS), then the longer view (proposed) |
 | [ADR 0001](adr/0001-orchestrator-kubernetes.md) | Why Kubernetes is FF's orchestrator |
 | [ADR 0004](adr/0004-identity-and-tenancy.md) | Accounts, Keycloak login, API keys, account-scoped access, plans, and the operators' separate login. ADR 0002 and 0003 are reserved by the CLI plan |

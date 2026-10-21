@@ -112,6 +112,8 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.
 - [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in six phases (proposed).
+- [What to build next](docs/what-to-build-next.md): what FF adds after functions, in five steps, and the longer view.
+- [Step 1 plan](docs/step-1-plan.md): environment variables and secrets, AWS's events, function URLs, schedules, packages and the CLI, task by task, with its progress log.
 - [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why; how to deploy the platform.
 - [deploy/backup](deploy/backup/README.md): the backups, the restore runbook and the monthly drill.
 - [The documentation's index](docs/README.md), with the architecture decisions (ADRs).
