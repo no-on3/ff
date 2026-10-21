@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Status** | Proposed, not started. Brought up to date on 2026-10-21 with the platform as the [client-readiness plan](client-readiness-plan.md) left it: login and API keys exist, the logs API exists, and function names are unique and follow Lambda's rule (§1.2). Its phases 0 to 2 are task U-08 of the [step-1 plan](step-1-plan.md), which also builds this plan's C-31 backend part and answers its question 1. Open questions for you are in §10. |
+| **Status** | Started on 2026-10-21: its phases 0 to 2 are task U-08 of the [step-1 plan](step-1-plan.md), on that plan's branch, `feat/step-1`; the step-1 plan also built this plan's C-31 backend part and answered its question 1. What is done is in the progress log (§12). Brought up to date on 2026-10-21 with the platform as the [client-readiness plan](client-readiness-plan.md) left it: login and API keys exist, the logs API exists, and function names are unique and follow Lambda's rule (§1.2). Open questions for you are in §10. |
 | **Replaces** | The plan in `cli/README.md`, which no longer matched the platform (§1). It was removed with the prototypes; git history has it, for example at commit `fb9d833`. |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): finding H-10; tasks R-02 (in part) and R-10; ADR-007 (Rust) and ADR-009 (SAM); §6.1 packaging, §7.1 `ff export`, §7.4 `ff doctor` |
 | **Builds on** | The [Kubernetes migration](kubernetes-migration-plan.md) (K-00 to K-12), the [client-readiness plan](client-readiness-plan.md) (accounts, API keys, logs, metrics, usage) and the [getting-started guide](getting-started.md) |
-| **Decision records** | ADR 0002 (the CLI) in C-00, ADR 0003 (code delivery) in C-20. [ADR 0004](adr/0004-identity-and-tenancy.md) already names the CLI's Keycloak client, `ff-cli`, and its login flow. |
+| **Decision records** | [ADR 0002](adr/0002-cli.md) (the CLI) in C-00, ADR 0003 (code delivery) in C-20. [ADR 0004](adr/0004-identity-and-tenancy.md) already names the CLI's Keycloak client, `ff-cli`, and its login flow. |
 | **Comes next** | [What to build next](what-to-build-next.md): the CLI side of each new service is phase 5 here. Step 1's services (environment and secrets, function URLs, schedules) come from the [step-1 plan](step-1-plan.md) |
 
 FF needs one command-line tool for developers. With it you write a function, run it locally in the same runtime it gets in production, deploy it, invoke it, read its logs, and later package it with dependencies, all with the packaging rules of AWS Lambda. That way a project built on FF can move to AWS without changes. Today that work is done with the `curl` commands in the getting-started guide. The two CLI prototypes that were in the repository couldn't do it (§1).
@@ -76,7 +76,7 @@ The client-readiness plan ran from 2026-10-17 to 2026-10-20. This plan was writt
 
 ## 3. Decisions
 
-Decisions D1–D3, D5, D7 and D8 are recorded in ADR 0002 (task C-00). D4 is decided by a spike and recorded in ADR 0003 (C-20).
+Decisions D1–D3, D5, D7 and D8 are recorded in [ADR 0002](adr/0002-cli.md) (task C-00). D4 is decided by a spike and recorded in ADR 0003 (C-20).
 
 ### D1. Rust, one binary, talking only to the API
 - **Crates:**
@@ -268,7 +268,7 @@ developer machine                                   FF platform
 These are the same as the Kubernetes migration and the client-readiness plan:
 - `hack/check-resources.sh` runs before every heavy step: builds, Docker runs, cluster tests.
 - One heavy operation at a time.
-- Work on a branch `feat/cli`, with one commit per task: `type(scope): summary (C-xx)`. Task numbers go in commit messages and in this plan, not in code comments, tests or API documentation, which explain their context in plain words instead.
+- Work on the step-1 plan's branch, `feat/step-1`, since phases 0 to 2 are its U-08 (the branch `feat/cli` this plan first named isn't made), with one commit per task: `type(scope): summary (C-xx)`. Task numbers go in commit messages and in this plan, not in code comments, tests or API documentation, which explain their context in plain words instead.
 - Each task's progress row records its tests and documentation.
 - The CLI's checks join `hack/ci.sh` (C-08), and `hack/install-tools.sh` installs the Rust toolchain it needs.
 
@@ -604,7 +604,7 @@ The CLI side of steps 1 to 3 of [What to build next](what-to-build-next.md). Eac
 
 | Task | Status | Commit | Evidence |
 |---|---|---|---|
-| C-00 Preparation and ADR 0002 | ⏳ Planned | | |
+| C-00 Preparation and ADR 0002 | ✅ Done | (this commit) | • **[ADR 0002](adr/0002-cli.md)** records D1 (one Rust binary that talks only to the API, its crates, no async runtime and no S3 client), D2 (profiles, the credentials file, precedence, no `--token`, the TLS rule), D3 (names), D5 (Lambda's packaging rules), D7 (exit codes) and D8 (an API key first, `ff login` later), naming the parent's ADR-007 and ADR-009 and [ADR 0004](adr/0004-identity-and-tenancy.md)'s `ff-cli` client. It checked D1 against today's crates: `ureq` 3.4 has the `platform-verifier` feature for the system's certificates.<br>• **The branch:** the work is the step-1 plan's U-08, so it goes on that plan's branch, `feat/step-1` (§7 says so), not on a `feat/cli` of its own.<br>• The docs' index lists ADR 0002; ADR 0004's row reserves only 0003 now.<br>• `hack/check-docs.py`: OK. |
 | C-01 One CLI | ⏳ Planned | | |
 | C-02 Configuration, authentication and API client | ⏳ Planned | | |
 | C-03 Backend: request limits and names | 🔶 Names done outside this plan (unique, with Lambda's rule) | `1bd102e` | The limits and the `name` filter are not started |
