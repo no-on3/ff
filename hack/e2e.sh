@@ -184,6 +184,50 @@ check "handler output is returned, with the Lambda context" "Hello Python 128" \
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
 
+echo "== the API's request limits, and a function found by its name"
+# Bodies this large go through files: a command line's argument holds 128 KiB at most.
+xs() { head -c "$1" /dev/zero | tr '\0' x; }
+greeter='export async function handler(event: { name?: string }) {
+  return { message: `Hello ${event.name ?? "world"}` };
+}'
+{ printf '// '; xs 150000; printf '\n%s\n' "$greeter"; } >"$work/large.ts"
+jq -n --rawfile code "$work/large.ts" '{name: "e2e-large", runtime: "nodejs", code: $code, memory: 128, timeout: 5}' >"$work/large.json"
+created="$(http POST /functions "" --data-binary @"$work/large.json")"
+check "a function with 150 KB of code is made, which a body of 100 KB at most refused before" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
+large_id="$(jq -r .id <<<"$created")"
+check "GET /functions?name= finds it, and only it" "1 $large_id" "$(http GET '/functions?name=e2e-large' | jq -r '"\(length) \(.[0].id)"')"
+check "and compares names exactly: another case finds none" 0 "$(http GET '/functions?name=e2e-LARGE' | jq length)"
+xs 1048576 >"$work/huge.ts"
+jq -n --rawfile code "$work/huge.ts" '{code: $code}' >"$work/huge.json"
+http PUT "/functions/$large_id" "" --data-binary @"$work/huge.json" >/dev/null
+check "1 MiB of code is refused, saying the limit, and the function stays as it was" \
+  "400 code is 1,048,576 bytes of UTF-8; it may have 921,600 at most, what a function's ConfigMap holds (900 KiB) ACTIVE" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$large_id" | jq -r .status)"
+xs 1000000 >"$work/name.txt"
+jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
+invoked="$(http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json")"
+check "an input of 1 MB is taken, and its answer comes whole" "201 COMPLETED 1000006" "$(status) $(jq -r '"\(.status) \(.output.message | length)"' <<<"$invoked")"
+xs 6300000 >"$work/name.txt"
+jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
+http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json" >/dev/null
+check "an input over 6 MB is refused as AWS Lambda refuses it, and nothing runs" \
+  "413 RequestEntityTooLargeException Request must be smaller than 6291456 bytes for the InvokeFunction operation: the input is 6300011 bytes as JSON 1" \
+  "$(status) $(jq -r '"\(.error) \(.message)"' "$work/body") $(http GET "/functions/$large_id/invocations" | jq -r .total)"
+xs 7400000 >"$work/name.txt"
+jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
+http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json" >/dev/null
+check "a body over 7 MB is refused, saying the limits" \
+  "413 The request's body is over 7 MB (7,340,032 bytes): a function's code may have 900 KiB, an invocation's input 6 MB" \
+  "$(status) $(jq -r .message "$work/body")"
+xs 120000 >"$work/name.txt"
+jq -n --rawfile name "$work/name.txt" '{name: "e2e-large", expression: "rate(1 hour)", input: {name: $name}}' >"$work/schedule.json"
+http POST "/functions/$large_id/schedules" "" --data-binary @"$work/schedule.json" >/dev/null
+check "any other body over 100 KB is refused with 413 and why, where the API answered 500 before" \
+  "413 The request's body is over 100 KB (102,400 bytes), this route's limit true" \
+  "$(status) $(jq -r .message "$work/body") $(jq -r '.requestId | length == 36' "$work/body")"
+http DELETE "/functions/$large_id" >/dev/null
+check "delete returns 200" 200 "$(status)"
+
 echo "== environment variables"
 # A variable of its own for the function: the sections below still read $id, the Python function's.
 # Read with the stack's own PostgreSQL: what the database holds of them.

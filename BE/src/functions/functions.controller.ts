@@ -7,6 +7,7 @@ import { Invocation } from '../plans/rate-limits';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
+import { ListFunctionsQuery } from './dto/list-functions.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { SecretsView, UpdateSecretsDto } from './dto/secrets.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
@@ -51,10 +52,10 @@ export class FunctionsController {
 
   @Get()
   @RequireScope('functions:read')
-  @ApiOperation({ summary: "List the account's functions" })
+  @ApiOperation({ summary: "List the account's functions, newest first; with name, the one of that name" })
   @ApiResponse({ status: 200, description: 'List of functions', type: [Function] })
-  async findAll(@Principal() principal: Principal): Promise<Function[]> {
-    return this.functionsService.findAll(principal.accountId);
+  async findAll(@Query() query: ListFunctionsQuery, @Principal() principal: Principal): Promise<Function[]> {
+    return this.functionsService.findAll(principal.accountId, query.name);
   }
 
   @Get(':id')
@@ -101,6 +102,7 @@ export class FunctionsController {
   @RequireActiveAccount()
   @ApiOperation({ summary: 'Invoke a function' })
   @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
+  @ApiResponse({ status: 413, description: 'The input is over 6 MB as JSON, AWS Lambda\'s limit for a synchronous call: RequestEntityTooLargeException, as Lambda names it' })
   async invoke(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() invokeFunctionDto: InvokeFunctionDto,

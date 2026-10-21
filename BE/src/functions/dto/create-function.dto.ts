@@ -1,7 +1,9 @@
-import { IsString, IsEnum, IsNumber, IsOptional, Matches, Min, Max, ValidateIf } from 'class-validator';
+import { IsString, IsEnum, IsNumber, IsObject, IsOptional, Matches, Min, Max, ValidateIf } from 'class-validator';
 import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { MaxJsonBytes, MaxUtf8Bytes } from '../../common/byte-limits';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
+import { MAX_CODE_BYTES, MAX_METADATA_BYTES } from '../limits';
 import { EventFormat, Runtime } from '../entities/function.entity';
 import { IsEnvironment, IsSecrets } from '../environment';
 
@@ -29,8 +31,9 @@ export class CreateFunctionDto {
   @IsEnum(Runtime)
   runtime: Runtime;
 
-  @ApiProperty({ description: 'Function code' })
+  @ApiProperty({ description: "The function's code, one file: 900 KiB (921,600 bytes) of UTF-8 at most, what its ConfigMap holds", maxLength: MAX_CODE_BYTES })
   @IsString()
+  @MaxUtf8Bytes(MAX_CODE_BYTES, "what a function's ConfigMap holds (900 KiB)")
   code: string;
 
   @ApiProperty({
@@ -64,8 +67,10 @@ export class CreateFunctionDto {
   @IsEnum(EventFormat)
   eventFormat?: EventFormat;
 
-  @ApiPropertyOptional({ description: 'Additional metadata', type: 'object', additionalProperties: true })
+  @ApiPropertyOptional({ description: 'Additional metadata: an object, 4 KB at most as JSON', type: 'object', additionalProperties: true })
   @IsOptional()
+  @IsObject()
+  @MaxJsonBytes(MAX_METADATA_BYTES, 'for labels rather than data (4 KB)')
   metadata?: Record<string, unknown>;
 
   @EnvironmentProperty()

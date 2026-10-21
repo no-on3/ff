@@ -18,7 +18,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
   - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy: its functions reach the internet only once you turn the account's egress on, and never FF's own network;
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
-  - code is stored in immutable ConfigMaps, up to 900 KiB. The API currently accepts requests of about 100 KB at most, which is task C-03 of the [CLI plan](docs/cli-plan.md).
+  - code is stored in immutable ConfigMaps, up to 900 KiB, which the API checks when it is sent; an invocation's input may have 6 MB as JSON, as on AWS Lambda.
 - **Runtimes** `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`, runtime protocol 3 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
   - Lambda's `handler(event, context)`, error names, and log lines, with the code's directory as the working directory and the peak memory as `Max Memory Used`;
   - real timeouts;

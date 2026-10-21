@@ -2,7 +2,7 @@
  * L1: request IDs and error answers (client-readiness plan, P-10, D4), through
  * a real HTTP server with the backend's global interceptor and filter.
  */
-import { BadRequestException, Controller, Get, INestApplication, InternalServerErrorException, Logger } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, INestApplication, InternalServerErrorException, Logger, Post } from '@nestjs/common';
 import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { ApiExceptionFilter } from './api-exception.filter';
@@ -29,6 +29,11 @@ class ProbeController {
   @Get('worded')
   worded() {
     throw new InternalServerErrorException('Deploying the function failed because of an internal error (request x).');
+  }
+
+  @Post('echo')
+  echo(@Body() body: unknown) {
+    return body;
   }
 }
 
@@ -102,6 +107,22 @@ describe('request IDs and error answers (L1, P-10)', () => {
 
     expect(res.status).toBe(500);
     expect(await res.json()).toMatchObject({ message: 'Deploying the function failed because of an internal error (request x).' });
+  });
+
+  it("answers a body over the parser's limit with 413, as the parser says: the caller's, not a platform failure", async () => {
+    const res = await fetch(`${baseUrl}/probe/echo`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ a: 'x'.repeat(200_000) }) });
+
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ statusCode: 413, error: 'Payload Too Large', message: 'request entity too large', requestId: res.headers.get(REQUEST_ID_HEADER) });
+    expect(logged).not.toHaveBeenCalled();
+  });
+
+  it('answers a body that is no JSON with 400', async () => {
+    const res = await fetch(`${baseUrl}/probe/echo`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"a": ' });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ statusCode: 400, error: 'Bad Request', requestId: res.headers.get(REQUEST_ID_HEADER) });
+    expect(logged).not.toHaveBeenCalled();
   });
 
   it('gives an unknown route its request ID too', async () => {

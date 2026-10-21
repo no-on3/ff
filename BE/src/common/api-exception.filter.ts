@@ -1,4 +1,5 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { STATUS_CODES } from 'node:http';
 import { describeError } from './describe-error';
 import { REQUEST_ID_HEADER, requestIdOf } from './request-context';
 
@@ -14,10 +15,24 @@ export function internalErrorMessage(requestId: string): string {
 }
 
 /**
+ * An error Express's middleware made for the caller's request, which says so
+ * as the http-errors package does: a 4xx status, and `expose`. Body parsers
+ * give them: a body over their limit (413), a charset or encoding they don't
+ * read (415), a request cut short (400).
+ */
+function callersError(exception: unknown): { status: number; message: string } | undefined {
+  if (typeof exception !== 'object' || exception === null) return undefined;
+  const { status, expose, message } = exception as { status?: unknown; expose?: unknown; message?: unknown };
+  if (typeof status !== 'number' || status < 400 || status > 499 || expose !== true || typeof message !== 'string') return undefined;
+  return { status, message };
+}
+
+/**
  * Every error answer, with the request's ID. An HttpException (the caller's
- * mistake, or a failure already worded for the caller) goes out as it is.
- * Anything else is a platform failure: 500 with a generic message, and the
- * details only in the server log (D4).
+ * mistake, or a failure already worded for the caller) goes out as it is, and
+ * so does an error middleware made for the caller's request. Anything else is
+ * a platform failure: 500 with a generic message, and the details only in the
+ * server log (D4).
  */
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
@@ -36,6 +51,11 @@ export class ApiExceptionFilter implements ExceptionFilter {
       // RFC 6750: say how to authenticate.
       if (status === HttpStatus.UNAUTHORIZED) response.setHeader('WWW-Authenticate', 'Bearer realm="ff"');
       response.status(status).json({ ...(typeof body === 'string' ? { statusCode: status, message: body } : body), requestId });
+      return;
+    }
+    const callers = callersError(exception);
+    if (callers) {
+      response.status(callers.status).json({ statusCode: callers.status, error: STATUS_CODES[callers.status], message: callers.message, requestId });
       return;
     }
     this.logger.error(

@@ -3,6 +3,7 @@
  * documented in docs/kubernetes-migration-plan.md §4.
  */
 import { Runtime } from '../../functions/entities/function.entity';
+import { MAX_CODE_BYTES } from '../../functions/limits';
 import { CodeTooLargeError } from '../orchestrator.errors';
 import { FunctionWorkload, TenantLimits, WorkloadEnvironment } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
@@ -22,8 +23,8 @@ export interface K8sObject {
 }
 
 export const RUNTIME_PORT = 8080;
-/** A ConfigMap holds at most 1 MiB; keep a margin for keys and metadata. */
-export const MAX_CODE_BYTES = 900 * 1024;
+/** A ConfigMap holds at most 1 MiB; the API refuses larger code first, with this limit. */
+export { MAX_CODE_BYTES };
 export const TENANT_QUOTA_NAME = 'ff-tenant-quota';
 export const TENANT_LIMITS_NAME = 'ff-tenant-limits';
 export const TENANT_NETWORK_POLICY_NAME = 'ff-default-deny';

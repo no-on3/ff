@@ -5,9 +5,11 @@
  * caller and nobody can pose as another address; the API's documents are
  * served only where the settings say, off in production; and text with a NUL
  * character, which PostgreSQL can't store, is refused with a 400 rather than
- * failing at the database with a 500, but for an invocation's input.
+ * failing at the database with a 500, but for an invocation's input. A
+ * function's code and an invocation's input may make a body of 7 MB; any
+ * other body has 100 KB, and a larger one is refused saying which limit.
  */
-import { Body, Controller, Get, INestApplication, Param, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, INestApplication, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { IsObject, IsOptional, IsString } from 'class-validator';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
@@ -59,9 +61,33 @@ class ProbeController {
   }
 }
 
+/** Routes of the paths whose bodies may be large, and one whose body may not. */
+@Controller('functions')
+class LargeBodiesController {
+  @Post()
+  create(@Body() body: { code: string }) {
+    return { length: body.code.length };
+  }
+
+  @Put(':id')
+  update(@Body() body: { code: string }) {
+    return { length: body.code.length };
+  }
+
+  @Post(':id/invoke')
+  invoke(@Body() body: { input: string }) {
+    return { length: body.input.length };
+  }
+
+  @Post(':id/schedules')
+  schedule(@Body() body: { input: string }) {
+    return { length: body.input.length };
+  }
+}
+
 /** An app set up with these settings, listening on a free port; its URL. */
 async function appWith(settings: { trustProxy: string[]; apiDocs: boolean }): Promise<{ app: INestApplication; url: string }> {
-  const moduleRef = await Test.createTestingModule({ controllers: [ProbeController] }).compile();
+  const moduleRef = await Test.createTestingModule({ controllers: [ProbeController, LargeBodiesController] }).compile();
   const app = moduleRef.createNestApplication({ logger: false });
   const values: Record<string, unknown> = { 'cors.origins': ['https://console.ff.example'], 'http.trustProxy': settings.trustProxy, 'http.apiDocs': settings.apiDocs };
   configureApp(app, { getOrThrow: (key: string) => values[key] } as unknown as ConfigService);
@@ -145,6 +171,50 @@ describe('the app as main.ts sets it up', () => {
 
       expect([invoked.status, await invoked.json()]).toEqual([201, { text: 'a\u0000b', ['k\u0000']: true }]);
       expect(handled).toEqual([{ text: 'a\u0000b', ['k\u0000']: true }, { id: '7', name: 'Atelier Sfax é ✓' }]);
+    });
+  });
+
+  describe("a request's body", () => {
+    const send = (url: string, method: string, path: string, field: string, characters: number) =>
+      fetch(`${url}${path}`, {
+        method,
+        headers: { 'content-type': 'application/json', origin: 'https://console.ff.example' },
+        body: JSON.stringify({ [field]: 'x'.repeat(characters) }),
+      });
+
+    it("may be 7 MB for a function's code, on create and update, and an invocation's input", async () => {
+      const url = await open({ trustProxy: [], apiDocs: false });
+
+      for (const [method, path, field] of [['POST', '/functions', 'code'], ['PUT', '/functions/f1', 'code'], ['POST', '/functions/f1/invoke', 'input']]) {
+        const res = await send(url, method, path, field, 6 * 1024 * 1024);
+        expect([method, path, res.status, await res.json()]).toEqual([method, path, method === 'PUT' ? 200 : 201, { length: 6 * 1024 * 1024 }]);
+      }
+    });
+
+    it('is refused past 7 MB there, saying the limits, with CORS so that the console reads why', async () => {
+      const url = await open({ trustProxy: [], apiDocs: false });
+
+      const res = await send(url, 'POST', '/functions/f1/invoke', 'input', 7 * 1024 * 1024);
+
+      expect([res.status, await res.json()]).toEqual([
+        413,
+        {
+          statusCode: 413,
+          error: 'Payload Too Large',
+          message: "The request's body is over 7 MB (7,340,032 bytes): a function's code may have 900 KiB, an invocation's input 6 MB",
+        },
+      ]);
+      expect(res.headers.get('access-control-allow-origin')).toBe('https://console.ff.example');
+    });
+
+    it('is refused past 100 KB everywhere else', async () => {
+      const url = await open({ trustProxy: [], apiDocs: false });
+
+      const res = await send(url, 'POST', '/functions/f1/schedules', 'input', 100 * 1024);
+      const small = await send(url, 'POST', '/functions/f1/schedules', 'input', 100 * 1024 - 20);
+
+      expect([res.status, ((await res.json()) as { message: string }).message]).toEqual([413, "The request's body is over 100 KB (102,400 bytes), this route's limit"]);
+      expect([small.status, await small.json()]).toEqual([201, { length: 100 * 1024 - 20 }]);
     });
   });
 

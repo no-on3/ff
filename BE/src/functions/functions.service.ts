@@ -1,12 +1,14 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpStatus,
   Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
   MessageEvent,
   NotFoundException,
+  PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -15,6 +17,7 @@ import { Observable } from 'rxjs';
 import { EntityManager, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
+import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
 import {
   CodeTooLargeError,
@@ -63,6 +66,7 @@ import { callersFailure, failureResponse, platformFailure } from './failures';
 import { keptJson, keptText } from './history';
 import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
+import { MAX_INPUT_BYTES } from './limits';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
 const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout', 'eventFormat'] as const;
@@ -312,9 +316,10 @@ export class FunctionsService {
     });
   }
 
-  async findAll(accountId: string): Promise<Function[]> {
+  /** The account's functions, newest first; with a name, the one of that name, if any. */
+  async findAll(accountId: string, name?: string): Promise<Function[]> {
     return this.functionsRepository.find({
-      where: { accountId },
+      where: name === undefined ? { accountId } : { accountId, name },
       order: { createdAt: 'DESC' },
     });
   }
@@ -576,6 +581,16 @@ export class FunctionsService {
 
   /** Calls the function with `input` as its event, any JSON value, as AWS Lambda's Invoke does; {} when there is none. */
   async invoke(accountId: string, id: string, input?: unknown): Promise<FunctionInvocation> {
+    const payload = input === undefined ? {} : input;
+    // As AWS Lambda refuses a synchronous call's payload over 6 MB, with its words and its exception's name.
+    const size = jsonBytes(payload);
+    if (size > MAX_INPUT_BYTES) {
+      throw new PayloadTooLargeException({
+        statusCode: HttpStatus.PAYLOAD_TOO_LARGE,
+        error: 'RequestEntityTooLargeException',
+        message: `Request must be smaller than ${MAX_INPUT_BYTES} bytes for the InvokeFunction operation: the input is ${size} bytes as JSON`,
+      });
+    }
     const function_ = await this.findOne(accountId, id);
     if (function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
@@ -583,7 +598,6 @@ export class FunctionsService {
     // D9: 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
     await this.credit.admit(accountId);
 
-    const payload = input === undefined ? {} : input;
     const outcome = await this.call(function_, payload, { source: InvocationSource.API });
     if (!outcome.ok) throw failureResponse(outcome.error, outcome.visible);
     // The answer: the invocation as kept, with the input and output whole.

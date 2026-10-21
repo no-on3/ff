@@ -177,3 +177,33 @@ describe("the event a function receives, as the API takes it", () => {
     expect(await pipe.transform({}, { type: 'body', metatype: InvokeFunctionDto })).toEqual({});
   });
 });
+
+describe("a function's code and metadata, as the API takes them: what a ConfigMap holds, labels rather than data", () => {
+  const create = { name: 'hello', runtime: Runtime.NODEJS, memory: 128, timeout: 5 };
+
+  it('takes code up to 900 KiB of UTF-8, on create and on update', async () => {
+    const code = `// ${'x'.repeat(921_600 - 3)}`;
+
+    expect(await validated(CreateFunctionDto, { ...create, code })).toMatchObject({ code });
+    expect(await validated(UpdateFunctionDto, { code })).toMatchObject({ code });
+  });
+
+  it("refuses code over 900 KiB, counting bytes as stored, and says how many it has", async () => {
+    // 460,801 characters, two bytes each in UTF-8: 921,602 bytes.
+    const code = 'é'.repeat(460_801);
+    const message = "code is 921,602 bytes of UTF-8; it may have 921,600 at most, what a function's ConfigMap holds (900 KiB)";
+
+    expect(await validated(CreateFunctionDto, { ...create, code })).toEqual([message]);
+    expect(await validated(UpdateFunctionDto, { code })).toEqual([message]);
+  });
+
+  it('takes metadata as an object of up to 4 KB as JSON, and nothing else', async () => {
+    const code = 'exports.handler = async () => 1;';
+
+    expect(await validated(CreateFunctionDto, { ...create, code, metadata: { team: 'billing', tier: 2 } })).toMatchObject({ metadata: { team: 'billing', tier: 2 } });
+    expect(await validated(UpdateFunctionDto, { metadata: ['team'] })).toEqual(['metadata must be an object']);
+    expect(await validated(UpdateFunctionDto, { metadata: { notes: 'x'.repeat(4_096) } })).toEqual([
+      'metadata is 4,108 bytes as JSON; it may have 4,096 at most, for labels rather than data (4 KB)',
+    ]);
+  });
+});

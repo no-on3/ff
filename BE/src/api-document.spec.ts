@@ -202,7 +202,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
     expect(await viewer.text()).toContain('swagger-ui');
   });
 
-  it('documents invoke as 201 Created, which hack/e2e.sh checks too', () => {
-    expect(Object.keys(document.paths['/functions/{id}/invoke'].post!.responses)).toEqual(['201']);
+  it("documents invoke as 201 Created, which hack/e2e.sh checks too, and 413 for an input over AWS Lambda's 6 MB", () => {
+    expect(Object.keys(document.paths['/functions/{id}/invoke'].post!.responses)).toEqual(['201', '413']);
   });
 });

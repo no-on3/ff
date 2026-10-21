@@ -338,7 +338,8 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 
 **What a function can be, today:**
 - one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
-- up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads, and a request to the function's URL may be up to 6 MB; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
+- up to 900 KiB of code (921,600 bytes of UTF-8), what the ConfigMap that holds it can take; more answers 400, saying how many bytes it has;
+- with an input of up to 6 MB as JSON, as AWS Lambda's synchronous calls take, and a request to its URL up to 6 MB; a larger input answers 413 `RequestEntityTooLargeException`, in Lambda's words. A request's body may have 7 MB for a function's create, update and invoke, 100 KB elsewhere, and a larger one answers 413, saying which limit;
 - within the account's plan: on the beta plan, 25 functions, each with 128–1024 MB of memory and a timeout of 1–300 s;
 - with environment variables and secrets, 4 KB at most together, as on Lambda (above);
 - up to 3 instances by default, and at most the plan's `instancesPerFunction` (10 on the beta plan) with `maxInstances`; `minInstances` from 0 up to the same limit keeps instances running when idle.

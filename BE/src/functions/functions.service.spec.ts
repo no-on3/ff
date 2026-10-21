@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, HttpException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, PayloadTooLargeException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -550,6 +550,28 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   });
 
   describe('invoke', () => {
+    it("refuses an input over 6 MB as JSON with 413, as AWS Lambda does, before reading the function or the credit", async () => {
+      const input = { data: 'x'.repeat(6 * 1024 * 1024) };
+
+      const refusal = (await service.invoke('user-1', 'fn-1', input).catch((error: unknown) => error)) as PayloadTooLargeException;
+
+      expect(refusal).toBeInstanceOf(PayloadTooLargeException);
+      expect(refusal.getResponse()).toEqual({
+        statusCode: 413,
+        error: 'RequestEntityTooLargeException',
+        message: 'Request must be smaller than 6291456 bytes for the InvokeFunction operation: the input is 6291467 bytes as JSON',
+      });
+      expect([functionsRepo.findOne.mock.calls.length, credit.admit.mock.calls.length, orchestrator.invoke.mock.calls.length]).toEqual([0, 0, 0]);
+    });
+
+    it('takes an input of 6 MB exactly', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 1, memoryUsedMb: 1 });
+      const input = 'x'.repeat(6 * 1024 * 1024 - 2); // with its quotes, 6 MB of JSON
+
+      await expect(service.invoke('user-1', 'fn-1', input)).resolves.toMatchObject({ input });
+    });
+
     it("refuses with 402 when the account's credit has run out (P-33), before anything is recorded or run", async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       const refusal = new InsufficientCreditException(
@@ -1416,6 +1438,14 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     it("lists only the calling account's functions", async () => {
       await expect(service.findAll('user-2')).resolves.toEqual([]);
       await expect(service.findAll('user-1')).resolves.toEqual([owned()]);
+    });
+
+    it('finds the function of a name, its own account\'s only, compared exactly', async () => {
+      const { name } = owned();
+
+      await expect(service.findAll('user-1', name)).resolves.toEqual([owned()]);
+      await expect(service.findAll('user-1', name.toUpperCase())).resolves.toEqual([]);
+      await expect(service.findAll('user-2', name)).resolves.toEqual([]);
     });
 
     describe('logs (P-43)', () => {
