@@ -2,6 +2,7 @@ import { BadRequestException, Body, Controller, Get, Param, Patch, PipeTransform
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { ACCOUNT_ID, RequestWithPrincipal, resolvePrincipal } from '../auth/principal';
+import { AllowAnyApiKey } from '../auth/route-rules';
 import { AccountsService } from './accounts.service';
 import { AccountView, CreateAccountDto, MeView, UpdateAccountDto, UpdateMeDto } from './dto/account.dto';
 import { User } from './entities/user.entity';
@@ -26,10 +27,14 @@ export class AccountsController {
   constructor(private readonly accounts: AccountsService) {}
 
   @Get('me')
-  @ApiOperation({ summary: 'The logged-in user, and their accounts and roles' })
+  @AllowAnyApiKey()
+  @ApiOperation({ summary: 'The logged-in user, and their accounts and roles; for an API key, whatever its scopes, the key and its account' })
   @ApiResponse({ status: 200, type: MeView })
   async me(@CurrentUser() user: User | undefined, @Req() request: RequestWithPrincipal): Promise<MeView> {
-    return user ? this.accounts.me(user) : this.accounts.developmentMe(resolvePrincipal(request));
+    if (user) return this.accounts.me(user);
+    const principal = resolvePrincipal(request);
+    const { keyId } = principal;
+    return keyId ? this.accounts.keyMe({ ...principal, keyId }) : this.accounts.developmentMe(principal);
   }
 
   @Patch('me')

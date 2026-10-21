@@ -124,7 +124,7 @@ export class AccountsService {
       const { id, name, status, planId, dataDeletionDueAt, dataDeletedAt } = account as Account;
       accounts.push({ id, name, status, role, plan: await this.plans.get(planId), dataDeletionDueAt, dataDeletedAt });
     }
-    return { user: { id: user.id, email: user.email, name: user.name, locale: user.locale }, accounts };
+    return { user: { id: user.id, email: user.email, name: user.name, locale: user.locale }, key: null, accounts };
   }
 
   /** PATCH /me: the user's own settings; then GET /me's answer. */
@@ -136,7 +136,17 @@ export class AccountsService {
   /** GET /me in development mode: its account, as owner. */
   async developmentMe(principal: Principal): Promise<MeView> {
     const { id, name, status, planId, dataDeletionDueAt, dataDeletedAt } = await this.developmentAccount(principal.accountId);
-    return { user: null, accounts: [{ id, name, status, role: 'owner', plan: await this.plans.get(planId), dataDeletionDueAt, dataDeletedAt }] };
+    return { user: null, key: null, accounts: [{ id, name, status, role: 'owner', plan: await this.plans.get(planId), dataDeletionDueAt, dataDeletedAt }] };
+  }
+
+  /** GET /me with an API key: the key, and the account it acts for, with its creator's role, which bounds the key. */
+  async keyMe(principal: Principal & { keyId: string }): Promise<MeView> {
+    const { id, name, status, planId, dataDeletionDueAt, dataDeletedAt } = await this.accounts.findOneOrFail({ where: { id: principal.accountId } });
+    return {
+      user: null,
+      key: { id: principal.keyId, name: principal.keyName ?? '', scopes: principal.scopes ?? [] },
+      accounts: [{ id, name, status, role: principal.role, plan: await this.plans.get(planId), dataDeletionDueAt, dataDeletedAt }],
+    };
   }
 
   /**

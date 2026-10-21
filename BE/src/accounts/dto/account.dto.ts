@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsIn, IsISO31661Alpha2, IsOptional, IsString, Length, MaxLength } from 'class-validator';
+import { SCOPES } from '../../api-keys/api-key-format';
 import { Role } from '../../auth/principal';
 import { LOCALES, Locale } from '../../mail/language';
 import { PlanSummary } from '../../plans/plan.dto';
@@ -84,11 +85,21 @@ class MeAccount {
   @ApiProperty({ nullable: true, type: Date, description: 'When they were deleted; null until then' }) dataDeletedAt: Date | null;
 }
 
-/** GET /me: the user, and the accounts they belong to (D4). */
+/** The API key a request came with, as GET /me shows it to the key itself. */
+class MeKey {
+  @ApiProperty({ example: '0123456789ab', description: 'The key ID: the key reads ffk_<id>_<secret>' }) id: string;
+  @ApiProperty({ example: 'laptop' }) name: string;
+  @ApiProperty({ enum: SCOPES, isArray: true, description: 'What the key may do, within its creator\'s role' }) scopes: string[];
+}
+
+/** GET /me: the user, and the accounts they belong to (D4); or the API key, and its account. */
 export class MeView {
-  @ApiProperty({ type: MeUser, nullable: true, description: 'null in development mode, which acts without a user' })
+  @ApiProperty({ type: MeUser, nullable: true, description: 'null for an API key, and in development mode, which acts without a user' })
   user: MeUser | null;
 
-  @ApiProperty({ type: [MeAccount] })
+  @ApiProperty({ type: MeKey, nullable: true, description: "The API key the request came with; null for a user's token and in development mode" })
+  key: MeKey | null;
+
+  @ApiProperty({ type: [MeAccount], description: "The user's accounts; for a key, its own, with its creator's role, which bounds what the key may do" })
   accounts: MeAccount[];
 }

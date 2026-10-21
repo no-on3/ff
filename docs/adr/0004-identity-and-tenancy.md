@@ -71,7 +71,7 @@ Three facts shape the decision:
 - **Choosing the account:**
   - an API key acts on its own account;
   - a user's token acts on the account named by the `X-FF-Account` header. Without the header, the user's only account is used. A user with several accounts and no header gets 400, and one who names an account they don't belong to gets 404;
-  - `GET /me` lists the user's accounts and roles, so the console and the CLI can choose.
+  - `GET /me` lists the user's accounts and roles, so the console and the CLI can choose. An API key reads it too, whatever its scopes: the key itself and its own account, with its creator's role (added on 2026-10-21 with the [CLI plan](../cli-plan.md)'s C-02, for `ff whoami`).
 - **Services take the account ID, and every query includes it** (`where: { id, accountId }`). Controllers never load a resource by its ID alone.
 - **Another account's resource answers 404,** exactly like one that doesn't exist, so an ID reveals nothing.
 - **Roles:**

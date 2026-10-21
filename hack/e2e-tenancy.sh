@@ -819,7 +819,11 @@ with_token "$key_1" GET /billing/pro-formas >/dev/null
 check "a key without usage:read can't list them" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
-for path in /me /api-keys /members /audit-log; do
+me_key="$(with_token "$key_1" GET /me)"
+check "a key reads GET /me whatever its scopes: itself, and only its own account, with its creator's role" \
+  "200 $key_1_id l5 reader functions:read,functions:invoke $account_1 owner 1 true" \
+  "$(status) $(jq -r '[.key.id, .key.name, (.key.scopes | join(",")), .accounts[0].id, .accounts[0].role, (.accounts | length), (.user == null)] | join(" ")' <<<"$me_key")"
+for path in /api-keys /members /audit-log; do
   with_token "$key_1" GET "$path" >/dev/null
   check "a key can't call GET $path, which takes a user's token" \
     "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"

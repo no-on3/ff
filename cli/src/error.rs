@@ -32,19 +32,20 @@ impl Kind {
     }
 }
 
-/// A failed command: its kind, its message, and the API's request ID when it gave one, which
-/// finds the call in FF's logs.
+/// A failed command: its kind, its message, and for the API's refusals, its status and the
+/// request ID that finds the call in FF's logs.
 #[derive(Debug)]
 pub struct Error {
     pub kind: Kind,
     pub message: String,
+    pub status: Option<u16>,
     pub request_id: Option<String>,
     broken_pipe: bool,
 }
 
 impl Error {
     pub fn new(kind: Kind, message: impl Into<String>) -> Self {
-        Error { kind, message: message.into(), request_id: None, broken_pipe: false }
+        Error { kind, message: message.into(), status: None, request_id: None, broken_pipe: false }
     }
 
     pub fn exit_code(&self) -> u8 {

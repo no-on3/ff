@@ -32,6 +32,12 @@ impl Output {
         Ok(())
     }
 
+    /// Something to fix that doesn't stop the command, on stderr.
+    pub fn warn(&self, text: &str) {
+        let label = if self.color { "\x1b[1;33mwarning:\x1b[0m" } else { "warning:" };
+        let _ = writeln!(io::stderr().lock(), "{label} {text}");
+    }
+
     /// The error, on stderr. Nothing more can be done if stderr itself fails.
     pub fn error(&self, error: &Error) {
         let text = match self.format {
@@ -51,9 +57,10 @@ fn error_text(error: &Error, color: bool) -> String {
     }
 }
 
-/// The error for a script: always the same keys, the request ID null when there is none.
+/// The error for a script: always the same keys, the API's status and request ID null when the
+/// API gave none.
 fn error_document(error: &Error) -> serde_json::Value {
-    json!({ "error": { "message": error.message, "exitCode": error.exit_code(), "requestId": error.request_id } })
+    json!({ "error": { "message": error.message, "exitCode": error.exit_code(), "status": error.status, "requestId": error.request_id } })
 }
 
 #[cfg(test)]
@@ -63,6 +70,7 @@ mod tests {
 
     fn refused() -> Error {
         let mut error = Error::new(Kind::Failed, "The function failed to load");
+        error.status = Some(400);
         error.request_id = Some("7d1e5c1a".into());
         error
     }
@@ -78,7 +86,7 @@ mod tests {
     fn an_error_as_json_has_its_message_exit_code_and_request_id() {
         assert_eq!(
             error_document(&refused()),
-            json!({ "error": { "message": "The function failed to load", "exitCode": 3, "requestId": "7d1e5c1a" } })
+            json!({ "error": { "message": "The function failed to load", "exitCode": 3, "status": 400, "requestId": "7d1e5c1a" } })
         );
         assert_eq!(error_document(&Error::new(Kind::Usage, "Bad JSON"))["error"]["requestId"], serde_json::Value::Null);
     }

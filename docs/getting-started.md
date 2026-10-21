@@ -491,7 +491,7 @@ curl -s $FF/api-keys -H "$AUTH" | jq -c '.[] | {id, name, lastUsedAt}'
 curl -s -X DELETE $FF/api-keys/${KEY:4:12} -H "$AUTH"      # revoked: it stops working at once
 ```
 
-A key never does more than its creator's role allows, checked on every request: it stops when its creator leaves the account. An account has at most 20 keys; `expiresAt` (ISO 8601) makes one expire. Keys can't manage accounts or keys.
+A key never does more than its creator's role allows, checked on every request: it stops when its creator leaves the account. An account has at most 20 keys; `expiresAt` (ISO 8601) makes one expire. Keys can't manage accounts or keys. Any key reads `GET /me`, whatever its scopes: itself (`key`: its ID, name and scopes) and the account it acts for, with its creator's role, which is how a script, or `ff whoami`, checks the key it was given.
 
 **Members.** An owner invites people by e-mail, with a role: `owner` (everything), `developer` (functions) or `viewer` (reads). Whoever next calls the API with a login for that address joins, within 7 days: Keycloak has verified the address. The invitation e-mail links to the console (`FF_CONSOLE_URL`). Owners change roles and remove members, but an account always keeps an owner, and a removed member's API keys stop at once.
 

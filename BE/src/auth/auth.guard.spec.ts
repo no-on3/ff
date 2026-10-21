@@ -20,7 +20,7 @@ import { ApiExceptionFilter } from '../common/api-exception.filter';
 import { AuthGuard } from './auth.guard';
 import { Principal } from './principal';
 import { Public } from './public.decorator';
-import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from './route-rules';
+import { AllowAnyApiKey, RequireActiveAccount, RequireRole, RequireScope, WRITERS } from './route-rules';
 import { Identity, InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
 
 const AUDIENCE = 'ff-api';
@@ -45,8 +45,15 @@ class ProbeController {
     return principal;
   }
 
-  /** Like GET /me: a user's token only. */
+  /** Like GET /members: a user's token only. */
+  @Get('members')
+  members(@Principal() principal: Principal) {
+    return principal;
+  }
+
+  /** Like GET /me: a user's token, or any API key, whatever its scopes. */
   @Get('me')
+  @AllowAnyApiKey()
   me(@Principal() principal: Principal) {
     return principal;
   }
@@ -269,11 +276,25 @@ describe('the global guard and token checks (L1, P-11)', () => {
       expect(await res.json()).toMatchObject({ message: 'This API key lacks the scope functions:write' });
     });
 
-    it("can't call a route that names no scope: accounts and keys take a user's token", async () => {
-      const res = await withKey('/me');
+    it("can't call a route that names no scope: accounts, members and keys take a user's token", async () => {
+      const res = await withKey('/members');
 
       expect(res.status).toBe(403);
       expect(await res.json()).toMatchObject({ message: "API keys can't call this route: it takes a user's token" });
+    });
+
+    it('call a route open to any key whatever their scopes, as GET /me is, to say who they are', async () => {
+      const res = await withKey('/me');
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ accountId: '123456789012', keyId: '0123456789ab', scopes: ['functions:read'] });
+    });
+
+    it('still need to be valid there', async () => {
+      const res = await fetch(`${baseUrl}/me`, { headers: { authorization: `Bearer ffk_0123456789ab_${'a'.repeat(43)}` } });
+
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ message: 'The API key is invalid' });
     });
   });
 

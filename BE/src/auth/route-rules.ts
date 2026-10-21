@@ -18,5 +18,14 @@ export const RequireActiveAccount = () => SetMetadata(ACTIVE_ACCOUNT, true);
  */
 export const RequireScope = (scope: Scope) => SetMetadata(SCOPE, scope);
 
+export const ANY_KEY = 'ff:any-key';
+
+/**
+ * Any API key may call the route, whatever its scopes: it answers only about
+ * the key itself and the account it acts for, as GET /me does, which is how a
+ * script or the CLI checks the key it was given.
+ */
+export const AllowAnyApiKey = () => SetMetadata(ANY_KEY, true);
+
 /** Who may write: deploy, change, delete or invoke functions. Viewers only read (D4). */
 export const WRITERS: Role[] = ['owner', 'developer'];

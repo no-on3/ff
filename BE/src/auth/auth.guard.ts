@@ -16,7 +16,7 @@ import { User } from '../accounts/entities/user.entity';
 import { ACCOUNT_HEADER, ACCOUNT_ID, DEV_ACCOUNT_HEADER, RequestWithPrincipal, resolvePrincipal, Role } from './principal';
 import { requestIdOf } from '../common/request-context';
 import { IS_PUBLIC } from './public.decorator';
-import { ACTIVE_ACCOUNT, ROLES, SCOPE } from './route-rules';
+import { ACTIVE_ACCOUNT, ANY_KEY, ROLES, SCOPE } from './route-rules';
 import { Identity, InvalidTokenError, TokenVerifier, UnverifiedEmailError } from './token-verifier';
 import { ADMIN_CLIENT, CHANGES_NOTHING, IS_ADMIN, OPERATOR_ROLE, REASON_LENGTH, RequestWithOperator, reasonOf } from '../admin/operator';
 
@@ -53,7 +53,8 @@ const STATUS_MESSAGES: Record<Exclude<AccountStatus, AccountStatus.ACTIVE>, stri
  *   why. A key acts for its own account.
  * Then the route's rules apply: who may call it (@RequireRole), whether the
  * account must be active (@RequireActiveAccount), and for a key, the scope it
- * needs (@RequireScope); a route without one takes no key.
+ * needs (@RequireScope); a route without one takes no key, unless any key may
+ * call it (@AllowAnyApiKey).
  *
  * The admin dashboard's routes (@AdminRoutes(), P-70) are apart: an operator's
  * token issued to ff-admin, never a key or development mode, and a reason for
@@ -86,7 +87,7 @@ export class AuthGuard implements CanActivate {
     }
 
     const key = request.principal?.keyId ? request.principal : undefined;
-    if (key) {
+    if (key && !this.reflector.getAllAndOverride<boolean>(ANY_KEY, targets)) {
       const scope = this.reflector.getAllAndOverride<string | undefined>(SCOPE, targets);
       if (!scope) throw new ForbiddenException("API keys can't call this route: it takes a user's token");
       if (!key.scopes?.includes(scope)) throw new ForbiddenException(`This API key lacks the scope ${scope}`);
