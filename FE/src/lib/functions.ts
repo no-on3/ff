@@ -1,5 +1,15 @@
 import type { Function, FunctionUpdate, PlanLimits, ScalingLimits } from '../services/api';
 
+/**
+ * AWS Lambda's rule for a function's name, which the API applies, as an HTML
+ * `pattern`: the browser anchors it, and its `v` flag wants the hyphen escaped.
+ */
+export const FUNCTION_NAME_PATTERN = '[A-Za-z0-9_\\-]{1,64}';
+/** The longest name the rule allows: the forms stop there rather than send one the API refuses. */
+export const MAX_FUNCTION_NAME_LENGTH = 64;
+/** The rule in words, for the forms. */
+export const FUNCTION_NAME_RULE = '1 to 64 letters, digits, hyphens or underscores';
+
 /** The fields the console's edit form changes. */
 export type EditableFields = Pick<Function, 'name' | 'code' | 'memory' | 'timeout'>;
 
@@ -28,6 +38,25 @@ export function apiErrorMessage(error: unknown): string {
   if (typeof message === 'string' && message) return message;
   if (error instanceof Error && error.message) return error.message;
   return 'Something went wrong';
+}
+
+/** The field of a failed create's answer that names the function the API saved all the same, as ERROR. */
+export const SAVED_FUNCTION_FIELD = 'functionId';
+
+/** Why a create failed, and the function it saved anyway, when it got that far. */
+export interface CreateFailure {
+  message: string;
+  functionId?: string;
+}
+
+/**
+ * A failed create as the console acts on it. When the code failed to load, the
+ * function exists: the console opens it to be fixed, as a form still filled in
+ * would only create it a second time.
+ */
+export function createFailure(error: unknown): CreateFailure {
+  const saved = (error as { response?: { data?: Record<string, unknown> } } | null)?.response?.data?.[SAVED_FUNCTION_FIELD];
+  return { message: apiErrorMessage(error), ...(typeof saved === 'string' && saved ? { functionId: saved } : {}) };
 }
 
 export type ParsedInput = { ok: true; input: Record<string, unknown> } | { ok: false; error: string };

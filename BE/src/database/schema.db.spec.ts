@@ -48,6 +48,7 @@ const INVOICES = migrationNames.find((name) => name.startsWith('Invoices')) as s
 const CANCELLED_PRO_FORMAS = migrationNames.find((name) => name.startsWith('CancelledProFormas')) as string;
 const INVOCATION_HISTORY = migrationNames.find((name) => name.startsWith('InvocationHistory')) as string;
 const CLOSED_ACCOUNT_DELETION = migrationNames.find((name) => name.startsWith('ClosedAccountDeletion')) as string;
+const ALARMS = migrationNames.find((name) => name.startsWith('Alarms')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -366,6 +367,76 @@ run('database schema (L2, real PostgreSQL)', () => {
         { id: '000000000001', status: 'active' },
         { id: '000000000002', status: 'closed' },
       ]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the unique-function-names migration renames all but the oldest of an account's functions with one name, records each in its audit log, and reverts keeping the names", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, ALARMS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ('000000000001', 'A', 'active', 'beta'), ('000000000002', 'B', 'active', 'beta')`);
+      const created = async (accountId: string, name: string, minutesAgo: number): Promise<string> => {
+        const [{ id }] = await dataSource.query(
+          `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status, created_at)
+           VALUES ($1, $2, 'nodejs', 'x', 128, 5, 'ERROR', now() - make_interval(mins => $3)) RETURNING id`,
+          [name, accountId, minutesAgo],
+        );
+        return id;
+      };
+      const oldest = await created('000000000001', 'test', 30);
+      const second = await created('000000000001', 'test', 20);
+      const third = await created('000000000001', 'test', 10);
+      const elsewhere = await created('000000000002', 'test', 5);
+      const alone = await created('000000000001', 'testing', 1);
+      const printed = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+      const indexes = () => dataSource.query(`SELECT indexdef FROM pg_indexes WHERE tablename = 'functions' AND indexname NOT LIKE 'PK_%'`);
+      const names = () => dataSource.query(`SELECT id, name FROM functions ORDER BY created_at`);
+
+      let lines: unknown[];
+      try {
+        await dataSource.runMigrations({ transaction: 'each' });
+      } finally {
+        lines = printed.mock.calls.map(([line]) => line); // before the restore, which forgets them
+        printed.mockRestore();
+      }
+
+      const renamed = { [second]: `test-${second.slice(0, 8)}`, [third]: `test-${third.slice(0, 8)}` };
+      expect(await names()).toEqual([
+        { id: oldest, name: 'test' },
+        { id: second, name: renamed[second] },
+        { id: third, name: renamed[third] },
+        { id: elsewhere, name: 'test' },
+        { id: alone, name: 'testing' },
+      ]);
+      expect(await dataSource.query(`SELECT account_id, actor, actor_label, action, resource, details FROM audit_log ORDER BY resource`)).toEqual(
+        [second, third].sort().map((id) => ({
+          account_id: '000000000001',
+          actor: 'system',
+          actor_label: 'FF',
+          action: 'function.update',
+          resource: `function:${id}`,
+          details: {
+            changed: ['name'],
+            name: renamed[id],
+            outcome: "renamed by FF: another of the account's functions had the same name, and names are now unique",
+          },
+        })),
+      );
+      expect(lines.sort()).toEqual(
+        [second, third].sort().map((id) => `Renamed function:${id} of account 000000000001 to "${renamed[id]}": another of its functions had the same name`),
+      );
+      expect(await indexes()).toEqual([{ indexdef: expect.stringMatching(/^CREATE UNIQUE INDEX .* ON public\.functions USING btree \(account_id, name\)$/) }]);
+      const another = await dataSource
+        .query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('test', '000000000001', 'nodejs', 'x', 128, 5)`)
+        .then(() => 'accepted', (error: Error) => error.message);
+      expect(another).toMatch(/^duplicate key value violates unique constraint/);
+
+      await migrateDownTo(dataSource, ALARMS);
+
+      expect(await indexes()).toEqual([{ indexdef: expect.stringMatching(/^CREATE INDEX .* ON public\.functions USING btree \(account_id\)$/) }]);
+      expect((await names()).map((row: { name: string }) => row.name)).toEqual(['test', renamed[second], renamed[third], 'test', 'testing']);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

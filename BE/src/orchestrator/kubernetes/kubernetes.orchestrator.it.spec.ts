@@ -228,13 +228,16 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     ]);
   });
 
-  it("reports the function's own load error, from its runtime's log, instead of hanging (P-10)", async () => {
+  it("reports the function's own load error, from its runtime's log, as soon as it's there rather than at the timeout", async () => {
     const broken = workload({ id: randomUUID(), accountId: tenant, name: 'it-broken', code: 'throw new Error("boom at init");', timeout: 3 });
     try {
       await orchestrator.deploy(broken, limits());
-      const failure = await orchestrator.waitUntilReady(broken, 25_000).catch((error: unknown) => error);
+      const started = Date.now();
+      const failure = await orchestrator.waitUntilReady(broken, 90_000).catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(FunctionLoadError);
       expect(failure).toMatchObject({ errorType: 'Runtime.ImportModuleError', message: 'Error: boom at init' });
+      // The pod starts in seconds and the log store has its lines about 5 s later; the timeout is 90 s.
+      expect(Date.now() - started).toBeLessThan(30_000);
     } finally {
       await orchestrator.remove(broken);
     }

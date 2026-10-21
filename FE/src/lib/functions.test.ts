@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Function } from '../services/api';
 import { BETA_PLAN } from '../test-fixtures';
-import { apiErrorMessage, changedFields, formatDuration, formatMemory, historyText, parseInvokeInput, scalingLimitsError } from './functions';
+import { apiErrorMessage, changedFields, createFailure, formatDuration, formatMemory, historyText, parseInvokeInput, scalingLimitsError } from './functions';
 
 const stored: Function = {
   id: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
@@ -62,6 +62,36 @@ describe('apiErrorMessage', () => {
   it('passes a message through, and has a default for anything else', () => {
     expect(apiErrorMessage('Function not found')).toBe('Function not found');
     expect(apiErrorMessage(undefined)).toBe('Something went wrong');
+  });
+});
+
+describe('createFailure', () => {
+  const axiosError = (status: number, data: unknown) =>
+    Object.assign(new Error(`Request failed with status code ${status}`), { response: { status, data } });
+
+  it('names the function the API saved when its code failed to load, so the console opens it rather than create it again', () => {
+    const error = axiosError(400, {
+      statusCode: 400,
+      message: 'The function failed to load: Runtime.HandlerNotFound: function.handler is undefined or not exported',
+      functionId: stored.id,
+    });
+
+    expect(createFailure(error)).toEqual({
+      message: 'The function failed to load: Runtime.HandlerNotFound: function.handler is undefined or not exported',
+      functionId: stored.id,
+    });
+  });
+
+  it('names none when nothing was saved: a refused request, or no answer at all', () => {
+    expect(createFailure(axiosError(400, { message: ['memory must not be greater than 1024'] }))).toEqual({
+      message: 'memory must not be greater than 1024',
+    });
+    expect(createFailure(new Error('Network Error'))).toEqual({ message: 'Network Error' });
+  });
+
+  it("ignores a functionId that isn't an ID", () => {
+    expect(createFailure(axiosError(500, { message: 'Internal error', functionId: 42 }))).toEqual({ message: 'Internal error' });
+    expect(createFailure(axiosError(500, { message: 'Internal error', functionId: '' }))).toEqual({ message: 'Internal error' });
   });
 });
 

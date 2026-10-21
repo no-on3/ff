@@ -1,7 +1,8 @@
-import { BadRequestException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import {
@@ -52,7 +53,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** Whether a write of the account's namespace runs inside PlansService.withTenant, under the account's lock. */
   let underLock: boolean;
   const plans = { forAccount: jest.fn(), withTenant: jest.fn() };
-  const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn() };
+  const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn(), existsBy: jest.fn() };
+  /** The names the account's other functions have; and those another request takes after an update checked its new name. */
+  let namesInUse: Set<string>;
+  let takenMeanwhile: Set<string>;
   const TENANT = { quota: BETA_LIMITS.quota, internetEgress: false };
   const audit = { record: jest.fn() };
   const usage = { record: jest.fn() };
@@ -104,7 +108,13 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
     transaction.countBy.mockImplementation(async () => existingFunctions);
     transaction.save.mockImplementation(async (_target, entity) => functionsRepo.save(entity));
-    Object.assign(functionsRepo, { manager: { transaction: jest.fn(async (work) => work(transaction)) } });
+    namesInUse = new Set();
+    takenMeanwhile = new Set();
+    const named = (where: { name: string }) => namesInUse.has(where.name);
+    transaction.existsBy.mockImplementation(async (_target, where: { name: string }) => named(where) || takenMeanwhile.has(where.name));
+    Object.assign(functionsRepo, {
+      manager: { transaction: jest.fn(async (work) => work(transaction)), existsBy: jest.fn(async (_target, where: { name: string }) => named(where)) },
+    });
     invocationsRepo.create.mockImplementation((dto) => ({ ...dto, id: 'inv-1', createdAt: new Date('2026-10-17T10:00:00Z') }));
     ending.findOne.mockImplementation(async () => ({ status: InvocationStatus.RUNNING }));
     ending.save.mockImplementation(async (_target, entity) => invocationsRepo.save({ ...entity, updatedAt: new Date('2026-10-17T10:00:02Z') }));
@@ -211,6 +221,130 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await expect(service.create('user-1', dto)).rejects.toThrow('the current limit is 921600 bytes');
       expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    // The function is saved before it is deployed: a client that took the failure for "nothing
+    // created" would create it again, as the console did, and the account would have two.
+    it.each([
+      ['its code failed to load', new FunctionLoadError('Error', 'boom at init'), 400],
+      ['the platform failed', new OrchestratorError('no pods were created'), 500],
+      ['its code is too large', new CodeTooLargeError(2_000_000, 921_600), 400],
+    ])('names the function it saved, as ERROR, in the failure answer when %s', async (_case, error, status) => {
+      orchestrator.deploy.mockRejectedValue(error);
+
+      const failure = (await service.create('user-1', dto).catch((err: unknown) => err)) as HttpException;
+
+      expect(failure.getStatus()).toBe(status);
+      expect(failure.getResponse()).toMatchObject({ statusCode: status, message: failure.message, functionId: 'fn-1' });
+      expect(savedStatuses.at(-1)).toBe(FunctionStatus.ERROR);
+    });
+
+    it('names no function when the request was refused before anything was saved', async () => {
+      const failure = (await service.create('user-1', { ...dto, memory: 999_999 }).catch((err: unknown) => err)) as HttpException;
+
+      expect(failure).toBeInstanceOf(BadRequestException);
+      expect(failure.getResponse()).not.toHaveProperty('functionId');
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('names, unique within an account', () => {
+    const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
+    const taken = (name: string) => `A function named "${name}" already exists in this account: choose another name, or change that function`;
+    const failureOf = (promise: Promise<unknown>) => promise.then(() => undefined, (err: unknown) => err as HttpException);
+    const LOCK = 'SELECT 1 FROM "accounts" WHERE "id" = $1 FOR NO KEY UPDATE';
+
+    it("refuses a create with another function's name, with 409, before saving, archiving or deploying anything", async () => {
+      namesInUse.add('hello');
+
+      const failure = await failureOf(service.create('user-1', dto));
+
+      expect(failure).toBeInstanceOf(ConflictException);
+      expect(failure?.message).toBe(taken('hello'));
+      expect(transaction.existsBy).toHaveBeenCalledWith(Function, { accountId: 'user-1', name: 'hello' });
+      // Checked under the lock the plan's count takes: two creates at once can't both pass.
+      expect(transaction.query).toHaveBeenCalledWith(LOCK, ['user-1']);
+      expect(transaction.query.mock.invocationCallOrder[0]).toBeLessThan(transaction.existsBy.mock.invocationCallOrder[0]);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(storage.uploadCode).not.toHaveBeenCalled();
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+    });
+
+    it("refuses a rename to another function's name before rolling anything out", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      namesInUse.add('taken');
+
+      const failure = await failureOf(service.update('user-1', 'fn-1', { name: 'taken', code: 'v2' }));
+
+      expect(failure).toBeInstanceOf(ConflictException);
+      expect(failure?.message).toBe(taken('taken'));
+      // The account's other functions: never another account's, never the function itself.
+      expect((functionsRepo as unknown as { manager: { existsBy: jest.Mock } }).manager.existsBy).toHaveBeenCalledWith(Function, {
+        accountId: 'user-1',
+        name: 'taken',
+        id: Not('fn-1'),
+      });
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('checks no name an update sends unchanged', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      namesInUse.add('hello'); // as a check that didn't leave the function itself out would find
+
+      await expect(service.update('user-1', 'fn-1', { name: 'hello', memory: 256 })).resolves.toMatchObject({ name: 'hello', memory: 256 });
+    });
+
+    it("renames when the name is free, claimed under the account's lock", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      await expect(service.update('user-1', 'fn-1', { name: 'renamed' })).resolves.toMatchObject({ name: 'renamed' });
+
+      expect(transaction.query).toHaveBeenCalledWith(LOCK, ['user-1']);
+      expect(transaction.existsBy).toHaveBeenCalledWith(Function, { accountId: 'user-1', name: 'renamed', id: Not('fn-1') });
+      expect(transaction.save).toHaveBeenCalledWith(Function, expect.objectContaining({ id: 'fn-1', name: 'renamed' }));
+    });
+
+    it('saves nothing when another request took the name since the check, for a rename alone', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      takenMeanwhile.add('new');
+
+      const failure = await failureOf(service.update('user-1', 'fn-1', { name: 'new' }));
+
+      expect(failure).toBeInstanceOf(ConflictException);
+      expect(failure?.message).toBe(taken('new'));
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('keeps the record true to a version that went live while another request took the new name: the old name, the new code, and a 409', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      takenMeanwhile.add('new');
+
+      const failure = await failureOf(service.update('user-1', 'fn-1', { name: 'new', code: 'v2' }));
+
+      expect(failure).toBeInstanceOf(ConflictException);
+      expect(failure?.message).toBe('The new version is live, but the function keeps its name "hello": another function was given the name "new" meanwhile');
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'hello', code: 'v2', status: FunctionStatus.ACTIVE }));
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ details: expect.objectContaining({ changed: ['code'], outcome: 'live' }) }));
+      expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'v2');
+    });
+
+    it('keeps a failed repair under the old name when another request took the new one, and says so with the failure', async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'old diagnosis' });
+      orchestrator.waitUntilReady.mockRejectedValue(new FunctionLoadError('Error', 'boom at init'));
+      takenMeanwhile.add('new');
+
+      const failure = await failureOf(service.update('user-1', 'fn-1', { name: 'new', code: 'still broken' }));
+
+      expect(failure).toBeInstanceOf(BadRequestException);
+      expect(failure?.message).toBe(
+        'The function failed to load: Error: boom at init. The function keeps its name "hello": another function was given the name "new" meanwhile.',
+      );
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'hello', code: 'still broken', status: FunctionStatus.ERROR }));
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ details: expect.objectContaining({ changed: ['code'] }) }));
+      expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 0);
     });
   });
 

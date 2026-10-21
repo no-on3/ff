@@ -30,8 +30,20 @@ export class FunctionsController {
   @RequireScope('functions:write')
   @RequireRole(...WRITERS)
   @RequireActiveAccount()
-  @ApiOperation({ summary: 'Create a new function' })
+  @ApiOperation({
+    summary: 'Create a new function',
+    description:
+      'Answers once an instance runs the code. When it can\'t, the function is saved all the same, as ERROR with the reason, ' +
+      "and the error's body names it in `functionId`: fix it with PUT /functions/{id}, or delete it, rather than create it again. " +
+      'Code that fails to load is reported as soon as its runtime says so, in a few seconds.',
+  })
   @ApiResponse({ status: 201, description: 'Function created successfully', type: Function })
+  @ApiResponse({
+    status: 400,
+    description:
+      'The request was refused (validation, the plan), and nothing was saved; or the code failed to load, and `functionId` names the function saved as ERROR',
+  })
+  @ApiResponse({ status: 409, description: 'Another of the account\'s functions has the name: names are unique within an account. Nothing was saved' })
   async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<Function> {
     return this.functionsService.create(principal.accountId, createFunctionDto);
   }
@@ -58,6 +70,12 @@ export class FunctionsController {
   @RequireActiveAccount()
   @ApiOperation({ summary: 'Update a function' })
   @ApiResponse({ status: 200, description: 'Function updated successfully', type: Function })
+  @ApiResponse({
+    status: 409,
+    description:
+      "Another of the account's functions has the new name, and nothing changed. Should another function take it during the " +
+      'rollout of a new version, that version stays live and the function keeps its name, which the message says',
+  })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateFunctionDto: UpdateFunctionDto,

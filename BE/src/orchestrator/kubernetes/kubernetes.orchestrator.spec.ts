@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { AddressInfo } from 'node:net';
@@ -19,7 +20,7 @@ import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from '
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { StoredLine, decodeCursor, pageQuery, tailQuery } from './log-store';
 import { BLOCKED_EGRESS_CIDRS, MAX_CODE_BYTES, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
-import { functionResourceName, accountNamespace } from './naming';
+import { ANNOTATIONS, LABELS, functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -31,6 +32,16 @@ const rolledOut = (replicas: number) => ({
 
 /** Where the log store's queries go through the API server (P-43). */
 const STORE_QUERY = '/api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/select/logsql/query?';
+
+/** A runtime's lines in the log store, newest first: started, then failed to load the code; or started only. */
+const LISTENING: StoredLine = { _time: '2026-10-16T10:00:00Z', _msg: '{"level":"info","msg":"runtime listening","port":8080}' };
+const LOAD_FAILED: StoredLine[] = [
+  {
+    _time: '2026-10-16T10:00:01Z',
+    _msg: '{"level":"error","msg":"function initialization failed","errorType":"Runtime.ImportModuleError","errorMessage":"Cannot find module \'lodash\'"}',
+  },
+  LISTENING,
+];
 
 /** In-memory stand-in for the API server. */
 class FakeKubeApi implements KubeApi {
@@ -46,16 +57,11 @@ class FakeKubeApi implements KubeApi {
   responses: Array<KubeResponse | Error> = [];
   /**
    * The log store's answer to every query through its Service proxy (P-43): rows,
-   * newest first, as it sorts them; an Error is thrown. By default, the runtime's
-   * lines when its code failed to load: one JSON object per line.
+   * newest first, as it sorts them, or the rows for a given query; an Error is
+   * thrown. By default, the runtime's lines when its code failed to load: one
+   * JSON object per line.
    */
-  storeRows: StoredLine[] | Error = [
-    {
-      _time: '2026-10-16T10:00:01Z',
-      _msg: '{"level":"error","msg":"function initialization failed","errorType":"Runtime.ImportModuleError","errorMessage":"Cannot find module \'lodash\'"}',
-    },
-    { _time: '2026-10-16T10:00:00Z', _msg: '{"level":"info","msg":"runtime listening","port":8080}' },
-  ];
+  storeRows: StoredLine[] | Error | ((query: string) => StoredLine[]) = LOAD_FAILED;
   storeQueries: string[] = [];
 
   async apply<T>(path: string, manifest: object): Promise<T> {
@@ -90,9 +96,11 @@ class FakeKubeApi implements KubeApi {
   }
   async request(method: string, path: string, options?: RequestOptions): Promise<KubeResponse> {
     if (path.startsWith(STORE_QUERY)) {
-      this.storeQueries.push(new URLSearchParams(path.slice(path.indexOf('?') + 1)).get('query') ?? '');
+      const query = new URLSearchParams(path.slice(path.indexOf('?') + 1)).get('query') ?? '';
+      this.storeQueries.push(query);
       if (this.storeRows instanceof Error) throw this.storeRows;
-      return { status: 200, headers: {}, body: this.storeRows.map((row) => JSON.stringify(row)).join('\n') };
+      const rows = typeof this.storeRows === 'function' ? this.storeRows(query) : this.storeRows;
+      return { status: 200, headers: {}, body: rows.map((row) => JSON.stringify(row)).join('\n') };
     }
     this.requests.push({ method, path, options });
     const next = this.responses.shift() ?? { status: 200, headers: {}, body: 'null' };
@@ -283,7 +291,7 @@ describe('KubernetesOrchestrator', () => {
 
     it('fails with the platform diagnostics when the runtime logged no load error', async () => {
       crashLooping();
-      api.storeRows = [{ _time: '2026-10-16T10:00:00Z', _msg: '{"level":"info","msg":"runtime listening","port":8080}' }];
+      api.storeRows = [LISTENING];
 
       const error = await orchestrator.waitUntilReady(fn, 30).catch((err) => err);
 
@@ -319,6 +327,74 @@ describe('KubernetesOrchestrator', () => {
 
     it('fails immediately when the Deployment does not exist', async () => {
       await expect(orchestrator.waitUntilReady(fn, 1000)).rejects.toThrow('does not exist');
+    });
+
+    describe('code that fails to load, reported while waiting rather than at the deadline', () => {
+      const podsPath = `/api/v1/namespaces/${ns}/pods`;
+      const version = (code: string, runtime: string = fn.runtime) => ({
+        labels: { [LABELS.runtime]: runtime },
+        annotations: { [ANNOTATIONS.codeSha256]: code },
+      });
+      /** The Deployment rolling out `code`, its pods not ready yet. */
+      const rollingOut = (code: string) => ({
+        ...rolledOut(1),
+        spec: { replicas: 1, template: { metadata: version(code) } },
+        status: { observedGeneration: 1, replicas: 2, updatedReplicas: 1, availableReplicas: 0 },
+      });
+      const runningPod = (name: string, created: string, code: string, runtime?: string) => ({
+        metadata: { name, creationTimestamp: created, ...version(code, runtime) },
+        status: { phase: 'Running', containerStatuses: [{ ready: false, state: { running: {} } }] },
+      });
+
+      it('fails as soon as the log store has the load error, long before the timeout', async () => {
+        orchestrator = new KubernetesOrchestrator(settings(), api, 5, 20);
+        api.objects.set(deploymentPath, rollingOut('v2'));
+        api.lists.set(podsPath, [runningPod('fn-v2', '2026-10-21T00:00:01Z', 'v2')]);
+
+        const started = Date.now();
+        const error = await orchestrator.waitUntilReady(fn, 60_000).catch((err) => err);
+
+        expect(error).toBeInstanceOf(FunctionLoadError);
+        expect(error).toMatchObject({ errorType: 'Runtime.ImportModuleError' });
+        expect(Date.now() - started).toBeLessThan(2_000);
+        expect(api.storeQueries[0]).toContain('pod:="fn-v2"');
+      });
+
+      it("keeps waiting when only pods of another version logged one, as a rollback's wait must", async () => {
+        orchestrator = new KubernetesOrchestrator(settings(), api, 5, 5);
+        // Rolling back to v1: the failed v2 pod, and one with v1's code on another runtime, are newer than v1's.
+        api.objects.set(deploymentPath, rollingOut('v1'));
+        api.lists.set(podsPath, [
+          runningPod('fn-v1', '2026-10-21T00:00:00Z', 'v1'),
+          runningPod('fn-v2', '2026-10-21T00:00:05Z', 'v2'),
+          runningPod('fn-v1-python', '2026-10-21T00:00:09Z', 'v1', 'python'),
+        ]);
+        api.storeRows = (query) => (query.includes('pod:="fn-v1"') ? [LISTENING] : LOAD_FAILED);
+        setTimeout(() => api.objects.set(deploymentPath, rolledOut(1)), 150);
+
+        await expect(orchestrator.waitUntilReady(fn, 5_000)).resolves.toBeUndefined();
+        expect(api.storeQueries.length).toBeGreaterThan(0);
+        expect(api.storeQueries.every((query) => query.includes('pod:="fn-v1"'))).toBe(true);
+      });
+
+      it("doesn't warn at every look while the log store can't answer: once, at the deadline", async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        try {
+          orchestrator = new KubernetesOrchestrator(settings(), api, 5, 5);
+          api.objects.set(deploymentPath, rollingOut('v2'));
+          api.lists.set(podsPath, [runningPod('fn-v2', '2026-10-21T00:00:01Z', 'v2')]);
+          api.storeRows = new Error('connect ECONNREFUSED');
+
+          const error = await orchestrator.waitUntilReady(fn, 200).catch((err) => err);
+
+          expect(error).toBeInstanceOf(OrchestratorError);
+          expect(error).not.toBeInstanceOf(FunctionLoadError);
+          expect(api.storeQueries.length).toBeGreaterThan(2);
+          expect(warn.mock.calls.filter(([message]) => String(message).startsWith('No log lines'))).toHaveLength(1);
+        } finally {
+          warn.mockRestore();
+        }
+      });
     });
   });
 

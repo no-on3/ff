@@ -86,6 +86,15 @@ if [ -n "${K8S_RUNTIME_CLASS:-}" ]; then
   check "its pods use RuntimeClass $K8S_RUNTIME_CLASS" "$K8S_RUNTIME_CLASS" \
     "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.runtimeClassName}')"
 fi
+# Names follow AWS Lambda's rule, and belong to one function of the account.
+http POST /functions "$(jq -n --arg code "$v1" '{name: "e2e-hello", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" >/dev/null
+check "a second function of the same name is refused with 409, and nothing is created" \
+  "409 A function named \"e2e-hello\" already exists in this account: choose another name, or change that function 1" \
+  "$(status) $(jq -r .message "$work/body") $(http GET /functions | jq length)"
+http PUT "/functions/$id" '{"name": "e2e hello"}' >/dev/null
+check "a name outside AWS Lambda's rule is refused, naming the rule" \
+  "400 name must be 1 to 64 letters, digits, hyphens or underscores, as an AWS Lambda function's name e2e-hello" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$id" | jq -r .name)"
 
 scaling="$(http PUT "/functions/$id/scaling-config" '{"maxInstances": 2}')"
 check "scaling limits can be changed" "200 0 2 true" \

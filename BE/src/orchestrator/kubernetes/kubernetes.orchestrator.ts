@@ -30,11 +30,11 @@ import {
   resourceQuotaManifest,
   serviceManifest,
 } from './manifests';
-import { LABELS, MANAGED_BY, accountNamespace, codeConfigMapName, codeHash, functionResourceName } from './naming';
+import { ANNOTATIONS, LABELS, MANAGED_BY, accountNamespace, codeConfigMapName, codeHash, functionResourceName } from './naming';
 
 interface Deployment extends K8sObject {
   metadata: K8sObject['metadata'] & { generation?: number };
-  spec?: { replicas?: number };
+  spec?: { replicas?: number; template?: { metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'> } };
   status?: {
     observedGeneration?: number;
     replicas?: number;
@@ -66,6 +66,24 @@ interface Pod extends Listed {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The newest of the pods, by creation time; undefined when there are none. */
+function newestOf<T extends Listed>(pods: T[]): T | undefined {
+  return [...pods].sort((a, b) => (b.metadata.creationTimestamp ?? '').localeCompare(a.metadata.creationTimestamp ?? ''))[0];
+}
+
+/**
+ * Whether a pod runs the code and runtime the Deployment's template names now,
+ * which decide whether the code loads. A rollback's wait thus never takes the
+ * load error of the version it replaces for its own.
+ */
+function runsTemplate(pod: Pod, deployment: Deployment): boolean {
+  const template = deployment.spec?.template?.metadata;
+  return (
+    pod.metadata.annotations?.[ANNOTATIONS.codeSha256] === template?.annotations?.[ANNOTATIONS.codeSha256] &&
+    pod.metadata.labels?.[LABELS.runtime] === template?.labels?.[LABELS.runtime]
+  );
+}
+
 /** The rollout is finished: every replica runs the new template and is available (as `kubectl rollout status`). */
 export function isRolledOut(deployment: Deployment): boolean {
   const desired = deployment.spec?.replicas ?? 1;
@@ -87,10 +105,16 @@ export class KubernetesOrchestrator implements Orchestrator {
   private readonly logger = new Logger(KubernetesOrchestrator.name);
   private readonly logStore: LogStore;
 
+  /**
+   * `loadCheckIntervalMs`: how often a wait for instances looks in the log store
+   * for the runtime's load error, which reaches it a few seconds after the
+   * runtime writes it.
+   */
   constructor(
     private readonly settings: KubernetesSettings,
     private readonly api: KubeApi,
     private readonly pollIntervalMs = 1000,
+    private readonly loadCheckIntervalMs = 3000,
   ) {
     this.logStore = new LogStore(settings.invokeMode, api);
   }
@@ -243,12 +267,20 @@ export class KubernetesOrchestrator implements Orchestrator {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const deadline = Date.now() + timeoutMs;
+    let nextLoadCheck = Date.now() + this.loadCheckIntervalMs;
     let deployment: Deployment | null;
     for (;;) {
       deployment = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
       if (!deployment) throw new OrchestratorError(`Deployment ${ns}/${name} does not exist`);
       if (done(deployment)) return;
       if (Date.now() >= deadline) break;
+      // Code that fails to load never becomes ready, and its runtime says so within a second:
+      // waiting out the timeout would only keep the caller waiting for the same answer.
+      if (Date.now() >= nextLoadCheck) {
+        const loadError = await this.loadErrorSoFar(fn, ns, deployment);
+        if (loadError) throw loadError;
+        nextLoadCheck = Date.now() + this.loadCheckIntervalMs;
+      }
       await sleep(this.pollIntervalMs);
     }
     const { details, loadError } = await this.diagnose(fn, ns, deployment);
@@ -288,10 +320,7 @@ export class KubernetesOrchestrator implements Orchestrator {
         }
         if (!pod.status?.containerStatuses?.length && pod.status?.phase) reasons.add(`pod ${pod.status.phase}`);
       }
-      const newest = [...pods].sort((a, b) =>
-        (b.metadata.creationTimestamp ?? '').localeCompare(a.metadata.creationTimestamp ?? ''),
-      )[0];
-      const log = await this.lastLines(fn, ns, newest.metadata.name);
+      const log = await this.lastLines(fn, ns, newestOf(pods)!.metadata.name);
       return {
         details: [...reasons, log && `last log lines: ${log.split('\n').slice(-5).join(' | ')}`].filter(Boolean).join('; '),
         loadError: loadErrorIn(log),
@@ -321,17 +350,36 @@ export class KubernetesOrchestrator implements Orchestrator {
    */
   private async lastLines(fn: FunctionWorkload, ns: string, pod: string): Promise<string> {
     try {
-      const rows = await this.logStore.query(
-        `{namespace=${quoted(ns)}, function_id=${quoted(fn.id)}} pod:=${quoted(pod)} _time:1h | sort by (_time desc) limit 20 | fields _time, _msg`,
-      );
-      return rows
-        .reverse()
-        .map((row) => row._msg ?? '')
-        .join('\n')
-        .trim();
+      return await this.queryLastLines(fn, ns, pod);
     } catch (error) {
       this.logger.warn(`No log lines for the diagnosis of ${ns}/${pod}: ${(error as Error).message}`);
       return '';
+    }
+  }
+
+  private async queryLastLines(fn: FunctionWorkload, ns: string, pod: string): Promise<string> {
+    const rows = await this.logStore.query(
+      `{namespace=${quoted(ns)}, function_id=${quoted(fn.id)}} pod:=${quoted(pod)} _time:1h | sort by (_time desc) limit 20 | fields _time, _msg`,
+    );
+    return rows
+      .reverse()
+      .map((row) => row._msg ?? '')
+      .join('\n')
+      .trim();
+  }
+
+  /**
+   * The load error that the newest pod running the version being rolled out has
+   * logged so far, while the wait goes on. Quiet when the pods or the log store
+   * can't be read: the diagnosis at the deadline says so, once.
+   */
+  private async loadErrorSoFar(fn: FunctionWorkload, ns: string, deployment: Deployment): Promise<FunctionLoadError | undefined> {
+    try {
+      const pods = await this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
+      const newest = newestOf(pods.filter((pod) => runsTemplate(pod, deployment)));
+      return newest && loadErrorIn(await this.queryLastLines(fn, ns, newest.metadata.name));
+    } catch {
+      return undefined;
     }
   }
 

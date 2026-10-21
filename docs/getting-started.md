@@ -95,11 +95,19 @@ npm run start:dev
 - **The schema comes from migrations,** in development as in production. `npm run migration:run` applies the ones your database hasn't had yet. Run it again whenever you pull changes that add a migration (`BE/src/migrations/`). The backend refuses to start while a migration is pending, and says so.
 - Leave this terminal running, and run the remaining commands from a second terminal at the repository root. Check that the backend answers: `curl -s localhost:3000/functions` prints `[]`, and the Swagger UI is at http://localhost:3000/api.
 
-**A database created before 2026-10-17 must be reset once.** Until then, the backend created its tables itself, with other column names, and `npm run migration:run` stops with `relation "functions" already exists`. Resetting deletes your development functions and their history. Their Deployments in the cluster go with the old dev tenant's namespace (tenant `1`):
+**A database created before 2026-10-17 must be reset once, or replaced by a new one.** Until then, the backend created its tables itself, with other column names: `npm run migration:run` stops with `relation "functions" already exists`, and the backend, which finds every migration pending, doesn't start. Resetting deletes your development functions and their history. Their Deployments in the cluster go with the old dev tenant's namespace (tenant `1`):
 
 ```bash
 docker compose exec postgres psql -U postgres -c 'DROP DATABASE serverless_platform WITH (FORCE)' -c 'CREATE DATABASE serverless_platform'
 source hack/k8s/env.sh && kubectl delete namespace "ff-t-$(printf %s 1 | sha256sum | cut -c1-12)" --ignore-not-found
+(cd BE && npm run migration:run)
+```
+
+To keep the old database as it is, give the backend a new one instead, and its name in `BE/.env`:
+
+```bash
+docker compose exec postgres createdb -U postgres ff_dev
+sed -i 's/^DB_NAME=.*/DB_NAME=ff_dev/' BE/.env
 (cd BE && npm run migration:run)
 ```
 
@@ -140,6 +148,8 @@ ID=$(jq -n --rawfile code examples/hello.ts \
      | curl -s "$FF/functions" -H 'content-type: application/json' -d @- | jq -r .id)
 echo "$ID"
 ```
+
+**A name belongs to one function of the account.** It follows AWS Lambda's rule: 1 to 64 letters, digits, hyphens or underscores, compared exactly, so `Hello` and `hello` are two names. A name outside the rule answers 400, `name must be 1 to 64 letters, digits, hyphens or underscores, as an AWS Lambda function's name`; one given before 2026-10-21 that breaks it is kept until the function is renamed. Another create or rename with a name in use answers 409, `A function named "hello" already exists in this account: choose another name, or change that function`, and changes nothing: run the command above twice and the second `ID` is `null`. Delete the first one (`curl -s -X DELETE "$FF/functions/$ID"`), or choose another name. Names weren't unique before 2026-10-21 either: the migration that made them so kept the name of the oldest of an account's functions with one name, and added the first 8 characters of their ID to the others' (`hello-3f9c2a1e`). The account's audit log records each of these renames, as FF's.
 
 **Invoke it.** `input` becomes `event.body` in the handler, and `duration` is the execution time in milliseconds, as the runtime measured it:
 
@@ -261,9 +271,9 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 
 A request beyond the plan gets 400 with the plan's limit, for example `memory must be at most 1024 MB on the Beta plan`. "Plans and limits" in section 5 lists them all.
 
-The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runtimes/nodejs/README.md) and [Python](../runtimes/python/README.md) runtime READMEs describe `event`, `context`, and the error names.
+The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runtimes/nodejs/README.md) and [Python](../runtimes/python/README.md) runtime READMEs describe `event`, `context`, and the error names. The code must define it: `exports.handler = async (event, context) => { … }` in Node.js, `def handler(event, context):` in Python. Code without one, such as a lone `console.log('hi');`, fails to load with `Runtime.HandlerNotFound: function.handler is undefined or not exported`.
 
-**If a function cannot load** (a syntax error, a missing handler, an exception at import), the create call waits for the readiness timeout (90 s, `FF_READY_TIMEOUT_SECONDS` in `BE/.env`). It then answers 400 with the runtime's reason, for example `The function failed to load: Runtime.UserCodeSyntaxError: SyntaxError: function.ts:2:11 Property assignment expected.` The function is listed with status `ERROR` and that reason, and its pod is released. **Fix it with an update:** send the corrected code (`PUT /functions/<id>`), and the function becomes `ACTIVE`, keeping its ID. An update of an `ERROR` function always rolls out, even without changes, so `PUT` with `{}` retries the same code after a passing failure such as a full quota. While developing functions, a lower timeout such as 30 gives faster feedback.
+**If a function cannot load** (a syntax error, a missing handler, an exception at import), the create call answers 400 as soon as the runtime has said why, in about 10 s: the runtime logs it at start, and the backend reads it in the log store, which has it about 5 s later. Without the log pipeline (`--no-logging`), the backend can't read it, and waits for the readiness timeout instead (90 s, `FF_READY_TIMEOUT_SECONDS` in `BE/.env`). The answer gives the runtime's reason, for example `The function failed to load: Runtime.UserCodeSyntaxError: SyntaxError: function.ts:2:11 Property assignment expected.`, and `functionId`: the function is saved all the same, listed with status `ERROR` and that reason, and its pod is released. Creating it again would only answer 409, since the name is taken: the console opens the saved function's page instead of keeping its form. **Fix it with an update:** send the corrected code (`PUT /functions/<id>`), and the function becomes `ACTIVE`, keeping its ID. An update of an `ERROR` function always rolls out, even without changes, so `PUT` with `{}` retries the same code after a passing failure such as a full quota. Without the log pipeline, a lower timeout such as 30 gives faster feedback.
 
 ## 4. Look inside the cluster
 
@@ -348,7 +358,23 @@ cd BE && npm run migration:run && npm run start:dev      # migration:run does no
 docker compose --profile auth up -d --wait   # Keycloak on http://localhost:8180 (admin console: admin / admin), Mailpit on http://localhost:58025
 ```
 
-Make a user, either by registering at http://localhost:8180/realms/ff/account (the verification e-mail arrives in Mailpit), or through the admin API. Then get a token through the `ff-e2e` client, which exists only in this development realm:
+**Both dashboards with a login, from start to finish.** Run the backend, the console and the admin dashboard each in its own terminal, with the login's settings on the command line. Variables set there win over `BE/.env` and the apps' `.env.local`, which stay as they are; to keep the settings, put them in those files instead, as `BE/.env.example`, `FE/.env.example` and `admin/.env.example` show:
+
+```bash
+cd BE && FF_AUTH_MODE=oidc FF_OIDC_ISSUER=http://localhost:8180/realms/ff FF_OIDC_AUDIENCE=ff-api \
+  FF_SMTP_URL=smtp://localhost:51025 npm run start:dev
+cd FE && VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff npm run dev      # the console, http://localhost:5199
+cd admin && VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff npm run dev   # the admin dashboard, http://localhost:5198
+```
+
+1. On the console, "Sign up". Any e-mail address works, a made-up one such as `amira@ff.test` too: Keycloak and the backend send every e-mail to Mailpit, which keeps them all and delivers none. Open the verification e-mail at http://localhost:58025, follow its link, and choose a password: Keycloak brings you back to the console, logged in.
+2. Create the account. It waits for approval, and Mailpit gets the e-mail FF sends its operator about it.
+3. On the admin dashboard, log in as `operator@ff.test`, password `operator-dev-1`. The first time, Keycloak asks you to set up a one-time password: scan its QR code with an authenticator app (FreeOTP, Google Authenticator, …), then enter a code. "Approvals" lists the new account: approve it, with a reason. The owner's e-mail about it arrives in Mailpit, in French unless they chose English.
+4. On the console, "Check again" shows the functions page.
+
+If Keycloak answers `Invalid parameter: redirect_uri` or `Client not found`, its realm is older than the dashboards: reset it, as "Reset Keycloak" below shows, then open the console again rather than reloading the error page. Section 6 says where each part's logs are.
+
+For the API from the command line, make a user, either by registering at http://localhost:8180/realms/ff/account (the verification e-mail arrives in Mailpit), or through the admin API. Then get a token through the `ff-e2e` client, which exists only in this development realm:
 
 ```bash
 KC=http://localhost:8180
@@ -532,7 +558,7 @@ cd BE && npm run capacity:report -- --days 7      # the last 7 days by the UTC c
 One 128 MB instance kept warm for a day holds 10,800 GB-s, while a 1 ms call bills 0.000125 GB-s: that gap is D8's. The admin dashboard's Overview shows the same for the last 7 days (P-75); the report goes further back. "Provisioned" is what `minInstances` would bill at the provisioned price. The report reads the database that `BE/.env` names, and changes nothing.
 
 **The console with a login.** With the backend in OIDC mode as above, copy `FE/.env.example` to `FE/.env.local`, set `VITE_OIDC_AUTHORITY=http://localhost:8180/realms/ff` in it, and restart `npm run dev`. The console then opens on a login page:
-1. "Sign up" opens Keycloak's registration form. The verification e-mail arrives in Mailpit (http://localhost:58025); its link asks for a password, then brings you back to the console, logged in.
+1. "Sign up" opens Keycloak's registration form, which takes any address: the verification e-mail arrives in Mailpit (http://localhost:58025) whatever its domain. Its link asks for a password, then brings you back to the console, logged in.
 2. The console asks you to create your account, which then waits for approval. Approve it as above, and "Check again" shows the functions.
 3. "Account" shows the account; its owners rename it or set its tax ID. "Members" invites people and changes their roles. "API keys" lists, creates and revokes the account's keys, and shows a new key once. The account switcher in the header lists your accounts, and "New account…" makes another. A viewer sees no button to create, change or invoke.
 
@@ -679,7 +705,12 @@ curl -s -X POST $FF/admin/price-books -H "Authorization: Bearer $OP" -H 'content
   -d "$(jq -cn --argjson doc "$BOOK" '{validFrom: "2027-01-01T00:00:00Z", document: $doc, reason: "Same prices next year"}')" | jq -c '{id, status}'
 ```
 
-**Reset Keycloak** with `docker compose --profile auth down -v keycloak`: it deletes Keycloak's users, and imports the realm again at the next start. Keycloak reads `deploy/keycloak/ff-realm.json` only at its first start, so a change to that file needs this reset. Name the service: without it, `down -v` deletes the database and S3 volumes too.
+**Reset Keycloak** when its realm is older than `deploy/keycloak/ff-realm.json`: Keycloak reads that file only at its first start, so a change to it needs this reset. It deletes Keycloak's users; sign up again afterwards, and the operator sets up its one-time password again. The backend, the console and the admin dashboard can keep running.
+
+```bash
+docker compose --profile auth down -v keycloak   # name the service: without it, -v deletes the database and S3 volumes too
+docker compose --profile auth up -d --wait       # imports the realm again, in about 30 s
+```
 
 **Plans and limits.** Each account has a plan (D5 of the client-readiness plan); new accounts get `beta`. A plan sets how many functions an account may have, each one's memory, timeout and instances, the quota of the account's namespace (all its functions together), the rate of changes and of invocations, and the idle window before scale to zero. `GET /me` shows each account's plan, and so does the console's account page. The beta plan:
 
@@ -803,6 +834,24 @@ docker compose down -v
 
 ## 6. When something goes wrong
 
+**Where the logs are.** Look there first: most problems name themselves.
+
+| Part | Its log |
+|---|---|
+| The backend | Its terminal, the one running `npm run start:dev`: `<time> [<level>] [<context>] <message>`, with the stack trace under an error. Every answer carries its request ID in the `x-ff-request-id` header, which the browser's Network tab shows; in JSON (below), each line logged while serving it names it. Started in the background (`npm run start:dev > ~/ff-backend.log 2>&1 &`), it logs to that file: `tail -f ~/ff-backend.log`. |
+| The console, the admin dashboard | Their `npm run dev` terminal shows build errors. What happens in the page shows in the browser's developer tools (F12): Console for its errors, Network for each call to the API and its answer. |
+| Keycloak | `docker compose logs -f keycloak`. A failed login is a `LOGIN_ERROR` line, with its reason: `error="invalid_redirect_uri"`, `error="invalid_user_credentials"`, … |
+| E-mails | Mailpit, http://localhost:58025, keeps every e-mail Keycloak and the backend sent. Without `FF_SMTP_URL`, the backend writes its e-mails to its own log instead. |
+| PostgreSQL, S3, Mailpit | `docker compose logs -f postgres`, or `s3`, or `mailpit`. |
+| Functions | Section 4, "Logs": the console's Logs tab, `GET /functions/:id/logs`, or `kubectl logs`. |
+
+In development the backend also logs every SQL query, a few every 10 s from its background tasks. To read its log without them, start it with JSON lines and leave out TypeORM's; other lines, such as the compiler's, pass as they are:
+
+```bash
+cd BE && FF_LOG_FORMAT=json npm run start:dev 2>&1 | jq -rR --unbuffered '(fromjson? | objects) // {message: .}
+  | select(.context != "TypeORM") | ([.time, .level, .context, .requestId, .message] | map(select(. != null)) | join(" ")), (.stack[]? // empty)'
+```
+
 | Symptom | Fix |
 |---|---|
 | `resources: FAIL …` | Free memory or disk first. The thresholds protect the machine; don't lower them to push through. |
@@ -812,8 +861,9 @@ docker compose down -v
 | `Port 5199 is already in use` | The console doesn't move to another port: the login and the backend's `CORS_ORIGIN` name this one. Stop what holds it (`ss -ltnp 'sport = :5199'`). To use another port anyway, change `CONSOLE_PORT` in `FE/vite.config.ts`, add the address to `ff-console`'s redirect URIs and web origins in Keycloak's admin console, and set `CORS_ORIGIN` in `BE/.env`. |
 | The console says `Can't reach the API at …` | The backend isn't running at `VITE_API_URL`, or its `CORS_ORIGIN` doesn't include http://localhost:5199. A `BE/.env` from before 2026-10-17 says 5173: take the line from `BE/.env.example`. |
 | The console says `The API asks for a login, but this console has none` | The backend runs in OIDC mode, and the console without a login. Set `VITE_OIDC_AUTHORITY` in `FE/.env.local` and restart `npm run dev`, or set `FF_AUTH_MODE=dev` in `BE/.env`. |
-| Keycloak answers `Invalid parameter: redirect_uri` | Your Keycloak still has the realm it imported before the console moved to port 5199 (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows, and sign up again. |
-| The admin dashboard's login answers `Client not found`, or `operator@ff.test` can't log in | Your Keycloak imported the realm before the admin dashboard existed (2026-10-17). Reset it, as "Log in with Keycloak" in section 5 shows. |
+| Keycloak answers `Invalid parameter: redirect_uri` | Your Keycloak still has the realm it imported before the console moved to port 5199 (2026-10-17). Reset it, as "Reset Keycloak" in section 5 shows, then open the console again and sign up again: reloading the error page repeats the old request. |
+| The admin dashboard's login answers `Client not found`, or `operator@ff.test` can't log in | Your Keycloak imported the realm before the admin dashboard existed (2026-10-17). Reset it, as "Reset Keycloak" in section 5 shows. |
+| Keycloak, Mailpit or S3 doesn't answer after `docker system prune` | The prune deleted their stopped containers, not their volumes: `docker compose --profile auth up -d --wait` makes the containers again, with the data they had. |
 | 403 `The admin routes take a token issued to the admin dashboard (ff-admin)` | The token came from another client, such as the console's. Log in to the admin dashboard, or get the token through `ff-admin`. |
 | 400 `prices.requestsPerMillion: must be 0.20 × 3.0080 = 0.6016` | A book that says its prices are AWS's US$ prices times a rate has one that isn't: change it, or make the book's source `manual`. |
 | `Ledger transaction … does not sum to zero`, or `… has fewer than two entries` | Something wrote the ledger around `LedgerService.post()`, such as SQL by hand. The database checks each transaction when it commits, so nothing of it was written. Write a whole transaction, balanced, in one database transaction, or post it through the service. |
@@ -863,7 +913,11 @@ docker compose down -v
 | `npm run test:db` fails with `ECONNREFUSED` | PostgreSQL isn't running: `docker compose up -d --wait postgres`. The tests read `DB_*` from `BE/.env`. |
 | Kubernetes calls fail with `Unauthorized` | The token expired: `hack/k8s/mint-token.sh`. |
 | Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. |
-| `create` takes 90 s, then fails | The function cannot load: the answer starts with `The function failed to load:` and the runtime's reason. Fix the code and send it with `PUT /functions/<id>`: see "If a function cannot load" in section 3. If the answer is 500 instead, the platform failed: see the row below about request IDs. |
+| `create` fails with `The function failed to load:` | The code didn't load: the runtime's reason follows, and `functionId` names the function, saved as `ERROR`. Fix the code and send it with `PUT /functions/<id>`, rather than create it again: see "If a function cannot load" in section 3. If the answer is 500 instead, the platform failed: see the row below about request IDs. |
+| `create` takes 90 s, then fails | The backend couldn't read the runtime's reason in the log store, and waited for the readiness timeout: check the log pipeline (`kubectl -n ff-system get pods`; `hack/k8s/logging-up.sh` installs it). |
+| 400 `name must be 1 to 64 letters, digits, hyphens or underscores…` | Function names follow AWS Lambda's rule: no spaces, dots or accented letters, and 64 characters at most. `my-function` or `my_function`, rather than `my function`. |
+| 409 `A function named "…" already exists in this account` | Names are unique within an account: choose another name, or change the function that has it (`PUT /functions/<id>`). One whose code failed to load was saved all the same: fix it rather than create it again. |
+| 409 `The new version is live, but the function keeps its name …` | Another create or rename took the new name while the update rolled out. The rest of the update went through; rename the function again with a free name. |
 | An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first. The previous version still serves, and the record is unchanged. |
 | An invocation stays `RUNNING`, then becomes `LOST` | The backend stopped during the call, so its answer is unknown; it isn't billed. Invoke again. See "Lost calls" in section 5. |
 | The backend logs `Could not create the monthly partitions` | The migrations haven't run (`cd BE && npm run migration:run`), or the database refused: the message says why. An invocation in a month without a partition fails with `no partition of relation "usage_records" found for row`. |

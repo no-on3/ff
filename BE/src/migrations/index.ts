@@ -20,6 +20,7 @@ import { ClosedAccountDeletion1792325241958 } from './1792325241958-ClosedAccoun
 import { RateLimitedInvocations1792419122035 } from './1792419122035-RateLimitedInvocations';
 import { Notifications1792424270622 } from './1792424270622-Notifications';
 import { Alarms1792462186640 } from './1792462186640-Alarms';
+import { UniqueFunctionNames1792545248288 } from './1792545248288-UniqueFunctionNames';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -49,4 +50,5 @@ export const MIGRATIONS: Array<new () => object> = [
   RateLimitedInvocations1792419122035,
   Notifications1792424270622,
   Alarms1792462186640,
+  UniqueFunctionNames1792545248288,
 ];

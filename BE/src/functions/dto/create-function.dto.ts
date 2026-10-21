@@ -1,11 +1,26 @@
-import { IsString, IsEnum, IsNumber, IsOptional, Min, Max } from 'class-validator';
+import { IsString, IsEnum, IsNumber, IsOptional, Matches, Min, Max } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
 import { Runtime } from '../entities/function.entity';
 
+/**
+ * AWS Lambda's rule for a function's name, which FF's follow: names address
+ * functions, in the CLI as on Lambda. A name given before the rule is kept
+ * until the function is renamed, since only a name sent is checked.
+ */
+export const FUNCTION_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
 export class CreateFunctionDto {
-  @ApiProperty({ description: 'Name of the function' })
+  @ApiProperty({
+    description:
+      "The function's name: 1 to 64 letters, digits, hyphens or underscores, as on AWS Lambda. Unique within the account and " +
+      "compared exactly, case included: another function's answers 409",
+    pattern: FUNCTION_NAME.source,
+    minLength: 1,
+    maxLength: 64,
+  })
   @IsString()
+  @Matches(FUNCTION_NAME, { message: "name must be 1 to 64 letters, digits, hyphens or underscores, as an AWS Lambda function's name" })
   name: string;
 
   @ApiProperty({ enum: Runtime, description: 'Runtime environment for the function' })

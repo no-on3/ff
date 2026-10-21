@@ -4,6 +4,9 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Tabs, Tab, Box } from '@mui/material';
 import {
   EditableFields,
+  FUNCTION_NAME_PATTERN,
+  FUNCTION_NAME_RULE,
+  MAX_FUNCTION_NAME_LENGTH,
   TRUNCATED_NOTE,
   apiErrorMessage,
   changedFields,
@@ -195,6 +198,10 @@ const FunctionDetail: React.FC = () => {
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 className="input mt-1"
+                maxLength={MAX_FUNCTION_NAME_LENGTH}
+                // Only a new name must follow the rule: one given before it keeps until it changes.
+                pattern={form.name !== func.name ? FUNCTION_NAME_PATTERN : undefined}
+                title={FUNCTION_NAME_RULE}
               />
             </div>
 
