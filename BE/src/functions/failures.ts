@@ -32,10 +32,15 @@ export function platformFailure(logger: Logger, action: string, error: unknown):
   return `${action} failed because of an internal error (request ${requestId}).`;
 }
 
-/** The answer to a failure that `visible` already words for the caller. */
-export function failureResponse(error: unknown, visible: string): HttpException {
+/**
+ * The answer to a failure that `visible` already words for the caller, with
+ * `extra` fields in its body: a failed create names the function it saved.
+ */
+export function failureResponse(error: unknown, visible: string, extra: Record<string, unknown> = {}): HttpException {
   if (error instanceof FunctionThrottledError) {
-    return new HttpException({ statusCode: 429, error: 'Too Many Requests', message: visible }, HttpStatus.TOO_MANY_REQUESTS);
+    return new HttpException({ statusCode: 429, error: 'Too Many Requests', message: visible, ...extra }, HttpStatus.TOO_MANY_REQUESTS);
   }
-  return callersFailure(error) === undefined ? new InternalServerErrorException(visible) : new BadRequestException(visible);
+  return callersFailure(error) === undefined
+    ? new InternalServerErrorException({ statusCode: 500, error: 'Internal Server Error', message: visible, ...extra })
+    : new BadRequestException({ statusCode: 400, error: 'Bad Request', message: visible, ...extra });
 }

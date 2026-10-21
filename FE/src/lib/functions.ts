@@ -30,6 +30,25 @@ export function apiErrorMessage(error: unknown): string {
   return 'Something went wrong';
 }
 
+/** The field of a failed create's answer that names the function the API saved all the same, as ERROR. */
+export const SAVED_FUNCTION_FIELD = 'functionId';
+
+/** Why a create failed, and the function it saved anyway, when it got that far. */
+export interface CreateFailure {
+  message: string;
+  functionId?: string;
+}
+
+/**
+ * A failed create as the console acts on it. When the code failed to load, the
+ * function exists: the console opens it to be fixed, as a form still filled in
+ * would only create it a second time.
+ */
+export function createFailure(error: unknown): CreateFailure {
+  const saved = (error as { response?: { data?: Record<string, unknown> } } | null)?.response?.data?.[SAVED_FUNCTION_FIELD];
+  return { message: apiErrorMessage(error), ...(typeof saved === 'string' && saved ? { functionId: saved } : {}) };
+}
+
 export type ParsedInput = { ok: true; input: Record<string, unknown> } | { ok: false; error: string };
 
 /** The invoke form's text as the API's `input`: empty means {}, and it must be a JSON object. */

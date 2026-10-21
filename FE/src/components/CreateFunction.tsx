@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
-import { apiErrorMessage } from '../lib/functions';
+import { CreateFailure, apiErrorMessage } from '../lib/functions';
 import { NewFunction, Runtime } from '../services/api';
 import { can } from '../lib/session';
 import { useSession } from '../session/session';
@@ -32,8 +32,14 @@ const CreateFunction: React.FC = () => {
       await dispatch(createFunction(formData)).unwrap();
       navigate('/functions');
     } catch (err) {
-      // The API's reason: a validation error, or why the function didn't become ready.
-      setError(apiErrorMessage(err));
+      // The API's reason: a validation error, or why the function didn't become ready. In the
+      // second case the function exists, ERROR: its page says why, and the form there fixes it.
+      const failure = err as Partial<CreateFailure>;
+      if (failure.functionId) {
+        navigate(`/functions/${failure.functionId}`);
+        return;
+      }
+      setError(failure.message ?? apiErrorMessage(err));
     } finally {
       setCreating(false);
     }

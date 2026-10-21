@@ -10,6 +10,7 @@ import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw
 import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
+import functionsServiceSource from '../../BE/src/functions/functions.service.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
 import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
 import languageSource from '../../BE/src/mail/language.ts?raw';
@@ -25,6 +26,7 @@ import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
 import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
+import { SAVED_FUNCTION_FIELD } from './lib/functions';
 import {
   ALARM_FIELDS,
   ALARM_STATES,
@@ -285,5 +287,11 @@ describe('the alarms', () => {
     expect(alarmRulesSource).toContain(`export const MAX_EVALUATION_PERIODS = ${MAX_EVALUATION_PERIODS};`);
     expect(alarmRulesSource).toContain(`export const MAX_WEBHOOKS = ${MAX_WEBHOOKS};`);
     expect(dtoFields(alarmsDtoSource, 'export class AlarmView {')).toEqual([...ALARM_FIELDS]);
+  });
+});
+
+describe('a failed create', () => {
+  it("names the function the API saved anyway in the field the console reads, so the console opens it rather than create it twice", () => {
+    expect(functionsServiceSource).toContain(`failureResponse(error, failure, { ${SAVED_FUNCTION_FIELD}: savedFunction.id })`);
   });
 });

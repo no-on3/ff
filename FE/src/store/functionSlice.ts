@@ -1,5 +1,5 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { apiErrorMessage } from '../lib/functions';
+import { CreateFailure, apiErrorMessage, createFailure } from '../lib/functions';
 import { Function, FunctionUpdate, NewFunction, functionsApi } from '../services/api';
 
 interface FunctionState {
@@ -29,13 +29,13 @@ export const fetchFunctions = createAsyncThunk<Function[], void, { rejectValue: 
   }
 );
 
-export const createFunction = createAsyncThunk<Function, NewFunction, { rejectValue: string }>(
+export const createFunction = createAsyncThunk<Function, NewFunction, { rejectValue: CreateFailure }>(
   'functions/create',
   async (functionData, { rejectWithValue }) => {
     try {
       return (await functionsApi.createFunction(functionData)).data;
     } catch (error) {
-      return rejectWithValue(apiErrorMessage(error));
+      return rejectWithValue(createFailure(error));
     }
   }
 );

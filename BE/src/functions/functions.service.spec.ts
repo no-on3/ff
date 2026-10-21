@@ -1,4 +1,4 @@
-import { BadRequestException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -211,6 +211,30 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await expect(service.create('user-1', dto)).rejects.toThrow('the current limit is 921600 bytes');
       expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    // The function is saved before it is deployed: a client that took the failure for "nothing
+    // created" would create it again, as the console did, and the account would have two.
+    it.each([
+      ['its code failed to load', new FunctionLoadError('Error', 'boom at init'), 400],
+      ['the platform failed', new OrchestratorError('no pods were created'), 500],
+      ['its code is too large', new CodeTooLargeError(2_000_000, 921_600), 400],
+    ])('names the function it saved, as ERROR, in the failure answer when %s', async (_case, error, status) => {
+      orchestrator.deploy.mockRejectedValue(error);
+
+      const failure = (await service.create('user-1', dto).catch((err: unknown) => err)) as HttpException;
+
+      expect(failure.getStatus()).toBe(status);
+      expect(failure.getResponse()).toMatchObject({ statusCode: status, message: failure.message, functionId: 'fn-1' });
+      expect(savedStatuses.at(-1)).toBe(FunctionStatus.ERROR);
+    });
+
+    it('names no function when the request was refused before anything was saved', async () => {
+      const failure = (await service.create('user-1', { ...dto, memory: 999_999 }).catch((err: unknown) => err)) as HttpException;
+
+      expect(failure).toBeInstanceOf(BadRequestException);
+      expect(failure.getResponse()).not.toHaveProperty('functionId');
+      expect(functionsRepo.save).not.toHaveBeenCalled();
     });
   });
 

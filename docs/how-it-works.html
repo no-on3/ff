@@ -747,7 +747,7 @@ const SCENARIOS = [
         msg: [{ kind: 'http', first: 'GET /readyz HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json' }, body: { status: 'ready' } }],
         set: { [K + '.Pod']: 'Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment, every second', title: 'The backend waits for the rollout',
-        text: 'Since step 9 the backend has polled the Deployment every second. It is done when the controller has seen the latest generation and the updated and available replicas reach the desired count. After FF_READY_TIMEOUT_SECONDS (90 s) it gives up with a diagnosis; see "The function fails to load".',
+        text: 'Since step 9 the backend has polled the Deployment every second. It is done when the controller has seen the latest generation and the updated and available replicas reach the desired count. Every 3 s it also looks in the log store for the runtime\'s load error, and stops at once on one; else, after FF_READY_TIMEOUT_SECONDS (90 s), it gives up with a diagnosis; see "The function fails to load".',
         code: 'kubernetes.orchestrator.ts waitUntilReady(), isRolledOut()', t: '⏱ 6–12 s from the request to ready',
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { metadata: { name: fn(FN), generation: 1, '…': '…' }, spec: { replicas: 1, '…': '…' }, status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } } }] },
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ACTIVE', title: 'The function is ACTIVE',
@@ -864,7 +864,7 @@ const SCENARIOS = [
       { from: 'node', to: 'pod', kind: 'req', label: 'readiness probe → Ready', title: 'The pod is Ready', text: 'It joins the Service\'s endpoints.', code: 'kubelet readiness probe',
         set: { [K + '.Pod']: 'Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'wait until rolled out (≤ 90 s)', title: 'The backend waits',
-        text: 'It polls the Deployment every second, for at most K8S_READY_TIMEOUT_SECONDS (90 s).', code: 'kubernetes.orchestrator.ts waitUntilReady()' },
+        text: 'It polls the Deployment every second, for at most K8S_READY_TIMEOUT_SECONDS (90 s), and the log store every 3 s for a load error, which would end the wait at once.', code: 'kubernetes.orchestrator.ts waitUntilReady()' },
       { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke (through the API server)', title: 'Now the usual invocation',
         text: 'From here on it is the warm path: the API server\'s proxy, the runtime, the worker, your handler.', code: 'kubernetes.orchestrator.ts post()', hl: ['k8sapi', 'service'],
         msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json' }, body: { name: 'Sousse' } },
@@ -1011,7 +1011,7 @@ const SCENARIOS = [
         msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-16T14:05:05.903Z', 0)] },
         set: { [K + '.Pod']: 'new: Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment until rolled out', title: 'The backend waits for the rollout',
-        text: 'For up to 90 s. If the new pod isn\'t ready by then, the backend applies the previous version again and waits for it, then answers 400 with the reason: the record, the Deployment and S3 all keep the old version, and the old pod never stopped serving, because maxUnavailable is 0. A function that wasn\'t ACTIVE has no version to go back to: it keeps the attempt, stays ERROR with the new reason, and is scaled to zero.', code: 'kubernetes.orchestrator.ts waitUntilReady() · functions.service.ts rollBack()', t: '⏱ about 6 s in all',
+        text: 'For up to 90 s, or until the new pod\'s runtime has logged a load error, which the backend looks for every 3 s. If the new pod isn\'t ready by then, the backend applies the previous version again and waits for it, reading only the lines of pods that run that version\'s code, not the failed pod\'s, then answers 400 with the reason: the record, the Deployment and S3 all keep the old version, and the old pod never stopped serving, because maxUnavailable is 0. A function that wasn\'t ACTIVE has no version to go back to: it keeps the attempt, stays ERROR with the new reason, and is scaled to zero.', code: 'kubernetes.orchestrator.ts waitUntilReady() · functions.service.ts rollBack()', t: '⏱ about 6 s in all',
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { metadata: { generation: 2, '…': '…' }, status: { observedGeneration: 2, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } } }] },
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions (code)', title: 'The change is saved', text: 'The record changes only once the new version is live, and is then ACTIVE with no error, whatever it was before: an update also repairs a function in ERROR.', code: 'functions.service.ts update()',
         msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"code\" = '…Marhba…', \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = '" + FN + "';" },
@@ -1500,7 +1500,7 @@ const SCENARIOS = [
   },
   {
     id: 'loadfail', title: 'The function fails to load', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod', 'worker'],
-    summary: 'Code with a syntax error. Everything is deployed, but the runtime never reports ready; after 90 s the backend gives up, with the reason it found in the pod\'s log, and releases the pod. An update with fixed code repairs the function.',
+    summary: 'Code with a syntax error. Everything is deployed, but the runtime never reports ready. Within about 10 s the backend finds the runtime\'s reason in the log store, releases the pod, and answers 400 with the reason and the function\'s ID. An update with fixed code repairs the function.',
     initial: {},
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions (broken code)', title: 'You create a function with a syntax error', text: 'Valid JSON and valid fields; only the code itself is broken.', code: 'functions.controller.ts create()',
@@ -1521,17 +1521,17 @@ const SCENARIOS = [
       { from: 'node', to: 'pod', kind: 'err', label: 'readiness probe → 503', title: 'The pod never becomes Ready', text: 'It gets no traffic, so nothing can invoke it.', code: 'kubelet readiness probe',
         msg: [{ kind: 'http', first: 'GET /readyz HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 503 Service Unavailable', headers: { 'content-type': 'application/json' }, body: { status: 'failed', error: { errorType: 'Runtime.UserCodeSyntaxError', errorMessage: SYNTAX_ERROR } } }],
         set: { [K + '.Pod']: 'Running · not ready (503)' } },
-      { from: 'api', to: 'k8s', kind: 'req', label: '90 s later: read the pods and the log', title: 'The backend gives up, and finds out why',
-        text: 'After FF_READY_TIMEOUT_SECONDS it lists the function\'s pods for waiting or terminated containers, then reads the newest pod\'s log. The runtime\'s "function initialization failed" line there is the function\'s own error, which its owner may see. A missing RuntimeClass or an exhausted quota would show up as "no pods were created": a platform failure, which the caller only sees as a generic message with the request ID, while the details go to the server log.', code: 'kubernetes.orchestrator.ts waitUntilReady(), diagnose(), loadErrorIn()', t: '90 s',
-        msg: [{ kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods?' + BY_FUNCTION(BAD) + ' HTTP/1.1' }, { kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods/' + fn(BAD) + '-…/log?container=function&tailLines=20 HTTP/1.1' }] },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'every 3 s: the pods, and the newest one\'s lines', title: 'The backend finds out why, without waiting out the timeout',
+        text: 'While it polls the Deployment, every 3 s it lists the function\'s pods, takes the newest one that runs the code being deployed (its code-sha256 annotation and runtime label are the template\'s), and reads that pod\'s last lines in the log store, which has them about 5 s after the runtime wrote them. The runtime\'s "function initialization failed" line there is the function\'s own error, which its owner may see, and the wait ends with it. Without that line, the wait goes on to FF_READY_TIMEOUT_SECONDS (90 s), then says what it found: a missing RuntimeClass or an exhausted quota shows up as "no pods were created", a platform failure, which the caller only sees as a generic message with the request ID, while the details go to the server log.', code: 'kubernetes.orchestrator.ts waitUntilReady(), loadErrorSoFar(), loadErrorIn()', t: 'about 10 s',
+        msg: [{ kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods?' + BY_FUNCTION(BAD) + ' HTTP/1.1' }, { kind: 'http', first: 'GET /api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/select/logsql/query?query=%7Bnamespace%3D%22' + NS + '%22%2C+function_id%3D%22' + BAD + '%22%7D+pod%3A%3D%22' + fn(BAD) + '-…%22+_time%3A1h… HTTP/1.1' }] },
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ERROR', title: 'The function is ERROR', text: 'The load error is stored in its error column. Its objects stay in the cluster, and its archived code in S3, so that an update can repair it.', code: 'functions.service.ts create() · failures.ts callersFailure()',
         msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ERROR',\n       \"error\" = '" + LOAD_FAILED.replace(/'/g, "''") + "'\n WHERE \"id\" = '" + BAD + "';" },
         set: { 'PostgreSQL.functions': 'ERROR (with the diagnosis)' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'scale Deployment → 0', title: 'Its pod is released', text: 'A pod that can never become ready would hold its memory and CPU in the tenant\'s quota for good, since the idle sweep only scales ACTIVE functions. So the backend scales the Deployment to zero.', code: 'functions.service.ts create() → releaseInstances()', hl: ['deployment'],
         msg: { kind: 'http', first: 'PATCH /apis/apps/v1/namespaces/' + NS + '/deployments/' + fn(BAD) + '/scale?fieldManager=ff-scaler HTTP/1.1', headers: { 'content-type': 'application/merge-patch+json' }, body: { spec: { replicas: 0 } } },
         set: { [K + '.Deployment']: 'replicas 0', [K + '.Pod']: 'Terminating' } },
-      { from: 'api', to: 'user', kind: 'err', label: '400 · failed to load', title: 'You get a 400, with the reason', text: 'Fix the code and send it with an update (PUT /functions/:id). It rolls out, is checked on a real pod, and the function becomes ACTIVE, keeping its ID. Or delete it.', code: 'functions.service.ts create()',
-        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8', 'x-ff-request-id': '…' }, body: { message: LOAD_FAILED, error: 'Bad Request', statusCode: 400, requestId: '…' } } },
+      { from: 'api', to: 'user', kind: 'err', label: '400 · failed to load', title: 'You get a 400, with the reason and the function', text: 'The function exists all the same, and functionId names it: the console opens its page, which shows the reason, rather than keep its form, whose next "Create" would make a second function. Fix the code and send it with an update (PUT /functions/:id). It rolls out, is checked on a real pod, and the function becomes ACTIVE, keeping its ID. Or delete it.', code: 'functions.service.ts create() · failures.ts failureResponse()',
+        msg: { kind: 'http', first: 'HTTP/1.1 400 Bad Request', headers: { 'content-type': 'application/json; charset=utf-8', 'x-ff-request-id': '…' }, body: { statusCode: 400, error: 'Bad Request', message: LOAD_FAILED, functionId: BAD, requestId: '…' } } },
     ],
   },
   {
@@ -2325,7 +2325,7 @@ function stateMachines() {
     '<text class="ttl" x="16" y="22">A function</text>' +
     node(16, 50, 130, 'CREATING') + node(320, 14, 120, 'ACTIVE', 'ok') + node(320, 90, 120, 'ERROR', 'bad') + node(600, 52, 150, 'deleted') +
     edge('M146,62 C230,44 250,32 318,32', 'a pod is ready', 228, 34) +
-    edge('M146,76 C230,96 250,108 318,108', 'not ready within 90 s, or the deploy failed', 232, 140) +
+    edge('M146,76 C230,96 250,108 318,108', 'failed to load, not ready in 90 s, deploy failed', 232, 140) +
     edge('M440,32 C520,32 540,62 598,66', 'DELETE', 522, 36) +
     edge('M440,108 C520,108 540,82 598,76', 'DELETE', 522, 112) +
     edge('M412,88 L412,52', 'an update goes live', 476, 75) +

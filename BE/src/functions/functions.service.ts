@@ -149,7 +149,8 @@ export class FunctionsService {
       await this.functionsRepository.save(savedFunction);
       // Its objects and the diagnosis stay, so an update can repair it, and a delete removes everything.
       if (!(error instanceof CodeTooLargeError)) await this.releaseInstances(savedFunction);
-      throw failureResponse(error, failure);
+      // The function exists all the same: its ID lets the caller open it to fix it, rather than create it again.
+      throw failureResponse(error, failure, { functionId: savedFunction.id });
     }
   }
 
