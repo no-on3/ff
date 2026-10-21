@@ -25,11 +25,25 @@ fn usage(message: impl Into<String>) -> Error {
     Error::new(Kind::Usage, message)
 }
 
-/// The name: `--name`, else the file's name without its extension, by Lambda's rule.
+/// The name a file gives: its own without its extension; for `function.*`, the name of the file
+/// `ff init` makes, its folder's.
+fn file_name(file: &Path) -> String {
+    let stem = file.file_stem().and_then(|stem| stem.to_str()).unwrap_or("");
+    if stem == "function" {
+        let folder =
+            std::fs::canonicalize(file).ok().and_then(|path| Some(path.parent()?.file_name()?.to_str()?.to_owned()));
+        if let Some(folder) = folder {
+            return folder;
+        }
+    }
+    stem.to_owned()
+}
+
+/// The name: `--name`, else the file's, by Lambda's rule.
 pub fn name_of(file: &Path, name: Option<&str>) -> Result<String, Error> {
     let name = match name {
         Some(name) => name.to_owned(),
-        None => file.file_stem().and_then(|stem| stem.to_str()).unwrap_or("").to_owned(),
+        None => file_name(file),
     };
     if is_function_name(&name) {
         Ok(name)
@@ -222,6 +236,17 @@ mod tests {
             "{}",
             refused.message
         );
+    }
+
+    #[test]
+    fn a_function_file_takes_its_folders_name_as_ff_init_makes_them() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let folder = dir.path().join("orders-api");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("function.py"), "").unwrap();
+
+        assert_eq!(name_of(&folder.join("function.py"), None).unwrap(), "orders-api");
+        assert_eq!(name_of(&folder.join("function.py"), Some("orders")).unwrap(), "orders");
     }
 
     #[test]

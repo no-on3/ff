@@ -7,8 +7,9 @@
 # in ff logs --follow, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
 # exit 5 with the call's ID, which the history shows; code that fails to load exits 4, and the
 # function is kept, in ERROR, with its error. A second account finds none of the first's. Then
-# ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and
-# ff local start answering on its port until Ctrl-C, no container left behind.
+# ff init for both runtimes, its folder run locally, deployed and invoked; and ff local, in
+# Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
+# answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
 #   hack/cli-e2e.sh
 set -euo pipefail
@@ -152,6 +153,23 @@ ff --profile b list
 check "and another account none of them" "0 No function yet: \`ff deploy <file>\` makes one" "$(code) $(out)"
 for name in cli-raises cli-slow cli-broken; do ff delete "$name" --yes; done
 check "the last one deleted" "0 deleted cli-broken" "$(code) $(out)"
+
+echo "== ff init: a new function's folder, run locally, then deployed"
+for runtime in python nodejs; do
+  name="cli-init-$runtime"
+  (cd "$work" && rm -rf "$name" && "$ff_bin" init "$name" --runtime "$runtime" >"$work/out" 2>"$work/err")
+  extension=py
+  [ "$runtime" = nodejs ] && extension=ts
+  check "ff init makes $name's handler, event and README, and nothing else" "README.md events/event.json function.$extension" \
+    "$(cd "$work/$name" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' ')"
+  (cd "$work/$name" && ff local invoke . --data @events/event.json)
+  check "which runs locally with its event, the folder's name its own" "0 Hello Tunis" "$(code) $(out | sed '$d' | jq -r .message)"
+  (cd "$work/$name" && ff deploy "function.$extension")
+  check "and deploys as $name, from function.$extension" "0 created $name ($runtime, 128 MB, 5 s): ACTIVE" "$(code) $(out | sed 's/ in [0-9.]* s$//')"
+  ff invoke "$name" --data "@$work/$name/events/event.json"
+  check "and answers on FF" "0 Hello Tunis" "$(code) $(out | sed '$d' | jq -r .message)"
+  ff delete "$name" --yes
+done
 
 echo "== ff local: on this machine, in Docker, as production runs it"
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }

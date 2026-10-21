@@ -4,6 +4,7 @@ mod completion;
 mod config;
 mod deploy;
 mod functions;
+mod init;
 mod invoke;
 mod local;
 mod logs;
@@ -34,6 +35,7 @@ impl Context<'_> {
 
 pub fn run(command: Command, context: &Context) -> Result<(), Error> {
     match command {
+        Command::Init { name, runtime } => init::run(&name, runtime, context),
         Command::Deploy(args) => deploy::run(args, context),
         Command::Invoke(args) => invoke::run(args, context),
         Command::List => functions::list(context),

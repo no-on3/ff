@@ -84,6 +84,16 @@ pub enum Format {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Make a function's folder: its handler, an event to call it with, and a README
+    Init {
+        /// The function's name, and its folder's
+        name: String,
+
+        /// Its runtime
+        #[arg(long, value_enum)]
+        runtime: Runtime,
+    },
+
     /// Create a function from a file, or update the function of that name with what changed
     Deploy(DeployArgs),
 
@@ -162,7 +172,7 @@ pub struct DeployArgs {
     /// The function's file: .ts, .js or .cjs for Node.js, .py for Python
     pub file: PathBuf,
 
-    /// Its name, else the file's without its extension
+    /// Its name, else the file's without its extension, or for function.ts or .py, its folder's
     #[arg(long)]
     pub name: Option<String>,
 

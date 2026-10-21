@@ -6,6 +6,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::cli::Runtime;
@@ -157,10 +158,15 @@ pub fn check_docker(image: &str) -> Result<(), Error> {
 
 /// The containers running now, which Ctrl-C removes before ff exits.
 static RUNNING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Set by Ctrl-C: from then on, only the handler removes containers, and it ends ff.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-/// On Ctrl-C, the containers are removed, and ff exits as a shell expects of an interrupt.
+/// On Ctrl-C, the containers are removed, and ff exits as a shell expects of an interrupt. Until
+/// it is done, a thread that would remove one too waits: two removals at once may leave the
+/// container in place a moment longer than ff runs, and ff would exit with another code.
 pub fn remove_on_interrupt() {
     let _ = ctrlc::set_handler(|| {
+        INTERRUPTED.store(true, Ordering::SeqCst);
         let names = RUNNING.lock().map(|names| names.clone()).unwrap_or_default();
         for name in names {
             let _ = docker(&["rm".into(), "--force".into(), name]);
@@ -219,6 +225,12 @@ impl Container {
 
 impl Drop for Container {
     fn drop(&mut self) {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            // The handler removes it, then ends ff.
+            loop {
+                std::thread::park();
+            }
+        }
         let _ = docker(&["rm".into(), "--force".into(), self.name.clone()]);
         if let Ok(mut running) = RUNNING.lock() {
             running.retain(|name| *name != self.name);
