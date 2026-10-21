@@ -43,6 +43,7 @@ export class FunctionsController {
     description:
       'The request was refused (validation, the plan), and nothing was saved; or the code failed to load, and `functionId` names the function saved as ERROR',
   })
+  @ApiResponse({ status: 409, description: 'Another of the account\'s functions has the name: names are unique within an account. Nothing was saved' })
   async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<Function> {
     return this.functionsService.create(principal.accountId, createFunctionDto);
   }
@@ -69,6 +70,12 @@ export class FunctionsController {
   @RequireActiveAccount()
   @ApiOperation({ summary: 'Update a function' })
   @ApiResponse({ status: 200, description: 'Function updated successfully', type: Function })
+  @ApiResponse({
+    status: 409,
+    description:
+      "Another of the account's functions has the new name, and nothing changed. Should another function take it during the " +
+      'rollout of a new version, that version stays live and the function keeps its name, which the message says',
+  })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateFunctionDto: UpdateFunctionDto,

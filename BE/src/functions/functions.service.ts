@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Inject,
   Injectable,
   InternalServerErrorException,
@@ -11,7 +12,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Observable } from 'rxjs';
-import { Repository } from 'typeorm';
+import { EntityManager, Not, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { MinioClientService } from '../minio-client/minio-client.service';
 import { describeError } from '../common/describe-error';
@@ -80,6 +81,28 @@ function refuseOverPlan(plan: PlanView, change: Sized, current?: Sized): void {
   const problems = planProblems(plan, change, current);
   if (problems.length) throw new BadRequestException(problems);
 }
+
+/**
+ * Locks the account's row until the transaction ends. Every create and rename
+ * takes it, so they run one at a time per account: the plan's count and the
+ * name each one checks stay true until it saves.
+ */
+function lockAccount(manager: EntityManager, accountId: string): Promise<unknown> {
+  return manager.query('SELECT 1 FROM "accounts" WHERE "id" = $1 FOR NO KEY UPDATE', [accountId]);
+}
+
+/** Whether another of the account's functions has this name. */
+function nameInUse(manager: EntityManager, accountId: string, name: string, otherThan?: string): Promise<boolean> {
+  return manager.existsBy(Function, { accountId, name, ...(otherThan ? { id: Not(otherThan) } : {}) });
+}
+
+/** The answer when another of the account's functions has the name. */
+function nameTaken(name: string): ConflictException {
+  return new ConflictException(`A function named "${name}" already exists in this account: choose another name, or change that function`);
+}
+
+/** How a save goes on when the new name was taken since the update checked it. */
+type WhenNameTaken = 'refuse' | 'keepOldName';
 
 /**
  * The function lifecycle (client-readiness plan, P-03). A function's record and
@@ -155,13 +178,14 @@ export class FunctionsService {
   }
 
   /**
-   * Saves a new function, unless its account has as many as its plan allows. The
-   * account's row stays locked while counting, so that two creates at once can't
-   * both take the last place.
+   * Saves a new function, unless another of its account's has the name, or the
+   * account has as many as its plan allows. The account's row stays locked
+   * meanwhile, so that two creates at once can't both take the name or the last place.
    */
   private insertWithinPlan(plan: PlanView, function_: Function): Promise<Function> {
     return this.functionsRepository.manager.transaction(async (manager) => {
-      await manager.query('SELECT 1 FROM "accounts" WHERE "id" = $1 FOR NO KEY UPDATE', [function_.accountId]);
+      await lockAccount(manager, function_.accountId);
+      if (await nameInUse(manager, function_.accountId, function_.name)) throw nameTaken(function_.name);
       const count = await manager.countBy(Function, { accountId: function_.accountId });
       if (count >= plan.limits.functions) {
         const allowed = plan.limits.functions === 1 ? '1 function' : `${plan.limits.functions} functions`;
@@ -213,6 +237,11 @@ export class FunctionsService {
     const function_ = await this.findOne(accountId, id);
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
+    const previousName = function_.name;
+    const newName = updateFunctionDto.name !== undefined && updateFunctionDto.name !== previousName ? updateFunctionDto.name : undefined;
+    // Refused before anything changes. The save claims the name again, under the account's lock:
+    // another request may take it during a rollout.
+    if (newName !== undefined && (await nameInUse(this.functionsRepository.manager, accountId, newName, id))) throw nameTaken(newName);
     const updated = { ...function_, ...updateFunctionDto };
     const changed = (Object.keys(updateFunctionDto) as Array<keyof UpdateFunctionDto>).filter(
       (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
@@ -226,7 +255,7 @@ export class FunctionsService {
 
     if (!changesVersion && !repairing) {
       Object.assign(function_, updateFunctionDto);
-      const saved = await this.functionsRepository.save(function_);
+      const saved = await this.saveClaimingName(function_, previousName, 'refuse');
       if (changed.length) await this.recordUpdate(saved, changed, 'saved');
       return saved;
     }
@@ -243,10 +272,36 @@ export class FunctionsService {
 
     const previousCodePath = this.codePath(function_);
     Object.assign(function_, updateFunctionDto, { status: FunctionStatus.ACTIVE, error: null });
-    const saved = await this.functionsRepository.save(function_);
-    await this.recordUpdate(saved, changed, 'live');
+    // The new version is live, and the record says so even when the new name went to another function meanwhile.
+    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName');
+    const nameLost = newName !== undefined && saved.name !== newName;
+    await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'live');
     await this.archiveCode(saved, previousCodePath);
+    if (nameLost) {
+      throw new ConflictException(
+        `The new version is live, but the function keeps its name "${previousName}": another function was given the name "${newName}" meanwhile`,
+      );
+    }
     return saved;
+  }
+
+  /**
+   * Saves the function. A new name is claimed with the account's row locked, as
+   * creates do, so that two of its functions never share one. When another has it
+   * by now, `refuse` saves nothing and answers 409, and `keepOldName` saves the
+   * rest under the old name: a version already rolled out, which the record must
+   * describe.
+   */
+  private saveClaimingName(function_: Function, previousName: string, whenTaken: WhenNameTaken): Promise<Function> {
+    if (function_.name === previousName) return this.functionsRepository.save(function_);
+    return this.functionsRepository.manager.transaction(async (manager) => {
+      await lockAccount(manager, function_.accountId);
+      if (await nameInUse(manager, function_.accountId, function_.name, function_.id)) {
+        if (whenTaken === 'refuse') throw nameTaken(function_.name);
+        function_.name = previousName;
+      }
+      return manager.save(Function, function_);
+    });
   }
 
   /**
@@ -278,13 +333,17 @@ export class FunctionsService {
    */
   private async keepFailedAttempt(function_: Function, changes: UpdateFunctionDto, changed: string[], error: unknown): Promise<never> {
     const previousCodePath = this.codePath(function_);
+    const previousName = function_.name;
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     Object.assign(function_, changes, { status: FunctionStatus.ERROR, error: failure });
-    const saved = await this.functionsRepository.save(function_);
-    await this.recordUpdate(saved, changed, 'failed, kept: ERROR');
+    // The attempt is what the Deployment holds: kept, under the old name if the new one went to another function meanwhile.
+    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName');
+    const nameLost = changes.name !== undefined && changes.name !== previousName && saved.name === previousName;
+    await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'failed, kept: ERROR');
     await this.releaseInstances(saved);
     await this.archiveCode(saved, previousCodePath);
-    throw failureResponse(error, failure);
+    const keptName = ` The function keeps its name "${previousName}": another function was given the name "${changes.name}" meanwhile.`;
+    throw failureResponse(error, nameLost ? `${clause(failure)}.${keptName}` : failure);
   }
 
   /**

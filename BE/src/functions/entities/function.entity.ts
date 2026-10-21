@@ -24,7 +24,13 @@ export enum Runtime {
   PYTHON = 'python',
 }
 
+/**
+ * A name belongs to one function of its account, as on AWS Lambda, compared
+ * exactly: "Hello" and "hello" are two names. The index also serves every
+ * query by account, which all start with its column.
+ */
 @Entity('functions')
+@Index(['accountId', 'name'], { unique: true })
 export class Function {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -33,7 +39,6 @@ export class Function {
   name: string;
 
   /** The account that owns the function (D1). Every query includes it (D4). */
-  @Index()
   @Column({ type: 'char', length: 12 })
   accountId: string;
 

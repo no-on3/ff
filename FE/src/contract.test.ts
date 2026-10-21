@@ -11,6 +11,7 @@ import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import functionsServiceSource from '../../BE/src/functions/functions.service.ts?raw';
+import createFunctionDtoSource from '../../BE/src/functions/dto/create-function.dto.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
 import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
 import languageSource from '../../BE/src/mail/language.ts?raw';
@@ -26,7 +27,7 @@ import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
 import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
-import { SAVED_FUNCTION_FIELD } from './lib/functions';
+import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import {
   ALARM_FIELDS,
   ALARM_STATES,
@@ -293,5 +294,16 @@ describe('the alarms', () => {
 describe('a failed create', () => {
   it("names the function the API saved anyway in the field the console reads, so the console opens it rather than create it twice", () => {
     expect(functionsServiceSource).toContain(`failureResponse(error, failure, { ${SAVED_FUNCTION_FIELD}: savedFunction.id })`);
+  });
+});
+
+describe("a function's name", () => {
+  it("is held in the forms to the rule the API applies, AWS Lambda's", () => {
+    const api = new RegExp(/export const FUNCTION_NAME = \/(.+)\/;/.exec(createFunctionDtoSource)![1]);
+    // As a browser compiles an input's pattern: anchored, with the v flag.
+    const form = new RegExp(`^(?:${FUNCTION_NAME_PATTERN})$`, 'v');
+    const names = ['hello', 'Hello_World-2', 'a', 'x'.repeat(MAX_FUNCTION_NAME_LENGTH), 'x'.repeat(MAX_FUNCTION_NAME_LENGTH + 1), '', 'my function', ' hello', 'a.b', 'a/b', 'é', 'a\nb'];
+    expect(names.map((name) => form.test(name))).toEqual(names.map((name) => api.test(name)));
+    expect(names.filter((name) => api.test(name))).toEqual(['hello', 'Hello_World-2', 'a', 'x'.repeat(64)]);
   });
 });

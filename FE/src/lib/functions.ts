@@ -1,5 +1,15 @@
 import type { Function, FunctionUpdate, PlanLimits, ScalingLimits } from '../services/api';
 
+/**
+ * AWS Lambda's rule for a function's name, which the API applies, as an HTML
+ * `pattern`: the browser anchors it, and its `v` flag wants the hyphen escaped.
+ */
+export const FUNCTION_NAME_PATTERN = '[A-Za-z0-9_\\-]{1,64}';
+/** The longest name the rule allows: the forms stop there rather than send one the API refuses. */
+export const MAX_FUNCTION_NAME_LENGTH = 64;
+/** The rule in words, for the forms. */
+export const FUNCTION_NAME_RULE = '1 to 64 letters, digits, hyphens or underscores';
+
 /** The fields the console's edit form changes. */
 export type EditableFields = Pick<Function, 'name' | 'code' | 'memory' | 'timeout'>;
 

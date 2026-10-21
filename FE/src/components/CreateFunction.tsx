@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
-import { CreateFailure, apiErrorMessage } from '../lib/functions';
+import { CreateFailure, FUNCTION_NAME_PATTERN, FUNCTION_NAME_RULE, MAX_FUNCTION_NAME_LENGTH, apiErrorMessage } from '../lib/functions';
 import { NewFunction, Runtime } from '../services/api';
 import { can } from '../lib/session';
 import { useSession } from '../session/session';
@@ -73,8 +73,12 @@ const CreateFunction: React.FC = () => {
             value={formData.name}
             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
             className="input mt-1"
+            maxLength={MAX_FUNCTION_NAME_LENGTH}
+            pattern={FUNCTION_NAME_PATTERN}
+            title={FUNCTION_NAME_RULE}
             required
           />
+          <p className="mt-1 text-sm text-gray-500">{FUNCTION_NAME_RULE}, unique in this account.</p>
         </div>
 
         <div>
