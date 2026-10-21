@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | Proposed on 2026-10-21. It is a view with an order and reasons, not a plan with tasks. When you pick a step, it gets its own plan, in the format of the [client-readiness plan](client-readiness-plan.md). **Step 1 started on 2026-10-21:** its plan is the [step-1 plan](step-1-plan.md), tasks U-00 to U-09, and its progress log says what is done. |
+| **Status** | Proposed on 2026-10-21. It is a view with an order and reasons, not a plan with tasks. When you pick a step, it gets its own plan, in the format of the [client-readiness plan](client-readiness-plan.md). **Step 1 done on 2026-10-21,** in development: its plan is the [step-1 plan](step-1-plan.md), tasks U-00 to U-09, whose progress log says what was built; production's code registry waits for your confirmation of [ADR 0003](adr/0003-code-delivery.md). **Step 2's plan** is the [step-2 plan](step-2-plan.md), proposed, for you to confirm. |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): its Phase 3 (E-01 to E-10), its Phase 4 (S-01 to S-10), §4.6 event sources, §4.7 storage and queues, §6.7 AWS-compatible services, §10 go-to-market |
-| **Builds on** | The [client-readiness plan](client-readiness-plan.md), done up to its pilot-launch tasks, and the [CLI plan](cli-plan.md), not started |
+| **Builds on** | The [client-readiness plan](client-readiness-plan.md), done up to its pilot-launch tasks, and the [CLI plan](cli-plan.md), its phases 0 to 2 done with step 1 |
 | **What it is for** | To answer "what do we add after functions?", and to look further ahead |
 
 FF runs functions. The goal is bigger: the set of services a developer in Tunisia would otherwise buy from AWS with a foreign card, offered here, in dinars, with the same code, and with a way out to AWS at any time.
@@ -51,7 +51,7 @@ One more rule for every service: **a function must reach it over FF's private ne
 
 Four gaps stop a customer from running anything real. They come before any new service.
 
-**Under way:** the [step-1 plan](step-1-plan.md) builds this step, in this order: environment variables and secrets; the event a function receives, which must be AWS's before a web address or a schedule can send one; function URLs, their TLS at the edge, and custom domains; schedules; then packages and the `ff` command, as the CLI plan's phases 0 to 2. **Done so far:** environment variables and secrets; AWS Lambda's event, with the functions made before keeping theirs until switched; function URLs, in the API and the console, served by the backend on a port of its own and over HTTPS at the edge, at customers' own domains too, proved by DNS; schedules, in the API and the console, with EventBridge's expressions and its Scheduled Event; the `ff` command, the CLI plan's phase 1 (deploy, invoke, logs and the live tail, local runs in Docker, `ff init`, the account's usage, balance and metrics), with the commands of each service above; packages with libraries, a zip as Lambda takes one, uploaded once and checked, which a function names and runs as an image its pods mount, in development (the CLI plan's C-21 to C-23); the Node.js runtime on Debian 13's glibc, so that native modules built as Lambda builds them load (C-25); and `ff package` and `ff deploy <folder>`, which make a function's folder a package with its libraries, for the runtimes' platform, and upload it when the account hasn't it, with the getting-started guide's "Functions with dependencies" (C-26, C-27). **Left:** inline code on the packages' path, and the registry in production's manifests, once you confirm [ADR 0003](adr/0003-code-delivery.md), which adds it; then the step's close. The plan's progress log has the details.
+**Done on 2026-10-21, in development:** the [step-1 plan](step-1-plan.md) built this step, in this order: environment variables and secrets; the event a function receives, which must be AWS's before a web address or a schedule can send one; function URLs, their TLS at the edge, and custom domains; schedules; then packages and the `ff` command, as the CLI plan's phases 0 to 2. **Done so far:** environment variables and secrets; AWS Lambda's event, with the functions made before keeping theirs until switched; function URLs, in the API and the console, served by the backend on a port of its own and over HTTPS at the edge, at customers' own domains too, proved by DNS; schedules, in the API and the console, with EventBridge's expressions and its Scheduled Event; the `ff` command, the CLI plan's phase 1 (deploy, invoke, logs and the live tail, local runs in Docker, `ff init`, the account's usage, balance and metrics), with the commands of each service above; packages with libraries, a zip as Lambda takes one, uploaded once and checked, which a function names and runs as an image its pods mount, in development (the CLI plan's C-21 to C-23); the Node.js runtime on Debian 13's glibc, so that native modules built as Lambda builds them load (C-25); and `ff package` and `ff deploy <folder>`, which make a function's folder a package with its libraries, for the runtimes' platform, and upload it when the account hasn't it, with the getting-started guide's "Functions with dependencies" (C-26, C-27). The getting-started guide's [A small app, end to end](getting-started.md#a-small-app-end-to-end) walks through all of it at once: a web address that writes to a database through a secret, a nightly schedule, and a package with its driver, which `hack/cli-e2e.sh` runs. **Waiting for you:** [ADR 0003](adr/0003-code-delivery.md)'s confirmation, which adds the code registry to production's manifests and puts inline code on the packages' path (the CLI plan's C-28 and C-24), and the choices of the step-1 plan's §9. The plan's progress log has the details.
 
 | Feature | Why | Parent task | Size |
 |---|---|---|---|
@@ -64,6 +64,8 @@ Four gaps stop a customer from running anything real. They come before any new s
 
 These two are the heart of the "local cloud" idea. Almost every app needs both, and both need a foreign card today.
 
+**Planned:** the [step-2 plan](step-2-plan.md), proposed on 2026-10-21, for you to confirm before it starts. It takes the decisions below further: where the customers' database server runs and how functions reach it, how its size is limited, the S3 front door that the parent plan's E-04 describes, and what each service is billed.
+
 ### 5.1 Managed PostgreSQL
 
 **What:** one database and one database user per account, on a PostgreSQL server that FF runs. The customer gets the connection string as a secret (step 1) and uses it from functions with any PostgreSQL driver.
@@ -74,7 +76,7 @@ These two are the heart of the "local cloud" idea. Almost every app needs both, 
 - One shared server per plan tier. Later, a server per account for the bigger plans.
 - The backups FF already runs (restore to any minute, a copy on a second site) cover the customers' databases too.
 - Limits per plan: storage size, connections, number of databases.
-- Billing by storage, in GB per month, from a sample taken every hour, the way `capacity_samples` works for instances. A small monthly fee per database if the costs need it.
+- Billing by storage, in GB per month, from a sample taken every hour, as `capacity_samples` samples instances every minute. A small monthly fee per database if the costs need it.
 - The way out: `pg_dump` and restore to AWS RDS. Write the page.
 
 **Risks:** one customer's heavy queries slow the others (limits per user, and watch it in the operator's monitoring); a shared server is a bigger target (TLS on, one user per database, no admin rights for customers).
@@ -239,8 +241,8 @@ From the parent plan's non-goals (§1.3, §3.3), with the reason in plain words:
 
 | Order | What | Needs | Size |
 |---|---|---|---|
-| 1 | Step 1: function URLs, secrets, packages and the CLI, schedules. **Under way:** the [step-1 plan](step-1-plan.md) | nothing | the CLI plan, plus about 4 weeks; the step-1 plan says 22 to 32 days besides the CLI (its §10) |
-| 2 | Step 2: managed PostgreSQL, file storage | secrets | medium, plus 2.5 weeks |
+| 1 | Step 1: function URLs, secrets, packages and the CLI, schedules. **Done** in development: the [step-1 plan](step-1-plan.md) | nothing | the CLI plan, plus about 4 weeks; the step-1 plan says 22 to 32 days besides the CLI (its §10) |
+| 2 | Step 2: managed PostgreSQL, file storage. **Planned:** the [step-2 plan](step-2-plan.md), for you to confirm | secrets | medium, plus 2.5 weeks; the step-2 plan says 35 to 45 days (its §10), counting all that every service needs |
 | 3 | Step 3: the queue, as async invoke, SQS queues and bucket notifications | storage | about 6.5 weeks |
 | 4 | Step 4: static sites, e-mail, a cache | storage | medium |
 | 5 | Step 5: the Lambda API, versions, Terraform, the export kit | steps 1 to 3 | about 15 weeks |

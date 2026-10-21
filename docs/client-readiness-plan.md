@@ -315,7 +315,7 @@ This follows Lambda: errors count as requests, throttles don't. **The cold start
 You asked whether production PostgreSQL is only a matter of environment variables. **Mostly yes.** The backend already reads `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD` and `DB_NAME`, so it can use any PostgreSQL: one managed by the data center, or one you run. Today that would still fail, for reasons this plan fixes:
 1. **The schema.** In production, schema sync is off and the migrations are out of date, so a fresh production database stays empty and the backend breaks on first use (§1.2). P-01 fixes it.
 2. **TLS to the database.** The backend has no TLS settings for its database connection. P-02 adds `DB_SSL` and `DB_SSL_CA`, and refuses the default credentials.
-3. **Backups.** Usage, ledger and invoices are money. P-61 adds point-in-time recovery: from the provider, or pgBackRest if you run the server yourself.
+3. **Backups.** Usage, ledger and invoices are money. P-61 adds point-in-time recovery: from the provider, or pgBackRest if you run the server yourself. **As built (P-61):** WAL-G rather than pgBackRest, to the second site's S3 ([`deploy/backup`](../deploy/backup/README.md)).
 
 Keycloak needs a database too: a second database and user on the same server, set through its `KC_DB_*` variables (P-60). Use PostgreSQL 15 or newer; development uses 15. **Decided:** no database operator in the cluster for now; you pick the server when you pick the hosting.
 

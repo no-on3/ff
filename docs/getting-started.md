@@ -421,6 +421,57 @@ ff metrics hello --since 6h                       # its invocations, errors, dur
 
 On an FF with logins, an owner of the account makes an API key in the console's API keys page, with the scopes the commands need (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `usage:read` for `ff usage` and `ff balance`, `metrics:read` for `ff metrics`), and `ff config set-token` saves it without showing it; `ff config set endpoint https://api.<domain>` names the API. A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh` makes the static Linux binary, with its SHA-256.
 
+### A small app, end to end
+
+[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and written to PostgreSQL, through a secret that holds the database's address, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, makes its two functions. FF has no database for customers yet (step 2 of [What to build next](what-to-build-next.md)): the app uses one of its own, which its functions reach over the internet, once the account's internet access is on.
+
+**The database.** A function never reaches a private address, FF's own network included. In development, `hack/k8s/app-database.sh up` runs a PostgreSQL that the cluster's functions reach as they would one on the internet: on a Docker network of its own in 198.18.0.0/15, the range set aside for tests, which the cluster's node joins (Docker 28 or later). It prints the database's address, which the functions get as a secret.
+
+```bash
+DATABASE_URL=$(hack/k8s/app-database.sh up)       # postgres://app:…@198.18.0.10:5432/app
+```
+
+**Its internet access.** The beta plan's accounts have none. FF's operator turns it on in the admin dashboard, on the account's page (`PUT /admin/accounts/<id>/egress`). In development mode, with no operator, the database stands in, and the next deploy applies it to the account's namespace:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d serverless_platform \
+  -c "UPDATE accounts SET internet_egress = true WHERE id = '$(curl -s "$FF/me" | jq -r '.accounts[0].id')'"
+```
+
+**The web address.** From the app's folder:
+
+```bash
+cd examples/orders-app
+ff deploy . --name orders-api --handler index.http     # npm installs pg in a copy of the folder; the package goes up
+printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
+ff url enable orders-api --auth none                    # its address: http://<id>.fn.localhost:3001/
+ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}'
+# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…"}
+ff invoke orders-api --http GET /orders                 # or curl http://<id>.fn.localhost:3001/orders
+../../hack/k8s/app-database.sh psql -c 'SELECT * FROM orders'
+```
+
+Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the address the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after.
+
+**The nightly report.** The same folder makes the second function, with the other handler. Its package is the same, so nothing goes up again:
+
+```bash
+ff deploy . --name orders-nightly --handler index.nightly   # "package: …, which the account had"
+printf '%s\n' "$DATABASE_URL" | ff secrets set orders-nightly DATABASE_URL
+ff schedule set orders-nightly "cron(0 2 * * ? *)"          # every night at 02:00 UTC; it says the next runs
+ff invoke orders-nightly --data @events/scheduled.json      # a night's run, now, with EventBridge's Scheduled Event
+ff logs orders-nightly                                      # report {"day":"2026-10-21","orders":1,"items":2,"removed":0}
+```
+
+The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. At 02:00 UTC the scheduler calls the function with that event itself; the run is in `ff history orders-nightly`, and `ff schedule list orders-nightly` says how it went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
+
+```bash
+ff delete orders-nightly --yes && ff delete orders-api --yes
+../../hack/k8s/app-database.sh down                     # the database, with its data
+```
+
+**In production** the database is yours, at an address on the internet, with TLS (`sslmode=require` in its address) and its password in the secret; FF's operator turns the account's internet access on. The same folder runs on AWS Lambda with an RDS database: `ff package` writes its zip.
+
 ## 4. Look inside the cluster
 
 ```bash

@@ -18,6 +18,8 @@ e2e_pids=()
 e2e_namespaces=()
 # Containers a test starts beside the compose project, such as a DNS server: removed on exit.
 e2e_containers=()
+# Commands that undo what a test set up beside the stack, such as an app's database: run on exit, first.
+e2e_cleanups=()
 e2e_teardown=false
 passed=0
 mkdir -p "$work"
@@ -57,7 +59,10 @@ e2e_dns() {
 }
 
 e2e_cleanup() {
-  local status=$? pid ns
+  local status=$? pid ns command
+  for command in "${e2e_cleanups[@]}"; do
+    eval "$command" >/dev/null 2>&1 || true
+  done
   for pid in "${e2e_pids[@]}"; do
     if kill -0 "$pid" 2>/dev/null; then
       kill "$pid"

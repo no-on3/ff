@@ -30,6 +30,8 @@ cleanup() {
   jobs -p | xargs -r kill 2>/dev/null || true
   k3d cluster delete "$cluster" >/dev/null 2>&1 || true
   k3d registry delete "k3d-$registry" >/dev/null 2>&1 || true
+  # The cluster's network, which k3d keeps while the registry is still on it.
+  docker network rm "k3d-$cluster" >/dev/null 2>&1 || true
   rm -f "$KUBECONFIG"
   [ "$status" -eq 0 ] || echo "code-delivery spike: FAILED (its files: $work)" >&2
 }

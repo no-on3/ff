@@ -11,7 +11,9 @@
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
-# ff package --compile, whose zip runs on FF as it is; and ff local, in
+# ff package --compile, whose zip runs on FF as it is; the getting-started guide's small app
+# (examples/orders-app), its functions writing to a database as one on the internet would be
+# (hack/k8s/app-database.sh), in an account whose internet access is on; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -411,6 +413,53 @@ check "that zip's files, deployed as they are with --no-build, are the same pack
 ff invoke cli-pkg-ts --data '{"ms": 60000}'
 check "and run on FF as they would on Lambda" "0 1m" "$(code) $(out | sed '$d' | jq -r .took)"
 ff delete cli-pkg-ts --yes
+
+echo "== a small app, as the guide walks through it: a package with a driver, a secret, a URL that writes to a database, a nightly schedule"
+# The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own.
+export FF_APP_DB_NAME="$E2E_PROJECT-app-db" FF_APP_DB_SUBNET=198.18.1.0/24 FF_APP_DB_ADDRESS=198.18.1.10
+e2e_cleanups+=("$FF_REPO_ROOT/hack/k8s/app-database.sh down")
+database_url="$("$FF_REPO_ROOT/hack/k8s/app-database.sh" up)"
+app_db() { "$FF_REPO_ROOT/hack/k8s/app-database.sh" psql -tA "$@"; }
+sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
+account_c="$(random_account)"
+e2e_namespaces+=("$(tenant_namespace "$account_c")")
+ff config set endpoint "$api" --profile c
+ff config set dev_account "$account_c" --profile c
+ff whoami --profile c
+# As an operator turns it on in the admin dashboard; e2e has no operator, so SQL. Its deploys apply it.
+sql "UPDATE accounts SET internet_egress = true WHERE id = '$account_c'"
+app="$work/orders-app"
+rm -rf "$app" && cp -r "$FF_REPO_ROOT/examples/orders-app" "$app"
+ff deploy "$app" --name orders-api --handler index.http --profile c
+check "examples/orders-app, pg among its libraries, deployed as orders-api with its URL's handler" \
+  "0 created orders-api (nodejs, 128 MB, 5 s): ACTIVE uploaded" "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//') $(out | tail -1 | awk '{ print $NF }')"
+printf '%s\n' "$database_url" | ff secrets set orders-api DATABASE_URL --profile c
+check "its database's address, a secret" "0 DATABASE_URL" "$(code) $("$ff_bin" secrets list orders-api --profile c --output json | jq -r '.secrets[0].name')"
+ff url enable orders-api --auth none --profile c
+check "a URL, open to anyone" 0 "$(code)"
+ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}' --profile c
+check "a POST to its URL writes an order to the database, through the secret and the account's internet access" \
+  "0 HTTP 201 harissa 2" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity)"')"
+check "which the database has" "harissa|2" "$(app_db -c 'SELECT item, quantity FROM orders')"
+ff invoke orders-api --http POST /orders --data '{"item": "", "quantity": 0}' --profile c
+check "a wrong order is refused" "0 HTTP 400" "$(code) $(out | head -1)"
+ff invoke orders-api --http GET /orders --profile c
+check "a GET lists the orders" "0 HTTP 200 harissa" "$(code) $(out | head -1) $(out | tail -1 | jq -r '.[0].item')"
+ff deploy "$app" --name orders-nightly --handler index.nightly --profile c
+check "the same folder, a second function with the other handler: its package, the account has" \
+  "0 created orders-nightly (nodejs, 128 MB, 5 s): ACTIVE which the account had" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//') $(out | tail -1 | sed 's/.*, //')"
+printf '%s\n' "$database_url" | ff secrets set orders-nightly DATABASE_URL --profile c
+ff schedule set orders-nightly "cron(0 2 * * ? *)" --profile c
+check "a schedule at 02:00 UTC every night" "0 orders-nightly's schedule schedule made: cron(0 2 * * ? *), with EventBridge's Scheduled Event true" \
+  "$(code) $(out | head -1) $(out | sed -n 2p | grep -qE '^next runs \(UTC\): [0-9-]+ 02:00' && echo true || echo false)"
+# Its next run's event, now: EventBridge's Scheduled Event for 02:00 after the day the order was made.
+order_day="$(app_db -c "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') FROM orders")"
+jq --arg time "$(date -u -d "$order_day + 1 day" +%Y-%m-%dT02:00:00Z)" '.time = $time' "$app/events/scheduled.json" >"$work/scheduled.json"
+ff invoke orders-nightly --data "@$work/scheduled.json" --profile c
+check "which reports the day's order from the database" "0 $order_day 1 2 0" "$(code) $(out | sed '$d' | jq -r '"\(.day) \(.orders) \(.items) \(.removed)"')"
+ff delete orders-nightly --yes --profile c
+ff delete orders-api --yes --profile c
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts

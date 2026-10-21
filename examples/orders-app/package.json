@@ -1,0 +1,8 @@
+{
+  "name": "orders-app",
+  "private": true,
+  "description": "A small app on FF: orders taken at a function's URL into PostgreSQL, and a nightly report",
+  "dependencies": {
+    "pg": "8.23.1"
+  }
+}
