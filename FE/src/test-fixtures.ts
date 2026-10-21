@@ -17,5 +17,6 @@ export const BETA_PLAN: Plan = {
     historyRetentionDays: 30,
     idleSeconds: 900,
     internetEgress: false,
+    customDomains: 5,
   },
 };

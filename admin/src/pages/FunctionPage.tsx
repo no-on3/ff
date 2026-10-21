@@ -15,6 +15,7 @@ import {
   Look,
   TRUNCATED,
   callValue,
+  domainsText,
   eventFormatText,
   lookDialog,
   milliseconds,
@@ -134,6 +135,8 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
             {page.url ? (
               <>
                 <span className="break-all font-mono text-sm">{page.url.functionUrl}</span> · {urlText(page.url)}
+                <br />
+                <span className="text-sm">Own domains: {domainsText(page.url.domains)}</span>
               </>
             ) : (
               'none'

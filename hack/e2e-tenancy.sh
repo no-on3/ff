@@ -272,6 +272,7 @@ path_for() {
   path="${path//\{functionId\}/$3}"
   path="${path//\{userId\}/$missing}"
   path="${path//\{invocationId\}/$missing}"
+  path="${path//\{domain\}/l5.example.tn}"
   path="${path//\{month\}/$(date -u +%Y-%m)}"
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
@@ -300,6 +301,7 @@ body_for() {
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
     "PATCH /functions/{id}/secrets") echo '{"secrets": {"L5_SECRET": "l5"}}' ;;
     "POST /functions/{id}/url" | "PUT /functions/{id}/url") echo '{"authType": "NONE"}' ;;
+    "POST /functions/{id}/url/domains") echo '{"domain": "l5.example.tn"}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;

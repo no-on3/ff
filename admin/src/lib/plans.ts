@@ -14,6 +14,7 @@ export interface PlanLimits {
   historyRetentionDays: number;
   idleSeconds: number;
   internetEgress: boolean;
+  customDomains: number;
 }
 
 export interface Plan {
@@ -39,6 +40,7 @@ export const LIMIT_FIELDS: Array<{ path: [keyof PlanLimits] | ['quota', keyof Pl
   { path: ['historyRetentionDays'], label: 'History retention', unit: 'days', kind: 'whole' },
   { path: ['idleSeconds'], label: 'Idle time before scale to zero', unit: 's', kind: 'whole' },
   { path: ['internetEgress'], label: 'Internet egress, by default', kind: 'boolean' },
+  { path: ['customDomains'], label: "Customers' own domains", unit: "for their functions' URLs, all together", kind: 'whole' },
 ];
 
 const QUANTITY = /^\d+(\.\d+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$/;

@@ -31,6 +31,11 @@ export type AuditAction =
   | 'function_url.create'
   | 'function_url.update'
   | 'function_url.delete'
+  // A customer's own domain for a function's URL: added, proved by DNS, no longer proved, removed.
+  | 'custom_domain.add'
+  | 'custom_domain.verify'
+  | 'custom_domain.unverify'
+  | 'custom_domain.remove'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

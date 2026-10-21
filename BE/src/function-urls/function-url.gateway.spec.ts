@@ -59,6 +59,8 @@ describe('the function URL gateway (L1)', () => {
   let port: number;
   let throttler: ThrottlerStorageService;
   const urls = new Map<string, FunctionUrl>();
+  /** Customers' verified domains, each to its function. */
+  const domains = new Map<string, string>();
   const functions = { findOne: jest.fn(), call: jest.fn() };
   const apiKeys = { authenticate: jest.fn() };
   const credit = { admit: jest.fn() };
@@ -102,6 +104,7 @@ describe('the function URL gateway (L1)', () => {
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     urls.clear();
+    domains.clear();
     for (const row of [urlRow(PUBLIC, UrlAuthType.NONE), urlRow(PRIVATE, UrlAuthType.AWS_IAM), urlRow(WITH_CORS, UrlAuthType.NONE, CORS)]) urls.set(row.urlId, row);
     output = { statusCode: 200, body: 'ok' };
     functions.findOne.mockImplementation(async (accountId: string, id: string) => ({
@@ -121,7 +124,11 @@ describe('the function URL gateway (L1)', () => {
     throttler = new ThrottlerStorageService();
     gateway = new FunctionUrlGateway(
       config,
-      { forUrlId: async (urlId: string) => urls.get(urlId) ?? null } as never,
+      {
+        forUrlId: async (urlId: string) => urls.get(urlId) ?? null,
+        forFunction: async (functionId: string) => [...urls.values()].find((url) => url.functionId === functionId) ?? null,
+      } as never,
+      { forHost: async (host: string) => (domains.has(host) ? { domain: host, functionId: domains.get(host) } : null) } as never,
       functions as never,
       apiKeys as never,
       credit as never,
@@ -397,6 +404,45 @@ describe('the function URL gateway (L1)', () => {
 
       expect([answer.status, answer.headers['access-control-allow-origin']]).toEqual([200, 'https://mine.example']);
       expect(lastEvent().requestContext.http.method).toBe('OPTIONS');
+    });
+  });
+
+  describe("a customer's own domain", () => {
+    const onDomain = (domain: string, path = '/', headers: Record<string, string> = {}) =>
+      send('', path, { headers: { host: domain, ...headers } });
+
+    it('reaches its function once verified, and the event names the domain', async () => {
+      domains.set('shop.example.tn', 'fn-p');
+
+      const answer = await onDomain('Shop.Example.TN:443', '/cart?item=1');
+
+      expect(answer.status).toBe(200);
+      expect(calls()[0][0]).toMatchObject({ id: 'fn-p' });
+      expect(lastEvent().requestContext).toMatchObject({ domainName: 'shop.example.tn', domainPrefix: 'shop', apiId: PUBLIC });
+      expect(lastEvent().rawPath).toBe('/cart');
+    });
+
+    it('answers 404 for a domain not verified, or whose URL is gone', async () => {
+      domains.set('gone.example.tn', 'fn-none');
+
+      expect((await onDomain('pending.example.tn')).status).toBe(404);
+      expect((await onDomain('gone.example.tn')).status).toBe(404);
+      expect(functions.call).not.toHaveBeenCalled();
+    });
+
+    it("leaves a function's own /tls/allowed to it on its domain", async () => {
+      domains.set('shop.example.tn', 'fn-p');
+
+      await onDomain('shop.example.tn', '/tls/allowed?domain=anything.example');
+
+      expect(lastEvent().rawPath).toBe('/tls/allowed');
+    });
+
+    it('gets a certificate on demand once verified, and not before', async () => {
+      domains.set('shop.example.tn', 'fn-p');
+      const ask = (domain: string) => send('', `/tls/allowed?domain=${domain}`, { headers: { host: 'ff-backend.ff-system.svc.cluster.local:3001' } });
+
+      expect([(await ask('shop.example.tn')).status, (await ask('pending.example.tn')).status]).toEqual([200, 404]);
     });
   });
 

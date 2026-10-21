@@ -9,6 +9,7 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { Principal } from '../auth/principal';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { INVOCATION } from '../plans/rate-limits';
+import { CustomDomainsController } from './custom-domains.controller';
 import { FunctionUrlsController } from './function-urls.controller';
 import { FunctionUrlsService } from './function-urls.service';
 
@@ -34,6 +35,29 @@ describe('FunctionUrlsController route rules (L1)', () => {
 
   it('lets every member read it, viewers included, and a key with functions:read', () => {
     expect(rules('get')).toEqual({ roles: 'anyone', activeAccount: false, scope: 'functions:read', invocation: false });
+  });
+});
+
+describe('CustomDomainsController route rules (L1)', () => {
+  const domainRules = (handler: keyof CustomDomainsController) => {
+    const method = CustomDomainsController.prototype[handler];
+    return {
+      roles: reflector.get<string[] | undefined>(ROLES, method) ?? 'anyone',
+      activeAccount: reflector.get<boolean | undefined>(ACTIVE_ACCOUNT, method) ?? false,
+      scope: reflector.get<string | undefined>(SCOPE, method) ?? 'no key',
+    };
+  };
+
+  it.each<keyof CustomDomainsController>(['add', 'verify'])('%s: writers only, in an approved account, and a key with functions:write', (handler) => {
+    expect(domainRules(handler)).toEqual({ roles: ['owner', 'developer'], activeAccount: true, scope: 'functions:write' });
+  });
+
+  it('lets writers remove a domain, even in an account that is not active', () => {
+    expect(domainRules('remove')).toEqual({ roles: ['owner', 'developer'], activeAccount: false, scope: 'functions:write' });
+  });
+
+  it('lets every member list them, and a key with functions:read', () => {
+    expect(domainRules('list')).toEqual({ roles: 'anyone', activeAccount: false, scope: 'functions:read' });
   });
 });
 

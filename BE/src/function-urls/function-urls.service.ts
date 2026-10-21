@@ -130,7 +130,13 @@ export class FunctionUrlsService {
     });
   }
 
-  private async urlOf(accountId: string, functionId: string): Promise<FunctionUrl> {
+  /** The URL of a function, for the gateway's customers' domains; null when it has none. */
+  forFunction(functionId: string): Promise<FunctionUrl | null> {
+    return this.urls.findOne({ where: { functionId } });
+  }
+
+  /** The account's function's URL; 404 for another account's function, and for a function without one. */
+  async urlOf(accountId: string, functionId: string): Promise<FunctionUrl> {
     await this.functions.findOne(accountId, functionId);
     const url = await this.urls.findOne({ where: { functionId, accountId } });
     if (!url) throw new NotFoundException(`Function ${functionId} has no URL: create one with POST /functions/${functionId}/url`);

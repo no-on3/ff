@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TRUNCATED, callValue, eventFormatText, foundIn, lookDialog, milliseconds, namesText, outcome, searchSummary, sourceText, urlText } from './support';
+import { TRUNCATED, callValue, domainsText, eventFormatText, foundIn, lookDialog, milliseconds, namesText, outcome, searchSummary, sourceText, urlText } from './support';
 
 describe("a look at a customer's data", () => {
   it("says what it shows, and that the account's owners see it in their audit log, with the reason", () => {
@@ -56,10 +56,17 @@ describe("a function's configuration, to read", () => {
   });
 
   it('says who may call its URL, and whether it has CORS', () => {
-    const url = { functionUrl: 'https://abc.fn.example.tn/', createdAt: '2026-10-21T08:00:00Z' };
+    const url = { functionUrl: 'https://abc.fn.example.tn/', createdAt: '2026-10-21T08:00:00Z', domains: [] };
 
     expect(urlText({ ...url, authType: 'NONE', cors: false })).toBe('anyone may call it');
     expect(urlText({ ...url, authType: 'AWS_IAM', cors: true })).toBe('only with an API key of the account, with CORS');
+  });
+
+  it("names the URL's own domains, each with where it stands", () => {
+    expect(domainsText([{ domain: 'shop.example.tn', status: 'verified', checkError: null }, { domain: 'example.tn', status: 'pending', checkError: 'No TXT record' }])).toBe(
+      'shop.example.tn (verified), example.tn (pending)',
+    );
+    expect(domainsText([])).toBe('none');
   });
 
   it('names the variables and secrets, or says there are none', () => {

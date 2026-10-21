@@ -16,6 +16,8 @@ work="$FF_REPO_ROOT/hack/.$E2E_NAME"
 compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth)
 e2e_pids=()
 e2e_namespaces=()
+# Containers a test starts beside the compose project, such as a DNS server: removed on exit.
+e2e_containers=()
 e2e_teardown=false
 passed=0
 mkdir -p "$work"
@@ -38,6 +40,20 @@ e2e_base_env=(
   FF_FUNCTION_URL_PORT=0
 )
 
+# e2e_dns <port> <directory>: a DNS server on 127.0.0.1:<port>, CoreDNS, for customers' domains: each zone file
+# <zone>.db in the directory is served, read again within a second of a change (its serial must grow).
+e2e_dns() {
+  local port=$1 dir=$2 zone
+  : >"$dir/Corefile"
+  for zone in "$dir"/*.db; do
+    zone="$(basename "$zone" .db)"
+    printf '%s:53 {\n  file /zones/%s.db {\n    reload 1s\n  }\n}\n' "$zone" "$zone" >>"$dir/Corefile"
+  done
+  docker run -d --name "$E2E_PROJECT-dns" -p "127.0.0.1:$port:53/udp" -p "127.0.0.1:$port:53/tcp" -v "$dir:/zones:ro" \
+    rancher/mirrored-coredns-coredns:1.14.7 -conf /zones/Corefile >/dev/null
+  e2e_containers+=("$E2E_PROJECT-dns")
+}
+
 e2e_cleanup() {
   local status=$? pid ns
   for pid in "${e2e_pids[@]}"; do
@@ -49,6 +65,7 @@ e2e_cleanup() {
   for ns in "${e2e_namespaces[@]}"; do
     kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   done
+  [ "${#e2e_containers[@]}" -eq 0 ] || docker rm -f "${e2e_containers[@]}" >/dev/null 2>&1 || true
   "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   if $e2e_teardown; then "$FF_REPO_ROOT/hack/k8s/cluster-down.sh" >/dev/null 2>&1 || true; fi
   if [ "$status" -ne 0 ]; then

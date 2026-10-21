@@ -13,7 +13,8 @@
 # switched). Then a function's URL, called with curl through its gateway: a
 # query, a JSON body, bytes, a cookie, the function's own 404 and its error, a
 # browser's preflight, the account's credentials, and the call in the history
-# and the usage records. Then plans:
+# and the usage records; the URL's own domains, proved through a DNS server of
+# the test's, a subdomain by its CNAME and an apex by its TXT record. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -59,9 +60,12 @@ metrics_host="${FF_E2E_METRICS_HOST:-127.0.0.1}"
 metrics_port="${FF_E2E_METRICS_PORT:-$(free_port)}"
 # Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which curl takes to this machine.
 url_port="$(free_port)"
+# Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
+dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
   FF_METRICS_HOST="$metrics_host" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json
-  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port")
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
+  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1)
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -328,6 +332,53 @@ latest="$(http GET "/functions/$url_fn/invocations?limit=1" | jq -c '.invocation
 check "the call is in the history as the URL's, its credentials kept as ***" 'url *** null' \
   "$(jq -r '"\(.source) \(.input.headers.authorization) \(.input.cookies)"' <<<"$latest")"
 check "each call has its usage record, under its request ID" 1 "$(env_q "SELECT count(*) FROM usage_records WHERE request_id = '$url_call'")"
+echo "== a URL's own domain"
+zone_dir="$work/zones"
+mkdir -p "$zone_dir"
+# zone <serial> [record...]: the test zone, e2e-customer.tn, with these records besides its own; a new serial each time.
+zone() {
+  local serial=$1
+  shift
+  {
+    printf '$ORIGIN e2e-customer.tn.\n$TTL 5\n@ IN SOA ns.e2e-customer.tn. hostmaster.e2e-customer.tn. %s 60 60 600 5\n' "$serial"
+    printf '@ IN NS ns.e2e-customer.tn.\nns IN A 127.0.0.1\n'
+    printf '%s\n' "$@"
+  } >"$zone_dir/e2e-customer.tn.db"
+}
+zone 1
+e2e_dns "$dns_port" "$zone_dir"
+added="$(http POST "/functions/$url_fn/url/domains" '{"domain": "Shop.E2E-Customer.tn."}')"
+check "a domain of the customer's is added, pending, with the CNAME to make: to the URL's host" "201 shop.e2e-customer.tn pending $url_host" \
+  "$(status) $(jq -r '"\(.domain) \(.status) \(.records.cname[0].value)"' <<<"$added")"
+# verify_until <domain>: checks the domain again until the DNS server has read the new zone, half a minute at most.
+verify_until() {
+  local _
+  for _ in $(seq 1 30); do
+    http POST "/functions/$url_fn/url/domains/$1/verify" >/dev/null
+    [ "$(jq -r .status "$work/body")" = verified ] && break
+    sleep 1
+  done
+  cat "$work/body"
+}
+at_domain() { curl -sS -o "$work/url-body" -w '%{http_code}' --resolve "$1:$url_port:127.0.0.1" "http://$1:$url_port${2:-/}"; }
+check "before it is proved, the URL doesn't answer there" 404 "$(at_domain shop.e2e-customer.tn)"
+zone 2 "shop IN CNAME $url_host."
+check "once its CNAME is made, the check proves it" "verified null" "$(verify_until shop.e2e-customer.tn | jq -r '"\(.status) \(.checkError)"')"
+check "the URL answers there, and the event names the domain" '200 {"path":"/hello","domain":"shop.e2e-customer.tn"}' \
+  "$(at_domain shop.e2e-customer.tn '/hello?name=domain') $(jq -c '{path, domain}' "$work/url-body")"
+apex="$(http POST "/functions/$url_fn/url/domains" '{"domain": "e2e-customer.tn"}')"
+txt="$(jq -r '.records.txt[] | select(.type == "TXT") | .value' <<<"$apex")"
+check "an apex, which can't be a CNAME, gets a TXT record with its token to make, and the edge's address" "201 pending A 127.0.0.1 true" \
+  "$(status) $(jq -r .status <<<"$apex") $(jq -r '.records.txt[] | select(.type == "A") | "\(.type) \(.value)"' <<<"$apex") $([[ $txt =~ ^ff-verify=[0-9a-f]{32}$ ]] && echo true || echo false)"
+zone 3 "shop IN CNAME $url_host." "_ff-verify IN TXT \"$txt\"" "@ IN A 127.0.0.1"
+check "once the TXT record and the address are made, the check proves the apex" verified "$(verify_until e2e-customer.tn | jq -r .status)"
+asked() { curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$url_port/tls/allowed?domain=$1"; }
+check "the edge may get certificates for the verified domains, and not for another" "200 200 404" \
+  "$(asked shop.e2e-customer.tn) $(asked e2e-customer.tn) $(asked blog.e2e-customer.tn)"
+http DELETE "/functions/$url_fn/url/domains/shop.e2e-customer.tn" >/dev/null
+check "removed, the domain stops answering at once" "204 404" "$(status) $(at_domain shop.e2e-customer.tn)"
+check "the audit log names each change of the domains" "custom_domain.add custom_domain.verify custom_domain.add custom_domain.verify custom_domain.remove" \
+  "$(http GET '/audit-log?limit=30' | jq -r --arg r "function:$url_fn" '[.entries[] | select(.resource == $r and (.action | startswith("custom_domain")))] | reverse | map(.action) | join(" ")')"
 http PUT "/functions/$url_fn/url" '{"cors": {"allowOrigins": ["https://app.example.tn"], "allowMethods": ["POST"], "maxAge": 60}}' >/dev/null
 at_url OPTIONS /orders -H 'origin: https://app.example.tn' -H 'access-control-request-method: POST' >/dev/null
 check "with CORS set, the URL answers a browser's preflight itself" "200 204 https://app.example.tn POST 60" \

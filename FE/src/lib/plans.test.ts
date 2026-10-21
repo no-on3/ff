@@ -16,13 +16,14 @@ describe('planLimitRows', () => {
       ['Invocation history kept', '30 days'],
       ['Logs kept', '14 days'],
       ['Internet access for functions', 'No, unless turned on for the account'],
+      ["Your own domains for functions' URLs", '5'],
     ]);
   });
 
   it("says a plan's internet access is where an account starts, which FF changes for each account", () => {
     const open = { ...BETA_PLAN, limits: { ...BETA_PLAN.limits, internetEgress: true } };
 
-    expect(planLimitRows(open).slice(-1)[0]).toEqual(['Internet access for functions', 'Yes, unless turned off for the account']);
+    expect(planLimitRows(open).find(([label]) => label === 'Internet access for functions')).toEqual(['Internet access for functions', 'Yes, unless turned off for the account']);
   });
 });
 

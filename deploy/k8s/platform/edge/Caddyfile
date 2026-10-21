@@ -15,8 +15,9 @@
 	skip_install_trust
 	# Caddy's own redirects would name its port, 8443: the one below names none, so 443.
 	auto_https disable_redirects
-	# A certificate on demand (FF_FUNCTION_URL_TLS=on-demand) only for a host the backend says is a function URL:
-	# nobody makes the edge ask a certificate authority for names of their choosing.
+	# A certificate on demand (a function URL's host with FF_FUNCTION_URL_TLS=on-demand, a customer's own domain
+	# always) only for a host the backend says is one, verified: nobody makes the edge ask a certificate authority for
+	# names of their choosing.
 	on_demand_tls {
 		ask http://ff-backend.ff-system.svc.cluster.local:3001/tls/allowed
 	}
@@ -74,6 +75,18 @@ http:// {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		-Server
 	}
+	log
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:3001
+}
+
+# Customers' own domains for their functions' URLs, each proved by DNS: every other host, its certificate made on
+# demand at its first request once the backend says the domain is verified, else the handshake fails. Without HSTS:
+# the domain is the customer's, and its other names too.
+https:// {
+	tls {
+		on_demand
+	}
+	header -Server
 	log
 	reverse_proxy ff-backend.ff-system.svc.cluster.local:3001
 }

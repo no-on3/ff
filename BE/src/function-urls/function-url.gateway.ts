@@ -24,6 +24,7 @@ import { refusals, statusClass, urlResponses } from '../monitoring/operator-metr
 import { FunctionThrottledError } from '../orchestrator/orchestrator.errors';
 import { PlansService } from '../plans/plans.service';
 import { countInvocation } from '../plans/rate-limits';
+import { CustomDomainsService } from './custom-domains.service';
 import { FunctionUrlsService } from './function-urls.service';
 import { functionDomain, hostName, urlIdOf } from './url-address';
 import { isCorsHeader, isPreflight, preflightHeaders, responseCorsHeaders } from './url-cors';
@@ -136,6 +137,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
   constructor(
     config: ConfigService,
     private readonly urls: FunctionUrlsService,
+    private readonly domains: CustomDomainsService,
     private readonly functions: FunctionsService,
     private readonly apiKeys: ApiKeysService,
     private readonly credit: CreditService,
@@ -193,10 +195,9 @@ export class FunctionUrlGateway implements OnModuleDestroy {
   }
 
   private async answer(request: IncomingMessage, context: { requestId: string; sourceIp: string; time: Date }): Promise<UrlAnswer> {
-    const urlId = urlIdOf(request.headers.host, this.domain);
-    // Any other host is the edge itself, asking before a certificate: no function URL's request names it.
-    if (!urlId && pathOf(request.url) === TLS_ALLOWED_PATH) return this.tlsAllowed(request.url as string);
-    const url = urlId ? await this.urls.forUrlId(urlId) : null;
+    const url = await this.urlFor(request.headers.host);
+    // A host that is neither a URL nor a customer's domain is the edge itself, asking before a certificate.
+    if (!url && pathOf(request.url) === TLS_ALLOWED_PATH) return this.tlsAllowed(request.url as string);
     if (!url) return jsonAnswer(HttpStatus.NOT_FOUND, 'Not Found');
     const origin = single(request.headers.origin);
     // With CORS set, the URL answers browsers' preflights itself, before any credentials: browsers send none with them.
@@ -214,16 +215,25 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     return url.cors ? withCors(answer, url.cors, origin) : answer;
   }
 
+  /** The URL a host names: by its ID under the function domain, or a customer's verified domain; null for any other. */
+  private async urlFor(host: string | undefined): Promise<FunctionUrl | null> {
+    const urlId = urlIdOf(host, this.domain);
+    if (urlId) return this.urls.forUrlId(urlId);
+    const name = hostName(host);
+    const domain = name ? await this.domains.forHost(name) : null;
+    return domain ? this.urls.forFunction(domain.functionId) : null;
+  }
+
   /**
    * The edge's question before it gets a certificate on demand, for a host it
-   * hasn't one for (Caddy's on_demand_tls ask): 200 for a function URL's host,
-   * 404 for any other, so that nobody makes it ask a certificate authority for
-   * names of their choosing. Only the edge reaches this port in a cluster.
+   * hasn't one for (Caddy's on_demand_tls ask): 200 for a function URL's host
+   * or a customer's verified domain, 404 for any other, so that nobody makes it
+   * ask a certificate authority for names of their choosing. Only the edge
+   * reaches this port in a cluster.
    */
   private async tlsAllowed(target: string): Promise<UrlAnswer> {
     const domain = new URL(target, 'http://edge').searchParams.get('domain') ?? undefined;
-    const urlId = urlIdOf(domain, this.domain);
-    const known = urlId !== undefined && (await this.urls.forUrlId(urlId)) !== null;
+    const known = (await this.urlFor(domain)) !== null;
     return known ? { status: HttpStatus.OK, headers: [['content-type', 'text/plain']], body: Buffer.from('allowed') } : jsonAnswer(HttpStatus.NOT_FOUND, 'Not Found');
   }
 
@@ -237,6 +247,8 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     await this.admit(url);
 
     const body = await readBody(request, URL_PAYLOAD_LIMIT);
+    // On a customer's domain, the event names it, and its first label, as API Gateway names a custom domain's.
+    const domainName = hostName(request.headers.host) as string;
     const event = urlEvent({
       method: request.method ?? 'GET',
       target: originForm(request.url),
@@ -244,8 +256,8 @@ export class FunctionUrlGateway implements OnModuleDestroy {
       body,
       sourceIp: context.sourceIp,
       protocol: `HTTP/${request.httpVersion}`,
-      domainName: hostName(request.headers.host) as string,
-      domainPrefix: url.urlId,
+      domainName,
+      domainPrefix: urlIdOf(domainName, this.domain) ?? domainName.split('.')[0],
       urlId: url.urlId,
       requestId: context.requestId,
       time: context.time,

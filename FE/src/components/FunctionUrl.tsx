@@ -17,6 +17,7 @@ import axios from 'axios';
 import { AuthType, CORS_METHODS, CorsForm, FunctionUrl as Url, authTypeText, corsFormOf, corsOf, corsText, curlExample } from '../lib/function-url';
 import { apiErrorMessage } from '../lib/functions';
 import { Function, functionUrlApi } from '../services/api';
+import { FunctionUrlDomains } from './FunctionUrlDomains';
 
 interface FunctionUrlProps {
   func: Function;
@@ -206,79 +207,82 @@ export const FunctionUrlTab: React.FC<FunctionUrlProps> = ({ func, mayChange }) 
   );
 
   return (
-    <Card>
-      <CardContent>
-        <Typography variant="h6" gutterBottom>
-          URL
-        </Typography>
-        <Typography variant="body2" color="text.secondary" gutterBottom>
-          A web address for this function, as AWS Lambda&apos;s function URLs: every request to it, any method and path, calls the function with
-          Lambda&apos;s event for function URLs, and what the function returns is the response. Calls count and cost as invokes do.
-        </Typography>
-
-        {error && (
-          <Alert severity="error" sx={{ my: 2 }}>
-            {error}
-          </Alert>
-        )}
-
-        {func.eventFormat === 'wrapped' ? (
-          <Alert severity="info" sx={{ my: 2 }}>
-            A URL sends AWS Lambda&apos;s event, and this function takes FF&apos;s original one, with the input in event.body. Move it to AWS
-            Lambda&apos;s event first, in Overview.
-          </Alert>
-        ) : url === undefined ? (
-          <Typography variant="body2" sx={{ my: 2 }}>
-            Loading…
+    <>
+      <Card>
+        <CardContent>
+          <Typography variant="h6" gutterBottom>
+            URL
           </Typography>
-        ) : url === null ? (
-          mayChange ? (
-            configuration
-          ) : (
-            <Typography variant="body2" color="text.secondary" sx={{ my: 2 }}>
-              This function has no URL. Owners and developers can give it one.
+          <Typography variant="body2" color="text.secondary" gutterBottom>
+            A web address for this function, as AWS Lambda&apos;s function URLs: every request to it, any method and path, calls the function with
+            Lambda&apos;s event for function URLs, and what the function returns is the response. Calls count and cost as invokes do.
+          </Typography>
+
+          {error && (
+            <Alert severity="error" sx={{ my: 2 }}>
+              {error}
+            </Alert>
+          )}
+
+          {func.eventFormat === 'wrapped' ? (
+            <Alert severity="info" sx={{ my: 2 }}>
+              A URL sends AWS Lambda&apos;s event, and this function takes FF&apos;s original one, with the input in event.body. Move it to AWS
+              Lambda&apos;s event first, in Overview.
+            </Alert>
+          ) : url === undefined ? (
+            <Typography variant="body2" sx={{ my: 2 }}>
+              Loading…
             </Typography>
-          )
-        ) : (
-          <>
-            <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap', my: 2 }}>
-              <Typography component="code" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                {url.functionUrl}
+          ) : url === null ? (
+            mayChange ? (
+              configuration
+            ) : (
+              <Typography variant="body2" color="text.secondary" sx={{ my: 2 }}>
+                This function has no URL. Owners and developers can give it one.
               </Typography>
-              <Button size="small" variant="outlined" onClick={() => void copy(url.functionUrl)}>
-                {copied ? 'Copied' : 'Copy'}
-              </Button>
-              {url.authType === 'NONE' && (
-                <Button size="small" href={url.functionUrl} target="_blank" rel="noopener noreferrer">
-                  Open
+            )
+          ) : (
+            <>
+              <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap', my: 2 }}>
+                <Typography component="code" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                  {url.functionUrl}
+                </Typography>
+                <Button size="small" variant="outlined" onClick={() => void copy(url.functionUrl)}>
+                  {copied ? 'Copied' : 'Copy'}
                 </Button>
-              )}
-            </Box>
-            <Typography variant="body2">{authTypeText(url.authType)}</Typography>
-            <Typography variant="body2">{corsText(url.cors)}</Typography>
-            <Typography component="pre" variant="body2" sx={{ fontFamily: 'monospace', bgcolor: 'grey.100', p: 1, mt: 2, overflowX: 'auto' }}>
-              {curlExample(url)}
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              Each answer carries x-amzn-RequestId, the call&apos;s request ID in the history and the logs. A function that fails answers 502, its
-              error in the history only.
-            </Typography>
-            {mayChange &&
-              (editing ? (
-                configuration
-              ) : (
-                <Box sx={{ display: 'flex', gap: 2, mt: 3 }}>
-                  <Button variant="outlined" disabled={busy} onClick={() => setEditing(true)}>
-                    Change
+                {url.authType === 'NONE' && (
+                  <Button size="small" href={url.functionUrl} target="_blank" rel="noopener noreferrer">
+                    Open
                   </Button>
-                  <Button color="error" disabled={busy} onClick={() => void remove()}>
-                    Delete URL
-                  </Button>
-                </Box>
-              ))}
-          </>
-        )}
-      </CardContent>
-    </Card>
+                )}
+              </Box>
+              <Typography variant="body2">{authTypeText(url.authType)}</Typography>
+              <Typography variant="body2">{corsText(url.cors)}</Typography>
+              <Typography component="pre" variant="body2" sx={{ fontFamily: 'monospace', bgcolor: 'grey.100', p: 1, mt: 2, overflowX: 'auto' }}>
+                {curlExample(url)}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                Each answer carries x-amzn-RequestId, the call&apos;s request ID in the history and the logs. A function that fails answers 502, its
+                error in the history only.
+              </Typography>
+              {mayChange &&
+                (editing ? (
+                  configuration
+                ) : (
+                  <Box sx={{ display: 'flex', gap: 2, mt: 3 }}>
+                    <Button variant="outlined" disabled={busy} onClick={() => setEditing(true)}>
+                      Change
+                    </Button>
+                    <Button color="error" disabled={busy} onClick={() => void remove()}>
+                      Delete URL
+                    </Button>
+                  </Box>
+                ))}
+            </>
+          )}
+        </CardContent>
+      </Card>
+      {url && <FunctionUrlDomains functionId={func.id} functionUrl={url.functionUrl} mayChange={mayChange} />}
+    </>
   );
 };

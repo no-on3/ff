@@ -3,7 +3,7 @@ import { PlanLimits, PlanView } from './plan-limits';
 import { PlansService, tenantLimits } from './plans.service';
 import { TenantLimits } from '../orchestrator/orchestrator.types';
 
-/** The beta plan's limits, as P-15's migration writes them. */
+/** The beta plan's limits, as the migrations write them. */
 export const BETA_LIMITS: PlanLimits = {
   functions: 25,
   memoryMb: 1024,
@@ -16,6 +16,7 @@ export const BETA_LIMITS: PlanLimits = {
   historyRetentionDays: 30,
   idleSeconds: 900,
   internetEgress: false,
+  customDomains: 5,
 };
 
 /** A plan: the beta plan, with the given limits changed. */

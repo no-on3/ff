@@ -3,6 +3,7 @@ import { IsString, IsUUID, Length, Matches } from 'class-validator';
 import { FunctionLogsQuery } from '../functions/dto/function-logs.dto';
 import { InvocationSource, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { UrlAuthType } from '../functions/entities/function-url.entity';
+import { DomainStatus } from '../function-urls/custom-domain.entity';
 import { EventFormat } from '../functions/entities/function.entity';
 import { AdminAccountSummaryView } from './admin-accounts.dto';
 import { AdminChange } from './admin.dto';
@@ -93,12 +94,20 @@ export class AdminCallView {
   errorType: string | null;
 }
 
-/** A function's URL as support sees it: its address, and who may call it. */
+/** A customer's own domain for a URL, and where it stands. */
+export class AdminDomainView {
+  @ApiProperty({ example: 'shop.example.tn' }) domain: string;
+  @ApiProperty({ enum: DomainStatus }) status: DomainStatus;
+  @ApiProperty({ nullable: true, type: String, description: 'What its last check found wrong' }) checkError: string | null;
+}
+
+/** A function's URL as support sees it: its address, who may call it, and the customer's own domains for it. */
 export class AdminFunctionUrlView {
   @ApiProperty() functionUrl: string;
   @ApiProperty({ enum: UrlAuthType }) authType: UrlAuthType;
   @ApiProperty({ description: 'Whether it has a CORS configuration' }) cors: boolean;
   @ApiProperty() createdAt: Date;
+  @ApiProperty({ type: [AdminDomainView] }) domains: AdminDomainView[];
 }
 
 export class AdminFunctionPageView {

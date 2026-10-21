@@ -13,7 +13,8 @@
 # cluster lacks or no node runs), and reading its logs, the backend's token for the cluster's API lasting an
 # hour; the operator's e-mail through the cluster's SMTP; the audit log naming the caller's address, not
 # the edge's; a function URL over HTTPS through the edge, its certificate made on demand once the backend says
-# yes, and none for a host that is no URL; who reaches whom inside the cluster; and deploy.sh again, which
+# yes, and none for a host that is no URL; a customer's own domain, proved through a DNS server beside the
+# cluster, reaching the function the same way; who reaches whom inside the cluster; and deploy.sh again, which
 # changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
@@ -40,7 +41,7 @@ cleanup() {
   fi
   k3d cluster delete "$cluster" >/dev/null 2>&1 || true
   rm -f "$FF_KUBE_DIR/$cluster.kubeconfig"
-  docker rm -f "$prefix-postgres" "$prefix-s3" "$prefix-mailpit" >/dev/null 2>&1 || true
+  docker rm -f "$prefix-postgres" "$prefix-s3" "$prefix-mailpit" "$prefix-dns" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -259,6 +260,41 @@ at_url "$unknown" >/dev/null 2>&1 || refused=$?
 check "a host that is no URL gets no certificate: the handshake fails" true "$([ "$refused" -ne 0 ] && echo true || echo false)"
 asked() { kubectl -n ff-edge exec deploy/ff-edge -- wget -qO- "http://ff-backend.ff-system.svc.cluster.local:3001/tls/allowed?domain=$1" 2>/dev/null || echo no; }
 check "the backend said yes for the URL's host, and no for the other, when the edge asked" "allowed no" "$(asked "$url_host") $(asked "$unknown")"
+
+echo "== a customer's own domain, through the edge"
+# A DNS server beside the cluster, as the customer's DNS provider would be, for the test's zone; the backend asks it.
+mkdir -p "$work/zones"
+zone() { # <serial> [record...]
+  local serial=$1
+  shift
+  {
+    printf '$ORIGIN e2e-customer.tn.\n$TTL 5\n@ IN SOA ns.e2e-customer.tn. hostmaster.e2e-customer.tn. %s 60 60 600 5\n' "$serial"
+    printf '@ IN NS ns.e2e-customer.tn.\nns IN A 127.0.0.1\n'
+    printf '%s\n' "$@"
+  } >"$work/zones/e2e-customer.tn.db"
+}
+zone 1
+printf 'e2e-customer.tn:53 {\n  file /zones/e2e-customer.tn.db {\n    reload 1s\n  }\n}\n' >"$work/zones/Corefile"
+chmod 755 "$work/zones"
+docker run -d --name "$prefix-dns" --network "$network" -v "$work/zones:/zones:ro" rancher/mirrored-coredns-coredns:1.14.7 -conf /zones/Corefile >/dev/null
+kubectl -n ff-system set env deployment/ff-backend FF_DOMAIN_RESOLVERS="$(address "$prefix-dns"):53" >/dev/null
+kubectl -n ff-system rollout status deployment/ff-backend --timeout=300s >/dev/null
+added="$(as "$token" "/functions/$fn/url/domains" -d '{"domain": "shop.e2e-customer.tn"}')"
+check "the customer adds a domain of theirs to the URL: pending, with the CNAME to make" "201 pending $url_host" \
+  "$(status) $(jq -r '"\(.status) \(.records.cname[0].value)"' <<<"$added")"
+zone 2 "shop IN CNAME $url_host."
+# Until the DNS server has read the new zone, and the backend has asked it again: a minute at most.
+for _ in $(seq 1 60); do
+  [ "$(as "$token" /functions/$fn/url/domains/shop.e2e-customer.tn/verify -X POST | jq -r .status)" = verified ] && break
+  sleep 1
+done
+check "once its CNAME is made, the backend proves it, asking the DNS from inside the cluster" "200 verified" \
+  "$(status) $(jq -r 'if .status == "verified" then .status else "\(.status) (\(.checkError))" end' "$work/body")"
+check "the domain reaches the function over HTTPS through the edge, its certificate made on demand" "200 Hello world" \
+  "$(at_url shop.e2e-customer.tn '/') $(jq -r .message "$work/body")"
+refused=0
+at_url blog.e2e-customer.tn >/dev/null 2>&1 || refused=$?
+check "a domain not proved gets no certificate: the handshake fails" true "$([ "$refused" -ne 0 ] && echo true || echo false)"
 
 echo "== who reaches whom inside the cluster"
 kubectl create namespace e2e-probe >/dev/null

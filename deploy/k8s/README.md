@@ -93,7 +93,9 @@ Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox and the fu
   The record lives in the zone `fn.example.tn`, delegated to that server, or in FF's main zone if that server holds it. A provider without RFC 2136 has a module of its own for Caddy: build the edge with it instead (`deploy/edge/Dockerfile`, one `--with`), and change `edge/Caddyfile`'s `function-url-tls-wildcard` to it.
 - `on-demand`, without access to the DNS: a certificate for each URL's host, at its first request, once the edge has asked the backend (`/tls/allowed?domain=` on port 3001), which says yes only for a URL that exists, so nobody makes the edge ask for names of their choosing. Let's Encrypt issues 50 certificates a week per registered domain: enough for a small beta. The first request to a new URL waits for its certificate, a few seconds.
 
-The test overlay (`hack/k8s/platform-e2e`) uses `on-demand` with Caddy's own authority, offline.
+**Customers' own domains** come through the same port: the edge's last site takes every host no other site names, and gets a certificate for it at its first request once the backend says the domain is verified (the same question, `/tls/allowed`), whatever `FF_FUNCTION_URL_TLS` says. Let's Encrypt's limit then counts per customer's domain, not FF's. Give the backend `FF_EDGE_ADDRESSES`, the edge's public addresses, in `backend.env`: a customer's domain apex, which can't be a CNAME, must point to them, and the check says so; without them, the TXT record alone proves an apex. The checks ask the cluster's DNS, or the servers `FF_DOMAIN_RESOLVERS` names.
+
+The test overlay (`hack/k8s/platform-e2e`) uses `on-demand` with Caddy's own authority, offline, and a DNS server of its own for a customer's domain.
 
 **The first operator:**
 1. In Keycloak's admin console (`https://<login>/admin`, from an address `FF_ADMIN_ALLOW` names), as the bootstrap administrator, make the user.

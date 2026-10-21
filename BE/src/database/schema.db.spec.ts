@@ -425,7 +425,8 @@ run('database schema (L2, real PostgreSQL)', () => {
           },
         })),
       );
-      expect(lines.sort()).toEqual(
+      // The migrations after it print their own lines too: this one's are the renames.
+      expect(lines.filter((line) => String(line).startsWith('Renamed ')).sort()).toEqual(
         [second, third].sort().map((id) => `Renamed function:${id} of account 000000000001 to "${renamed[id]}": another of its functions had the same name`),
       );
       expect(await indexes()).toEqual([{ indexdef: expect.stringMatching(/^CREATE UNIQUE INDEX .* ON public\.functions USING btree \(account_id, name\)$/) }]);
@@ -608,8 +609,11 @@ run('database schema (L2, real PostgreSQL)', () => {
         'audit_log',
         'capacity_samples',
         'currencies',
+        'custom_domains',
+        'function_environments',
         'function_invocations',
         'function_metrics',
+        'function_urls',
         'functions',
         'invitations',
         'invoice_counters',

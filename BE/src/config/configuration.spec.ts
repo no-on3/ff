@@ -255,14 +255,31 @@ describe('configuration', () => {
 
   describe('function URLs', () => {
     it('are served on port 3001, apart from the API, under fn.localhost in development', () => {
-      expect(configuration(dev).functionUrls).toEqual({ port: 3001, base: 'http://fn.localhost:3001' });
+      expect(configuration(dev).functionUrls).toEqual({ port: 3001, base: 'http://fn.localhost:3001', edgeAddresses: [], domainResolvers: [] });
     });
 
     it('take an origin with a dot in its host, a trailing slash dropped, and port 0 for none', () => {
-      expect(configuration({ ...production, FF_FUNCTION_URL_BASE: 'https://fn.example.tn/', FF_FUNCTION_URL_PORT: '0' }).functionUrls).toEqual({
+      expect(configuration({ ...production, FF_FUNCTION_URL_BASE: 'https://fn.example.tn/', FF_FUNCTION_URL_PORT: '0' }).functionUrls).toMatchObject({
         port: 0,
         base: 'https://fn.example.tn',
       });
+    });
+
+    it("take the edge's addresses, which customers' domain apexes point to, and the DNS servers that check them", () => {
+      const settings = { ...dev, FF_EDGE_ADDRESSES: '203.0.113.10, 2001:db8::10', FF_DOMAIN_RESOLVERS: '10.43.0.10,127.0.0.1:5353,[::1]:53,2001:db8::53' };
+
+      expect(configuration(settings).functionUrls).toMatchObject({
+        edgeAddresses: ['203.0.113.10', '2001:db8::10'],
+        domainResolvers: ['10.43.0.10', '127.0.0.1:5353', '[::1]:53', '2001:db8::53'],
+      });
+    });
+
+    it.each([
+      ['FF_EDGE_ADDRESSES', 'edge.example.tn'],
+      ['FF_DOMAIN_RESOLVERS', 'dns.example.tn'],
+      ['FF_DOMAIN_RESOLVERS', '127.0.0.1:99999'],
+    ])('refuse %s=%s, which is no address', (name, value) => {
+      expect(problems({ ...dev, [name]: value })).toEqual([expect.stringContaining(`${name} must be a comma-separated list of`)]);
     });
 
     it.each(['https://fn.example.tn/path', 'ftp://fn.example.tn', 'https://localhost', 'fn.example.tn'])('refuse %s as where they live', (base) => {

@@ -17,6 +17,8 @@ import { FunctionsController } from './functions/functions.controller';
 import { FunctionsService } from './functions/functions.service';
 import { FunctionUrlsController } from './function-urls/function-urls.controller';
 import { FunctionUrlsService } from './function-urls/function-urls.service';
+import { CustomDomainsController } from './function-urls/custom-domains.controller';
+import { CustomDomainsService } from './function-urls/custom-domains.service';
 import { HealthController } from './health/health.controller';
 import { MetricsController } from './metrics/metrics.controller';
 import { CustomerMetricsService } from './metrics/customer-metrics.service';
@@ -76,6 +78,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       controllers: [
         FunctionsController,
         FunctionUrlsController,
+        CustomDomainsController,
         MetricsController,
         HealthController,
         AccountsController,
@@ -105,6 +108,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
           useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }), liveLogs: async () => of({ data: {} }) }),
         },
         { provide: FunctionUrlsService, useValue: succeeding(FunctionUrlsService) },
+        { provide: CustomDomainsService, useValue: succeeding(CustomDomainsService, { list: async () => [] }) },
         { provide: MetricsService, useValue: succeeding(MetricsService) },
         { provide: CustomerMetricsService, useValue: succeeding(CustomerMetricsService) },
         { provide: AccountsService, useValue: succeeding(AccountsService) },
@@ -177,7 +181,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/url/domains', 'POST /functions/{id}/url/domains', 'POST /functions/{id}/url/domains/{domain}/verify', 'DELETE /functions/{id}/url/domains/{domain}', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview']));
     // The scaler's per-minute table answered GET /metrics/:functionId; the metrics now come from the usage records.
     expect(checked.map((r) => r.route)).not.toContain('GET /metrics/{functionId}');
     expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);

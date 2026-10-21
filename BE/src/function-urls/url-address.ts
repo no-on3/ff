@@ -27,6 +27,11 @@ export function urlAddress(base: string, urlId: string): string {
   return `${protocol}//${urlId}.${host}/`;
 }
 
+/** A URL's host, without the base's port: what a customer's domain is a CNAME to. */
+export function urlHost(base: string, urlId: string): string {
+  return `${urlId}.${functionDomain(base)}`;
+}
+
 /** The host a request names, in lower case, without its port or a final dot; undefined without one, or for an IP address in brackets. */
 export function hostName(host: string | undefined): string | undefined {
   if (!host || host.startsWith('[')) return undefined;

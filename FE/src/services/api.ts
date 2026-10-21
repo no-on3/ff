@@ -2,6 +2,7 @@ import axios from 'axios';
 import { config } from '../config';
 import { requestHeaders } from '../lib/session';
 import type { AuthType, FunctionUrl, UrlCors } from '../lib/function-url';
+import type { CustomDomain } from '../lib/custom-domains';
 
 const api = axios.create({
   baseURL: config.apiUrl,
@@ -192,6 +193,14 @@ export const functionUrlApi = {
   update: (functionId: string, configuration: { authType?: AuthType; cors?: UrlCors | null }) =>
     api.put<FunctionUrl>(`/functions/${functionId}/url`, configuration),
   remove: (functionId: string) => api.delete(`/functions/${functionId}/url`),
+};
+
+/** A function URL's own domains: listed, added, checked again, removed. */
+export const domainsApi = {
+  list: (functionId: string) => api.get<CustomDomain[]>(`/functions/${functionId}/url/domains`),
+  add: (functionId: string, domain: string) => api.post<CustomDomain>(`/functions/${functionId}/url/domains`, { domain }),
+  verify: (functionId: string, domain: string) => api.post<CustomDomain>(`/functions/${functionId}/url/domains/${encodeURIComponent(domain)}/verify`),
+  remove: (functionId: string, domain: string) => api.delete(`/functions/${functionId}/url/domains/${encodeURIComponent(domain)}`),
 };
 
 /** GET and PUT /functions/:id/scaling-config. Each instance serves one call at a time. */
@@ -547,6 +556,8 @@ export interface PlanLimits {
   /** Seconds without a call before a function scales to zero. */
   idleSeconds: number;
   internetEgress: boolean;
+  /** Customers' own domains for their functions' URLs, all together. */
+  customDomains: number;
 }
 
 export interface Plan {

@@ -46,8 +46,17 @@ export interface Call {
   errorType: string | null;
 }
 
-export const FUNCTION_URL_FIELDS = ['functionUrl', 'authType', 'cors', 'createdAt'] as const;
-/** A function's URL: its address, and who may call it. */
+export const DOMAIN_FIELDS = ['domain', 'status', 'checkError'] as const;
+/** A customer's own domain for a URL, and where it stands. */
+export interface Domain {
+  domain: string;
+  status: 'pending' | 'verified';
+  /** What its last check found wrong. */
+  checkError: string | null;
+}
+
+export const FUNCTION_URL_FIELDS = ['functionUrl', 'authType', 'cors', 'createdAt', 'domains'] as const;
+/** A function's URL: its address, who may call it, and the customer's own domains for it. */
 export interface FunctionUrl {
   functionUrl: string;
   /** NONE: anyone; AWS_IAM: an API key of the account. */
@@ -55,6 +64,7 @@ export interface FunctionUrl {
   /** Whether it has a CORS configuration. */
   cors: boolean;
   createdAt: string;
+  domains: Domain[];
 }
 
 export const FUNCTION_PAGE_FIELDS = ['function', 'url', 'variables', 'secrets', 'account', 'recentCalls', 'recentErrors'] as const;
@@ -146,6 +156,10 @@ export function urlText(url: FunctionUrl): string {
   const who = url.authType === 'NONE' ? 'anyone may call it' : 'only with an API key of the account';
   return `${who}${url.cors ? ', with CORS' : ''}`;
 }
+
+/** A URL's own domains, to read: each with where it stands. */
+export const domainsText = (domains: Domain[]): string =>
+  domains.length ? domains.map(({ domain, status }) => `${domain} (${status})`).join(', ') : 'none';
 
 /** Names, to read: "A, B", or "none". */
 export const namesText = (names: string[]): string => (names.length ? names.join(', ') : 'none');

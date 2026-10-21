@@ -8,6 +8,7 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionUrlsService } from '../function-urls/function-urls.service';
+import { CustomDomainsService } from '../function-urls/custom-domains.service';
 import { AdminAccountsService } from './admin-accounts.service';
 import { AdminCallDataView, AdminCallHitView, AdminCallView, AdminCodeView, AdminFunctionHitView, AdminFunctionPageView, AdminSearchView } from './admin-support.dto';
 
@@ -62,6 +63,7 @@ export class AdminSupportService {
     private readonly functionsService: FunctionsService,
     private readonly audit: AuditService,
     private readonly urls: FunctionUrlsService,
+    private readonly domains: CustomDomainsService,
   ) {}
 
   /**
@@ -130,16 +132,23 @@ export class AdminSupportService {
   /** A function's page: its settings and state, its account, and its recent calls and failures, without their data. */
   async functionPage(id: string): Promise<AdminFunctionPageView> {
     const fn = await this.findFunction(id);
-    const [recent, failed, url, names] = await Promise.all([
+    const [recent, failed, url, names, domains] = await Promise.all([
       this.invocations.find({ where: { functionId: id }, order: { createdAt: 'DESC' }, take: 20 }),
       this.invocations.find({ where: { functionId: id, status: In(FAILED) }, order: { createdAt: 'DESC' }, take: 10 }),
       this.urls.find(id),
       this.functionsService.environmentNames(id),
+      this.domains.forFunction(id),
     ]);
     const { name, runtime, memory, timeout, minInstances, maxInstances, status, eventFormat, createdAt, updatedAt } = fn;
     return {
       function: { id, name, runtime, memory, timeout, minInstances, maxInstances, status, eventFormat, error: fn.error ?? null, createdAt, updatedAt },
-      url: url && { functionUrl: url.functionUrl, authType: url.authType, cors: url.cors !== null, createdAt: url.createdAt },
+      url: url && {
+        functionUrl: url.functionUrl,
+        authType: url.authType,
+        cors: url.cors !== null,
+        createdAt: url.createdAt,
+        domains: domains.map(({ domain, status, checkError }) => ({ domain, status, checkError })),
+      },
       ...names,
       account: await this.accounts.summaryOf(fn.accountId),
       recentCalls: recent.map(callView),

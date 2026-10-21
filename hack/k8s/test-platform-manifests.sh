@@ -203,9 +203,9 @@ edge = len(reaching) == 1 and all(peer.get('podSelector', {}).get('matchLabels',
 print(service['port'], container['name'], 'edge-only' if edge else 'open')
 PY
 )"
-check "the edge sends them there, and asks there before a certificate on demand" \
-  "ask http://ff-backend.ff-system.svc.cluster.local:$url_port/tls/allowed reverse_proxy ff-backend.ff-system.svc.cluster.local:$url_port" \
-  "$(grep -oE 'ask http://[^ ]+' "$platform/edge/Caddyfile") $(grep -oE "reverse_proxy ff-backend.ff-system.svc.cluster.local:$url_port" "$platform/edge/Caddyfile")"
+check "the edge sends them there, function URLs' hosts and customers' own domains, and asks there before a certificate on demand" \
+  "ask http://ff-backend.ff-system.svc.cluster.local:$url_port/tls/allowed 2" \
+  "$(grep -oE 'ask http://[^ ]+' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$url_port$" "$platform/edge/Caddyfile")"
 
 echo "== the edge"
 docker build -q -t ff-edge:test "$FF_REPO_ROOT/deploy/edge" >/dev/null

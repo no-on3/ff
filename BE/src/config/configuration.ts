@@ -231,6 +231,19 @@ const smtpUrl = {
   test: (v: string) => isUrl(v, ['smtp:', 'smtps:']),
   expected: 'an smtp:// or smtps:// URL, such as smtp://localhost:51025 (credentials go in it: smtps://user:password@host)',
 };
+/** An IP address, as the edge's are given. */
+const ipAddress = { test: (v: string) => isIP(v) !== 0, expected: 'IP addresses, such as 203.0.113.10 or 2001:db8::10' };
+/** A DNS server: an IP address, with a port after a colon, IPv6 in brackets then. */
+const dnsServer = {
+  test: (v: string) => {
+    const bracketed = /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(v);
+    if (bracketed) return isIP(bracketed[1]) === 6 && (!bracketed[2] || Number(bracketed[2]) <= 65535);
+    const [address, port, ...rest] = v.split(':');
+    if (isIP(v) === 6) return true;
+    return rest.length === 0 && isIP(address) === 4 && (port === undefined || (/^\d{1,5}$/.test(port) && Number(port) <= 65535));
+  },
+  expected: 'DNS servers, an IP address and a port if not 53, such as 10.43.0.10 or 127.0.0.1:5353',
+};
 /** Where function URLs live: a scheme, a host under which each URL is <id>.<host>, and a port if any; no path. */
 const functionUrlBase = {
   test: (v: string) => {
@@ -348,6 +361,10 @@ const appShape = {
   // Function URLs: the port of the server that answers them, apart from the API's (0: none), and where they live.
   FF_FUNCTION_URL_PORT: integer(3001, 0, 65535),
   FF_FUNCTION_URL_BASE: text(DEV_FUNCTION_URL_BASE, functionUrlBase),
+  // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
+  // servers that check domains' records (none: the system's).
+  FF_EDGE_ADDRESSES: list(ipAddress),
+  FF_DOMAIN_RESOLVERS: list(dnsServer),
 
   // The keys that encrypt functions' environment variables and secrets at rest: one a line, <id>:<32 bytes in base64>,
   // the first sealing. Unset: the development key, which production refuses.
@@ -617,6 +634,8 @@ export default function configuration(env: Env = process.env) {
     functionUrls: {
       port: parsed.FF_FUNCTION_URL_PORT,
       base: parsed.FF_FUNCTION_URL_BASE.replace(/\/$/, ''),
+      edgeAddresses: parsed.FF_EDGE_ADDRESSES,
+      domainResolvers: parsed.FF_DOMAIN_RESOLVERS,
     },
     // What FF keeps encrypted at rest (functions' environments) is sealed with these keys, the first sealing.
     encryption: {
