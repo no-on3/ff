@@ -1,5 +1,6 @@
 //! One file per command.
 
+mod account;
 mod completion;
 mod config;
 mod deploy;
@@ -49,6 +50,11 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         }
         Command::Local(LocalCommand::Start { function, port, watch }) => local::start(&function, port, watch, context),
         Command::Whoami => whoami::run(context),
+        Command::Accounts => account::accounts(context),
+        Command::Account => account::account(context),
+        Command::Usage { month, csv } => account::usage(month.as_deref(), csv, context),
+        Command::Balance => account::balance(context),
+        Command::Metrics { name, period, since } => account::metrics(name.as_deref(), period, &since, context),
         Command::Config(command) => config::run(command, context),
         Command::Version => version::run(context.out),
         Command::Completion { shell } => completion::run(shell),

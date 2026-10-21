@@ -111,6 +111,53 @@ pub struct Scaling {
     pub scale_to_zero: bool,
 }
 
+/// `GET /me`: the user, or the API key, and the accounts it reaches.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Me {
+    pub user: Option<MeUser>,
+    #[serde(default)]
+    pub key: Option<MeKey>,
+    pub accounts: Vec<MeAccount>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MeUser {
+    pub email: String,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MeKey {
+    pub id: String,
+    pub name: String,
+    pub scopes: Vec<String>,
+}
+
+/// An account as `GET /me` gives it: the caller's role in it, its plan with its limits.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeAccount {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub role: String,
+    pub plan: Plan,
+    #[serde(default)]
+    pub internet_egress: Option<bool>,
+    #[serde(default)]
+    pub data_deletion_due_at: Option<String>,
+    #[serde(default)]
+    pub data_deleted_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Plan {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub limits: serde_json::Map<String, serde_json::Value>,
+}
+
 /// The account's function of that name: `GET /functions?name=`, compared exactly.
 pub fn find(client: &Client, name: &str) -> Result<Option<Function>, Error> {
     let found: Vec<Function> = client.json(&Call::get("/functions").query("name", name))?;

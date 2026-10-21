@@ -581,7 +581,7 @@ export interface Plan {
 
 /** One of the user's accounts, in GET /me. */
 /** An account's fields in GET /me, as the API's DTO names them: contract.test.ts checks them against it. */
-export const ME_ACCOUNT_FIELDS = ['id', 'name', 'status', 'role', 'plan', 'dataDeletionDueAt', 'dataDeletedAt'] as const satisfies ReadonlyArray<keyof MeAccount>;
+export const ME_ACCOUNT_FIELDS = ['id', 'name', 'status', 'role', 'plan', 'internetEgress', 'dataDeletionDueAt', 'dataDeletedAt'] as const satisfies ReadonlyArray<keyof MeAccount>;
 
 export interface MeAccount {
   /** 12 digits. */
@@ -592,6 +592,8 @@ export interface MeAccount {
   role: Role;
   /** Its plan, whose limits the API applies. */
   plan: Plan;
+  /** Whether its functions may reach the internet. */
+  internetEgress: boolean;
   /** When a closed account's functions, their history and logs are deleted; null unless closed. */
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */

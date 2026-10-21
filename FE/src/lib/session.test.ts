@@ -20,6 +20,7 @@ const account = (id: string, status: MeAccount['status'] = 'active'): MeAccount 
   status,
   role: 'owner',
   plan: BETA_PLAN,
+  internetEgress: false,
   dataDeletionDueAt: null,
   dataDeletedAt: null,
 });

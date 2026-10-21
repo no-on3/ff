@@ -80,6 +80,8 @@ class MeAccount {
   @ApiProperty({ enum: AccountStatus }) status: AccountStatus;
   @ApiProperty({ enum: ['owner', 'developer', 'viewer'] }) role: Role;
   @ApiProperty({ type: PlanSummary, description: "The account's plan and its limits (D5)" }) plan: PlanSummary;
+  @ApiProperty({ description: "Whether its functions may reach the internet: its plan's default when it was made, unless FF's operator changed it" })
+  internetEgress: boolean;
   @ApiProperty({ nullable: true, type: Date, description: "When a closed account's functions, their invocation history and logs are deleted: its closure plus the notice period set then. Null unless the account is closed" })
   dataDeletionDueAt: Date | null;
   @ApiProperty({ nullable: true, type: Date, description: 'When they were deleted; null until then' }) dataDeletedAt: Date | null;

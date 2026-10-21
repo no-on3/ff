@@ -171,6 +171,22 @@ for runtime in python nodejs; do
   ff delete "$name" --yes
 done
 
+echo "== the account: who, its plan, what it used and owes, how its functions ran"
+ff accounts
+check "ff accounts lists account A, current" "0 * $account_a" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
+ff account
+check "ff account says its plan, and that its functions don't reach the internet, as beta's" "0 Beta true" \
+  "$(code) $(out | sed -n 's/^plan *\([A-Za-z]*\):.*/\1/p') $(out | grep -q '^internet     off' && echo true || echo false)"
+ff usage --output json
+check "ff usage counts this month's calls of the functions deleted since, by name" "0 4 true" \
+  "$(code) $(out | jq -r '.functions[] | select(.functionName == "cli-hello-ts") | .requests') $(out | jq -r '[.functions[] | select(.functionName == "cli-hello-ts") | .deleted] | first')"
+ff usage --csv
+check "and gives the API's CSV" "0 true" "$(code) $(out | head -1 | grep -q 'requests' && echo true || echo false)"
+ff balance --output json
+check "ff balance says the balance, in dinars" "0 TND" "$(code) $(out | jq -r .currency)"
+ff metrics --since 2h --output json
+check "ff metrics counts the account's invocations of the last two hours" "0 true" "$(code) $(out | jq '[.metrics.Invocations[]] | add > 10')"
+
 echo "== ff local: on this machine, in Docker, as production runs it"
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }
 for example in hello.ts hello.py; do

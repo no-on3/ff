@@ -90,6 +90,11 @@ impl Reply {
         Reply { status, headers: vec![("content-type".into(), "application/json".into())], body: body.to_string() }
     }
 
+    /// Text of a media type, such as CSV.
+    pub fn text(status: u16, content_type: &str, body: &str) -> Reply {
+        Reply { status, headers: vec![("content-type".into(), content_type.into())], body: body.to_owned() }
+    }
+
     /// Server-Sent Events, as the live tail sends them: the stream ends with the reply.
     pub fn events(events: &str) -> Reply {
         Reply {

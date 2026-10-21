@@ -72,6 +72,14 @@ fn profile_name(text: &str) -> Result<String, String> {
     }
 }
 
+/// A metrics period: a minute, five, or an hour, as the API takes it.
+fn period(text: &str) -> Result<u32, String> {
+    match text {
+        "60" | "300" | "3600" => Ok(text.parse().expect("digits")),
+        _ => Err("a period is 60, 300 or 3600 seconds".to_owned()),
+    }
+}
+
 fn account_id(text: &str) -> Result<String, String> {
     if is_account_id(text) { Ok(text.to_owned()) } else { Err("an account ID is 12 digits".to_owned()) }
 }
@@ -152,6 +160,40 @@ pub enum Command {
 
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
+
+    /// List the accounts the token reaches, the role in each, the current one marked
+    Accounts,
+
+    /// Show the current account: its status, the role in it, its plan's limits, its internet access
+    Account,
+
+    /// Show a month's usage per function, with its estimated cost
+    Usage {
+        /// The month, YYYY-MM, by the UTC calendar [default: this month]
+        #[arg(long)]
+        month: Option<String>,
+
+        /// The API's CSV, for a spreadsheet
+        #[arg(long)]
+        csv: bool,
+    },
+
+    /// Show the account's balance, this month's charges, and whether calls go on
+    Balance,
+
+    /// Show a function's metrics, or the account's: invocations, errors, throttles, durations, a row per period
+    Metrics {
+        /// The function's name [default: the whole account]
+        name: Option<String>,
+
+        /// Seconds per row
+        #[arg(long, default_value_t = 60, value_parser = period)]
+        period: u32,
+
+        /// How far back: 30m, 6h, 2d
+        #[arg(long, default_value = "1h")]
+        since: String,
+    },
 
     /// ff's settings: the API's address, the account, the token
     #[command(subcommand)]

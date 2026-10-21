@@ -47,11 +47,19 @@ pub struct Call {
     query: Vec<(String, String)>,
     body: Option<serde_json::Value>,
     timeout: Duration,
+    accept: &'static str,
 }
 
 impl Call {
     pub fn new(method: Method, path: impl Into<String>) -> Call {
-        Call { method, path: path.into(), query: Vec::new(), body: None, timeout: DEFAULT_TIMEOUT }
+        Call {
+            method,
+            path: path.into(),
+            query: Vec::new(),
+            body: None,
+            timeout: DEFAULT_TIMEOUT,
+            accept: "application/json",
+        }
     }
 
     pub fn get(path: impl Into<String>) -> Call {
@@ -73,6 +81,12 @@ impl Call {
     /// A query parameter, encoded as it goes.
     pub fn query(mut self, name: &str, value: impl ToString) -> Call {
         self.query.push((name.to_owned(), value.to_string()));
+        self
+    }
+
+    /// What the answer should be, when not JSON: the month's usage as CSV.
+    pub fn accept(mut self, media_type: &'static str) -> Call {
+        self.accept = media_type;
         self
     }
 
@@ -134,6 +148,11 @@ impl Client {
         Ok(Events::new(BufReader::new(response.into_body().into_reader())))
     }
 
+    /// The call's answer as text, such as CSV.
+    pub fn text(&self, call: &Call) -> Result<String, Error> {
+        self.answer(call).map(|(_, body)| body)
+    }
+
     /// A call whose answer has nothing to read, such as a delete's.
     pub fn done(&self, call: &Call) -> Result<(), Error> {
         self.answer(call).map(|_| ())
@@ -169,7 +188,7 @@ impl Client {
             Method::Patch => self.agent.patch(&url),
             Method::Delete => self.agent.delete(&url).force_send_body(),
         };
-        request = request.header("accept", "application/json");
+        request = request.header("accept", call.accept);
         for (name, value) in &self.headers {
             request = request.header(*name, value);
         }

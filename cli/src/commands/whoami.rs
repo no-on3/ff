@@ -1,47 +1,11 @@
 //! `ff whoami`: `GET /me`, which says who the token is (an API key, whatever its scopes, or a
 //! user) and the account it acts for: the first check of a new key.
 
-use serde::Deserialize;
-
 use super::Context;
+use crate::api::types::{Me, MeAccount as Account};
 use crate::api::{Call, Client};
 use crate::config::Settings;
 use crate::error::Error;
-
-#[derive(Deserialize)]
-struct Me {
-    user: Option<User>,
-    #[serde(default)]
-    key: Option<Key>,
-    accounts: Vec<Account>,
-}
-
-#[derive(Deserialize)]
-struct User {
-    email: String,
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Key {
-    id: String,
-    name: String,
-    scopes: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct Account {
-    id: String,
-    name: String,
-    status: String,
-    role: String,
-    plan: Plan,
-}
-
-#[derive(Deserialize)]
-struct Plan {
-    name: String,
-}
 
 pub fn run(context: &Context) -> Result<(), Error> {
     let settings = context.settings()?;
