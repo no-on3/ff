@@ -294,7 +294,7 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
 
 1. It builds the four images (`ff-backend`, `ff-console`, `ff-admin`, `ff-edge`, tagged `e2e`) and imports them, and installs gVisor in the cluster with `hack/k8s/gvisor-up.sh`, as production requires it for functions.
 2. PostgreSQL, S3 and Mailpit run as containers on the cluster's Docker network, outside it, as in production. Their passwords are made for the run; the backend gets none of development's.
-3. It applies `deploy/k8s/base` and `logging`. `deploy.sh` must first refuse a sandbox the cluster lacks, and one no node is labelled to run; then it runs `deploy/k8s/platform/deploy.sh hack/k8s/platform-e2e`. That overlay holds hostnames under `ff.test`, TLS from Caddy's own authority, and the development realm for its test client.
+3. It applies `deploy/k8s/base` and `logging`. `deploy.sh` must first refuse a sandbox the cluster lacks, and one no node is labelled to run; then it runs `deploy/k8s/platform/deploy.sh hack/k8s/platform-e2e`. That overlay holds hostnames under `ff.test`, function URLs under `fn.ff.test` with their certificates on demand, TLS from Caddy's own authority, and the development realm for its test client.
 4. It checks:
    - TLS and HSTS on the four hostnames, verified against the edge's root, and plain HTTP sent to HTTPS with a 308;
    - `/readyz`, and the login's public issuer;
@@ -303,7 +303,8 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
    - the backend's token for the cluster's API, read in its pod, lasting an hour;
    - a function deployed and invoked in direct mode, answering from gVisor's kernel, and its logs;
    - the audit log naming the caller's address, not the edge's;
-   - an ordinary pod reaching the edge, and not the backend, Keycloak, the console or a function;
+   - a function URL over HTTPS through the edge, its certificate made on demand once the backend said yes, the function told the caller's address; no certificate for a host that is no URL;
+   - an ordinary pod reaching the edge, and not the backend, its port for function URLs, Keycloak, the console or a function;
    - `deploy.sh` run again changing nothing.
 
 ```bash

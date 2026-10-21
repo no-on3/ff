@@ -1,8 +1,9 @@
-# The edge proxy: TLS for the four hostnames, its certificates from Let's Encrypt kept on its volume, so that a
-# restart doesn't ask for them again; the admin app and Keycloak's administration for FF's addresses only
-# (edge/Caddyfile). The Service is the cluster's load balancer on 80 and 443, and keeps the callers' addresses
-# (externalTrafficPolicy: Local): the allowlist and the backend's audit log and rate limits read them. One
-# replica, as its volume is mounted on one node.
+# The edge proxy: TLS for the four hostnames and for functions' URLs, its certificates from Let's Encrypt kept on its
+# volume, so that a restart doesn't ask for them again; the admin app and Keycloak's administration for FF's
+# addresses only (edge/Caddyfile). The TSIG key for the function domain's DNS, when its certificate is a wildcard,
+# is the Secret ff-edge-dns (FF_DNS_TSIG_KEY), which the deployment writes. The Service is the cluster's load
+# balancer on 80 and 443, and keeps the callers' addresses (externalTrafficPolicy: Local): the allowlist and the
+# backend's audit log and rate limits read them. One replica, as its volume is mounted on one node.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -73,6 +74,10 @@ spec:
           envFrom:
             - configMapRef:
                 name: ff-edge
+            # Only with FF_FUNCTION_URL_TLS=wildcard: deploy.sh refuses that mode without it.
+            - secretRef:
+                name: ff-edge-dns
+                optional: true
           ports:
             - name: http
               containerPort: 8080

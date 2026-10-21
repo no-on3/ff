@@ -33,6 +33,9 @@ import { InvalidUrlResponseError, UrlAnswer, urlAnswer } from './url-response';
 /** AWS Lambda's limit on an invocation's event, and on its answer: 6 MB. */
 export const URL_PAYLOAD_LIMIT = 6 * 1024 * 1024;
 
+/** Where the edge asks whether a host may have a certificate: ?domain=<host>. */
+export const TLS_ALLOWED_PATH = '/tls/allowed';
+
 /** The header that names each answer's request, as AWS's function URLs name it: the invocation's ID. */
 export const URL_REQUEST_ID_HEADER = 'x-amzn-RequestId';
 
@@ -66,6 +69,9 @@ function plainAddress(address: string): string {
   const mapped = /^::ffff:(.+)$/i.exec(address);
   return mapped && isIPv4(mapped[1]) ? mapped[1] : address;
 }
+
+/** The request's path alone. */
+const pathOf = (target: string | undefined): string => originForm(target).split('?')[0];
 
 /** The request's path and query: an absolute target, as a proxy may send one, without its scheme and host; "*" is the root. */
 function originForm(target: string | undefined): string {
@@ -188,6 +194,8 @@ export class FunctionUrlGateway implements OnModuleDestroy {
 
   private async answer(request: IncomingMessage, context: { requestId: string; sourceIp: string; time: Date }): Promise<UrlAnswer> {
     const urlId = urlIdOf(request.headers.host, this.domain);
+    // Any other host is the edge itself, asking before a certificate: no function URL's request names it.
+    if (!urlId && pathOf(request.url) === TLS_ALLOWED_PATH) return this.tlsAllowed(request.url as string);
     const url = urlId ? await this.urls.forUrlId(urlId) : null;
     if (!url) return jsonAnswer(HttpStatus.NOT_FOUND, 'Not Found');
     const origin = single(request.headers.origin);
@@ -204,6 +212,19 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     }
     // A browser reads a refusal too only with the CORS headers.
     return url.cors ? withCors(answer, url.cors, origin) : answer;
+  }
+
+  /**
+   * The edge's question before it gets a certificate on demand, for a host it
+   * hasn't one for (Caddy's on_demand_tls ask): 200 for a function URL's host,
+   * 404 for any other, so that nobody makes it ask a certificate authority for
+   * names of their choosing. Only the edge reaches this port in a cluster.
+   */
+  private async tlsAllowed(target: string): Promise<UrlAnswer> {
+    const domain = new URL(target, 'http://edge').searchParams.get('domain') ?? undefined;
+    const urlId = urlIdOf(domain, this.domain);
+    const known = urlId !== undefined && (await this.urls.forUrlId(urlId)) !== null;
+    return known ? { status: HttpStatus.OK, headers: [['content-type', 'text/plain']], body: Buffer.from('allowed') } : jsonAnswer(HttpStatus.NOT_FOUND, 'Not Found');
   }
 
   /** One call of the URL's function, as the API's invoke makes it; a Refusal when it can't be made. */

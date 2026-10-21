@@ -25,6 +25,36 @@ else
   echo "functions run without a sandbox (K8S_ALLOW_UNSANDBOXED): never with customers' code" >&2
 fi
 
+echo "== function URLs"
+# The edge's function domain must be the host of the backend's FF_FUNCTION_URL_BASE, or the addresses the API
+# gives would reach nothing; a wildcard certificate needs the TSIG key that lets the edge write the DNS record.
+rendered="$(kubectl kustomize "$dir")"
+setting() { sed -n "s/^  $1: *//p" <<<"$rendered" | tr -d '"' | head -1; }
+base="$(setting FF_FUNCTION_URL_BASE)"
+domain="$(setting FF_FUNCTION_URL_DOMAIN)"
+tls="$(setting FF_FUNCTION_URL_TLS)"
+base_host="${base#*://}"
+base_host="${base_host%%[:/]*}"
+if [ "$base_host" != "$domain" ]; then
+  echo "the edge's FF_FUNCTION_URL_DOMAIN ($domain) must be the host of the backend's FF_FUNCTION_URL_BASE ($base)" >&2
+  exit 1
+fi
+case "$tls" in
+  wildcard)
+    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep -q . || {
+      echo "FF_FUNCTION_URL_TLS=wildcard needs the Secret ff-edge-dns with FF_DNS_TSIG_KEY, the TSIG key the edge signs" >&2
+      echo "the DNS updates with (deploy/k8s/README.md, \"Function URLs\"); or choose on-demand" >&2
+      exit 1
+    }
+    echo "function URLs under $domain, with one certificate for *.$domain, through DNS"
+    ;;
+  on-demand) echo "function URLs under $domain, with a certificate per host, on demand: Let's Encrypt gives 50 a week" ;;
+  *)
+    echo "the edge's FF_FUNCTION_URL_TLS must be wildcard or on-demand, not '$tls'" >&2
+    exit 1
+    ;;
+esac
+
 echo "== migrations"
 # A Job's template never changes: the last one goes first.
 kubectl -n ff-system delete job ff-migrations --ignore-not-found --wait=true >/dev/null

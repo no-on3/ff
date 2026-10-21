@@ -12,7 +12,9 @@
 # as production requires (hack/k8s/gvisor-up.sh installs it in the cluster; deploy.sh refuses a sandbox the
 # cluster lacks or no node runs), and reading its logs, the backend's token for the cluster's API lasting an
 # hour; the operator's e-mail through the cluster's SMTP; the audit log naming the caller's address, not
-# the edge's; who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
+# the edge's; a function URL over HTTPS through the edge, its certificate made on demand once the backend says
+# yes, and none for a host that is no URL; who reaches whom inside the cluster; and deploy.sh again, which
+# changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
@@ -191,9 +193,10 @@ check "and so does Keycloak's administration" 403 "$(status)"
 client_ip="$(kubectl -n ff-edge logs deploy/ff-edge | jq -r 'select(.request.host == "admin.ff.test:'"$https_port"'") | .request.remote_ip' | tail -1)"
 kubectl -n ff-edge set env deployment/ff-edge FF_ADMIN_ALLOW="$client_ip/32" >/dev/null
 kubectl -n ff-edge rollout status deployment/ff-edge --timeout=180s >/dev/null
-# The new pod listens before the node's forwarding to it is in place: until then, connections are reset.
+# The new pod listens before the node's forwarding to it is in place: until then, connections are reset, and the
+# old one, stopping, may still answer for a moment with the old allowlist. So until the admin app answers, a minute.
 for _ in $(seq 1 60); do
-  curl -s -o /dev/null --cacert "$work/root.crt" "${resolve[@]}" "https://admin.ff.test:$https_port/" && break
+  [ "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/root.crt" "${resolve[@]}" "https://admin.ff.test:$https_port/")" = 200 ] && break
   sleep 1
 done
 https admin / >/dev/null
@@ -238,11 +241,30 @@ check "its logs, from the cluster's log store" true "$([ "$lines" -ge 1 ] && ech
 check "the audit log names the caller's address, not the edge's" "$client_ip" \
   "$(as "$token" '/audit-log?limit=50' -X GET | jq -r '[.entries[] | select(.action == "function.create")][0].ip')"
 
+echo "== a function's URL, through the edge"
+url="$(as "$token" "/functions/$fn/url" -d '{"authType": "NONE"}' | jq -r .functionUrl)"
+check "the customer gives the function a URL, under the function domain" "201 true" \
+  "$(status) $([[ $url =~ ^https://[a-z0-9]{32}\.fn\.ff\.test:$https_port/$ ]] && echo true || echo false)"
+url_host="${url#https://}"
+url_host="${url_host%%:*}"
+# The edge has no certificate for the host yet: it asks the backend, then its authority, during the first handshake.
+at_url() { curl -sS --cacert "$work/root.crt" --resolve "$1:$https_port:127.0.0.1" -o "$work/body" -w '%{http_code}' "https://$1:$https_port${2:-/}"; }
+check "a request over HTTPS, its certificate made on demand, reaches the function in gVisor, and its answer comes back" \
+  "200 Hello world true" "$(at_url "$url_host" '/hello?name=edge') $(jq -r .message "$work/body") $(jq -r '.kernel | test("gvisor")' "$work/body")"
+check "the function was told the caller's address, through the edge" "url $client_ip" \
+  "$(as "$token" "/functions/$fn/invocations?limit=1" -X GET | jq -r '.invocations[0] | "\(.source) \(.input.requestContext.http.sourceIp)"')"
+unknown="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n').fn.ff.test"
+refused=0
+at_url "$unknown" >/dev/null 2>&1 || refused=$?
+check "a host that is no URL gets no certificate: the handshake fails" true "$([ "$refused" -ne 0 ] && echo true || echo false)"
+asked() { kubectl -n ff-edge exec deploy/ff-edge -- wget -qO- "http://ff-backend.ff-system.svc.cluster.local:3001/tls/allowed?domain=$1" 2>/dev/null || echo no; }
+check "the backend said yes for the URL's host, and no for the other, when the edge asked" "allowed no" "$(asked "$url_host") $(asked "$unknown")"
+
 echo "== who reaches whom inside the cluster"
 kubectl create namespace e2e-probe >/dev/null
 kubectl -n e2e-probe run probe --image=ff-runtime-nodejs:24-v3 --image-pull-policy=Never --restart=Never --command -- node -e '
 const net = require("node:net");
-const targets = { edge: ["ff-edge.ff-edge.svc", 443], backend: ["ff-backend.ff-system.svc", 80], keycloak: ["keycloak.ff-system.svc", 8080],
+const targets = { edge: ["ff-edge.ff-edge.svc", 443], backend: ["ff-backend.ff-system.svc", 80], urls: ["ff-backend.ff-system.svc", 3001], keycloak: ["keycloak.ff-system.svc", 8080],
   console: ["ff-console.ff-system.svc", 80], function: [process.argv[1], 8080] };
 Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((resolve) => {
   const socket = net.connect({ host, port });
@@ -252,8 +274,8 @@ Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((r
   socket.once("error", () => done("refused"));
 }))).then((states) => console.log(states.join(" ")));' "fn-$fn.ff-t-$(printf %s "$account" | sha256sum | cut -c1-12).svc" >/dev/null
 kubectl -n e2e-probe wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe --timeout=120s >/dev/null || true
-check "an ordinary pod reaches the edge, and neither the backend, Keycloak, the console nor a function" \
-  "edge=open backend=refused keycloak=refused console=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
+check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console nor a function" \
+  "edge=open backend=refused urls=refused keycloak=refused console=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
 
 echo "== deploy.sh again"
 "$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >"$work/redeploy.log" 2>&1 || { tail -20 "$work/redeploy.log" >&2; fail "deploy.sh failed the second time"; }

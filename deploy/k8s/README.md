@@ -49,18 +49,18 @@ Closing an account deletes its log lines with the delete key (P-45). The backend
 - its migrations, as a Job;
 - the console and the admin app, two replicas each;
 - Keycloak;
-- the edge proxy in `ff-edge`: Caddy, TLS from Let's Encrypt for four hostnames, and the admin app and Keycloak's administration for FF's addresses only.
+- the edge proxy in `ff-edge`: Caddy, TLS from Let's Encrypt for four hostnames and for functions' URLs under the function domain, and the admin app and Keycloak's administration for FF's addresses only.
 
 PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`, `FE/`, `admin/` and `deploy/edge/` (getting-started, "The platform's images").
 
 **Before the first deploy:**
 1. Two databases on the PostgreSQL server, `ff` and `keycloak`, each with its user.
 2. gVisor on the nodes that run functions, each labelled `ff.dev/gvisor=true`, and `optional/runtimeclass-gvisor.yaml` applied (the Kubernetes dev guide, "On real nodes"). `backend.env` runs every function in it (`K8S_RUNTIME_CLASS=gvisor`): the backend refuses to start in production without a sandbox, and `deploy.sh` to deploy when the cluster lacks the RuntimeClass or a node to run it.
-3. DNS for the four hostnames (API, console, admin, login) to the edge's load balancer, ports 80 and 443 open: Let's Encrypt checks them.
+3. DNS for the four hostnames (API, console, admin, login) to the edge's load balancer, ports 80 and 443 open: Let's Encrypt checks them. And for functions' URLs, a wildcard record, `*.fn.example.tn`, to the same address ("Function URLs", below).
 4. An overlay of `platform/` with FF's values:
    - `backend.env`, merged: the hostnames, the database, S3, the seller's and the bank's details, `FF_TRUST_PROXY` (the cluster's pod network, which only the edge reaches the backend from);
    - `keycloak.env`: the login hostname, its database, the mail server;
-   - `edge.env`: the four hostnames, the ACME e-mail, and `FF_ADMIN_ALLOW`, FF's own addresses;
+   - `edge.env`: the four hostnames, the ACME e-mail, `FF_ADMIN_ALLOW`, FF's own addresses, and the function domain with its way to certificates ("Function URLs", below);
    - `images`: the registry's images and their tags.
 5. The Secrets:
 
@@ -76,7 +76,24 @@ PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`
 
    Keep a copy of the keys file apart from the cluster and the database, as the backups' own key is kept (`deploy/backup/README.md`): without it, no function's variables or secrets can be read. To change keys, put a new line first in the Secret, restart the backend, and remove the old line once every function has been updated since.
 
-Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox, runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
+Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox and the function URLs' settings, runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
+
+**Function URLs** (step-1 plan, D6 and D7). Each function URL is `https://<32 letters and digits>.<function domain>/`. The backend answers them on a port of its own, 3001 (`FF_FUNCTION_URL_PORT`), which its Service names `function-urls` and only the edge reaches; the edge sends every host under the function domain there. Three settings must agree, and `deploy.sh` checks that they do: the backend's `FF_FUNCTION_URL_BASE` (`https://fn.example.tn`, the addresses the API gives), the edge's `FF_FUNCTION_URL_DOMAIN` (`fn.example.tn`), and the DNS record `*.fn.example.tn` to the edge. Their certificates come one of two ways, as the edge's `FF_FUNCTION_URL_TLS` says:
+- `wildcard`, for production: one certificate for `*.fn.example.tn`, which Let's Encrypt issues only through a DNS-01 challenge, a TXT record `_acme-challenge.fn.example.tn` the edge writes and removes. It writes it with RFC 2136 updates, the standard that BIND, Knot and PowerDNS take, so FF depends on no DNS company: `FF_DNS_SERVER` (the primary server, `host:53`), `FF_DNS_TSIG_KEY_NAME` and `FF_DNS_TSIG_KEY_ALG` in `edge.env`, and the key itself in a Secret, which `deploy.sh` refuses to go without:
+
+  ```bash
+  # On the DNS server, BIND for example: a key, and the right to change that one record's TXT, nothing else.
+  tsig-keygen -a hmac-sha256 ff-acme. > /etc/bind/ff-acme.key   # include it in named.conf, then in the zone fn.example.tn:
+  #   update-policy { grant ff-acme. name _acme-challenge.fn.example.tn. TXT; };
+  # In the cluster: the namespace first, as the platform makes it, then the Secret with the key's secret.
+  kubectl apply -f deploy/k8s/platform/00-namespace-edge.yaml
+  kubectl -n ff-edge create secret generic ff-edge-dns --from-literal=FF_DNS_TSIG_KEY='<the secret of ff-acme.>'
+  ```
+
+  The record lives in the zone `fn.example.tn`, delegated to that server, or in FF's main zone if that server holds it. A provider without RFC 2136 has a module of its own for Caddy: build the edge with it instead (`deploy/edge/Dockerfile`, one `--with`), and change `edge/Caddyfile`'s `function-url-tls-wildcard` to it.
+- `on-demand`, without access to the DNS: a certificate for each URL's host, at its first request, once the edge has asked the backend (`/tls/allowed?domain=` on port 3001), which says yes only for a URL that exists, so nobody makes the edge ask for names of their choosing. Let's Encrypt issues 50 certificates a week per registered domain: enough for a small beta. The first request to a new URL waits for its certificate, a few seconds.
+
+The test overlay (`hack/k8s/platform-e2e`) uses `on-demand` with Caddy's own authority, offline.
 
 **The first operator:**
 1. In Keycloak's admin console (`https://<login>/admin`, from an address `FF_ADMIN_ALLOW` names), as the bootstrap administrator, make the user.
@@ -92,14 +109,14 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 | File | Object | Purpose |
 |---|---|---|
 | `platform/00-namespace-edge.yaml` | Namespace `ff-edge` | The edge's, the only pods the internet reaches. Pod Security `restricted` |
-| `platform/10-backend.yaml` | Service and Deployment `ff-backend` in `ff-system` | One replica, as `ff-controller`, with a token for the cluster's API asked for an hour, not the default year ("Cluster-wide reads", below); `/readyz` and `/healthz` its probes, its metrics port named `metrics`; user 10001, read-only root, the log store's key mounted for deleting a closed account's lines, and the keys of `ff-encryption-keys` for functions' variables and secrets |
+| `platform/10-backend.yaml` | Service and Deployment `ff-backend` in `ff-system` | The API on port 80, functions' URLs on 3001 (`function-urls`); one replica, as `ff-controller`, with a token for the cluster's API asked for an hour, not the default year ("Cluster-wide reads", below); `/readyz` and `/healthz` its probes, its metrics port named `metrics`; user 10001, read-only root, the log store's key mounted for deleting a closed account's lines, and the keys of `ff-encryption-keys` for functions' variables and secrets |
 | `platform/15-migrations.yaml` | Job `ff-migrations` | The migrations, from the backend's image and settings; `deploy.sh` runs it first |
 | `platform/20-console.yaml`, `30-admin.yaml` | Services and Deployments `ff-console`, `ff-admin` | The static builds, two replicas each, user 65532, read-only root |
 | `platform/40-keycloak.yaml` | Service and Deployment `keycloak` | Keycloak 26.7.5 with `start`, TLS at the edge, its database outside; the realm imported at its first start. Non-root, no capability; its root is writable, as its start builds its configuration there |
-| `platform/50-edge.yaml` | PVC, Service (LoadBalancer, keeping callers' addresses) and Deployment `ff-edge` | Caddy on 8080 and 8443, the Service on 80 and 443; its certificates on the volume |
-| `platform/60-network-policies.yaml` | NetworkPolicies | `ff-system` denies by default; the edge reaches the backend, the apps and Keycloak; the backend reaches Keycloak for the realm's keys; the metrics store reaches the backend's metrics port; the edge takes the world on its two ports |
+| `platform/50-edge.yaml` | PVC, Service (LoadBalancer, keeping callers' addresses) and Deployment `ff-edge` | Caddy, with the RFC 2136 DNS module, on 8080 and 8443, the Service on 80 and 443; its certificates on the volume; the Secret `ff-edge-dns` in its environment when there is one |
+| `platform/60-network-policies.yaml` | NetworkPolicies | `ff-system` denies by default; the edge reaches the backend (its API and its port for functions' URLs), the apps and Keycloak; the backend reaches Keycloak for the realm's keys; the metrics store reaches the backend's metrics port; the edge takes the world on its two ports |
 | `platform/backend.env`, `keycloak.env`, `edge.env` | ConfigMaps | What isn't secret, with example values (`example.tn`) for an overlay to replace |
-| `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites, HSTS, the allowlist; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
+| `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites and the function domain's, HSTS, the allowlist, function URLs' certificates by DNS or on demand; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
 | `platform/keycloak/ff-realm.json` | ConfigMap `keycloak-realm` | The production realm |
 
 `hack/e2e-platform.sh` deploys them on a k3d cluster of its own, with `deploy.sh` and the overlay `hack/k8s/platform-e2e`, and takes a customer's path through the edge (the Kubernetes dev guide, "The platform on a cluster of its own"). `hack/k8s/test-platform-manifests.sh` checks them without deploying:
@@ -108,7 +125,8 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 - credentials in Secrets only: none in a ConfigMap, an environment value or a command line;
 - the backend's settings, read by the backend's own configuration;
 - the realm up to date;
-- the edge's Caddyfile, valid for Caddy;
+- the function domain the same for the backend and the edge, and the backend's port for function URLs reached by the edge alone;
+- the edge's image with the RFC 2136 module, and its Caddyfile valid for Caddy, with function URLs' certificates either way;
 - the cluster API's schemas, with a server dry run.
 
 ## Monitoring

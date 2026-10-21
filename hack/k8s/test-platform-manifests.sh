@@ -4,7 +4,7 @@
 #   - every pod as Pod Security "restricted" wants it and more: non-root by number, no capability, no privilege
 #     escalation, the runtime's seccomp profile, a read-only root (Keycloak's alone may write, named here),
 #     memory limits, probes, no API token but the backend's, and the backend's asked for an hour, not the year
-#     of the token Kubernetes mounts by default;
+#     of the token Kubernetes mounts by default; and a Secret only its group may read given to the pod's group;
 #   - credentials only in Secrets: none in a ConfigMap, an environment value or a command line, whose
 #     contents the backend's token can read across the cluster;
 #   - every workload behind a NetworkPolicy, ff-system denying by default, and every Service selecting pods;
@@ -12,7 +12,9 @@
 #     accepted, but for the seller's and the bank's details, which an overlay must give; its encryption keys
 #     mounted from their Secret where its settings look;
 #   - the production realm up to date with the development realm;
-#   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image;
+#   - function URLs: the edge's function domain the backend's, the backend's port for them reached by the edge alone;
+#   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image, both ways to function URLs'
+#     certificates;
 #   - all of it valid for the dev cluster's API, no field unknown (a server dry run, which writes nothing).
 #   hack/k8s/test-platform-manifests.sh
 set -euo pipefail
@@ -55,6 +57,11 @@ for doc in docs:
         problems.append(f'{name}: an API token it does not need')
     if name in API_TOKEN and (len(tokens) != 1 or not 600 <= tokens[0].get('expirationSeconds', 0) <= 3600):
         problems.append(f'{name}: no API token of an hour at most')
+    # A file only its group may read reaches the pod's user through fsGroup alone: else the pod can't read it.
+    for volume in pod.get('volumes', []):
+        source = volume.get('secret') or volume.get('configMap')
+        if source and source.get('defaultMode') is not None and not source['defaultMode'] & 0o004 and context.get('fsGroup') is None:
+            problems.append(f"{name}: volume {volume['name']} only its group may read, and no fsGroup gives the pod that group")
     for container in pod['containers']:
         where = f"{name}/{container['name']}"
         security = container.get('securityContext', {})
@@ -74,7 +81,7 @@ for doc in docs:
 print(len([d for d in docs if d['kind'] in ('Deployment', 'Job', 'CronJob')]))
 for problem in problems: print(problem)
 PY
-check "every workload hardened: non-root, no capability, no escalation, seccomp, read-only root but Keycloak's, limits, probes, the backend's API token an hour long and no other" \
+check "every workload hardened: non-root, no capability, no escalation, seccomp, read-only root but Keycloak's, limits, probes, the backend's API token an hour long and no other, the files it may read readable" \
   "7" "$(cat "$work/pods.txt")"
 
 echo "== credentials"
@@ -177,13 +184,42 @@ print(f"{mount['mountPath']}/keys" if mount.get('readOnly') else 'writable')
 PY
 )"
 
+echo "== function URLs"
+# The edge serves the function domain, the host of the addresses the backend gives; it reaches the backend's port
+# for them through the Service, as do its questions before a certificate on demand; nothing else reaches that port.
+check "the edge's function domain is the host of the backend's FF_FUNCTION_URL_BASE" "fn.example.tn fn.example.tn" \
+  "$(sed -n 's/^FF_FUNCTION_URL_DOMAIN=//p' "$platform/edge.env") $(sed -n 's#^FF_FUNCTION_URL_BASE=https://##p' "$platform/backend.env")"
+url_port="$(sed -n 's/^FF_FUNCTION_URL_PORT=//p' "$platform/backend.env")"
+check "the backend's port for function URLs in its Service, reached by the edge alone" "$url_port function-urls edge-only" \
+  "$(python3 - "$work/platform.yaml" "$url_port" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+port = int(sys.argv[2])
+named = lambda kind, name: next(d for d in docs if d['kind'] == kind and d['metadata']['name'] == name)
+container = next(p for p in named('Deployment', 'ff-backend')['spec']['template']['spec']['containers'][0]['ports'] if p['containerPort'] == port)
+service = next(p for p in named('Service', 'ff-backend')['spec']['ports'] if p['targetPort'] == container['name'])
+reaching = [rule['from'] for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if port in [p['port'] for p in rule['ports']]]
+edge = len(reaching) == 1 and all(peer.get('podSelector', {}).get('matchLabels', {}).get('app.kubernetes.io/name') == 'ff-edge' for peer in reaching[0])
+print(service['port'], container['name'], 'edge-only' if edge else 'open')
+PY
+)"
+check "the edge sends them there, and asks there before a certificate on demand" \
+  "ask http://ff-backend.ff-system.svc.cluster.local:$url_port/tls/allowed reverse_proxy ff-backend.ff-system.svc.cluster.local:$url_port" \
+  "$(grep -oE 'ask http://[^ ]+' "$platform/edge/Caddyfile") $(grep -oE "reverse_proxy ff-backend.ff-system.svc.cluster.local:$url_port" "$platform/edge/Caddyfile")"
+
 echo "== the edge"
 docker build -q -t ff-edge:test "$FF_REPO_ROOT/deploy/edge" >/dev/null
-check "its image: Caddy 2.11.7, as the numeric user 65532" "v2.11.7 65532:65532" \
-  "$(docker run --rm ff-edge:test caddy version | cut -d' ' -f1) $(docker image inspect ff-edge:test --format '{{.Config.User}}')"
-check "its Caddyfile, with its settings, valid for Caddy" 0 \
-  "$(docker run --rm --read-only --tmpfs /tmp --tmpfs /data --cap-drop ALL --security-opt no-new-privileges --env-file "$platform/edge.env" \
-      -v "$platform/edge/Caddyfile:/etc/caddy/Caddyfile:ro" ff-edge:test caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$work/validate.log" 2>&1; echo $?)"
+check "its image: Caddy 2.11.7 with the RFC 2136 DNS module, as the numeric user 65532" "v2.11.7 1 65532:65532" \
+  "$(docker run --rm ff-edge:test caddy version | cut -d' ' -f1) $(docker run --rm ff-edge:test caddy list-modules | grep -c '^dns.providers.rfc2136$') $(docker image inspect ff-edge:test --format '{{.Config.User}}')"
+# Both ways to function URLs' certificates: one for the function domain by DNS, with a TSIG key as its Secret gives
+# it, or one per host on demand.
+validated=""
+for mode in wildcard on-demand; do
+  validated+="$(docker run --rm --read-only --tmpfs /tmp --tmpfs /data --cap-drop ALL --security-opt no-new-privileges --env-file "$platform/edge.env" \
+      -e FF_FUNCTION_URL_TLS="$mode" -e FF_DNS_TSIG_KEY="$(head -c 32 /dev/urandom | base64)" -v "$platform/edge/Caddyfile:/etc/caddy/Caddyfile:ro" \
+      ff-edge:test caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$work/validate-$mode.log" 2>&1; echo $?) "
+done
+check "its Caddyfile, with its settings, valid for Caddy, function URLs' certificates by DNS or on demand" "0 0 " "$validated"
 
 echo "== the cluster's API"
 # A server dry run writes nothing, and refuses an unknown field. The dev cluster has no ff-edge: its objects are

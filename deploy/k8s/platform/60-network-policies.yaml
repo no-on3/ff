@@ -1,5 +1,5 @@
 # Who reaches whom. In ff-system, nothing unless allowed below or by the log store's own policy (logging/): the
-# edge reaches the backend, the two apps and Keycloak; the backend reaches Keycloak for the realm's keys; the
+# edge reaches the backend (its API, and its port for functions' URLs), the two apps and Keycloak; the backend reaches Keycloak for the realm's keys; the
 # metrics store reaches the backend's metrics port. Tenants' pods reach none of them. The edge takes the world on
 # its two ports. The API server's proxy and the kubelet's probes come from the node, which k3s lets through.
 apiVersion: networking.k8s.io/v1
@@ -35,6 +35,8 @@ spec:
               app.kubernetes.io/name: ff-edge
       ports:
         - port: 3000
+          protocol: TCP
+        - port: 3001
           protocol: TCP
     - from:
         - namespaceSelector:

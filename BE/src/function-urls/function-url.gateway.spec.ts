@@ -400,6 +400,35 @@ describe('the function URL gateway (L1)', () => {
     });
   });
 
+  describe("the edge's question before a certificate on demand", () => {
+    const ask = (domain: string | undefined, host = 'ff-backend.ff-system.svc.cluster.local:3001') =>
+      send('', `/tls/allowed${domain === undefined ? '' : `?domain=${encodeURIComponent(domain)}`}`, { headers: { host } });
+
+    it("says yes for a function URL's host, whatever its case", async () => {
+      const answers = [await ask(`${PUBLIC}.fn.localhost`), await ask(`${PRIVATE.toUpperCase()}.FN.localhost`)];
+
+      expect(answers.map((answer) => [answer.status, answer.body.toString()])).toEqual([
+        [200, 'allowed'],
+        [200, 'allowed'],
+      ]);
+    });
+
+    it.each([
+      ['an ID no URL has', 'z0000000000000000000000000000001.fn.localhost'],
+      ['the function domain itself', 'fn.localhost'],
+      ['another domain', `${PUBLIC}.fn.example.com`],
+      ['no domain', undefined],
+    ])('says no for %s, so that nobody gets the edge to ask for names of their choosing', async (_case, domain) => {
+      expect((await ask(domain)).status).toBe(404);
+    });
+
+    it("is a path like any other on a function URL's host: the function's", async () => {
+      await send(PUBLIC, `/tls/allowed?domain=${PUBLIC}.fn.localhost`);
+
+      expect(lastEvent().rawPath).toBe('/tls/allowed');
+    });
+  });
+
   it('counts each answer by its status class, apart from the API\'s', async () => {
     const before = { ok: await valueOf(urlResponses, { class: '2xx' }), missing: await valueOf(urlResponses, { class: '4xx' }) };
 
