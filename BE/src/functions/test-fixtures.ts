@@ -1,7 +1,10 @@
 // Shared by the L3 suites that drive FunctionsService against the dev cluster
 // (not part of the build: tsconfig.build.json excludes test-fixtures.ts).
 import { randomUUID } from 'node:crypto';
+import { FindOperator } from 'typeorm';
 import { Function, FunctionStatus } from './entities/function.entity';
+import { FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty } from './environment';
+import type { EnvironmentStore } from './environment.store';
 
 /** The column defaults of a new function, as the database sets them (see the migrations). */
 export const FUNCTION_DEFAULTS: Partial<Function> = {
@@ -37,12 +40,19 @@ export class MemoryRepository<T extends { id?: string }> {
     return row ?? null;
   }
 
-  /** Rows whose fields equal every value of `where`. */
+  /** Rows whose fields equal every value of `where`, or differ from it for a Not(), as the name checks ask. */
   async find(options: { where?: Partial<T> } = {}): Promise<T[]> {
     const where = Object.entries(options.where ?? {});
+    const matches = (actual: unknown, wanted: unknown) =>
+      wanted instanceof FindOperator ? wanted.type === 'not' && actual !== wanted.value : actual === wanted;
     return [...this.rows.values()]
-      .filter((row) => where.every(([key, value]) => (row as Record<string, unknown>)[key] === value))
+      .filter((row) => where.every(([key, value]) => matches((row as Record<string, unknown>)[key], value)))
       .map((row) => ({ ...row }));
+  }
+
+  /** Whether a row matches, as the name checks ask: EntityManager.existsBy. */
+  async existsBy(_target: unknown, where: Partial<T>): Promise<boolean> {
+    return (await this.find({ where })).length > 0;
   }
 
   /**
@@ -51,10 +61,12 @@ export class MemoryRepository<T extends { id?: string }> {
    */
   get manager() {
     return {
+      existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
       transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> =>
         work({
           query: async () => [],
           countBy: async (_target: unknown, where: Partial<T>) => (await this.find({ where })).length,
+          existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
           findOne: async (_target: unknown, options: { where: Partial<T> }) => this.findOne(options),
           save: async (_target: unknown, entity: T) => this.save(entity),
         }),
@@ -79,4 +91,21 @@ export async function eventually(check: () => Promise<boolean>, timeoutMs: numbe
     if (Date.now() > deadline) throw new Error('condition not met in time');
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
+}
+
+/**
+ * Functions' environments kept in memory, unsealed, for the suites that don't
+ * test how they are stored: what each function was saved with, by its ID.
+ */
+export function memoryEnvironments(): EnvironmentStore & { saved: Map<string, FunctionEnvironmentValues> } {
+  const saved = new Map<string, FunctionEnvironmentValues>();
+  const store = {
+    saved,
+    load: async (functionId: string) => saved.get(functionId) ?? NO_ENVIRONMENT,
+    save: async (fn: { id: string }, environment: FunctionEnvironmentValues) => {
+      if (isEmpty(environment)) saved.delete(fn.id);
+      else saved.set(fn.id, environment);
+    },
+  };
+  return store as unknown as EnvironmentStore & { saved: Map<string, FunctionEnvironmentValues> };
 }

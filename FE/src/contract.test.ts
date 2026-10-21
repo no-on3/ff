@@ -12,6 +12,7 @@ import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import functionsServiceSource from '../../BE/src/functions/functions.service.ts?raw';
 import createFunctionDtoSource from '../../BE/src/functions/dto/create-function.dto.ts?raw';
+import environmentSource from '../../BE/src/functions/environment.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
 import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
 import languageSource from '../../BE/src/mail/language.ts?raw';
@@ -28,6 +29,7 @@ import { MAX_ATTEMPTS } from './lib/notifications';
 import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
+import { FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
   ALARM_STATES,
@@ -305,5 +307,18 @@ describe("a function's name", () => {
     const names = ['hello', 'Hello_World-2', 'a', 'x'.repeat(MAX_FUNCTION_NAME_LENGTH), 'x'.repeat(MAX_FUNCTION_NAME_LENGTH + 1), '', 'my function', ' hello', 'a.b', 'a/b', 'é', 'a\nb'];
     expect(names.map((name) => form.test(name))).toEqual(names.map((name) => api.test(name)));
     expect(names.filter((name) => api.test(name))).toEqual(['hello', 'Hello_World-2', 'a', 'x'.repeat(64)]);
+  });
+});
+
+describe("a function's environment variables", () => {
+  /** The names of one of the API's lists, as written in its source. */
+  const listed = (name: string) => [...new RegExp(`const ${name} = \\[([^\\]]*)\\]`).exec(environmentSource)![1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+
+  it('are held in the editor to the rules the API applies: the names, the reserved ones, the 4 KB', () => {
+    expect(new RegExp(/export const VARIABLE_NAME = \/(.+)\/;/.exec(environmentSource)![1]).source).toBe(VARIABLE_NAME.source);
+    expect(Number(/export const MAX_ENVIRONMENT_BYTES = (\d+);/.exec(environmentSource)![1])).toBe(MAX_ENVIRONMENT_BYTES);
+    expect(LAMBDA_RESERVED).toEqual(listed('LAMBDA_RESERVED'));
+    expect(FF_RESERVED).toEqual(listed('FF_RESERVED'));
+    expect(environmentSource).toContain("name.startsWith('FF_')");
   });
 });

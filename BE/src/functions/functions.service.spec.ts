@@ -26,7 +26,9 @@ import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
+import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
+import { memoryEnvironments } from './test-fixtures';
 import { TAIL_ENDED, TAIL_UNAVAILABLE } from './live-tail';
 import { Observable } from 'rxjs';
 
@@ -64,6 +66,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const credit = { admit: jest.fn(async (_accountId: string) => undefined) };
   /** The transaction that ends an invocation: it locks the row, saves the final state, then writes the usage record (D6). */
   const ending = { findOne: jest.fn(), save: jest.fn() };
+  /** Each function's variables and secrets, as the service saved them. */
+  let environments: ReturnType<typeof memoryEnvironments>;
 
   const activeFunction = (): Function =>
     ({
@@ -88,6 +92,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     savedStatuses = [];
+    environments = memoryEnvironments();
     functionsRepo.create.mockImplementation((dto) => ({ ...dto }));
     functionsRepo.save.mockImplementation(async (entity) => {
       savedStatuses.push(entity.status);
@@ -152,6 +157,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { provide: AuditService, useValue: audit },
         { provide: UsageService, useValue: usage },
         { provide: CreditService, useValue: credit },
+        { provide: EnvironmentStore, useValue: environments },
       ],
     }).compile();
     service = moduleRef.get(FunctionsService);
@@ -953,6 +959,116 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect(ending.save).not.toHaveBeenCalled();
       expect(record()).toMatchObject({ requestId: 'inv-1', status: 'success', billedMs: 31, endedAt: expect.any(Date) });
+    });
+  });
+
+  describe("a function's environment variables", () => {
+    const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
+    const notReady = () => new FunctionLoadError('Error', 'boom at init');
+    /** The environment the orchestrator was given at each deploy or update, in order. */
+    const given = () => [...orchestrator.deploy.mock.calls, ...orchestrator.update.mock.calls].map(([fn]) => fn.environment);
+    const stored = (variables: Record<string, string>, revision = 'r0') =>
+      environments.saved.set('fn-1', { revision, variables, secrets: {} });
+
+    it('saves them with the new function, deploys them with a revision, and answers with them', async () => {
+      const result = await service.create('user-1', { ...dto, environment: { TABLE: 'orders', LOG_LEVEL: 'debug' } });
+
+      const saved = environments.saved.get('fn-1')!;
+      expect(saved).toEqual({ revision: expect.stringMatching(/^[0-9a-f]{16}$/), variables: { TABLE: 'orders', LOG_LEVEL: 'debug' }, secrets: {} });
+      expect(given()).toEqual([{ revision: saved.revision, values: { TABLE: 'orders', LOG_LEVEL: 'debug' } }]);
+      expect(result.environment).toEqual({ TABLE: 'orders', LOG_LEVEL: 'debug' });
+    });
+
+    it('gives a function without any no environment at all', async () => {
+      const result = await service.create('user-1', { ...dto, environment: {} });
+
+      expect(environments.saved.size).toBe(0);
+      expect(given()).toEqual([undefined]);
+      expect(result.environment).toEqual({});
+    });
+
+    it('answers GET with the variables', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+
+      expect((await service.describe('user-1', 'fn-1')).environment).toEqual({ TABLE: 'orders' });
+    });
+
+    it('rolls out new variables with a new revision, all of them replaced, and saves them once they are live', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders', OLD: 'x' });
+
+      const result = await service.update('user-1', 'fn-1', { environment: { TABLE: 'invoices' } });
+
+      const [rolledOut] = given();
+      expect(rolledOut).toEqual({ revision: expect.stringMatching(/^[0-9a-f]{16}$/), values: { TABLE: 'invoices' } });
+      expect(rolledOut!.revision).not.toBe('r0');
+      expect(environments.saved.get('fn-1')).toEqual({ revision: rolledOut!.revision, variables: { TABLE: 'invoices' }, secrets: {} });
+      expect(result.environment).toEqual({ TABLE: 'invoices' });
+    });
+
+    it('keeps the revision when the code changes and the variables do not, so their Secret stays where it is', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+
+      await service.update('user-1', 'fn-1', { code: 'v2', environment: { TABLE: 'orders' } });
+
+      expect(given()).toEqual([{ revision: 'r0', values: { TABLE: 'orders' } }]);
+    });
+
+    it('rolls nothing out when the same variables are sent again', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+
+      await service.update('user-1', 'fn-1', { environment: { TABLE: 'orders' } });
+
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(environments.saved.get('fn-1')!.revision).toBe('r0');
+    });
+
+    it('removes them all with an empty map: a version without any, and no row left', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+
+      await service.update('user-1', 'fn-1', { environment: {} });
+
+      expect(given()).toEqual([undefined]);
+      expect(environments.saved.has('fn-1')).toBe(false);
+    });
+
+    it('rolls a failed change back with the previous variables, and saves nothing', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+      orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
+
+      await expect(service.update('user-1', 'fn-1', { environment: { TABLE: 'broken' } })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(given().map((environment) => environment?.values)).toEqual([{ TABLE: 'broken' }, { TABLE: 'orders' }]);
+      expect(given()[1]!.revision).toBe('r0');
+      expect(environments.saved.get('fn-1')).toEqual({ revision: 'r0', variables: { TABLE: 'orders' }, secrets: {} });
+    });
+
+    it('keeps the variables of a failed repair with the attempt: the Deployment holds them', async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'earlier' });
+      stored({ TABLE: 'orders' });
+      orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
+
+      await expect(service.update('user-1', 'fn-1', { environment: { TABLE: 'retry' } })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(environments.saved.get('fn-1')!.variables).toEqual({ TABLE: 'retry' });
+    });
+
+    it('names the variables in the audit log, never their values', async () => {
+      await service.create('user-1', { ...dto, environment: { TABLE: 'orders', API_TOKEN: 'tok-123' } });
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders', API_TOKEN: 'tok-123', OLD: 'gone' });
+
+      await service.update('user-1', 'fn-1', { environment: { TABLE: 'orders', API_TOKEN: 'tok-456', NEW: 'v' } });
+
+      const [created, updated] = audit.record.mock.calls.map(([event]) => event);
+      expect(created.details).toEqual({ name: 'hello', runtime: 'nodejs', memory: 128, timeout: 5, environment: ['API_TOKEN', 'TABLE'] });
+      expect(updated.details).toEqual({ changed: ['environment'], environment: { added: ['NEW'], changed: ['API_TOKEN'], removed: ['OLD'] }, outcome: 'live' });
+      expect(JSON.stringify(audit.record.mock.calls)).not.toMatch(/tok-123|tok-456|orders/);
     });
   });
 

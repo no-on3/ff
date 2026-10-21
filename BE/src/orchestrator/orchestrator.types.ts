@@ -22,6 +22,15 @@ export interface FunctionWorkload {
   timeout: number;
   minInstances: number;
   maxInstances: number;
+  /** Its variables and secrets; none when absent or empty. */
+  environment?: WorkloadEnvironment;
+}
+
+/** What a function's process gets besides FF's own variables: its variables and its secrets' values. */
+export interface WorkloadEnvironment {
+  /** Random, new with every change of the values: the Deployment names it, so a change rolls out. Says nothing about them. */
+  revision: string;
+  values: Record<string, string>;
 }
 
 /** One line of a function's log (P-40), in the shape the log store gives too (P-43). */

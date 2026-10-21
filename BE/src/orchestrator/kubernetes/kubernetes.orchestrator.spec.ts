@@ -244,10 +244,103 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
-  it('remove deletes the Deployment, the Service and every code ConfigMap', async () => {
+  describe("the function's variables and secrets", () => {
+    const secretPath = (slot: number) => `/api/v1/namespaces/${ns}/secrets/${name}-env-${slot}`;
+    const withEnvironment = (revision: string, values: Record<string, string> = { DB_PASSWORD: 'hunter2' }) =>
+      workload({ environment: { revision, values } });
+    const applied = (kind: string) => api.applied.filter((a) => a.manifest.kind === kind);
+    const lastDeployment = () => applied('Deployment').at(-1)!.manifest;
+    /** The Deployment as the cluster now has it, rolled out. */
+    const rollOut = () => api.objects.set(deploymentPath, { ...lastDeployment(), ...rolledOut(1), spec: { ...lastDeployment().spec, replicas: 1 } });
+
+    it('writes them into the first Secret before the Deployment, which reads it through envFrom', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+
+      expect(api.applied.map((a) => a.manifest.kind).slice(-2)).toEqual(['Secret', 'Deployment']);
+      expect(applied('Secret')[0].path).toBe(secretPath(0));
+      expect(lastDeployment().spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: `${name}-env-0` } }]);
+    });
+
+    it('keeps an unchanged environment where it is, written again', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+
+      await orchestrator.update({ ...withEnvironment('r1'), code: 'export const handler = async () => 2;' }, tenant());
+
+      expect(applied('Secret').map((a) => a.path)).toEqual([secretPath(0), secretPath(0)]);
+    });
+
+    it("writes a new environment into the Secret the running version doesn't read, so its pods keep theirs", async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+      await orchestrator.update(withEnvironment('r2', { DB_PASSWORD: 'new' }), tenant());
+      rollOut();
+      await orchestrator.update(withEnvironment('r3', { DB_PASSWORD: 'newer' }), tenant());
+
+      expect(applied('Secret').map((a) => a.path)).toEqual([secretPath(0), secretPath(1), secretPath(0)]);
+      expect(lastDeployment().spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: `${name}-env-0` } }]);
+    });
+
+    it('deletes the Secret no pod reads once the rollout is complete, and never the one in use', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+      await orchestrator.update(withEnvironment('r2', { DB_PASSWORD: 'new' }), tenant());
+      rollOut();
+      api.deleted = [];
+
+      await orchestrator.waitUntilReady(withEnvironment('r2'), 100);
+
+      expect(api.deleted).toEqual([secretPath(0)]);
+    });
+
+    it('deletes both once the function has none any more, and writes no Secret for it', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+      await orchestrator.update(fn, tenant());
+      rollOut();
+      api.deleted = [];
+
+      await orchestrator.waitUntilReady(fn, 100);
+
+      expect(applied('Secret')).toHaveLength(1);
+      expect(lastDeployment().spec.template.spec.containers[0].envFrom).toBeUndefined();
+      expect(api.deleted).toEqual([secretPath(0), secretPath(1)]);
+    });
+
+    it('keeps both while a rollout fails: a rollback needs the old values', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      api.objects.set(deploymentPath, { ...lastDeployment(), status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 0 } });
+      api.deleted = [];
+
+      await expect(orchestrator.waitUntilReady(withEnvironment('r1'), 30)).rejects.toThrow();
+
+      expect(api.deleted).toEqual([]);
+    });
+
+    it('says only that a Secret could not be deleted, and the wait still succeeds', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+      api.delete = async () => {
+        throw new Error('forbidden');
+      };
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      await expect(orchestrator.waitUntilReady(withEnvironment('r1'), 100)).resolves.toBeUndefined();
+
+      expect(warn).toHaveBeenCalledWith(`Could not delete the unused environment Secret ${ns}/${name}-env-1: forbidden`);
+      warn.mockRestore();
+    });
+  });
+
+  it('remove deletes the Deployment, the Service, every code ConfigMap, and both environment Secrets by name', async () => {
     await orchestrator.remove(fn);
 
-    expect(api.deleted).toEqual([deploymentPath, `/api/v1/namespaces/${ns}/services/${name}`]);
+    expect(api.deleted).toEqual([
+      deploymentPath,
+      `/api/v1/namespaces/${ns}/services/${name}`,
+      `/api/v1/namespaces/${ns}/secrets/${name}-env-0`,
+      `/api/v1/namespaces/${ns}/secrets/${name}-env-1`,
+    ]);
     expect(api.deletedCollections).toEqual([
       { path: `/api/v1/namespaces/${ns}/configmaps`, selector: `ff.dev/function-id=${fn.id}` },
     ]);

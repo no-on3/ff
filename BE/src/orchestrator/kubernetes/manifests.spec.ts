@@ -6,6 +6,7 @@ import {
   codeConfigMapManifest,
   cpuMillicores,
   deploymentManifest,
+  environmentSecretManifest,
   namespaceManifest,
   networkPolicyManifest,
   resourceQuotaManifest,
@@ -100,6 +101,40 @@ describe('Kubernetes manifests', () => {
         LAMBDA_TASK_ROOT: '/var/task',
         FF_HANDLER: 'function.handler',
         PORT: '8080',
+      });
+    });
+
+    describe("the function's own variables and secrets", () => {
+      const environment = { revision: 'a1b2c3d4e5f60718', values: { DB_HOST: 'db.internal', DB_PASSWORD: 'hunter2' } };
+      const withEnvironment = (values: Record<string, string> = environment.values) =>
+        deploymentManifest(workload({ environment: { ...environment, values } }), 'ff-t-abc', 'fn-x-0123456789', 'hash', settings(), 1, 'fn-x-env-1') as any;
+
+      it('come from their Secret through envFrom, and the template names their revision, so a change rolls out', () => {
+        const d = withEnvironment();
+
+        expect(container(d).envFrom).toEqual([{ secretRef: { name: 'fn-x-env-1' } }]);
+        expect(d.spec.template.metadata.annotations).toEqual({ 'ff.dev/code-sha256': 'hash', 'ff.dev/environment-revision': 'a1b2c3d4e5f60718' });
+      });
+
+      it('never put a value in the Deployment, which the backend and the cluster read', () => {
+        expect(JSON.stringify(withEnvironment())).not.toContain('hunter2');
+        expect(JSON.stringify(withEnvironment())).not.toContain('db.internal');
+      });
+
+      it("give way to nothing of FF's, but FF's UTC gives way to the function's own TZ", () => {
+        const names = (d: any) => container(d).env.map((e: any) => e.name);
+
+        expect(names(withEnvironment())).toContain('TZ');
+        expect(container(build()).env).toContainEqual({ name: 'TZ', value: 'UTC' });
+        expect(names(withEnvironment({ TZ: 'Africa/Tunis' }))).not.toContain('TZ');
+      });
+
+      it('are left out entirely for a function without any, or without the Secret named', () => {
+        const unnamed = deploymentManifest(workload({ environment }), 'ff-t-abc', 'fn-x-0123456789', 'hash', settings(), 1) as any;
+        for (const d of [build(), withEnvironment({}), unnamed]) {
+          expect(container(d).envFrom).toBeUndefined();
+          expect(d.spec.template.metadata.annotations).toEqual({ 'ff.dev/code-sha256': 'hash' });
+        }
       });
     });
 
@@ -198,6 +233,28 @@ describe('Kubernetes manifests', () => {
     });
   });
 
+  it("puts a function's variables and secrets in a Secret: base64, labelled as the function's, naming only the revision", () => {
+    const fn = workload({ environment: { revision: 'a1b2c3d4e5f60718', values: { DB_PASSWORD: 'hunter2', GREETING: 'Ahlan é' } } });
+    const secret: any = environmentSecretManifest(fn as any, 'ff-t-abc', 'fn-x-env-0');
+
+    expect(secret).toMatchObject({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      type: 'Opaque',
+      metadata: {
+        name: 'fn-x-env-0',
+        namespace: 'ff-t-abc',
+        labels: { 'ff.dev/function-id': fn.id, 'app.kubernetes.io/managed-by': 'ff-controller' },
+        annotations: { 'ff.dev/environment-revision': 'a1b2c3d4e5f60718' },
+      },
+    });
+    expect(Object.fromEntries(Object.entries(secret.data).map(([k, v]) => [k, Buffer.from(v as string, 'base64').toString('utf8')]))).toEqual({
+      DB_PASSWORD: 'hunter2',
+      GREETING: 'Ahlan é',
+    });
+    expect(JSON.stringify(secret.metadata)).not.toContain('hunter2');
+  });
+
   it("sizes the tenant ResourceQuota from the account's plan, with pods as a quantity string", () => {
     const quota: any = resourceQuotaManifest('ff-t-abc', { pods: 5, cpu: '2', memory: '4Gi' });
 
@@ -207,6 +264,8 @@ describe('Kubernetes manifests', () => {
       'limits.cpu': '2',
       'requests.memory': '4Gi',
       'limits.memory': '4Gi',
+      // Two a function, for its environment.
+      secrets: '60',
     });
   });
 

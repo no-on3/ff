@@ -18,7 +18,7 @@ import { FunctionsService } from './functions.service';
 import { recordingAudit } from '../audit/test-fixtures';
 import { recordingUsage } from '../usage/test-fixtures';
 import { onePlan } from '../plans/test-fixtures';
-import { FUNCTION_DEFAULTS, MemoryRepository, eventually } from './test-fixtures';
+import { FUNCTION_DEFAULTS, MemoryRepository, eventually, memoryEnvironments } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' ? describe : describe.skip;
 const kubeDir = path.resolve(__dirname, '../../../hack/.kube');
@@ -64,6 +64,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     recordingAudit().audit,
     usage.usage,
     { admit: async () => undefined } as never, // D9's balance check (P-33): every call admitted
+    memoryEnvironments(),
   );
   const spec = (name: string, code: string) => ({ name, runtime: Runtime.NODEJS, code, memory: 128, timeout: 3 });
 
@@ -80,6 +81,32 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
   afterAll(async () => {
     for (const fn of functions.rows.values()) await orchestrator.remove(fn).catch(() => undefined);
     await client.delete(paths.namespace(ns)).catch(() => undefined); // allowed: managed ff-t-* namespace
+  });
+
+  it("gives a function its variables, and the new ones after an update, never in a pod's spec, and leaves the replaced Secret behind", async () => {
+    const reader = 'export async function handler() { return { greeting: process.env.GREETING ?? null, tz: process.env.TZ }; }';
+    const fn = await service.create(account, { ...spec('it-environment', reader), environment: { GREETING: 'Ahlan' } });
+    const name = functionResourceName(fn.id);
+    const secretRead = async () =>
+      (await client.get<{ spec?: { template?: { spec?: { containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }> } } } }>(
+        paths.apps(ns, 'deployments', name),
+      ))?.spec?.template?.spec?.containers?.[0]?.envFrom?.[0]?.secretRef?.name;
+
+    expect((await service.invoke(account, fn.id, {})).output).toEqual({ greeting: 'Ahlan', tz: 'UTC' });
+    expect(await secretRead()).toBe(`${name}-env-0`);
+
+    await service.update(account, fn.id, { environment: { GREETING: 'Marhba', TZ: 'Africa/Tunis' } });
+
+    // The function's own TZ, as AWS Lambda lets it set one.
+    expect((await service.invoke(account, fn.id, {})).output).toEqual({ greeting: 'Marhba', tz: 'Africa/Tunis' });
+    expect(await secretRead()).toBe(`${name}-env-1`);
+    // The pods' specs, which the backend's token reads, name the Secret and hold no value.
+    const specs = JSON.stringify(await client.list(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`));
+    expect(specs).toContain(`${name}-env-1`);
+    expect(specs).not.toMatch(/Ahlan|Marhba/);
+    // The backend's token reads no Secret; the replaced one was deleted once the rollout was complete.
+    expect((await client.request('GET', paths.core(ns, 'secrets', `${name}-env-1`))).status).toBe(403);
+    expect(await client.delete(paths.core(ns, 'secrets', `${name}-env-0`))).toBe(false);
   });
 
   it('a broken create ends ERROR without a pod; an update with fixed code makes it ACTIVE and invocable', async () => {
@@ -124,7 +151,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     const updated = await service.update(account, fn.id, { code: greeter('v2') });
 
     expect(updated.status).toBe(FunctionStatus.ACTIVE);
-    expect(await orchestrator.readyInstances(updated)).toBeGreaterThanOrEqual(1);
+    expect(await orchestrator.readyInstances(functions.byName('it-rollback'))).toBeGreaterThanOrEqual(1);
     expect((await service.invoke(account, fn.id, {})).output).toEqual({ version: 'v2', message: 'Hello world' });
   });
 
@@ -136,7 +163,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
       body: JSON.stringify({ spec: { template: { spec: { containers: [{ name: 'function', command: ['node', '-e', silent] }] } } } }),
       contentType: 'application/strategic-merge-patch+json',
     });
-    await orchestrator.waitUntilReady(fn, 90_000);
+    await orchestrator.waitUntilReady(functions.byName('it-silent'), 90_000);
 
     const failure = await service.invoke(account, fn.id, {}).catch((error: unknown) => error);
 

@@ -19,7 +19,7 @@ import { FunctionsService } from './functions.service';
 import { recordingAudit } from '../audit/test-fixtures';
 import { recordingUsage } from '../usage/test-fixtures';
 import { onePlan } from '../plans/test-fixtures';
-import { FUNCTION_DEFAULTS, MemoryRepository, eventually } from './test-fixtures';
+import { FUNCTION_DEFAULTS, MemoryRepository, eventually, memoryEnvironments } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' ? describe : describe.skip;
 const kubeDir = path.resolve(__dirname, '../../../hack/.kube');
@@ -66,6 +66,7 @@ run('scaling on concurrency against the dev cluster (L3, P-06)', () => {
     recordingAudit().audit,
     recordingUsage().usage,
     { admit: async () => undefined } as never, // D9's balance check (P-33): every call admitted
+    memoryEnvironments(),
   );
 
   afterAll(async () => {

@@ -14,6 +14,7 @@ export const LABELS = {
 export const ANNOTATIONS = {
   accountId: 'ff.dev/account-id',
   codeSha256: 'ff.dev/code-sha256',
+  environmentRevision: 'ff.dev/environment-revision',
 } as const;
 
 const FUNCTION_ID = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
@@ -47,4 +48,23 @@ export function codeHash(runtime: string, code: string): string {
 /** Immutable ConfigMap name: a new code version gets a new name. */
 export function codeConfigMapName(functionId: string, hash: string): string {
   return `${functionResourceName(functionId)}-${hash.slice(0, 10)}`;
+}
+
+/** The two Secrets a function's environment is written to, in turn: 0 and 1. */
+export type EnvironmentSlot = 0 | 1;
+
+/**
+ * A Secret that holds a function's environment. A new environment goes into
+ * the one its running version doesn't read, so that the pods of that version
+ * keep theirs during a rollout.
+ */
+export function environmentSecretName(functionId: string, slot: EnvironmentSlot): string {
+  return `${functionResourceName(functionId)}-env-${slot}`;
+}
+
+/** Which slot an environment Secret's name is; undefined for any other name. */
+export function environmentSlotOf(functionId: string, name: string): EnvironmentSlot | undefined {
+  if (name === environmentSecretName(functionId, 0)) return 0;
+  if (name === environmentSecretName(functionId, 1)) return 1;
+  return undefined;
 }

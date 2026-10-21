@@ -12,6 +12,7 @@
 import * as fs from 'node:fs';
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import { DEVELOPMENT_KEY, EncryptionKey, parseKeyRing } from '../encryption/key-ring';
 
 /** The configuration is invalid. The message lists each problem, naming its variable. */
 export class ConfigurationError extends Error {
@@ -326,6 +327,10 @@ const appShape = {
   FF_BANK_NAME: text(DEV_SELLER.FF_BANK_NAME),
   FF_BANK_IBAN: text(DEV_SELLER.FF_BANK_IBAN, iban),
   FF_BANK_BIC: optionalText(),
+
+  // The keys that encrypt functions' environment variables and secrets at rest: one a line, <id>:<32 bytes in base64>,
+  // the first sealing. Unset: the development key, which production refuses.
+  FF_ENCRYPTION_KEYS_FILE: optionalText(),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -406,6 +411,9 @@ function appRules(env: AppEnv): string[] {
         "K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production; K8S_ALLOW_UNSANDBOXED=true runs them without one, for a cluster that only tries the platform's manifests",
       );
     }
+    if (!env.FF_ENCRYPTION_KEYS_FILE) {
+      problems.push("FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production: its keys encrypt functions' environment variables and secrets");
+    }
     if (env.FF_WEBHOOK_ALLOW_PRIVATE) {
       problems.push("FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network");
     }
@@ -426,6 +434,27 @@ function parse<S extends z.ZodType>(schema: S, env: Env): z.infer<S> {
     );
   }
   return result.data;
+}
+
+/**
+ * The platform's encryption keys: the keys file's, read and checked at start,
+ * else the development key, which production refuses (appRules). A problem
+ * names the file and its line, never a key.
+ */
+function encryptionKeys(path: string | undefined, production: boolean): EncryptionKey[] {
+  if (!path) return [DEVELOPMENT_KEY];
+  let text: string;
+  try {
+    text = fs.readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new ConfigurationError([`FF_ENCRYPTION_KEYS_FILE cannot be read: ${path} (${(error as NodeJS.ErrnoException).code ?? 'error'})`]);
+  }
+  const { ring, problems } = parseKeyRing(text);
+  if (!ring) throw new ConfigurationError(problems.map((problem) => `FF_ENCRYPTION_KEYS_FILE ${path}: ${problem}`));
+  if (production && ring.holdsDevelopmentKey()) {
+    throw new ConfigurationError([`FF_ENCRYPTION_KEYS_FILE ${path} holds the development key, which protects nothing: refused when NODE_ENV=production`]);
+  }
+  return [...ring.keys];
 }
 
 function readCertificate(name: string, path: string): string {
@@ -549,6 +578,10 @@ export default function configuration(env: Env = process.env) {
       adminUrl: parsed.FF_ADMIN_URL.replace(/\/$/, ''),
       // The console, which invitation e-mails link to (P-16).
       consoleUrl: parsed.FF_CONSOLE_URL.replace(/\/$/, ''),
+    },
+    // What FF keeps encrypted at rest (functions' environments) is sealed with these keys, the first sealing.
+    encryption: {
+      keys: encryptionKeys(parsed.FF_ENCRYPTION_KEYS_FILE, production),
     },
     // Who sells, and where transfers go, as pro-formas say it (P-35).
     billing: {

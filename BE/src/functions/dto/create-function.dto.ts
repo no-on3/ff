@@ -1,7 +1,9 @@
-import { IsString, IsEnum, IsNumber, IsOptional, Matches, Min, Max } from 'class-validator';
+import { IsString, IsEnum, IsNumber, IsOptional, Matches, Min, Max, ValidateIf } from 'class-validator';
+import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
 import { Runtime } from '../entities/function.entity';
+import { IsEnvironment } from '../environment';
 
 /**
  * AWS Lambda's rule for a function's name, which FF's follow: names address
@@ -54,4 +56,29 @@ export class CreateFunctionDto {
   @ApiPropertyOptional({ description: 'Additional metadata', type: 'object', additionalProperties: true })
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  @EnvironmentProperty()
+  environment?: Record<string, string>;
+}
+
+/**
+ * The environment property, as create and update take it: optional, but null
+ * is no map, so it is refused rather than taken for "unchanged" (an update's
+ * other fields are optional in the way that lets null through).
+ */
+export function EnvironmentProperty(): PropertyDecorator {
+  return applyDecorators(
+    ApiPropertyOptional({
+      description:
+        "The function's environment variables, as on AWS Lambda: string values; names of a letter, then letters, digits or underscores, " +
+        "two characters at least; the names Lambda and FF's runtimes set are refused; 4 KB at most as JSON text, secrets included. " +
+        'An update replaces them all, and rolls out a new version. Whoever reads the function reads them: a value no one may read back is a secret. ' +
+        'Encrypted at rest.',
+      type: 'object',
+      additionalProperties: { type: 'string' },
+      example: { TABLE_NAME: 'orders', LOG_LEVEL: 'info' },
+    }),
+    ValidateIf((_dto, value) => value !== undefined),
+    IsEnvironment(),
+  );
 }

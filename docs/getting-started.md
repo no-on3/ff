@@ -249,6 +249,16 @@ curl -s -X PUT "$FF/functions/$ID/scaling-config" -H 'content-type: application/
 # {"minInstances":0,"maxInstances":5,"scaleToZero":true}
 ```
 
+**Environment variables**, as AWS Lambda's: names and string values your code reads as `process.env.NAME` in Node.js, `os.environ["NAME"]` in Python. Set them on create, or replace them all with an update, which rolls out a new version as a change of code does; `{}` removes them. A name starts with a letter, then letters, digits or underscores, two characters at least. The names Lambda sets itself (`AWS_REGION`, `AWS_LAMBDA_FUNCTION_NAME` and the rest of its list) and FF's runtimes' (`FUNCTION_TIMEOUT`, `PORT`, `PATH`, every `FF_` name) are refused, and all of them together take at most 4 KB as JSON text, as Lambda counts it. `TZ` is yours: the runtimes run in UTC otherwise.
+
+```bash
+curl -s -X PUT "$FF/functions/$ID" -H 'content-type: application/json' \
+  -d '{"environment": {"GREETING": "Ahlan", "TZ": "Africa/Tunis"}}' | jq -c .environment
+# {"GREETING":"Ahlan","TZ":"Africa/Tunis"}
+```
+
+They are configuration: whoever reads the function reads them, as on Lambda, and `GET /functions/<id>` answers with them (the list doesn't). The database keeps them encrypted, with the keys of `FF_ENCRYPTION_KEYS_FILE`: development has a key of its own, which production refuses. The cluster gives them to the function's pods through a Kubernetes Secret, and the audit log names the variables an update added, changed or removed, never their values. The console's Environment tab edits them. A value nobody should read back, such as a database password, belongs in a secret, which the [step-1 plan](step-1-plan.md)'s U-02 adds.
+
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
 ```bash
@@ -267,6 +277,7 @@ for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DEL
 - one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
 - up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
 - within the account's plan: on the beta plan, 25 functions, each with 128–1024 MB of memory and a timeout of 1–300 s;
+- with environment variables, 4 KB at most, as on Lambda (above);
 - up to 3 instances by default, and at most the plan's `instancesPerFunction` (10 on the beta plan) with `maxInstances`; `minInstances` from 0 up to the same limit keeps instances running when idle.
 
 A request beyond the plan gets 400 with the plan's limit, for example `memory must be at most 1024 MB on the Beta plan`. "Plans and limits" in section 5 lists them all.

@@ -48,3 +48,75 @@ describe("a function's name, as the API takes it: AWS Lambda's rule", () => {
     expect(await validated(UpdateFunctionDto, { memory: 256 })).not.toHaveProperty('name');
   });
 });
+
+describe("a function's environment variables, as the API takes them: AWS Lambda's rules", () => {
+  const create = { name: 'hello', runtime: Runtime.NODEJS, code: 'exports.handler = async () => 1;', memory: 128, timeout: 5 };
+  const both = async (environment: unknown) => [await validated(CreateFunctionDto, { ...create, environment }), await validated(UpdateFunctionDto, { environment })];
+
+  it('takes a map of names to strings, on create and on update, and an empty one, which removes them all', async () => {
+    const environment = { TABLE_NAME: 'orders', LOG_LEVEL: 'info', AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1', TZ: 'Africa/Tunis', ab: '' };
+
+    for (const result of await both(environment)) expect(result).toMatchObject({ environment });
+    for (const result of await both({})) expect(result).toMatchObject({ environment: {} });
+  });
+
+  it.each([
+    ['a digit first', '1ST'],
+    ['an underscore first', '_PRIVATE'],
+    ['one character', 'X'],
+    ['a hyphen', 'MY-VAR'],
+    ['a dot', 'my.var'],
+    ['a letter outside ASCII', 'CAFÉ'],
+  ])('refuses a name with %s, naming the rule', async (_case, name) => {
+    for (const result of await both({ [name]: 'v' })) {
+      expect(result).toEqual([`"${name}" is not a variable name: a letter first, then letters, digits or underscores, two characters at least, as on AWS Lambda`]);
+    }
+  });
+
+  it.each(['AWS_REGION', 'AWS_LAMBDA_FUNCTION_NAME', 'AWS_ACCESS_KEY_ID', 'LAMBDA_TASK_ROOT', 'FUNCTION_TIMEOUT', 'PORT', 'PATH'])(
+    "refuses %s: AWS Lambda or FF's runtime sets it",
+    async (name) => {
+      for (const result of await both({ [name]: 'v' })) expect(result).toEqual([`${name} is reserved: AWS Lambda or FF's runtime sets it`]);
+    },
+  );
+
+  it("refuses every name starting with FF_, FF's own", async () => {
+    for (const result of await both({ FF_HANDLER: 'x.handler' })) expect(result).toEqual(['FF_HANDLER is reserved: names starting with FF_ are FF\'s own']);
+  });
+
+  it('refuses values that are not strings, naming the variable, never the value', async () => {
+    for (const result of await both({ PORT_NUMBER: 8080, DEBUG: true, LIST: ['a'] })) {
+      expect(result).toEqual([
+        "PORT_NUMBER's value must be a string, as every variable's is on AWS Lambda; " +
+          "DEBUG's value must be a string, as every variable's is on AWS Lambda; " +
+          "LIST's value must be a string, as every variable's is on AWS Lambda",
+      ]);
+    }
+  });
+
+  it('refuses what is not a map, null included: an empty map removes the variables', async () => {
+    for (const environment of [['A=1'], 'A=1', null, 42]) {
+      for (const result of await both(environment)) expect(result).toEqual(['environment must be a JSON object of variable names to string values']);
+    }
+  });
+
+  it('takes 4 KB as AWS Lambda counts it, the JSON text of the map, and not one byte more', async () => {
+    // {"BIG":"…"} is 10 bytes around the value.
+    const exactly = { BIG: 'x'.repeat(4096 - 10) };
+    const over = { BIG: 'x'.repeat(4096 - 9) };
+
+    expect(await validated(CreateFunctionDto, { ...create, environment: exactly })).toMatchObject({ environment: exactly });
+    expect(await validated(CreateFunctionDto, { ...create, environment: over })).toEqual([
+      "The environment is 4097 bytes as JSON text: AWS Lambda allows 4096 (4 KB) for a function's variables and secrets together",
+    ]);
+  });
+
+  it('counts bytes, not characters: a value outside ASCII takes two each', async () => {
+    // 2,054 characters, far under 4,096, but 4,098 bytes: each é is two bytes in UTF-8.
+    const accented = { BIG: 'é'.repeat(2044) };
+
+    expect(await validated(CreateFunctionDto, { ...create, environment: accented })).toEqual([
+      "The environment is 4098 bytes as JSON text: AWS Lambda allows 4096 (4 KB) for a function's variables and secrets together",
+    ]);
+  });
+});

@@ -21,6 +21,7 @@ import { useSession } from '../session/session';
 import { updateFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
 import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
+import { FunctionEnvironment } from './FunctionEnvironment';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
 import { MetricsDashboard } from './MetricsDashboard';
@@ -29,8 +30,16 @@ import { ScalingConfiguration } from './ScalingConfiguration';
 /** How many invocations the history shows, newest first. */
 const HISTORY_PAGE = 20;
 
-/** The page's tabs, by their name in the address (`?tab=logs`), so that a link opens one. */
-const TABS = ['overview', 'invocations', 'logs', 'metrics', 'scaling'] as const;
+/** The page's tabs, by their name in the address (`?tab=logs`), so that a link opens one, in their order. */
+const TABS = ['overview', 'environment', 'invocations', 'logs', 'metrics', 'scaling'] as const;
+const TAB_LABELS: Record<(typeof TABS)[number], string> = {
+  overview: 'Overview',
+  environment: 'Environment',
+  invocations: 'Invocations',
+  logs: 'Logs',
+  metrics: 'Metrics',
+  scaling: 'Scaling',
+};
 
 const GREEN = 'bg-green-100 text-green-800';
 const BLUE = 'bg-blue-100 text-blue-800';
@@ -69,6 +78,7 @@ const FunctionDetail: React.FC = () => {
   const [invokeError, setInvokeError] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = Math.max(0, TABS.indexOf(searchParams.get('tab') as (typeof TABS)[number]));
+  const tab = TABS[activeTab];
   const logsFilter = useMemo(() => filterFromSearch(searchParams), [searchParams]);
   const showLogs = (filter: LogsFilter) => setSearchParams(searchForFilter(filter));
 
@@ -158,14 +168,12 @@ const FunctionDetail: React.FC = () => {
     <div className="container mx-auto px-4 py-8">
       {/* On a phone the tabs don't fit: the bar scrolls by touch. Scroll buttons would appear after the open tab is scrolled into view, and hide it. */}
       <Tabs value={activeTab} onChange={handleTabChange} variant="scrollable" scrollButtons={false}>
-        <Tab label="Overview" />
-        <Tab label="Invocations" />
-        <Tab label="Logs" />
-        <Tab label="Metrics" />
-        <Tab label="Scaling" />
+        {TABS.map((name) => (
+          <Tab key={name} label={TAB_LABELS[name]} />
+        ))}
       </Tabs>
 
-      {activeTab === 0 && (
+      {tab === 'overview' && (
         <div className="mb-8">
           <div className="flex items-center gap-3 mb-4">
             <h1 className="text-2xl font-bold">{func.name}</h1>
@@ -255,7 +263,13 @@ const FunctionDetail: React.FC = () => {
         </div>
       )}
 
-      {activeTab === 1 && (
+      {tab === 'environment' && (
+        <Box p={3}>
+          <FunctionEnvironment func={func} mayChange={mayChange} onSaved={setFunc} />
+        </Box>
+      )}
+
+      {tab === 'invocations' && (
         <div className="mt-12">
           <h2 className="text-xl font-bold mb-4">Invoke Function</h2>
           {!mayChange && <p className="text-sm text-gray-600">As a viewer, you read the history; owners and developers invoke.</p>}
@@ -356,19 +370,19 @@ const FunctionDetail: React.FC = () => {
         </div>
       )}
 
-      {activeTab === 2 && (
+      {tab === 'logs' && (
         <Box p={3}>
           <FunctionLogs functionId={id!} filter={logsFilter} onFilterChange={showLogs} />
         </Box>
       )}
 
-      {activeTab === 3 && (
+      {tab === 'metrics' && (
         <Box p={3}>
           <MetricsDashboard functionId={id!} />
         </Box>
       )}
 
-      {activeTab === 4 && (
+      {tab === 'scaling' && (
         <Box p={3}>
           <ScalingConfiguration functionId={id!} />
         </Box>

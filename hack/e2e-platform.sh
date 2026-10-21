@@ -120,6 +120,9 @@ kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/base" >/dev/null
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/delete-key"
 kubectl -n ff-system create secret generic victoria-logs-delete-key --from-file=key="$work/delete-key" >/dev/null
 kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/logging" >/dev/null
+# The keys that encrypt functions' variables and secrets at rest: one, made for this run.
+echo "e2e:$(head -c 32 /dev/urandom | base64)" >"$work/encryption-keys"
+kubectl -n ff-system create secret generic ff-encryption-keys --from-file=keys="$work/encryption-keys" >/dev/null
 kubectl -n ff-system create secret generic ff-backend --from-literal=DB_PASSWORD="$ff_db" \
   --from-literal=MINIO_ACCESS_KEY="$s3_key" --from-literal=MINIO_SECRET_KEY="$s3_secret" \
   --from-literal=FF_SMTP_URL=smtp://ff-test-smtp.ff-system.svc.cluster.local:1025 >/dev/null

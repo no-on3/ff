@@ -29,6 +29,11 @@ outcome() {
   local out
   if out="$("$@" 2>&1)"; then echo allowed; elif grep -q "ff-controller may only manage" <<<"$out"; then echo denied; else echo "error: $out"; fi
 }
+# "forbidden" when RBAC refuses the request itself, as for any read of a Secret.
+forbidden() {
+  local out
+  if out="$("$@" 2>&1)"; then echo "allowed"; elif grep -q "forbidden" <<<"$out"; then echo forbidden; else echo "error: $out"; fi
+}
 # For calls that fail further on anyway (a Service without pods): did the policy let them through?
 policy() {
   if "$@" 2>&1 | grep -q "ff-controller may only manage"; then echo denied; else echo "passed the policy"; fi
@@ -47,6 +52,7 @@ can_until() {
 cleanup() {
   kubectl delete namespace ff-t-rbactest ff-t-rogue rogue-ns --ignore-not-found --wait=false >/dev/null 2>&1
   kubectl -n default delete configmap ff-vap-test --ignore-not-found >/dev/null 2>&1
+  kubectl -n default delete secret ff-vap-test --ignore-not-found >/dev/null 2>&1
   kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/dev" >/dev/null 2>&1 # restores the dev overlay's binding
 }
 trap cleanup EXIT
@@ -64,9 +70,14 @@ check "create networkpolicies" yes "$(can create networkpolicies.networking.k8s.
 check "create services/proxy (dev overlay: the invoke path outside the cluster)" yes "$(can create services --subresource=proxy -n ff-t-x)"
 check "list deployments in every namespace at once (capacity samples)" yes "$(can list deployments.apps --all-namespaces)"
 check "create namespaces" yes "$(can create namespaces)"
+check "create, patch and delete secrets in a tenant namespace: functions' environments" "yes yes yes" \
+  "$(can create secrets -n ff-t-x) $(can patch secrets -n ff-t-x) $(can delete secrets -n ff-t-x)"
 
 echo "RBAC denials:"
 check "get secrets" no "$(can get secrets -n ff-t-x)"
+check "list or watch secrets in a tenant namespace" "no no" "$(can list secrets -n ff-t-x) $(can watch secrets -n ff-t-x)"
+check "list secrets in every namespace at once" no "$(can list secrets --all-namespaces)"
+check "deletecollection secrets: one by one, by name" no "$(can deletecollection secrets -n ff-t-x)"
 check "create pods directly" no "$(can create pods -n ff-t-x)"
 check "pods/exec" no "$(can create pods --subresource=exec -n ff-t-x)"
 check "create clusterroles" no "$(can create clusterroles.rbac.authorization.k8s.io)"
@@ -97,6 +108,16 @@ check "labelled ff-t-rbactest namespace is allowed" allowed \
   "$(outcome as_sa apply -f - <<<'{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"ff-t-rbactest","labels":{"app.kubernetes.io/managed-by":"ff-controller"}}}')"
 check "configmap inside the managed namespace is allowed" allowed \
   "$(outcome as_sa -n ff-t-rbactest create configmap ff-vap-test --from-literal=a=b)"
+check "secret in 'default' is denied" denied \
+  "$(outcome as_sa -n default create secret generic ff-vap-test --from-literal=a=b)"
+check "secret in 'ff-system', where the platform's credentials are, is denied" denied \
+  "$(outcome as_sa -n ff-system apply --server-side --field-manager=ff-controller -f - <<<'{"apiVersion":"v1","kind":"Secret","metadata":{"name":"ff-vap-test"},"stringData":{"a":"b"}}')"
+check "secret applied in the managed namespace, as the backend writes a function's environment, is allowed" allowed \
+  "$(outcome as_sa -n ff-t-rbactest apply --server-side --field-manager=ff-controller -f - <<<'{"apiVersion":"v1","kind":"Secret","metadata":{"name":"ff-vap-test"},"stringData":{"a":"b"}}')"
+check "reading it back is forbidden, even in the managed namespace" forbidden \
+  "$(forbidden as_sa -n ff-t-rbactest get secret ff-vap-test)"
+check "deleting it by name is allowed" allowed \
+  "$(outcome as_sa -n ff-t-rbactest delete secret ff-vap-test)"
 check "removing the managed-by label is denied" denied \
   "$(outcome as_sa label namespace ff-t-rbactest app.kubernetes.io/managed-by-)"
 as_sa -n ff-t-rbactest create service clusterip ff-vap-test --tcp=8080:8080 >/dev/null 2>&1

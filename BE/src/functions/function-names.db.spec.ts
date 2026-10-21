@@ -16,6 +16,7 @@ import { onePlan } from '../plans/test-fixtures';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
+import { memoryEnvironments } from './test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '400000000001';
@@ -63,6 +64,7 @@ run("functions' names (L2)", () => {
       { record: () => audited() } as never,
       {} as never, // no invocations: no usage records
       {} as never, // nor a balance check
+      memoryEnvironments(),
     );
   });
 

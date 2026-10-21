@@ -69,6 +69,11 @@ export interface Function {
   maxInstances: number;
   scaleToZero: boolean;
   metadata?: Record<string, unknown> | null;
+  /**
+   * Its environment variables, by name: in the answers of GET /functions/:id, a create and an update; not in the
+   * list. Its secrets' values are never in any answer.
+   */
+  environment?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
@@ -76,10 +81,13 @@ export interface Function {
 /** What POST /functions accepts. */
 export type NewFunction = Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'> & {
   metadata?: Record<string, unknown>;
+  environment?: Record<string, string>;
 };
 
-/** What PUT /functions/:id accepts: any subset of these. */
-export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'>>;
+/** What PUT /functions/:id accepts: any subset of these. `environment` replaces all the variables, and rolls out. */
+export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'>> & {
+  environment?: Record<string, string>;
+};
 
 /**
  * Every status an invocation can have: the API's, which contract.test.ts checks.

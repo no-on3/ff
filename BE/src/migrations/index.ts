@@ -21,6 +21,7 @@ import { RateLimitedInvocations1792419122035 } from './1792419122035-RateLimited
 import { Notifications1792424270622 } from './1792424270622-Notifications';
 import { Alarms1792462186640 } from './1792462186640-Alarms';
 import { UniqueFunctionNames1792545248288 } from './1792545248288-UniqueFunctionNames';
+import { FunctionEnvironments1792555028887 } from './1792555028887-FunctionEnvironments';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -51,4 +52,5 @@ export const MIGRATIONS: Array<new () => object> = [
   Notifications1792424270622,
   Alarms1792462186640,
   UniqueFunctionNames1792545248288,
+  FunctionEnvironments1792555028887,
 ];

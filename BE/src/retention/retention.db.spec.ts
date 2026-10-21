@@ -26,6 +26,7 @@ import { BETA_LIMITS } from '../plans/test-fixtures';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
 import { RetentionService } from './retention.service';
+import { memoryEnvironments } from '../functions/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const MINUTE = 60;
@@ -98,6 +99,7 @@ run('what FF keeps only for a while (L2)', () => {
       audit,
       new UsageService(db.dataSource.getRepository(UsageRecord), db.dataSource, config),
       { admit: async () => undefined } as never,
+      memoryEnvironments(),
     );
     retention = new RetentionService(db.dataSource, functions, orchestrator as unknown as Orchestrator, audit, config);
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);

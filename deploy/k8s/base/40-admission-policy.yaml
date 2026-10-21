@@ -23,7 +23,7 @@ spec:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE", "DELETE"]
-        resources: ["namespaces", "configmaps", "services", "resourcequotas", "limitranges"]
+        resources: ["namespaces", "configmaps", "secrets", "services", "resourcequotas", "limitranges"]
       - apiGroups: ["apps"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE", "DELETE"]

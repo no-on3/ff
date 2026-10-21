@@ -13,7 +13,7 @@ import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-conf
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
 import { sendEvents } from './event-stream';
-import { FunctionsService } from './functions.service';
+import { FunctionView, FunctionsService } from './functions.service';
 
 /**
  * Every route acts for the caller's account (D4): without a principal it
@@ -44,7 +44,7 @@ export class FunctionsController {
       'The request was refused (validation, the plan), and nothing was saved; or the code failed to load, and `functionId` names the function saved as ERROR',
   })
   @ApiResponse({ status: 409, description: 'Another of the account\'s functions has the name: names are unique within an account. Nothing was saved' })
-  async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<Function> {
+  async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<FunctionView> {
     return this.functionsService.create(principal.accountId, createFunctionDto);
   }
 
@@ -59,9 +59,9 @@ export class FunctionsController {
   @Get(':id')
   @RequireScope('functions:read')
   @ApiOperation({ summary: 'Get a function by ID' })
-  @ApiResponse({ status: 200, description: 'Function details', type: Function })
-  async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<Function> {
-    return this.functionsService.findOne(principal.accountId, id);
+  @ApiResponse({ status: 200, description: "Function details, with its environment variables; never its secrets' values", type: Function })
+  async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<FunctionView> {
+    return this.functionsService.describe(principal.accountId, id);
   }
 
   @Put(':id')
@@ -80,7 +80,7 @@ export class FunctionsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateFunctionDto: UpdateFunctionDto,
     @Principal() principal: Principal,
-  ): Promise<Function> {
+  ): Promise<FunctionView> {
     return this.functionsService.update(principal.accountId, id, updateFunctionDto);
   }
 

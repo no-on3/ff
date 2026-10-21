@@ -9,7 +9,8 @@
 #     contents the backend's token can read across the cluster;
 #   - every workload behind a NetworkPolicy, ff-system denying by default, and every Service selecting pods;
 #   - the backend's settings (backend.env, with the Secret's keys) read by the backend's own configuration:
-#     accepted, but for the seller's and the bank's details, which an overlay must give;
+#     accepted, but for the seller's and the bank's details, which an overlay must give; its encryption keys
+#     mounted from their Secret where its settings look;
 #   - the production realm up to date with the development realm;
 #   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image;
 #   - all of it valid for the dev cluster's API, no field unknown (a server dry run, which writes nothing).
@@ -162,6 +163,19 @@ check "the backend's settings, with the Secret's, accepted but for the seller an
   "FF_SELLER_NAME FF_SELLER_TAX_ID FF_SELLER_ADDRESS FF_BANK_NAME FF_BANK_IBAN" "$problems"
 check "the production realm made from the development realm, up to date" 0 \
   "$("$FF_REPO_ROOT/deploy/keycloak/production-realm.py" --check >/dev/null 2>&1; echo $?)"
+
+# The keys that seal functions' variables and secrets: the Secret mounted where the backend's settings look, read-only.
+keys_file="$(sed -n 's/^FF_ENCRYPTION_KEYS_FILE=//p' "$platform/backend.env")"
+check "the backend's encryption keys mounted from their Secret where FF_ENCRYPTION_KEYS_FILE looks, read-only" "$keys_file" \
+  "$(python3 - "$work/platform.yaml" <<'PY'
+import sys, yaml
+backend = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d['kind'] == 'Deployment' and d['metadata']['name'] == 'ff-backend')
+pod = backend['spec']['template']['spec']
+volume = next(v['name'] for v in pod['volumes'] if v.get('secret', {}).get('secretName') == 'ff-encryption-keys')
+mount = next(m for m in pod['containers'][0]['volumeMounts'] if m['name'] == volume)
+print(f"{mount['mountPath']}/keys" if mount.get('readOnly') else 'writable')
+PY
+)"
 
 echo "== the edge"
 docker build -q -t ff-edge:test "$FF_REPO_ROOT/deploy/edge" >/dev/null

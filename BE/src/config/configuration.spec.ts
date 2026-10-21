@@ -1,13 +1,21 @@
 // Imported through the "@/" alias on purpose: this spec also proves the
 // Jest moduleNameMapper matches the tsconfig "paths" mapping.
 import configuration, { ConfigurationError, Env, VARIABLES, databaseConfiguration } from '@/config/configuration';
+import { DEVELOPMENT_KEY } from '@/encryption/key-ring';
 import { parse as parseEnvFile } from 'dotenv';
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 /** The smallest valid development environment: everything else has a default. */
 const dev: Env = { FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' };
+
+/** A keys file of the platform's, as production needs one: its encryption keys, one a line. */
+const keysDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-keys-'));
+const keysFile = path.join(keysDir, 'keys');
+fs.writeFileSync(keysFile, `2026-10:${randomBytes(32).toString('base64')}\n`);
+afterAll(() => fs.rmSync(keysDir, { recursive: true, force: true }));
 
 /** The smallest valid production environment. */
 const production: Env = {
@@ -27,6 +35,7 @@ const production: Env = {
   FF_BANK_NAME: 'Banque de Tunisie',
   FF_BANK_IBAN: 'TN5910006035183598478831',
   K8S_RUNTIME_CLASS: 'gvisor',
+  FF_ENCRYPTION_KEYS_FILE: keysFile,
 };
 
 /** The problems a configuration is refused for; fails the test if it is accepted. */
@@ -212,6 +221,7 @@ describe('configuration', () => {
       ['pro-formas with the example IBAN (P-35)', { FF_BANK_IBAN: 'TN59 1000 6035 1835 9847 8831' }, 'FF_BANK_IBAN must be set when NODE_ENV=production'],
       ["webhooks allowed into FF's own network", { FF_WEBHOOK_ALLOW_PRIVATE: 'true' }, "FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network"],
       ["customers' code on the node's own kernel, without a sandbox", { K8S_RUNTIME_CLASS: '' }, 'K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production'],
+      ["functions' environments sealed with the development key", { FF_ENCRYPTION_KEYS_FILE: undefined }, 'FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production'],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 
@@ -238,6 +248,54 @@ describe('configuration', () => {
       expect(message).toContain('MINIO_SECRET_KEY');
       expect(message).not.toContain('ffdevsecretkey-local-only');
       expect(message).not.toMatch(/"postgres"|: postgres/);
+    });
+  });
+
+  describe("the keys that encrypt functions' environments at rest", () => {
+    const write = (name: string, text: string) => {
+      const file = path.join(keysDir, name);
+      fs.writeFileSync(file, text);
+      return file;
+    };
+
+    it('uses the development key when no keys file is set, outside production', () => {
+      expect(configuration(dev).encryption.keys).toEqual([DEVELOPMENT_KEY]);
+    });
+
+    it('reads every key of the file, the first sealing', () => {
+      const [newer, older] = [randomBytes(32), randomBytes(32)];
+      const file = write('two', `# newest first\n2026-10:${newer.toString('base64')}\n2026-01:${older.toString('base64')}\n`);
+
+      const keys = configuration({ ...production, FF_ENCRYPTION_KEYS_FILE: file }).encryption.keys;
+
+      expect(keys.map((key) => key.id)).toEqual(['2026-10', '2026-01']);
+      expect(keys[0].key.equals(newer)).toBe(true);
+    });
+
+    it('refuses a file it cannot read, naming it', () => {
+      expect(problems({ ...dev, FF_ENCRYPTION_KEYS_FILE: '/nonexistent/keys' })).toEqual([
+        'FF_ENCRYPTION_KEYS_FILE cannot be read: /nonexistent/keys (ENOENT)',
+      ]);
+    });
+
+    it('refuses a malformed file, naming each line, never repeating a key', () => {
+      const short = randomBytes(16).toString('base64');
+      const file = write('bad', `a:${short}\nno separator\n`);
+
+      expect(problems({ ...dev, FF_ENCRYPTION_KEYS_FILE: file })).toEqual([
+        `FF_ENCRYPTION_KEYS_FILE ${file}: line 1: the key "a" must be 32 bytes in base64, such as \`openssl rand -base64 32\` writes`,
+        `FF_ENCRYPTION_KEYS_FILE ${file}: line 2 must be <id>:<key>, the key 32 bytes in base64`,
+      ]);
+      expect(problems({ ...dev, FF_ENCRYPTION_KEYS_FILE: file }).join(' ')).not.toContain(short);
+    });
+
+    it('refuses the development key in production, wherever it is in the file; development may use it', () => {
+      const file = write('with-dev', `2026-10:${randomBytes(32).toString('base64')}\nold:${DEVELOPMENT_KEY.key.toString('base64')}\n`);
+
+      expect(problems({ ...production, FF_ENCRYPTION_KEYS_FILE: file })).toEqual([
+        `FF_ENCRYPTION_KEYS_FILE ${file} holds the development key, which protects nothing: refused when NODE_ENV=production`,
+      ]);
+      expect(configuration({ ...dev, FF_ENCRYPTION_KEYS_FILE: file }).encryption.keys).toHaveLength(2);
     });
   });
 

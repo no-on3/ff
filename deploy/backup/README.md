@@ -23,6 +23,8 @@ FF's database and Keycloak's are two databases of one PostgreSQL server (D13). P
 
 The encryption key is kept apart from both the server and the second site: in FF's password manager, and printed in the safe. Without it nothing can be restored, and with it alone nobody can reach the backups. The second site holds no customer data in clear. WAL-G's own metadata names the databases and their tables, which FF's repository shows anyway.
 
+**Functions' variables and secrets** are in FF's database, sealed with the keys of the Secret `ff-encryption-keys` (`FF_ENCRYPTION_KEYS_FILE`, `deploy/k8s/README.md`). A restored database is useless for them without those keys: keep the keys file with the backups' own key, in FF's password manager and in the safe, and add each new key there the day it goes into the Secret. The backups themselves never hold a value in clear: the rows are sealed before PostgreSQL sees them.
+
 PostgreSQL keeps a segment it couldn't ship and tries again. While the second site is away, `pg_wal` grows: the operator's metrics alert on the database's disk (`FFDatabaseDiskFilling`, ADR 0006).
 
 ## The legal records

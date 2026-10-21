@@ -6,7 +6,8 @@
 # build, as a deploy step would. Scenario: create → invoke → history → update →
 # invoke → delete, with checks on the Kubernetes side and in object storage (the
 # code archive, read through SeaweedFS's filer), then the same lifecycle
-# for a Python function. Then plans (P-15): an account on a small plan, its
+# for a Python function, and a function's environment variables: delivered
+# through a Secret, replaced by an update, sealed in the database. Then plans (P-15): an account on a small plan, its
 # limits, its namespace's quota and its rate limits, which don't touch other
 # accounts. Then usage records (P-20): one per invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
@@ -166,6 +167,36 @@ check "handler output is returned, with the Lambda context" "Hello Python 128" \
   "$(jq -r '"\(.output.message) \(.output.memory)"' <<<"$invoked")"
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
+
+echo "== environment variables"
+# A variable of its own for the function: the sections below still read $id, the Python function's.
+# Read with the stack's own PostgreSQL: what the database holds of them.
+env_q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
+reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ }; }'
+created="$(http POST /functions "$(jq -n --arg code "$reader" '{name: "e2e-environment", runtime: "nodejs", code: $code, memory: 128, timeout: 5, environment: {TABLE: "orders"}}')")"
+check "a function created with a variable answers with it" "201 ACTIVE orders" "$(status) $(jq -r '"\(.status) \(.environment.TABLE)"' <<<"$created")"
+env_fn="$(jq -r .id <<<"$created")"
+check "the function reads it, in UTC by default" "orders UTC" "$(http POST "/functions/$env_fn/invoke" '{"input":{}}' | jq -r '"\(.output.table) \(.output.tz)"')"
+check "GET answers with it; the list doesn't load it" "orders null" \
+  "$(http GET "/functions/$env_fn" | jq -r .environment.TABLE) $(http GET /functions | jq -r --arg id "$env_fn" '.[] | select(.id == $id) | .environment')"
+http PUT "/functions/$env_fn" '{"environment": {"TABLE": "invoices", "TZ": "Africa/Tunis"}}' >/dev/null
+check "an update replaces them, rolled out, and the function's own TZ wins" "200 invoices Africa/Tunis" \
+  "$(status) $(http POST "/functions/$env_fn/invoke" '{"input":{}}' | jq -r '"\(.output.table) \(.output.tz)"')"
+check "the Deployment reads them from its Secret, and holds no value" "fn-$env_fn-env-1 0" \
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$env_fn" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}') $(kubectl -n "$tenant_ns" get deployment "fn-$env_fn" -o json | grep -c invoices)"
+check "the Secret of the version replaced is gone once the rollout is complete" "fn-$env_fn-env-1" \
+  "$(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$env_fn" -o jsonpath='{.items[*].metadata.name}')"
+check "the database keeps them sealed: no value, no name in clear" "1 0" \
+  "$(env_q "SELECT count(*), count(*) FILTER (WHERE document::text ~ 'invoices|TABLE') FROM function_environments WHERE function_id = '$env_fn'" | tr '|' ' ')"
+http PUT "/functions/$env_fn" '{"environment": {"AWS_REGION": "x", "1BAD": "y"}}' >/dev/null
+check "names AWS Lambda reserves, or outside its rule, are refused, naming each" \
+  "400 AWS_REGION is reserved: AWS Lambda or FF's runtime sets it; \"1BAD\" is not a variable name: a letter first, then letters, digits or underscores, two characters at least, as on AWS Lambda" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+check "the audit log names the variables changed, never their values" '{"added":["TZ"],"changed":["TABLE"],"removed":[]} 0' \
+  "$(http GET /audit-log | jq -c --arg r "function:$env_fn" '[.entries[] | select(.resource == $r and .action == "function.update")][0].details.environment') $(http GET /audit-log | grep -c -E 'invoices|orders')"
+http DELETE "/functions/$env_fn" >/dev/null
+check "deleting the function deletes its Secrets and its row" "200  0" \
+  "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$env_fn" -o name) $(env_q "SELECT count(*) FROM function_environments WHERE function_id = '$env_fn'")"
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account

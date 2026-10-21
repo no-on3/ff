@@ -4,7 +4,7 @@
  */
 import { Runtime } from '../../functions/entities/function.entity';
 import { CodeTooLargeError } from '../orchestrator.errors';
-import { FunctionWorkload, TenantLimits } from '../orchestrator.types';
+import { FunctionWorkload, TenantLimits, WorkloadEnvironment } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
 import { ANNOTATIONS, LABELS, MANAGED_BY, accountHash, functionResourceName } from './naming';
 
@@ -100,6 +100,8 @@ export function resourceQuotaManifest(namespace: string, quota: TenantLimits['qu
         'requests.memory': memory,
         'limits.memory': memory,
         configmaps: '60',
+        // Two a function at most: its environment's (environmentSecretManifest).
+        secrets: '60',
         services: '30',
       },
     },
@@ -187,6 +189,32 @@ export function codeConfigMapManifest(fn: FunctionWorkload, namespace: string, n
   };
 }
 
+/** Whether the function has variables or secrets to be given. */
+export function hasEnvironment(fn: FunctionWorkload): fn is FunctionWorkload & { environment: WorkloadEnvironment } {
+  return fn.environment !== undefined && Object.keys(fn.environment.values).length > 0;
+}
+
+/**
+ * The Secret that gives the function's process its variables and secrets,
+ * through envFrom. The backend writes it and never reads it back: a pod spec, a
+ * Deployment or a ConfigMap never holds a value. It names the environment's
+ * revision, never anything derived from the values.
+ */
+export function environmentSecretManifest(fn: FunctionWorkload & { environment: WorkloadEnvironment }, namespace: string, name: string): K8sObject {
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name,
+      namespace,
+      labels: functionLabels(fn),
+      annotations: { [ANNOTATIONS.environmentRevision]: fn.environment.revision },
+    },
+    type: 'Opaque',
+    data: Object.fromEntries(Object.entries(fn.environment.values).map(([key, value]) => [key, Buffer.from(value, 'utf8').toString('base64')])),
+  };
+}
+
 export function serviceManifest(fn: FunctionWorkload, namespace: string): K8sObject {
   return {
     apiVersion: 'v1',
@@ -207,12 +235,17 @@ export function deploymentManifest(
   hash: string,
   settings: KubernetesSettings,
   replicas: number,
+  /** The Secret that holds the function's environment (environmentSecretManifest); none without one. */
+  environmentSecret?: string,
 ): K8sObject {
   const image = settings.runtimeImages[fn.runtime];
   if (!image) throw new Error(`No runtime image configured for runtime "${fn.runtime}"`);
   const memory = `${fn.memory}Mi`;
   const cpu = `${cpuMillicores(fn.memory)}m`;
   const labels = functionLabels(fn);
+  const environment = environmentSecret && hasEnvironment(fn) ? fn.environment : undefined;
+  // FF's runtimes run in UTC, unless the function sets TZ itself, as AWS Lambda lets it: its envFrom would lose to env.
+  const timeZone = environment && Object.prototype.hasOwnProperty.call(environment.values, 'TZ') ? [] : [{ name: 'TZ', value: 'UTC' }];
   return {
     apiVersion: 'apps/v1',
     kind: 'Deployment',
@@ -224,7 +257,14 @@ export function deploymentManifest(
       selector: { matchLabels: { [LABELS.functionId]: fn.id } },
       strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } },
       template: {
-        metadata: { labels, annotations: { [ANNOTATIONS.codeSha256]: hash } },
+        metadata: {
+          labels,
+          annotations: {
+            [ANNOTATIONS.codeSha256]: hash,
+            // A new environment is a new version: changing it rolls out, as changing the code does.
+            ...(environment ? { [ANNOTATIONS.environmentRevision]: environment.revision } : {}),
+          },
+        },
         spec: {
           automountServiceAccountToken: false,
           enableServiceLinks: false,
@@ -252,8 +292,10 @@ export function deploymentManifest(
                 { name: 'LAMBDA_TASK_ROOT', value: '/var/task' },
                 { name: 'FF_HANDLER', value: 'function.handler' },
                 { name: 'PORT', value: String(RUNTIME_PORT) },
-                { name: 'TZ', value: 'UTC' },
+                ...timeZone,
               ],
+              // The function's own variables and secrets. FF's names above are reserved, so none of them is overridden.
+              ...(environment ? { envFrom: [{ secretRef: { name: environmentSecret } }] } : {}),
               resources: { requests: { cpu, memory }, limits: { cpu, memory } },
               securityContext: {
                 allowPrivilegeEscalation: false,
