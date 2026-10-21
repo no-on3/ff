@@ -51,6 +51,7 @@ Nomad is no longer used; its development VM was removed.
 | `FE/` | Console (React, Vite, Tailwind) |
 | `admin/` | Admin dashboard for FF's operators (React, Vite, Tailwind): a separate app, behind its own login (P-70) |
 | `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol 3 |
+| `cli/` | The `ff` command (Rust): one binary that works through the API only, being built as the [CLI plan](docs/cli-plan.md) says |
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs), `logging/` (the log pipeline), `monitoring/` (the operator's metrics, alerts and dashboards), `platform/` (the backend, the apps, Keycloak and the edge proxy, with their deploy script), `backup/` (the legal records' mirror) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
 | `infrastructure/` | SeaweedFS (S3) identities for `docker-compose.yml` |
@@ -114,7 +115,7 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 - [Client-readiness plan](docs/client-readiness-plan.md): the work that takes FF to its first paying customers, task by task, with its progress log.
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.
-- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in six phases (proposed).
+- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in six phases; phases 0 to 2 under way, as the step-1 plan's U-08.
 - [What to build next](docs/what-to-build-next.md): what FF adds after functions, in five steps, and the longer view.
 - [Step 1 plan](docs/step-1-plan.md): environment variables and secrets, AWS's events, function URLs, schedules, packages and the CLI, task by task, with its progress log.
 - [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why; how to deploy the platform.
