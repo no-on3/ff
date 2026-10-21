@@ -24,7 +24,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[expect(dead_code, reason = "PATCH comes with the command for secrets")]
 pub enum Method {
     Get,
     Post,
@@ -72,6 +71,10 @@ impl Call {
 
     pub fn put(path: impl Into<String>, body: serde_json::Value) -> Call {
         Call { body: Some(body), ..Call::new(Method::Put, path) }
+    }
+
+    pub fn patch(path: impl Into<String>, body: serde_json::Value) -> Call {
+        Call { body: Some(body), ..Call::new(Method::Patch, path) }
     }
 
     pub fn delete(path: impl Into<String>) -> Call {

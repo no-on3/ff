@@ -20,6 +20,9 @@ One Rust binary that deploys, invokes and reads FF's functions, through FF's API
 | `ff env list <name> [--show]` | Its environment variables' names, and with `--show` their values: they are readable like its code, as on Lambda |
 | `ff env set <name> KEY=value… \| KEY…` | Sets variables, keeping the others, and returns once the new version is live; a `KEY` alone reads its value from stdin, or from a prompt that doesn't show it, so that the shell's history doesn't keep it. Nothing is sent when nothing changes |
 | `ff env unset <name> KEY…` | Removes variables |
+| `ff secrets list <name>` | Its secrets: their names, and when each was set; never a value, which nobody reads back, the API included |
+| `ff secrets set <name> NAME…` | Sets secrets, keeping the others, once the new version is live: each value from a prompt that doesn't show it, or a line of stdin each, in the names' order; a value on the command line is refused, as the shell's history would keep it |
+| `ff secrets unset <name> NAME…` | Removes secrets |
 | `ff accounts` | The accounts the token reaches, the role in each, the current one marked |
 | `ff account` | The current account (the one named by `--account`, `FF_ACCOUNT` or the profile, else the only one): its status, the role in it, its plan's limits, and whether its functions reach the internet, which is why a call out fails when they don't |
 | `ff usage [--month YYYY-MM] [--csv]` | A month's usage per function, deleted ones included: requests, GB-seconds, the calls not billed, the cost; the total and the estimate; `--csv`, the API's own CSV. Needs `usage:read` |

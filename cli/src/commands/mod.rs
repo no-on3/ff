@@ -10,10 +10,11 @@ mod init;
 mod invoke;
 mod local;
 mod logs;
+mod secrets;
 mod version;
 mod whoami;
 
-use crate::cli::{Command, ConnectionArgs, EnvCommand, LocalCommand};
+use crate::cli::{Command, ConnectionArgs, EnvCommand, LocalCommand, SecretsCommand};
 use crate::config::Settings;
 use crate::error::Error;
 use crate::output::Output;
@@ -53,6 +54,9 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Env(EnvCommand::List { name, show }) => env::list(&name, show, context),
         Command::Env(EnvCommand::Set { name, variables }) => env::set(&name, &variables, context),
         Command::Env(EnvCommand::Unset { name, keys }) => env::unset(&name, &keys, context),
+        Command::Secrets(SecretsCommand::List { name }) => secrets::list(&name, context),
+        Command::Secrets(SecretsCommand::Set { name, secrets }) => secrets::set(&name, &secrets, context),
+        Command::Secrets(SecretsCommand::Unset { name, secrets }) => secrets::unset(&name, &secrets, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),

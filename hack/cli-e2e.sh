@@ -161,7 +161,7 @@ check "deploy --env makes a function with its variable" "0 created" "$(code) $(o
 ff invoke cli-env --raw
 check "which the function reads" "0 Ahlan" "$(code) $(out | jq -r .greeting)"
 ff env set cli-env GREETING=Salam
-echo "from-stdin" | "$ff_bin" env set cli-env TOKEN >"$work/out" 2>"$work/err"
+echo "from-stdin" | ff env set cli-env TOKEN
 ff invoke cli-env --raw
 check "ff env set changes one, and reads a value from stdin, both live once it answers" "0 Salam from-stdin" "$(code) $(out | jq -r '"\(.greeting) \(.token)"')"
 ff env list cli-env
@@ -174,6 +174,23 @@ ff local invoke "$work/env-reader.py" --env GREETING=Local --raw
 check "ff local invoke --env gives the run its variables" "0 Local" "$(code) $(out | jq -r .greeting)"
 ff local invoke "$work/env-reader.py" --env FUNCTION_TIMEOUT=1
 check "and refuses the names the runtime sets itself, as the API does" "2 error: FUNCTION_TIMEOUT is reserved: AWS Lambda or FF's runtime sets it" "$(code) $(err)"
+
+echo "== secrets: set from stdin, read by the function only"
+printf 'import os\n\ndef handler(event, context):\n    return {"password": os.environ.get("DB_PASSWORD", "none")}\n' >"$work/secret-reader.py"
+ff deploy "$work/secret-reader.py" --name cli-secrets
+echo "hunter2-$account_a" | ff secrets set cli-secrets DB_PASSWORD
+check "ff secrets set takes the value from stdin, and says nothing of it" "0 false" \
+  "$(code) $(cat "$work/out" "$work/err" | grep -q "hunter2" && echo true || echo false)"
+ff invoke cli-secrets --raw
+check "the function reads it, once the command has answered" "0 hunter2-$account_a" "$(code) $(out | jq -r .password)"
+ff secrets list cli-secrets
+check "ff secrets list names it, and when it was set" "0 DB_PASSWORD" "$(code) $(out | sed -n 2p | awk '{ print $1 }')"
+ff get cli-secrets --output json
+check "and ff get shows no value of it" "0 false" "$(code) $(out | grep -q hunter2 && echo true || echo false)"
+ff secrets unset cli-secrets DB_PASSWORD
+ff invoke cli-secrets --raw
+check "ff secrets unset removes it" "0 none" "$(code) $(out | jq -r .password)"
+ff delete cli-secrets --yes
 
 echo "== ff init: a new function's folder, run locally, then deployed"
 for runtime in python nodejs; do

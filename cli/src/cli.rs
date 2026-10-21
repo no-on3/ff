@@ -162,6 +162,10 @@ pub enum Command {
     #[command(subcommand)]
     Env(EnvCommand),
 
+    /// A function's secrets: variables whose values nobody reads back
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -405,6 +409,35 @@ pub enum EnvCommand {
         /// Their names
         #[arg(required = true)]
         keys: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SecretsCommand {
+    /// List its secrets: their names, and when each was set; never a value
+    List {
+        /// The function's name
+        name: String,
+    },
+
+    /// Set secrets: each value from a prompt that doesn't show it, or a line of stdin each, never the command line
+    Set {
+        /// The function's name
+        name: String,
+
+        /// The secrets' names
+        #[arg(required = true)]
+        secrets: Vec<String>,
+    },
+
+    /// Remove secrets
+    Unset {
+        /// The function's name
+        name: String,
+
+        /// The secrets' names
+        #[arg(required = true)]
+        secrets: Vec<String>,
     },
 }
 
