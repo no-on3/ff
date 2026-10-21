@@ -15,6 +15,7 @@ import {
   formatMemory,
   historyText,
   parseInvokeInput,
+  sourceText,
 } from '../lib/functions';
 import { Function, FunctionInvocation, InvocationStatus, functionsApi } from '../services/api';
 import { can } from '../lib/session';
@@ -23,6 +24,7 @@ import { updateFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
 import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
 import { EnvironmentTab } from './FunctionEnvironment';
+import { FunctionUrlTab } from './FunctionUrl';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
 import { MetricsDashboard } from './MetricsDashboard';
@@ -32,10 +34,11 @@ import { ScalingConfiguration } from './ScalingConfiguration';
 const HISTORY_PAGE = 20;
 
 /** The page's tabs, by their name in the address (`?tab=logs`), so that a link opens one, in their order. */
-const TABS = ['overview', 'environment', 'invocations', 'logs', 'metrics', 'scaling'] as const;
+const TABS = ['overview', 'environment', 'url', 'invocations', 'logs', 'metrics', 'scaling'] as const;
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   overview: 'Overview',
   environment: 'Environment',
+  url: 'URL',
   invocations: 'Invocations',
   logs: 'Logs',
   metrics: 'Metrics',
@@ -106,6 +109,12 @@ const FunctionDetail: React.FC = () => {
     };
     void load();
   }, [id, loadHistory]);
+
+  // Calls come from elsewhere too (its URL, the API, a schedule): the history is read again each time its tab opens.
+  useEffect(() => {
+    if (tab !== 'invocations' || loading) return;
+    void loadHistory().catch((err: unknown) => setInvokeError(apiErrorMessage(err)));
+  }, [tab, loading, loadHistory]);
 
   const handleInvoke = async () => {
     const parsed = parseInvokeInput(input);
@@ -295,6 +304,12 @@ const FunctionDetail: React.FC = () => {
         </Box>
       )}
 
+      {tab === 'url' && (
+        <Box p={3}>
+          <FunctionUrlTab func={func} mayChange={mayChange} />
+        </Box>
+      )}
+
       {tab === 'invocations' && (
         <div className="mt-12">
           <h2 className="text-xl font-bold mb-4">Invoke Function</h2>
@@ -334,7 +349,9 @@ const FunctionDetail: React.FC = () => {
               {invocations.map((invocation) => (
                 <div key={invocation.id} className="card">
                   <div className="flex justify-between items-start mb-4">
-                    <span className="text-sm text-gray-500">{new Date(invocation.createdAt).toLocaleString()}</span>
+                    <span className="text-sm text-gray-500">
+                      {new Date(invocation.createdAt).toLocaleString()} · {sourceText(invocation.source)}
+                    </span>
                     <span className="flex items-center gap-3">
                       <Link to={`?${searchForFilter({ range: 'all', q: '', requestId: invocation.id }).toString()}`} className="text-sm">
                         Logs

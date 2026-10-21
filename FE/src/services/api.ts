@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { config } from '../config';
 import { requestHeaders } from '../lib/session';
+import type { AuthType, FunctionUrl, UrlCors } from '../lib/function-url';
 
 const api = axios.create({
   baseURL: config.apiUrl,
@@ -177,6 +178,20 @@ export const secretsApi = {
   /** Each name to its new value, or to null to remove it. */
   change: (functionId: string, secrets: Record<string, string | null>) =>
     api.patch<{ secrets: SecretView[] }>(`/functions/${functionId}/secrets`, { secrets }),
+};
+
+/**
+ * GET, POST, PUT and DELETE /functions/:id/url: the function's URL, as AWS
+ * Lambda's function URL configuration. GET answers 404 for a function without one.
+ */
+export const functionUrlApi = {
+  get: (functionId: string) => api.get<FunctionUrl>(`/functions/${functionId}/url`),
+  create: (functionId: string, configuration: { authType: AuthType; cors: UrlCors | null }) =>
+    api.post<FunctionUrl>(`/functions/${functionId}/url`, configuration),
+  /** What is sent changes, what is left out stays; cors null removes CORS. */
+  update: (functionId: string, configuration: { authType?: AuthType; cors?: UrlCors | null }) =>
+    api.put<FunctionUrl>(`/functions/${functionId}/url`, configuration),
+  remove: (functionId: string) => api.delete(`/functions/${functionId}/url`),
 };
 
 /** GET and PUT /functions/:id/scaling-config. Each instance serves one call at a time. */

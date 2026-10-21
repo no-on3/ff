@@ -1,4 +1,4 @@
-import type { Function, FunctionUpdate, PlanLimits, ScalingLimits } from '../services/api';
+import type { Function, FunctionUpdate, InvocationSource, PlanLimits, ScalingLimits } from '../services/api';
 
 /**
  * AWS Lambda's rule for a function's name, which the API applies, as an HTML
@@ -83,6 +83,10 @@ export function eventFormatText(func: Pick<Function, 'eventFormat'>): string {
  * 64 KiB of each input, output and error, the personal data of the customer's users.
  */
 export const TRUNCATED_NOTE = 'Truncated: the history keeps the first 64 KiB.';
+
+/** What brought a call, as the history says it. */
+export const sourceText = (source: InvocationSource): string =>
+  ({ api: 'through the API', url: 'through its URL', schedule: 'by a schedule' })[source] ?? source;
 
 /**
  * An input or output as the history shows it: its JSON, indented; or, when

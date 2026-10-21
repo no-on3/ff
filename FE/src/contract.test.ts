@@ -24,12 +24,16 @@ import retrySource from '../../BE/src/notifications/retry.ts?raw';
 import alarmRulesSource from '../../BE/src/alarms/alarm-rules.ts?raw';
 import alarmsDtoSource from '../../BE/src/alarms/alarms.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
+import functionUrlDtoSource from '../../BE/src/function-urls/dto/function-url.dto.ts?raw';
+import urlResponseSource from '../../BE/src/function-urls/url-response.ts?raw';
+import functionUrlEntitySource from '../../BE/src/functions/entities/function-url.entity.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
 import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
+import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
@@ -348,5 +352,32 @@ describe('the event a function receives', () => {
   it("is one of the API's formats", () => {
     const body = /export enum EventFormat \{([\s\S]*?)\n\}/.exec(functionEntitySource)![1];
     expect([...body.matchAll(/= '(\w+)'/g)].map((m) => m[1])).toEqual([...EVENT_FORMATS]);
+  });
+});
+
+describe("a function's URL", () => {
+  it("has the API's fields and auth types, so the tab reads each one there is", () => {
+    const authTypes = functionUrlEntitySource.slice(functionUrlEntitySource.indexOf('export enum UrlAuthType'));
+
+    expect(dtoFields(functionUrlDtoSource, 'export class FunctionUrlView {')).toEqual([...FUNCTION_URL_FIELDS]);
+    expect([...authTypes.slice(0, authTypes.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...AUTH_TYPES]);
+  });
+
+  it("checks CORS by the API's rules and limits, so the form refuses what the API would", () => {
+    const methods = /export const CORS_METHODS = \[([^\]]*)\] as const/.exec(functionUrlDtoSource)?.[1].match(/'[^']+'/g)?.map((s) => s.slice(1, -1));
+
+    expect(methods).toEqual([...CORS_METHODS]);
+    expect(functionUrlDtoSource).toContain(`const ORIGIN = ${ORIGIN.toString()};`);
+    expect(urlResponseSource).toContain(`export const TOKEN = ${HEADER_NAME.toString()};`);
+    for (const rule of [
+      `@ArrayMaxSize(${CORS_LIMITS.origins})`,
+      `@MaxLength(${CORS_LIMITS.originLength}, { each: true })`,
+      `@ArrayMaxSize(${CORS_LIMITS.headers})`,
+      `@MaxLength(${CORS_LIMITS.headerLength}, { each: true })`,
+      `@ArrayMaxSize(${CORS_LIMITS.methods})`,
+      `@Max(${CORS_LIMITS.maxAge})`,
+    ]) {
+      expect(functionUrlDtoSource).toContain(rule);
+    }
   });
 });

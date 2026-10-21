@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { Function } from '../services/api';
 import { BETA_PLAN } from '../test-fixtures';
-import { apiErrorMessage, changedFields, createFailure, eventFormatText, formatDuration, formatMemory, historyText, parseInvokeInput, scalingLimitsError } from './functions';
+import {
+  apiErrorMessage,
+  changedFields,
+  createFailure,
+  eventFormatText,
+  formatDuration,
+  formatMemory,
+  historyText,
+  parseInvokeInput,
+  scalingLimitsError,
+  sourceText,
+} from './functions';
 
 const stored: Function = {
   id: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
@@ -178,5 +189,11 @@ describe('eventFormatText', () => {
   it("says what a function's handler gets", () => {
     expect(eventFormatText({ eventFormat: 'lambda' })).toBe("AWS Lambda's event: the input itself");
     expect(eventFormatText({ eventFormat: 'wrapped' })).toMatch(/^FF's original event: the input in event.body/);
+  });
+});
+
+describe('what brought a call', () => {
+  it('is said as the history says it', () => {
+    expect((['api', 'url', 'schedule'] as const).map(sourceText)).toEqual(['through the API', 'through its URL', 'by a schedule']);
   });
 });
