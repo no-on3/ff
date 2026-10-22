@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { EventStreamParser, LogsFilter, TIME_RANGES, TimeRange, lineTime, logsErrorMessage, mergeLines, pageQuery } from '../lib/logs';
 import { FunctionLogLine, logsApi } from '../services/api';
+import { Callout } from './Panel';
 
 interface Props {
   functionId: string;
@@ -120,15 +121,15 @@ export const FunctionLogs: React.FC<Props> = ({ functionId, filter, onFilterChan
   return (
     <div>
       <form
-        className="flex flex-wrap items-end gap-3 mb-3"
+        className="mb-4 flex flex-wrap items-end gap-3"
         onSubmit={(event) => {
           event.preventDefault();
           onFilterChange({ ...filter, q: phrase });
         }}
       >
-        <label className="text-sm text-gray-700">
+        <label className="text-[13px] font-medium text-gray-700">
           Time range
-          <select className="input mt-1 block" value={range} onChange={(e) => onFilterChange({ ...filter, range: e.target.value as TimeRange })}>
+          <select className="select mt-1 block" value={range} onChange={(e) => onFilterChange({ ...filter, range: e.target.value as TimeRange })}>
             {TIME_RANGES.map((r) => (
               <option key={r.key} value={r.key}>
                 {r.label}
@@ -136,7 +137,7 @@ export const FunctionLogs: React.FC<Props> = ({ functionId, filter, onFilterChan
             ))}
           </select>
         </label>
-        <label className="text-sm text-gray-700 grow">
+        <label className="grow text-[13px] font-medium text-gray-700">
           Phrase
           <input
             className="input mt-1 block w-full"
@@ -152,24 +153,28 @@ export const FunctionLogs: React.FC<Props> = ({ functionId, filter, onFilterChan
         <button type="button" className="btn btn-secondary" onClick={() => setReloads((n) => n + 1)} disabled={loading}>
           Refresh
         </button>
-        <label className="flex items-center gap-2 text-sm text-gray-700 pb-2">
+        <label className="flex items-center gap-2 pb-2 text-[13px] font-medium text-gray-700">
           <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
           Live
         </label>
       </form>
 
       {requestId && (
-        <p className="text-sm text-gray-700 mb-2">
+        <p className="mb-2 text-[13px] text-gray-700">
           Only the lines of call <code>{requestId}</code>.{' '}
           <button type="button" className="text-blue-600 underline" onClick={() => onFilterChange({ ...filter, requestId: '' })}>
             Show every call's
           </button>
         </p>
       )}
-      {liveNote && <p className="text-sm text-gray-600 mb-2">{liveNote}</p>}
-      {error && <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-3">{error}</div>}
+      {liveNote && <p className="mb-2 text-[13px] text-gray-600">{liveNote}</p>}
+      {error && (
+        <Callout tone="danger" role="alert" className="mb-3">
+          {error}
+        </Callout>
+      )}
 
-      <div ref={list} onScroll={onScroll} role="log" aria-label="Log lines" className="bg-gray-900 text-gray-100 font-mono text-xs rounded p-3 max-h-[32rem] overflow-y-auto">
+      <div ref={list} onScroll={onScroll} role="log" aria-label="Log lines" className="max-h-[32rem] overflow-y-auto rounded-lg bg-ink p-4 font-mono text-xs leading-5 text-blue-50 shadow-sm">
         {next && (
           <button type="button" className="text-blue-300 underline mb-2" onClick={() => void loadOlder()} disabled={loadingOlder}>
             {loadingOlder ? 'Loading…' : 'Load older lines'}
@@ -177,7 +182,7 @@ export const FunctionLogs: React.FC<Props> = ({ functionId, filter, onFilterChan
         )}
         {lines.map((line, index) => (
           <div key={`${index}:${line.time}`} className={`flex items-start gap-3 ${STREAM_STYLES[line.stream ?? ''] ?? ''}`}>
-            <span className="text-gray-400 shrink-0" title={line.time}>
+            <span className="shrink-0 text-gray-400" title={line.time}>
               {lineTime(line.time)}
             </span>
             {line.requestId ? (
@@ -202,7 +207,7 @@ export const FunctionLogs: React.FC<Props> = ({ functionId, filter, onFilterChan
           <p className="text-gray-400">No lines in this time range{q.trim() ? ' with this phrase' : ''}{requestId ? ' for this call' : ''}.</p>
         )}
       </div>
-      <p className="text-xs text-gray-500 mt-2">
+      <p className="mt-2 text-xs text-gray-500">
         Red lines are stderr. An amber line is FF&apos;s: the account wrote more than its limit in that second, and it says how many lines were dropped.
       </p>
     </div>

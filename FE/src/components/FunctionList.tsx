@@ -12,6 +12,7 @@ import { metricsApi, usageApi, type FunctionStatus, type Runtime, type UsageEsti
 import { useSession } from '../session/session';
 import { AppDispatch } from '../store/store';
 import Icon from './Icon';
+import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { Page, PageHeader } from './Page';
 import StatusPill from './StatusPill';
 
@@ -41,15 +42,6 @@ function useAccountNumbers(): { day: Day | null | 'failed'; estimate: UsageEstim
   }, []);
   return { day, estimate };
 }
-
-/** One key number: its label, the number, and a line under it. */
-const KeyNumber: React.FC<{ label: string; value: React.ReactNode; note: React.ReactNode }> = ({ label, value, note }) => (
-  <div className="flex min-w-0 flex-col gap-1 bg-white px-4 py-3.5">
-    <span className="text-xs font-medium text-gray-500">{label}</span>
-    <span className="text-[22px] leading-7 font-semibold tracking-[-0.02em] text-ink tabular-nums">{value}</span>
-    <span className="flex min-h-5 items-center justify-between gap-2 text-xs text-gray-600">{note}</span>
-  </div>
-);
 
 const Sparkline: React.FC<{ values: number[] }> = ({ values }) => (
   <svg width="104" height="20" viewBox="0 0 104 20" fill="none" aria-hidden="true" className="shrink-0 text-blue-500">
@@ -99,7 +91,7 @@ const FunctionList: React.FC = () => {
         }
       />
 
-      <section aria-label="Key numbers" className="mb-5 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line shadow-sm lg:grid-cols-4">
+      <KeyNumbers label="Key numbers" className="mb-5 grid-cols-2 lg:grid-cols-4">
         <KeyNumber
           label="Calls, last 24 hours"
           value={totals ? totals.invocations.toLocaleString('en-US') : day === 'failed' ? '–' : '…'}
@@ -142,7 +134,7 @@ const FunctionList: React.FC = () => {
           }
           note={`${account.plan.name} plan`}
         />
-      </section>
+      </KeyNumbers>
 
       <section aria-label="Functions" className="overflow-hidden rounded-lg border border-line bg-white shadow-sm">
         <div className="flex flex-wrap items-center gap-2 border-b border-line px-3.5 py-3">

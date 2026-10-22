@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { Function } from '../services/api';
+import { INVOCATION_STATUSES, type Function } from '../services/api';
 import { BETA_PLAN } from '../test-fixtures';
 import {
+  INVOCATION_STATUS_INFO,
   apiErrorMessage,
   changedFields,
   createFailure,
@@ -216,5 +217,25 @@ describe('codeText', () => {
 
   it('shows sizes as the API states its limits: bytes, KB, MB', () => {
     expect([formatBytes(999), formatBytes(1000), formatBytes(921_600), formatBytes(52_428_800)]).toEqual(['999 bytes', '1.0 KB', '921.6 KB', '52.4 MB']);
+  });
+});
+
+describe('INVOCATION_STATUS_INFO', () => {
+  it("names every status the API has in a word, with its pill's tone", () => {
+    expect(INVOCATION_STATUSES.map((status) => `${status}: ${INVOCATION_STATUS_INFO[status].label}, ${INVOCATION_STATUS_INFO[status].tone}`)).toEqual([
+      'SUCCESS: Succeeded, ok',
+      'ERROR: Error, failed',
+      'TIMEOUT: Timed out, failed',
+      'RUNNING: Running, busy',
+      'COMPLETED: Completed, ok',
+      'THROTTLED: Throttled, warn',
+      'LOST: Lost, idle',
+    ]);
+  });
+
+  it('says why the two statuses that are not billed are not', () => {
+    const noted = INVOCATION_STATUSES.filter((status) => INVOCATION_STATUS_INFO[status].note);
+    expect(noted).toEqual(['THROTTLED', 'LOST']);
+    expect(noted.every((status) => INVOCATION_STATUS_INFO[status].note!.startsWith('Not billed'))).toBe(true);
   });
 });

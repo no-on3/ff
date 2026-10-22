@@ -1,12 +1,13 @@
 import React from 'react';
 
-/** The pills' tones: healthy in the direction's teal, under way in blue, failed in red, idle in grey. */
-export type PillTone = 'ok' | 'busy' | 'failed' | 'idle';
+/** The pills' tones: healthy in the direction's teal, under way in blue, failed in red, to retry in amber, idle in grey. */
+export type PillTone = 'ok' | 'busy' | 'failed' | 'warn' | 'idle';
 
 const TONES: Record<PillTone, string> = {
   ok: 'bg-green-100 text-green-700',
   busy: 'bg-blue-50 text-blue-600',
   failed: 'bg-red-50 text-red-700',
+  warn: 'bg-amber-50 text-amber-800',
   idle: 'bg-gray-100 text-gray-600',
 };
 

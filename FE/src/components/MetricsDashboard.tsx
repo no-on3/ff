@@ -3,26 +3,25 @@ import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, T
 import { apiErrorMessage } from '../lib/functions';
 import { METRIC_RANGES, MetricRange, MetricRow, metricRows, metricTotals, milliseconds, pointLabel, rangeQuery } from '../lib/metrics';
 import { Metrics, metricsApi } from '../services/api';
+import { colors, scales } from '../theme/tokens';
+import { KeyNumber, KeyNumbers } from './KeyNumbers';
+import { Callout } from './Panel';
 
-/** The first three slots of the validated categorical palette, in their fixed order. */
-const SERIES = ['#2a78d6', '#eb6834', '#1baf7a'] as const;
-const AXIS = { fontSize: 12, fill: '#52514e' };
+/**
+ * Three categorical slots in a fixed order, from the console's tokens: Column's blue, its orange and its green. The
+ * dataviz validator passes them on white (lightness, chroma, colour-blind separation 10.9, normal vision 26.8); the
+ * green's contrast of 2.6:1 asks for a legend, which every chart of two series and more has, and the table view.
+ */
+const SERIES = [scales.blue[500], colors.attention, scales.green[400]] as const;
+const AXIS = { fontSize: 12, fill: scales.gray[600] };
 /** An axis's values as they are, to two decimals: its unit is in the chart's title. */
 const tick = (value: number) => value.toLocaleString('en', { maximumFractionDigits: 2 });
 const REFRESH_MS = 60_000;
 
-const Figure: React.FC<{ label: string; value: string; note?: string }> = ({ label, value, note }) => (
-  <div className="card py-3">
-    <div className="text-sm text-gray-600">{label}</div>
-    <div className="text-2xl font-semibold text-gray-900">{value}</div>
-    {note && <div className="text-xs text-gray-500">{note}</div>}
-  </div>
-);
-
 /** The tooltip: the period, then each series' value in ink, beside a mark of its colour. */
 const ChartTooltip: React.FC<TooltipProps<number, string> & { period: number; unit?: (value: number) => string }> = ({ active, payload, label, period, unit }) =>
   active && label !== undefined ? (
-    <div className="rounded border border-gray-200 bg-white px-3 py-2 text-sm shadow" role="status">
+    <div className="rounded-lg border border-line bg-white px-3 py-2 text-[13px] shadow-raised" role="status">
       <div className="mb-1 font-medium text-gray-900">{pointLabel(String(label), period)}</div>
       {payload?.length ? (
         payload.map((item) => (
@@ -56,14 +55,14 @@ const Chart: React.FC<{
   series: ReadonlyArray<{ key: keyof MetricRow; name: string }>;
   unit?: (value: number) => string;
 }> = ({ title, rows, period, series, unit }) => (
-  <section className="card" aria-label={title}>
-    <h3 className="mb-2 font-medium text-gray-900">{title}</h3>
+  <section className="min-w-0 rounded-lg border border-line bg-white p-5 shadow-sm" aria-label={title}>
+    <h3 className="mb-3 text-[15px] font-semibold text-ink">{title}</h3>
     <ResponsiveContainer width="100%" height={240}>
       <LineChart data={rows} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
-        <CartesianGrid stroke="#e7e6e2" vertical={false} />
-        <XAxis dataKey="time" tickFormatter={(t: string) => pointLabel(t, period)} tick={AXIS} minTickGap={24} stroke="#c3c2b7" />
-        <YAxis tick={AXIS} allowDecimals={!!unit} width={48} stroke="#c3c2b7" tickFormatter={tick} />
-        <Tooltip content={<ChartTooltip period={period} unit={unit} />} cursor={{ stroke: '#8a8984', strokeWidth: 1 }} />
+        <CartesianGrid stroke={colors.line} vertical={false} />
+        <XAxis dataKey="time" tickFormatter={(t: string) => pointLabel(t, period)} tick={AXIS} minTickGap={24} stroke={scales.gray[300]} />
+        <YAxis tick={AXIS} allowDecimals={!!unit} width={48} stroke={scales.gray[300]} tickFormatter={tick} />
+        <Tooltip content={<ChartTooltip period={period} unit={unit} />} cursor={{ stroke: scales.gray[500], strokeWidth: 1 }} />
         {series.length > 1 && <Legend wrapperStyle={{ fontSize: 13 }} formatter={(value: string) => <span className="text-gray-700">{value}</span>} />}
         {series.map(({ key, name }, i) => (
           <Line
@@ -115,11 +114,11 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
   const totals = view ? metricTotals(view) : null;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <div className="flex flex-wrap items-end gap-3">
-        <label className="text-sm text-gray-700">
+        <label className="text-[13px] font-medium text-gray-700">
           Time range
-          <select aria-label="Time range" className="input mt-1 block" value={range} onChange={(e) => setRange(e.target.value as MetricRange)}>
+          <select aria-label="Time range" className="select mt-1 block" value={range} onChange={(e) => setRange(e.target.value as MetricRange)}>
             {METRIC_RANGES.map((r) => (
               <option key={r.key} value={r.key}>
                 {r.label}
@@ -130,28 +129,32 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
         <button type="button" className="btn btn-secondary" onClick={() => setAsTable((v) => !v)}>
           {asTable ? 'Show the charts' : 'Show as a table'}
         </button>
-        <p className="pb-2 text-sm text-gray-500">From the usage records the bill is made of; refreshed every minute.</p>
+        <p className="pb-2 text-[13px] text-gray-500">From the usage records the bill is made of; refreshed every minute.</p>
       </div>
-      {failure && <div className="rounded border border-red-400 bg-red-100 px-4 py-3 text-red-700">{failure}</div>}
+      {failure && (
+        <Callout tone="danger" role="alert">
+          {failure}
+        </Callout>
+      )}
       {!view && !failure && <p className="text-gray-500">Loading…</p>}
       {view && totals && (
         <>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-            <Figure label="Invocations" value={totals.invocations.toLocaleString('en')} />
-            <Figure label="Errors" value={totals.errors.toLocaleString('en')} note={totals.errorRate === null ? undefined : `${totals.errorRate}% of the calls`} />
-            <Figure label="Throttles" value={totals.throttles.toLocaleString('en')} note="Refused: no instance free, or the rate limit" />
-            <Figure label="Cold starts" value={totals.coldStarts.toLocaleString('en')} />
-            <Figure label="Slowest call" value={milliseconds(totals.slowest)} />
-            <Figure label="Most instances" value={String(totals.peakInstances)} />
-          </div>
+          <KeyNumbers label="The range's figures" className="grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
+            <KeyNumber label="Invocations" value={totals.invocations.toLocaleString('en')} />
+            <KeyNumber label="Errors" value={totals.errors.toLocaleString('en')} note={totals.errorRate === null ? undefined : `${totals.errorRate}% of the calls`} />
+            <KeyNumber label="Throttles" value={totals.throttles.toLocaleString('en')} note="Refused: no instance free, or the rate limit" />
+            <KeyNumber label="Cold starts" value={totals.coldStarts.toLocaleString('en')} />
+            <KeyNumber label="Slowest call" value={milliseconds(totals.slowest)} />
+            <KeyNumber label="Most instances" value={String(totals.peakInstances)} />
+          </KeyNumbers>
           {totals.invocations === 0 && totals.throttles === 0 && <p className="text-gray-600">No call in this range.</p>}
           {asTable ? (
-            <div className="card overflow-x-auto p-0">
-              <table className="w-full text-left text-sm" aria-label="Metrics per period">
-                <thead className="bg-gray-50 text-gray-600">
+            <div className="relative overflow-x-auto rounded-lg border border-line bg-white shadow-sm">
+              <table className="w-full text-left text-[13px] tabular-nums" aria-label="Metrics per period">
+                <thead className="bg-gray-50/70 text-xs text-gray-500">
                   <tr>
                     {['Period', 'Invocations', 'Errors', 'Throttles', 'Cold starts', 'p50', 'p95', 'p99', 'Instances'].map((label) => (
-                      <th key={label} className="px-3 py-2 font-medium">
+                      <th key={label} className="px-3 py-2.5 font-medium whitespace-nowrap">
                         {label}
                       </th>
                     ))}
@@ -159,7 +162,7 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
                 </thead>
                 <tbody>
                   {rows.map((row) => (
-                    <tr key={row.time} className="border-t border-gray-200">
+                    <tr key={row.time} className="border-t border-gray-100">
                       <td className="whitespace-nowrap px-3 py-1">{pointLabel(row.time, view.period)}</td>
                       <td className="px-3 py-1">{row.Invocations}</td>
                       <td className="px-3 py-1">{row.Errors}</td>

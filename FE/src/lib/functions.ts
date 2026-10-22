@@ -1,4 +1,4 @@
-import type { Function, FunctionUpdate, InvocationSource, PlanLimits, ScalingLimits } from '../services/api';
+import type { Function, FunctionUpdate, InvocationSource, InvocationStatus, PlanLimits, ScalingLimits } from '../services/api';
 
 /**
  * AWS Lambda's rule for a function's name, which the API applies, as an HTML
@@ -136,3 +136,17 @@ export function scalingLimitsError(
   if (minInstances > maxInstances) return "Minimum instances can't be more than maximum instances";
   return null;
 }
+
+/**
+ * An invocation's status as the history shows it: a word, its pill's tone, and for the two that aren't billed, why.
+ * THROTTLED: no instance could take the call in time (P-15); LOST: the backend stopped during the call (P-20).
+ */
+export const INVOCATION_STATUS_INFO: Record<InvocationStatus, { label: string; tone: 'ok' | 'busy' | 'failed' | 'warn' | 'idle'; note?: string }> = {
+  SUCCESS: { label: 'Succeeded', tone: 'ok' },
+  COMPLETED: { label: 'Completed', tone: 'ok' },
+  RUNNING: { label: 'Running', tone: 'busy' },
+  ERROR: { label: 'Error', tone: 'failed' },
+  TIMEOUT: { label: 'Timed out', tone: 'failed' },
+  THROTTLED: { label: 'Throttled', tone: 'warn', note: 'Not billed: no instance could take the call in time. Try again.' },
+  LOST: { label: 'Lost', tone: 'idle', note: 'Not billed: the backend stopped during the call, so its answer is unknown.' },
+};
