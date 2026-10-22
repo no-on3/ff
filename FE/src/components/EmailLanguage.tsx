@@ -32,7 +32,7 @@ const EmailLanguage: React.FC = () => {
 
   return (
     <div className="card mb-6">
-      <h2 className="text-lg font-semibold mb-1">Your e-mails</h2>
+      <h2 className="text-[15px] leading-6 font-semibold text-ink mb-1">Your e-mails</h2>
       <p className="mb-4 text-sm text-gray-500">The language of the e-mails FF sends you, about all your accounts: approvals, invitations, credit, payments and invoices.</p>
       <div className="flex flex-wrap items-center gap-3">
         <label htmlFor="email-language" className="text-sm font-medium text-gray-700">

@@ -4,14 +4,8 @@ import { apiErrorMessage } from '../lib/functions';
 import { estimateLines, formatBilledDuration, formatGbSeconds, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from '../lib/usage';
 import { MonthlyUsage, usageApi } from '../services/api';
 import { useSession } from '../session/session';
+import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { saveFile } from '../lib/download';
-
-const Figure: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-  <div className="card">
-    <div className="text-sm text-gray-500">{label}</div>
-    <div className="text-2xl font-semibold mt-1">{value}</div>
-  </div>
-);
 
 /** The account's usage, this month or last, per function (P-22), with its estimated cost (P-30): every member reads it. */
 const Usage: React.FC = () => {
@@ -52,8 +46,8 @@ const Usage: React.FC = () => {
 
   const unbilled = usage ? notBilled(usage.totals) : [];
   return (
-    <div className="container mx-auto px-4 py-8 max-w-5xl">
-      <h1 className="text-2xl font-bold mb-2">Usage</h1>
+    <div className="page max-w-5xl">
+      <h1 className="mb-2">Usage</h1>
       <p className="text-gray-600 mb-6">
         What your functions used, counted as it will be billed: requests, and GB-seconds (billed duration × memory). Costs are
         estimated at FF's prices, AWS Lambda's in TND, with the same free tier. Months follow the UTC calendar.
@@ -78,7 +72,7 @@ const Usage: React.FC = () => {
       </div>
 
       {error && (
-        <div role="alert" className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+        <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-900">
           {error}
         </div>
       )}
@@ -87,12 +81,12 @@ const Usage: React.FC = () => {
         !error && <p>Loading…</p>
       ) : (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-4">
-            <Figure label="Requests billed" value={usage.totals.requests.toLocaleString('en-US')} />
-            <Figure label="Billed duration" value={formatBilledDuration(usage.totals.billedMs)} />
-            <Figure label="GB-seconds" value={formatGbSeconds(usage.totals.gbSeconds)} />
-            <Figure label="Estimated cost" value={usage.estimate ? formatMoney(usage.estimate.total, usage.estimate.currency) : '–'} />
-          </div>
+          <KeyNumbers label="The month's figures" className="mb-4 grid-cols-2 lg:grid-cols-4">
+            <KeyNumber label="Requests billed" value={usage.totals.requests.toLocaleString('en-US')} />
+            <KeyNumber label="Billed duration" value={formatBilledDuration(usage.totals.billedMs)} />
+            <KeyNumber label="GB-seconds" value={formatGbSeconds(usage.totals.gbSeconds)} />
+            <KeyNumber label="Estimated cost" value={usage.estimate ? formatMoney(usage.estimate.total, usage.estimate.currency) : '–'} />
+          </KeyNumbers>
           {unbilled.length > 0 && <p className="text-sm text-gray-600 mb-4">Not billed: {unbilled.join(', ')}.</p>}
 
           {usage.estimate ? (
@@ -118,7 +112,7 @@ const Usage: React.FC = () => {
             {usage.functions.length === 0 ? (
               <p className="text-gray-500">No calls in {monthLabel(usage.month)}.</p>
             ) : (
-              <table className="w-full text-left text-sm">
+              <table className="data-table">
                 <thead className="text-gray-500">
                   <tr>
                     <th className="py-2 pr-4 font-medium">Function</th>

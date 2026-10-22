@@ -13,8 +13,8 @@ const STATE_BADGE = {
 } as const;
 
 const Page: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="container mx-auto px-4 py-8 max-w-5xl">
-    <h1 className="text-2xl font-bold mb-6">API keys</h1>
+  <div className="page max-w-5xl">
+    <h1 className="mb-6">API keys</h1>
     {children}
   </div>
 );
@@ -32,7 +32,7 @@ const NewKey: React.FC<{ created: CreatedApiKey; onDone(): void }> = ({ created,
   };
   return (
     <div role="status" className="card mb-6 border border-green-300">
-      <h2 className="text-lg font-semibold mb-2">Your new key "{created.name}"</h2>
+      <h2 className="text-[15px] leading-6 font-semibold text-ink mb-2">Your new key "{created.name}"</h2>
       <p className="mb-3 text-amber-900">Copy it now: it is shown only once. Keep it in a secret store, such as your CI's secrets.</p>
       <div className="flex flex-wrap items-center gap-3 mb-3">
         <code data-testid="new-api-key" className="select-all break-all rounded bg-gray-100 px-3 py-2 font-mono text-sm">
@@ -140,7 +140,7 @@ const ApiKeys: React.FC = () => {
       )}
 
       <form onSubmit={handleCreate} className="card mb-6 space-y-4">
-        <h2 className="text-lg font-semibold">New key</h2>
+        <h2 className="text-[15px] leading-6 font-semibold text-ink">New key</h2>
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <label htmlFor="key-name" className="block text-sm font-medium text-gray-700 mb-1">
@@ -199,7 +199,7 @@ const ApiKeys: React.FC = () => {
         ) : keys.length === 0 ? (
           <p className="text-gray-500">No keys yet.</p>
         ) : (
-          <table className="w-full text-left text-sm">
+          <table className="data-table">
             <thead className="text-gray-500">
               <tr>
                 <th className="py-2 pr-4 font-medium">Name</th>

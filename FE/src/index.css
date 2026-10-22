@@ -108,6 +108,26 @@
  * button showed the old global button rule's white text on light grey.
  */
 @layer components {
+  /*
+   * A page's column: up to 1200 px wide, with the same margins on every page; narrower pages add their max-w-*. Every
+   * page starts at the same left edge, so that the titles stay put from one page to the next.
+   */
+  .page {
+    @apply w-full max-w-[1200px] px-4 py-6 sm:px-6 lg:px-9 lg:py-8;
+  }
+  /* A table of records: small grey headings, hairlines between the rows, figures in tabular numbers. Cells keep their own padding. */
+  .data-table {
+    @apply w-full text-left text-[13px] tabular-nums;
+  }
+  .data-table thead {
+    @apply text-xs text-gray-500;
+  }
+  .data-table th {
+    @apply font-medium whitespace-nowrap;
+  }
+  .data-table tbody tr {
+    @apply border-t border-gray-100;
+  }
   .btn {
     @apply inline-flex items-center justify-center gap-2 rounded-lg border border-transparent px-3.5 py-2 text-sm leading-5 font-medium transition-colors duration-150;
   }

@@ -11,10 +11,10 @@ interface LoginPageProps {
 const LoginPage: React.FC<LoginPageProps> = ({ notice, onLogIn, onSignUp }) => (
   <div className="min-h-screen flex items-center justify-center px-4">
     <div className="card w-full max-w-md">
-      <h1 className="text-2xl font-bold mb-2">FF console</h1>
+      <h1 className="mb-2">FF console</h1>
       <p className="text-gray-600 mb-6">Log in to deploy, invoke and watch your functions.</p>
       {notice && (
-        <div role="alert" className="mb-6 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        <div role="alert" className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900">
           {notice}
         </div>
       )}

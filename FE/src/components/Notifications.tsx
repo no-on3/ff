@@ -79,7 +79,7 @@ const SigningSecret: React.FC<{ active: boolean }> = ({ active }) => {
         </button>
       )}
       {confirming && (
-        <div role="alertdialog" aria-labelledby="rotate-title" className="mt-4 rounded border border-amber-300 bg-amber-50 p-4">
+        <div role="alertdialog" aria-labelledby="rotate-title" className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
           <p id="rotate-title" className="mb-3 text-amber-900">
             A new secret signs every webhook from now on. For 24 hours each one carries a signature by the old secret too: change your receivers to the new one within that day.
           </p>
@@ -205,8 +205,8 @@ const Notifications: React.FC = () => {
   const active = account.status === 'active';
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-5xl">
-      <h1 className="text-2xl font-bold mb-2">Notifications</h1>
+    <div className="page max-w-5xl">
+      <h1 className="mb-2">Notifications</h1>
       <p className="mb-6 text-gray-600">How FF tells this account what happens: by e-mail to its owners, and by webhooks, a POST of JSON to a URL of yours.</p>
       {!active && <p className="mb-6 text-sm text-gray-600">An account that isn't active can't send tests or rotate its secret.</p>}
       {account.role === 'owner' && <SigningSecret active={active} />}
@@ -245,7 +245,7 @@ const Notifications: React.FC = () => {
         )}
         {deliveries && deliveries.length > 0 && (
           <div className="hidden overflow-x-auto md:block">
-            <table className="w-full text-left text-sm" aria-label="Recent deliveries">
+            <table className="data-table" aria-label="Recent deliveries">
               <thead className="text-gray-600">
                 <tr>
                   {['When', 'What', 'To', 'Outcome'].map((label) => (

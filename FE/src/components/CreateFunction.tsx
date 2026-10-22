@@ -7,6 +7,8 @@ import { can } from '../lib/session';
 import { useSession } from '../session/session';
 import { createFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
+import { Page, PageHeader } from './Page';
+import { Callout, Panel } from './Panel';
 
 const CreateFunction: React.FC = () => {
   const navigate = useNavigate();
@@ -47,122 +49,117 @@ const CreateFunction: React.FC = () => {
 
   if (!can(role, 'change functions')) {
     return (
-      <div className="container mx-auto px-4 py-8">
+      <div className="page">
         <div className="card">As a viewer, you read this account's functions; owners and developers create them.</div>
       </div>
     );
   }
 
   return (
-    <div className="container mx-auto px-4 py-8">
-      <h1 className="text-2xl font-bold mb-6">Create New Function</h1>
+    <Page>
+      <PageHeader
+        crumbs={[{ label: 'Functions', to: '/functions' }]}
+        title="Create a function"
+        description={
+          <>
+            Write its code here, or deploy a folder with its libraries from your terminal with <code className="font-mono text-[13px]">ff deploy</code>.
+          </>
+        }
+      />
 
-      {error && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-          {error}
-        </div>
-      )}
+      <div className="max-w-3xl">
+        {error && (
+          <Callout tone="danger" role="alert" className="mb-4">
+            {error}
+          </Callout>
+        )}
 
-      <form onSubmit={handleSubmit} className="space-y-6">
-        <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Function Name
-          </label>
-          <input
-            type="text"
-            value={formData.name}
-            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            className="input mt-1"
-            maxLength={MAX_FUNCTION_NAME_LENGTH}
-            pattern={FUNCTION_NAME_PATTERN}
-            title={FUNCTION_NAME_RULE}
-            required
-          />
-          <p className="mt-1 text-sm text-gray-500">{FUNCTION_NAME_RULE}, unique in this account.</p>
-        </div>
+        <Panel>
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <label className="block">
+              <span className="text-[13px] font-medium text-gray-700">Name</span>
+              <input
+                type="text"
+                value={formData.name}
+                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                className="input mt-1"
+                maxLength={MAX_FUNCTION_NAME_LENGTH}
+                pattern={FUNCTION_NAME_PATTERN}
+                title={FUNCTION_NAME_RULE}
+                required
+              />
+              <span className="mt-1 block text-xs text-gray-500">{FUNCTION_NAME_RULE}, unique in this account.</span>
+            </label>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Code
-          </label>
-          <textarea
-            value={formData.code}
-            onChange={(e) => setFormData({ ...formData, code: e.target.value })}
-            className="input mt-1 font-mono"
-            rows={10}
-            required
-          />
-        </div>
+            <label className="block">
+              <span className="text-[13px] font-medium text-gray-700">Code</span>
+              <textarea
+                value={formData.code}
+                onChange={(e) => setFormData({ ...formData, code: e.target.value })}
+                className="input mt-1 font-mono text-[13px] leading-5"
+                rows={14}
+                spellCheck={false}
+                required
+              />
+            </label>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Runtime
-          </label>
-          <select
-            value={formData.runtime}
-            onChange={(e) => setFormData({ ...formData, runtime: e.target.value as Runtime })}
-            className="input mt-1"
-            required
-          >
-            <option value="nodejs">Node.js</option>
-            <option value="python">Python</option>
-          </select>
-        </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <label className="block">
+                <span className="text-[13px] font-medium text-gray-700">Runtime</span>
+                <select
+                  value={formData.runtime}
+                  onChange={(e) => setFormData({ ...formData, runtime: e.target.value as Runtime })}
+                  className="select mt-1 w-full"
+                  required
+                >
+                  <option value="nodejs">Node.js</option>
+                  <option value="python">Python</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-[13px] font-medium text-gray-700">Memory (MB)</span>
+                <input
+                  type="number"
+                  min={128}
+                  max={plan.limits.memoryMb}
+                  value={formData.memory}
+                  onChange={(e) => setFormData({ ...formData, memory: parseInt(e.target.value) })}
+                  className="input mt-1"
+                  required
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  128 to {plan.limits.memoryMb} MB on the {plan.name} plan.
+                </span>
+              </label>
+              <label className="block">
+                <span className="text-[13px] font-medium text-gray-700">Timeout (s)</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={plan.limits.timeoutSeconds}
+                  value={formData.timeout}
+                  onChange={(e) => setFormData({ ...formData, timeout: parseInt(e.target.value) })}
+                  className="input mt-1"
+                  required
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  1 to {plan.limits.timeoutSeconds} s on the {plan.name} plan.
+                </span>
+              </label>
+            </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Memory (MB)
-          </label>
-          <input
-            type="number"
-            min={128}
-            max={plan.limits.memoryMb}
-            value={formData.memory}
-            onChange={(e) => setFormData({ ...formData, memory: parseInt(e.target.value) })}
-            className="input mt-1"
-            required
-          />
-          <p className="mt-1 text-sm text-gray-500">
-            128 to {plan.limits.memoryMb} MB on the {plan.name} plan.
-          </p>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Timeout (s)
-          </label>
-          <input
-            type="number"
-            min={1}
-            max={plan.limits.timeoutSeconds}
-            value={formData.timeout}
-            onChange={(e) => setFormData({ ...formData, timeout: parseInt(e.target.value) })}
-            className="input mt-1"
-            required
-          />
-          <p className="mt-1 text-sm text-gray-500">
-            1 to {plan.limits.timeoutSeconds} s on the {plan.name} plan.
-          </p>
-        </div>
-
-        <div className="flex gap-4">
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={creating}
-          >
-            {creating ? 'Creating… (waits until it runs)' : 'Create Function'}
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate('/functions')}
-            className="btn btn-secondary"
-          >
-            Cancel
-          </button>
-        </div>
-      </form>
-    </div>
+            <div className="flex gap-3 border-t border-line pt-4">
+              <button type="submit" className="btn btn-primary" disabled={creating}>
+                {creating ? 'Creating… (waits until it runs)' : 'Create function'}
+              </button>
+              <button type="button" onClick={() => navigate('/functions')} className="btn btn-secondary">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </Panel>
+      </div>
+    </Page>
   );
 };
 

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 
 /** A page's column: up to 1200 px wide, with the same margins on every page. */
 export const Page: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="mx-auto w-full max-w-[1200px] px-4 py-6 sm:px-6 lg:px-9 lg:py-8 print:p-0">{children}</div>
+  <div className="page print:p-0">{children}</div>
 );
 
 export interface Crumb {

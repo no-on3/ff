@@ -20,15 +20,9 @@ import { apiErrorMessage } from '../lib/functions';
 import { formatMoney } from '../lib/usage';
 import { Alerts, BillingTransaction, Invoice, ProForma, billingApi } from '../services/api';
 import { useSession } from '../session/session';
+import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { useBalance } from '../session/balance';
 
-const Figure: React.FC<{ label: string; value: string; note?: string | null }> = ({ label, value, note }) => (
-  <div className="card">
-    <div className="text-sm text-gray-500">{label}</div>
-    <div className="text-2xl font-semibold mt-1">{value}</div>
-    {note && <div className="text-sm text-gray-600 mt-1">{note}</div>}
-  </div>
-);
 
 /** The low-balance e-mails (P-33): every member sees the shares; an owner changes them. */
 const LowBalanceEmails: React.FC<{ owner: boolean }> = ({ owner }) => {
@@ -196,7 +190,7 @@ const AddingCredit: React.FC<{ owner: boolean; currency: string | null; decimals
       )}
       {proFormas && proFormas.length > 0 && (
         <div className="card overflow-x-auto p-0">
-          <table className="w-full text-left text-sm" aria-label="Pro-formas">
+          <table className="data-table" aria-label="Pro-formas">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
                 <th className="px-4 py-2 font-medium">Reference</th>
@@ -268,7 +262,7 @@ const Invoices: React.FC = () => {
       </p>
       {invoices && invoices.length > 0 && (
         <div className="card overflow-x-auto p-0">
-          <table className="w-full text-left text-sm" aria-label="Invoices">
+          <table className="data-table" aria-label="Invoices">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
                 <th className="px-4 py-2 font-medium">Number</th>
@@ -350,44 +344,44 @@ const Billing: React.FC = () => {
   if (!account) return null;
   const trial = balance && trialNote(balance);
   return (
-    <div className="container mx-auto px-4 space-y-8">
-      <h1 className="text-2xl font-bold">Billing</h1>
+    <div className="page space-y-8">
+      <h1>Billing</h1>
       {balance && (
-        <section className="grid gap-4 sm:grid-cols-3" aria-label="Balance">
-          <Figure label="Balance" value={balanceLabel(balance)} />
-          <Figure
+        <KeyNumbers label="Balance" className="grid-cols-1 sm:grid-cols-3">
+          <KeyNumber label="Balance" value={balanceLabel(balance)} />
+          <KeyNumber
             label="Charged this month"
             value={formatMoney(balance.charged, balance.currency)}
-            note={balance.ratedUntil ? `Rated up to ${new Date(balance.ratedUntil).toISOString().slice(0, 16).replace('T', ' ')} UTC` : null}
+            note={balance.ratedUntil ? `Rated up to ${new Date(balance.ratedUntil).toISOString().slice(0, 16).replace('T', ' ')} UTC` : undefined}
           />
-          <Figure label="Invokes" value={invokesLabel(balance)} />
-        </section>
+          <KeyNumber label="Invokes" value={invokesLabel(balance)} />
+        </KeyNumbers>
       )}
       {trial && <p className="text-blue-900 bg-blue-50 rounded px-3 py-2">{trial}</p>}
 
       <section className="space-y-2">
-        <h2 className="text-lg font-semibold">Adding credit</h2>
+        <h2 className="text-[15px] leading-6 font-semibold text-ink">Adding credit</h2>
         <AddingCredit owner={account.role === 'owner'} currency={balance?.currency ?? null} decimals={balance ? decimalsOf(balance.balance) : null} />
       </section>
 
       <section className="space-y-2">
-        <h2 className="text-lg font-semibold">Invoices and usage statements</h2>
+        <h2 className="text-[15px] leading-6 font-semibold text-ink">Invoices and usage statements</h2>
         <Invoices />
       </section>
 
       <section className="space-y-2">
-        <h2 className="text-lg font-semibold">Low-balance e-mails</h2>
+        <h2 className="text-[15px] leading-6 font-semibold text-ink">Low-balance e-mails</h2>
         <LowBalanceEmails owner={account.role === 'owner'} />
       </section>
 
       <section className="space-y-2">
-        <h2 className="text-lg font-semibold">What moved the balance</h2>
+        <h2 className="text-[15px] leading-6 font-semibold text-ink">What moved the balance</h2>
         {error && <p role="alert" className="text-red-700">{error}</p>}
         {transactions.length === 0 ? (
           <p className="card text-gray-600">Nothing yet: usage is charged every hour once billing starts, and credit appears here too.</p>
         ) : (
           <div className="card overflow-x-auto p-0">
-            <table className="w-full text-left text-sm" aria-label="Transactions">
+            <table className="data-table" aria-label="Transactions">
               <thead className="bg-gray-50 text-gray-600">
                 <tr>
                   <th className="px-4 py-2 font-medium">What</th>
