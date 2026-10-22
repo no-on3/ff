@@ -36,7 +36,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
         </div>
       )}
       <CreditBanner />
-      <main className="py-6 print:py-0">
+      <main>
         <Routes>
           <Route path="/accounts/new" element={<Onboarding />} />
           <Route path="/account" element={account ? <AccountSettings /> : <Navigate to="/" replace />} />
