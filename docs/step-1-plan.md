@@ -392,8 +392,8 @@ This plan had to decide these to start; the task each affects is named. **You co
 |---|---|---|
 | Existing functions and the new event | **Confirmed on 2026-10-22:** they keep today's wrapper until switched, one by one; new functions get Lambda's event. The other way: switch all of them now, since no customer has any yet | U-03 |
 | `AWS_IAM` on a function URL | An FF API key with `functions:invoke`, until SigV4 exists. **Confirmed on 2026-10-22** | U-04 |
-| Certificates for function URL hosts | A wildcard by DNS-01 with RFC 2136 if FF's DNS allows it, else one per host on demand. **Confirmed on 2026-10-22;** still to name: FF's domain, and who manages its DNS | U-05 |
-| The region in events and ARNs | `tn-tunis-1`, until the parent's ADR-006. **Confirmed on 2026-10-22,** if FF's servers are in Tunis | U-07 |
+| Certificates for function URL hosts | A wildcard by DNS-01 with RFC 2136 if FF's DNS allows it, else one per host on demand. **Confirmed on 2026-10-22;** FF's domain, named that day: `ffunc.tn`, not yet registered; still to choose: who hosts its DNS (the [decision log](decisions.md), 17 and 20) | U-05 |
+| The region in events and ARNs | `tn-tunis-1`, until the parent's ADR-006. **Confirmed on 2026-10-22,** if FF's servers are in Tunis; FF's first server, named that day, is in Canada: to decide again if production runs there (the [decision log](decisions.md), 21) | U-07 |
 | A scheduled run that fails | Recorded, not retried, until step 3, whose async invokes retry. **Confirmed on 2026-10-22** | U-07 |
 | How packaged code reaches the pods | Each version's code an image in a registry in the cluster, mounted at `/var/task` ([ADR 0003](adr/0003-code-delivery.md), after the CLI plan's C-20 spike). A registry joins the platform. **Confirmed on 2026-10-21:** C, and later, runtime versions for customers to choose from, which C keeps open. The other way measured as well: an image per version, which needs the registry too | U-08 (C-23, C-24) |
 

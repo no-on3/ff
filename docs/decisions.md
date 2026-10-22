@@ -5,9 +5,27 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-10-22, later: FF's domain and its first server
+
+You named both, and asked to record them and to merge step 1 into `master`. Two things found while recording them need you: nobody has registered the domain yet (20), and the server is in Canada, while the plans promise hosting in Tunisia (21).
+
+**20. FF's domain is `ffunc.tn`.** ✅ Your answer.
+- **What it means:** FF's addresses go under it. Following the example in production's settings, they would be `api.ffunc.tn`, `console.ffunc.tn`, `admin.ffunc.tn` and `login.ffunc.tn`, and each function URL `https://<32 letters and digits>.fn.ffunc.tn/`.
+- **Found on 2026-10-22:** the domain isn't registered yet. The .tn registry (ATI) has no record of it, and DNS answers "no such domain". Register it soon, through a registrar ATI accredits, before someone else does. Choosing its name servers then answers the rest of decision 17: who hosts its DNS.
+- **Changed already:** this log; the step-1 plan's §9 and the roadmap name it.
+- **Still to change, once it is registered:** production's settings, where they say `example.tn` (`deploy/k8s/platform/*.env`, through an overlay); its DNS records, the four hosts and `*.fn` pointing to the server; decision 17's way to certificates.
+
+**21. FF's first server is the one you reach with `ssh next`.** ✅ Your answer.
+- **What it is,** read over SSH on 2026-10-22, nothing changed on it: a virtual server at OVH with 8 vCPUs, 22 GB of memory and two 200 GB disks (the second mounted at `/data`), running Ubuntu 26.04 LTS. Nothing is installed on it yet beyond Ubuntu itself. Its address belongs to OVH's data center in Beauharnois, near Montreal, **in Canada**. Its address and login stay in your SSH config, out of this repository.
+- **What it means:** two things in the plans assume servers in Tunisia:
+  - the promise "hosted in Tunisia" (the [parent plan](local-markets-and-aws-portability-plan.md), A1). Customers' personal data sent abroad needs INPDP's authorization (Law 2004-63, art. 52; the parent plan's §8.6), which may be hard to get while INPDP's council isn't renewed (R17);
+  - the region, `tn-tunis-1` (18).
+- **Changed already:** this log; the step-1 plan's §9 and the parent plan's §15 (question 3, ADR-006) point to it.
+- **Still to change:** what it is for (the question at the end). Then FF's install there ([`deploy/k8s`](../deploy/k8s/README.md)), with its backups' second site at another provider or in another region ([`deploy/backup`](../deploy/backup/README.md)).
+
 ## 2026-10-22: the step-1 and step-2 plans' choices, and C-29
 
-You answered "all as recommended" to the 19 questions explained to you that day. Two of them start new work, in this order: **C-29 first, then step 2.** One still needs a fact from you: FF's domain and who manages its DNS (17).
+You answered "all as recommended" to the 19 questions explained to you that day. Two of them start new work, in this order: **C-29 first, then step 2.** One needed a fact from you: FF's domain, which you gave the same day (20); who hosts its DNS is still to choose (17).
 
 ### Lost code images (the CLI plan's C-29)
 
@@ -73,11 +91,11 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Changed already:** `7eb725b` and `f8886c5` (U-04): function URLs, `AWS_IAM` checked as an API key of the function's account with `functions:invoke`, sent as `Authorization: Bearer ffk_…`.
 - **Still to change:** later, AWS's signatures (SigV4), with the Lambda API of step 5, or reusing the signature checks step 2 builds for buckets.
 
-**17. Certificates for function URLs: one for all of them if FF's DNS allows it, else one per URL.** ✅ Confirmed. ⏳ **Waiting for you:** FF's domain, and who manages its DNS.
+**17. Certificates for function URLs: one for all of them if FF's DNS allows it, else one per URL.** ✅ Confirmed. The domain: `ffunc.tn` (20). ⏳ **Waiting for you:** who hosts its DNS, chosen when you register it.
 - **Changed already:** `d13581b` (U-05): the edge built with the standard module for DNS updates (RFC 2136), both ways (`wildcard`, `on-demand`), and `deploy.sh`'s checks; `d0f5604` (U-06): customers' own domains, always one certificate each.
 - **Still to change, once you answer:** DNS servers FF runs itself: settings only (`edge.env` and the Secret `ff-edge-dns`); a DNS company: its module in `deploy/edge/Dockerfile`, one line; neither: `on-demand`, about 50 new URLs a week for all customers, while the beta stays small.
 
-**18. The region is `tn-tunis-1`.** ✅ Confirmed, if FF's servers are in Tunis.
+**18. The region is `tn-tunis-1`.** ✅ Confirmed, if FF's servers are in Tunis. ⚠️ FF's first server is in Canada (21): to decide again if production runs there.
 - **Changed already:** `57101f7` (U-07): `FF_REGION`, `tn-tunis-1` by default, in each scheduled event's `region` and in its rule's name (`arn:aws:events:tn-tunis-1:…`).
 - **Still to change:** from step 2 (V-08), functions also get it as `AWS_REGION`. Before launch: the legal check of names like AWS's, and the `aws` in those names (the [parent plan](local-markets-and-aws-portability-plan.md)'s ADR-006).
 
@@ -109,10 +127,11 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
-| FF's domain, and who manages its DNS (decision 17) | [Step-1 plan](step-1-plan.md) §9 | How function URLs get their certificates in production |
+| Register `ffunc.tn`, and choose who hosts its DNS: DNS servers FF runs, a DNS company, or neither (decisions 17 and 20) | This log, 17 and 20 | Keeping the domain; how function URLs get their certificates in production |
+| What the server in Canada is for: a test server for FF until one in Tunisia, with no customer's personal data on it (recommended), or production, with INPDP's authorization and a region named for where it is (decisions 18 and 21) | This log, 21; the [parent plan](local-markets-and-aws-portability-plan.md) §8.6 | Where customers' data may go; the region's name; the promise "hosted in Tunisia" |
 | Where `ff`'s downloads and the public runtime images are published, if customers can't rely on GitHub | [CLI plan](cli-plan.md) §10, question 3 | The first public release of `ff` |
 | Windows for `ff`: in its phase 4, or when a customer asks | CLI plan §10, question 5 | The CLI's phase 4 |
 | `ff login` sooner, so that the first customers never paste a key | CLI plan §10, question 7 | The order of the CLI's next tasks |
-| Your company and the Startup Act label; FF Cloud or on-premises first; the data center and the hardware budget; a bank or payment provider; the team and the launch date; the product's name | [Parent plan](local-markets-and-aws-portability-plan.md) §15, questions 1 to 5 and 7 | Priorities, not the direction |
+| Your company and the Startup Act label; FF Cloud or on-premises first; the data center and the hardware budget (a first server named: 21); a bank or payment provider; the team and the launch date; the product's name | [Parent plan](local-markets-and-aws-portability-plan.md) §15, questions 1 to 5 and 7 | Priorities, not the direction |
 | Send the accountant's five questions; book the external penetration test | [Client-readiness plan](client-readiness-plan.md) §9 | VAT, invoices and withholding; the public launch |
 | Later: take away the backend's right to create ConfigMaps, once no backend older than C-24 runs anywhere | [`deploy/k8s`](../deploy/k8s/README.md) | Nothing until then |
