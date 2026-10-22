@@ -2,8 +2,9 @@
 # label, so these rules are cluster-wide; the ff-controller-scope
 # ValidatingAdmissionPolicy (40-admission-policy.yaml) restricts every write to
 # FF-managed ff-t-* tenant namespaces. Reads stay cluster-wide: README.md says
-# what that exposes, and why the beta accepts it. Deliberately absent: secrets,
-# pods create/exec/attach, pods/log (logs come from the log store, P-43),
+# what that exposes, and why the beta accepts it. Secrets are written, never
+# read: no get, list or watch, anywhere. Deliberately absent: pods
+# create/exec/attach, pods/log (logs come from the log store),
 # services/proxy (development only: deploy/k8s/dev), roles and bindings, nodes,
 # and any escalate/bind/impersonate verbs.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -22,6 +23,11 @@ rules:
   - apiGroups: [""]
     resources: ["services", "resourcequotas", "limitranges"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Functions' environments, their variables and secrets: a pod reads its own through envFrom; the backend writes
+  # them and never reads one back. The admission policy keeps these writes to tenant namespaces.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch", "update", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]

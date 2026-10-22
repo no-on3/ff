@@ -1,6 +1,6 @@
 # Restore drills
 
-Each drill restores FF's database and Keycloak's to a point in time from the second site alone, and the bucket's legal records too ([deploy/backup/README.md](../deploy/backup/README.md)). Run one every month, and after any change to the backups: `hack/backup-drill.sh --record` adds its line here. A drill on the production setup notes the provider's or the server's own figures beside it.
+Each drill restores FF's database and Keycloak's to a point in time from the second site alone, and the bucket's legal records and functions' packages too ([deploy/backup/README.md](../deploy/backup/README.md)). Run one every month, and after any change to the backups: `hack/backup-drill.sh --record` adds its line here. A drill on the production setup notes the provider's or the server's own figures beside it.
 
 The targets (client-readiness plan, P-61): data lost at most 15 minutes before a failure (recovery point), and service back within 4 hours (recovery time).
 

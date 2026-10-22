@@ -2,9 +2,7 @@
  * Pure builders for every Kubernetes object FF creates. Conventions are
  * documented in docs/kubernetes-migration-plan.md §4.
  */
-import { Runtime } from '../../functions/entities/function.entity';
-import { CodeTooLargeError } from '../orchestrator.errors';
-import { FunctionWorkload, TenantLimits } from '../orchestrator.types';
+import { FunctionWorkload, TenantLimits, WorkloadEnvironment } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
 import { ANNOTATIONS, LABELS, MANAGED_BY, accountHash, functionResourceName } from './naming';
 
@@ -22,8 +20,6 @@ export interface K8sObject {
 }
 
 export const RUNTIME_PORT = 8080;
-/** A ConfigMap holds at most 1 MiB; keep a margin for keys and metadata. */
-export const MAX_CODE_BYTES = 900 * 1024;
 export const TENANT_QUOTA_NAME = 'ff-tenant-quota';
 export const TENANT_LIMITS_NAME = 'ff-tenant-limits';
 export const TENANT_NETWORK_POLICY_NAME = 'ff-default-deny';
@@ -49,10 +45,6 @@ export function maxQueueWaitMs(fn: Pick<FunctionWorkload, 'timeout'>): number {
 /** Lambda-like proportional CPU: 1,769 MB ≈ 1 vCPU, never below 100m. */
 export function cpuMillicores(memoryMb: number): number {
   return Math.max(100, Math.round((memoryMb / 1769) * 1000));
-}
-
-export function codeFileName(runtime: Runtime): string {
-  return runtime === Runtime.PYTHON ? 'function.py' : 'function.ts';
 }
 
 function managedLabels(extra: Record<string, string> = {}): Record<string, string> {
@@ -100,6 +92,8 @@ export function resourceQuotaManifest(namespace: string, quota: TenantLimits['qu
         'requests.memory': memory,
         'limits.memory': memory,
         configmaps: '60',
+        // Two a function at most: its environment's (environmentSecretManifest).
+        secrets: '60',
         services: '30',
       },
     },
@@ -170,20 +164,29 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
   };
 }
 
-export function codeConfigMapManifest(fn: FunctionWorkload, namespace: string, name: string, hash: string): K8sObject {
-  const bytes = Buffer.byteLength(fn.code, 'utf8');
-  if (bytes > MAX_CODE_BYTES) throw new CodeTooLargeError(bytes, MAX_CODE_BYTES);
+/** Whether the function has variables or secrets to be given. */
+export function hasEnvironment(fn: FunctionWorkload): fn is FunctionWorkload & { environment: WorkloadEnvironment } {
+  return fn.environment !== undefined && Object.keys(fn.environment.values).length > 0;
+}
+
+/**
+ * The Secret that gives the function's process its variables and secrets,
+ * through envFrom. The backend writes it and never reads it back: a pod spec, a
+ * Deployment or a ConfigMap never holds a value. It names the environment's
+ * revision, never anything derived from the values.
+ */
+export function environmentSecretManifest(fn: FunctionWorkload & { environment: WorkloadEnvironment }, namespace: string, name: string): K8sObject {
   return {
     apiVersion: 'v1',
-    kind: 'ConfigMap',
+    kind: 'Secret',
     metadata: {
       name,
       namespace,
       labels: functionLabels(fn),
-      annotations: { [ANNOTATIONS.codeSha256]: hash },
+      annotations: { [ANNOTATIONS.environmentRevision]: fn.environment.revision },
     },
-    immutable: true,
-    data: { [codeFileName(fn.runtime)]: fn.code },
+    type: 'Opaque',
+    data: Object.fromEntries(Object.entries(fn.environment.values).map(([key, value]) => [key, Buffer.from(value, 'utf8').toString('base64')])),
   };
 }
 
@@ -203,16 +206,23 @@ export function serviceManifest(fn: FunctionWorkload, namespace: string): K8sObj
 export function deploymentManifest(
   fn: FunctionWorkload,
   namespace: string,
-  configMapName: string,
+  /** The version's code (codeHash): a new one rolls the pods out. */
   hash: string,
   settings: KubernetesSettings,
   replicas: number,
+  /** The Secret that holds the function's environment (environmentSecretManifest); none without one. */
+  environmentSecret?: string,
 ): K8sObject {
   const image = settings.runtimeImages[fn.runtime];
   if (!image) throw new Error(`No runtime image configured for runtime "${fn.runtime}"`);
+  const codeImage = fn.codeImage;
+  if (!codeImage) throw new Error(`Function ${fn.id} has no code image: its code reaches its pods as one (ADR 0003)`);
   const memory = `${fn.memory}Mi`;
   const cpu = `${cpuMillicores(fn.memory)}m`;
   const labels = functionLabels(fn);
+  const environment = environmentSecret && hasEnvironment(fn) ? fn.environment : undefined;
+  // FF's runtimes run in UTC, unless the function sets TZ itself, as AWS Lambda lets it: its envFrom would lose to env.
+  const timeZone = environment && Object.prototype.hasOwnProperty.call(environment.values, 'TZ') ? [] : [{ name: 'TZ', value: 'UTC' }];
   return {
     apiVersion: 'apps/v1',
     kind: 'Deployment',
@@ -224,7 +234,14 @@ export function deploymentManifest(
       selector: { matchLabels: { [LABELS.functionId]: fn.id } },
       strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } },
       template: {
-        metadata: { labels, annotations: { [ANNOTATIONS.codeSha256]: hash } },
+        metadata: {
+          labels,
+          annotations: {
+            [ANNOTATIONS.codeSha256]: hash,
+            // A new environment is a new version: changing it rolls out, as changing the code does.
+            ...(environment ? { [ANNOTATIONS.environmentRevision]: environment.revision } : {}),
+          },
+        },
         spec: {
           automountServiceAccountToken: false,
           enableServiceLinks: false,
@@ -250,10 +267,14 @@ export function deploymentManifest(
                 { name: 'FUNCTION_TIMEOUT', value: String(fn.timeout * 1000) },
                 { name: 'FF_MAX_QUEUE_WAIT_MS', value: String(maxQueueWaitMs(fn)) },
                 { name: 'LAMBDA_TASK_ROOT', value: '/var/task' },
-                { name: 'FF_HANDLER', value: 'function.handler' },
+                { name: 'FF_HANDLER', value: fn.handler },
+                // The payload as the event, as on AWS Lambda, or FF's original wrapper for a function made before.
+                { name: 'FF_EVENT_FORMAT', value: fn.eventFormat },
                 { name: 'PORT', value: String(RUNTIME_PORT) },
-                { name: 'TZ', value: 'UTC' },
+                ...timeZone,
               ],
+              // The function's own variables and secrets. FF's names above are reserved, so none of them is overridden.
+              ...(environment ? { envFrom: [{ secretRef: { name: environmentSecret } }] } : {}),
               resources: { requests: { cpu, memory }, limits: { cpu, memory } },
               securityContext: {
                 allowPrivilegeEscalation: false,
@@ -277,7 +298,8 @@ export function deploymentManifest(
             },
           ],
           volumes: [
-            { name: 'code', configMap: { name: configMapName, defaultMode: 0o444 } },
+            // The code's image, read-only, pulled by the node like the runtime's (ADR 0003).
+            { name: 'code', image: { reference: codeImage, pullPolicy: 'IfNotPresent' } },
             { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } },
           ],
         },

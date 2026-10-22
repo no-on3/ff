@@ -21,6 +21,15 @@ import { RateLimitedInvocations1792419122035 } from './1792419122035-RateLimited
 import { Notifications1792424270622 } from './1792424270622-Notifications';
 import { Alarms1792462186640 } from './1792462186640-Alarms';
 import { UniqueFunctionNames1792545248288 } from './1792545248288-UniqueFunctionNames';
+import { FunctionEnvironments1792555028887 } from './1792555028887-FunctionEnvironments';
+import { EventFormat1792558201826 } from './1792558201826-EventFormat';
+import { FunctionUrls1792559781729 } from './1792559781729-FunctionUrls';
+import { CustomDomains1792564226078 } from './1792564226078-CustomDomains';
+import { Schedules1792568579855 } from './1792568579855-Schedules';
+import { FunctionPackages1792581123640 } from './1792581123640-FunctionPackages';
+import { Packages1792584171843 } from './1792584171843-Packages';
+import { CodeImages1792586195192 } from './1792586195192-CodeImages';
+import { InlineCodePackages1792596918071 } from './1792596918071-InlineCodePackages';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -51,4 +60,13 @@ export const MIGRATIONS: Array<new () => object> = [
   Notifications1792424270622,
   Alarms1792462186640,
   UniqueFunctionNames1792545248288,
+  FunctionEnvironments1792555028887,
+  EventFormat1792558201826,
+  FunctionUrls1792559781729,
+  CustomDomains1792564226078,
+  Schedules1792568579855,
+  FunctionPackages1792581123640,
+  Packages1792584171843,
+  CodeImages1792586195192,
+  InlineCodePackages1792596918071,
 ];

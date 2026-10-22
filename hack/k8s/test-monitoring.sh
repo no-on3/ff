@@ -81,7 +81,7 @@ probe_ns="ff-monitoring-probe-$RANDOM"
 kubectl create namespace "$probe_ns" >/dev/null
 trap 'kubectl delete namespace "$probe_ns" --wait=false >/dev/null 2>&1 || true; cleanup' EXIT
 # Each address: open, or refused within 3 s; the API server answering shows that the pod's network works.
-kubectl -n "$probe_ns" run probe --image=ff-runtime-nodejs:24-v2 --image-pull-policy=Never --restart=Never --command -- node -e '
+kubectl -n "$probe_ns" run probe --image=ff-runtime-nodejs:24-v3 --image-pull-policy=Never --restart=Never --command -- node -e '
 const net = require("node:net");
 const targets = { api: ["kubernetes.default.svc", 443], store: ["victoria-metrics.ff-monitoring.svc", 8428],
   alertmanager: ["alertmanager.ff-monitoring.svc", 9093], mailpit: ["mailpit.ff-monitoring.svc", 1025] };

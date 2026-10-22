@@ -1,4 +1,4 @@
-import { Runtime } from '../functions/entities/function.entity';
+import { EventFormat, Runtime } from '../functions/entities/function.entity';
 
 /** Injection token for the active scheduler driver (see OrchestratorModule). */
 export const ORCHESTRATOR = Symbol('ORCHESTRATOR');
@@ -16,12 +16,30 @@ export interface FunctionWorkload {
   accountId: string;
   runtime: Runtime;
   code: string;
+  /** What its runtime calls: AWS Lambda's handler, function.handler unless it names another. */
+  handler: string;
+  /**
+   * The code's image, by digest, as the cluster's nodes pull it (ADR 0003): its pods mount it at /var/task, inline
+   * code's too. A deploy or an update needs it, and is refused without; scaling, calls and removal don't.
+   */
+  codeImage?: string;
   /** Memory in MB. */
   memory: number;
   /** Timeout in seconds. */
   timeout: number;
   minInstances: number;
   maxInstances: number;
+  /** What its handler gets as its event: the payload itself, or FF's original wrapper around it. */
+  eventFormat: EventFormat;
+  /** Its variables and secrets; none when absent or empty. */
+  environment?: WorkloadEnvironment;
+}
+
+/** What a function's process gets besides FF's own variables: its variables and its secrets' values. */
+export interface WorkloadEnvironment {
+  /** Random, new with every change of the values: the Deployment names it, so a change rolls out. Says nothing about them. */
+  revision: string;
+  values: Record<string, string>;
 }
 
 /** One line of a function's log (P-40), in the shape the log store gives too (P-43). */
@@ -121,7 +139,7 @@ export interface Orchestrator {
    * invocation, its usage record and its log lines share one ID (D6). An error
    * after a cold start carries its duration: initMsOf().
    */
-  invoke(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<InvokeResult>;
+  invoke(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<InvokeResult>;
   scale(fn: FunctionWorkload, replicas: number): Promise<void>;
   /** Instances that can serve now. */
   readyInstances(fn: FunctionWorkload): Promise<number>;
@@ -132,6 +150,12 @@ export interface Orchestrator {
    * many: FF's capacity at this moment, from one call (P-21).
    */
   readyInstancesByFunction(): Promise<Map<string, number>>;
+  /**
+   * The code image each function's pods mount, by function ID, from one call:
+   * to find those whose image the registry has lost. None for a function whose
+   * pods mount their code from elsewhere, as a code ConfigMap from before.
+   */
+  codeImagesByFunction(): Promise<Map<string, string>>;
   /** Whether the cluster answers, within `timeoutMs`: for the readiness probe. Rejects with why not. */
   ping(timeoutMs: number): Promise<void>;
   /**

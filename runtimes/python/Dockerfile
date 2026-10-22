@@ -1,11 +1,11 @@
-# FF function runtime for Python (runtime protocol v2).
-# Build:  docker build -t ff-runtime-python:3.13-v2 runtimes/python
+# FF function runtime for Python (runtime protocol v3).
+# Build:  docker build -t ff-runtime-python:3.13-v3 runtimes/python
 # The runtime uses only the standard library, and nothing is installed when a
 # function starts: functions ship their dependencies in their package, as on
 # AWS Lambda. Debian (glibc), so manylinux wheels built for Lambda work.
 FROM python:3.13-slim
 LABEL org.opencontainers.image.title="ff-runtime-python" \
-      org.opencontainers.image.description="FF function runtime for Python, protocol v2"
+      org.opencontainers.image.description="FF function runtime for Python, protocol v3"
 WORKDIR /opt/ff
 COPY ff_runtime ./ff_runtime
 # The root filesystem is read-only at run time, so compile the runtime now.

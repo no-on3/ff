@@ -18,6 +18,7 @@ import type { FunctionLogLine } from '../orchestrator.types';
 import { KubeClient, paths } from './kube-client';
 import { KubernetesOrchestrator } from './kubernetes.orchestrator';
 import { accountNamespace } from './naming';
+import { inlineCodeImage } from '../../functions/test-fixtures';
 import { settings, tenant as limits, workload } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' && process.env.K8S_IT_LOGGING === '1' ? describe : describe.skip;
@@ -47,7 +48,7 @@ function reachable(host: string, port: number): Promise<boolean> {
 }
 
 export async function handler(event: Event) {
-  const { nonce = '', lines = 0, stderr = false, text, probe = false } = event.body;
+  const { nonce = '', lines = 0, stderr = false, text, probe = false } = event;
   if (probe) return { victoriaLogs: await reachable('victoria-logs.ff-system.svc.cluster.local', 9428) };
   for (let i = 1; i <= lines; i++) console.log(nonce + ' ' + i);
   if (stderr) console.error(nonce + ' on stderr');
@@ -57,17 +58,31 @@ export async function handler(event: Event) {
 
 const pythonPrinter = `
 def handler(event, context):
-    print("hello from python " + event["body"]["nonce"])
+    print("hello from python " + event["nonce"])
     return "ok"
 `;
 
-// Run in ff-system by reachesTheStoreFrom(): prints whether it could open a connection to the store.
+// Run in ff-system by reachesTheStoreFrom(): prints whether it could open a connection to the store within 15 s.
+// It tries again until then: the network policy admits a new pod's address a moment after the pod starts, later
+// while the cluster is busy, and a single try once found the backend's way closed.
 const storeProbe = `
-const socket = require('node:net').connect({ host: 'victoria-logs.ff-system.svc.cluster.local', port: 9428 });
+const deadline = Date.now() + 15000;
 const done = (result) => { console.log(result); process.exit(0); };
-socket.setTimeout(3000, () => done('refused'));
-socket.once('connect', () => done('reachable'));
-socket.once('error', () => done('refused'));
+const attempt = () => {
+  let over = false;
+  const socket = require('node:net').connect({ host: 'victoria-logs.ff-system.svc.cluster.local', port: 9428 });
+  const next = () => {
+    if (over) return;
+    over = true;
+    socket.destroy();
+    if (Date.now() < deadline) setTimeout(attempt, 500);
+    else done('refused');
+  };
+  socket.setTimeout(2000, next);
+  socket.once('connect', () => done('reachable'));
+  socket.once('error', next);
+};
+attempt();
 `;
 
 interface StoredLine {
@@ -130,7 +145,7 @@ async function reachesTheStoreFrom(labels: Record<string, string>): Promise<bool
       containers: [
         {
           name: 'probe',
-          image: 'ff-runtime-nodejs:24-v2',
+          image: 'ff-runtime-nodejs:24-v3',
           imagePullPolicy: 'IfNotPresent',
           command: ['node', '-e', storeProbe],
           resources: { requests: { cpu: '10m', memory: '32Mi' }, limits: { memory: '64Mi' } },
@@ -174,6 +189,8 @@ run('the log pipeline on the dev cluster (L3)', () => {
   const functions = [printerA, python, printerB];
 
   beforeAll(async () => {
+    // Each function's code as an image, as the backend gives it (ADR 0003).
+    for (const fn of functions) fn.codeImage = await inlineCodeImage(fn.code, fn.runtime, fn.accountId);
     for (const fn of functions) await orchestrator.deploy(fn, limits());
     await Promise.all(functions.map((fn) => orchestrator.waitUntilReady(fn, 120_000)));
   });

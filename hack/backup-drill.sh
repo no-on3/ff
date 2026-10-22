@@ -10,6 +10,8 @@
 #      isn't, in both databases; the ledger still balanced; the time it took, against the 4 hours promised.
 #   5. The invoices and withholding certificates copied to the second site with rclone, one lost on the primary,
 #      and copied back, byte for byte.
+#   6. Functions' packages synced there by the same mirror: one FF deleted goes from the copy, set aside 30 days
+#      first; a bucket that lost them all deletes nothing at the site; they come back from it, byte for byte.
 #   hack/backup-drill.sh [--record]
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -153,10 +155,13 @@ head -c 30000 /dev/urandom >"$work/records/withholding-certificates/payment-1.pd
 rclone copy /work/records primary:functions >/dev/null
 # The mirror the cluster runs hourly (deploy/k8s/backup/mirror.sh), the same script, in rclone's image.
 cp "$repo/deploy/k8s/backup/mirror.sh" "$work/mirror.sh"
+# mirror [-e VAR=value...]: one run of it, with these settings too; its exit status.
 mirror() {
-  rclone_env=(-e PRIMARY_BUCKET=functions -e SITE_BUCKET=ff-backups)
-  rclone_run sh /work/mirror.sh
+  rclone_env=(-e PRIMARY_BUCKET=functions -e SITE_BUCKET=ff-backups "$@")
+  local status=0
+  rclone_run sh /work/mirror.sh || status=$?
   rclone_env=()
+  return "$status"
 }
 mirror >/dev/null
 check "every record copied to the second site, byte for byte" 0 \
@@ -169,9 +174,36 @@ rclone copy site:ff-backups/s3/invoices primary:functions/invoices >/dev/null
 rclone copy primary:functions/invoices/2026/FAC-2026-000001.pdf /work/restored >/dev/null
 check "and comes back from it, byte for byte" "$(sha256sum <"$work/records/invoices/2026/FAC-2026-000001.pdf")" "$(sha256sum <"$work/restored/FAC-2026-000001.pdf")"
 
+echo "== functions' packages"
+mkdir -p "$work/packages/packages/111111111111" "$work/packages/packages/222222222222"
+for zip in 111111111111/a 111111111111/b 111111111111/c 222222222222/d; do head -c 20000 /dev/urandom >"$work/packages/packages/$zip.zip"; done
+rclone copy /work/packages primary:functions >/dev/null
+# Deleted 40 days ago by an earlier run, and kept aside since: due to go.
+rclone copyto /work/packages/packages/222222222222/d.zip site:ff-backups/s3-deleted/2020-01-01T000000/packages/222222222222/old.zip >/dev/null
+sleep 1
+mirror >/dev/null
+check "every package copied to the second site, byte for byte" 0 "$(rclone check primary:functions/packages site:ff-backups/s3/packages >/dev/null 2>&1; echo $?)"
+check "what was set aside 30 days ago or more is gone from the second site" 0 "$(rclone lsf -R site:ff-backups/s3-deleted | grep -c old.zip)"
+# The purge of unused packages deletes one, as FF does an hour after its last use.
+rclone deletefile primary:functions/packages/111111111111/a.zip >/dev/null
+sleep 1
+mirror >/dev/null
+check "a package FF deleted goes from the copy, set aside for 30 days first" "0 1" \
+  "$(rclone lsf -R site:ff-backups/s3/packages | grep -c a.zip) $(rclone lsf -R site:ff-backups/s3-deleted | grep -c 'packages/111111111111/a.zip')"
+# The bucket loses them all: a run must not take them from the copy.
+rclone purge primary:functions/packages >/dev/null
+sleep 1
+refusal="$(mirror -e PACKAGES_MAX_DELETE=1 2>&1 >/dev/null)" && fail "the mirror synced an empty bucket"
+check "a bucket that lost every package deletes none at the second site: the run stops, saying why" "3 true" \
+  "$(rclone lsf -R --files-only site:ff-backups/s3/packages | wc -l | tr -d ' ') $(grep -q "this run would delete 3 of the second site's 3" <<<"$refusal" && echo true || echo false)"
+rclone copy site:ff-backups/s3/packages primary:functions/packages >/dev/null
+check "and they come back from it, byte for byte" 0 "$(rclone check site:ff-backups/s3/packages primary:functions/packages >/dev/null 2>&1; echo $?)"
+sleep 1
+check "the next run finds nothing to delete" "packages copied to the second site, 0 deleted there" "$(mirror | grep -o 'packages copied to the second site, [0-9]* deleted there')"
+
 echo "backup drill: $passed checks passed; restored to the target in $restore_seconds s"
 if $record; then
-  printf '| %s | %s | PostgreSQL 15.19 with WAL-G 3.0.9, both databases to a target time; the legal records with rclone 1.75.1 | %s s | %s checks passed |\n' \
+  printf '| %s | %s | PostgreSQL 15.19 with WAL-G 3.0.9, both databases to a target time; the legal records and the packages with rclone 1.75.1 | %s s | %s checks passed |\n' \
     "$(date -u +%Y-%m-%d)" "$(git -C "$repo" rev-parse --short HEAD)" "$restore_seconds" "$passed" >>"$repo/docs/backup-drills.md"
   echo "recorded in docs/backup-drills.md"
 fi

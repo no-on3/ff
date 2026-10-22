@@ -7,6 +7,7 @@ import { AuditService } from '../audit/audit.service';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
+import { PackagesService } from '../packages/packages.service';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { DELIVERY_DAYS, RetentionService } from './retention.service';
 
@@ -26,7 +27,8 @@ describe('RetentionService', () => {
   let marked: number;
   let update: jest.Mock;
   let steps: string[];
-  let functions: { remove: jest.Mock };
+  let functions: { remove: jest.Mock; restoreCodeImages: jest.Mock };
+  let packages: { purgeUnused: jest.Mock; deleteAll: jest.Mock };
   let orchestrator: { removeTenant: jest.Mock; deleteLogs: jest.Mock };
   let audit: { record: jest.Mock };
   let service: RetentionService;
@@ -61,7 +63,17 @@ describe('RetentionService', () => {
       getRepository: (entity: unknown) => repositories.get(entity),
       transaction: async (work: (m: typeof manager) => Promise<unknown>) => work(manager),
     } as unknown as DataSource;
-    functions = { remove: jest.fn(async (accountId: string, id: string) => void steps.push(`function ${accountId}/${id}`)) };
+    functions = {
+      remove: jest.fn(async (accountId: string, id: string) => void steps.push(`function ${accountId}/${id}`)),
+      restoreCodeImages: jest.fn(async () => ({ packages: 0, imagesMade: 0, zipsMade: 0, rolledOut: 0, failures: 0 })),
+    };
+    packages = {
+      purgeUnused: jest.fn(async () => 0),
+      deleteAll: jest.fn(async (accountId: string) => {
+        steps.push(`packages ${accountId}`);
+        return 1;
+      }),
+    };
     orchestrator = {
       removeTenant: jest.fn(async (accountId: string) => void steps.push(`namespace ${accountId}`)),
       deleteLogs: jest.fn(async (accountId: string) => void steps.push(`logs ${accountId}`)),
@@ -71,6 +83,7 @@ describe('RetentionService', () => {
     service = new RetentionService(
       dataSource,
       functions as unknown as FunctionsService,
+      packages as unknown as PackagesService,
       orchestrator as unknown as Orchestrator,
       audit as unknown as AuditService,
       config,
@@ -142,7 +155,7 @@ describe('RetentionService', () => {
   });
 
   describe("closed accounts' data", () => {
-    it('deletes each function, then the namespace, then the logs, then marks the account and records it once', async () => {
+    it('deletes each function, then its packages, the namespace, the logs, then marks the account and records it once', async () => {
       dueAccounts = [{ id: '300000000001' }];
       functionsOf = { '300000000001': [{ id: 'f-1' }, { id: 'f-2' }] };
 
@@ -151,6 +164,7 @@ describe('RetentionService', () => {
       expect(steps).toEqual([
         'function 300000000001/f-1',
         'function 300000000001/f-2',
+        'packages 300000000001',
         'namespace 300000000001',
         'logs 300000000001',
         'deliveries 300000000001',
@@ -160,7 +174,7 @@ describe('RetentionService', () => {
         'audit account.data_delete 300000000001',
       ]);
       expect(audit.record).toHaveBeenCalledWith(
-        { accountId: '300000000001', action: 'account.data_delete', resource: 'account:300000000001', details: { functions: 2 } },
+        { accountId: '300000000001', action: 'account.data_delete', resource: 'account:300000000001', details: { functions: 2, packages: 1 } },
         expect.anything(),
       );
       // Marked only while not marked yet: of two runs at once, one records it.
@@ -175,7 +189,9 @@ describe('RetentionService', () => {
 
       expect(orchestrator.deleteLogs).toHaveBeenCalledWith('300000000001');
       expect(steps).toEqual([
+        'packages 300000000001',
         'namespace 300000000001',
+        'packages 300000000002',
         'namespace 300000000002',
         'logs 300000000002',
         'deliveries 300000000002',
@@ -194,7 +210,15 @@ describe('RetentionService', () => {
       await service.deleteClosedAccounts();
 
       // Deleting its notifications again changes nothing: they went with the first run.
-      expect(steps).toEqual(['namespace 300000000001', 'logs 300000000001', 'deliveries 300000000001', 'secret 300000000001', 'alarms 300000000001', 'mark 300000000001']);
+      expect(steps).toEqual([
+        'packages 300000000001',
+        'namespace 300000000001',
+        'logs 300000000001',
+        'deliveries 300000000001',
+        'secret 300000000001',
+        'alarms 300000000001',
+        'mark 300000000001',
+      ]);
       expect(audit.record).not.toHaveBeenCalled();
     });
 
@@ -214,18 +238,54 @@ describe('RetentionService', () => {
   describe('the timer', () => {
     /** The purges of a table so far: each run purges the history, then the deliveries. */
     const purges = (table: string) => query.mock.calls.filter(([sql]: [string]) => sql.includes(`"${table}"`)).length;
-    it('runs the purge and then the closed accounts at start and every interval, until the module stops', async () => {
+    it('runs the purges, the closed accounts and the restore of lost code images at start and every interval, until the module stops', async () => {
       jest.useFakeTimers({ now: new Date('2026-10-18T10:00:00Z') });
+      const runs = () => [
+        purges('function_invocations'),
+        purges('notification_deliveries'),
+        packages.purgeUnused.mock.calls.length,
+        findAccounts.mock.calls.length,
+        functions.restoreCodeImages.mock.calls.length,
+      ];
       service.onModuleInit();
       await jest.advanceTimersByTimeAsync(0);
-      expect([purges('function_invocations'), purges('notification_deliveries'), findAccounts.mock.calls.length]).toEqual([1, 1, 1]);
+      expect(runs()).toEqual([1, 1, 1, 1, 1]);
 
       await jest.advanceTimersByTimeAsync(3 * HOUR_MS);
-      expect([purges('function_invocations'), purges('notification_deliveries'), findAccounts.mock.calls.length]).toEqual([4, 4, 4]);
+      expect(runs()).toEqual([4, 4, 4, 4, 4]);
 
       service.onModuleDestroy();
       await jest.advanceTimersByTimeAsync(5 * HOUR_MS);
-      expect([purges('function_invocations'), purges('notification_deliveries'), findAccounts.mock.calls.length]).toEqual([4, 4, 4]);
+      expect(runs()).toEqual([4, 4, 4, 4, 4]);
+    });
+
+    it('restores the lost code images last, and logs a restore that fails', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-18T10:00:00Z') });
+      const order: string[] = [];
+      packages.purgeUnused.mockImplementation(async () => void order.push('unused packages'));
+      findAccounts.mockImplementation(async () => {
+        order.push('closed accounts');
+        return [];
+      });
+      functions.restoreCodeImages.mockImplementationOnce(async () => {
+        order.push('lost code images');
+        throw new Error('the registry answered 503');
+      });
+
+      service.onModuleInit();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(order).toEqual(['unused packages', 'closed accounts', 'lost code images']);
+      expect(errors).toHaveBeenCalledWith('Could not restore the lost code images: the registry answered 503');
+    });
+
+    it('logs a purge of the unused packages that fails, and still looks for closed accounts', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-18T10:00:00Z') });
+      packages.purgeUnused.mockRejectedValueOnce(new Error('The object store answered 503'));
+
+      service.onModuleInit();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(errors).toHaveBeenCalledWith('Could not purge the unused packages: The object store answered 503');
+      expect(findAccounts).toHaveBeenCalledTimes(1);
     });
 
     it('logs a purge that fails, still looks for closed accounts, and runs again at the next interval', async () => {
@@ -286,6 +346,7 @@ describe('RetentionService', () => {
       const fast = new RetentionService(
         { query, getRepository: (entity: unknown) => ({ find: async () => (entity === Plan ? plans : []) }) } as unknown as DataSource,
         functions as unknown as FunctionsService,
+        packages as unknown as PackagesService,
         orchestrator as unknown as Orchestrator,
         audit as unknown as AuditService,
         config,

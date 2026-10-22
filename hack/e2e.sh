@@ -4,11 +4,27 @@
 #   + the k3d dev cluster + the backend (built, started on a free port).
 # The backend first refuses the new database, then the migrations run from the
 # build, as a deploy step would. Scenario: create → invoke → history → update →
-# invoke → delete, with checks on the Kubernetes side and in object storage (the
-# code archive, read through SeaweedFS's filer), then the same lifecycle
-# for a Python function. Then plans (P-15): an account on a small plan, its
-# limits, its namespace's quota and its rate limits, which don't touch other
-# accounts. Then usage records (P-20): one per invocation, with the runtime
+# invoke → delete, with checks on the Kubernetes side (inline code too an image
+# of the cluster's registry, no ConfigMap) and in object storage (the
+# code archive, read through SeaweedFS's filer), and on the code's hash and size
+# as AWS Lambda gives them; then the same lifecycle for a Python function (its
+# handler then renamed lambda_handler), a package uploaded (named by its SHA-256,
+# kept once, refused when a name leaves it) and a function made from it (its code
+# an image from the cluster's registry, then a Python package, then inline code
+# again), a function's environment variables (delivered through
+# a Secret, replaced by an update, sealed in the database) and its secrets
+# (never in an answer or the audit log, set and removed by name), and the
+# event a function receives (the payload itself, or the old wrapper until
+# switched). Then a function's URL, called with curl through its gateway: a
+# query, a JSON body, bytes, a cookie, the function's own 404 and its error, a
+# browser's preflight, the account's credentials, and the call in the history
+# and the usage records; the URL's own domains, proved through a DNS server of
+# the test's, a subdomain by its CNAME and an apex by its TXT record. Then a
+# function on schedules: rate(1 minute) within about 70 s, with EventBridge's
+# Scheduled Event or the schedule's input, a disabled one never. Then plans:
+# an account on a small plan, its limits, its namespace's quota and its rate
+# limits, which don't touch other accounts. Then usage records (P-20): one per
+# invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
@@ -18,7 +34,10 @@
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
 # invokes refused with 402, a top-up, and invokes accepted again at once. Then an
 # alarm: a function's error fires it, a quiet minute recovers it, and each
-# change reaches a local webhook receiver, signed.
+# change reaches a local webhook receiver, signed. Last, code images the
+# registry lost: a function's layer, made again when the backend restarts, and
+# pulled by a node that had no copy; and a function whose pods named an image
+# the registry never had, rolled out with its package's.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -39,6 +58,12 @@ tenant="$(random_account)"
 tenant_ns="$(tenant_namespace "$tenant")"
 e2e_namespaces+=("$tenant_ns")
 http() { http_at "$api" "$@"; }
+# A text's SHA-256 in base64 and its size, as AWS Lambda's CodeSha256 and CodeSize give a function's code.
+code_facts() { printf '%s' "$1" | python3 -c 'import base64, hashlib, sys; code = sys.stdin.buffer.read(); print(base64.b64encode(hashlib.sha256(code).digest()).decode(), len(code))'; }
+# The code image a function's pods mount at /var/task (ADR 0003), and whether it is the account's in the cluster's registry, by digest.
+code_image_of() { kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'; }
+in_registry() { [[ "$1" == "$FF_REGISTRY_NAME:5000/ff-code/$tenant@sha256:"* ]] && echo true || echo false; }
+code_configmaps() { kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$1" -o name | wc -l; }
 
 e2e_dependencies
 e2e_cluster
@@ -49,8 +74,14 @@ e2e_build
 # hack/k8s/test-monitoring.sh sets the address, for the cluster's metrics store to scrape them during the run.
 metrics_host="${FF_E2E_METRICS_HOST:-127.0.0.1}"
 metrics_port="${FF_E2E_METRICS_PORT:-$(free_port)}"
+# Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which curl takes to this machine.
+url_port="$(free_port)"
+# Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
+dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
-  FF_METRICS_HOST="$metrics_host" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json)
+  FF_METRICS_HOST="$metrics_host" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
+  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1)
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -72,16 +103,22 @@ e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 check "backend answers on $api" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")"
 
 echo "== scenario (tenant $tenant → namespace $tenant_ns)"
-v1='export async function handler(event: { body: { name?: string } }) {
-  return { version: 1, message: `Hello ${event.body.name ?? "world"}` };
+v1='export async function handler(event: { name?: string }) {
+  return { version: 1, message: `Hello ${event.name ?? "world"}` };
 }'
 created="$(http POST /functions "$(jq -n --arg code "$v1" '{name: "e2e-hello", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
 check "create returns 201" 201 "$(status)"
 check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
 id="$(jq -r .id <<<"$created")"
+check "its code is inline, its handler function.handler, with its SHA-256 and size as AWS Lambda's CodeSha256 and CodeSize" \
+  "inline function.handler $(code_facts "$v1")" "$(jq -r '"\(.packageType) \(.handler) \(.codeSha256) \(.codeSize)"' <<<"$created")"
 check "its code is archived in object storage" "$v1" "$(archived "$id/code.ts")"
 check "its Deployment runs in the tenant namespace" "fn-$id" \
   "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.metadata.name}' 2>/dev/null)"
+v1_image="$(code_image_of "$id")"
+check "its code reaches its pods as an image of the registry, as a package's, and no ConfigMap holds it" "true 0" \
+  "$(in_registry "$v1_image") $(code_configmaps "$id")"
+check "the account's packages are its uploads, none: not the one the backend made of this code" 0 "$(http GET /packages | jq length)"
 if [ -n "${K8S_RUNTIME_CLASS:-}" ]; then
   check "its pods use RuntimeClass $K8S_RUNTIME_CLASS" "$K8S_RUNTIME_CLASS" \
     "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.runtimeClassName}')"
@@ -135,7 +172,10 @@ http PUT "/functions/$id" "$(jq -n --arg code "$v2" '{code: $code}')" >/dev/null
 check "update returns 200" 200 "$(status)"
 check "the new code is live after the update" 2 \
   "$(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.version)"
+check "the record has the new code's SHA-256 and size" "$(code_facts "$v2")" "$(http GET "/functions/$id" | jq -r '"\(.codeSha256) \(.codeSize)"')"
 check "the archive holds the new code" "$v2" "$(archived "$id/code.ts")"
+v2_image="$(code_image_of "$id")"
+check "its pods mount the new code's image" "true true" "$([ "$v2_image" != "$v1_image" ] && echo true || echo false) $(in_registry "$v2_image")"
 
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
@@ -154,7 +194,7 @@ check "the function record is gone" 404 "$(status)"
 
 echo "== python function"
 py='def handler(event, context):
-    return {"message": "Hello " + event["body"].get("name", "world"), "memory": context.memory_limit_in_mb}
+    return {"message": "Hello " + event.get("name", "world"), "memory": context.memory_limit_in_mb}
 '
 created="$(http POST /functions "$(jq -n --arg code "$py" '{name: "e2e-python", runtime: "python", code: $code, memory: 128, timeout: 5}')")"
 check "create returns 201" 201 "$(status)"
@@ -164,8 +204,417 @@ invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"Python"}}')"
 check "invocation is COMPLETED" COMPLETED "$(jq -r .status <<<"$invoked")"
 check "handler output is returned, with the Lambda context" "Hello Python 128" \
   "$(jq -r '"\(.output.message) \(.output.memory)"' <<<"$invoked")"
+# AWS Lambda's Python functions are often lambda_handler: naming it is enough.
+py_aws='def lambda_handler(event, context):
+    return {"message": "Hello from lambda_handler"}
+'
+http PUT "/functions/$id" "$(jq -n --arg code "$py_aws" '{code: $code, handler: "function.lambda_handler"}')" >/dev/null
+check "a handler named by an update rolls out, and the runtime calls it" "200 function.lambda_handler Hello from lambda_handler" \
+  "$(status) $(http GET "/functions/$id" | jq -r .handler) $(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.message)"
+check "its pods are told it" function.lambda_handler \
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FF_HANDLER")].value}')"
+http PUT "/functions/$id" '{"handler": "lambda_function.lambda_handler"}' >/dev/null
+check "a handler in another file than inline code's is refused, naming its file, and the function keeps its own" \
+  "400 handler must be function.<name> for inline code, which is the file function.py: function.handler, for example function.lambda_handler" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$id" | jq -r .handler)"
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
+
+echo "== the API's request limits, and a function found by its name"
+# Bodies this large go through files: a command line's argument holds 128 KiB at most.
+xs() { head -c "$1" /dev/zero | tr '\0' x; }
+greeter='export async function handler(event: { name?: string }) {
+  return { message: `Hello ${event.name ?? "world"}` };
+}'
+{ printf '// '; xs 150000; printf '\n%s\n' "$greeter"; } >"$work/large.ts"
+jq -n --rawfile code "$work/large.ts" '{name: "e2e-large", runtime: "nodejs", code: $code, memory: 128, timeout: 5}' >"$work/large.json"
+created="$(http POST /functions "" --data-binary @"$work/large.json")"
+check "a function with 150 KB of code is made, which a body of 100 KB at most refused before" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
+large_id="$(jq -r .id <<<"$created")"
+check "GET /functions?name= finds it, and only it" "1 $large_id" "$(http GET '/functions?name=e2e-large' | jq -r '"\(length) \(.[0].id)"')"
+check "and compares names exactly: another case finds none" 0 "$(http GET '/functions?name=e2e-LARGE' | jq length)"
+{ printf '// '; xs 1048576; printf '\n%s\n' "$greeter"; } >"$work/mib.ts"
+jq -n --rawfile code "$work/mib.ts" '{code: $code}' >"$work/mib.json"
+http PUT "/functions/$large_id" "" --data-binary @"$work/mib.json" >/dev/null
+check "1 MiB of code, more than a ConfigMap holds, is taken, as its image, and answers" "200 $(stat -c %s "$work/mib.ts") Hello Sfax" \
+  "$(status) $(jq -r .codeSize "$work/body") $(http POST "/functions/$large_id/invoke" '{"input":{"name":"Sfax"}}' | jq -r .output.message)"
+xs 3145729 >"$work/huge.ts"
+jq -n --rawfile code "$work/huge.ts" '{code: $code}' >"$work/huge.json"
+http PUT "/functions/$large_id" "" --data-binary @"$work/huge.json" >/dev/null
+check "3 MiB and a byte of code is refused, saying the limit, and the function stays as it was" \
+  "400 code is 3,145,729 bytes of UTF-8; it may have 3,145,728 at most, as AWS Lambda's console takes in its editor (3 MiB): more comes as a package ACTIVE $(stat -c %s "$work/mib.ts")" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$large_id" | jq -r '"\(.status) \(.codeSize)"')"
+xs 1000000 >"$work/name.txt"
+jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
+invoked="$(http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json")"
+check "an input of 1 MB is taken, and its answer comes whole" "201 COMPLETED 1000006" "$(status) $(jq -r '"\(.status) \(.output.message | length)"' <<<"$invoked")"
+xs 6300000 >"$work/name.txt"
+jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
+calls="$(http GET "/functions/$large_id/invocations" | jq -r .total)"
+http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json" >/dev/null
+check "an input over 6 MB is refused as AWS Lambda refuses it, and nothing runs" \
+  "413 RequestEntityTooLargeException Request must be smaller than 6291456 bytes for the InvokeFunction operation: the input is 6300011 bytes as JSON $calls" \
+  "$(status) $(jq -r '"\(.error) \(.message)"' "$work/body") $(http GET "/functions/$large_id/invocations" | jq -r .total)"
+xs 7400000 >"$work/name.txt"
+jq -n --rawfile name "$work/name.txt" '{input: {name: $name}}' >"$work/input.json"
+http POST "/functions/$large_id/invoke" "" --data-binary @"$work/input.json" >/dev/null
+check "a body over 7 MB is refused, saying the limits" \
+  "413 The request's body is over 7 MB (7,340,032 bytes): a function's code may have 3 MiB, an invocation's input 6 MB" \
+  "$(status) $(jq -r .message "$work/body")"
+xs 120000 >"$work/name.txt"
+jq -n --rawfile name "$work/name.txt" '{name: "e2e-large", expression: "rate(1 hour)", input: {name: $name}}' >"$work/schedule.json"
+http POST "/functions/$large_id/schedules" "" --data-binary @"$work/schedule.json" >/dev/null
+check "any other body over 100 KB is refused with 413 and why, where the API answered 500 before" \
+  "413 The request's body is over 100 KB (102,400 bytes), this route's limit true" \
+  "$(status) $(jq -r .message "$work/body") $(jq -r '.requestId | length == 36' "$work/body")"
+http DELETE "/functions/$large_id" >/dev/null
+check "delete returns 200" 200 "$(status)"
+
+echo "== a function's package"
+# zip_of <zip> <name=text>...: a zip as zip tools make one, each file deflated, its names as given.
+zip_of() {
+  python3 - "$@" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as archive:
+    for entry in sys.argv[2:]:
+        name, text = entry.split('=', 1)
+        archive.writestr(name, text)
+PY
+}
+# upload <zip> [content type]: POST /packages with the file as the body; its answer, its status in $work/status.
+upload() { curl -sS -o "$work/body" -w '%{http_code}' -X POST -H "content-type: ${2:-application/zip}" --data-binary @"$1" "$api/packages" >"$work/status"; cat "$work/body"; }
+sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
+zip_of "$work/package.zip" 'index.js=exports.handler = async () => require("./lib/greet")("e2e");' 'lib/greet.js=module.exports = (name) => "Hello " + name;'
+package_sha="$(sha256_of "$work/package.zip")"
+uploaded="$(upload "$work/package.zip")"
+check "a package is taken: 201, named by its SHA-256 in base64 as computed here, with its sizes and files" \
+  "201 $package_sha $(stat -c %s "$work/package.zip") 2" "$(status) $(jq -r '"\(.codeSha256) \(.codeSize) \(.fileCount)"' <<<"$uploaded")"
+upload "$work/package.zip" >/dev/null
+check "the same package again: 200, and the account has it once" "200 1" "$(status) $(http GET /packages | jq length)"
+check "GET /packages?codeSha256= finds it" "$package_sha" \
+  "$(http GET "/packages?codeSha256=$(jq -rn --arg s "$package_sha" '$s | @uri')" | jq -r '.[0].codeSha256')"
+check "its zip is in object storage, under its account and its SHA-256 in hex" "$(stat -c %s "$work/package.zip")" \
+  "$(archived "packages/$tenant/$(printf '%s' "$package_sha" | base64 -d | od -An -tx1 | tr -d ' \n').zip" | wc -c)"
+check "the audit log records the upload once" 1 \
+  "$(http GET /audit-log | jq --arg r "package:$package_sha" '[.entries[] | select(.resource == $r and .action == "package.upload")] | length')"
+zip_of "$work/slip.zip" 'index.js=exports.handler = async () => 1;' '../../etc/cron.d/evil=* * * * * root sh'
+upload "$work/slip.zip" >/dev/null
+check "a package whose name leaves it is refused, saying which, and nothing is kept" \
+  "400 The package can't be read: ../../etc/cron.d/evil leaves the package with ..: a package's names stay inside it 1" \
+  "$(status) $(jq -r .message "$work/body") $(http GET /packages | jq length)"
+upload "$work/package.zip" text/plain >/dev/null
+check "a body not sent as a zip is refused with 415" "415 Send the package as the body, a zip archive, with Content-Type: application/zip, not text/plain" \
+  "$(status) $(jq -r .message "$work/body")"
+
+echo "== a function made from a package"
+created="$(http POST /functions "$(jq -n --arg sha "$package_sha" '{name: "e2e-package", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}')")"
+check "a function made from the package is ACTIVE: zip, the package's hash and size, no inline code" \
+  "201 ACTIVE zip $package_sha $(stat -c %s "$work/package.zip") 0" \
+  "$(status) $(jq -r '"\(.status) \(.packageType) \(.codeSha256) \(.codeSize) \(.code | length)"' <<<"$created")"
+pkg_fn="$(jq -r .id <<<"$created")"
+check "it runs the package's code, its library in a folder included" "Hello e2e" "$(http POST "/functions/$pkg_fn/invoke" '{"input":{}}' | jq -r .output)"
+code_image="$(code_image_of "$pkg_fn")"
+check "its pods mount the package's code image at /var/task, from the registry, by digest" true "$(in_registry "$code_image")"
+check "the registry has that image, and the function no code ConfigMap" "200 0" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -I -H 'accept: application/vnd.oci.image.manifest.v1+json' "http://127.0.0.1:$FF_REGISTRY_PORT/v2/ff-code/$tenant/manifests/${code_image##*@}") $(code_configmaps "$pkg_fn")"
+http POST /functions "$(jq -n --arg sha "$package_sha" '{name: "e2e-wrong-handler", runtime: "nodejs", codeSha256: $sha, handler: "src/app.handler", memory: 128, timeout: 5}')" >/dev/null
+check "a handler the package lacks is refused, saying which file, and nothing is made" \
+  "400 The package has no src/app.js, .mjs, .cjs or .ts, nor a folder src/app/, which the handler src/app.handler names 0" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET '/functions?name=e2e-wrong-handler' | jq length)"
+unknown_sha='n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg='
+http POST /functions "$(jq -n --arg sha "$unknown_sha" '{name: "e2e-no-package", runtime: "nodejs", codeSha256: $sha, memory: 128, timeout: 5}')" >/dev/null
+check "a package the account hasn't is refused, saying how to upload one" \
+  "400 The account has no package $unknown_sha: upload it with POST /packages, which answers its SHA-256" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+# A Python package: its handler's module at the root, a helper in a folder without __init__.py, as Python 3 imports one.
+zip_of "$work/python.zip" 'lambda_function.py=from helpers.greet import greet
+
+
+def lambda_handler(event, context):
+    return greet(event.get("name", "world"))
+' 'helpers/greet.py=def greet(name):
+    return "Ahlan " + name
+'
+upload "$work/python.zip" >/dev/null
+python_sha="$(sha256_of "$work/python.zip")"
+http PUT "/functions/$pkg_fn" "$(jq -n --arg sha "$python_sha" '{runtime: "python", codeSha256: $sha, handler: "lambda_function.lambda_handler", memory: 256}')" >/dev/null
+check "one update moves it to a Python package, with its handler, runtime and memory, in one rollout" "200 python 256 Ahlan Sfax" \
+  "$(status) $(http GET "/functions/$pkg_fn" | jq -r '"\(.runtime) \(.memory)"') $(http POST "/functions/$pkg_fn/invoke" '{"input":{"name":"Sfax"}}' | jq -r .output)"
+http PUT "/functions/$pkg_fn" "$(jq -n --arg code 'def handler(event, context):
+    return "inline again"
+' '{code: $code, handler: "function.handler"}')" >/dev/null
+inline_image="$(code_image_of "$pkg_fn")"
+check "and back to inline code: an image of its own, which answers, and still no ConfigMap" "200 inline inline again true true 0" \
+  "$(status) $(http GET "/functions/$pkg_fn" | jq -r .packageType) $(http POST "/functions/$pkg_fn/invoke" '{"input":{}}' | jq -r .output) $([ "$inline_image" != "$code_image" ] && echo true || echo false) $(in_registry "$inline_image") $(code_configmaps "$pkg_fn")"
+check "the account's packages are still its two uploads" 2 "$(http GET /packages | jq length)"
+http DELETE "/functions/$pkg_fn" >/dev/null
+check "delete returns 200" 200 "$(status)"
+# A native module built as AWS Lambda's builds are, against glibc: bcrypt with the prebuilt linux-x64-glibc binary that npm
+# fetches as it installs it. Made once, then kept in hack/.cache, since it needs the npm registry and GitHub.
+native_zip="$FF_REPO_ROOT/hack/.cache/bcrypt-5.1.1-glibc.zip"
+if [ ! -s "$native_zip" ]; then
+  mkdir -p "$(dirname "$native_zip")" "$work/native"
+  printf '%s\n' "const bcrypt = require('bcrypt');" "exports.handler = async (event) => {" \
+    "  const hash = bcrypt.hashSync(event.password ?? 'secret', 4);" \
+    "  return { native: true, matches: bcrypt.compareSync(event.password ?? 'secret', hash) };" "};" >"$work/native/index.js"
+  docker run --rm -v "$work/native:/out" -w /out node:24-trixie-slim sh -c \
+    "npm init -y >/dev/null && npm install --silent --omit=dev bcrypt@5.1.1 >/dev/null && chown -R $(id -u):$(id -g) /out" ||
+    fail "could not build the bcrypt package: npm needs the network"
+  (cd "$work/native" && python3 -c 'import shutil, sys; shutil.make_archive(sys.argv[1][:-4], "zip", ".")' "$native_zip")
+fi
+upload "$native_zip" >/dev/null
+native="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$native_zip")" '{name: "e2e-native", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 10}')")"
+check "a package with a native module built against glibc, as Lambda's are, runs on the Node.js runtime: bcrypt hashes and checks" \
+  '201 ACTIVE {"native":true,"matches":true}' \
+  "$(status) $(jq -r .status <<<"$native") $(http POST "/functions/$(jq -r .id <<<"$native")/invoke" '{"input":{"password":"hunter2"}}' | jq -c .output)"
+http DELETE "/functions/$(jq -r .id <<<"$native")" >/dev/null
+
+echo "== environment variables"
+# A variable of its own for the function: the sections below still read $id, the Python function's.
+# Read with the stack's own PostgreSQL: what the database holds of them.
+env_q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
+reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ }; }'
+created="$(http POST /functions "$(jq -n --arg code "$reader" '{name: "e2e-environment", runtime: "nodejs", code: $code, memory: 128, timeout: 5, environment: {TABLE: "orders"}}')")"
+check "a function created with a variable answers with it" "201 ACTIVE orders" "$(status) $(jq -r '"\(.status) \(.environment.TABLE)"' <<<"$created")"
+env_fn="$(jq -r .id <<<"$created")"
+check "the function reads it, in UTC by default" "orders UTC" "$(http POST "/functions/$env_fn/invoke" '{"input":{}}' | jq -r '"\(.output.table) \(.output.tz)"')"
+check "GET answers with it; the list doesn't load it" "orders null" \
+  "$(http GET "/functions/$env_fn" | jq -r .environment.TABLE) $(http GET /functions | jq -r --arg id "$env_fn" '.[] | select(.id == $id) | .environment')"
+http PUT "/functions/$env_fn" '{"environment": {"TABLE": "invoices", "TZ": "Africa/Tunis"}}' >/dev/null
+check "an update replaces them, rolled out, and the function's own TZ wins" "200 invoices Africa/Tunis" \
+  "$(status) $(http POST "/functions/$env_fn/invoke" '{"input":{}}' | jq -r '"\(.output.table) \(.output.tz)"')"
+check "the Deployment reads them from its Secret, and holds no value" "fn-$env_fn-env-1 0" \
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$env_fn" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}') $(kubectl -n "$tenant_ns" get deployment "fn-$env_fn" -o json | grep -c invoices)"
+check "the Secret of the version replaced is gone once the rollout is complete" "fn-$env_fn-env-1" \
+  "$(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$env_fn" -o jsonpath='{.items[*].metadata.name}')"
+check "the database keeps them sealed: no value, no name in clear" "1 0" \
+  "$(env_q "SELECT count(*), count(*) FILTER (WHERE document::text ~ 'invoices|TABLE') FROM function_environments WHERE function_id = '$env_fn'" | tr '|' ' ')"
+http PUT "/functions/$env_fn" '{"environment": {"AWS_REGION": "x", "1BAD": "y"}}' >/dev/null
+check "names AWS Lambda reserves, or outside its rule, are refused, naming each" \
+  "400 AWS_REGION is reserved: AWS Lambda or FF's runtime sets it; \"1BAD\" is not a variable name: a letter first, then letters, digits or underscores, two characters at least, as on AWS Lambda" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+check "the audit log names the variables changed, never their values" '{"added":["TZ"],"changed":["TABLE"],"removed":[]} 0' \
+  "$(http GET /audit-log | jq -c --arg r "function:$env_fn" '[.entries[] | select(.resource == $r and .action == "function.update")][0].details.environment') $(http GET /audit-log | grep -c -E 'invoices|orders')"
+http DELETE "/functions/$env_fn" >/dev/null
+check "deleting the function deletes its Secrets and its row" "200  0" \
+  "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$env_fn" -o name) $(env_q "SELECT count(*) FROM function_environments WHERE function_id = '$env_fn'")"
+
+echo "== secrets"
+# Variables whose values nobody reads back, read by a Python function as its variables.
+sec_reader='import os
+
+def handler(event, context):
+    return {"user": os.environ.get("DB_USER"), "password": os.environ.get("DB_PASSWORD"), "token": os.environ.get("API_TOKEN")}
+'
+created="$(http POST /functions "$(jq -n --arg code "$sec_reader" '{name: "e2e-secrets", runtime: "python", code: $code, memory: 128, timeout: 5,
+  environment: {DB_USER: "ff"}, secrets: {DB_PASSWORD: "e2e-first-password"}}')")"
+check "a function created with a secret answers with its variable, never the secret" "201 ACTIVE ff 0" \
+  "$(status) $(jq -r '"\(.status) \(.environment.DB_USER)"' <<<"$created") $(grep -c e2e-first-password <<<"$created")"
+sec_fn="$(jq -r .id <<<"$created")"
+check "the Python function reads both, as variables" "ff e2e-first-password null" \
+  "$(http POST "/functions/$sec_fn/invoke" '{"input":{}}' | jq -r '"\(.output.user) \(.output.password) \(.output.token)"')"
+http GET "/functions/$sec_fn/secrets" >/dev/null
+check "GET .../secrets names it, with when it was set, never its value" '200 ["DB_PASSWORD"] true 0' \
+  "$(status) $(jq -c '[.secrets[].name]' "$work/body") $(jq -r '.secrets[0].updatedAt | test("^20[0-9-]{8}T")' "$work/body") $(grep -c e2e-first-password "$work/body")"
+http PATCH "/functions/$sec_fn/secrets" '{"secrets": {"DB_PASSWORD": "e2e-second-password", "API_TOKEN": "e2e-token"}}' >/dev/null
+check "PATCH sets and replaces them, rolled out, and answers their names alone" '200 ["API_TOKEN","DB_PASSWORD"] 0' \
+  "$(status) $(jq -c '[.secrets[].name]' "$work/body") $(grep -c -E 'e2e-second-password|e2e-token' "$work/body")"
+check "the new version reads the new values" "e2e-second-password e2e-token" \
+  "$(http POST "/functions/$sec_fn/invoke" '{"input":{}}' | jq -r '"\(.output.password) \(.output.token)"')"
+in_use="$(kubectl -n "$tenant_ns" get deployment "fn-$sec_fn" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')"
+check "they reach the pods through the Secret the Deployment names, and the Deployment holds none" "e2e-second-password 0" \
+  "$(kubectl -n "$tenant_ns" get secret "$in_use" -o jsonpath='{.data.DB_PASSWORD}' | base64 -d) $(kubectl -n "$tenant_ns" get deployment "fn-$sec_fn" -o json | grep -c -E 'e2e-(first|second)-password|e2e-token')"
+http PATCH "/functions/$sec_fn/secrets" '{"secrets": {"API_TOKEN": null}}' >/dev/null
+check "null removes one, and the function no longer reads it" '200 ["DB_PASSWORD"] null' \
+  "$(status) $(jq -c '[.secrets[].name]' "$work/body") $(http POST "/functions/$sec_fn/invoke" '{"input":{}}' | jq -r .output.token)"
+http PUT "/functions/$sec_fn" '{"environment": {"DB_USER": "ff", "DB_PASSWORD": "x"}}' >/dev/null
+check "a variable can't take a secret's name" "400 DB_PASSWORD is both a variable and a secret: a name is one or the other" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+http PATCH "/functions/$sec_fn/secrets" "$(jq -cn --arg big "$(head -c 4100 /dev/zero | tr '\0' x)" '{secrets: {BIG: $big}}')" >/dev/null
+check "nor do variables and secrets go over 4 KB together" "400 true" \
+  "$(status) $(jq -r '.message | join("; ") | test("AWS Lambda allows 4096 \\(4 KB\\)")' "$work/body")"
+check "neither the function's answers, nor the audit log, nor the database holds a secret's value" "0 0 0" \
+  "$(http GET "/functions/$sec_fn" | grep -c -E 'e2e-(first|second)-password') $(http GET /audit-log | grep -c -E 'e2e-(first|second)-password|e2e-token') $(env_q "SELECT count(*) FROM function_environments WHERE document::text ~ 'e2e-|DB_PASSWORD'")"
+check "the audit log names the secrets changed" '{"added":["API_TOKEN"],"changed":["DB_PASSWORD"],"removed":[]}' \
+  "$(http GET /audit-log | jq -c --arg r "function:$sec_fn" '[.entries[] | select(.resource == $r and .action == "function.update")] | last | .details.secrets')"
+http DELETE "/functions/$sec_fn" >/dev/null
+check "deleting the function deletes its Secrets" "200 " "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$sec_fn" -o name)"
+
+echo "== the event a function receives"
+echo_code='export const handler = async (event: unknown) => ({ event });'
+created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-event", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+check "a new function gets AWS Lambda's event, the payload itself" "201 lambda" "$(status) $(jq -r .eventFormat <<<"$created")"
+event_fn="$(jq -r .id <<<"$created")"
+echoed() { http POST "/functions/$1/invoke" "$(jq -cn --argjson input "$2" '{input: $input}')" | jq -c .output.event; }
+check "any JSON value is the event: an object, a string, a number, an array, null" '{"name":"Tunis"} "Tunis" 42 [1,"two"] null' \
+  "$(echoed "$event_fn" '{"name":"Tunis"}') $(echoed "$event_fn" '"Tunis"') $(echoed "$event_fn" 42) $(echoed "$event_fn" '[1,"two"]') $(echoed "$event_fn" null)"
+check "its pods are told so" lambda \
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$event_fn" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FF_EVENT_FORMAT")].value}')"
+created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-wrapped", runtime: "nodejs", code: $code, memory: 128, timeout: 5, eventFormat: "wrapped"}')")"
+wrapped_fn="$(jq -r .id <<<"$created")"
+check "a function made before gets FF's original wrapper, the payload in body" '201 {"name":"Sfax"} POST /invoke' \
+  "$(status) $(http POST "/functions/$wrapped_fn/invoke" '{"input": {"name": "Sfax"}}' | jq -cr '.output.event | "\(.body | tojson) \(.method) \(.path)"')"
+http PUT "/functions/$wrapped_fn" '{"eventFormat": "lambda"}' >/dev/null
+check "switching it is an update, rolled out, after which it gets the payload itself" '200 lambda {"name":"Sfax"}' \
+  "$(status) $(jq -r .eventFormat "$work/body") $(echoed "$wrapped_fn" '{"name":"Sfax"}')"
+http PUT "/functions/$wrapped_fn" '{"eventFormat": "v2"}' >/dev/null
+check "an unknown format is refused" "400 eventFormat must be one of the following values: lambda, wrapped" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+for f in "$event_fn" "$wrapped_fn"; do http DELETE "/functions/$f" >/dev/null; done
+
+echo "== a function's URL"
+url_code='export async function handler(event: any) {
+  if (event.rawPath === "/fail") throw new Error("broken on purpose");
+  if (event.rawPath === "/missing") return { statusCode: 404, headers: { "content-type": "text/plain" }, body: "no such page" };
+  if (event.rawPath === "/cookie") return { statusCode: 200, cookies: ["visited=yes; Path=/"], body: "set" };
+  return {
+    statusCode: 200,
+    headers: { "x-handled-by": "e2e" },
+    body: JSON.stringify({
+      method: event.requestContext.http.method, path: event.rawPath, query: event.queryStringParameters ?? null,
+      cookies: event.cookies ?? [], body: event.body ?? null, base64: event.isBase64Encoded, auth: event.headers.authorization ?? null,
+      account: event.requestContext.accountId, requestId: event.requestContext.requestId, domain: event.requestContext.domainName,
+    }),
+  };
+}'
+created="$(http POST /functions "$(jq -n --arg code "$url_code" '{name: "e2e-url", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+url_fn="$(jq -r .id <<<"$created")"
+made="$(http POST "/functions/$url_fn/url" '{"authType": "NONE"}')"
+url_address="$(jq -r .functionUrl <<<"$made")"
+check "a function gets a URL, at a random address under the function domain" "201 true" \
+  "$(status) $([[ $url_address =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
+url_host="${url_address#http://}"
+url_host="${url_host%%:*}"
+# at_url <method> <path> [curl option...]: a request to the URL, by its address; prints the body, the status and
+# the headers go to $work/url-status and $work/url-headers. --resolve so that no system resolver is needed.
+at_url() {
+  local method=$1 path=$2
+  shift 2
+  curl -sS -o "$work/url-body" -D "$work/url-headers" -w '%{http_code}' -X "$method" --resolve "$url_host:$url_port:127.0.0.1" \
+    "$@" "http://$url_host:$url_port$path" >"$work/url-status"
+  cat "$work/url-body"
+}
+url_status() { cat "$work/url-status"; }
+url_header() { awk -v name="$1" 'tolower($1) == tolower(name ":") { sub(/\r$/, ""); $1 = ""; sub(/^ /, ""); print }' "$work/url-headers"; }
+answered="$(at_url GET '/hello?name=Amira&tag=a&tag=b')"
+check "GET with a query reaches the function as AWS Lambda's event, anonymous, and its answer comes back" \
+  '200 e2e {"method":"GET","path":"/hello","query":{"name":"Amira","tag":"a,b"},"account":"anonymous"}' \
+  "$(url_status) $(url_header x-handled-by) $(jq -c '{method, path, query, account}' <<<"$answered")"
+check "the answer names the call, as the event does: the invocation's ID" true \
+  "$(jq -r --arg id "$(url_header x-amzn-requestid)" '.requestId == $id and ($id | test("^[0-9a-f-]{36}$"))' <<<"$answered")"
+url_call="$(url_header x-amzn-requestid)"
+check "a JSON POST comes as text" '200 {"body":"{\"order\":7}","base64":false}' \
+  "$(url_status) $(at_url POST /orders -H 'content-type: application/json' --data '{"order":7}' | jq -c '{body, base64}')"
+printf '\x89PNG\r\n\x1a\n\x00\xff' >"$work/url-bytes"
+check "a binary PUT comes in base64" "200 $(base64 -w0 "$work/url-bytes") true" \
+  "$(url_status) $(at_url PUT /upload -H 'content-type: image/png' --data-binary @"$work/url-bytes" | jq -r '"\(.body) \(.base64)"')"
+at_url GET /cookie >/dev/null
+check "a cookie set by the function, and read back" '200 visited=yes; Path=/ ["visited=yes"]' \
+  "$(url_status) $(url_header set-cookie) $(at_url GET / -H 'cookie: visited=yes' | jq -c .cookies)"
+check "a path the function doesn't know: its own 404" "no such page 404" "$(at_url GET /missing) $(url_status)"
+check "a function's error is a 502, without its message" '502 {"Message":"Internal Server Error"}' "$(at_url GET /fail >/dev/null; url_status) $(cat "$work/url-body")"
+check "a host that is no URL is a 404" "404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' --resolve "nothing.fn.localhost:$url_port:127.0.0.1" "http://nothing.fn.localhost:$url_port/")"
+at_url GET / -H 'authorization: Bearer the-callers-own-token' >/dev/null
+latest="$(http GET "/functions/$url_fn/invocations?limit=1" | jq -c '.invocations[0]')"
+check "the call is in the history as the URL's, its credentials kept as ***" 'url *** null' \
+  "$(jq -r '"\(.source) \(.input.headers.authorization) \(.input.cookies)"' <<<"$latest")"
+check "each call has its usage record, under its request ID" 1 "$(env_q "SELECT count(*) FROM usage_records WHERE request_id = '$url_call'")"
+echo "== a URL's own domain"
+zone_dir="$work/zones"
+mkdir -p "$zone_dir"
+# zone <serial> [record...]: the test zone, e2e-customer.tn, with these records besides its own; a new serial each time.
+zone() {
+  local serial=$1
+  shift
+  {
+    printf '$ORIGIN e2e-customer.tn.\n$TTL 5\n@ IN SOA ns.e2e-customer.tn. hostmaster.e2e-customer.tn. %s 60 60 600 5\n' "$serial"
+    printf '@ IN NS ns.e2e-customer.tn.\nns IN A 127.0.0.1\n'
+    printf '%s\n' "$@"
+  } >"$zone_dir/e2e-customer.tn.db"
+}
+zone 1
+e2e_dns "$dns_port" "$zone_dir"
+added="$(http POST "/functions/$url_fn/url/domains" '{"domain": "Shop.E2E-Customer.tn."}')"
+check "a domain of the customer's is added, pending, with the CNAME to make: to the URL's host" "201 shop.e2e-customer.tn pending $url_host" \
+  "$(status) $(jq -r '"\(.domain) \(.status) \(.records.cname[0].value)"' <<<"$added")"
+# verify_until <domain>: checks the domain again until the DNS server has read the new zone, half a minute at most.
+verify_until() {
+  local _
+  for _ in $(seq 1 30); do
+    http POST "/functions/$url_fn/url/domains/$1/verify" >/dev/null
+    [ "$(jq -r .status "$work/body")" = verified ] && break
+    sleep 1
+  done
+  cat "$work/body"
+}
+at_domain() { curl -sS -o "$work/url-body" -w '%{http_code}' --resolve "$1:$url_port:127.0.0.1" "http://$1:$url_port${2:-/}"; }
+check "before it is proved, the URL doesn't answer there" 404 "$(at_domain shop.e2e-customer.tn)"
+zone 2 "shop IN CNAME $url_host."
+check "once its CNAME is made, the check proves it" "verified null" "$(verify_until shop.e2e-customer.tn | jq -r '"\(.status) \(.checkError)"')"
+check "the URL answers there, and the event names the domain" '200 {"path":"/hello","domain":"shop.e2e-customer.tn"}' \
+  "$(at_domain shop.e2e-customer.tn '/hello?name=domain') $(jq -c '{path, domain}' "$work/url-body")"
+apex="$(http POST "/functions/$url_fn/url/domains" '{"domain": "e2e-customer.tn"}')"
+txt="$(jq -r '.records.txt[] | select(.type == "TXT") | .value' <<<"$apex")"
+check "an apex, which can't be a CNAME, gets a TXT record with its token to make, and the edge's address" "201 pending A 127.0.0.1 true" \
+  "$(status) $(jq -r .status <<<"$apex") $(jq -r '.records.txt[] | select(.type == "A") | "\(.type) \(.value)"' <<<"$apex") $([[ $txt =~ ^ff-verify=[0-9a-f]{32}$ ]] && echo true || echo false)"
+zone 3 "shop IN CNAME $url_host." "_ff-verify IN TXT \"$txt\"" "@ IN A 127.0.0.1"
+check "once the TXT record and the address are made, the check proves the apex" verified "$(verify_until e2e-customer.tn | jq -r .status)"
+asked() { curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$url_port/tls/allowed?domain=$1"; }
+check "the edge may get certificates for the verified domains, and not for another" "200 200 404" \
+  "$(asked shop.e2e-customer.tn) $(asked e2e-customer.tn) $(asked blog.e2e-customer.tn)"
+http DELETE "/functions/$url_fn/url/domains/shop.e2e-customer.tn" >/dev/null
+check "removed, the domain stops answering at once" "204 404" "$(status) $(at_domain shop.e2e-customer.tn)"
+check "the audit log names each change of the domains" "custom_domain.add custom_domain.verify custom_domain.add custom_domain.verify custom_domain.remove" \
+  "$(http GET '/audit-log?limit=30' | jq -r --arg r "function:$url_fn" '[.entries[] | select(.resource == $r and (.action | startswith("custom_domain")))] | reverse | map(.action) | join(" ")')"
+http PUT "/functions/$url_fn/url" '{"cors": {"allowOrigins": ["https://app.example.tn"], "allowMethods": ["POST"], "maxAge": 60}}' >/dev/null
+at_url OPTIONS /orders -H 'origin: https://app.example.tn' -H 'access-control-request-method: POST' >/dev/null
+check "with CORS set, the URL answers a browser's preflight itself" "200 204 https://app.example.tn POST 60" \
+  "$(status) $(url_status) $(url_header access-control-allow-origin) $(url_header access-control-allow-methods) $(url_header access-control-max-age)"
+http PUT "/functions/$url_fn/url" '{"authType": "AWS_IAM"}' >/dev/null
+check "a URL that takes the account's credentials refuses a caller without them" '403 403' \
+  "$(at_url GET / >/dev/null; url_status) $(at_url GET / -H 'authorization: Bearer ffk_0123456789ab_not-a-real-secret' >/dev/null; url_status)"
+http PUT "/functions/$url_fn" '{"eventFormat": "wrapped"}' >/dev/null
+check "a function with a URL keeps AWS Lambda's event" 400 "$(status)"
+http DELETE "/functions/$url_fn/url" >/dev/null
+check "deleting the URL: its address answers 404 at once, and the function has none" "204 404 404" \
+  "$(status) $(at_url GET / >/dev/null; url_status) $(http GET "/functions/$url_fn/url" >/dev/null; status)"
+http DELETE "/functions/$url_fn" >/dev/null
+
+echo "== a function on a schedule"
+created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-scheduled", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+sched_fn="$(jq -r .id <<<"$created")"
+check "the next runs of an expression, for a preview: five, in UTC" "200 5 true" \
+  "$(http GET '/schedules/next-runs?expression=cron(0%208%20*%20*%20%3F%20*)' >/dev/null; status) $(jq '.runs | length' "$work/body") $(jq '[.runs[] | endswith("T08:00:00.000Z")] | all' "$work/body")"
+http POST "/functions/$sched_fn/schedules" '{"name": "bad", "expression": "rate(5 minute)"}' >/dev/null
+check "an expression EventBridge wouldn't take is refused, saying why" "400 rate(5 minute) must be rate(5 minutes): the unit is plural above 1" "$(status) $(jq -r .message "$work/body")"
+made_at="$(date -u +%s)"
+every="$(http POST "/functions/$sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}')"
+check "a schedule is made, its first run a minute after" "201 true" \
+  "$(status) $(jq --argjson t "$made_at" '(.nextRunAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $t | (. >= 55 and . <= 65)' <<<"$every")"
+http POST "/functions/$sched_fn/schedules" '{"name": "with-input", "expression": "rate(1 minute)", "input": {"report": "daily"}}' >/dev/null
+http POST "/functions/$sched_fn/schedules" '{"name": "off", "expression": "rate(1 minute)", "enabled": false}' >/dev/null
+check "and one with an input of its own, and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
+http PUT "/functions/$sched_fn" '{"eventFormat": "wrapped"}' >/dev/null
+check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
+# Within about 70 s: a minute, and the scheduler's tick, every 5 s.
+for _ in $(seq 1 30); do
+  [ "$(http GET "/functions/$sched_fn/invocations?limit=10" | jq '[.invocations[] | select(.source == "schedule")] | length')" -ge 2 ] && break
+  sleep 5
+done
+history="$(http GET "/functions/$sched_fn/invocations?limit=10")"
+event="$(jq -c '[.invocations[] | select(.source == "schedule" and .input["detail-type"] != null)][0].input' <<<"$history")"
+check "each schedule ran within a minute and a few seconds, as calls of its schedule" 2 "$(jq '[.invocations[] | select(.source == "schedule")] | length' <<<"$history")"
+check "with EventBridge's Scheduled Event: its source, its account, FF's region, the rule's ARN" \
+  "Scheduled Event aws.events $tenant tn-tunis-1 arn:aws:events:tn-tunis-1:$tenant:rule/e2e-scheduled-every-minute true" \
+  "$(jq -r '"\(.["detail-type"]) \(.source) \(.account) \(.region) \(.resources[0]) \(.time | test("^[0-9-]{10}T[0-9:]{8}Z$"))"' <<<"$event")"
+check "or the schedule's own input" '{"report":"daily"}' \
+  "$(jq -c '[.invocations[] | select(.source == "schedule" and .input.report != null)][0].input' <<<"$history")"
+schedules="$(http GET "/functions/$sched_fn/schedules")"
+check "each schedule says how its run went, and which call it was; the disabled one never ran" \
+  "every-minute success true off null with-input success" \
+  "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
+check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM usage_records WHERE function_id = '$sched_fn'")"
+http DELETE "/functions/$sched_fn" >/dev/null
+check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account
@@ -212,9 +661,9 @@ check "another account, from the same address, isn't slowed: its own count, and 
 echo "== usage records (P-20)"
 # q <sql>: one value, or a row with its columns separated by spaces.
 q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F ' ' -c "$1"; }
-meter='export async function handler(event: { body: { sleepMs?: number; fail?: boolean } }, context: { awsRequestId: string }) {
-  if (event.body.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.body.sleepMs));
-  if (event.body.fail) throw new Error("failed on purpose");
+meter='export async function handler(event: { sleepMs?: number; fail?: boolean }, context: { awsRequestId: string }) {
+  if (event.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.sleepMs));
+  if (event.fail) throw new Error("failed on purpose");
   return { requestId: context.awsRequestId };
 }'
 created="$(http POST /functions "$(jq -n --arg code "$meter" '{name: "e2e-meter", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')")"
@@ -273,6 +722,7 @@ wait "$call_pid" 2>/dev/null || true
 # Restarted at once, as a supervisor would. Its reaper marks the call LOST once the longest a call can
 # take has passed (2 × 3 s + a 1 s cold-start limit + 30 s), at the next run of the minute.
 e2e_start_backend "$work/backend-restarted.log" "$api" "${be_env[@]}" "${alarm_env[@]}" K8S_READY_TIMEOUT_SECONDS=1
+restarted_pid="${e2e_pids[${#e2e_pids[@]}-1]}" # the processes started after it come after it
 state=""
 for _ in $(seq 1 120); do
   state="$(q "SELECT status FROM function_invocations WHERE id = '$lost'")"
@@ -307,7 +757,8 @@ check "the account's totals are its records' own sums" \
   "$(q "SELECT count(*) FILTER (WHERE $billed), sum(billed_ms), trim_scale(sum(billed_ms::numeric * memory_mb) / 1024000)
           FROM usage_records WHERE account_id = '$tenant' AND started_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'")" \
   "$(jq -r '.totals | "\(.requests) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
-check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 1" \
+# Its two calls: handler's, then lambda_handler's.
+check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 2" \
   "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
 check "as CSV: a download, its header, and the meter function's line" \
@@ -393,8 +844,8 @@ PY
 : >"$work/webhooks.jsonl"
 python3 "$work/receiver.py" "$receiver_port" "$work/webhooks.jsonl" &
 e2e_pids+=("$!")
-failing='export async function handler(event: { body: { fail?: boolean } }) {
-  if (event.body.fail) throw new Error("asked to fail");
+failing='export async function handler(event: { fail?: boolean }) {
+  if (event.fail) throw new Error("asked to fail");
   return { ok: true };
 }'
 alarmed_id="$(http POST /functions "$(jq -n --arg code "$failing" '{name: "e2e-alarmed", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
@@ -473,5 +924,53 @@ print(bool(lines) and all({'time', 'level', 'message'} <= line.keys() for line i
       any('requestId' in line for line in queries))
 PY
 )"
+
+echo "== code images the registry lost, made again (CLI plan, C-29)"
+node="k3d-$FF_CLUSTER_NAME-server-0"
+registry="http://127.0.0.1:$FF_REGISTRY_PORT"
+small_ns="$(tenant_namespace "$small")"
+# code_image_in <namespace> <function>: the code image its pods mount. repository_of <image>: its repository.
+code_image_in() { kubectl -n "$1" get deployment "fn-$2" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'; }
+repository_of() { local path="${1#*/}"; echo "${path%@*}"; }
+# layer_status <image> <layer>: what the registry answers for the image's layer. on_node <image>: whether the node has it.
+layer_status() { curl -s -o /dev/null -w '%{http_code}' -I "$registry/v2/$(repository_of "$1")/blobs/$2"; }
+on_node() { docker exec "$node" crictl inspecti "$1" >/dev/null 2>&1 && echo true || echo false; }
+meter_image="$(code_image_of "$meter_id")"
+meter_layer="$(curl -s -H 'accept: application/vnd.oci.image.manifest.v1+json' "$registry/v2/$(repository_of "$meter_image")/manifests/${meter_image##*@}" | jq -r '.layers[0].digest')"
+small_image="$(code_image_in "$small_ns" "$small_id")"
+# Neither function has a pod, nor the node a copy of their images, as a node that never pulled them.
+kubectl -n "$tenant_ns" scale deployment "fn-$meter_id" --replicas=0 >/dev/null
+kubectl -n "$small_ns" scale deployment "fn-$small_id" --replicas=0 >/dev/null
+kubectl -n "$tenant_ns" wait --for=delete pod -l "ff.dev/function-id=$meter_id" --timeout=120s >/dev/null 2>&1 || true
+kubectl -n "$small_ns" wait --for=delete pod -l "ff.dev/function-id=$small_id" --timeout=120s >/dev/null 2>&1 || true
+for image in "$meter_image" "$small_image"; do docker exec "$node" crictl rmi "$image" >/dev/null 2>&1 || true; done
+# The registry loses the meter function's layer and keeps its manifest, as a disk that lost a file would.
+curl -s -o /dev/null -X DELETE "$registry/v2/$(repository_of "$meter_image")/blobs/$meter_layer"
+# The other function's pods name an image the registry never had, as one an earlier backend made, lost since.
+lost_image="${small_image%@*}@sha256:$(printf '0%.0s' $(seq 1 64))"
+kubectl -n "$small_ns" patch deployment "fn-$small_id" \
+  -p "{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\":\"code\",\"image\":{\"reference\":\"$lost_image\"}}]}}}}" >/dev/null
+check "the registry lost a layer of the meter function's image; the node has neither image; the other function names a lost one" \
+  "404 false false $lost_image" \
+  "$(layer_status "$meter_image" "$meter_layer") $(on_node "$meter_image") $(on_node "$small_image") $(code_image_in "$small_ns" "$small_id")"
+# Restarted, as the runbook says after losing the registry: the retention job runs at the backend's start.
+kill "$restarted_pid"
+wait "$restarted_pid" 2>/dev/null || true
+e2e_start_backend "$work/backend-restored.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
+restored=""
+for _ in $(seq 1 180); do
+  restored="$(grep -o 'Lost code images restored: [^"]*' "$work/backend-restored.log" | head -1 || true)"
+  [ -n "$restored" ] && break
+  sleep 1
+done
+check "the restarted backend restores them at once, and says what it did" \
+  "1 image(s) made again, 0 zip(s) made again of inline code; 1 function(s) rolled out with their image; 0 failure(s)" "${restored#*in use, }"
+check "the meter function's image whole again, by the digest its pods name" "200 $meter_image" \
+  "$(layer_status "$meter_image" "$meter_layer") $(code_image_of "$meter_id")"
+kubectl -n "$tenant_ns" scale deployment "fn-$meter_id" --replicas=1 >/dev/null
+check "a new pod of it starts on the node, which had no copy: pulled from the registry" "true true" \
+  "$(kubectl -n "$tenant_ns" rollout status deployment "fn-$meter_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false) $(on_node "$meter_image")"
+check "the other function rolled out with its package's image, which its new pod pulled; its record as it was" "$small_image true true ACTIVE" \
+  "$(code_image_in "$small_ns" "$small_id") $(kubectl -n "$small_ns" rollout status deployment "fn-$small_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false) $(on_node "$small_image") $(as_small GET "/functions/$small_id" | jq -r .status)"
 
 echo "e2e: $passed checks passed"

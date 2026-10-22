@@ -194,7 +194,22 @@ run('accounts, users and memberships (L2, P-12)', () => {
 
       expect(await service.me(user)).toEqual({
         user: { id: user.id, email: 'user12@example.tn', name: 'User 12', locale: 'fr-TN' },
-        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, dataDeletionDueAt: null, dataDeletedAt: null }],
+        key: null,
+        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: false, dataDeletionDueAt: null, dataDeletedAt: null }],
+      });
+    });
+
+    it("shows an API key, in GET /me, itself and the account it acts for, with its creator's role, which bounds it", async () => {
+      const user = await service.userFor(identity(15));
+      const { id } = await service.create(user, { name: 'Keyed' });
+      // FF's operator turned the account's internet egress on, which the beta plan leaves off.
+      await db.dataSource.query(`UPDATE accounts SET status = 'active', internet_egress = true WHERE id = $1`, [id]);
+      const principal = { accountId: id, accountStatus: AccountStatus.ACTIVE, planId: 'beta', keyId: '0123456789ab', keyName: 'laptop', userId: user.id, role: 'developer' as const, scopes: ['functions:read', 'logs:read'] };
+
+      expect(await service.keyMe(principal)).toEqual({
+        user: null,
+        key: { id: '0123456789ab', name: 'laptop', scopes: ['functions:read', 'logs:read'] },
+        accounts: [{ id, name: 'Keyed', status: 'active', role: 'developer', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: true, dataDeletionDueAt: null, dataDeletedAt: null }],
       });
     });
 

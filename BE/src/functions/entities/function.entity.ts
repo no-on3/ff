@@ -25,6 +25,26 @@ export enum Runtime {
 }
 
 /**
+ * What the function's handler gets as its event: the payload itself, as on AWS
+ * Lambda, the default; or FF's original wrapper around it, { body, headers,
+ * method, query, path }, which every function made before has.
+ */
+export enum EventFormat {
+  LAMBDA = 'lambda',
+  WRAPPED = 'wrapped',
+}
+
+/**
+ * How the function's code comes, as AWS Lambda's PackageType says it: inline,
+ * the one file of `code`, which FF writes as function.ts or function.py; or
+ * zip, a package uploaded, its libraries inside.
+ */
+export enum PackageType {
+  INLINE = 'inline',
+  ZIP = 'zip',
+}
+
+/**
  * A name belongs to one function of its account, as on AWS Lambda, compared
  * exactly: "Hello" and "hello" are two names. The index also serves every
  * query by account, which all start with its column.
@@ -56,6 +76,31 @@ export class Function {
   @Column('text')
   code: string;
 
+  @Column({ type: 'enum', enum: PackageType, default: PackageType.INLINE })
+  packageType: PackageType;
+
+  /** What its runtime calls, as AWS Lambda's Handler: `<file>.<export>` or `<module>.<function>` (code-package.ts). Its pods are told with FF_HANDLER. */
+  @Column({ type: 'varchar', length: 128, default: 'function.handler' })
+  handler: string;
+
+  /** The SHA-256 of its code, in base64, as AWS Lambda's CodeSha256: of the package, or of inline code's UTF-8. */
+  @Column({ type: 'varchar', length: 44 })
+  codeSha256: string;
+
+  /** Its code's size in bytes, as AWS Lambda's CodeSize: the package's, or inline code's UTF-8. */
+  @Column({ type: 'integer' })
+  codeSize: number;
+
+  /**
+   * The package its pods run (ADR 0003): its own for a package function; for
+   * inline code, the one-file package the backend makes of it, which the purge
+   * of unused packages must keep, and the restore of lost code images reads.
+   * The backend's to know: no answer gives it. None for inline code not rolled
+   * out since packages came.
+   */
+  @Column({ type: 'varchar', length: 44, nullable: true, select: false })
+  packageSha256?: string | null;
+
   @Column()
   memory: number;
 
@@ -68,6 +113,10 @@ export class Function {
     default: FunctionStatus.CREATING,
   })
   status: FunctionStatus;
+
+  /** What its handler gets: AWS Lambda's event, or FF's original wrapper (EventFormat). Its pods are told with FF_EVENT_FORMAT. */
+  @Column({ type: 'enum', enum: EventFormat, default: EventFormat.LAMBDA })
+  eventFormat: EventFormat;
 
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, unknown>;

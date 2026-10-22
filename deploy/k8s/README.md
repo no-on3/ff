@@ -49,29 +49,80 @@ Closing an account deletes its log lines with the delete key (P-45). The backend
 - its migrations, as a Job;
 - the console and the admin app, two replicas each;
 - Keycloak;
-- the edge proxy in `ff-edge`: Caddy, TLS from Let's Encrypt for four hostnames, and the admin app and Keycloak's administration for FF's addresses only.
+- the edge proxy in `ff-edge`: Caddy, TLS from Let's Encrypt for four hostnames and for functions' URLs under the function domain, and the admin app and Keycloak's administration for FF's addresses only;
+- the code registry, Zot, which keeps functions' code images for the nodes to mount ([ADR 0003](../../docs/adr/0003-code-delivery.md)): every function's, inline code's too.
 
 PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`, `FE/`, `admin/` and `deploy/edge/` (getting-started, "The platform's images").
 
 **Before the first deploy:**
 1. Two databases on the PostgreSQL server, `ff` and `keycloak`, each with its user.
 2. gVisor on the nodes that run functions, each labelled `ff.dev/gvisor=true`, and `optional/runtimeclass-gvisor.yaml` applied (the Kubernetes dev guide, "On real nodes"). `backend.env` runs every function in it (`K8S_RUNTIME_CLASS=gvisor`): the backend refuses to start in production without a sandbox, and `deploy.sh` to deploy when the cluster lacks the RuntimeClass or a node to run it.
-3. DNS for the four hostnames (API, console, admin, login) to the edge's load balancer, ports 80 and 443 open: Let's Encrypt checks them.
+3. DNS for the four hostnames (API, console, admin, login) to the edge's load balancer, ports 80 and 443 open: Let's Encrypt checks them. And for functions' URLs, a wildcard record, `*.fn.example.tn`, to the same address ("Function URLs", below).
 4. An overlay of `platform/` with FF's values:
    - `backend.env`, merged: the hostnames, the database, S3, the seller's and the bank's details, `FF_TRUST_PROXY` (the cluster's pod network, which only the edge reaches the backend from);
    - `keycloak.env`: the login hostname, its database, the mail server;
-   - `edge.env`: the four hostnames, the ACME e-mail, and `FF_ADMIN_ALLOW`, FF's own addresses;
+   - `edge.env`: the four hostnames, the ACME e-mail, `FF_ADMIN_ALLOW`, FF's own addresses, and the function domain with its way to certificates ("Function URLs", below);
    - `images`: the registry's images and their tags.
 5. The Secrets:
 
    ```bash
    kubectl -n ff-system create secret generic ff-backend --from-literal=DB_PASSWORD=… --from-literal=MINIO_ACCESS_KEY=… \
-     --from-literal=MINIO_SECRET_KEY=… --from-literal=FF_SMTP_URL='smtp://user:password@smtp.example.tn:587'
+     --from-literal=MINIO_SECRET_KEY=… --from-literal=FF_SMTP_URL='smtp://user:password@smtp.example.tn:587' \
+     --from-literal=FF_CODE_REGISTRY_PASSWORD="$BACKEND_PASSWORD"
+   # The code registry's two users, bcrypt: htpasswd comes with Apache's tools, or as
+   # docker run --rm httpd:2.4.69-alpine htpasswd -nbBC 12 <user> <password>
+   htpasswd -nbBC 12 ff-backend "$BACKEND_PASSWORD" > htpasswd && htpasswd -nbBC 12 ff-node "$NODE_PASSWORD" >> htpasswd
+   kubectl -n ff-system create secret generic ff-code-registry --from-file=htpasswd=./htpasswd
    kubectl -n ff-system create secret generic keycloak --from-literal=KC_DB_PASSWORD=… \
      --from-literal=KC_BOOTSTRAP_ADMIN_USERNAME=admin --from-literal=KC_BOOTSTRAP_ADMIN_PASSWORD=… --from-literal=FF_SMTP_PASSWORD=…
+   # The keys that encrypt functions' variables and secrets at rest: one a line, <id>:<32 bytes in base64>, the first sealing
+   echo "$(date +%Y-%m):$(openssl rand -base64 32)" > keys
+   kubectl -n ff-system create secret generic ff-encryption-keys --from-file=keys=./keys
    ```
 
-Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox, runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
+   Keep a copy of the keys file apart from the cluster and the database, as the backups' own key is kept (`deploy/backup/README.md`): without it, no function's variables or secrets can be read. To change keys, put a new line first in the Secret, restart the backend, and remove the old line once every function has been updated since.
+6. Each node's containerd told where code images are ("The code registry", below).
+
+Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox, the function URLs' settings and the code registry's Secrets, runs the migrations Job from the new image and waits for it, then applies the rest and waits for each rollout. The backend refuses to start on a schema with migrations pending anyway.
+
+**The code registry** ([ADR 0003](../../docs/adr/0003-code-delivery.md)). Every function runs its code from an image, which the backend makes from its package, inline code from a one-file package of its own, and pushes to the registry, and which the node pulls to mount at the function's `/var/task`. Without it, no function deploys, and the backend refuses to start in production. The registry is Zot, in its minimal build, in `ff-system` (`platform/70-code-registry.yaml`, its settings `platform/code-registry/config.json`):
+- **Two users,** from the Secret `ff-code-registry`'s `htpasswd`: `ff-backend` pushes and deletes, with its password in the Secret `ff-backend` (`FF_CODE_REGISTRY_PASSWORD`); `ff-node` only pulls. Nobody reads anything without a login.
+- **The backend** pushes to the Service by its name (`FF_CODE_REGISTRY` in `backend.env`), and names the images `registry.ff.internal/ff-code/<account>@sha256:…` (`FF_CODE_REGISTRY_PULL`). Only the backend reaches the registry from a pod: tenants' pods reach no private address, and `ff-system` denies by default.
+- **The nodes** pull from themselves, which k3s lets through, at the Service's fixed address, `10.43.0.250`, in the band of k3s's Service range (`10.43.0.0/16`) that Kubernetes keeps for fixed addresses; a cluster with another range gives another address in an overlay. Each node's containerd maps the name to it. On k3s, `/etc/rancher/k3s/registries.yaml` on every node, then a restart of k3s there:
+
+  ```yaml
+  mirrors:
+    registry.ff.internal:
+      endpoint:
+        - "http://10.43.0.250:5000"
+  configs:
+    "10.43.0.250:5000":
+      auth:
+        username: ff-node
+        password: "<ff-node's password>"
+  ```
+
+  Elsewhere, containerd's `hosts.toml` for `registry.ff.internal`, and its CRI configuration for the login. With a network plugin other than k3s's, or nodes that pull from the registry on another node, add the nodes' addresses to the NetworkPolicy `ff-code-registry`.
+- **No backup:** the backend makes an image again from its package's zip, which object storage keeps and the backups copy to the second site, when the registry has lost it, or a blob of it. Its retention job does so every hour and at the backend's start, for every package a function names, and then rolls out each working function whose pods mount an image the registry hasn't: one made again with another digest, by a later backend, isn't the one their pods name (the CLI plan's C-29). After losing the registry, restart the backend (`kubectl -n ff-system rollout restart deployment/ff-backend`) rather than wait for the hour. Meanwhile a pod that starts on a node without its image can't pull it, while running pods, and nodes that have it, keep it: put the volume on storage that outlives a node all the same. Blobs nothing names any more go a day later (`gc`); the volume, 20 GiB here, holds the images of the packages in use and those an hour unused.
+
+**Function URLs** (step-1 plan, D6 and D7). Each function URL is `https://<32 letters and digits>.<function domain>/`. The backend answers them on a port of its own, 3001 (`FF_FUNCTION_URL_PORT`), which its Service names `function-urls` and only the edge reaches; the edge sends every host under the function domain there. Three settings must agree, and `deploy.sh` checks that they do: the backend's `FF_FUNCTION_URL_BASE` (`https://fn.example.tn`, the addresses the API gives), the edge's `FF_FUNCTION_URL_DOMAIN` (`fn.example.tn`), and the DNS record `*.fn.example.tn` to the edge. Their certificates come one of two ways, as the edge's `FF_FUNCTION_URL_TLS` says:
+- `wildcard`, for production: one certificate for `*.fn.example.tn`, which Let's Encrypt issues only through a DNS-01 challenge, a TXT record `_acme-challenge.fn.example.tn` the edge writes and removes. It writes it with RFC 2136 updates, the standard that BIND, Knot and PowerDNS take, so FF depends on no DNS company: `FF_DNS_SERVER` (the primary server, `host:53`), `FF_DNS_TSIG_KEY_NAME` and `FF_DNS_TSIG_KEY_ALG` in `edge.env`, and the key itself in a Secret, which `deploy.sh` refuses to go without:
+
+  ```bash
+  # On the DNS server, BIND for example: a key, and the right to change that one record's TXT, nothing else.
+  tsig-keygen -a hmac-sha256 ff-acme. > /etc/bind/ff-acme.key   # include it in named.conf, then in the zone fn.example.tn:
+  #   update-policy { grant ff-acme. name _acme-challenge.fn.example.tn. TXT; };
+  # In the cluster: the namespace first, as the platform makes it, then the Secret with the key's secret.
+  kubectl apply -f deploy/k8s/platform/00-namespace-edge.yaml
+  kubectl -n ff-edge create secret generic ff-edge-dns --from-literal=FF_DNS_TSIG_KEY='<the secret of ff-acme.>'
+  ```
+
+  The record lives in the zone `fn.example.tn`, delegated to that server, or in FF's main zone if that server holds it. A provider without RFC 2136 has a module of its own for Caddy: build the edge with it instead (`deploy/edge/Dockerfile`, one `--with`), and change `edge/Caddyfile`'s `function-url-tls-wildcard` to it.
+- `on-demand`, without access to the DNS: a certificate for each URL's host, at its first request, once the edge has asked the backend (`/tls/allowed?domain=` on port 3001), which says yes only for a URL that exists, so nobody makes the edge ask for names of their choosing. Let's Encrypt issues 50 certificates a week per registered domain: enough for a small beta. The first request to a new URL waits for its certificate, a few seconds.
+
+**Customers' own domains** come through the same port: the edge's last site takes every host no other site names, and gets a certificate for it at its first request once the backend says the domain is verified (the same question, `/tls/allowed`), whatever `FF_FUNCTION_URL_TLS` says. Let's Encrypt's limit then counts per customer's domain, not FF's. Give the backend `FF_EDGE_ADDRESSES`, the edge's public addresses, in `backend.env`: a customer's domain apex, which can't be a CNAME, must point to them, and the check says so; without them, the TXT record alone proves an apex. The checks ask the cluster's DNS, or the servers `FF_DOMAIN_RESOLVERS` names.
+
+The test overlay (`hack/k8s/platform-e2e`) uses `on-demand` with Caddy's own authority, offline, and a DNS server of its own for a customer's domain.
 
 **The first operator:**
 1. In Keycloak's admin console (`https://<login>/admin`, from an address `FF_ADMIN_ALLOW` names), as the bootstrap administrator, make the user.
@@ -87,14 +138,16 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 | File | Object | Purpose |
 |---|---|---|
 | `platform/00-namespace-edge.yaml` | Namespace `ff-edge` | The edge's, the only pods the internet reaches. Pod Security `restricted` |
-| `platform/10-backend.yaml` | Service and Deployment `ff-backend` in `ff-system` | One replica, as `ff-controller`, with a token for the cluster's API asked for an hour, not the default year ("Cluster-wide reads", below); `/readyz` and `/healthz` its probes, its metrics port named `metrics`; user 10001, read-only root, the log store's key mounted for deleting a closed account's lines |
+| `platform/10-backend.yaml` | Service and Deployment `ff-backend` in `ff-system` | The API on port 80, functions' URLs on 3001 (`function-urls`); one replica, as `ff-controller`, with a token for the cluster's API asked for an hour, not the default year ("Cluster-wide reads", below); `/readyz` and `/healthz` its probes, its metrics port named `metrics`; user 10001, read-only root, the log store's key mounted for deleting a closed account's lines, and the keys of `ff-encryption-keys` for functions' variables and secrets |
 | `platform/15-migrations.yaml` | Job `ff-migrations` | The migrations, from the backend's image and settings; `deploy.sh` runs it first |
 | `platform/20-console.yaml`, `30-admin.yaml` | Services and Deployments `ff-console`, `ff-admin` | The static builds, two replicas each, user 65532, read-only root |
 | `platform/40-keycloak.yaml` | Service and Deployment `keycloak` | Keycloak 26.7.5 with `start`, TLS at the edge, its database outside; the realm imported at its first start. Non-root, no capability; its root is writable, as its start builds its configuration there |
-| `platform/50-edge.yaml` | PVC, Service (LoadBalancer, keeping callers' addresses) and Deployment `ff-edge` | Caddy on 8080 and 8443, the Service on 80 and 443; its certificates on the volume |
-| `platform/60-network-policies.yaml` | NetworkPolicies | `ff-system` denies by default; the edge reaches the backend, the apps and Keycloak; the backend reaches Keycloak for the realm's keys; the metrics store reaches the backend's metrics port; the edge takes the world on its two ports |
+| `platform/50-edge.yaml` | PVC, Service (LoadBalancer, keeping callers' addresses) and Deployment `ff-edge` | Caddy, with the RFC 2136 DNS module, on 8080 and 8443, the Service on 80 and 443; its certificates on the volume; the Secret `ff-edge-dns` in its environment when there is one |
+| `platform/60-network-policies.yaml` | NetworkPolicies | `ff-system` denies by default; the edge reaches the backend (its API and its port for functions' URLs), the apps and Keycloak; the backend reaches Keycloak for the realm's keys, and the code registry; the metrics store reaches the backend's metrics port; the edge takes the world on its two ports |
+| `platform/70-code-registry.yaml` | PVC, Service (at a fixed address) and Deployment `ff-code-registry` | Zot 2.1.22, minimal, the functions' code images; user 10001, read-only root; two users from the Secret `ff-code-registry` |
+| `platform/code-registry/config.json` | ConfigMap `ff-code-registry` | Zot's settings: its storage and its collection of blobs nothing names, the login, `ff-backend` pushing and deleting, `ff-node` pulling |
 | `platform/backend.env`, `keycloak.env`, `edge.env` | ConfigMaps | What isn't secret, with example values (`example.tn`) for an overlay to replace |
-| `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites, HSTS, the allowlist; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
+| `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites and the function domain's, HSTS, the allowlist, function URLs' certificates by DNS or on demand; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
 | `platform/keycloak/ff-realm.json` | ConfigMap `keycloak-realm` | The production realm |
 
 `hack/e2e-platform.sh` deploys them on a k3d cluster of its own, with `deploy.sh` and the overlay `hack/k8s/platform-e2e`, and takes a customer's path through the edge (the Kubernetes dev guide, "The platform on a cluster of its own"). `hack/k8s/test-platform-manifests.sh` checks them without deploying:
@@ -103,7 +156,9 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 - credentials in Secrets only: none in a ConfigMap, an environment value or a command line;
 - the backend's settings, read by the backend's own configuration;
 - the realm up to date;
-- the edge's Caddyfile, valid for Caddy;
+- the function domain the same for the backend and the edge, and the backend's port for function URLs reached by the edge alone;
+- the edge's image with the RFC 2136 module, and its Caddyfile valid for Caddy, with function URLs' certificates either way;
+- the code registry: Zot's settings valid for its pinned image, where the volume and the users' Secret are mounted; its fixed address and port the backend's settings name; the backend alone reaching it;
 - the cluster API's schemas, with a server dry run.
 
 ## Monitoring
@@ -150,14 +205,15 @@ Optional in development, required in production (see "Platform").
 | Resource | Verbs | Why |
 |---|---|---|
 | `namespaces` | get, list, watch, create, patch, update, delete | One namespace per tenant (`ff-t-<hash>`) |
-| `configmaps` | … + `deletecollection` | Immutable code ConfigMaps; clean-up by label |
+| `configmaps` | … + `deletecollection` | The code ConfigMaps functions had before their code came as images (ADR 0003): deleted at a function's second rollout since, and by label with the function. The backend makes none any more; its create and patch can go once no backend from before may run |
 | `services`, `resourcequotas`, `limitranges` | get, list, watch, create, patch, update, delete | Per-function Service; per-tenant guardrails |
 | `apps/deployments` (+ `deployments/scale`: get, patch, update) | get, list, watch, create, patch, update, delete | One Deployment per function; scaling, including to zero; once a minute, one list across the tenant namespaces for the capacity samples (client-readiness plan, P-21) |
 | `networking.k8s.io/networkpolicies` | get, list, watch, create, patch, update, delete | Default-deny policy per tenant |
+| `secrets` | create, patch, update, delete: **never get, list or watch** | A function's variables and secrets, which its pods read through `envFrom` ("Functions' environments", below) |
 | `pods` | get, list, watch | Readiness checks and failure diagnostics. `pods/log` went in P-43 (client-readiness plan): the logs, and the load error a failed deploy names, come from the log store |
 | `services/proxy` | get, create | **Development only,** in `dev/`: invoking functions through the API server |
 
-**Not granted:** secrets, `pods/log`, creating pods directly, `pods/exec`/`attach`/`portforward`, roles and bindings, nodes, `impersonate`, `escalate`, `bind`, and, in production, `services/proxy`.
+**Not granted:** reading secrets (get, list, watch), `pods/log`, creating pods directly, `pods/exec`/`attach`/`portforward`, roles and bindings, nodes, `impersonate`, `escalate`, `bind`, and, in production, `services/proxy`.
 
 ## Why an admission policy
 
@@ -178,20 +234,29 @@ RBAC can't limit reads to `ff-t-*` namespaces, and the admission policy doesn't 
 
 It can no longer read containers' logs: `pods/log` went in P-43, when the logs began to come from the log store. In development, it can also query the log store, which holds the functions' logs only.
 
-It still couldn't read Secrets, run anything inside a pod, or change anything outside the tenant namespaces.
+It still couldn't read Secrets, run anything inside a pod, or change anything outside the tenant namespaces. It may write Secrets in tenant namespaces, never read one: see "Functions' environments", below.
 
 **FF accepts this, under five rules:**
 1. FF has its own cluster, with no unrelated workloads.
 2. Platform components keep credentials in Secrets only: never in ConfigMaps, environment values or command lines, and never in their logs. `hack/k8s/test-platform-manifests.sh` checks the platform's manifests for this: no ConfigMap key or environment value named like a credential, no password in a URL, no private key, and no secret written into the realm's JSON (its SMTP password is `${FF_SMTP_PASSWORD}`, filled in from the Secret when Keycloak starts).
 3. Inside the cluster the backend's token is asked for an hour (`deploy/k8s/platform/10-backend.yaml`), bound to its pod, and renewed by the kubelet before it expires; the backend reads the file again every minute. The token Kubernetes mounts by default would be valid for a year: measured on k3s, 31,536,000 s. `hack/e2e-platform.sh` reads it in the backend's pod: 3,600 s.
 4. `pods/log` went when the log store began to serve logs (client-readiness plan, P-43).
-5. A function's pod spec holds no secret: today it has FF's own settings only. When functions get environment variables of their own, as on Lambda, their values go in a Secret in the tenant's namespace, never as plain values in the pod spec, which this token reads.
+5. A function's pod spec holds no secret. Since functions have environment variables and secrets of their own (step-1 plan, U-01), their values go in a Secret in the tenant's namespace, read through `envFrom`, never as plain values in the pod spec, which this token reads.
 
 **Reviewed by the security review** (client-readiness plan, P-64, 2026-10-20), and kept, for the beta and for GA:
-- What a stolen token shows is the platform's layout (names, images, settings without credentials, the cluster's public CA), and every customer's function code, which the functions' ConfigMaps hold. Rules 2 and 5 keep credentials out of it. The token itself can change nothing outside `ff-t-*` namespaces, which the admission policy enforces.
+- What a stolen token shows is the platform's layout (names, images, settings without credentials, the cluster's public CA), and every customer's function code, which the functions' ConfigMaps hold. Rules 2 and 5 keep credentials out of it. The token itself can change nothing outside `ff-t-*` namespaces, which the admission policy enforces. **Since 2026-10-21** functions' code is in the code registry rather than in ConfigMaps ([ADR 0003](../../docs/adr/0003-code-delivery.md)): the token shows only the code ConfigMaps of functions deployed before, until their next rollouts delete them, and the images' names, not their contents, which take a registry login from a Secret.
 - Rule 3 was found untrue as written: the backend used the default token, valid for a year. It now asks for an hour.
-- The narrower option below would hide `kube-system` and `ff-system` from the token, which hold no credentials outside Secrets. To do that, it would give the backend the power to create RoleBindings, a write that is riskier than these reads. And the functions' code stays readable under either option, since the backend must read their namespaces. So it is not taken.
+- The narrower option below would hide `kube-system` and `ff-system` from the token, which hold no credentials outside Secrets. To do that, it would give the backend the power to create RoleBindings, a write that is riskier than these reads. And the functions' code stayed readable under either option, since the backend must read their namespaces (no longer: their code is in the registry now, above). So it is not taken.
 
 **The narrower option, not taken:** read permissions per tenant namespace, through a RoleBinding in each one to a ClusterRole `ff-tenant-reader`. RBAC lets a subject create a binding to a role only if it holds the role's permissions or may `bind` that role, so granting `bind` on `ff-tenant-reader` alone, with the admission policy keeping such bindings inside `ff-t-*` namespaces, would let the backend create them without a separate provisioner. It moves the risk into the backend's right to create bindings, so it needs its own review before it replaces the cluster-wide reads.
+
+## Functions' environments (step-1 plan, U-01)
+
+A function's variables and secrets reach its pods through a Secret in its account's namespace, which the pods read through `envFrom`. So the backend may **create, patch, update and delete Secrets, and never get, list or watch one**:
+- the admission policy keeps those writes to `ff-t-*` namespaces, as every write of the backend's;
+- the answer to a write is the object written: in a tenant namespace, an environment the backend wrote itself; anywhere else the policy refuses the write before anything is written or answered;
+- each function has two Secrets, `fn-<id>-env-0` and `fn-<id>-env-1`, written in turn: a new environment goes into the one the running version doesn't read, so that its pods keep theirs during a rollout and a rollback finds the old values. The backend reads which one is in use from the Deployment, and deletes the other once a rollout is complete; deleting a function deletes both, by name;
+- the backend keeps them in its database encrypted with the keys of `ff-encryption-keys` (the backup runbook says where their copy lives);
+- in etcd, Secrets are encrypted only when the cluster says so: start k3s with `--secrets-encryption` (or turn it on with `k3s secrets-encrypt enable`, then rotate). A cluster without it keeps every Secret, FF's own included, in clear on its disks.
 
 `hack/k8s/test-rbac.sh` checks all of this against a live cluster, both what is allowed and what is denied. For the production manifests, it removes the development overlay's binding, checks that no Service proxy is left, and restores it.

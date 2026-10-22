@@ -6,6 +6,9 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 
 - **Functions API** (NestJS, PostgreSQL, S3-compatible storage). You can:
   - create, update, delete, and invoke functions;
+  - give a function environment variables, as on AWS Lambda, and secrets, variables whose values nobody reads back: 4 KB at most together, encrypted at rest, delivered to its pods through a Kubernetes Secret that the backend writes and never reads;
+  - give a function a URL, a web address as AWS Lambda's function URLs have: any request to it calls the function with Lambda's event for them, and the function's answer is the response; open to anyone or only to the account's API keys, with CORS, counted and billed as an invoke, and at the customer's own domains once DNS proves them theirs. The backend answers URLs on a port of its own, `http://<id>.fn.localhost:3001/` in development, and in a cluster the edge serves them over HTTPS, with a wildcard certificate it gets through FF's DNS (RFC 2136) or one per host on demand;
+  - run a function on a schedule, with EventBridge's expressions (`rate(5 minutes)`, `cron(0 2 * * ? *)`) and its Scheduled Event, each run at most once and counted, billed and kept as an invoke;
   - see the invocation history with durations, kept for the plan's retention with up to 64 KiB of each input, output and error;
   - read a function's or the account's metrics, named as CloudWatch names Lambda's (invocations, errors, throttles, cold starts, the duration's percentiles, instances), a point a minute, five minutes or an hour, from the usage records the bill is made of;
   - be notified by e-mail, each owner in their language, and by webhooks signed with the account's secret and tried again when they fail: a test, from the API or the console's Notifications page;
@@ -15,8 +18,8 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
   - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy: its functions reach the internet only once you turn the account's egress on, and never FF's own network;
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
-  - code is stored in immutable ConfigMaps, up to 900 KiB. The API currently accepts requests of about 100 KB at most, which is task C-03 of the [CLI plan](docs/cli-plan.md).
-- **Runtimes** `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2`, runtime protocol 2 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
+  - every function's code runs as an image in the cluster's registry, which its pods mount read-only at `/var/task` ([ADR 0003](docs/adr/0003-code-delivery.md)): a package's, a zip with its libraries as AWS Lambda takes one (50 MB, 250 MB unpacked), checked entry by entry when it is uploaded; and inline code's, one file of up to 3 MiB, as AWS Lambda's console takes, which the backend makes a one-file package of. An invocation's input may have 6 MB as JSON, as on AWS Lambda.
+- **Runtimes** `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`, runtime protocol 3 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
   - Lambda's `handler(event, context)`, error names, and log lines, with the code's directory as the working directory and the peak memory as `Max Memory Used`;
   - real timeouts;
   - out-of-memory and crashes are handled per invocation, without restarting the container; a replacement that can't load the code again restarts it;
@@ -31,12 +34,12 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 - **Deployment:** images for the backend, the console, the admin app and the edge, each non-root on a read-only root; `deploy/k8s/platform` deploys them with Keycloak and a Caddy edge proxy (Let's Encrypt, an admin allowlist), migrations first, every workload behind its own NetworkPolicy, PostgreSQL and S3 outside the cluster. `hack/e2e-platform.sh` deploys it on a cluster of its own and takes a customer's path through the edge.
 - **Backups** ([deploy/backup](deploy/backup/README.md)): point-in-time recovery of FF's and Keycloak's databases to a second site, encrypted, with at most 5 minutes of WAL at risk; the invoices and withholding certificates mirrored hourly; a restore runbook, and a monthly drill (`hack/backup-drill.sh`) recorded in `docs/backup-drills.md`.
 - **Admin dashboard:** a separate web app in `admin/`, for you as FF's operator: Keycloak's client `ff-admin`, the realm role `ff-operator` and a one-time password. It opens on the accounts waiting for your approval; every account has a page with its members, functions, usage, balance and history, where you approve, reject, suspend, reactivate or close it, and change its plan or internet egress, and its owners get an e-mail. Its Payments page finds a pro-forma by the reference on the bank statement, records the transfer, and takes the withholding certificate; its Invoices page issues a month's invoices and their credit notes; its Prices page makes new price books, tried first on last month; its Plans page edits plans' limits, which apply at once. Every change takes a reason, which the audit log keeps; the operator audit log lists every operator's actions, filtered by operator, account, action and date, and exports them as CSV. The platform's settings are there too.
-- **Console:** a React + Vite web app in `FE/`: login and sign-up, the new account's onboarding and approval, account settings, members, API keys, the function pages, which show each role only what it may do, with each function's logs, searched or followed live, its metrics and its alarms; the account's alarms, notifications and usage; and billing: the balance on every page, credit by bank transfer against a pro-forma, the invoices and the usage statements.
+- **The `ff` command** ([`cli/`](cli/README.md), Rust, one static binary that talks to the API only): `ff deploy` a file, or a folder as a package with its libraries, creating the function or updating what changed, and `ff package`, the same zip for AWS Lambda too; `ff invoke`, `ff logs` with the live tail, `ff list`, `get`, `history`, `scale` and `delete`, by the function's name; `ff local invoke` and `ff local start`, a function run on this machine in Docker as its pod runs it; `ff init`, a new function's folder; `ff config` and `ff whoami`, with an API key or, in development, the account to act as. Its exit codes tell a failed deploy (4) and a failed call (5) from the account's refusal (6). `hack/build-cli.sh` makes the static Linux binary, `hack/cli-e2e.sh` tests it against the stack. The [CLI plan](docs/cli-plan.md) builds it, task by task.
+- **Console:** a React + Vite web app in `FE/`: login and sign-up, the new account's onboarding and approval, account settings, members, API keys, the function pages, which show each role only what it may do, with each function's variables and secrets, its URL and its domains, its schedules, its logs, searched or followed live, its metrics and its alarms; the account's alarms, notifications and usage; and billing: the balance on every page, credit by bank transfer against a pro-forma, the invoices and the usage statements.
 
 **Not implemented yet**, despite what older documents say:
 - Paying: usage is rated and charged hourly (debited once you turn shadow mode off), credit comes by bank transfer and from FF's grants, and each month's credit is invoiced as a PDF, but there are no refunds yet, no card payments, and no El Fatoora e-invoicing (skipped for now). See phase 3 of the client-readiness plan.
-- Custom domains and function versioning.
-- Multi-file packages with dependencies, which need the zip pipeline (parent plan R-02).
+- Function versions and aliases.
 
 Nomad is no longer used; its development VM was removed.
 
@@ -47,7 +50,8 @@ Nomad is no longer used; its development VM was removed.
 | `BE/` | Backend: functions API, metrics, scaling, and the orchestrator (`src/orchestrator/kubernetes`) |
 | `FE/` | Console (React, Vite, Tailwind) |
 | `admin/` | Admin dashboard for FF's operators (React, Vite, Tailwind): a separate app, behind its own login (P-70) |
-| `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol 2 |
+| `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol 3 |
+| `cli/` | The `ff` command (Rust): one binary that works through the API only, being built as the [CLI plan](docs/cli-plan.md) says |
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs), `logging/` (the log pipeline), `monitoring/` (the operator's metrics, alerts and dashboards), `platform/` (the backend, the apps, Keycloak and the edge proxy, with their deploy script), `backup/` (the legal records' mirror) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
 | `infrastructure/` | SeaweedFS (S3) identities for `docker-compose.yml` |
@@ -63,8 +67,8 @@ You need Docker 24+, Node.js 24.15 or newer, Python 3.11+ (for the Python runtim
 ```bash
 docker compose up -d --wait                 # PostgreSQL (127.0.0.1:5432) + SeaweedFS S3 (127.0.0.1:9003)
 hack/k8s/cluster-up.sh                      # k3d cluster (k3s v1.37.1), RBAC, admission policy, credentials
-runtimes/nodejs/test/container-smoke.sh     # builds ff-runtime-nodejs:24-v2 and checks it
-runtimes/python/tests/container-smoke.sh    # builds ff-runtime-python:3.13-v2 and checks it
+runtimes/nodejs/test/container-smoke.sh     # builds ff-runtime-nodejs:24-v3 and checks it
+runtimes/python/tests/container-smoke.sh    # builds ff-runtime-python:3.13-v3 and checks it
 hack/k8s/load-images.sh                     # imports the runtime images into the cluster
 cp BE/.env.example BE/.env                  # first time only; the defaults match the steps above
 cd BE && npm install && npm run migration:run   # the database schema comes from migrations
@@ -76,7 +80,7 @@ Create a function and invoke it:
 ```bash
 curl -s localhost:3000/functions -H 'content-type: application/json' -d @- <<'EOF'
 {"name": "hello", "runtime": "nodejs", "memory": 128, "timeout": 5,
- "code": "export async function handler(event) { return { message: `Hello ${event.body.name ?? 'world'}` }; }"}
+ "code": "export async function handler(event) { return { message: `Hello ${event.name ?? 'world'}` }; }"}
 EOF
 curl -s -X POST localhost:3000/functions/<id>/invoke -H 'content-type: application/json' -d '{"input": {"name": "FF"}}'
 # → {"status": "COMPLETED", "output": {"message": "Hello FF"}, "duration": 0.48, …}
@@ -95,6 +99,7 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 | L1 runtimes | `cd runtimes/nodejs && npm test`; `cd runtimes/python && python3 -m unittest discover -s tests` | The runtime protocol on real processes |
 | L1 log filter | `hack/k8s/test-logging-filter.sh` | The log collector's configuration and Lua filter (each line's call, the limit, the notices, the cut), in the Fluent Bit image (Docker) |
 | L1 console | `cd FE && npm test` | What the console sends and shows: the fields of an edit, invoke input, API error messages, units; the token and account on each request, token renewal, the account it acts for, API keys; and that its port, client and scopes match the realm and the API (Vitest) |
+| L1, L2 `ff` | `cd cli && cargo test --locked` | The `ff` command: its settings and their precedence, its API client and error mapping, its exit codes, the container `ff local` starts; then the built binary against a scripted API that answers in order and records what it was sent |
 | L2 database | `cd BE && npm run test:db`; `npm run migration:check` | The migrations against real PostgreSQL, each case in its own scratch database; no drift between the migrations and the entities |
 | L2 images | `runtimes/*/test*/container-smoke.sh` | Images run hardened: read-only, uid 10001, no capabilities, no package manager |
 | L3 | `hack/k8s/test-it.sh` | The Kubernetes driver against the dev cluster (deploy, rollout, scale to zero, network policy, memory, gVisor), the function lifecycle (repair, rollback, updates at zero, a runtime that never answers), and, where it is installed, the log pipeline (what functions print reaches the store, limited, and only the backend may query it) |
@@ -102,6 +107,7 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 | L4 | `hack/e2e.sh` | The whole stack through the REST API, with both runtimes, and the code archive in object storage; an alarm that fires on a function's error and recovers, telling a local webhook receiver |
 | Pipeline | `hack/ci.sh static unit db security cluster` | All of the above in stages, as the CI server runs them (`.github/workflows/ci.yml`): plus the builds, the docs, gitleaks on every commit, `npm audit`, and every image scanned by Trivy with its SBOM ([getting started](docs/getting-started.md), "The pipeline") |
 | L5 | `hack/e2e-tenancy.sh` | Every route of the OpenAPI document, as another account (404, nothing changes) and anonymously (401); sign-up through Keycloak and Mailpit; isolation between two real accounts; a function's metrics against its usage records; a test notification to a local receiver, signed, and to the owner's e-mail; each account's alarms its own; closing an account, and its data deleted once its notice period has passed |
+| L3 `ff` | `hack/cli-e2e.sh` | The built `ff` against the stack, in development mode with a profile per account: deploy, invoke, logs and the live tail, update, scale, history, delete for both runtimes; the exit codes of a failed load, an error and a timeout; another account's view; `ff init`; `ff local` in Docker, with a failed load, a timeout, a call over its memory, and Ctrl-C |
 
 ## Documentation
 
@@ -111,7 +117,11 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 - [Client-readiness plan](docs/client-readiness-plan.md): the work that takes FF to its first paying customers, task by task, with its progress log.
 - [Kubernetes migration plan](docs/kubernetes-migration-plan.md): the design and the task log K-00 to K-13.
 - [Local markets and AWS portability plan](docs/local-markets-and-aws-portability-plan.md): the product and portability roadmap.
-- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in four phases (proposed).
+- [CLI plan](docs/cli-plan.md): the `ff` command-line tool, in six phases; phases 0 to 2 done with step 1.
+- [What to build next](docs/what-to-build-next.md): what FF adds after functions, in five steps, and the longer view.
+- [Step 1 plan](docs/step-1-plan.md): environment variables and secrets, AWS's events, function URLs, schedules, packages and the CLI, task by task, with its progress log; done in development.
+- [Step 2 plan](docs/step-2-plan.md): a database and file storage, managed PostgreSQL and buckets behind an S3 front door; confirmed on 2026-10-22, it starts after the CLI plan's C-29.
+- [Decision log](docs/decisions.md): every decision you made about FF, with what it changed and what is still to change, and the questions still waiting for you.
 - [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why; how to deploy the platform.
 - [deploy/backup](deploy/backup/README.md): the backups, the restore runbook and the monthly drill.
 - [The documentation's index](docs/README.md), with the architecture decisions (ADRs).

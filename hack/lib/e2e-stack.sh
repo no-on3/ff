@@ -16,6 +16,10 @@ work="$FF_REPO_ROOT/hack/.$E2E_NAME"
 compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth)
 e2e_pids=()
 e2e_namespaces=()
+# Containers a test starts beside the compose project, such as a DNS server: removed on exit.
+e2e_containers=()
+# Commands that undo what a test set up beside the stack, such as an app's database: run on exit, first.
+e2e_cleanups=()
 e2e_teardown=false
 passed=0
 mkdir -p "$work"
@@ -30,12 +34,35 @@ e2e_base_env=(
   ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy
   K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" K8S_LOG_STORE_DELETE_KEY_FILE="$FF_LOG_STORE_DELETE_KEY_FILE"
   K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
+  # The images this stack builds and imports, whatever a developer's BE/.env names: ConfigModule reads that file too.
+  K8S_RUNTIME_IMAGE_NODEJS=ff-runtime-nodejs:24-v3 K8S_RUNTIME_IMAGE_PYTHON=ff-runtime-python:3.13-v3
   # No operator's metrics port: the development backend may hold the default one. A test that reads them gives a free port.
   FF_METRICS_PORT=0
+  # Nor a function URL gateway, for the same reason: a test that calls URLs gives it a free port, and the base to match.
+  FF_FUNCTION_URL_PORT=0
+  # Every function's code runs as a code image (ADR 0003), pushed to the cluster's registry (hack/k8s/registry-up.sh), pulled by its node.
+  FF_CODE_REGISTRY="http://127.0.0.1:$FF_REGISTRY_PORT" FF_CODE_REGISTRY_PULL="$FF_REGISTRY_NAME:5000"
 )
 
+# e2e_dns <port> <directory>: a DNS server on 127.0.0.1:<port>, CoreDNS, for customers' domains: each zone file
+# <zone>.db in the directory is served, read again within a second of a change (its serial must grow).
+e2e_dns() {
+  local port=$1 dir=$2 zone
+  : >"$dir/Corefile"
+  for zone in "$dir"/*.db; do
+    zone="$(basename "$zone" .db)"
+    printf '%s:53 {\n  file /zones/%s.db {\n    reload 1s\n  }\n}\n' "$zone" "$zone" >>"$dir/Corefile"
+  done
+  docker run -d --name "$E2E_PROJECT-dns" -p "127.0.0.1:$port:53/udp" -p "127.0.0.1:$port:53/tcp" -v "$dir:/zones:ro" \
+    rancher/mirrored-coredns-coredns:1.14.7 -conf /zones/Corefile >/dev/null
+  e2e_containers+=("$E2E_PROJECT-dns")
+}
+
 e2e_cleanup() {
-  local status=$? pid ns
+  local status=$? pid ns command
+  for command in "${e2e_cleanups[@]}"; do
+    eval "$command" >/dev/null 2>&1 || true
+  done
   for pid in "${e2e_pids[@]}"; do
     if kill -0 "$pid" 2>/dev/null; then
       kill "$pid"
@@ -45,6 +72,7 @@ e2e_cleanup() {
   for ns in "${e2e_namespaces[@]}"; do
     kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   done
+  [ "${#e2e_containers[@]}" -eq 0 ] || docker rm -f "${e2e_containers[@]}" >/dev/null 2>&1 || true
   "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   if $e2e_teardown; then "$FF_REPO_ROOT/hack/k8s/cluster-down.sh" >/dev/null 2>&1 || true; fi
   if [ "$status" -ne 0 ]; then
@@ -102,11 +130,13 @@ e2e_cluster() {
   kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/logging-up.sh" >/dev/null
   # Closing an account deletes its log lines with the store's key (P-45).
   "$FF_REPO_ROOT/hack/k8s/log-store-key.sh" >/dev/null
-  docker image inspect ff-runtime-nodejs:24-v2 >/dev/null 2>&1 ||
-    docker build -q -t ff-runtime-nodejs:24-v2 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
-  docker image inspect ff-runtime-python:3.13-v2 >/dev/null 2>&1 ||
-    docker build -q -t ff-runtime-python:3.13-v2 "$FF_REPO_ROOT/runtimes/python" >/dev/null
-  "$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v2 ff-runtime-python:3.13-v2 >/dev/null 2>&1
+  # Every function's code runs as a code image (ADR 0003): a cluster made before its registry gets it now.
+  "$FF_REPO_ROOT/hack/k8s/registry-up.sh" >/dev/null
+  docker image inspect ff-runtime-nodejs:24-v3 >/dev/null 2>&1 ||
+    docker build -q -t ff-runtime-nodejs:24-v3 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
+  docker image inspect ff-runtime-python:3.13-v3 >/dev/null 2>&1 ||
+    docker build -q -t ff-runtime-python:3.13-v3 "$FF_REPO_ROOT/runtimes/python" >/dev/null
+  "$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v3 ff-runtime-python:3.13-v3 >/dev/null 2>&1
   echo "  $FF_CLUSTER_NAME ready, runtime images imported"
 }
 

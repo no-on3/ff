@@ -13,6 +13,8 @@ const BETA: PlanLimits = {
   historyRetentionDays: 30,
   idleSeconds: 900,
   internetEgress: false,
+  customDomains: 5,
+  schedules: 20,
 };
 
 describe("a plan's limits, in a form (P-73)", () => {

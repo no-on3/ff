@@ -127,6 +127,9 @@ def load_handler():
     if not separator or not module_name or not attribute:
         raise InitError("Runtime.MalformedHandlerName", f"Bad handler '{HANDLER}': expected <module>.<function>")
     module_name = module_name.replace("/", ".")
+    # As on AWS Lambda: a module compiled into Python (sys, time) would be imported instead of the function's.
+    if module_name.split(".")[0] in sys.builtin_module_names:
+        raise InitError("Runtime.BuiltInModuleConflict", f"Cannot use built-in module {module_name} as a handler module")
     sys.path.insert(0, TASK_ROOT)
     try:
         module = importlib.import_module(module_name)

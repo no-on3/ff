@@ -22,10 +22,13 @@ import { Function, FunctionStatus, Runtime } from '../functions/entities/functio
 import { FunctionsService } from '../functions/functions.service';
 import { LogStoreUnavailableError } from '../orchestrator/orchestrator.errors';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
+import { Package, packageKey } from '../packages/package.entity';
+import { PackagesService } from '../packages/packages.service';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
 import { RetentionService } from './retention.service';
+import { memoryEnvironments, noPackages } from '../functions/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const MINUTE = 60;
@@ -43,7 +46,7 @@ run('what FF keeps only for a while (L2)', () => {
     removeTenant: jest.fn(async (_accountId: string) => undefined),
     deleteLogs: jest.fn(async (_accountId: string) => undefined),
   };
-  const minio = { deleteCode: jest.fn(async (_path: string) => undefined) };
+  const minio = { deleteCode: jest.fn(async (_path: string) => undefined), deleteObject: jest.fn(async (_key: string) => undefined) };
 
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
 
@@ -98,8 +101,11 @@ run('what FF keeps only for a while (L2)', () => {
       audit,
       new UsageService(db.dataSource.getRepository(UsageRecord), db.dataSource, config),
       { admit: async () => undefined } as never,
+      memoryEnvironments(),
+      ...noPackages(),
     );
-    retention = new RetentionService(db.dataSource, functions, orchestrator as unknown as Orchestrator, audit, config);
+    const packages = new PackagesService(db.dataSource.getRepository(Package), minio as never, audit, { deleteImage: async () => undefined } as never);
+    retention = new RetentionService(db.dataSource, functions, packages, orchestrator as unknown as Orchestrator, audit, config);
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
 
@@ -215,6 +221,13 @@ run('what FF keeps only for a while (L2)', () => {
     const historyOf = (accountId: string) =>
       count('SELECT count(*)::int AS n FROM function_invocations i JOIN usage_records u ON u.request_id = i.id WHERE u.account_id = $1', accountId);
     const recordsOf = (accountId: string) => count('SELECT count(*)::int AS n FROM usage_records WHERE account_id = $1', accountId);
+    /** A package the account uploaded: its SHA-256. */
+    const packaged = async (accountId: string) => {
+      const sha = Buffer.from(accountId.padEnd(32, '0')).toString('base64');
+      await query(`INSERT INTO packages (account_id, code_sha256, code_size, unpacked_size, file_count, files) VALUES ($1, $2, 100, 200, 1, '{app.js}')`, [accountId, sha]);
+      return sha;
+    };
+    const packagesOf = (accountId: string) => count('SELECT count(*)::int AS n FROM packages WHERE account_id = $1', accountId);
     const deletedAt = async (accountId: string) =>
       (await query<Array<{ at: Date | null }>>('SELECT data_deleted_at AS at FROM accounts WHERE id = $1', [accountId]))[0].at;
     /** A notification delivered to the account, and its webhook secret. */
@@ -240,13 +253,15 @@ run('what FF keeps only for a while (L2)', () => {
         (row) => `${row.action} ${row.actor} ${row.resource}`,
       );
 
-    it("deletes a closed account's functions, with their code and history, its namespace, its logs and its notifications once its date has passed, keeps its usage records, and says so once", async () => {
+    it("deletes a closed account's functions, with their code and history, its packages, its namespace, its logs and its notifications once its date has passed, keeps its usage records, and says so once", async () => {
       const due = await closedAccount(-MINUTE);
       const later = await closedAccount(DAY);
       const active = await functionOn('beta');
       await invokedAgo(active, DAY);
       for (const id of [due.id, later.id]) await notified(id);
       const [node, python] = due.functions;
+      const sha = await packaged(due.id);
+      await packaged(later.id);
 
       await expect(retention.deleteClosedAccounts()).resolves.toBe(1);
 
@@ -257,6 +272,7 @@ run('what FF keeps only for a while (L2)', () => {
       ]);
       expect(removed).toEqual([node.id, python.id]);
       expect(minio.deleteCode.mock.calls).toEqual([[`${node.id}/code.ts`], [`${python.id}/code.py`]]);
+      expect([await packagesOf(due.id), await packagesOf(later.id), minio.deleteObject.mock.calls]).toEqual([0, 1, [[packageKey(due.id, sha)]]]);
       expect([orchestrator.removeTenant.mock.calls, orchestrator.deleteLogs.mock.calls]).toEqual([[[due.id]], [[due.id]]]);
       expect(Date.now() - ((await deletedAt(due.id)) as Date).getTime()).toBeLessThan(60_000);
       expect(await auditOf(due.id)).toEqual([

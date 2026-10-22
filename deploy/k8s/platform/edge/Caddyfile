@@ -1,8 +1,9 @@
-# FF's edge: TLS for the API, the console, the admin app and the login, each on its hostname, its certificate
-# from Let's Encrypt (ACME), kept on the edge's volume. Every value is the edge's environment (edge.env), read
-# when Caddy starts. The admin app, and Keycloak's own admin console, answer only the addresses FF_ADMIN_ALLOW
-# names; everyone else gets 403. The caller's address is the connection's: the Service keeps it
-# (externalTrafficPolicy: Local), and each app behind is told it in X-Forwarded-For.
+# FF's edge: TLS for the API, the console, the admin app and the login, each on its hostname, and for functions'
+# URLs, every host under the function domain; certificates from Let's Encrypt (ACME), kept on the edge's volume.
+# Every value is the edge's environment (edge.env, and the Secret ff-edge-dns), read when Caddy starts. The admin
+# app, and Keycloak's own admin console, answer only the addresses FF_ADMIN_ALLOW names; everyone else gets 403.
+# The caller's address is the connection's: the Service keeps it (externalTrafficPolicy: Local), and each app
+# behind is told it in X-Forwarded-For.
 {
 	admin off
 	email {$FF_ACME_EMAIL}
@@ -14,6 +15,12 @@
 	skip_install_trust
 	# Caddy's own redirects would name its port, 8443: the one below names none, so 443.
 	auto_https disable_redirects
+	# A certificate on demand (a function URL's host with FF_FUNCTION_URL_TLS=on-demand, a customer's own domain
+	# always) only for a host the backend says is one, verified: nobody makes the edge ask a certificate authority for
+	# names of their choosing.
+	on_demand_tls {
+		ask http://ff-backend.ff-system.svc.cluster.local:3001/tls/allowed
+	}
 	log {
 		output stdout
 		format json
@@ -38,6 +45,50 @@ http:// {
 {$FF_API_HOST} {
 	import common
 	reverse_proxy ff-backend.ff-system.svc.cluster.local:80
+}
+
+# Function URLs' certificates, as FF_FUNCTION_URL_TLS chooses: one for *.<function domain>, which Let's Encrypt
+# issues only through DNS (DNS-01), here by RFC 2136 updates signed with a TSIG key; or one per host, at the host's
+# first request, once the backend says yes (50 a week per registered domain, Let's Encrypt's limit: a small beta's).
+(function-url-tls-wildcard) {
+	tls {
+		dns rfc2136 {
+			server {$FF_DNS_SERVER}
+			key_name {$FF_DNS_TSIG_KEY_NAME}
+			key_alg {$FF_DNS_TSIG_KEY_ALG}
+			key {$FF_DNS_TSIG_KEY}
+		}
+	}
+}
+
+(function-url-tls-on-demand) {
+	tls {
+		on_demand
+	}
+}
+
+# Functions' URLs, <id>.<function domain>, to the backend's function URL gateway, as the callers sent them: no
+# compression of the functions' answers, which are theirs.
+*.{$FF_FUNCTION_URL_DOMAIN} {
+	import function-url-tls-{$FF_FUNCTION_URL_TLS}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	log
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:3001
+}
+
+# Customers' own domains for their functions' URLs, each proved by DNS: every other host, its certificate made on
+# demand at its first request once the backend says the domain is verified, else the handshake fails. Without HSTS:
+# the domain is the customer's, and its other names too.
+https:// {
+	tls {
+		on_demand
+	}
+	header -Server
+	log
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:3001
 }
 
 {$FF_CONSOLE_HOST} {

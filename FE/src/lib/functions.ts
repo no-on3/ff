@@ -1,4 +1,4 @@
-import type { Function, FunctionUpdate, PlanLimits, ScalingLimits } from '../services/api';
+import type { Function, FunctionUpdate, InvocationSource, PlanLimits, ScalingLimits } from '../services/api';
 
 /**
  * AWS Lambda's rule for a function's name, which the API applies, as an HTML
@@ -10,10 +10,10 @@ export const MAX_FUNCTION_NAME_LENGTH = 64;
 /** The rule in words, for the forms. */
 export const FUNCTION_NAME_RULE = '1 to 64 letters, digits, hyphens or underscores';
 
-/** The fields the console's edit form changes. */
-export type EditableFields = Pick<Function, 'name' | 'code' | 'memory' | 'timeout'>;
+/** The fields the console's edit form changes. The event format, only for a function that still gets FF's original event. */
+export type EditableFields = Pick<Function, 'name' | 'code' | 'memory' | 'timeout' | 'eventFormat'>;
 
-const EDITABLE: ReadonlyArray<keyof EditableFields> = ['name', 'code', 'memory', 'timeout'];
+const EDITABLE: ReadonlyArray<keyof EditableFields> = ['name', 'code', 'memory', 'timeout', 'eventFormat'];
 
 /**
  * The body of PUT /functions/:id for an edit: only the editable fields that
@@ -59,21 +59,36 @@ export function createFailure(error: unknown): CreateFailure {
   return { message: apiErrorMessage(error), ...(typeof saved === 'string' && saved ? { functionId: saved } : {}) };
 }
 
-export type ParsedInput = { ok: true; input: Record<string, unknown> } | { ok: false; error: string };
+export type ParsedInput = { ok: true; input: unknown } | { ok: false; error: string };
 
-/** The invoke form's text as the API's `input`: empty means {}, and it must be a JSON object. */
+/** The invoke form's text as the API's `input`: empty means {}, else any JSON value, as AWS Lambda takes a payload. */
 export function parseInvokeInput(text: string): ParsedInput {
   if (text.trim() === '') return { ok: true, input: {} };
-  let value: unknown;
   try {
-    value = JSON.parse(text);
+    return { ok: true, input: JSON.parse(text) as unknown };
   } catch {
     return { ok: false, error: 'The input is not valid JSON' };
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return { ok: false, error: 'The input must be a JSON object, such as {"name": "FF"}' };
-  }
-  return { ok: true, input: value as Record<string, unknown> };
+}
+
+/** A size in bytes, as people read one: bytes, KB or MB, decimal, as the API's limits say them. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1000) return `${bytes} bytes`;
+  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(1)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+/** A function's code, said for its page: inline or a package, its size, and the hash that names it. */
+export function codeText(func: Pick<Function, 'packageType' | 'codeSize' | 'codeSha256'>): string {
+  const kind = func.packageType === 'zip' ? 'A package' : 'Inline code';
+  return `${kind}, ${formatBytes(func.codeSize)}, SHA-256 ${func.codeSha256}`;
+}
+
+/** What a function's handler gets, said for its page: its event format, in words. */
+export function eventFormatText(func: Pick<Function, 'eventFormat'>): string {
+  return func.eventFormat === 'wrapped'
+    ? "FF's original event: the input in event.body, inside the request FF sent the function"
+    : "AWS Lambda's event: the input itself";
 }
 
 /**
@@ -81,6 +96,10 @@ export function parseInvokeInput(text: string): ParsedInput {
  * 64 KiB of each input, output and error, the personal data of the customer's users.
  */
 export const TRUNCATED_NOTE = 'Truncated: the history keeps the first 64 KiB.';
+
+/** What brought a call, as the history says it. */
+export const sourceText = (source: InvocationSource): string =>
+  ({ api: 'through the API', url: 'through its URL', schedule: 'by a schedule' })[source] ?? source;
 
 /**
  * An input or output as the history shows it: its JSON, indented; or, when

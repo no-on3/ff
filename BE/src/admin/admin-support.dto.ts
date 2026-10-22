@@ -1,7 +1,10 @@
 import { ApiProperty, IntersectionType } from '@nestjs/swagger';
 import { IsString, IsUUID, Length, Matches } from 'class-validator';
 import { FunctionLogsQuery } from '../functions/dto/function-logs.dto';
-import { InvocationStatus } from '../functions/entities/function-invocation.entity';
+import { InvocationSource, InvocationStatus } from '../functions/entities/function-invocation.entity';
+import { UrlAuthType } from '../functions/entities/function-url.entity';
+import { DomainStatus } from '../function-urls/custom-domain.entity';
+import { EventFormat } from '../functions/entities/function.entity';
 import { AdminAccountSummaryView } from './admin-accounts.dto';
 import { AdminChange } from './admin.dto';
 
@@ -68,6 +71,7 @@ export class AdminFunctionConfigView {
   @ApiProperty() minInstances: number;
   @ApiProperty() maxInstances: number;
   @ApiProperty() status: string;
+  @ApiProperty({ enum: EventFormat, description: "The event it takes: AWS Lambda's, or FF's original wrapped one" }) eventFormat: EventFormat;
   @ApiProperty({ nullable: true, type: String, description: 'Why its last deploy or update failed' }) error: string | null;
   @ApiProperty() createdAt: Date;
   @ApiProperty() updatedAt: Date;
@@ -77,6 +81,7 @@ export class AdminFunctionConfigView {
 export class AdminCallView {
   @ApiProperty({ format: 'uuid', description: 'Its request ID' }) id: string;
   @ApiProperty({ enum: InvocationStatus }) status: InvocationStatus;
+  @ApiProperty({ enum: InvocationSource, description: 'What brought it: the API, the function\'s URL, or a schedule' }) source: InvocationSource;
   @ApiProperty({ description: 'Milliseconds' }) duration: number;
   @ApiProperty({ nullable: true, type: Number, description: 'MB' }) memoryUsed: number | null;
   @ApiProperty() createdAt: Date;
@@ -89,8 +94,38 @@ export class AdminCallView {
   errorType: string | null;
 }
 
+/** A customer's own domain for a URL, and where it stands. */
+export class AdminDomainView {
+  @ApiProperty({ example: 'shop.example.tn' }) domain: string;
+  @ApiProperty({ enum: DomainStatus }) status: DomainStatus;
+  @ApiProperty({ nullable: true, type: String, description: 'What its last check found wrong' }) checkError: string | null;
+}
+
+/** A function's URL as support sees it: its address, who may call it, and the customer's own domains for it. */
+export class AdminFunctionUrlView {
+  @ApiProperty() functionUrl: string;
+  @ApiProperty({ enum: UrlAuthType }) authType: UrlAuthType;
+  @ApiProperty({ description: 'Whether it has a CORS configuration' }) cors: boolean;
+  @ApiProperty() createdAt: Date;
+  @ApiProperty({ type: [AdminDomainView] }) domains: AdminDomainView[];
+}
+
+/** A function's schedule as support sees it: when it runs, and how its last run went; never its input. */
+export class AdminScheduleView {
+  @ApiProperty() name: string;
+  @ApiProperty({ example: 'cron(0 2 * * ? *)' }) expression: string;
+  @ApiProperty() enabled: boolean;
+  @ApiProperty({ nullable: true, type: Date }) nextRunAt: Date | null;
+  @ApiProperty({ nullable: true, type: Date }) lastRunAt: Date | null;
+  @ApiProperty({ nullable: true, type: String, example: 'success' }) lastOutcome: string | null;
+}
+
 export class AdminFunctionPageView {
   @ApiProperty({ type: AdminFunctionConfigView }) function: AdminFunctionConfigView;
+  @ApiProperty({ type: AdminFunctionUrlView, nullable: true, description: 'Its public address, if it has one' }) url: AdminFunctionUrlView | null;
+  @ApiProperty({ type: [String], description: "Its variables' names, never their values" }) variables: string[];
+  @ApiProperty({ type: [String], description: "Its secrets' names, never their values" }) secrets: string[];
+  @ApiProperty({ type: [AdminScheduleView], description: 'Its schedules, by name' }) schedules: AdminScheduleView[];
   @ApiProperty({ type: AdminAccountSummaryView }) account: AdminAccountSummaryView;
   @ApiProperty({ type: [AdminCallView], description: 'The 20 newest calls' }) recentCalls: AdminCallView[];
   @ApiProperty({ type: [AdminCallView], description: 'The 10 newest that failed' }) recentErrors: AdminCallView[];

@@ -68,7 +68,7 @@ kubectl apply -f "$FF_REPO_ROOT/deploy/k8s/optional/runtimeclass-gvisor.yaml" >/
 kubectl label node "$node" ff.dev/gvisor=true --overwrite >/dev/null
 
 # 5. Proof: gVisor reports its own kernel version, not the host's.
-image=ff-runtime-nodejs:24-v2
+image=ff-runtime-nodejs:24-v3
 docker exec "$node" crictl inspecti "docker.io/library/$image" >/dev/null 2>&1 ||
   "$FF_REPO_ROOT/hack/k8s/load-images.sh" "$image" >/dev/null
 kubectl -n default delete pod ff-gvisor-check --ignore-not-found --wait=true >/dev/null

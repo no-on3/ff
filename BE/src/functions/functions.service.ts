@@ -1,23 +1,25 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpStatus,
   Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
   MessageEvent,
   NotFoundException,
+  PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Observable } from 'rxjs';
-import { EntityManager, Not, Repository } from 'typeorm';
+import { EntityManager, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
-import { MinioClientService } from '../minio-client/minio-client.service';
+import { MinioClientService, StoredObjectMissingError } from '../minio-client/minio-client.service';
+import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
 import {
-  CodeTooLargeError,
   FunctionRuntimeError,
   FunctionThrottledError,
   FunctionTimeoutError,
@@ -25,7 +27,7 @@ import {
   LogStoreUnavailableError,
   initMsOf,
 } from '../orchestrator/orchestrator.errors';
-import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { FunctionWorkload, ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
@@ -38,15 +40,119 @@ import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
-import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
-import { Function, FunctionStatus } from './entities/function.entity';
+import { SecretsView } from './dto/secrets.dto';
+import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
+import { FunctionUrl } from './entities/function-url.entity';
+import { Schedule } from '../schedules/schedule.entity';
+import {
+  FunctionEnvironmentValues,
+  NO_ENVIRONMENT,
+  StoredSecret,
+  changedSecrets,
+  combinedProblems,
+  isEmpty,
+  newRevision,
+  processEnvironment,
+  sameVariables,
+  secretsView,
+  storedSecrets,
+  variableChanges,
+  withSecrets,
+} from './environment';
+import { EnvironmentStore } from './environment.store';
+import { DEFAULT_HANDLER, handlerProblem, inlineCodeFacts, packageHandlerProblem } from './code-package';
+import { inlinePackage } from './inline-package';
+import { CodeImagesService } from '../packages/code-images.service';
+import { RegistryError } from '../packages/registry';
+import { PackagesService } from '../packages/packages.service';
 import { callersFailure, failureResponse, platformFailure } from './failures';
 import { keptJson, keptText } from './history';
 import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
+import { MAX_INPUT_BYTES } from './limits';
 
-/** Fields whose change requires rolling out a new version of the function. */
-const ROLLOUT_FIELDS = ['code', 'runtime', 'memory', 'timeout'] as const;
+/** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
+const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat'] as const;
+
+/** The advisory lock the restore of lost code images holds: one backend runs it at a time. */
+const RESTORE_LOCK = `hashtext('ff_code_images_restore')`;
+
+/** A package, by its account and SHA-256, as a key. */
+const packageRef = (accountId: string, codeSha256: string): string => `${accountId}/${codeSha256}`;
+
+/** What one restore of lost code images did (FunctionsService.restoreCodeImages). */
+export interface CodeImagesRestore {
+  /** The packages that functions name, each checked in the registry. */
+  packages: number;
+  /** Their images made again: the registry hadn't them whole. */
+  imagesMade: number;
+  /** One-file packages' zips made again of their function's code: object storage had lost them. */
+  zipsMade: number;
+  /** Working functions rolled out with their package's image: their pods mounted one the registry had lost. */
+  rolledOut: number;
+  /** Packages and functions that couldn't be restored, each logged: the next run tries again. */
+  failures: number;
+}
+
+/** A function as the API answers it: its record and its variables. Its secrets' values are never part of it. */
+export type FunctionView = Function & { environment: Record<string, string> };
+
+/** The answer for a function: a copy of its record, with its variables. */
+function viewOf(function_: Function, environment: FunctionEnvironmentValues): FunctionView {
+  return { ...function_, environment: { ...environment.variables } };
+}
+
+/** The function as the orchestrator runs it: its record, the variables and secrets its process gets, and its code's image. */
+function workloadOf(function_: Function, environment: FunctionEnvironmentValues, codeImage: string): FunctionWorkload {
+  return {
+    ...function_,
+    environment: isEmpty(environment) ? undefined : { revision: environment.revision, values: processEnvironment(environment) },
+    codeImage,
+  };
+}
+
+/** A function's code, as its record keeps it. */
+type CodeFields = Pick<Function, 'packageType' | 'code' | 'codeSha256' | 'codeSize'>;
+
+/** An environment with these variables, and a new revision when there is anything: a change rolls out. */
+function withVariables(environment: FunctionEnvironmentValues, variables: Record<string, string>): FunctionEnvironmentValues {
+  const next = { ...environment, variables: { ...variables } };
+  return { ...next, revision: isEmpty(next) ? '' : newRevision() };
+}
+
+/** A name that is a variable and a secret, or more than 4 KB between them: 400, before anything changes. */
+function refuseCombined(environment: FunctionEnvironmentValues): void {
+  const problems = combinedProblems(environment);
+  if (problems.length) throw new BadRequestException(problems);
+}
+
+/** A handler its function can't have, for its runtime and package: 400, before anything changes. */
+function refuseHandler(handler: string, runtime: Runtime, packageType: PackageType): void {
+  const problem = handlerProblem(handler, runtime, packageType);
+  if (problem) throw new BadRequestException([problem]);
+}
+
+/** A function's environment before a change, and after it: the same object when the change leaves it alone. */
+interface EnvironmentChange {
+  before: FunctionEnvironmentValues;
+  after: FunctionEnvironmentValues;
+}
+
+/** The fields of a function a change asks for, without its environment; with new code, how it comes, its hash and size. */
+type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields> & { packageSha256?: string };
+
+/** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
+const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
+  Object.fromEntries(Object.entries(secrets).map(([name, secret]) => [name, secret.value]));
+
+/**
+ * A call's outcome: the invocation as kept, and the function's output, or why
+ * the call failed: the error, and what its caller may see of it.
+ */
+export type CallOutcome =
+  | { invocation: FunctionInvocation; ok: true; output: unknown }
+  | { invocation: FunctionInvocation; ok: false; error: unknown; visible: string };
 
 /** A message without its final period, to continue it with another sentence. */
 const clause = (message: string): string => message.replace(/\.\s*$/, '');
@@ -137,52 +243,119 @@ export class FunctionsService {
     private audit: AuditService,
     private usage: UsageService,
     private credit: CreditService,
+    private environments: EnvironmentStore,
+    private packages: PackagesService,
+    private codeImages: CodeImagesService,
   ) {}
 
   private readyTimeoutMs(): number {
     return this.configService.get<number>('orchestrator.readyTimeoutSeconds', 90) * 1000;
   }
 
-  async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<Function> {
+  async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<FunctionView> {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, createFunctionDto);
+    const { environment: variables, secrets, ...fields } = createFunctionDto;
+    const handler = fields.handler ?? DEFAULT_HANDLER;
+    const code = await this.codeOf(accountId, fields, handler, fields.runtime);
+    const environment = withSecrets(withVariables(NO_ENVIRONMENT, variables ?? {}), storedSecrets(secrets ?? {}, new Date()));
+    refuseCombined(environment);
+    // The code's image before anything is saved: without it, there is no function to keep.
+    const { codeImage, packageSha256 } = await this.codeImageOf({ accountId, runtime: fields.runtime, ...code });
     const function_ = this.functionsRepository.create({
-      ...createFunctionDto,
+      ...fields,
+      handler,
+      ...code,
+      packageSha256,
       accountId,
       status: FunctionStatus.CREATING,
     });
 
-    const savedFunction = await this.insertWithinPlan(plan, function_);
+    const savedFunction = await this.insertWithinPlan(plan, function_, environment);
     try {
-      // Archive the code in object storage (the cluster gets it via an immutable ConfigMap).
-      await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
+      // A copy of inline code's text in object storage, beside the package its pods run; a package is there already.
+      if (savedFunction.packageType === PackageType.INLINE) await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
 
-      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(savedFunction, tenant));
+      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workloadOf(savedFunction, environment, codeImage), tenant));
       // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
       await this.orchestrator.waitUntilReady(savedFunction, this.readyTimeoutMs());
 
       savedFunction.status = FunctionStatus.ACTIVE;
       await this.functionsRepository.save(savedFunction);
 
-      return savedFunction;
+      return viewOf(savedFunction, environment);
     } catch (error) {
       const failure = callersFailure(error) ?? platformFailure(this.logger, 'Deploying the function', error);
       savedFunction.status = FunctionStatus.ERROR;
       savedFunction.error = failure;
       await this.functionsRepository.save(savedFunction);
       // Its objects and the diagnosis stay, so an update can repair it, and a delete removes everything.
-      if (!(error instanceof CodeTooLargeError)) await this.releaseInstances(savedFunction);
+      await this.releaseInstances(savedFunction);
       // The function exists all the same: its ID lets the caller open it to fix it, rather than create it again.
       throw failureResponse(error, failure, { functionId: savedFunction.id });
     }
   }
 
   /**
-   * Saves a new function, unless another of its account's has the name, or the
-   * account has as many as its plan allows. The account's row stays locked
-   * meanwhile, so that two creates at once can't both take the name or the last place.
+   * The code a create or an update sends, as the function keeps it: inline, its
+   * text, hash and size; or a package of the account, named by its SHA-256, its
+   * handler looked for in its files. 400 for both, a package the account
+   * hasn't, or a handler it can't run; 503 where no registry runs packages.
    */
-  private insertWithinPlan(plan: PlanView, function_: Function): Promise<Function> {
+  private async codeOf(accountId: string, sent: { code?: string; codeSha256?: string }, handler: string, runtime: Runtime): Promise<CodeFields> {
+    if (sent.code !== undefined && sent.codeSha256 !== undefined) {
+      throw new BadRequestException(['Send code or codeSha256, not both: inline code, or a package uploaded with POST /packages']);
+    }
+    if (sent.codeSha256 === undefined) {
+      refuseHandler(handler, runtime, PackageType.INLINE);
+      const code = sent.code as string;
+      return { packageType: PackageType.INLINE, code, ...inlineCodeFacts(code) };
+    }
+    refuseHandler(handler, runtime, PackageType.ZIP);
+    this.codeImages.assertAvailable();
+    const named = await this.packages.name(accountId, sent.codeSha256);
+    if (!named) {
+      throw new BadRequestException([`The account has no package ${sent.codeSha256}: upload it with POST /packages, which answers its SHA-256`]);
+    }
+    const problem = packageHandlerProblem(named.files, handler, runtime);
+    if (problem) throw new BadRequestException([problem]);
+    return { packageType: PackageType.ZIP, code: '', codeSha256: sent.codeSha256, codeSize: named.codeSize };
+  }
+
+  /**
+   * The code image a function's pods mount (ADR 0003), and the package it is
+   * made of: a package function's own; for inline code, the one-file package
+   * the backend makes of it, kept as an uploaded one is, so that the purge of
+   * unused packages keeps it while the function's record names it. 503 when
+   * this FF has no registry, or the registry can't be reached: the caller tries
+   * again, nothing having changed.
+   */
+  private async codeImageOf(
+    function_: Pick<Function, 'accountId' | 'runtime' | 'packageType' | 'code' | 'codeSha256'>,
+  ): Promise<{ codeImage: string; packageSha256: string }> {
+    this.codeImages.assertAvailable();
+    let packageSha256 = function_.codeSha256;
+    if (function_.packageType === PackageType.INLINE) {
+      const built = inlinePackage(function_.code, function_.runtime);
+      await this.packages.storeInline(function_.accountId, built);
+      packageSha256 = built.codeSha256;
+    }
+    try {
+      return { codeImage: await this.codeImages.imageFor(function_.accountId, packageSha256), packageSha256 };
+    } catch (error) {
+      if (!(error instanceof RegistryError)) throw error;
+      this.logger.error(`The code registry failed for package ${packageSha256} of account ${function_.accountId}: ${error.message}`);
+      throw new ServiceUnavailableException("The code registry can't be reached: nothing changed, try again in a moment");
+    }
+  }
+
+  /**
+   * Saves a new function and its environment, unless another of its account's
+   * has the name, or the account has as many as its plan allows. The account's
+   * row stays locked meanwhile, so that two creates at once can't both take the
+   * name or the last place.
+   */
+  private insertWithinPlan(plan: PlanView, function_: Function, environment: FunctionEnvironmentValues): Promise<Function> {
     return this.functionsRepository.manager.transaction(async (manager) => {
       await lockAccount(manager, function_.accountId);
       if (await nameInUse(manager, function_.accountId, function_.name)) throw nameTaken(function_.name);
@@ -192,13 +365,25 @@ export class FunctionsService {
         throw new BadRequestException(`The ${plan.name} plan allows ${allowed} per account: delete one first`);
       }
       const saved = await manager.save(Function, function_);
-      // Recorded with the row: a function whose deploy fails later still says who created it.
+      if (!isEmpty(environment)) await this.environments.save(saved, environment, manager);
+      // Recorded with the row: a function whose deploy fails later still says who created it. Variables and secrets by name only.
+      const variables = Object.keys(environment.variables).sort();
+      const secrets = Object.keys(environment.secrets).sort();
       await this.audit.record(
         {
           accountId: saved.accountId,
           action: 'function.create',
           resource: `function:${saved.id}`,
-          details: { name: saved.name, runtime: saved.runtime, memory: saved.memory, timeout: saved.timeout },
+          details: {
+            name: saved.name,
+            runtime: saved.runtime,
+            handler: saved.handler,
+            codeSha256: saved.codeSha256,
+            memory: saved.memory,
+            timeout: saved.timeout,
+            ...(variables.length ? { environment: variables } : {}),
+            ...(secrets.length ? { secrets } : {}),
+          },
         },
         manager,
       );
@@ -206,22 +391,41 @@ export class FunctionsService {
     });
   }
 
-  /** The fields an update changes, for the audit log: their names, and the new values but the code's. */
-  private recordUpdate(function_: Function, changed: string[], outcome: string): Promise<void> {
-    const values = Object.fromEntries(changed.filter((field) => field !== 'code').map((field) => [field, function_[field as keyof Function]]));
+  /**
+   * The fields an update changes, for the audit log: their names, and their
+   * new values, the code's hash rather than the code; the variables and the
+   * secrets by name only, never their values.
+   */
+  private recordUpdate(function_: Function, changed: string[], outcome: string, environment?: EnvironmentChange): Promise<void> {
+    const values = Object.fromEntries(
+      changed
+        .filter((field) => !['code', 'environment', 'secrets'].includes(field))
+        .map((field) => [field, function_[field as keyof Function]]),
+    );
+    const names = {
+      ...(environment && changed.includes('environment') ? { environment: variableChanges(environment.before.variables, environment.after.variables) } : {}),
+      ...(environment && changed.includes('secrets') ? { secrets: variableChanges(valuesOf(environment.before.secrets), valuesOf(environment.after.secrets)) } : {}),
+    };
     return this.audit.record({
       accountId: function_.accountId,
       action: 'function.update',
       resource: `function:${function_.id}`,
-      details: { changed, ...values, outcome },
+      details: { changed, ...values, ...(changed.includes('code') ? { codeSha256: function_.codeSha256 } : {}), ...names, outcome },
     });
   }
 
-  async findAll(accountId: string): Promise<Function[]> {
+  /** The account's functions, newest first; with a name, the one of that name, if any. */
+  async findAll(accountId: string, name?: string): Promise<Function[]> {
     return this.functionsRepository.find({
-      where: { accountId },
+      where: name === undefined ? { accountId } : { accountId, name },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  /** The account's function as GET /functions/:id answers it: with its variables, never its secrets' values. */
+  async describe(accountId: string, id: string): Promise<FunctionView> {
+    const function_ = await this.findOne(accountId, id);
+    return viewOf(function_, await this.environments.load(id));
   }
 
   /** The account's function; another account's is not found, exactly like one that doesn't exist (D4). */
@@ -233,87 +437,176 @@ export class FunctionsService {
     return function_;
   }
 
-  async update(accountId: string, id: string, updateFunctionDto: UpdateFunctionDto): Promise<Function> {
+  async update(accountId: string, id: string, updateFunctionDto: UpdateFunctionDto): Promise<FunctionView> {
     const function_ = await this.findOne(accountId, id);
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
-    const previousName = function_.name;
-    const newName = updateFunctionDto.name !== undefined && updateFunctionDto.name !== previousName ? updateFunctionDto.name : undefined;
+    const { environment: variables, ...changes } = updateFunctionDto;
+    const handler = changes.handler ?? function_.handler;
+    const runtime = changes.runtime ?? function_.runtime;
+    // New code, inline or a package, with its handler; or the handler and runtime checked against the code there.
+    let code: CodeFields | undefined;
+    if (changes.code !== undefined || changes.codeSha256 !== undefined) {
+      code = await this.codeOf(accountId, changes, handler, runtime);
+    } else if (changes.handler !== undefined || changes.runtime !== undefined) {
+      if (function_.packageType === PackageType.ZIP) await this.codeOf(accountId, { codeSha256: function_.codeSha256 }, handler, runtime);
+      else refuseHandler(handler, runtime, PackageType.INLINE);
+    }
+    if (changes.eventFormat === EventFormat.WRAPPED && function_.eventFormat !== EventFormat.WRAPPED) await this.refuseWrappedWhileSent(id);
+    const newName = changes.name !== undefined && changes.name !== function_.name ? changes.name : undefined;
     // Refused before anything changes. The save claims the name again, under the account's lock:
     // another request may take it during a rollout.
     if (newName !== undefined && (await nameInUse(this.functionsRepository.manager, accountId, newName, id))) throw nameTaken(newName);
-    const updated = { ...function_, ...updateFunctionDto };
-    const changed = (Object.keys(updateFunctionDto) as Array<keyof UpdateFunctionDto>).filter(
-      (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
+    // The variables sent replace them all, as on AWS Lambda; a change is a new version, as the code's is.
+    const before = await this.environments.load(id);
+    const environmentChanges = variables !== undefined && !sameVariables(variables, before.variables);
+    const after = environmentChanges ? withVariables(before, variables) : before;
+    if (environmentChanges) refuseCombined(after);
+    const changed: string[] = (Object.keys(changes) as Array<keyof typeof changes>).filter(
+      (field) => changes[field] !== undefined && changes[field] !== function_[field],
     );
-    const changesVersion = ROLLOUT_FIELDS.some(
-      (field) => updateFunctionDto[field] !== undefined && updateFunctionDto[field] !== function_[field],
-    );
+    if (environmentChanges) changed.push('environment');
+    const fieldChanges: FieldChanges = code ? { ...changes, ...code } : changes;
+    const { saved, environment } = await this.change(function_, fieldChanges, { before, after }, changed);
+    return viewOf(saved, environment);
+  }
+
+  /** The names of the function's variables and secrets, never a value: what the platform's support may see. */
+  async environmentNames(functionId: string): Promise<{ variables: string[]; secrets: string[] }> {
+    const { variables, secrets } = await this.environments.load(functionId);
+    return { variables: Object.keys(variables).sort(), secrets: Object.keys(secrets).sort() };
+  }
+
+  /**
+   * A function URL and a schedule send AWS's events: their function can't go
+   * back to FF's original wrapped one while it has either.
+   */
+  private async refuseWrappedWhileSent(id: string): Promise<void> {
+    const manager = this.functionsRepository.manager;
+    if (await manager.existsBy(FunctionUrl, { functionId: id })) {
+      throw new BadRequestException(
+        `The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/${id}/url) first, or keep eventFormat lambda`,
+      );
+    }
+    if (await manager.existsBy(Schedule, { functionId: id })) {
+      throw new BadRequestException(
+        `The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/${id}/schedules/{scheduleId}) first, or keep eventFormat lambda`,
+      );
+    }
+  }
+
+  /** The function's secrets: each one's name and when it was set, never a value. */
+  async listSecrets(accountId: string, id: string): Promise<SecretsView> {
+    await this.findOne(accountId, id);
+    return secretsView(await this.environments.load(id));
+  }
+
+  /**
+   * Sets and removes secrets (null removes one), rolled out as a new version
+   * like a change of variables; the answer comes once it is live. Values
+   * already there, and names already gone, change nothing, and roll nothing out.
+   */
+  async updateSecrets(accountId: string, id: string, changes: Record<string, string | null>): Promise<SecretsView> {
+    const function_ = await this.findOne(accountId, id);
+    const before = await this.environments.load(id);
+    const { secrets, changed } = changedSecrets(before.secrets, changes, new Date());
+    if (!changed) return secretsView(before);
+    const after = withSecrets(before, secrets);
+    refuseCombined(after);
+    const { environment } = await this.change(function_, {}, { before, after }, ['secrets']);
+    return secretsView(environment);
+  }
+
+  /**
+   * Applies a change: saved at once when it needs no new version (a new name),
+   * else rolled out and waited for, then saved, with the environment that went
+   * live. A failure rolls back to the working version, or keeps the attempt of
+   * a function that had none, as the lifecycle above describes.
+   */
+  private async change(
+    function_: Function,
+    changes: FieldChanges,
+    environment: EnvironmentChange,
+    changed: string[],
+  ): Promise<{ saved: Function; environment: FunctionEnvironmentValues }> {
+    const previousName = function_.name;
+    const newName = changes.name !== undefined && changes.name !== previousName ? changes.name : undefined;
+    const environmentChanges = environment.after !== environment.before;
+    const updated = { ...function_, ...changes };
+    const changesVersion = environmentChanges || ROLLOUT_FIELDS.some((field) => changes[field] !== undefined && changes[field] !== function_[field]);
     // A function that isn't ACTIVE always rolls out, even unchanged, so the same code
     // can be retried after a passing failure (a full quota, a missing image).
     const repairing = function_.status !== FunctionStatus.ACTIVE;
 
     if (!changesVersion && !repairing) {
-      Object.assign(function_, updateFunctionDto);
+      Object.assign(function_, changes);
       const saved = await this.saveClaimingName(function_, previousName, 'refuse');
       if (changed.length) await this.recordUpdate(saved, changed, 'saved');
-      return saved;
+      return { saved, environment: environment.before };
     }
 
+    // The code image first: without it, nothing has changed, and nothing needs rolling back.
+    const { codeImage, packageSha256 } = await this.codeImageOf(updated);
+    const workload = workloadOf(updated, environment.after, codeImage);
     try {
-      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.update(updated, tenant));
+      await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       // The old version keeps serving during the rollout; record the change only once it's live.
       await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
     } catch (error) {
-      if (error instanceof CodeTooLargeError) throw new BadRequestException(error.message); // nothing was applied
-      if (repairing) return this.keepFailedAttempt(function_, updateFunctionDto, changed, error);
-      return this.rollBack(function_, error, changed);
+      if (repairing) return this.keepFailedAttempt(function_, { ...changes, packageSha256 }, changed, error, environmentChanges ? environment : undefined);
+      return this.rollBack(function_, environment.before, error, changed);
     }
 
     const previousCodePath = this.codePath(function_);
-    Object.assign(function_, updateFunctionDto, { status: FunctionStatus.ACTIVE, error: null });
+    Object.assign(function_, changes, { packageSha256, status: FunctionStatus.ACTIVE, error: null });
     // The new version is live, and the record says so even when the new name went to another function meanwhile.
-    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName');
+    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName', environmentChanges ? environment.after : undefined);
     const nameLost = newName !== undefined && saved.name !== newName;
-    await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'live');
+    await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'live', environment);
     await this.archiveCode(saved, previousCodePath);
     if (nameLost) {
       throw new ConflictException(
         `The new version is live, but the function keeps its name "${previousName}": another function was given the name "${newName}" meanwhile`,
       );
     }
-    return saved;
+    return { saved, environment: environment.after };
   }
 
   /**
-   * Saves the function. A new name is claimed with the account's row locked, as
-   * creates do, so that two of its functions never share one. When another has it
-   * by now, `refuse` saves nothing and answers 409, and `keepOldName` saves the
+   * Saves the function, and its new environment in the same transaction when
+   * it has one. A new name is claimed with the account's row locked, as creates
+   * do, so that two of its functions never share one. When another has it by
+   * now, `refuse` saves nothing and answers 409, and `keepOldName` saves the
    * rest under the old name: a version already rolled out, which the record must
    * describe.
    */
-  private saveClaimingName(function_: Function, previousName: string, whenTaken: WhenNameTaken): Promise<Function> {
-    if (function_.name === previousName) return this.functionsRepository.save(function_);
+  private saveClaimingName(function_: Function, previousName: string, whenTaken: WhenNameTaken, environment?: FunctionEnvironmentValues): Promise<Function> {
+    if (function_.name === previousName && !environment) return this.functionsRepository.save(function_);
     return this.functionsRepository.manager.transaction(async (manager) => {
-      await lockAccount(manager, function_.accountId);
-      if (await nameInUse(manager, function_.accountId, function_.name, function_.id)) {
-        if (whenTaken === 'refuse') throw nameTaken(function_.name);
-        function_.name = previousName;
+      if (function_.name !== previousName) {
+        await lockAccount(manager, function_.accountId);
+        if (await nameInUse(manager, function_.accountId, function_.name, function_.id)) {
+          if (whenTaken === 'refuse') throw nameTaken(function_.name);
+          function_.name = previousName;
+        }
       }
-      return manager.save(Function, function_);
+      const saved = await manager.save(Function, function_);
+      if (environment) await this.environments.save(saved, environment, manager);
+      return saved;
     });
   }
 
   /**
-   * A failed update of a working function: apply the previous version again, so
-   * the Deployment matches the record, and answer with the diagnosis. If that
-   * fails too, the function is ERROR, with both messages.
+   * A failed update of a working function: apply the previous version again,
+   * with its environment, so the Deployment matches the record, and answer with
+   * the diagnosis. If that fails too, the function is ERROR, with both messages.
    */
-  private async rollBack(previous: Function, error: unknown, changed: string[]): Promise<never> {
+  private async rollBack(previous: Function, previousEnvironment: FunctionEnvironmentValues, error: unknown, changed: string[]): Promise<never> {
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
-      await this.plans.withTenant(previous.accountId, (tenant) => this.orchestrator.update(previous, tenant));
+      const workload = workloadOf(previous, previousEnvironment, (await this.codeImageOf(previous)).codeImage);
+      await this.plans.withTenant(previous.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {
       previous.status = FunctionStatus.ERROR;
@@ -321,29 +614,37 @@ export class FunctionsService {
       await this.functionsRepository.save(previous);
       await this.recordUpdate(previous, changed, 'failed, and so did the rollback: ERROR');
       await this.releaseInstances(previous);
-      throw new InternalServerErrorException(previous.error);
+      throw new InternalServerErrorException({ statusCode: 500, error: 'Internal Server Error', message: previous.error, functionId: previous.id });
     }
-    throw failureResponse(error, `${clause(failure)}. The update was rolled back: the previous version is still live.`);
+    // The function the new version never served is named, as a failed create names the one it saved.
+    throw failureResponse(error, `${clause(failure)}. The update was rolled back: the previous version is still live.`, { functionId: previous.id });
   }
 
   /**
    * A failed update of a function that wasn't ACTIVE: there is no working version
    * to go back to. Keep the attempt and its diagnosis, so the record shows the
    * code that failed and why, and release its instance, as a failed create does.
+   * A new environment is kept with it: the Deployment holds that too.
    */
-  private async keepFailedAttempt(function_: Function, changes: UpdateFunctionDto, changed: string[], error: unknown): Promise<never> {
+  private async keepFailedAttempt(
+    function_: Function,
+    changes: FieldChanges,
+    changed: string[],
+    error: unknown,
+    environment?: EnvironmentChange,
+  ): Promise<never> {
     const previousCodePath = this.codePath(function_);
     const previousName = function_.name;
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     Object.assign(function_, changes, { status: FunctionStatus.ERROR, error: failure });
     // The attempt is what the Deployment holds: kept, under the old name if the new one went to another function meanwhile.
-    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName');
+    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName', environment?.after);
     const nameLost = changes.name !== undefined && changes.name !== previousName && saved.name === previousName;
-    await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'failed, kept: ERROR');
+    await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'failed, kept: ERROR', environment);
     await this.releaseInstances(saved);
     await this.archiveCode(saved, previousCodePath);
     const keptName = ` The function keeps its name "${previousName}": another function was given the name "${changes.name}" meanwhile.`;
-    throw failureResponse(error, nameLost ? `${clause(failure)}.${keptName}` : failure);
+    throw failureResponse(error, nameLost ? `${clause(failure)}.${keptName}` : failure, { functionId: saved.id });
   }
 
   /**
@@ -359,18 +660,135 @@ export class FunctionsService {
   }
 
   /**
-   * Object storage keeps a copy of the record's code. It is written after the
+   * Object storage keeps a copy of the record's inline code; a package's zip is
+   * there already, and an inline copy from before goes. It is written after the
    * record, and a failure is only logged: nothing reads the copy yet, and the
    * record and the Deployment already agree.
    */
   private async archiveCode(function_: Function, previousCodePath: string): Promise<void> {
     const codePath = this.codePath(function_);
     try {
+      if (function_.packageType === PackageType.ZIP) {
+        await this.minioClientService.deleteCode(previousCodePath);
+        return;
+      }
       await this.minioClientService.uploadCode(codePath, function_.code);
       // A runtime change moves the copy (code.ts ↔ code.py).
       if (previousCodePath !== codePath) await this.minioClientService.deleteCode(previousCodePath);
     } catch (error) {
       this.logger.error(`Could not archive the code of function ${function_.id}: ${describeError(error)}`);
+    }
+  }
+
+  /**
+   * Makes again what the registry has lost of functions' code images (ADR
+   * 0003), so that a function's new pods can start on any node. The retention
+   * job runs it hourly and at the backend's start, one backend at a time
+   * (PostgreSQL's advisory lock); nothing where this FF has no registry.
+   * - Each package a function names gets its image made again from its zip,
+   *   as a deploy makes it, when the registry hasn't it whole. A one-file
+   *   package whose zip object storage has lost too is made again first, of its
+   *   function's code: the same code makes the same zip.
+   * - Then each working function whose pods mount an image the registry hasn't
+   *   is rolled out with its package's image, its record unchanged: an image
+   *   made again with another digest, by a later backend or for another
+   *   function of the same package, isn't the one its pods name. Pods mounting
+   *   another image the registry has, as an update under way does, are left.
+   * A failure is logged, and the next package or function tried; the next run
+   * tries again.
+   */
+  async restoreCodeImages(): Promise<CodeImagesRestore> {
+    const report: CodeImagesRestore = { packages: 0, imagesMade: 0, zipsMade: 0, rolledOut: 0, failures: 0 };
+    if (!this.codeImages.available) return report;
+    const runner = this.functionsRepository.manager.connection.createQueryRunner();
+    await runner.connect();
+    try {
+      const [{ locked }] = (await runner.query(`SELECT pg_try_advisory_lock(${RESTORE_LOCK}) AS "locked"`)) as Array<{ locked: boolean }>;
+      if (!locked) return report;
+      try {
+        await this.rollOutLostImages(await this.restorePackageImages(report), report);
+      } finally {
+        await runner.query(`SELECT pg_advisory_unlock(${RESTORE_LOCK})`);
+      }
+    } finally {
+      await runner.release();
+    }
+    if (report.imagesMade || report.zipsMade || report.rolledOut || report.failures) {
+      this.logger.log(
+        `Lost code images restored: of ${report.packages} package(s) in use, ${report.imagesMade} image(s) made again, ${report.zipsMade} zip(s) made again of inline code; ` +
+          `${report.rolledOut} function(s) rolled out with their image; ${report.failures} failure(s)`,
+      );
+    }
+    return report;
+  }
+
+  /** Each package a function names, its image made again where the registry lost it: their references, by package. */
+  private async restorePackageImages(report: CodeImagesRestore): Promise<Map<string, string>> {
+    const references = new Map<string, string>();
+    for (const { accountId, codeSha256, inline } of await this.packages.named()) {
+      report.packages++;
+      try {
+        let image: { reference: string; made: boolean };
+        try {
+          image = await this.codeImages.ensureImage(accountId, codeSha256);
+        } catch (error) {
+          if (!(error instanceof StoredObjectMissingError) || !inline || !(await this.restoreInlineZip(accountId, codeSha256))) throw error;
+          report.zipsMade++;
+          image = await this.codeImages.ensureImage(accountId, codeSha256);
+        }
+        if (image.made) {
+          report.imagesMade++;
+          this.logger.warn(`The registry hadn't the code image of package ${codeSha256} of account ${accountId} whole: made again, ${image.reference}`);
+        }
+        references.set(packageRef(accountId, codeSha256), image.reference);
+      } catch (error) {
+        report.failures++;
+        const lostZip = error instanceof StoredObjectMissingError ? ': its zip is lost too; restore the packages from the second site (deploy/backup/README.md)' : '';
+        this.logger.error(`Could not make the code image of package ${codeSha256} of account ${accountId} again${lostZip}: ${describeError(error)}`);
+      }
+    }
+    return references;
+  }
+
+  /** Makes again, of a function's code, a one-file package whose zip object storage lost: false when no function's code makes it. */
+  private async restoreInlineZip(accountId: string, codeSha256: string): Promise<boolean> {
+    const functions = await this.functionsRepository.find({ where: { accountId, packageType: PackageType.INLINE, packageSha256: codeSha256 } });
+    for (const function_ of functions) {
+      const built = inlinePackage(function_.code, function_.runtime);
+      if (built.codeSha256 !== codeSha256) continue;
+      await this.packages.restoreInlineZip(accountId, built);
+      this.logger.warn(`Object storage had lost the one-file package ${codeSha256} of account ${accountId}: made again of function ${function_.id}'s code`);
+      return true;
+    }
+    return false;
+  }
+
+  /** Rolls each working function whose pods mount an image the registry hasn't out with its package's image. */
+  private async rollOutLostImages(references: Map<string, string>, report: CodeImagesRestore): Promise<void> {
+    const mounted = await this.orchestrator.codeImagesByFunction();
+    if (mounted.size === 0) return;
+    const working = await this.functionsRepository.find({
+      where: { status: FunctionStatus.ACTIVE, packageSha256: Not(IsNull()) },
+      select: { id: true, accountId: true, packageSha256: true },
+    });
+    for (const { id, accountId, packageSha256 } of working) {
+      const current = mounted.get(id);
+      const image = references.get(packageRef(accountId, packageSha256 as string));
+      if (!current || !image || current === image) continue;
+      try {
+        if (await this.codeImages.hasMounted(current)) continue;
+        // As its record is now, if it still runs that package: a change saved meanwhile rolled out its own image.
+        const function_ = await this.functionsRepository.findOne({ where: { id, accountId, status: FunctionStatus.ACTIVE, packageSha256: packageSha256 as string } });
+        if (!function_) continue;
+        const workload = workloadOf(function_, await this.environments.load(id), image);
+        await this.plans.withTenant(accountId, (tenant) => this.orchestrator.update(workload, tenant));
+        await this.orchestrator.waitUntilReady(function_, this.readyTimeoutMs());
+        report.rolledOut++;
+        this.logger.warn(`Function ${id}'s pods mounted ${current}, which the registry has lost: rolled out with ${image}`);
+      } catch (error) {
+        report.failures++;
+        this.logger.error(`Could not roll function ${id} out with its code image ${image}: ${describeError(error)}`);
+      }
     }
   }
 
@@ -391,7 +809,18 @@ export class FunctionsService {
     await this.audit.record({ accountId, action: 'function.delete', resource: `function:${id}`, details: { name: function_.name } });
   }
 
-  async invoke(accountId: string, id: string, input?: Record<string, unknown>): Promise<FunctionInvocation> {
+  /** Calls the function with `input` as its event, any JSON value, as AWS Lambda's Invoke does; {} when there is none. */
+  async invoke(accountId: string, id: string, input?: unknown): Promise<FunctionInvocation> {
+    const payload = input === undefined ? {} : input;
+    // As AWS Lambda refuses a synchronous call's payload over 6 MB, with its words and its exception's name.
+    const size = jsonBytes(payload);
+    if (size > MAX_INPUT_BYTES) {
+      throw new PayloadTooLargeException({
+        statusCode: HttpStatus.PAYLOAD_TOO_LARGE,
+        error: 'RequestEntityTooLargeException',
+        message: `Request must be smaller than ${MAX_INPUT_BYTES} bytes for the InvokeFunction operation: the input is ${size} bytes as JSON`,
+      });
+    }
     const function_ = await this.findOne(accountId, id);
     if (function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
@@ -399,17 +828,46 @@ export class FunctionsService {
     // D9: 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
     await this.credit.admit(accountId);
 
-    const payload = input || {};
+    const outcome = await this.call(function_, payload, { source: InvocationSource.API });
+    // A call that failed is named, as the history keeps it: its ID finds its logs, its status says how it ended.
+    if (!outcome.ok) {
+      const { id: invocationId, status, duration, memoryUsed } = outcome.invocation;
+      throw failureResponse(outcome.error, outcome.visible, { invocation: { id: invocationId, status, duration, memoryUsed: memoryUsed ?? null } });
+    }
+    // The answer: the invocation as kept, with the input and output whole.
+    return Object.assign(outcome.invocation, { input: payload, output: outcome.output });
+  }
+
+  /**
+   * Runs one call of an ACTIVE function, whatever brought it (the API, its URL,
+   * a schedule), and records it as every call is: the invocation and its
+   * history, the metrics and the concurrency, the usage record. The caller has
+   * checked the function, the account's credit and its rate. The call's own
+   * failure is an outcome, not an exception, as each way in answers it its own
+   * way; only a failure to record it throws. `history` is what the history
+   * keeps of the event, when not the event itself: a URL's, without its
+   * callers' credentials. `requestId` is the invocation's ID when the caller
+   * chose it first: a URL's event names it.
+   */
+  async call(
+    function_: Function,
+    payload: unknown,
+    options: { source: InvocationSource; history?: unknown; requestId?: string },
+  ): Promise<CallOutcome> {
     // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
-    const keptInput = keptJson(payload);
+    const keptInput = keptJson(options.history === undefined ? payload : options.history);
     const invocation = this.invocationsRepository.create({
-      functionId: id,
+      ...(options.requestId === undefined ? {} : { id: options.requestId }),
+      functionId: function_.id,
+      source: options.source,
       input: keptInput.value,
       inputTruncated: keptInput.truncated,
       status: InvocationStatus.RUNNING,
     });
 
-    await this.invocationsRepository.save(invocation);
+    // A chosen ID is a new row: inserted, without the lookup by ID that save() makes first.
+    if (options.requestId === undefined) await this.invocationsRepository.save(invocation);
+    else await this.invocationsRepository.insert(invocation as QueryDeepPartialEntity<FunctionInvocation>);
 
     // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once (D14).
     this.metricsService.invocationStarted(function_);
@@ -420,7 +878,7 @@ export class FunctionsService {
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
-      this.metricsService.recordMetric(id, duration, result.memoryUsedMb || 0, false);
+      this.metricsService.recordMetric(function_.id, duration, result.memoryUsedMb || 0, false);
 
       // Update invocation with results and metrics. Duration is the execution
       // time reported by the runtime (the basis for metering), else end-to-end
@@ -433,12 +891,10 @@ export class FunctionsService {
       invocation.status = InvocationStatus.COMPLETED;
       // Should this fail, the catch below ends the call as a platform failure, unbilled: its outcome couldn't be kept.
       await this.finish(function_, invocation, UsageStatus.SUCCESS, result.initMs);
-
-      // The answer: the invocation as kept, with the input and output whole.
-      return Object.assign(invocation, { input: payload, output: result.output });
+      return { invocation, ok: true, output: result.output };
     } catch (error) {
       const duration = Date.now() - startTime;
-      this.metricsService.recordMetric(id, duration, 0, true);
+      this.metricsService.recordMetric(function_.id, duration, 0, true);
 
       // The runtime measures a call that failed too; without its measure, end-to-end without the cold start.
       const measured = error instanceof FunctionRuntimeError ? error : undefined;
@@ -456,7 +912,7 @@ export class FunctionsService {
       invocation.error = keptError.value;
       invocation.errorTruncated = keptError.truncated;
       await this.finish(function_, invocation, failureStatus(error), initMsOf(error));
-      throw failureResponse(error, visible);
+      return { invocation, ok: false, error, visible };
     } finally {
       this.metricsService.invocationFinished(function_);
     }

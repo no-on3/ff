@@ -30,11 +30,14 @@ export interface SearchResults {
   calls: CallHit[];
 }
 
-export const CALL_FIELDS = ['id', 'status', 'duration', 'memoryUsed', 'createdAt', 'errorType'] as const;
+export const CALL_FIELDS = ['id', 'status', 'source', 'duration', 'memoryUsed', 'createdAt', 'errorType'] as const;
+/** What brought a call: the API, the function's URL, or a schedule. */
+export type CallSource = 'api' | 'url' | 'schedule';
 /** A call, without what went in or out. */
 export interface Call {
   id: string;
   status: string;
+  source: CallSource;
   /** Milliseconds. */
   duration: number;
   memoryUsed: number | null;
@@ -43,6 +46,39 @@ export interface Call {
   errorType: string | null;
 }
 
+export const DOMAIN_FIELDS = ['domain', 'status', 'checkError'] as const;
+/** A customer's own domain for a URL, and where it stands. */
+export interface Domain {
+  domain: string;
+  status: 'pending' | 'verified';
+  /** What its last check found wrong. */
+  checkError: string | null;
+}
+
+export const FUNCTION_URL_FIELDS = ['functionUrl', 'authType', 'cors', 'createdAt', 'domains'] as const;
+/** A function's URL: its address, who may call it, and the customer's own domains for it. */
+export interface FunctionUrl {
+  functionUrl: string;
+  /** NONE: anyone; AWS_IAM: an API key of the account. */
+  authType: 'NONE' | 'AWS_IAM';
+  /** Whether it has a CORS configuration. */
+  cors: boolean;
+  createdAt: string;
+  domains: Domain[];
+}
+
+export const SCHEDULE_FIELDS = ['name', 'expression', 'enabled', 'nextRunAt', 'lastRunAt', 'lastOutcome'] as const;
+/** A function's schedule: when it runs, and how its last run went; never its input. */
+export interface Schedule {
+  name: string;
+  expression: string;
+  enabled: boolean;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastOutcome: string | null;
+}
+
+export const FUNCTION_PAGE_FIELDS = ['function', 'url', 'variables', 'secrets', 'schedules', 'account', 'recentCalls', 'recentErrors'] as const;
 export interface FunctionPage {
   function: {
     id: string;
@@ -53,10 +89,17 @@ export interface FunctionPage {
     minInstances: number;
     maxInstances: number;
     status: string;
+    /** The event it takes: AWS Lambda's, or FF's original wrapped one. */
+    eventFormat: 'lambda' | 'wrapped';
     error: string | null;
     createdAt: string;
     updatedAt: string;
   };
+  url: FunctionUrl | null;
+  /** Its variables' and secrets' names: never their values. */
+  variables: string[];
+  secrets: string[];
+  schedules: Schedule[];
   account: AccountSummary;
   recentCalls: Call[];
   recentErrors: Call[];
@@ -112,6 +155,32 @@ export const outcome = (call: Pick<Call, 'status' | 'errorType'>): string => (ca
 
 /** Where a call was found: the history, or only its usage record once the history no longer keeps it. */
 export const foundIn = (call: Pick<CallHit, 'inHistory'>): string => (call.inHistory ? 'the history' : 'its usage record only: the history no longer keeps it');
+
+/** What brought a call, to read. */
+export const sourceText = (source: CallSource): string => ({ api: 'API', url: 'URL', schedule: 'Schedule' })[source] ?? source;
+
+/** The event a function takes, to read. */
+export const eventFormatText = (format: FunctionPage['function']['eventFormat']): string =>
+  format === 'wrapped' ? "FF's original wrapped event, from before AWS Lambda's" : "AWS Lambda's";
+
+/** A function's URL, to read: who may call it, and whether browsers may from other sites. */
+export function urlText(url: FunctionUrl): string {
+  const who = url.authType === 'NONE' ? 'anyone may call it' : 'only with an API key of the account';
+  return `${who}${url.cors ? ', with CORS' : ''}`;
+}
+
+/** A URL's own domains, to read: each with where it stands. */
+export const domainsText = (domains: Domain[]): string =>
+  domains.length ? domains.map(({ domain, status }) => `${domain} (${status})`).join(', ') : 'none';
+
+/** A schedule, to read: its expression, and its next run or why there is none. */
+export function scheduleText(schedule: Schedule, when: (iso: string) => string): string {
+  const next = !schedule.enabled ? 'disabled' : schedule.nextRunAt ? `next ${when(schedule.nextRunAt)}` : 'no run left';
+  return `${schedule.name}: ${schedule.expression}, ${next}${schedule.lastOutcome ? `; last: ${schedule.lastOutcome}` : ''}`;
+}
+
+/** Names, to read: "A, B", or "none". */
+export const namesText = (names: string[]): string => (names.length ? names.join(', ') : 'none');
 
 /** "1.09 ms", "2,000 ms". */
 export const milliseconds = (ms: number): string => `${ms.toLocaleString('en', { maximumFractionDigits: 2 })} ms`;

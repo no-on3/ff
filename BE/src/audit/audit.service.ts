@@ -27,6 +27,21 @@ export type AuditAction =
   | 'function.update'
   | 'function.delete'
   | 'function.scaling'
+  // A function's package, uploaded: its SHA-256 and its sizes, once per account and package.
+  | 'package.upload'
+  // A function's URL, its public address: given, changed, taken away.
+  | 'function_url.create'
+  | 'function_url.update'
+  | 'function_url.delete'
+  // A customer's own domain for a function's URL: added, proved by DNS, no longer proved, removed.
+  | 'custom_domain.add'
+  | 'custom_domain.verify'
+  | 'custom_domain.unverify'
+  | 'custom_domain.remove'
+  // A function's schedule: made, changed (enabled, disabled, its expression…), deleted.
+  | 'schedule.create'
+  | 'schedule.update'
+  | 'schedule.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

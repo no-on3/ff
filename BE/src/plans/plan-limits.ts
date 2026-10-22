@@ -43,6 +43,10 @@ export const planLimitsSchema = z.strictObject({
   idleSeconds: positive,
   /** Whether functions may reach the internet; P-62 applies it per account. */
   internetEgress: z.boolean(),
+  /** Customers' own domains for their functions' URLs, all the account's together. */
+  customDomains: z.number().int().min(0),
+  /** Functions' schedules, all the account's together. */
+  schedules: z.number().int().min(0),
 });
 
 export type PlanLimits = z.infer<typeof planLimitsSchema>;

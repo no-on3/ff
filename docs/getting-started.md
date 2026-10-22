@@ -92,6 +92,7 @@ npm run start:dev
 - The defaults in `.env.example` match the steps above. In development the backend acts as one account, `FF_DEV_ACCOUNT_ID` (`FF_AUTH_MODE=dev`), without a login; section 5 shows how to log in with Keycloak instead. To act as another account, send the header `X-FF-Dev-Account: <12 digits>`: each account sees only its own functions, and another account's answer 404, as functions that don't exist.
 - **Every variable is checked when the backend starts.** A missing or bad value stops it with a message that names the variable and what it expects. `NODE_ENV=production` also refuses the development settings: the dev account, and the default database and storage credentials.
 - A `BE/.env` from before 2026-10-17 sets `FF_DEV_USER_ID`, which is no longer read: copy `BE/.env.example` again. The backend says so if you forget.
+- **Every function's code runs as an image** in the registry that `hack/k8s/cluster-up.sh` runs next to the cluster ([ADR 0003](adr/0003-code-delivery.md)). `BE/.env` names it as `.env.example` does: `FF_CODE_REGISTRY=http://127.0.0.1:5056` and `FF_CODE_REGISTRY_PULL=ff-dev-registry:5000`. A `BE/.env` from before 2026-10-21 lacks them: add those two lines, or every create and update answers 503 `This FF has no code registry`.
 - **The schema comes from migrations,** in development as in production. `npm run migration:run` applies the ones your database hasn't had yet. Run it again whenever you pull changes that add a migration (`BE/src/migrations/`). The backend refuses to start while a migration is pending, and says so.
 - Leave this terminal running, and run the remaining commands from a second terminal at the repository root. Check that the backend answers: `curl -s localhost:3000/functions` prints `[]`, and the Swagger UI is at http://localhost:3000/api.
 
@@ -151,7 +152,7 @@ echo "$ID"
 
 **A name belongs to one function of the account.** It follows AWS Lambda's rule: 1 to 64 letters, digits, hyphens or underscores, compared exactly, so `Hello` and `hello` are two names. A name outside the rule answers 400, `name must be 1 to 64 letters, digits, hyphens or underscores, as an AWS Lambda function's name`; one given before 2026-10-21 that breaks it is kept until the function is renamed. Another create or rename with a name in use answers 409, `A function named "hello" already exists in this account: choose another name, or change that function`, and changes nothing: run the command above twice and the second `ID` is `null`. Delete the first one (`curl -s -X DELETE "$FF/functions/$ID"`), or choose another name. Names weren't unique before 2026-10-21 either: the migration that made them so kept the name of the oldest of an account's functions with one name, and added the first 8 characters of their ID to the others' (`hello-3f9c2a1e`). The account's audit log records each of these renames, as FF's.
 
-**Invoke it.** `input` becomes `event.body` in the handler, and `duration` is the execution time in milliseconds, as the runtime measured it:
+**Invoke it.** `input` is the handler's event, as a payload is on AWS Lambda: any JSON value, `{}` when there is none. `duration` is the execution time in milliseconds, as the runtime measured it:
 
 ```bash
 curl -s -X POST "$FF/functions/$ID/invoke" -H 'content-type: application/json' \
@@ -170,11 +171,11 @@ PY=$(jq -n --rawfile code examples/hello.py \
 curl -s -X POST "$FF/functions/$PY/invoke" -H 'content-type: application/json' -d '{"input": {"name": "Sfax"}}' | jq .output
 ```
 
-**Errors and timeouts.** A function that raises, or runs past its timeout, answers HTTP 400 with the error. The invocation is recorded as `ERROR` or `TIMEOUT`. `examples/hello.py` raises for the name `error`, and `examples/slow.py` sleeps:
+**Errors and timeouts.** A function that raises, or runs past its timeout, answers HTTP 400 with the error, and with the call as the history keeps it: `invocation`, its `id` (the request ID of its log lines), `status` `ERROR` or `TIMEOUT`, `duration` and `memoryUsed`. `examples/hello.py` raises for the name `error`, and `examples/slow.py` sleeps:
 
 ```bash
-curl -s -X POST "$FF/functions/$PY/invoke" -H 'content-type: application/json' -d '{"input": {"name": "error"}}' | jq .message
-# "ValueError: this name is not allowed"
+curl -s -X POST "$FF/functions/$PY/invoke" -H 'content-type: application/json' -d '{"input": {"name": "error"}}' | jq -c '{message, invocation}'
+# {"message":"ValueError: this name is not allowed","invocation":{"id":"9b2e…","status":"ERROR","duration":2,"memoryUsed":36}}
 
 SLOW=$(jq -n --rawfile code examples/slow.py \
          '{name: "slow", runtime: "python", memory: 128, timeout: 2, code: $code}' \
@@ -249,7 +250,78 @@ curl -s -X PUT "$FF/functions/$ID/scaling-config" -H 'content-type: application/
 # {"minInstances":0,"maxInstances":5,"scaleToZero":true}
 ```
 
-**Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
+**Environment variables**, as AWS Lambda's: names and string values your code reads as `process.env.NAME` in Node.js, `os.environ["NAME"]` in Python. Set them on create, or replace them all with an update, which rolls out a new version as a change of code does; `{}` removes them. A name starts with a letter, then letters, digits or underscores, two characters at least. The names Lambda sets itself (`AWS_REGION`, `AWS_LAMBDA_FUNCTION_NAME` and the rest of its list) and FF's runtimes' (`FUNCTION_TIMEOUT`, `PORT`, `PATH`, every `FF_` name) are refused, and all of them together take at most 4 KB as JSON text, as Lambda counts it. `TZ` is yours: the runtimes run in UTC otherwise.
+
+```bash
+curl -s -X PUT "$FF/functions/$ID" -H 'content-type: application/json' \
+  -d '{"environment": {"GREETING": "Ahlan", "TZ": "Africa/Tunis"}}' | jq -c .environment
+# {"GREETING":"Ahlan","TZ":"Africa/Tunis"}
+```
+
+They are configuration: whoever reads the function reads them, as on Lambda, and `GET /functions/<id>` answers with them (the list doesn't). The database keeps them encrypted, with the keys of `FF_ENCRYPTION_KEYS_FILE`: development has a key of its own, which production refuses. The cluster gives them to the function's pods through a Kubernetes Secret, and the audit log names the variables an update added, changed or removed, never their values. The console's Environment tab edits them. A value nobody should read back, such as a database password, belongs in a secret.
+
+**Secrets** are variables whose values nobody reads back: not the console, not the API, not the audit log. The function reads them as its other variables, so its code is the same on AWS, where they become variables or Secrets Manager entries. They follow the variables' name rule, a name being a variable or a secret but not both, and count in the same 4 KB. Give them on create (`"secrets": {"DB_PASSWORD": "…"}`), or set and remove them later, `null` removing one; the others stay. A change rolls out a new version, as a change of variables does, and answers once it is live, with each secret's name and when it was set:
+
+```bash
+curl -s -X PATCH "$FF/functions/$ID/secrets" -H 'content-type: application/json' \
+  -d '{"secrets": {"DB_PASSWORD": "correct-horse-battery-staple", "OLD_TOKEN": null}}' | jq -c .
+# {"secrets":[{"name":"DB_PASSWORD","updatedAt":"2026-10-21T08:00:00.000Z"}]}
+curl -s "$FF/functions/$ID/secrets" | jq -c '[.secrets[].name]'
+```
+
+Every member lists their names; owners and developers change them, and API keys with `functions:read` and `functions:write`. A value set again unchanged, or a name already gone, changes nothing. The console's Environment tab lists them under the variables, sets one (the value typed once, never shown again) and removes one.
+
+**A web address for a function.** A function URL makes the function a web endpoint, as on AWS Lambda: every request to it, any method and any path, calls the function, and what the function returns is the response.
+
+```bash
+URL=$(curl -s -X POST "$FF/functions/$ID/url" -H 'content-type: application/json' -d '{"authType": "NONE"}' | jq -r .functionUrl)
+echo "$URL"                        # http://<32 letters and digits>.fn.localhost:3001/
+curl -si "${URL}hello?name=Amira"  # the function's answer, with x-amzn-RequestId
+```
+
+The backend answers URLs on a port of its own, `FF_FUNCTION_URL_PORT` (3001), at `FF_FUNCTION_URL_BASE` (`http://fn.localhost:3001`): browsers and curl take every name under `.localhost` to your machine. The address is random and stays the same until you delete the URL; a new URL gets a new address. The function gets AWS Lambda's event for function URLs, API Gateway's payload format 2.0: `rawPath`, `rawQueryString`, `queryStringParameters`, `headers` (names in lower case), `cookies`, `body` (text for text, JSON and XML; otherwise base64, with `isBase64Encoded`), and `requestContext` with `http.method`, `http.sourceIp` and `requestId`. It answers with `statusCode`, `headers`, `cookies`, `body` and `isBase64Encoded`; any other value is sent as JSON with 200. A handler written for a Lambda function URL runs unchanged:
+
+```ts
+export async function handler(event: { queryStringParameters?: Record<string, string> }) {
+  const name = event.queryStringParameters?.name ?? 'world';
+  return { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: `Ahlan ${name}` };
+}
+```
+
+- **Who may call it.** `"authType": "NONE"`: anyone, on the account's bill. `"AWS_IAM"`: only callers with an API key of the account that has `functions:invoke`, made by an owner or a developer, sent as `Authorization: Bearer ffk_…`; the function never sees the key. On AWS the same setting takes callers' SigV4 signatures instead.
+- **Browsers on other sites.** `"cors"` takes AWS Lambda's six fields: `allowOrigins`, `allowMethods`, `allowHeaders`, `exposeHeaders`, `allowCredentials` and `maxAge`. With them, the URL answers browsers' preflights itself and puts its CORS headers on every answer; without them, the function answers preflights like any request.
+- **A call like any other.** It counts against the plan's invocations per second together with the API's invokes, needs the account's credit, has its usage record and its price, and is in the history with `"source": "url"`. The history keeps the request with the values of `authorization`, `proxy-authorization` and `x-api-key` as `***`, and without its cookies.
+- **When FF answers instead of the function**, with `{"Message": …}`: `404` for an address that is no URL, `403` without the account's credentials, `429` past the plan's rate, `402` without credit, `503` while the function isn't `ACTIVE`, `413` for a request over 6 MB, as on Lambda. A function that throws, times out, or returns something that can't be an HTTP response gets `502`, never its error's text: the history has that for you, and the backend's log says why a response couldn't be sent. Every answer carries `x-amzn-RequestId`, the call's request ID in the history and the logs.
+- **Your own domain.** The URL can answer at a domain of yours too, such as `shop.example.tn`: add it, make the DNS record it asks for, and check it. A subdomain needs a CNAME to the URL's host; a domain apex, which can't have one, a TXT record `_ff-verify.<domain>` with the token FF gives, and an A record to FF's edge. Once the DNS proves the domain is yours, the URL answers there over HTTPS, its certificate made at the first request; the event's `requestContext.domainName` is your domain.
+
+  ```bash
+  curl -s -X POST "$FF/functions/$ID/url/domains" -H 'content-type: application/json' -d '{"domain": "shop.example.tn"}' | jq -c '{status, records}'
+  # {"status":"pending","records":{"cname":[{"type":"CNAME","name":"shop.example.tn","value":"<id>.fn.localhost"}],"txt":[…]}}
+  curl -s -X POST "$FF/functions/$ID/url/domains/shop.example.tn/verify" | jq -r '.status, .checkError'   # once the record is made
+  ```
+
+  A domain is checked again on each `…/verify`: if its records are gone, it goes back to pending and the URL stops answering there. An account adds a domain once; several accounts may add the same one, but only the first whose DNS proves it has it. The plan limits how many an account has (5 on the beta plan). `GET …/url/domains` lists them, `DELETE …/url/domains/<domain>` removes one, and deleting the URL removes them all. In development, the backend asks the DNS servers `FF_DOMAIN_RESOLVERS` names, for a test zone (`hack/e2e.sh` runs one), or the system's.
+- **In the console**, a function's URL tab does it all: create the URL, copy its address, see who may call it and how, change the auth type and CORS, delete it. The Invocations tab says which way each call came, and reads the history again each time it opens.
+- **The rest.** `GET /functions/<id>/url` reads it; `PUT` changes what you send and keeps the rest (`"cors": null` removes CORS); `DELETE` stops the address at once. Every member reads it; owners and developers change it, and API keys with `functions:read` and `functions:write`. Only functions with AWS Lambda's event can have a URL, and a function with a URL can't go back to FF's original wrapped event until the URL is deleted.
+- **In a cluster**, the edge sends every host under the function domain, `*.fn.<your domain>`, to that port over HTTPS, with one wildcard certificate that it gets through your DNS, or one per URL at its first request; and customers' own domains, each with a certificate made at its first request once the backend says the domain is verified: [deploy/k8s/README.md](../deploy/k8s/README.md), "Function URLs".
+
+**Run a function on a schedule.** A schedule calls the function at the times its expression names, as an EventBridge rule's schedule does, the one SAM's `Schedule` event declares:
+
+```bash
+curl -s -X POST "$FF/functions/$ID/schedules" -H 'content-type: application/json' \
+  -d '{"name": "nightly-report", "expression": "cron(0 2 * * ? *)"}' | jq -c '{name, nextRunAt}'
+# {"name":"nightly-report","nextRunAt":"2026-10-22T02:00:00.000Z"}
+curl -s "$FF/schedules/next-runs?expression=rate(15%20minutes)" | jq -c .runs   # a preview: the next five runs
+```
+
+- **Expressions** are EventBridge's, in UTC. `rate(1 minute)`, `rate(5 minutes)`, `rate(1 hour)`, `rate(2 days)`: the unit is singular for 1 and plural above, and the first run comes one interval after the schedule starts. `cron(minutes hours day-of-month month day-of-week year)`: six fields, one of the two days `?`, with `,` `-` `*` `/`, `L` (the month's last day, or `5L` its last Thursday), `W` (`15W`, the weekday nearest the 15th; `LW`, the last weekday), `#` (`2#1`, the first Monday), the names `JAN`–`DEC` and `SUN`–`SAT` (`1` is Sunday), and years from 1970 to 2199. Nothing runs more often than once a minute. A wrong expression is refused with what is wrong in it.
+- **The event** is EventBridge's Scheduled Event: `{"version": "0", "id", "detail-type": "Scheduled Event", "source": "aws.events", "account", "time", "region", "resources": [the rule's ARN], "detail": {}}`, `time` when the run was due and `region` FF's (`FF_REGION`, `tn-tunis-1`). A schedule with an `input` sends that instead, any JSON value, as SAM's `Input` does.
+- **Each run is a call like any other:** the plan's invocations per second, the account's credit, the history with `"source": "schedule"`, the usage record and its price. A run that can't be made (the function not `ACTIVE`, the account suspended or without credit, the plan's rate) is skipped, and the schedule's `lastOutcome` says why; otherwise it says `success`, `error`, `timeout` or `throttled`, and `lastRequestId` names the call in the history and the logs.
+- **At most once, never retried.** Every few seconds (`FF_SCHEDULER_INTERVAL_SECONDS`, 5), the backend takes the schedules due and moves each to its next run before calling, so several backends never run one twice; a backend stopped in between loses that run. A schedule late by any amount runs once, then follows its expression from now: missed runs aren't made up. A failed run is in the history and the metrics, where an alarm can watch it.
+- **In the console**, a function's Schedules tab lists its schedules, with when each runs next and how its last run went, in your time and in UTC, and the last run's request ID. It makes one, showing the next five runs as you type the expression, or what is wrong in it, with a few examples to start from; it changes one, disables and enables it, and deletes it. Every member sees them; owners and developers change them.
+- **The rest.** `GET /functions/<id>/schedules` lists them with their next run; `PUT …/schedules/<scheduleId>` changes what you send (`"enabled": false` stops the runs, `true` starts them again from now); `DELETE` removes one, and deleting the function removes them all. Names are unique within a function: letters, digits, `.`, `-` and `_`, as EventBridge rules'. The plan limits how many an account has (20 on the beta plan). Only functions with AWS Lambda's event can have schedules.
+
+**Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, handler, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
 ```bash
 jq -n --rawfile code examples/hello.ts '{code: $code}' \
@@ -263,27 +335,153 @@ curl -s -X PUT "$FF/functions/$ID" -H 'content-type: application/json' -d '{"mem
 for f in "$ID" "$PY" "$SLOW"; do curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$FF/functions/$f"; done
 ```
 
+**Functions made before 2026-10-21** get FF's original event: the input in `event.body`, inside the request FF sent them (`{ body, headers, method, query, path }`). Each keeps it until its owner moves it, with an update that changes its handler to read `event` and sets `"eventFormat": "lambda"` together; the console's edit form offers the choice on such a function's page. Only functions with AWS Lambda's event can have a web address or a schedule ([ADR 0007](adr/0007-function-events.md)). A function's `eventFormat` says which it has, and `"eventFormat": "wrapped"` on a create makes a new one the old way, for code not moved yet.
+
 **What a function can be, today:**
-- one file (`function.ts` for Node.js, `function.py` for Python) using only the standard library, since there is no npm or pip install yet;
-- up to about 100 KB of code, with invoke input up to about 100 KB: that is the API's request limit today (larger requests get `413 request entity too large`). The runtimes themselves accept 900 KiB of code and 6 MB payloads; raising the API's limit is task C-03 of the [CLI plan](cli-plan.md);
+- one file, inline (`function.ts` for Node.js, `function.py` for Python), up to 3 MiB of code (3,145,728 bytes of UTF-8), as AWS Lambda's console takes in its editor; more answers 400, saying how many bytes it has, and comes as a package;
+- or a package with its libraries, a zip as AWS Lambda takes one: 50 MB, 250 MB and 20,000 files unpacked (below);
+- with an input of up to 6 MB as JSON, as AWS Lambda's synchronous calls take, and a request to its URL up to 6 MB; a larger input answers 413 `RequestEntityTooLargeException`, in Lambda's words. A request's body may have 7 MB for a function's create, update and invoke, 100 KB elsewhere, and a larger one answers 413, saying which limit;
 - within the account's plan: on the beta plan, 25 functions, each with 128–1024 MB of memory and a timeout of 1–300 s;
+- with environment variables and secrets, 4 KB at most together, as on Lambda (above);
 - up to 3 instances by default, and at most the plan's `instancesPerFunction` (10 on the beta plan) with `maxInstances`; `minInstances` from 0 up to the same limit keeps instances running when idle.
 
 A request beyond the plan gets 400 with the plan's limit, for example `memory must be at most 1024 MB on the Beta plan`. "Plans and limits" in section 5 lists them all.
 
 The handler is AWS Lambda's `handler(event, context)`, and the [Node.js](../runtimes/nodejs/README.md) and [Python](../runtimes/python/README.md) runtime READMEs describe `event`, `context`, and the error names. The code must define it: `exports.handler = async (event, context) => { … }` in Node.js, `def handler(event, context):` in Python. Code without one, such as a lone `console.log('hi');`, fails to load with `Runtime.HandlerNotFound: function.handler is undefined or not exported`.
 
+**Another name for it.** A function's `handler` says which one its runtime calls, as AWS Lambda's handler does: `function.handler` unless you name another on a create or an update, such as `"handler": "function.lambda_handler"` for Python code written for Lambda. The code you send is the file `function` (`function.ts` or `function.py`), so its handler is `function.<name>`; another file, `lambda_function.lambda_handler` for example, answers 400. A function also says how its code came, `packageType` (`inline`: the one file you send), and gives its code's SHA-256 in base64 and its size in bytes, `codeSha256` and `codeSize`, in the form of Lambda's `CodeSha256` and `CodeSize`, which describe a package: for code sent inline, they are its text's.
+
+**Functions with dependencies.** A real function needs libraries: a database driver, an SDK. It comes as a package, a zip as AWS Lambda takes one: the handler's file, in a folder if need be, and its libraries, `node_modules/` beside it for Node.js, the packages at its root for Python (`pip install -t`). `ff deploy <folder>` makes it from the function's folder, its libraries installed, and deploys it, once `ff` is set up ("With the `ff` command", below):
+
+```bash
+mkdir -p orders/lib && cd orders
+echo '{ "name": "orders", "private": true, "dependencies": { "ms": "2.1.3" } }' > package.json
+echo 'module.exports = (name) => `Hello ${name}`;' > lib/greet.js
+cat > index.js <<'EOF'
+const ms = require('ms');
+const greet = require('./lib/greet');
+exports.handler = async (event) => ({ message: greet(event.name ?? 'world'), in: ms(event.ms ?? 90000) });
+EOF
+ff deploy .                       # npm installs ms in a copy of the folder; "created orders (nodejs, 128 MB, 5 s): ACTIVE …"
+ff invoke orders --data '{"name": "Tunis"}'    # {"message": "Hello Tunis", "in": "2m"}
+ff deploy .                       # "orders: no changes": the same files make the same zip, the same SHA-256
+cd .. && mkdir report && cd report
+echo 'requests==2.32.5' > requirements.txt     # or pyproject.toml's [project] dependencies
+printf 'import requests\n\n\ndef lambda_handler(event, context):\n    return {"requests": requests.__version__}\n' > lambda_function.py
+ff deploy .                       # pip's wheels for the runtime; the handler is AWS Lambda's default
+```
+
+- **The handler** is `--handler` if you name one (`--handler src/handlers/orders.create`), else the function's while the package has its file, else `function.handler` where ff's own `function.*` is, then AWS Lambda's defaults, `index.handler` for Node.js and `lambda_function.lambda_handler` for Python. The Node.js runtime loads `.js`, `.mjs` (an ES module), `.cjs` or `.ts`, and a `.js` as an ES module where its `package.json` says `"type": "module"`, as Lambda's does.
+- **ff builds in a copy of the folder,** never in it: `npm ci` (`npm install` without a lockfile), the `build` script if there is one, then `npm prune --omit=dev`; for Python, pip's wheels for the runtimes' platform, Linux x86_64 with glibc 2.28 or older and CPython 3.13, whatever your machine is. npm 11.19 doesn't run the install scripts of dependencies that `package.json`'s `allowScripts` doesn't allow, and ff says which it skipped: `npm install-scripts approve <package>` in the folder allows one.
+- **Native libraries** (bcrypt, numpy) need the runtimes' platform: Linux x86_64 with glibc 2.41, Debian 13's, for both runtimes. Built as AWS Lambda's builds are, they load: npm's prebuilt `linux-x64-glibc` binaries, pip's manylinux wheels. npm installs your machine's binaries, the right ones on Linux x86_64; elsewhere, or for a Python library published as source alone, `--container` builds in the runtime's base image, in Docker.
+- **Left out of the package:** version control, `__pycache__`, `.env` files, which usually hold secrets (ff says so: `ff secrets set` gives a function its secrets), and what a `.ffignore` names, in `.gitignore`'s syntax without `!`. `--no-build` packages the folder as it is, its `node_modules` included.
+- **For AWS Lambda too:** `ff package` writes the same zip to the folder's `.ff/<name>.zip` and prints its SHA-256, Lambda's `CodeSha256`; `aws lambda create-function --zip-file fileb://.ff/orders.zip --handler index.handler --runtime nodejs24.x …` takes it. FF runs `.ts` files as they are, Lambda doesn't: `ff package --compile` runs the project's own `tsc` and leaves the TypeScript out. [`cli/README.md`](../cli/README.md#packages) has the details.
+
+**Packages through the API.** Upload the zip, then name it by the SHA-256 the upload answers, in place of `code`, with the handler it holds; `ff deploy` does the same:
+
+```bash
+mkdir -p greet/lib && cd greet
+printf 'exports.handler = async (event) => require("./lib/greet")(event.name ?? "world");\n' > index.js
+printf 'module.exports = (name) => "Hello " + name;\n' > lib/greet.js
+python3 -c 'import shutil; shutil.make_archive("../greet", "zip", ".")' && cd ..
+SHA=$(curl -s -X POST "$FF/packages" -H 'content-type: application/zip' --data-binary @greet.zip | jq -r .codeSha256)
+jq -n --arg sha "$SHA" '{name: "greet", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}' \
+  | curl -s -X POST "$FF/functions" -H 'content-type: application/json' -d @- | jq '{status, packageType, codeSha256, codeSize}'
+```
+
+- **The upload** is checked entry by entry: a name that leaves the zip, a link, an encrypted file, a size or a checksum that lies are refused, saying which entry. The answer is 201 for a new package, 200 for one the account has already, which is stored once; `GET /packages?codeSha256=<SHA, URL-encoded>` says whether to upload at all.
+- **The handler** names a file of the package, which the create or update looks for: one the package lacks answers 400, saying which file.
+- **An update** names another package, with the settings that change, in one rollout; `code` makes the function inline again. A package that no function names is deleted an hour after its upload or its last use; an account keeps 20 unused at most.
+- **It runs as an image:** FF makes one from the package, once, pushes it to the cluster's registry, and the function's pods mount it at `/var/task` on their runtime's image, read-only ([ADR 0003](adr/0003-code-delivery.md)). Inline code takes the same path: FF makes a one-file package of it, the same bytes for the same code, which `GET /packages` doesn't list, and which goes an hour after no function names it. In development the registry runs next to the cluster (`hack/k8s/registry-up.sh`, which `cluster-up.sh` runs), and `BE/.env` names it, as `BE/.env.example` does: `FF_CODE_REGISTRY=http://127.0.0.1:5056` and `FF_CODE_REGISTRY_PULL=ff-dev-registry:5000`. Without them, every create and update answers 503. In production it is Zot, in the platform's manifests (`deploy/k8s/README.md`, "The code registry").
+
 **If a function cannot load** (a syntax error, a missing handler, an exception at import), the create call answers 400 as soon as the runtime has said why, in about 10 s: the runtime logs it at start, and the backend reads it in the log store, which has it about 5 s later. Without the log pipeline (`--no-logging`), the backend can't read it, and waits for the readiness timeout instead (90 s, `FF_READY_TIMEOUT_SECONDS` in `BE/.env`). The answer gives the runtime's reason, for example `The function failed to load: Runtime.UserCodeSyntaxError: SyntaxError: function.ts:2:11 Property assignment expected.`, and `functionId`: the function is saved all the same, listed with status `ERROR` and that reason, and its pod is released. Creating it again would only answer 409, since the name is taken: the console opens the saved function's page instead of keeping its form. **Fix it with an update:** send the corrected code (`PUT /functions/<id>`), and the function becomes `ACTIVE`, keeping its ID. An update of an `ERROR` function always rolls out, even without changes, so `PUT` with `{}` retries the same code after a passing failure such as a full quota. Without the log pipeline, a lower timeout such as 30 gives faster feedback.
+
+**With the `ff` command.** Everything above has its command in `ff`, FF's command-line tool ([`cli/`](../cli/README.md), [ADR 0002](adr/0002-cli.md)): one Rust binary that talks to the API only. Build it once, point it at the backend, and say whom it acts as: in development mode, the account the backend acts as stands in for a token.
+
+```bash
+(cd cli && cargo build --release --locked) && export PATH="$PWD/cli/target/release:$PATH"
+ff config set endpoint "$FF"
+ff config set dev_account "$(curl -s "$FF/me" | jq -r '.accounts[0].id')"   # development mode only
+ff whoami                                         # Development mode, as the owner of account …
+ff deploy examples/hello.ts                       # creates "hello", or updates it with what changed
+ff invoke hello --data '{"name": "Tunis"}'        # the answer, then its request ID, duration and memory
+ff logs hello --follow                            # its log lines as they come; Ctrl-C stops
+ff deploy examples/hello.py --name hello-py --memory 256
+ff history hello                                  # its calls, newest first, by request ID
+ff scale hello --min 1 --max 5
+ff list
+ff delete hello --yes
+ff local invoke examples/hello.py --data '{"name": "here"}'   # on this machine, in Docker, as FF runs it
+ff init orders --runtime python                   # a new function's folder: its handler and an event
+ff deploy ./orders                                # a folder: packaged with its libraries, uploaded when new
+ff package ./orders                               # the same zip, for AWS Lambda too: ./orders/.ff/orders.zip
+ff account                                        # its plan's limits, and whether functions reach the internet
+ff usage                                          # this month's calls per function, and their estimated cost
+ff metrics hello --since 6h                       # its invocations, errors, durations, a row a minute
+```
+
+On an FF with logins, an owner of the account makes an API key in the console's API keys page, with the scopes the commands need (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `usage:read` for `ff usage` and `ff balance`, `metrics:read` for `ff metrics`), and `ff config set-token` saves it without showing it; `ff config set endpoint https://api.<domain>` names the API. A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh` makes the static Linux binary, with its SHA-256.
+
+### A small app, end to end
+
+[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and written to PostgreSQL, through a secret that holds the database's address, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, makes its two functions. FF has no database for customers yet (step 2 of [What to build next](what-to-build-next.md)): the app uses one of its own, which its functions reach over the internet, once the account's internet access is on.
+
+**The database.** A function never reaches a private address, FF's own network included. In development, `hack/k8s/app-database.sh up` runs a PostgreSQL that the cluster's functions reach as they would one on the internet: on a Docker network of its own in 198.18.0.0/15, the range set aside for tests, which the cluster's node joins (Docker 28 or later). It prints the database's address, which the functions get as a secret.
+
+```bash
+DATABASE_URL=$(hack/k8s/app-database.sh up)       # postgres://app:…@198.18.0.10:5432/app
+```
+
+**Its internet access.** The beta plan's accounts have none. FF's operator turns it on in the admin dashboard, on the account's page (`PUT /admin/accounts/<id>/egress`). In development mode, with no operator, the database stands in, and the next deploy applies it to the account's namespace:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d serverless_platform \
+  -c "UPDATE accounts SET internet_egress = true WHERE id = '$(curl -s "$FF/me" | jq -r '.accounts[0].id')'"
+```
+
+**The web address.** From the app's folder:
+
+```bash
+cd examples/orders-app
+ff deploy . --name orders-api --handler index.http     # npm installs pg in a copy of the folder; the package goes up
+printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
+ff url enable orders-api --auth none                    # its address: http://<id>.fn.localhost:3001/
+ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}'
+# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…"}
+ff invoke orders-api --http GET /orders                 # or curl http://<id>.fn.localhost:3001/orders
+../../hack/k8s/app-database.sh psql -c 'SELECT * FROM orders'
+```
+
+Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the address the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after.
+
+**The nightly report.** The same folder makes the second function, with the other handler. Its package is the same, so nothing goes up again:
+
+```bash
+ff deploy . --name orders-nightly --handler index.nightly   # "package: …, which the account had"
+printf '%s\n' "$DATABASE_URL" | ff secrets set orders-nightly DATABASE_URL
+ff schedule set orders-nightly "cron(0 2 * * ? *)"          # every night at 02:00 UTC; it says the next runs
+ff invoke orders-nightly --data @events/scheduled.json      # a night's run, now, with EventBridge's Scheduled Event
+ff logs orders-nightly                                      # report {"day":"2026-10-21","orders":1,"items":2,"removed":0}
+```
+
+The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. At 02:00 UTC the scheduler calls the function with that event itself; the run is in `ff history orders-nightly`, and `ff schedule list orders-nightly` says how it went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
+
+```bash
+ff delete orders-nightly --yes && ff delete orders-api --yes
+../../hack/k8s/app-database.sh down                     # the database, with its data
+```
+
+**In production** the database is yours, at an address on the internet, with TLS (`sslmode=require` in its address) and its password in the secret; FF's operator turns the account's internet access on. The same folder runs on AWS Lambda with an RDS database: `ff package` writes its zip.
 
 ## 4. Look inside the cluster
 
 ```bash
 source hack/k8s/env.sh                                   # kubectl from hack/bin, the dev cluster's kubeconfig
 NS=ff-t-$(printf %s 000000000001 | sha256sum | cut -c1-12)   # the dev account's namespace (FF_DEV_ACCOUNT_ID)
-kubectl -n "$NS" get deployments,pods,services,configmaps
+kubectl -n "$NS" get deployments,pods,services
 ```
 
-Each function is a Deployment and a Service named `fn-<id>`. Its code is in an immutable ConfigMap `fn-<id>-<hash>`. The previous version's ConfigMap is kept too, because old pods may still use it during a rollout.
+Each function is a Deployment and a Service named `fn-<id>`. Its code is an image in the cluster's registry, inline code's too, which its pods mount read-only at `/var/task`, and which `kubectl -n "$NS" get deployment fn-<id> -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'` names: `ff-dev-registry:5000/ff-code/<account>@sha256:…`, the same image for the same code. A function deployed before 2026-10-21 keeps its code in an immutable ConfigMap `fn-<id>-<hash>` until its next update, which deletes it.
 
 **Logs.** Each function pod logs:
 - Lambda-style `START`, `END`, and `REPORT` lines, with duration and memory, for every invocation;
@@ -321,7 +519,7 @@ curl -s "$FF/functions/$ID/logs?q=greeting&sinceSeconds=3600" | jq -r '.lines[].
 curl -s "$FF/functions/$ID/logs?limit=100&cursor=$NEXT" | jq -c '.next'                    # the page before the one whose next was $NEXT
 ```
 
-**Call a runtime directly**, without the backend, to see its raw response and headers. Here the request body *is* the event body:
+**Call a runtime directly**, without the backend, to see its raw response and headers. Here the request body *is* the event:
 
 ```bash
 kubectl -n "$NS" port-forward svc/fn-$ID 18080:8080 >/dev/null &
@@ -417,7 +615,7 @@ curl -s $FF/api-keys -H "$AUTH" | jq -c '.[] | {id, name, lastUsedAt}'
 curl -s -X DELETE $FF/api-keys/${KEY:4:12} -H "$AUTH"      # revoked: it stops working at once
 ```
 
-A key never does more than its creator's role allows, checked on every request: it stops when its creator leaves the account. An account has at most 20 keys; `expiresAt` (ISO 8601) makes one expire. Keys can't manage accounts or keys.
+A key never does more than its creator's role allows, checked on every request: it stops when its creator leaves the account. An account has at most 20 keys; `expiresAt` (ISO 8601) makes one expire. Keys can't manage accounts or keys. Any key reads `GET /me`, whatever its scopes: itself (`key`: its ID, name and scopes) and the account it acts for, with its creator's role, which is how a script, or `ff whoami`, checks the key it was given.
 
 **Members.** An owner invites people by e-mail, with a role: `owner` (everything), `developer` (functions) or `viewer` (reads). Whoever next calls the API with a login for that address joins, within 7 days: Keycloak has verified the address. The invitation e-mail links to the console (`FF_CONSOLE_URL`). Owners change roles and remove members, but an account always keeps an owner, and a removed member's API keys stop at once.
 
@@ -790,15 +988,17 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 (cd FE && npm test)                                      # console unit tests, seconds
 (cd runtimes/nodejs && npm test)                         # Node.js runtime protocol
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
+(cd cli && cargo test --locked)                          # the ff command: unit tests, then its binary against a scripted API, seconds
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
 hack/k8s/test-logging-filter.sh                          # the log collector's configuration and filter, in its image, seconds
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
 hack/e2e.sh                                              # the whole stack through the API, about 3 min
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 1 min
+hack/cli-e2e.sh                                          # the ff command on the stack, and in Docker, about 5 min
 hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
 hack/k8s/test-platform-manifests.sh                      # deploy/k8s/platform checked without deploying it, about 1 min
 hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 15 min
-hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, about 2 min
+hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, the packages, about 2 min
 ```
 
 **The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). Each stage stops at its first failing step and names it:
@@ -890,7 +1090,7 @@ cd BE && FF_LOG_FORMAT=json npm run start:dev 2>&1 | jq -rR --unbuffered '(fromj
 | A backend test stops before it starts: `Must use import to load ES Module: …/node_modules/@nestjs/common/index.js` | NestJS ships its packages as ES modules only, and Jest loads them from the backend's CommonJS only on Node.js 24.9 or newer, with the flag `--experimental-vm-modules`. Check `node --version` (with nvm: `nvm install 24 && nvm use 24`). Then start Jest through npm, which passes the flag from `BE/.npmrc`: `npm test`, `npm run test:db`, or `npx jest <file>`. An editor's test runner, or `node_modules/.bin/jest`, needs `NODE_OPTIONS=--experimental-vm-modules` set itself. |
 | After your machine changed networks, functions can't resolve names (`EAI_AGAIN`, even for `kube-dns.kube-system.svc.cluster.local`), and L3's network cases fail | The cluster's node keeps the DNS servers it started with: `docker exec k3d-ff-dev-server-0 cat /etc/resolv.conf` names the old network's (`ExtServers`). Restart the cluster with the k3d in `hack/bin`, which isn't on your `PATH` (a bare `k3d` says the command isn't found): `hack/bin/k3d cluster stop ff-dev && hack/bin/k3d cluster start ff-dev`, about 15 s. The node then names the new network's servers, and L3 passes again. Every pod restarts, those of functions another terminal runs too. |
 | 400 `… must not contain the NUL character (U+0000)` | PostgreSQL stores no NUL in text, so the API refuses it in what it keeps: a function's code, names, settings, searches. Remove it. An invocation's input may hold one: the function gets it whole. |
-| A function can't reach an outside API: `connect ETIMEDOUT`, or a name that resolves but never answers | Its account's internet egress is off, as every new account's is. Turn it on in the admin dashboard (the account's page), or with `PUT /admin/accounts/:id/egress`. In development mode, without the admin dashboard: `UPDATE accounts SET internet_egress = true WHERE id = '<FF_DEV_ACCOUNT_ID>';` in the database, then change a function's code or create one: every rollout writes the account's NetworkPolicy. |
+| A function can't reach an outside API: `connect ETIMEDOUT`, or a name that resolves but never answers | Its account's internet egress is off, as every new account's is: `GET /me` says it of each account (`internetEgress`), and `ff account` too. Turn it on in the admin dashboard (the account's page), or with `PUT /admin/accounts/:id/egress`. In development mode, without the admin dashboard: `UPDATE accounts SET internet_egress = true WHERE id = '<FF_DEV_ACCOUNT_ID>';` in the database, then change a function's code or create one: every rollout writes the account's NetworkPolicy. |
 | The backend won't start: `K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production` | Production runs customers' code in gVisor. Install it on the nodes, apply `deploy/k8s/optional/runtimeclass-gvisor.yaml`, and set `K8S_RUNTIME_CLASS=gvisor` (the platform's `backend.env` has it). Only a cluster that tries the platform's manifests, without customers, sets `K8S_ALLOW_UNSANDBOXED=true` instead. |
 | 400 `… must be at most … on the Beta plan`, or `The Beta plan allows 25 functions per account` | The request goes beyond the account's plan. Ask for less, or move the account to a larger plan ("Plans and limits" in section 5). |
 | 400 `An account needs an owner: make another member owner first` | Make another member owner, then change or remove the first one. |
@@ -912,13 +1112,15 @@ cd BE && FF_LOG_FORMAT=json npm run start:dev 2>&1 | jq -rR --unbuffered '(fromj
 | `migration:run` fails with `relation "functions" already exists` | The database was created before migrations were used. Reset it once, as shown after step 7. |
 | `npm run test:db` fails with `ECONNREFUSED` | PostgreSQL isn't running: `docker compose up -d --wait postgres`. The tests read `DB_*` from `BE/.env`. |
 | Kubernetes calls fail with `Unauthorized` | The token expired: `hack/k8s/mint-token.sh`. |
-| Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. |
+| Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. Or the node can't pull the code image (`kubectl -n <namespace> describe pod` names it): `hack/k8s/registry-up.sh` starts the registry and tells the node where it is. A registry that lost the image, its volume deleted, gets it back from the backend, which makes again the images functions use every hour and at its start: restart it. |
+| `create` or `update` answers 503 `This FF has no code registry, so it can't deploy a function` | `BE/.env` lacks the registry, as one from before 2026-10-21 does: add `FF_CODE_REGISTRY=http://127.0.0.1:5056` and `FF_CODE_REGISTRY_PULL=ff-dev-registry:5000`, as in `BE/.env.example`, and restart the backend. |
+| `create` or `update` answers 503 `The code registry can't be reached: nothing changed, try again in a moment` | The registry isn't running: `hack/k8s/registry-up.sh`, then send it again. |
 | `create` fails with `The function failed to load:` | The code didn't load: the runtime's reason follows, and `functionId` names the function, saved as `ERROR`. Fix the code and send it with `PUT /functions/<id>`, rather than create it again: see "If a function cannot load" in section 3. If the answer is 500 instead, the platform failed: see the row below about request IDs. |
 | `create` takes 90 s, then fails | The backend couldn't read the runtime's reason in the log store, and waited for the readiness timeout: check the log pipeline (`kubectl -n ff-system get pods`; `hack/k8s/logging-up.sh` installs it). |
 | 400 `name must be 1 to 64 letters, digits, hyphens or underscores…` | Function names follow AWS Lambda's rule: no spaces, dots or accented letters, and 64 characters at most. `my-function` or `my_function`, rather than `my function`. |
 | 409 `A function named "…" already exists in this account` | Names are unique within an account: choose another name, or change the function that has it (`PUT /functions/<id>`). One whose code failed to load was saved all the same: fix it rather than create it again. |
 | 409 `The new version is live, but the function keeps its name …` | Another create or rename took the new name while the update rolled out. The rest of the update went through; rename the function again with a free name. |
-| An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first. The previous version still serves, and the record is unchanged. |
+| An update answers 400 with `The update was rolled back` | The new version couldn't start; the reason comes first, and `functionId` names the function, as a failed create's answer does. The previous version still serves, and the record is unchanged. |
 | An invocation stays `RUNNING`, then becomes `LOST` | The backend stopped during the call, so its answer is unknown; it isn't billed. Invoke again. See "Lost calls" in section 5. |
 | The backend logs `Could not create the monthly partitions` | The migrations haven't run (`cd BE && npm run migration:run`), or the database refused: the message says why. An invocation in a month without a partition fails with `no partition of relation "usage_records" found for row`. |
 | The backend logs `Could not sample capacity` | The Kubernetes API didn't answer the list of Deployments, or the database refused the samples: the message says why. That minute has no sample; the next minute is sampled as usual. |

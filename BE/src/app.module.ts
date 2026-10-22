@@ -14,16 +14,19 @@ import { RequestIdInterceptor } from './common/request-context';
 import configuration, { DatabaseSettings, LogFormat } from './config/configuration';
 import { backendDataSourceOptions } from './database/database.options';
 import { FunctionsModule } from './functions/functions.module';
+import { FunctionUrlsModule } from './function-urls/function-urls.module';
 import { HealthController } from './health/health.controller';
 import { MetricsModule } from './metrics/metrics.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AlarmsModule } from './alarms/alarms.module';
 import { MonitoringModule } from './monitoring/monitoring.module';
 import { MinioClientModule } from './minio-client/minio-client.module';
+import { PackagesModule } from './packages/packages.module';
 import { PlansModule } from './plans/plans.module';
 import { PlansService } from './plans/plans.service';
 import { RateLimitGuard, rateLimitOptions } from './plans/rate-limits';
 import { RetentionModule } from './retention/retention.module';
+import { SchedulesModule } from './schedules/schedules.module';
 
 @Module({
   imports: [
@@ -48,13 +51,16 @@ import { RetentionModule } from './retention/retention.module';
     ApiKeysModule,
     AuditModule,
     FunctionsModule,
+    FunctionUrlsModule,
     MetricsModule,
     NotificationsModule,
     AlarmsModule,
     MonitoringModule,
     MinioClientModule,
+    PackagesModule,
     PlansModule,
     RetentionModule,
+    SchedulesModule,
   ],
   controllers: [HealthController],
   providers: [

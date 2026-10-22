@@ -74,14 +74,6 @@ export class FunctionThrottledError extends Error {
   }
 }
 
-/** The code does not fit the current delivery mechanism (ConfigMap, 900 KiB). */
-export class CodeTooLargeError extends OrchestratorError {
-  constructor(bytes: number, limit: number) {
-    super(`Function code is ${bytes} bytes; the current limit is ${limit} bytes`);
-    this.name = 'CodeTooLargeError';
-  }
-}
-
 /** The log store could not be reached, or failed: logs can't be read for now (P-43). Its details are the platform's. */
 export class LogStoreUnavailableError extends Error {
   constructor(message: string) {

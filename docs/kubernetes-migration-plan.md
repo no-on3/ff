@@ -162,7 +162,7 @@ and calls functions directly at http://fn-<id>.<ns>.svc:8080 (K8S_INVOKE_MODE=di
 | kubectl | v1.37.1 | SHA-256 verified against `dl.k8s.io` |
 | k3d | v5.9.0 | SHA-256 verified against the release checksums |
 | k3s image | `rancher/k3s:v1.37.1-k3s1` | |
-| Node.js runtime base | `node:24-alpine` | Node 24 LTS = Lambda `nodejs24.x`; the digest is recorded in the runtime README |
+| Node.js runtime base | `node:24-alpine`; `node:24-trixie-slim` (glibc) since 2026-10-21, for native modules built as Lambda's are (the CLI plan's C-25) | Node 24 LTS = Lambda `nodejs24.x`; the digest is recorded in the runtime README |
 | Python runtime base | `python:3.13-slim` | Lambda `python3.13` |
 | TypeScript (in-runtime transpiler) | 5.7.3 | Same as the backend |
 | gVisor (optional, K-11) | release `20260928.0` | SHA-512 checked against the release bucket; installed by `hack/k8s/gvisor-up.sh` |

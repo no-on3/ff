@@ -5,6 +5,8 @@ What FF must never lose is money and law (client-readiness plan, P-61):
 - the logins, in Keycloak's;
 - the issued invoices' PDFs and the withholding certificates, in the S3 bucket (`invoices/`, `withholding-certificates/`).
 
+Nor its customers' code: the packages their functions run, in the bucket (`packages/`), which the code registry's images are made of again when it loses them. Inline code is in FF's database too.
+
 **The targets:** at most 15 minutes of data lost when the database's server fails (recovery point), and FF serving again within 4 hours (recovery time). A restore drill proves both every month: [`docs/backup-drills.md`](../../docs/backup-drills.md) records each.
 
 **A second site:** each backup lives at another provider, or at least in another region, than what it backs up. A key that only FF holds encrypts it before it leaves.
@@ -23,13 +25,19 @@ FF's database and Keycloak's are two databases of one PostgreSQL server (D13). P
 
 The encryption key is kept apart from both the server and the second site: in FF's password manager, and printed in the safe. Without it nothing can be restored, and with it alone nobody can reach the backups. The second site holds no customer data in clear. WAL-G's own metadata names the databases and their tables, which FF's repository shows anyway.
 
+**Functions' variables and secrets** are in FF's database, sealed with the keys of the Secret `ff-encryption-keys` (`FF_ENCRYPTION_KEYS_FILE`, `deploy/k8s/README.md`). A restored database is useless for them without those keys: keep the keys file with the backups' own key, in FF's password manager and in the safe, and add each new key there the day it goes into the Secret. The backups themselves never hold a value in clear: the rows are sealed before PostgreSQL sees them.
+
 PostgreSQL keeps a segment it couldn't ship and tries again. While the second site is away, `pg_wal` grows: the operator's metrics alert on the database's disk (`FFDatabaseDiskFilling`, ADR 0006).
 
-## The legal records
+## The legal records and the packages
 
 `deploy/k8s/backup/` is a CronJob in `ff-system`, hourly, running `mirror.sh` with rclone 1.75.1. It copies the bucket's `invoices/` and `withholding-certificates/` to the second site:
 - a copy, never a sync: a file gone from the bucket stays at the site;
 - a file replaced keeps its old version under `s3-replaced/<run>/`.
+
+Then it syncs `packages/`, the zips of functions' packages, the uploaded ones and those the backend makes of inline code:
+- what FF deletes there, a package no function has named for an hour or a closed account's, goes from the site too: set aside under `s3-deleted/<run>/` for 30 days first, about as long as the database's point-in-time recovery keeps what was deleted;
+- a run that would delete more than half of the site's packages, and more than 10, deletes nothing and fails, saying how many: a bucket lost, or replaced by an empty one, never empties the copy. Its Job's failed pod raises `FFPlatformPodNotRunning`. Look at the bucket; if FF did delete them, as when a large account closed, give the CronJob that number for one run (`kubectl -n ff-system set env cronjob/ff-records-mirror PACKAGES_MAX_DELETE=<n>`), and take it away after (`… PACKAGES_MAX_DELETE-`).
 
 It needs the Secret `ff-backup-s3`: `RCLONE_CONFIG_PRIMARY_TYPE=s3` and the rest of each site's rclone settings (`_PROVIDER`, `_ENDPOINT`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`), then `PRIMARY_BUCKET` and `SITE_BUCKET`. Give the second site's bucket versioning, or object lock, where the provider offers it.
 
@@ -46,7 +54,7 @@ How long to keep them is the accountant's answer (section 9, question 5); until 
 
    A managed PostgreSQL restores the provider's way, to a new instance.
 3. **Point the platform at it:** `DB_HOST` in the backend's settings and `KC_DB_URL_HOST` in Keycloak's, then `deploy/k8s/platform/deploy.sh <overlay>`. Its migrations Job finds none pending, or runs those the restored schema lacks.
-4. **The legal records,** if the bucket was lost: `rclone copy site:<bucket>/s3/<prefix> primary:<bucket>/<prefix>` for each prefix.
+4. **The legal records and the packages,** if the bucket was lost: `rclone copy site:<bucket>/s3/<prefix> primary:<bucket>/<prefix>` for each prefix, `invoices`, `withholding-certificates` and `packages`. Then restart the backend (`kubectl -n ff-system rollout restart deployment/ff-backend`): at its start it makes again every code image the registry lacks, and rolls out the functions whose pods mounted one ([`deploy/k8s`](../k8s/README.md), "The code registry").
 5. **Check** before opening the doors:
    - `npm run billing:reconcile` agrees with the restored usage;
    - the admin dashboard's Overview shows what you expect;
@@ -61,6 +69,7 @@ How long to keep them is the accountant's answer (section 9, question 5); until 
 - a base backup, rows before and after a target time, and the last segment shipped;
 - a check that the second site holds no row readable without the key;
 - a new server restored from the second site to the target time: the rows before it there, those after it not, in both databases, the ledger still balanced, and the time it took;
-- the legal records copied by the cluster's own `mirror.sh`, one lost and brought back byte for byte.
+- the legal records copied by the cluster's own `mirror.sh`, one lost and brought back byte for byte;
+- functions' packages synced by the same script: one FF deleted, gone from the copy and set aside, and what was set aside 30 days ago gone; a bucket that lost them all, deleting nothing at the site; and all brought back byte for byte.
 
 `--record` adds the outcome to `docs/backup-drills.md`. Run it monthly, and after any change here. A drill of the production setup, the provider's way or the server's, gets its own line there too.

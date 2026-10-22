@@ -52,6 +52,8 @@ fi
 kubectl wait --for=condition=Ready node --all --timeout=120s
 kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/dev"
 "$FF_REPO_ROOT/hack/k8s/mint-token.sh"
+# Functions' code images (ADR 0003): pushed by the backend, pulled by the nodes.
+"$FF_REPO_ROOT/hack/k8s/registry-up.sh"
 if $logging; then "$FF_REPO_ROOT/hack/k8s/logging-up.sh"; fi
 if $monitoring; then "$FF_REPO_ROOT/hack/k8s/monitoring-up.sh"; fi
 echo "cluster $FF_CLUSTER_NAME is ready (admin kubeconfig: $KUBECONFIG)"

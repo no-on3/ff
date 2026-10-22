@@ -11,7 +11,10 @@ import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import functionsServiceSource from '../../BE/src/functions/functions.service.ts?raw';
+import functionEntitySource from '../../BE/src/functions/entities/function.entity.ts?raw';
 import createFunctionDtoSource from '../../BE/src/functions/dto/create-function.dto.ts?raw';
+import secretsDtoSource from '../../BE/src/functions/dto/secrets.dto.ts?raw';
+import environmentSource from '../../BE/src/functions/environment.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
 import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
 import languageSource from '../../BE/src/mail/language.ts?raw';
@@ -21,15 +24,28 @@ import retrySource from '../../BE/src/notifications/retry.ts?raw';
 import alarmRulesSource from '../../BE/src/alarms/alarm-rules.ts?raw';
 import alarmsDtoSource from '../../BE/src/alarms/alarms.dto.ts?raw';
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
+import functionUrlDtoSource from '../../BE/src/function-urls/dto/function-url.dto.ts?raw';
+import urlResponseSource from '../../BE/src/function-urls/url-response.ts?raw';
+import functionUrlEntitySource from '../../BE/src/functions/entities/function-url.entity.ts?raw';
+import customDomainDtoSource from '../../BE/src/function-urls/dto/custom-domain.dto.ts?raw';
+import customDomainEntitySource from '../../BE/src/function-urls/custom-domain.entity.ts?raw';
+import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
 import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
+import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
+import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
+import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
+import { FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
+  EVENT_FORMATS,
+  PACKAGE_TYPES,
+  SECRET_FIELDS,
   ALARM_STATES,
   BALANCE_FIELDS,
   CREDIT_STATE_FIELDS,
@@ -38,6 +54,7 @@ import {
   EMAIL_LANGUAGES,
   WEBHOOK_SECRET_FIELDS,
   INVOCATION_FIELDS,
+  INVOCATION_SOURCES,
   INVOCATION_STATUSES,
   ME_ACCOUNT_FIELDS,
   METRIC_NAMES,
@@ -126,6 +143,15 @@ describe("an invocation's status", () => {
 
     expect(backendStatuses).toContain('LOST');
     expect(backendStatuses).toEqual([...INVOCATION_STATUSES]);
+  });
+});
+
+describe("what brought an invocation", () => {
+  it("is one of the API's, so the history names each one it may show", () => {
+    const enumBody = invocationSource.slice(invocationSource.indexOf('export enum InvocationSource'));
+    const backendSources = [...enumBody.slice(0, enumBody.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1]);
+
+    expect(backendSources).toEqual([...INVOCATION_SOURCES]);
   });
 });
 
@@ -305,5 +331,84 @@ describe("a function's name", () => {
     const names = ['hello', 'Hello_World-2', 'a', 'x'.repeat(MAX_FUNCTION_NAME_LENGTH), 'x'.repeat(MAX_FUNCTION_NAME_LENGTH + 1), '', 'my function', ' hello', 'a.b', 'a/b', 'é', 'a\nb'];
     expect(names.map((name) => form.test(name))).toEqual(names.map((name) => api.test(name)));
     expect(names.filter((name) => api.test(name))).toEqual(['hello', 'Hello_World-2', 'a', 'x'.repeat(64)]);
+  });
+});
+
+describe("a function's environment variables", () => {
+  /** The names of one of the API's lists, as written in its source. */
+  const listed = (name: string) => [...new RegExp(`const ${name} = \\[([^\\]]*)\\]`).exec(environmentSource)![1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+
+  it('are held in the editor to the rules the API applies: the names, the reserved ones, the 4 KB', () => {
+    expect(new RegExp(/export const VARIABLE_NAME = \/(.+)\/;/.exec(environmentSource)![1]).source).toBe(VARIABLE_NAME.source);
+    expect(Number(/export const MAX_ENVIRONMENT_BYTES = (\d+);/.exec(environmentSource)![1])).toBe(MAX_ENVIRONMENT_BYTES);
+    expect(LAMBDA_RESERVED).toEqual(listed('LAMBDA_RESERVED'));
+    expect(FF_RESERVED).toEqual(listed('FF_RESERVED'));
+    expect(environmentSource).toContain("name.startsWith('FF_')");
+  });
+});
+
+describe("a function's secrets", () => {
+  it('are read as the API says them: a name and when it was set, nothing else', () => {
+    const view = /export class SecretView \{([\s\S]*?)\n\}/.exec(secretsDtoSource)![1];
+    expect([...view.matchAll(/^ {2}(\w+): /gm)].map((m) => m[1])).toEqual([...SECRET_FIELDS]);
+  });
+});
+
+describe('the event a function receives', () => {
+  it("is one of the API's formats", () => {
+    const body = /export enum EventFormat \{([\s\S]*?)\n\}/.exec(functionEntitySource)![1];
+    expect([...body.matchAll(/= '(\w+)'/g)].map((m) => m[1])).toEqual([...EVENT_FORMATS]);
+  });
+});
+
+describe("a function's code", () => {
+  it("comes as one of the API's package types, with the handler, hash and size the page shows", () => {
+    const types = /export enum PackageType \{([\s\S]*?)\n\}/.exec(functionEntitySource)![1];
+    expect([...types.matchAll(/= '(\w+)'/g)].map((m) => m[1])).toEqual([...PACKAGE_TYPES]);
+    for (const field of ['packageType', 'handler', 'codeSha256', 'codeSize']) expect(functionEntitySource).toMatch(new RegExp(`^  ${field}: `, 'm'));
+  });
+});
+
+describe("a function's URL", () => {
+  it("has the API's fields and auth types, so the tab reads each one there is", () => {
+    const authTypes = functionUrlEntitySource.slice(functionUrlEntitySource.indexOf('export enum UrlAuthType'));
+
+    expect(dtoFields(functionUrlDtoSource, 'export class FunctionUrlView {')).toEqual([...FUNCTION_URL_FIELDS]);
+    expect([...authTypes.slice(0, authTypes.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...AUTH_TYPES]);
+  });
+
+  it("checks CORS by the API's rules and limits, so the form refuses what the API would", () => {
+    const methods = /export const CORS_METHODS = \[([^\]]*)\] as const/.exec(functionUrlDtoSource)?.[1].match(/'[^']+'/g)?.map((s) => s.slice(1, -1));
+
+    expect(methods).toEqual([...CORS_METHODS]);
+    expect(functionUrlDtoSource).toContain(`const ORIGIN = ${ORIGIN.toString()};`);
+    expect(urlResponseSource).toContain(`export const TOKEN = ${HEADER_NAME.toString()};`);
+    for (const rule of [
+      `@ArrayMaxSize(${CORS_LIMITS.origins})`,
+      `@MaxLength(${CORS_LIMITS.originLength}, { each: true })`,
+      `@ArrayMaxSize(${CORS_LIMITS.headers})`,
+      `@MaxLength(${CORS_LIMITS.headerLength}, { each: true })`,
+      `@ArrayMaxSize(${CORS_LIMITS.methods})`,
+      `@Max(${CORS_LIMITS.maxAge})`,
+    ]) {
+      expect(functionUrlDtoSource).toContain(rule);
+    }
+  });
+});
+
+describe("a function URL's own domain", () => {
+  it("has the API's fields and statuses, so the card shows each one there is", () => {
+    const statuses = customDomainEntitySource.slice(customDomainEntitySource.indexOf('export enum DomainStatus'));
+
+    expect(dtoFields(customDomainDtoSource, 'export class CustomDomainView {')).toEqual([...CUSTOM_DOMAIN_FIELDS]);
+    expect([...statuses.slice(0, statuses.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...DOMAIN_STATUSES]);
+    expect(dtoFields(customDomainDtoSource, 'export class DomainRecordsView {')).toEqual(['cname', 'txt']);
+  });
+});
+
+describe("a function's schedule", () => {
+  it("has the API's fields and name rule, so the tab reads each one there is and the form refuses what the API would", () => {
+    expect(dtoFields(scheduleDtoSource, 'export class ScheduleView {')).toEqual([...SCHEDULE_FIELDS]);
+    expect(scheduleDtoSource).toContain(`export const SCHEDULE_NAME = ${SCHEDULE_NAME.toString()};`);
   });
 });

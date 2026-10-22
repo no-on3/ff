@@ -6,14 +6,14 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-image="${IMAGE:-ff-runtime-nodejs:24-v2}"
+image="${IMAGE:-ff-runtime-nodejs:24-v3}"
 name="ff-runtime-smoke-$$"
 
 "$repo/hack/check-resources.sh"
 docker build -q -t "$image" "$here/.." >/dev/null
 echo "built $image ($(docker image inspect "$image" --format '{{.Size}}' | awk '{ printf "%d MB", $1 / 1e6 }'))"
 
-trap 'docker rm -f "$name" "$name-cwd" >/dev/null 2>&1 || true' EXIT
+trap 'docker rm -f "$name" "$name-cwd" "$name-esm" >/dev/null 2>&1 || true' EXIT
 docker run -d --name "$name" \
   --read-only --tmpfs /tmp:rw,size=64m \
   --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
@@ -43,7 +43,7 @@ check "root filesystem is read-only" denied \
   "$(docker exec "$name" sh -c 'touch /opt/ff/probe 2>/dev/null && echo writable || echo denied')"
 check "/tmp is writable" ok "$(docker exec "$name" sh -c 'touch /tmp/probe && echo ok')"
 check "no install at start (no npm activity in logs)" 0 "$(docker logs "$name" 2>&1 | grep -c 'npm' || true)"
-check "speaks runtime protocol 2" 1 "$(docker logs "$name" 2>&1 | grep -c '"protocol":2' || true)"
+check "speaks runtime protocol 3" 1 "$(docker logs "$name" 2>&1 | grep -c '"protocol":3' || true)"
 # The TypeScript compiler's code cache, written at the build, taken by V8 in a worker thread with a small heap, as
 # the runtime loads user code: refused, a cold start at 0.1 CPU takes seconds longer, and nothing else says so.
 check "the TypeScript compiler's code cache is taken, in a worker thread" true \
@@ -67,5 +67,21 @@ for _ in $(seq 1 50); do
 done
 check "runs in /var/task and reads a file next to the code" "/var/task next to the code" \
   "$(curl -s -X POST -d '{}' "http://127.0.0.1:$port/invoke" | jq -r '"\(.cwd) \(.data)"')"
+
+# An ES module, as AWS Lambda's runtime imports a .mjs handler, its top-level await included, under the same hardening.
+docker run -d --name "$name-esm" \
+  --read-only --tmpfs /tmp:rw,size=64m \
+  --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
+  --memory 256m --cpus 0.5 \
+  -e FUNCTION_NAME=esm -e FUNCTION_TIMEOUT=3000 -e FUNCTION_MEMORY_LIMIT=128 \
+  -v "$here/fixtures/esm-mjs:/var/task:ro" \
+  -p 127.0.0.1::8080 "$image" >/dev/null
+port="$(docker port "$name-esm" 8080/tcp | head -1 | sed 's/.*://')"
+for _ in $(seq 1 50); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/readyz")" = 200 ] && break
+  sleep 0.2
+done
+check "imports a .mjs handler as an ES module, its top-level await run" "Hello container true" \
+  "$(curl -s -X POST -d '{"name":"container"}' "http://127.0.0.1:$port/invoke" | jq -r '"\(.message) \(.esModule)"')"
 
 echo "container smoke: $passed passed"

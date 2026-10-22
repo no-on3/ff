@@ -4,7 +4,7 @@ enum Greeting {
 }
 
 interface Event {
-  body: { name?: string };
+  name?: string;
 }
 
 interface Context {
@@ -16,7 +16,7 @@ interface Context {
 
 export async function handler(event: Event, context: Context) {
   return {
-    message: `${Greeting.Hello} ${event.body.name ?? 'world'}`,
+    message: `${Greeting.Hello} ${event.name ?? 'world'}`,
     functionName: context.functionName,
     memoryLimitInMB: context.memoryLimitInMB,
     requestId: context.awsRequestId,

@@ -5,15 +5,18 @@ import { Tabs, Tab, Box } from '@mui/material';
 import {
   EditableFields,
   FUNCTION_NAME_PATTERN,
+  eventFormatText,
   FUNCTION_NAME_RULE,
   MAX_FUNCTION_NAME_LENGTH,
   TRUNCATED_NOTE,
   apiErrorMessage,
   changedFields,
+  codeText,
   formatDuration,
   formatMemory,
   historyText,
   parseInvokeInput,
+  sourceText,
 } from '../lib/functions';
 import { Function, FunctionInvocation, InvocationStatus, functionsApi } from '../services/api';
 import { can } from '../lib/session';
@@ -21,6 +24,9 @@ import { useSession } from '../session/session';
 import { updateFunction } from '../store/functionSlice';
 import { AppDispatch } from '../store/store';
 import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
+import { EnvironmentTab } from './FunctionEnvironment';
+import { FunctionUrlTab } from './FunctionUrl';
+import { FunctionSchedules } from './FunctionSchedules';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
 import { MetricsDashboard } from './MetricsDashboard';
@@ -29,8 +35,18 @@ import { ScalingConfiguration } from './ScalingConfiguration';
 /** How many invocations the history shows, newest first. */
 const HISTORY_PAGE = 20;
 
-/** The page's tabs, by their name in the address (`?tab=logs`), so that a link opens one. */
-const TABS = ['overview', 'invocations', 'logs', 'metrics', 'scaling'] as const;
+/** The page's tabs, by their name in the address (`?tab=logs`), so that a link opens one, in their order. */
+const TABS = ['overview', 'environment', 'url', 'schedules', 'invocations', 'logs', 'metrics', 'scaling'] as const;
+const TAB_LABELS: Record<(typeof TABS)[number], string> = {
+  overview: 'Overview',
+  environment: 'Environment',
+  url: 'URL',
+  schedules: 'Schedules',
+  invocations: 'Invocations',
+  logs: 'Logs',
+  metrics: 'Metrics',
+  scaling: 'Scaling',
+};
 
 const GREEN = 'bg-green-100 text-green-800';
 const BLUE = 'bg-blue-100 text-blue-800';
@@ -69,6 +85,7 @@ const FunctionDetail: React.FC = () => {
   const [invokeError, setInvokeError] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = Math.max(0, TABS.indexOf(searchParams.get('tab') as (typeof TABS)[number]));
+  const tab = TABS[activeTab];
   const logsFilter = useMemo(() => filterFromSearch(searchParams), [searchParams]);
   const showLogs = (filter: LogsFilter) => setSearchParams(searchForFilter(filter));
 
@@ -85,7 +102,7 @@ const FunctionDetail: React.FC = () => {
         setLoading(true);
         const { data } = await functionsApi.getFunction(id);
         setFunc(data);
-        setForm({ name: data.name, code: data.code, memory: data.memory, timeout: data.timeout });
+        setForm({ name: data.name, code: data.code, memory: data.memory, timeout: data.timeout, eventFormat: data.eventFormat });
         await loadHistory();
       } catch (err) {
         setLoadError(apiErrorMessage(err));
@@ -95,6 +112,12 @@ const FunctionDetail: React.FC = () => {
     };
     void load();
   }, [id, loadHistory]);
+
+  // Calls come from elsewhere too (its URL, the API, a schedule): the history is read again each time its tab opens.
+  useEffect(() => {
+    if (tab !== 'invocations' || loading) return;
+    void loadHistory().catch((err: unknown) => setInvokeError(apiErrorMessage(err)));
+  }, [tab, loading, loadHistory]);
 
   const handleInvoke = async () => {
     const parsed = parseInvokeInput(input);
@@ -158,14 +181,12 @@ const FunctionDetail: React.FC = () => {
     <div className="container mx-auto px-4 py-8">
       {/* On a phone the tabs don't fit: the bar scrolls by touch. Scroll buttons would appear after the open tab is scrolled into view, and hide it. */}
       <Tabs value={activeTab} onChange={handleTabChange} variant="scrollable" scrollButtons={false}>
-        <Tab label="Overview" />
-        <Tab label="Invocations" />
-        <Tab label="Logs" />
-        <Tab label="Metrics" />
-        <Tab label="Scaling" />
+        {TABS.map((name) => (
+          <Tab key={name} label={TAB_LABELS[name]} />
+        ))}
       </Tabs>
 
-      {activeTab === 0 && (
+      {tab === 'overview' && (
         <div className="mb-8">
           <div className="flex items-center gap-3 mb-4">
             <h1 className="text-2xl font-bold">{func.name}</h1>
@@ -174,8 +195,23 @@ const FunctionDetail: React.FC = () => {
               {func.runtime} · {func.memory} MB · {func.timeout} s
             </span>
           </div>
+          <p className="text-sm text-gray-600 mb-4 break-all">
+            Handler <code>{func.handler}</code> · {codeText(func)}
+          </p>
 
           <FunctionAlarms functionId={func.id} mayChange={mayChange} />
+
+          {func.eventFormat === 'wrapped' && (
+            <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded mb-4">
+              <p className="font-medium">This function gets {eventFormatText(func)}.</p>
+              <p className="text-sm mt-1">
+                It was made before functions got AWS Lambda&apos;s event, the input itself, which every new function gets, and which a web
+                address or a schedule needs. To move it, change its handler to read <code>event</code> where it reads{' '}
+                <code>event.body</code>, and choose AWS Lambda&apos;s event below, in the same update: the new version rolls out, and the
+                previous one stays if it can&apos;t start.
+              </p>
+            </div>
+          )}
 
           {func.status === 'ERROR' && func.error && (
             <div className="bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded mb-4">
@@ -205,15 +241,25 @@ const FunctionDetail: React.FC = () => {
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Code</label>
-              <textarea
-                value={form.code}
-                onChange={(e) => setForm({ ...form, code: e.target.value })}
-                className="input mt-1 font-mono"
-                rows={10}
-              />
-            </div>
+            {func.packageType === 'zip' ? (
+              <div className="bg-gray-50 border border-gray-200 px-4 py-3 rounded text-sm text-gray-700">
+                <p className="font-medium">This function runs a package, its libraries in it: its code isn&apos;t edited here.</p>
+                <p className="mt-1">
+                  A new version is a new package: <code>ff deploy</code> with its folder, or <code>POST /packages</code> with its zip, then an
+                  update naming its SHA-256 in <code>codeSha256</code>.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Code</label>
+                <textarea
+                  value={form.code}
+                  onChange={(e) => setForm({ ...form, code: e.target.value })}
+                  className="input mt-1 font-mono"
+                  rows={10}
+                />
+              </div>
+            )}
 
             <div className="flex gap-4">
               <div>
@@ -242,6 +288,19 @@ const FunctionDetail: React.FC = () => {
             <p className="text-sm text-gray-500">
               The {plan.name} plan allows up to {plan.limits.memoryMb} MB and {plan.limits.timeoutSeconds} s per function.
             </p>
+            {func.eventFormat === 'wrapped' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Event</label>
+                <select
+                  value={form.eventFormat}
+                  onChange={(e) => setForm({ ...form, eventFormat: e.target.value as EditableFields['eventFormat'] })}
+                  className="input mt-1"
+                >
+                  <option value="wrapped">FF&apos;s original: the input in event.body</option>
+                  <option value="lambda">AWS Lambda&apos;s: the input itself</option>
+                </select>
+              </div>
+            )}
             </fieldset>
 
             {mayChange ? (
@@ -255,7 +314,25 @@ const FunctionDetail: React.FC = () => {
         </div>
       )}
 
-      {activeTab === 1 && (
+      {tab === 'environment' && (
+        <Box p={3}>
+          <EnvironmentTab func={func} mayChange={mayChange} onSaved={setFunc} />
+        </Box>
+      )}
+
+      {tab === 'url' && (
+        <Box p={3}>
+          <FunctionUrlTab func={func} mayChange={mayChange} />
+        </Box>
+      )}
+
+      {tab === 'schedules' && (
+        <Box p={3}>
+          <FunctionSchedules func={func} mayChange={mayChange} />
+        </Box>
+      )}
+
+      {tab === 'invocations' && (
         <div className="mt-12">
           <h2 className="text-xl font-bold mb-4">Invoke Function</h2>
           {!mayChange && <p className="text-sm text-gray-600">As a viewer, you read the history; owners and developers invoke.</p>}
@@ -263,7 +340,11 @@ const FunctionDetail: React.FC = () => {
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder='JSON object, e.g. {"name": "Tunis"}; empty means {}'
+              placeholder={
+                func.eventFormat === 'wrapped'
+                  ? 'Any JSON value, which the handler gets as event.body, e.g. {"name": "Tunis"}; empty means {}'
+                  : 'The event: any JSON value, e.g. {"name": "Tunis"}; empty means {}'
+              }
               className="input flex-grow font-mono"
               rows={3}
             />
@@ -290,7 +371,9 @@ const FunctionDetail: React.FC = () => {
               {invocations.map((invocation) => (
                 <div key={invocation.id} className="card">
                   <div className="flex justify-between items-start mb-4">
-                    <span className="text-sm text-gray-500">{new Date(invocation.createdAt).toLocaleString()}</span>
+                    <span className="text-sm text-gray-500">
+                      {new Date(invocation.createdAt).toLocaleString()} · {sourceText(invocation.source)}
+                    </span>
                     <span className="flex items-center gap-3">
                       <Link to={`?${searchForFilter({ range: 'all', q: '', requestId: invocation.id }).toString()}`} className="text-sm">
                         Logs
@@ -356,19 +439,19 @@ const FunctionDetail: React.FC = () => {
         </div>
       )}
 
-      {activeTab === 2 && (
+      {tab === 'logs' && (
         <Box p={3}>
           <FunctionLogs functionId={id!} filter={logsFilter} onFilterChange={showLogs} />
         </Box>
       )}
 
-      {activeTab === 3 && (
+      {tab === 'metrics' && (
         <Box p={3}>
           <MetricsDashboard functionId={id!} />
         </Box>
       )}
 
-      {activeTab === 4 && (
+      {tab === 'scaling' && (
         <Box p={3}>
           <ScalingConfiguration functionId={id!} />
         </Box>

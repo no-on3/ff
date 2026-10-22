@@ -29,6 +29,7 @@
     --c-worker: #b8186a;
     --c-idp: #7a6400;
     --c-store: #9a4a1c;
+    --c-reg: #3b7a1e;
     --code-bg: #f3f4f0;
     --j-key: #2561c9;
     --j-str: #0f6f5c;
@@ -61,6 +62,7 @@
       --c-worker: #ff70b5;
       --c-idp: #e0c341;
       --c-store: #f0a07a;
+      --c-reg: #8ccf6a;
       --code-bg: #151815;
       --j-key: #8ab4ff;
       --j-str: #6fd8bc;
@@ -93,6 +95,7 @@
     --c-worker: #ff70b5;
     --c-idp: #e0c341;
     --c-store: #f0a07a;
+    --c-reg: #8ccf6a;
     --code-bg: #151815;
     --j-key: #8ab4ff;
     --j-str: #6fd8bc;
@@ -246,6 +249,8 @@
   .tbl text.pk { font-weight: 700; }
   .rel path { fill: none; stroke: var(--accent); stroke-width: 1.6; }
   .rel text { font-size: 11px; fill: var(--accent); font-weight: 700; }
+  .rel path.nofk { stroke-dasharray: 6 4; }
+  .rel text.note { fill: var(--muted); font-weight: 400; }
   .sm rect { fill: var(--surface); stroke: var(--border); stroke-width: 1.4; }
   .sm text { font-size: 12.5px; fill: var(--text); }
   .sm text.e { font-size: 11px; fill: var(--muted); }
@@ -318,7 +323,7 @@
 <section id="overview">
   <div class="wrap">
     <h2>Overview</h2>
-    <p class="lead">You send code to the backend. The backend keeps the record in PostgreSQL and an archive copy in S3, then asks Kubernetes for your tenant's namespace and guardrails, a ConfigMap that holds the code, a Service, and a Deployment. Kubernetes starts a pod from the runtime image; the runtime loads your code once and reports ready. On each invocation the backend forwards your input to the pod, the runtime calls <code>handler(event, context)</code> in a worker, and the result travels back and is recorded with its duration. Idle functions are scaled to zero and start again on the next call. Click a component for details.</p>
+    <p class="lead">You send code to the backend, inline or as a package with its libraries. The backend makes inline code a package of one file, keeps the package's zip in S3, and makes the package an image, which it pushes to the code registry. It keeps the function's record in PostgreSQL, and a copy of inline code in S3, then asks Kubernetes for your tenant's namespace and guardrails, a Service, and a Deployment whose pods mount that image. Kubernetes starts a pod from the runtime image; the node pulls the code image and mounts it read-only at <code>/var/task</code>, and the runtime loads your code once and reports ready. On each invocation the backend forwards your input to the pod, the runtime calls <code>handler(event, context)</code> in a worker, and the result travels back and is recorded with its duration. Idle functions are scaled to zero and start again on the next call. Click a component for details.</p>
     <div class="grid2">
       <div class="card pad scrollx"><div id="archBig"></div></div>
       <div class="card pad arch-info" id="archInfo" aria-live="polite"></div>
@@ -386,20 +391,24 @@
 <section id="data">
   <div class="wrap">
     <h2>Data model</h2>
-    <p class="lead">These tables hold everything the backend knows: functions with their invocations and metrics; accounts, with their plans, users, memberships, invitations and API keys (P-12 to P-16); and tables written once and never changed, which a trigger guards: the audit log (P-17), the usage records (P-20) and the capacity samples (P-21). A function belongs to an account, and its invocations and metrics are deleted with it (<code>ON DELETE CASCADE</code>). Its usage records and capacity samples have no foreign key, so they outlive it, and both tables have a partition per month. The platform's settings, which operators change from the admin dashboard, are in <code>platform_settings</code> (P-70), and the prices in <code>price_books</code>, each valid from its start until the next one's, never changed once started (P-30). Money is in a double-entry ledger (P-31): <code>ledger_transactions</code>, each with its <code>ledger_entries</code> on <code>ledger_accounts</code>, a customer account's wallet or one of FF's own. An entry's amount is whole minor units (millimes for TND), signed, added to its account's balance; a transaction's entries sum to zero in each currency, which the database checks when it commits, and nothing in the ledger is ever changed or deleted. Usage reaches it through the hourly rating (P-32): each settled hour's usage is summed into <code>usage_hourly</code>, each account's charge for the hour goes to <code>usage_charges</code>, debited or, in shadow mode, only recorded, and <code>rating_runs</code> lists the hours rated. The balance check reads the wallet before each invoke (P-33), and <code>low_balance_notices</code> keeps the low-balance e-mails sent, once per share of the last credit. Credit comes by bank transfer (P-35): <code>payments</code> holds each pro-forma an owner asked for, and the transfer and withholding certificate an operator recorded against it, each credit a ledger transaction. Each month's credit is invoiced (P-36): <code>invoices</code> and <code>invoice_lines</code>, written once when an operator issues them, numbered from <code>invoice_counters</code> without gap in each fiscal year, at the rates of <code>tax_rates</code>, which are dated data; <code>invoice_notices</code> keeps the operator's e-mails about them. A user belongs to accounts through memberships, each with a role. The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>account_id</code> is <code>accountId</code>).</p>
+    <p class="lead">These tables hold everything the backend knows: functions with their invocations and metrics, and what else a function has: its environment (its variables and secrets, sealed with a key of its own), its URL with the customer's own domains for it, and its schedules; the packages functions run, each a zip of its account's, named by its SHA-256; accounts, with their plans, users, memberships, invitations and API keys (P-12 to P-16); and tables written once and never changed, which a trigger guards: the audit log (P-17), the usage records (P-20) and the capacity samples (P-21). A function belongs to an account, and its invocations, metrics, environment, URL with its domains, and schedules are deleted with it (<code>ON DELETE CASCADE</code>). Its usage records and capacity samples have no foreign key, so they outlive it, and both tables have a partition per month. An account has each package once (<code>account_id</code> and <code>code_sha256</code> are unique together); a function names the one its pods run in <code>package_sha256</code>, an uploaded package or the one the backend made of its inline code, without a foreign key: the hourly purge reads that column, and deletes a package that no function names an hour after its last use. The platform's settings, which operators change from the admin dashboard, are in <code>platform_settings</code> (P-70), and the prices in <code>price_books</code>, each valid from its start until the next one's, never changed once started (P-30). Money is in a double-entry ledger (P-31): <code>ledger_transactions</code>, each with its <code>ledger_entries</code> on <code>ledger_accounts</code>, a customer account's wallet or one of FF's own. An entry's amount is whole minor units (millimes for TND), signed, added to its account's balance; a transaction's entries sum to zero in each currency, which the database checks when it commits, and nothing in the ledger is ever changed or deleted. Usage reaches it through the hourly rating (P-32): each settled hour's usage is summed into <code>usage_hourly</code>, each account's charge for the hour goes to <code>usage_charges</code>, debited or, in shadow mode, only recorded, and <code>rating_runs</code> lists the hours rated. The balance check reads the wallet before each invoke (P-33), and <code>low_balance_notices</code> keeps the low-balance e-mails sent, once per share of the last credit. Credit comes by bank transfer (P-35): <code>payments</code> holds each pro-forma an owner asked for, and the transfer and withholding certificate an operator recorded against it, each credit a ledger transaction. Each month's credit is invoiced (P-36): <code>invoices</code> and <code>invoice_lines</code>, written once when an operator issues them, numbered from <code>invoice_counters</code> without gap in each fiscal year, at the rates of <code>tax_rates</code>, which are dated data; <code>invoice_notices</code> keeps the operator's e-mails about them. A user belongs to accounts through memberships, each with a role. The schema comes only from migrations (<code>BE/src/migrations</code>), in every environment: <code>npm run migration:run</code> applies them as a separate step, and the backend refuses to start while one is pending. Columns are snake_case in the database, while the API's JSON keeps camelCase (<code>account_id</code> is <code>accountId</code>).</p>
     <div class="card pad scrollx"><div id="erDiagram" class="capped"></div></div>
     <p class="note">Not shown: the status values <code>DELETED</code> of <code>functions</code> and <code>SUCCESS</code> of <code>function_invocations</code>, which exist in the enums but are never set.</p>
     <h3>Lifecycles</h3>
     <div class="card pad scrollx"><div id="stateMachines" class="capped"></div></div>
     <h3>Kubernetes objects of one tenant</h3>
-    <p class="lead">One namespace per tenant, named <code>ff-t-</code> plus the first 12 hex characters of <code>sha256(tenant ID)</code>: account <code>000000000001</code>, the development tenant (<code>FF_DEV_ACCOUNT_ID</code>), gets <code>ff-t-27d6fbbe5c7d</code>. Each function adds a Deployment, a Service, and one ConfigMap per code version. Green arrows are traffic the network policy allows; the red one is blocked.</p>
+    <p class="lead">One namespace per tenant, named <code>ff-t-</code> plus the first 12 hex characters of <code>sha256(tenant ID)</code>: account <code>000000000001</code>, the development tenant (<code>FF_DEV_ACCOUNT_ID</code>), gets <code>ff-t-27d6fbbe5c7d</code>. Each function adds a Deployment and a Service. Its code is no object of the namespace: it is an image in the code registry, which the node pulls and mounts read-only at <code>/var/task</code> (ADR 0003). Green arrows are traffic the network policy allows; the red one is blocked.</p>
     <div class="card pad scrollx"><div id="k8sObjects" class="capped"></div></div>
     <h3>Where each piece of data lives</h3>
     <div class="tablewrap card">
       <table class="ref">
         <thead><tr><th>Data</th><th>Stored in</th><th>Written by</th><th>Read by</th></tr></thead>
         <tbody>
-          <tr><td>The function: name, runtime, code, memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
+          <tr><td>The function: name, runtime, code, its handler, its package type and its code's SHA-256 and size (Lambda's), the package its pods run (<code>package_sha256</code>: its own for a package function, the one-file package of inline code; the backend's alone, no answer gives it), memory, timeout, status, error</td><td>PostgreSQL <code>functions</code></td><td>create, update</td><td>every API call, the idle sweep</td></tr>
+          <tr><td>A function's schedules: each one's name, expression, input, next run, and how its last run went</td><td>PostgreSQL <code>schedules</code>, deleted with their function</td><td><code>POST</code>, <code>PUT</code> and <code>DELETE /functions/:id/schedules</code>, the console's Schedules tab among their callers; the scheduler, at each run</td><td>the scheduler, every few seconds, by their next run; <code>GET /functions/:id/schedules</code>, for the console's Schedules tab too; the support page</td></tr>
+          <tr><td>A function's URL: the address's random ID, who may call it, CORS</td><td>PostgreSQL <code>function_urls</code>, one per function, deleted with it</td><td><code>POST</code>, <code>PUT</code> and <code>DELETE /functions/:id/url</code>, the console's URL tab among their callers</td><td>the function URL gateway, by each request's host; <code>GET /functions/:id/url</code>, for the console's URL tab too; the support page</td></tr>
+          <tr><td>A URL's own domains: each one's name, the token of its TXT record, pending or verified, and how its last check went</td><td>PostgreSQL <code>custom_domains</code>, a name once per account, verified in one account at most, deleted with its URL</td><td><code>POST</code> and <code>DELETE /functions/:id/url/domains</code>; <code>…/verify</code>, which asks the DNS, again at each call</td><td>the function URL gateway, by each request's host; the edge, asking before it gets a host's certificate; <code>GET /functions/:id/url/domains</code></td></tr>
+          <tr><td>A function's variables and secrets, sealed together with a data key of the function's own</td><td>PostgreSQL <code>function_environments</code>, a row for a function that has any, deleted with it; and for its pods, a Secret <code>fn-&lt;id&gt;-env-0</code> or <code>-env-1</code> in turn, in its account's namespace</td><td>a create or an update that sets them, <code>PATCH /functions/:id/secrets</code></td><td>the backend, to write the Secret at each rollout; its pods, through <code>envFrom</code>, at start; <code>GET /functions/:id</code> gives the variables, <code>GET /functions/:id/secrets</code> the secrets' names, never a value</td></tr>
           <tr><td>Invocations: input, output and error, up to 64 KiB each, flagged when cut; status, duration, memory</td><td>PostgreSQL <code>function_invocations</code>, kept for the plan's history retention (P-45)</td><td>invoke (RUNNING, then the outcome); the lost-call reaper (LOST); the hourly purge deletes what is past the retention</td><td>the history (<code>GET /functions/:id/invocations</code>)</td></tr>
           <tr><td>Usage: one record per invocation, with what it ran on, its duration, what is billed, and its cold start</td><td>PostgreSQL <code>usage_records</code>, a partition per month (UTC); never changed or deleted</td><td>invoke, in the transaction that ends the invocation; the lost-call reaper</td><td><code>GET /usage</code> and the console's Usage page; the capacity report; the hourly rating (P-32); the metrics, <code>GET /functions/:id/metrics</code> and <code>GET /metrics</code> (P-50)</td></tr>
           <tr><td>The platform's settings: shadow billing, the negative buffer and grace period, low-balance e-mails, the invoice reminder, the large-credit threshold</td><td>PostgreSQL <code>platform_settings</code>; a setting without a row has its default (<code>BE/src/admin/platform-settings.ts</code>)</td><td>the admin dashboard, with a reason, through <code>PUT /admin/settings</code></td><td>the tasks that use them: P-32, P-33, P-36, P-74</td></tr>
@@ -418,8 +427,10 @@
           <tr><td>Notifications: each delivery of one, an e-mail to an owner in their language or a POST to a webhook, and how its attempts went</td><td>PostgreSQL <code>notification_deliveries</code>; kept 30 days</td><td>a notification: an alarm going into ALARM or out of it, or a test, <code>POST /notifications/test</code> (P-51, P-52); the worker, at each attempt</td><td>the worker, every 10 s; <code>GET /notifications/deliveries</code></td></tr>
           <tr><td>Alarms: a function's or the account's metric, its statistic over a period, a comparison and a threshold, "M out of N", what missing data counts as, the actions; and the state, why, and when it changed</td><td>PostgreSQL <code>alarms</code>; a function's go with it</td><td>owners and developers, through <code>POST</code>, <code>PUT</code> and <code>DELETE /alarms</code> (in the audit log); the evaluator, every minute, with the state</td><td><code>GET /alarms</code>; the evaluator, which tells a change through the notifications (P-52)</td></tr>
           <tr><td>The secret an account's webhooks are signed with, and for a day after a rotation the previous one</td><td>PostgreSQL <code>webhook_secrets</code>; kept as it is, since FF signs with it</td><td>its first need; an owner's rotation (<code>POST /notifications/webhook-secret/rotate</code>, in the audit log)</td><td>the worker, to sign; the owners (<code>GET /notifications/webhook-secret</code>)</td></tr>
-          <tr><td>An archive copy of the code</td><td>S3 bucket <code>functions</code>, key <code>&lt;id&gt;/code.ts</code> or <code>code.py</code></td><td>create, update</td><td>nothing yet: the cluster gets the code from the ConfigMap</td></tr>
-          <tr><td>The code the pod runs</td><td>ConfigMap <code>fn-&lt;id&gt;-&lt;hash&gt;</code>, immutable, mounted read-only at <code>/var/task</code></td><td>create, update</td><td>the runtime, when it starts</td></tr>
+          <tr><td>A copy of inline code's text</td><td>S3 bucket <code>functions</code>, key <code>&lt;id&gt;/code.ts</code> or <code>code.py</code></td><td>create, update</td><td>nothing: the pods run the code's image, made of its package's zip</td></tr>
+          <tr><td>The code the pod runs</td><td>Every function's code image (ADR 0003), an <code>image</code> volume by digest, mounted read-only at <code>/var/task</code> on the runtime's image. An inline function deployed before code came as images reads its code ConfigMap until its next rollout</td><td>create, update, a rollback</td><td>the runtime, when it starts</td></tr>
+          <tr><td>A package's code image (ADR 0003), inline code's one-file package's too: one layer, its files owned by root and read-only, the same for the same package</td><td>The cluster's registry (in development <code>ff-dev-registry</code>, <code>hack/k8s/registry-up.sh</code>), repository <code>ff-code/&lt;account&gt;</code>, tagged with the package's SHA-256 in hex; its digest in PostgreSQL <code>packages</code></td><td>the first create, update or rollback that runs the package; again when the registry has lost it, or a blob of it, at a deploy or by the backend's hourly restore, which also rolls out the functions whose pods name a lost one</td><td>the node's containerd, pulling it for the pods once per node; deleted with its package</td></tr>
+          <tr><td>Functions' packages: a zip with its libraries, uploaded once and named by its SHA-256, or the zip of one file the backend makes of inline code, marked <code>inline</code>; its sizes and its files' paths</td><td>S3 bucket <code>functions</code>, key <code>packages/&lt;account&gt;/&lt;SHA-256 in hex&gt;.zip</code>; PostgreSQL <code>packages</code>, a row per package and account</td><td><code>POST /packages</code>; a create, update or rollback with inline code (<code>storeInline()</code>); the hourly purge deletes one that no function names an hour after its last use, and a closed account's go with its data</td><td><code>GET /packages</code>, which leaves out the inline ones, as the account's limit of 20 unused packages does; a function naming one; its code image, made of its zip</td></tr>
           <tr><td>Desired and ready instances</td><td>Deployment <code>fn-&lt;id&gt;</code>: <code>spec.replicas</code>, <code>status.readyReplicas</code></td><td>create, update, the autoscaler, the idle sweep, cold starts; an operator's suspension or closure, and the minute's hold of such accounts at zero (P-71)</td><td>invoke, the waits, the metrics tick</td></tr>
           <tr><td>The current minute's metrics, and each function's last invocation time</td><td>Backend memory</td><td>invoke</td><td>the metrics tick and the idle sweep (one backend replica assumed)</td></tr>
           <tr><td>Logs: START, END, REPORT, your output, errors</td><td>Pod stdout (the container log), kept while the pod lives</td><td>the runtime and your code</td><td><code>kubectl logs</code>; <code>GET /functions/:id/logs</code>, each line with its instance and its call's request ID (P-40); the backend's diagnosis when a function doesn't become ready</td></tr>
@@ -442,7 +453,7 @@
 <section id="runtime">
   <div class="wrap">
     <h2>Inside the runtime</h2>
-    <p class="lead">Every function pod runs one of two images, <code>ff-runtime-nodejs:24-v2</code> or <code>ff-runtime-python:3.13-v2</code>, which speak the same protocol (version 2). Your code never runs in the main process: Node.js uses a worker thread with V8 heap limits, and Python a separate worker process with a memory budget. The main process therefore keeps answering probes, enforces the timeout, and replaces the worker after a timeout, an out-of-memory error, or a crash, without restarting the container. If that replacement can't load code that loaded before, the environment is broken, so the runtime exits and Kubernetes restarts the container. Your code runs in <code>/var/task</code>, as on Lambda.</p>
+    <p class="lead">Every function pod runs one of two images, <code>ff-runtime-nodejs:24-v3</code> or <code>ff-runtime-python:3.13-v3</code>, which speak the same protocol (version 2). Your code never runs in the main process: Node.js uses a worker thread with V8 heap limits, and Python a separate worker process with a memory budget. The main process therefore keeps answering probes, enforces the timeout, and replaces the worker after a timeout, an out-of-memory error, or a crash, without restarting the container. If that replacement can't load code that loaded before, the environment is broken, so the runtime exits and Kubernetes restarts the container. Your code runs in <code>/var/task</code>, as on Lambda.</p>
     <div class="grid2">
       <div class="card pad scrollx"><div id="runtimeDiagram"></div></div>
       <div class="card pad">
@@ -466,7 +477,7 @@
     <div class="grid2">
       <div class="layer">
         <div class="ttl">Kubernetes API: RBAC and an admission policy</div>
-        <div class="txt">The backend's ServiceAccount <code>ff-system/ff-controller</code> may manage only the objects functions need: no Secrets, no exec into pods, no changes to RBAC. The admission policy <code>ff-controller-scope</code> confines its writes, and its calls through a Service's proxy, to namespaces named <code>ff-t-*</code> and labelled <code>app.kubernetes.io/managed-by=ff-controller</code>. Only the development setup grants that proxy: in production the backend runs inside the cluster and calls the Services directly. Reads are cluster-wide, which the beta accepts under rules listed in <code>deploy/k8s/README.md</code>.</div>
+        <div class="txt">The backend's ServiceAccount <code>ff-system/ff-controller</code> may manage only the objects functions need: no exec into pods, no changes to RBAC. Secrets it may create, patch, update and delete, and never get, list or watch: a function's variables and secrets go into a Secret in its account's namespace, <code>fn-&lt;id&gt;-env-0</code> or <code>-env-1</code> in turn, which its pods read through <code>envFrom</code>, so that no value is ever in a pod's spec, which the backend can read. The admission policy <code>ff-controller-scope</code> confines its writes, and its calls through a Service's proxy, to namespaces named <code>ff-t-*</code> and labelled <code>app.kubernetes.io/managed-by=ff-controller</code>. Only the development setup grants that proxy: in production the backend runs inside the cluster and calls the Services directly. Reads are cluster-wide, Secrets excepted, which the beta accepts under rules listed in <code>deploy/k8s/README.md</code>.</div>
         <div class="layer">
           <div class="ttl">Tenant namespace <code>ff-t-…</code></div>
           <div class="txt">Pod Security <code>restricted</code>. A ResourceQuota sized by the account's plan (beta: 20 pods, 8 CPU, 8 Gi), with 60 ConfigMaps and 30 Services, a LimitRange, and the NetworkPolicy <code>ff-default-deny</code>: ingress only from the backend's pods in <code>ff-system</code>; egress only to DNS, and to public addresses once you turn the account's internet egress on in the admin dashboard, never to private ranges, cluster addresses, or metadata endpoints. Every deploy, plan change and egress change writes the quota and the policy again, under a lock on the account, so a deploy under way can't put an old value back.</div>
@@ -493,8 +504,9 @@
             <tr><td>Timeout</td><td>From 1 s up to the plan's <code>timeoutSeconds</code> (300 s on beta)</td></tr>
             <tr><td>Functions per account</td><td>The plan's <code>functions</code> (25 on beta), counted while the account is locked, so two creates at once can't both take the last one</td></tr>
             <tr><td>Request rates, per account</td><td>The plan's changes a minute and invocations a second (60 and 100 on beta), counted apart; reads are free. Beyond: 429 <code>TooManyRequestsException</code>, with <code>Retry-After</code>; a refused invocation counts in its function's <code>Throttles</code></td></tr>
-            <tr><td>Code</td><td>About 100 KB per API request today (the JSON body limit); 900 KiB fit in a ConfigMap</td></tr>
-            <tr><td>Invocation input</td><td>About 100 KB per API request today; the runtime accepts 6 MB</td></tr>
+            <tr><td>Inline code</td><td>3 MiB (3,145,728 bytes of UTF-8), as AWS Lambda's console takes in its editor: more answers 400, saying how many bytes it has. More code comes as a package: a zip of 50 MB at most, 250 MB unpacked, as on Lambda. A function's create and update take a body of 7 MB</td></tr>
+            <tr><td>Invocation input</td><td>6 MB as JSON, as AWS Lambda's synchronous calls: more answers 413 <code>RequestEntityTooLargeException</code>, Lambda's words. An invocation takes a body of 7 MB</td></tr>
+            <tr><td>Any other request's body</td><td>100 KB; beyond, 413, saying which limit</td></tr>
             <tr><td>Result</td><td>6 MB</td></tr>
             <tr><td>Concurrency</td><td>One invocation per pod at a time; up to 32 wait, each for at most one timeout, then 429</td></tr>
             <tr><td>Backend wait for an answer</td><td>One timeout of waiting for a free instance, plus the timeout, plus 2 s; then the invocation is <code>TIMEOUT</code></td></tr>
@@ -519,6 +531,8 @@
         <tbody>
           <tr><td>REST API</td><td><code>BE/src/functions/functions.controller.ts</code>, <code>BE/src/metrics/metrics.controller.ts</code></td></tr>
           <tr><td>Create, update, delete, invoke</td><td><code>BE/src/functions/functions.service.ts</code></td></tr>
+          <tr><td>Schedules: EventBridge's expressions and their next runs, the routes, the scheduler, the Scheduled Event</td><td><code>BE/src/schedules/schedule-expression.ts</code>, <code>schedules.service.ts</code>, <code>scheduler.service.ts</code>, <code>scheduled-event.ts</code>, <code>schedules.controller.ts</code>; the console's tab: <code>FE/src/components/FunctionSchedules.tsx</code>, <code>FE/src/lib/schedules.ts</code></td></tr>
+          <tr><td>Function URLs: their configuration, the gateway on its own port, the event, the answer, CORS</td><td><code>BE/src/function-urls/function-urls.service.ts</code>, <code>function-url.gateway.ts</code>, <code>url-event.ts</code>, <code>url-response.ts</code>, <code>url-cors.ts</code>, <code>url-address.ts</code>; the shared call: <code>functions.service.ts</code> <code>call()</code>; the shared rate: <code>BE/src/plans/rate-limits.ts</code> <code>countInvocation()</code>; the console's tab: <code>FE/src/components/FunctionUrl.tsx</code>, <code>FunctionUrlDomains.tsx</code>, <code>FE/src/lib/function-url.ts</code>, <code>custom-domains.ts</code></td></tr>
           <tr><td>Token checks, the global guard</td><td><code>BE/src/auth/auth.guard.ts</code>, <code>token-verifier.ts</code></td></tr>
           <tr><td>The caller of a request, and its account</td><td><code>BE/src/auth/principal.ts</code></td></tr>
           <tr><td>API keys</td><td><code>BE/src/api-keys/</code></td></tr>
@@ -535,6 +549,9 @@
           <tr><td>Every Kubernetes object</td><td><code>BE/src/orchestrator/kubernetes/manifests.ts</code>, <code>naming.ts</code></td></tr>
           <tr><td>Metrics, autoscaling, scale to zero</td><td><code>BE/src/metrics/metrics.service.ts</code>, <code>scaling.ts</code></td></tr>
           <tr><td>A function's and an account's metrics: the window, the series, their queries, the count of calls the rate limits refused, and the console's Metrics tab</td><td><code>BE/src/metrics/customer-metrics.ts</code>, <code>customer-metrics.service.ts</code>, <code>refused-invocations.service.ts</code>, <code>FE/src/components/MetricsDashboard.tsx</code>, <code>FE/src/lib/metrics.ts</code></td></tr>
+          <tr><td>Functions' packages: the upload, the checks of a zip, the record, and the purge of unused ones</td><td><code>BE/src/packages/packages.service.ts</code>, <code>package-archive.ts</code>, <code>packages.controller.ts</code>, <code>BE/src/retention/retention.service.ts</code>, and the migration <code>…-Packages.ts</code></td></tr>
+          <tr><td>Code images the registry lost: checked whole every hour and at the backend's start, made again, the functions whose pods name a lost one rolled out; and the packages' copy at the second site</td><td><code>BE/src/functions/functions.service.ts</code> (<code>restoreCodeImages</code>), <code>BE/src/packages/code-images.service.ts</code>, <code>registry.ts</code>, <code>deploy/k8s/backup/mirror.sh</code></td></tr>
+          <tr><td>Code images, every function's (ADR 0003): inline code made a package of one file and kept as one of the account's, the layer, the push to the registry, a function naming its package, its pods mounting the image, and the code ConfigMaps left from before</td><td><code>BE/src/functions/inline-package.ts</code> <code>inlinePackage()</code>, <code>BE/src/packages/packages.service.ts</code> <code>storeInline()</code>, <code>code-layer.ts</code>, <code>registry.ts</code>, <code>code-images.service.ts</code> <code>imageFor()</code>, <code>BE/src/functions/functions.service.ts</code> <code>codeOf()</code> and <code>codeImageOf()</code>, <code>manifests.ts</code> <code>deploymentManifest()</code>, <code>kubernetes.orchestrator.ts</code> <code>collectOldConfigMaps()</code>, <code>hack/k8s/registry-up.sh</code>, and the migration <code>…-InlineCodePackages.ts</code></td></tr>
           <tr><td>The invocation history: what it keeps of each call, and its hourly purge</td><td><code>BE/src/functions/history.ts</code>, <code>BE/src/retention/retention.service.ts</code>, and the migration <code>…-InvocationHistory.ts</code></td></tr>
           <tr><td>Support: the search, a function's page, and looking at a customer's data only for a reason, each look in its audit log</td><td><code>BE/src/admin/admin-support.service.ts</code>, <code>admin-support.controller.ts</code></td></tr>
           <tr><td>Closing an account: the date its data is deleted, then the deletion itself</td><td><code>BE/src/admin/admin-accounts.service.ts</code> <code>changeStatus()</code>, <code>BE/src/retention/retention.service.ts</code> <code>deleteClosedAccounts()</code>, <code>kubernetes.orchestrator.ts</code> <code>removeTenant()</code> and <code>deleteLogs()</code>, <code>hack/k8s/log-store-key.sh</code>, and the migration <code>…-ClosedAccountDeletion.ts</code></td></tr>
@@ -563,7 +580,7 @@
   </div>
 </section>
 </main>
-<footer><div class="wrap">The Kubernetes manifests shown are generated by the backend's own code for the sample function, and the ConfigMap names are the real hashes of <code>examples/hello.ts</code>, <code>hello.py</code>, and <code>slow.py</code>. Durations marked ⏱ were measured on the development cluster (128 MB, 0.1 CPU). IDs, timestamps, and the other numbers are examples.</div></footer>
+<footer><div class="wrap">The Kubernetes manifests shown are generated by the backend's own code for the sample function. The code images' digests, and their packages' SHA-256s and sizes, are the real ones of <code>examples/hello.ts</code>, <code>hello.py</code>, and <code>slow.py</code>, and of the page's two variants of <code>hello.ts</code>: each made a package of one file and an image by the backend's own code, for account <code>000000000001</code>, which the image's configuration names; in an account, the same code always makes the same digest. Durations marked ⏱ were measured on the development cluster (128 MB, 0.1 CPU) while the code still came in a ConfigMap; ADR 0003's spike measured an image volume as fast once the node has the image, and its first pull about a second more. IDs, timestamps, and the other numbers are examples.</div></footer>
 
 <script>
 'use strict';
@@ -576,18 +593,44 @@ const NS = 'ff-t-27d6fbbe5c7d';
 const INV = 'd2a1f0c4-3b5e-4f6a-8c7d-9e0f1a2b3c4d';
 // The call's request ID in the runtime is the invocation's ID: the backend sends it as x-ff-request-id (P-20, D6).
 const REQ = INV;
-const HASH_V1 = 'c4d785b3974c4e13e098fb8b8034abd3aaee686501033a3aef4019435aad8c44';
-const HASH_V2 = '9c9e249cb76d185984d6cf076a57c17a0221e5034e5e9e283e504b0060e40bc8';
-const HASH_PY = 'c38dc02399da3a28e683be106277c9888de99cbfae257cf053a8273b8a665c66';
-const HASH_SLOW = '16a2f390332cf9c1dd1e9b57fa8f5a3362e596a035e71b494dcd1b42a2914662';
-const HASH_BAD = '93201b57673588061bb0e87ed85bad5728d55391e96ceb14c8c95d9e4cee3084';
-const CODE_TS = "// A Node.js function in TypeScript. FF calls handler(event, context), as AWS Lambda does.\n// event.body is the \"input\" sent to POST /functions/:id/invoke.\nexport async function handler(event: { body: { name?: string } }, context: { awsRequestId: string }) {\n  const name = event.body.name ?? 'world';\n  console.log(`greeting ${name}`); // shows up in the function pod's logs\n  return { message: `Hello ${name}`, requestId: context.awsRequestId };\n}\n";
+/*
+ * Each sample's code as its pods get it (ADR 0003): the package of one file the backend makes of it, named by its SHA-256
+ * (sha, in base64; hex, which names its zip and tags its image), the zip's and the image layer's sizes in bytes, the image's
+ * digest, and the Deployment's ff.dev/code-sha256, codeHash(runtime, image). Made from the code below by the backend's own
+ * inlinePackage(), pushCodeImage() and codeHash(), for account 000000000001, whose nodes pull from ff-dev-registry:5000.
+ */
+const PKG_V1 = { sha: 'SYjuD19xLCEhG0r9ZBE7BKbqCSsOIDWUJUgZF5BzG6U=', hex: '4988ee0f5f712c21211b4afd64113b04a6ea092b0e2035942548191790731ba5', zip: 585, layer: 370,
+  digest: 'sha256:9c3d87bf813680c5fc11140048a6ca7147573ac52e8253889fc21f8b77c6b7e8', codeHash: '8e5e73d0618c5f6d7972a7849bfa195c73dbc6aef9f6731dfbf4bc18c204515c',
+  layerDigest: 'sha256:7f1f23f79232b8d323db14965109b632d570e73e93164ac8655cf93028fa2391', diffId: 'sha256:31f54cba0fed02fe3f7ca9010d70920e553f8500664a4668647f7dd7e2836c92',
+  configDigest: 'sha256:a92679bd9d8399a8be914454a291fd1e128021443a2375f85a872585c3d858fa', configSize: 273 };
+const PKG_V2 = { sha: '+x9CshZBRJUujfdfA2OlURsG6HmUkODRTfYaPQlweOw=', hex: 'fb1f42b2164144952e8df75f0363a5511b06e8799490e0d14df61a3d097078ec', zip: 586, layer: 371,
+  digest: 'sha256:af4bdfb1420d54d3a80d736ba3b48368317dd6699d791a2339d7b4032f789f93', codeHash: 'a2a05ebaded4b5c4864eea2274b5a3b517b8816026f1c3507c8bbacba5e3f7ba',
+  layerDigest: 'sha256:295b8edc462058c378154bc016a2e5b246c72396aab5243346526e70e1c398fa',
+  configDigest: 'sha256:d4fed8925cb38132d65368f14eb2cc9da040d424586a479e62caa005acd39f49', configSize: 273 };
+const PKG_PY = { sha: 'F24g917jVqDfYkcRnCnw1U9pSb3JA3f+czZ4xuVvCt0=', hex: '176e20f75ee356a0df6247119c29f0d54f6949bdc90377fe733678c6e56f0add', zip: 611, layer: 385,
+  digest: 'sha256:d4da3bf9befc10f18fd9df759016030a212cb743e9c9185432a90908169a9170', codeHash: '1980825bd646fb9e3409a5b1871659003ec3b5806bdef6b97ebe3f4aef52c783' };
+const PKG_SLOW = { sha: 'bsfB2u3BY5+d5yJKTeiJdC4Z6MBaOF4KGwv0s/dssg8=', hex: '6ec7c1daedc1639f9de7224a4de889742e19e8c05a385e0a1b0bf4b3f76cb20f', zip: 401, layer: 271,
+  digest: 'sha256:263247e4f5ffe89aed87cbbc4253e2bc98f6f2bf004b8ab1c4443bd66cebf655', codeHash: 'c410710e579c495dc7e837790aacc62fcb944394456f7a97b16ac6929584a91c' };
+const PKG_BAD = { sha: 'mHjRxiPk92iTCXVIu78LimLM/S20E/uR35ChsvH4bpM=', hex: '9878d1c623e4f76893097548bbbf0b8a62ccfd2db413fb91df90a1b2f1f86e93', zip: 170, layer: 137,
+  digest: 'sha256:0770167509fa3a475d4576db2b08f263061cc9d28e1a73c37fdcd24603cbbca6', codeHash: '31ab3903e06348c0d04c2cf52a68f6eab47365d53190d0b8649812f4b94d65a5' };
+const CODE_TS = "// A Node.js function in TypeScript. FF calls handler(event, context), as AWS Lambda does.\n// The event is the \"input\" sent to POST /functions/:id/invoke, as a payload is on AWS Lambda.\nexport async function handler(event: { name?: string }, context: { awsRequestId: string }) {\n  const name = event.name ?? 'world';\n  console.log(`greeting ${name}`); // shows up in the function pod's logs\n  return { message: `Hello ${name}`, requestId: context.awsRequestId };\n}\n";
 const CODE_TS_V2 = CODE_TS.replace('Hello ', 'Marhba ');
-const CODE_PY = "# A Python function. FF calls handler(event, context), as AWS Lambda does.\n# event[\"body\"] is the \"input\" sent to POST /functions/:id/invoke.\ndef handler(event, context):\n    name = event[\"body\"].get(\"name\", \"world\")\n    if name == \"error\":\n        raise ValueError(\"this name is not allowed\")  # the invocation ends as ERROR\n    print(f\"greeting {name}\")  # shows up in the function pod's logs\n    return {\"message\": f\"Hello {name}\", \"requestId\": context.aws_request_id}\n";
-const CODE_SLOW = "import time\n\n\n# Sleeps for event[\"body\"][\"seconds\"]. Longer than the function's timeout ends as TIMEOUT.\ndef handler(event, context):\n    seconds = event[\"body\"].get(\"seconds\", 1)\n    time.sleep(seconds)\n    return {\"slept\": seconds, \"remainingMs\": context.get_remaining_time_in_millis()}\n";
+const CODE_PY = "# A Python function. FF calls handler(event, context), as AWS Lambda does.\n# The event is the \"input\" sent to POST /functions/:id/invoke, as a payload is on AWS Lambda.\ndef handler(event, context):\n    name = event.get(\"name\", \"world\")\n    if name == \"error\":\n        raise ValueError(\"this name is not allowed\")  # the invocation ends as ERROR\n    print(f\"greeting {name}\")  # shows up in the function pod's logs\n    return {\"message\": f\"Hello {name}\", \"requestId\": context.aws_request_id}\n";
+const CODE_SLOW = "import time\n\n\n# Sleeps for event[\"seconds\"] seconds. Longer than the function's timeout ends as TIMEOUT.\ndef handler(event, context):\n    seconds = event.get(\"seconds\", 1)\n    time.sleep(seconds)\n    return {\"slept\": seconds, \"remainingMs\": context.get_remaining_time_in_millis()}\n";
 const CODE_BAD = "export async function handler() {\n  return {{{;\n}\n";
 const fn = (id) => 'fn-' + id;
-const cm = (id, hash) => fn(id) + '-' + hash.slice(0, 10);
+/** A long name as the state panel shortens it: its first and last characters. */
+const abbr = (s, head, tail) => s.slice(0, head) + '…' + s.slice(-tail);
+// The account's repository in the code registry, which the backend pushes to on 127.0.0.1:5056 in development.
+const REPO = 'ff-code/000000000001';
+const imageRef = (p) => 'ff-dev-registry:5000/' + REPO + '@' + p.digest;
+const shortDigest = (p) => 'sha256:' + abbr(p.digest.slice(7), 4, 4);
+const shortSha = (p) => abbr(p.sha, 4, 4);
+const zipKey = (p) => 'packages/000000000001/' + p.hex + '.zip';
+const shortZip = (p) => 'packages/000000000001/' + abbr(p.hex, 4, 4) + '.zip';
+const zipState = (p) => shortZip(p) + ' · ' + p.zip + ' bytes';
+const packageRow = (p) => shortSha(p) + ' · inline, 1 file · image ' + shortDigest(p);
+const utf8Bytes = (s) => new TextEncoder().encode(s).length;
 /** Python's json.dumps() spacing, as the Python runtime writes its logs. */
 function pyJSON(v) {
   if (Array.isArray(v)) return '[' + v.map(pyJSON).join(', ') + ']';
@@ -607,27 +650,32 @@ const M_NETPOL = { apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', me
   // 0.0.0.0/0 except 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 and 127/8.
   egress: [
     { to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }], ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] }] } };
-const mConfigMap = (hash, code) => ({ apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: cm(FN, hash), namespace: NS, labels: FN_LABELS, annotations: { 'ff.dev/code-sha256': hash } }, immutable: true, data: { 'function.ts': code } });
 const M_SERVICE = { apiVersion: 'v1', kind: 'Service', metadata: { name: fn(FN), namespace: NS, labels: FN_LABELS }, spec: { type: 'ClusterIP', selector: { 'ff.dev/function-id': FN }, ports: [{ name: 'http', port: 8080, targetPort: 'http', protocol: 'TCP' }] } };
-const mDeployment = (hash, replicas) => ({ apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name: fn(FN), namespace: NS, labels: FN_LABELS },
+// p: the version's package (PKG_V1, PKG_V2), whose image is its code.
+const mDeployment = (p, replicas) => ({ apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name: fn(FN), namespace: NS, labels: FN_LABELS },
   spec: { replicas, revisionHistoryLimit: 2, progressDeadlineSeconds: 120, selector: { matchLabels: { 'ff.dev/function-id': FN } }, strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } },
-    template: { metadata: { labels: FN_LABELS, annotations: { 'ff.dev/code-sha256': hash } },
+    template: { metadata: { labels: FN_LABELS, annotations: { 'ff.dev/code-sha256': p.codeHash } },
       spec: { automountServiceAccountToken: false, enableServiceLinks: false, terminationGracePeriodSeconds: 10,
         securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: 'RuntimeDefault' } },
-        containers: [{ name: 'function', image: 'ff-runtime-nodejs:24-v2', imagePullPolicy: 'IfNotPresent', ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
-          env: [{ name: 'FUNCTION_NAME', value: 'hello' }, { name: 'FUNCTION_VERSION', value: '$LATEST' }, { name: 'FUNCTION_MEMORY_LIMIT', value: '128' }, { name: 'FUNCTION_TIMEOUT', value: '5000' }, { name: 'LAMBDA_TASK_ROOT', value: '/var/task' }, { name: 'FF_HANDLER', value: 'function.handler' }, { name: 'PORT', value: '8080' }, { name: 'TZ', value: 'UTC' }],
+        containers: [{ name: 'function', image: 'ff-runtime-nodejs:24-v3', imagePullPolicy: 'IfNotPresent', ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
+          env: [{ name: 'FUNCTION_NAME', value: 'hello' }, { name: 'FUNCTION_VERSION', value: '$LATEST' }, { name: 'FUNCTION_MEMORY_LIMIT', value: '128' }, { name: 'FUNCTION_TIMEOUT', value: '5000' }, { name: 'FF_MAX_QUEUE_WAIT_MS', value: '5000' }, { name: 'LAMBDA_TASK_ROOT', value: '/var/task' }, { name: 'FF_HANDLER', value: 'function.handler' }, { name: 'FF_EVENT_FORMAT', value: 'lambda' }, { name: 'PORT', value: '8080' }, { name: 'TZ', value: 'UTC' }],
           resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '100m', memory: '128Mi' } },
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } },
           readinessProbe: { httpGet: { path: '/readyz', port: 'http' }, periodSeconds: 2, failureThreshold: 3 },
           livenessProbe: { httpGet: { path: '/healthz', port: 'http' }, periodSeconds: 10, failureThreshold: 3 },
           volumeMounts: [{ name: 'code', mountPath: '/var/task', readOnly: true }, { name: 'tmp', mountPath: '/tmp' }] }],
-        volumes: [{ name: 'code', configMap: { name: cm(FN, hash), defaultMode: 292 } }, { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } }] } } } });
+        volumes: [{ name: 'code', image: { reference: imageRef(p), pullPolicy: 'IfNotPresent' } }, { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } }] } } } });
 
 const KUBE_HEADERS = { 'content-type': 'application/apply-patch+yaml', accept: 'application/json', authorization: 'Bearer <token of the ff-controller ServiceAccount>' };
 const APPLY = (path, body) => ({ kind: 'http', first: 'PATCH ' + path + '?fieldManager=ff-controller&force=true HTTP/1.1', headers: KUBE_HEADERS, body });
 const DEPLOY_PATH = '/apis/apps/v1/namespaces/' + NS + '/deployments/' + fn(FN);
 const PROXY_PATH = (id) => '/api/v1/namespaces/' + NS + '/services/' + fn(id) + ':http/proxy/invoke';
 const BY_FUNCTION = (id) => 'labelSelector=ff.dev%2Ffunction-id%3D' + id;
+// collectOldConfigMaps(): the function's code ConfigMaps from before code came as images, found by its label.
+const OLD_CONFIGMAPS = (id) => [{ kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/configmaps?' + BY_FUNCTION(id) + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { kind: 'ConfigMapList', apiVersion: 'v1', items: [] } }];
+// The manifest the backend pushes for a package's image (pushCodeImage()): its configuration and its one layer, by digest.
+const IMAGE_MANIFEST = (p) => ({ schemaVersion: 2, mediaType: 'application/vnd.oci.image.manifest.v1+json', config: { mediaType: 'application/vnd.oci.image.config.v1+json', digest: p.configDigest, size: p.configSize }, layers: [{ mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip', digest: p.layerDigest, size: p.layer }] });
+const S3_SIGNED = 'AWS4-HMAC-SHA256 Credential=<development key>/<date>/us-east-1/s3/aws4_request, SignedHeaders=…, Signature=…';
 const INVOKE_REQ = (id, input) => ({ kind: 'http', first: 'POST /functions/' + id + '/invoke HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { input } });
 const SHUTDOWN_LOG = (time, inFlight) => JSON.stringify({ time, level: 'info', msg: 'shutting down; draining invocations', signal: 'SIGTERM', inFlight, queued: 0 });
 const SYNTAX_ERROR = "SyntaxError: function.ts:2:11 Property assignment expected.; function.ts:4:1 '}' expected.";
@@ -650,22 +698,29 @@ const LANES = {
   idp:    { label: 'Keycloak', sub: 'realm ff', color: '--c-idp', map: 'idp' },
   store:  { label: 'Log store', sub: 'VictoriaLogs', color: '--c-store', map: 'logstore' },
   hook:   { label: 'Your receiver', sub: 'webhook URL', color: '--c-user', map: 'user' },
+  reg:    { label: 'Registry', sub: 'code images', color: '--c-reg', map: 'registry' },
+  yourdb: { label: 'Your database', sub: 'PostgreSQL', color: '--c-user', map: 'user' },
 };
-const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'k8sapi', 'ns', 'guard', 'service', 'configmap', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
+const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'registry', 'k8sapi', 'ns', 'guard', 'service', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
-  'PostgreSQL': { 'functions': null, 'function_invocations': null, 'function_metrics': null, 'usage_records': null, 'notification_deliveries': null, 'webhook_secrets': null, 'alarms': null, 'capacity_samples': null, 'usage_hourly': null, 'usage_charges': null, 'ledger_entries': null, 'payments': null, 'invoices': null },
-  'S3 (bucket functions)': { 'object': null },
-  [K]: { 'Namespace': null, 'ResourceQuota': null, 'LimitRange': null, 'NetworkPolicy': null, 'ConfigMap': null, 'Service': null, 'Deployment': null, 'Pod': null },
+  'PostgreSQL': { 'functions': null, 'packages': null, 'function_urls': null, 'schedules': null, 'function_invocations': null, 'function_metrics': null, 'usage_records': null, 'notification_deliveries': null, 'webhook_secrets': null, 'alarms': null, 'capacity_samples': null, 'usage_hourly': null, 'usage_charges': null, 'ledger_entries': null, 'payments': null, 'invoices': null },
+  'S3 (bucket functions)': { 'object': null, 'package': null },
+  'Registry': { 'code image': null },
+  [K]: { 'Namespace': null, 'ResourceQuota': null, 'LimitRange': null, 'NetworkPolicy': null, 'Service': null, 'Deployment': null, 'Pod': null },
   'Runtime': { 'main process': null, 'worker': null },
 };
-function activeState(id, hash, codeFile, extra) {
+/** A deployed inline function: its record, its copy of the code (codeFile), its package p and p's image, and its objects. */
+function activeState(id, p, codeFile, extra) {
   return Object.assign({
     'PostgreSQL.functions': 'ACTIVE',
+    'PostgreSQL.packages': packageRow(p),
     'S3 (bucket functions).object': id + '/' + codeFile,
+    'S3 (bucket functions).package': zipState(p),
+    'Registry.code image': REPO + '@' + shortDigest(p),
     [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits',
-    [K + '.NetworkPolicy']: 'ff-default-deny', [K + '.ConfigMap']: cm(id, hash), [K + '.Service']: fn(id) + ' (ClusterIP :8080)',
+    [K + '.NetworkPolicy']: 'ff-default-deny', [K + '.Service']: fn(id) + ' (ClusterIP :8080)',
     [K + '.Deployment']: 'replicas 1 · ready 1/1', [K + '.Pod']: 'Running · Ready',
     'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'code loaded · idle',
   }, extra || {});
@@ -673,8 +728,8 @@ function activeState(id, hash, codeFile, extra) {
 
 const SCENARIOS = [
   {
-    id: 'create', title: 'Create a function', lanes: ['user', 'api', 'db', 's3', 'k8s', 'node', 'pod', 'worker'],
-    summary: 'POST /functions with examples/hello.ts. The call returns only once a pod is serving: 6–12 s at 128 MB in our measurements, most of it the runtime starting on 0.1 CPU.',
+    id: 'create', title: 'Create a function', lanes: ['user', 'api', 'db', 's3', 'reg', 'k8s', 'node', 'pod', 'worker'],
+    summary: 'POST /functions with examples/hello.ts. Before it saves anything, the backend makes the code a package of one file, and the package an image in the code registry; then it saves the function and deploys it, its pods mounting that image at /var/task. The call returns only once a pod is serving: 6–12 s at 128 MB in our measurements, most of it the runtime starting on 0.1 CPU.',
     initial: {},
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions', title: 'You send the function',
@@ -682,18 +737,51 @@ const SCENARIOS = [
         code: 'FE/src/components/CreateFunction.tsx · BE/src/functions/functions.controller.ts',
         msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'hello', runtime: 'nodejs', code: CODE_TS, memory: 128, timeout: 5 } } },
       { from: 'api', to: 'api', kind: 'int', label: 'validate · resolve the tenant', title: 'Validation and the tenant',
-        text: 'The ValidationPipe rejects unknown fields and checks what any function may be: a name of 1 to 64 letters, digits, hyphens or underscores, as on AWS Lambda, memory 128–10,240 MB, timeout 1–900 s, runtime nodejs or python. The account\'s plan then sets lower limits (beta: 1,024 MB, 300 s, 25 functions), and a request beyond them gets 400 naming the plan\'s limit; changes beyond the plan\'s rate, 60 a minute on beta, get 429 TooManyRequestsException with Retry-After. In OIDC mode, the global guard first checks the caller: an API key (ffk_…), which acts for its own account within its scopes, or an access token: its signature against the Keycloak realm\'s published keys, an asymmetric algorithm, the issuer, the ff-api audience, the expiry, and a verified e-mail address (401 or 403 otherwise). The guard then finds the user (created on the first call) and the account the request acts for: the user\'s only account, or the one an X-FF-Account header names (400 to choose among several, 403 without any, 404 for one the user isn\'t a member of). Writing needs the owner or developer role, and deploying or invoking an account that was approved: a new one waits for approval. In development (FF_AUTH_MODE=dev), the caller is the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names, created the first time. Without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID, which the first middleware gives it before the guards run: every line the backend logs while serving it names that ID, the guards\' included.',
-        code: 'BE/src/main.ts · BE/src/auth/auth.guard.ts · token-verifier.ts · principal.ts · BE/src/common/request-context.ts' },
+        text: 'The body was read first, up to 7 MB for a function\'s code (100 KB on most routes). The ValidationPipe rejects unknown fields and checks what any function may be: a name of 1 to 64 letters, digits, hyphens or underscores, as on AWS Lambda, inline code of 3 MiB at most, as AWS Lambda\'s console takes in its editor (more comes as a package), memory 128–10,240 MB, timeout 1–900 s, runtime nodejs or python, and a handler as Lambda writes one, function.handler unless the body names another: inline code is the file function, so its handler is function.<name>. The account\'s plan then sets lower limits (beta: 1,024 MB, 300 s, 25 functions), and a request beyond them gets 400 naming the plan\'s limit; changes beyond the plan\'s rate, 60 a minute on beta, get 429 TooManyRequestsException with Retry-After. In OIDC mode, the global guard first checks the caller: an API key (ffk_…), which acts for its own account within its scopes, or an access token: its signature against the Keycloak realm\'s published keys, an asymmetric algorithm, the issuer, the ff-api audience, the expiry, and a verified e-mail address (401 or 403 otherwise). The guard then finds the user (created on the first call) and the account the request acts for: the user\'s only account, or the one an X-FF-Account header names (400 to choose among several, 403 without any, 404 for one the user isn\'t a member of). Writing needs the owner or developer role, and deploying or invoking an account that was approved: a new one waits for approval. In development (FF_AUTH_MODE=dev), the caller is the owner of FF_DEV_ACCOUNT_ID ("000000000001"), or of the account that an X-FF-Dev-Account header names, created the first time. Without either, the answer is 401 "Authentication required". Bodies over 100 KB get 413. Every answer carries x-ff-request-id, the request\'s ID, which the first middleware gives it before the guards run: every line the backend logs while serving it names that ID, the guards\' included.',
+        code: 'BE/src/main.ts · BE/src/auth/auth.guard.ts · token-verifier.ts · principal.ts · BE/src/common/request-context.ts · BE/src/functions/functions.service.ts codeOf()' },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE packages … RETURNING id · none', title: 'Inline code becomes a package of one file',
+        text: 'Before anything is saved, the code is made the zip AWS Lambda would take: one file, function.ts (function.py for Python), stored, not compressed, dated 1980-01-01, a regular file with mode 0644, its name in UTF-8. So the same code always makes the same ' + PKG_V1.zip + ' bytes, the same SHA-256, and the same image. It is kept as one of the account\'s packages, named by that SHA-256 as an uploaded one is: when the account has it already, the same code having been deployed before, its last use becomes now and nothing more is stored. Here it hasn\'t.',
+        code: 'BE/src/functions/functions.service.ts create(), codeImageOf() · inline-package.ts inlinePackage() · BE/src/packages/packages.service.ts storeInline()',
+        msg: { kind: 'sql', text: "UPDATE \"packages\" SET \"used_at\" = now()\n WHERE \"account_id\" = '000000000001' AND \"code_sha256\" = '" + PKG_V1.sha + "'\nRETURNING \"id\";   -- no row: the account hasn't this package" } },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT ' + shortZip(PKG_V1), title: 'The zip in object storage, first',
+        text: 'In the functions bucket, under the account and the package\'s SHA-256 in hex, where an uploaded package\'s zip goes too. The bytes come before the row, so that a row never names a package that object storage hasn\'t.',
+        code: 'packages.service.ts storeInline() · package.entity.ts packageKey() · minio-client.service.ts putDocument()',
+        msg: { kind: 'http', first: 'PUT /functions/' + zipKey(PKG_V1) + '?x-id=PutObject HTTP/1.1', headers: { host: 'localhost:9003', 'content-type': 'application/zip', 'content-length': String(PKG_V1.zip), 'x-amz-content-sha256': '<SHA-256 of the zip>', authorization: S3_SIGNED }, body: '<the zip: function.ts, ' + utf8Bytes(CODE_TS) + ' bytes, stored, dated 1980-01-01, mode 0644>' },
+        set: { 'S3 (bucket functions).package': zipState(PKG_V1) } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT packages (inline)', title: 'One of the account\'s packages, marked inline',
+        text: 'Its row: the zip\'s size, one file, function.ts, and inline, since the backend made it rather than the account: GET /packages doesn\'t list it, and it doesn\'t count toward the account\'s limit of 20 unused packages. No checks and no audit entry: the API took the code already. The hourly purge keeps it while a function names it, and deletes it, with its zip and its image, an hour after its last use otherwise. Two rollouts that make it at once insert it once.',
+        code: 'packages.service.ts storeInline() · package.entity.ts',
+        msg: { kind: 'sql', text: "INSERT INTO \"packages\" (\"account_id\", \"code_sha256\", \"code_size\", \"unpacked_size\", \"file_count\", \"files\", \"inline\")\nVALUES ('000000000001', '" + PKG_V1.sha + "', " + PKG_V1.zip + ', ' + utf8Bytes(CODE_TS) + ", 1, '{function.ts}', true)\nON CONFLICT DO NOTHING;" },
+        set: { 'PostgreSQL.packages': shortSha(PKG_V1) + ' · inline, 1 file · no image yet' } },
+      { from: 'api', to: 's3', kind: 'req', label: 'GET ' + shortZip(PKG_V1), title: 'The zip, read back to make the image',
+        text: 'Then the package\'s image, made as an uploaded package\'s is. The package\'s row has no image digest yet, so the backend reads the zip back from object storage: the zip is the source of the image, which can always be made again from it.',
+        code: 'BE/src/packages/code-images.service.ts imageFor(), make() · minio-client.service.ts getFile()',
+        msg: [{ kind: 'sql', text: "SELECT \"id\", \"image_digest\" FROM \"packages\"\n WHERE \"account_id\" = '000000000001' AND \"code_sha256\" = '" + PKG_V1.sha + "' LIMIT 1;   -- image_digest null: no image yet" },
+          { kind: 'http', first: 'GET /functions/' + zipKey(PKG_V1) + '?x-id=GetObject HTTP/1.1', headers: { host: 'localhost:9003', authorization: S3_SIGNED } },
+          { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/zip', 'content-length': String(PKG_V1.zip) } }] },
+      { from: 'api', to: 'reg', kind: 'req', label: 'push ' + REPO + ':' + abbr(PKG_V1.hex, 4, 4), title: 'The package becomes a code image',
+        text: 'The zip made one tar layer: its file owned by root, read-only, dated at the epoch, then gzip-compressed, ' + PKG_V1.layer + ' bytes. It goes to the cluster\'s registry, on 127.0.0.1:5056 in development, with a minimal configuration that names the account and the package, each blob skipped when the registry has it; then the manifest, tagged with the package\'s SHA-256 in hex. The manifest\'s digest names the image, and is kept with the package: later rollouts only ask the registry for it, and make it again if the registry has lost it. A registry that doesn\'t answer, after three tries, gives 503 "The code registry can\'t be reached: nothing changed, try again in a moment", before the function is saved. A development backend without FF_CODE_REGISTRY answers 503 to every create and update; a production one doesn\'t start without it.',
+        code: 'code-images.service.ts imageFor(), pushCodeImage() · code-layer.ts buildLayer() · registry.ts pushBlob(), pushManifest()',
+        msg: [{ kind: 'http', first: 'HEAD /v2/' + REPO + '/blobs/' + PKG_V1.layerDigest + ' HTTP/1.1', headers: { host: '127.0.0.1:5056' } }, { kind: 'http', first: 'HTTP/1.1 404 Not Found' },
+          { kind: 'http', first: 'POST /v2/' + REPO + '/blobs/uploads/ HTTP/1.1', headers: { 'content-length': '0' } },
+          { kind: 'http', first: 'HTTP/1.1 202 Accepted', headers: { location: '/v2/' + REPO + '/blobs/uploads/<upload ID>' } },
+          { kind: 'http', first: 'PUT /v2/' + REPO + '/blobs/uploads/<upload ID>?digest=' + PKG_V1.layerDigest + ' HTTP/1.1', headers: { 'content-type': 'application/octet-stream', 'content-length': String(PKG_V1.layer) }, body: '<the layer: function.ts, 0444, owned by root, at the epoch, gzip>' },
+          { kind: 'http', first: 'HTTP/1.1 201 Created' },
+          { kind: 'ipc', title: 'The configuration, pushed the same way: ' + PKG_V1.configSize + ' bytes, sha256:' + abbr(PKG_V1.configDigest.slice(7), 4, 4), body: { architecture: 'amd64', os: 'linux', config: { Labels: { 'ff.dev/account': '000000000001', 'ff.dev/code-sha256': PKG_V1.sha } }, rootfs: { type: 'layers', diff_ids: [PKG_V1.diffId] } } },
+          { kind: 'http', first: 'PUT /v2/' + REPO + '/manifests/' + PKG_V1.hex + ' HTTP/1.1', headers: { 'content-type': 'application/vnd.oci.image.manifest.v1+json' }, body: IMAGE_MANIFEST(PKG_V1) },
+          { kind: 'http', first: 'HTTP/1.1 201 Created' },
+          { kind: 'sql', text: "UPDATE \"packages\" SET \"image_digest\" = '" + PKG_V1.digest + "' WHERE \"id\" = '…';" }],
+        set: { 'Registry.code image': REPO + '@' + shortDigest(PKG_V1), 'PostgreSQL.packages': packageRow(PKG_V1) } },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT functions (CREATING)', title: 'The record is saved as CREATING',
-        text: 'In one transaction, the account\'s row locked so that its creates and renames run one at a time: a name that another of its functions has answers 409, since a name belongs to one function of the account, compared exactly; an account with as many functions as its plan allows gets 400. The row then gets its UUID, the tenant ID, and the defaults: minInstances 0, maxInstances 3, scaleToZero true. A unique index on (account_id, name) keeps names unique whatever writes the row.',
+        text: 'In one transaction, the account\'s row locked so that its creates and renames run one at a time: a name that another of its functions has answers 409, since a name belongs to one function of the account, compared exactly; an account with as many functions as its plan allows gets 400. The row then gets its UUID, the tenant ID, and the defaults: minInstances 0, maxInstances 3, scaleToZero true, packageType inline; with its code\'s SHA-256 in base64 and its size, as Lambda\'s CodeSha256 and CodeSize, which a trigger keeps with inline code whatever writes the row. And package_sha256, the package its pods run, the zip\'s SHA-256 rather than the code\'s: while a function names a package, the purge keeps it. The backend reads that column in SQL only; no answer gives it. A unique index on (account_id, name) keeps names unique whatever writes the row.',
         code: 'BE/src/functions/functions.service.ts create(), insertWithinPlan()',
-        msg: { kind: 'sql', text: "SELECT 1 FROM \"accounts\" WHERE \"id\" = '000000000001' FOR NO KEY UPDATE;\nSELECT EXISTS (SELECT 1 FROM \"functions\" WHERE \"account_id\" = '000000000001' AND \"name\" = 'hello');   -- false: the name is free\nSELECT COUNT(1) FROM \"functions\" WHERE \"account_id\" = '000000000001';   -- 0 of the plan's 25\nINSERT INTO \"functions\" (\"name\", \"account_id\", \"runtime\", \"code\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '000000000001', 'nodejs', '// A Node.js function…', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
+        msg: { kind: 'sql', text: "SELECT 1 FROM \"accounts\" WHERE \"id\" = '000000000001' FOR NO KEY UPDATE;\nSELECT EXISTS (SELECT 1 FROM \"functions\" WHERE \"account_id\" = '000000000001' AND \"name\" = 'hello');   -- false: the name is free\nSELECT COUNT(1) FROM \"functions\" WHERE \"account_id\" = '000000000001';   -- 0 of the plan's 25\nINSERT INTO \"functions\" (\"name\", \"account_id\", \"runtime\", \"code\", \"package_sha256\", \"memory\", \"timeout\", \"status\", …)\nVALUES ('hello', '000000000001', 'nodejs', '// A Node.js function…', '" + PKG_V1.sha + "', 128, 5, 'CREATING', …)\nRETURNING \"id\";   -- " + FN },
         set: { 'PostgreSQL.functions': 'CREATING' } },
       { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts', title: 'An archive copy of the code',
-        text: 'The code goes to the functions bucket under <id>/code.ts, through the AWS SDK\'s S3 client, which signs every request with the storage key (SigV4). Nothing reads it back today: the cluster gets the code through a ConfigMap.',
+        text: 'Inline code\'s text also goes to the functions bucket, under <id>/code.ts, through the AWS SDK\'s S3 client, which signs every request with the storage key (SigV4). Nothing reads this copy back: the pods run the image, made of the package\'s zip.',
         code: 'BE/src/minio-client/minio-client.service.ts uploadCode()',
-        msg: { kind: 'http', first: 'PUT /functions/' + FN + '/code.ts?x-id=PutObject HTTP/1.1', headers: { host: 'localhost:9003', 'content-type': 'text/plain; charset=utf-8', 'content-length': '450', 'x-amz-content-sha256': '<SHA-256 of the code>', authorization: 'AWS4-HMAC-SHA256 Credential=<development key>/<date>/us-east-1/s3/aws4_request, SignedHeaders=…, Signature=…' }, body: CODE_TS },
-        set: { 'S3 (bucket functions).object': FN + '/code.ts (450 bytes)' } },
+        msg: { kind: 'http', first: 'PUT /functions/' + FN + '/code.ts?x-id=PutObject HTTP/1.1', headers: { host: 'localhost:9003', 'content-type': 'text/plain; charset=utf-8', 'content-length': String(utf8Bytes(CODE_TS)), 'x-amz-content-sha256': '<SHA-256 of the code>', authorization: S3_SIGNED }, body: CODE_TS },
+        set: { 'S3 (bucket functions).object': FN + '/code.ts (' + utf8Bytes(CODE_TS) + ' bytes)' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply Namespace ' + NS, title: 'The tenant\'s namespace',
         text: 'Every write is a server-side apply: a PATCH of the whole desired object, with fieldManager ff-controller, so repeating it changes nothing. The admission policy ff-controller-scope lets the backend\'s ServiceAccount write only to namespaces named ff-t-* and labelled as managed by ff-controller.',
         code: 'BE/src/orchestrator/kubernetes/kubernetes.orchestrator.ts ensureTenant() · manifests.ts namespaceManifest()', hl: ['ns'],
@@ -706,26 +794,28 @@ const SCENARIOS = [
           APPLY('/api/v1/namespaces/' + NS + '/limitranges/ff-tenant-limits', M_LIMITS),
           APPLY('/apis/networking.k8s.io/v1/namespaces/' + NS + '/networkpolicies/ff-default-deny', M_NETPOL)],
         set: { [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits', [K + '.NetworkPolicy']: 'ff-default-deny' } },
-      { from: 'api', to: 'k8s', kind: 'req', label: 'apply ConfigMap (the code)', title: 'The code, as an immutable ConfigMap',
-        text: 'Its name ends with the first 10 hex characters of sha256(runtime + newline + code), so each code version is a new ConfigMap. Up to 900 KiB of code fit, but the API\'s 100 KB request limit applies first today.',
-        code: 'manifests.ts codeConfigMapManifest() · naming.ts codeHash()', hl: ['configmap'],
-        msg: APPLY('/api/v1/namespaces/' + NS + '/configmaps/' + cm(FN, HASH_V1), mConfigMap(HASH_V1, CODE_TS)),
-        set: { [K + '.ConfigMap']: cm(FN, HASH_V1) + ' (immutable)' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply Service', title: 'A Service in front of the pods',
         text: 'A ClusterIP Service on port http (8080) that selects the function\'s pods by the label ff.dev/function-id. Invocations reach the function through it.',
         code: 'manifests.ts serviceManifest()', hl: ['service'],
         msg: APPLY('/api/v1/namespaces/' + NS + '/services/' + fn(FN), M_SERVICE),
         set: { [K + '.Service']: fn(FN) + ' (ClusterIP :8080)' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply Deployment (replicas 1)', title: 'The Deployment',
-        text: 'The backend first reads the Deployment, so that a redeploy keeps the current replica count; on create there is none yet, so it starts at max(1, minInstances) = 1. The manifest sets the runtime image, the FUNCTION_* variables, requests equal to limits (128 Mi and 100m CPU), the probes, the security context, and two volumes: the ConfigMap at /var/task (read-only, mode 0444) and /tmp. A rolling update adds the new pod before it removes the old one. Last, ConfigMaps older than the previous version are deleted; there are none yet.',
-        code: 'kubernetes.orchestrator.ts apply(), collectOldConfigMaps() · manifests.ts deploymentManifest()', hl: ['deployment'],
+        text: 'The backend first reads the Deployment, so that a redeploy keeps the current replica count; on create there is none yet, so it starts at max(1, minInstances) = 1. The manifest sets the runtime image, the FUNCTION_* variables, requests equal to limits (128 Mi and 100m CPU), the probes, the security context, and two volumes: the code image at /var/task, by digest and read-only, and /tmp. Its pod template\'s ff.dev/code-sha256 annotation is sha256 of the runtime and the image\'s reference, so new code is a new template, and a rollout. A rolling update adds the new pod before it removes the old one. Last, collectOldConfigMaps() looks for the function\'s code ConfigMaps from before code came as images: a new function has none.',
+        code: 'kubernetes.orchestrator.ts apply(), collectOldConfigMaps() · manifests.ts deploymentManifest() · naming.ts codeHash()', hl: ['deployment'],
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 404 Not Found' },
-          APPLY(DEPLOY_PATH, mDeployment(HASH_V1, 1))],
+          APPLY(DEPLOY_PATH, mDeployment(PKG_V1, 1))].concat(OLD_CONFIGMAPS(FN)),
         set: { [K + '.Deployment']: 'replicas 1 · ready 0/1' } },
-      { from: 'k8s', to: 'node', kind: 'req', label: 'schedule · start the container', title: 'Kubernetes starts a pod',
-        text: 'The Deployment controller creates a ReplicaSet, which creates the pod. The scheduler places it on a node, and kubelet starts the container. The image is already on the node (imported into the development cluster with k3d image import; imagePullPolicy IfNotPresent), and the ConfigMap is mounted at /var/task.',
+      { from: 'k8s', to: 'node', kind: 'req', label: 'schedule · start the pod', title: 'Kubernetes starts a pod',
+        text: 'The Deployment controller creates a ReplicaSet, which creates the pod. The scheduler places it on a node, where kubelet prepares its volumes and starts the container. The runtime image is already on the node (imported into the development cluster with k3d image import; imagePullPolicy IfNotPresent); the code image isn\'t yet.',
         code: 'Kubernetes controllers and kubelet', hl: ['pod-box'],
         set: { [K + '.Pod']: 'ContainerCreating' } },
+      { from: 'node', to: 'reg', kind: 'req', label: 'pull ' + REPO + '@' + shortDigest(PKG_V1), title: 'The node pulls the code image, once',
+        text: 'containerd pulls it by digest from ff-dev-registry:5000, over the node\'s own network, which no tenant policy covers: the manifest, the configuration, and the ' + PKG_V1.layer + '-byte layer. Its pull policy is IfNotPresent, so the node keeps the image: the next pods of this version there, a cold start\'s among them, don\'t pull it again. kubelet mounts it read-only at /var/task, in the container whose root is the runtime\'s image, ff-runtime-nodejs:24-v3; /tmp stays the only place the pod can write.',
+        code: 'containerd and kubelet · manifests.ts deploymentManifest() (the code volume)', hl: ['pod-box'],
+        msg: [{ kind: 'http', first: 'GET /v2/' + REPO + '/manifests/' + PKG_V1.digest + ' HTTP/1.1', headers: { host: 'ff-dev-registry:5000', accept: 'application/vnd.oci.image.manifest.v1+json, …' } },
+          { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/vnd.oci.image.manifest.v1+json', 'docker-content-digest': PKG_V1.digest }, body: IMAGE_MANIFEST(PKG_V1) },
+          { kind: 'http', first: 'GET /v2/' + REPO + '/blobs/' + PKG_V1.layerDigest + ' HTTP/1.1', headers: { host: 'ff-dev-registry:5000' } }],
+        set: { [K + '.Pod']: 'ContainerCreating · /var/task ← the code image' } },
       { from: 'node', to: 'pod', kind: 'req', label: 'the runtime starts', title: 'The runtime starts',
         text: 'The container runs the runtime\'s main process as uid 10001 on a read-only root filesystem. Its HTTP server listens on :8080: /healthz answers 200 at once, and /readyz answers 503 "starting" until your code is loaded.',
         code: 'runtimes/nodejs/src/main.ts',
@@ -747,7 +837,7 @@ const SCENARIOS = [
         msg: [{ kind: 'http', first: 'GET /readyz HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json' }, body: { status: 'ready' } }],
         set: { [K + '.Pod']: 'Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment, every second', title: 'The backend waits for the rollout',
-        text: 'Since step 9 the backend has polled the Deployment every second. It is done when the controller has seen the latest generation and the updated and available replicas reach the desired count. Every 3 s it also looks in the log store for the runtime\'s load error, and stops at once on one; else, after FF_READY_TIMEOUT_SECONDS (90 s), it gives up with a diagnosis; see "The function fails to load".',
+        text: 'Since step 13 the backend has polled the Deployment every second. It is done when the controller has seen the latest generation and the updated and available replicas reach the desired count. Every 3 s it also looks in the log store for the runtime\'s load error, and stops at once on one; else, after FF_READY_TIMEOUT_SECONDS (90 s), it gives up with a diagnosis; see "The function fails to load".',
         code: 'kubernetes.orchestrator.ts waitUntilReady(), isRolledOut()', t: '⏱ 6–12 s from the request to ready',
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { metadata: { name: fn(FN), generation: 1, '…': '…' }, spec: { replicas: 1, '…': '…' }, status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } } }] },
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ACTIVE', title: 'The function is ACTIVE',
@@ -764,10 +854,10 @@ const SCENARIOS = [
   {
     id: 'invoke', title: 'Invoke (warm)', lanes: ['user', 'api', 'db', 'k8s', 'pod', 'worker'],
     summary: 'POST /functions/:id/invoke on a function with a ready pod. Your handler runs in about a millisecond; the rest of the time is the trip through the backend and the API server.',
-    initial: activeState(FN, HASH_V1, 'code.ts'),
+    initial: activeState(FN, PKG_V1, 'code.ts'),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'You invoke the function',
-        text: 'The body has one field, input, holding any JSON object. It becomes event.body in your handler.',
+        text: 'The body has one field, input, holding any JSON value. It is the event your handler gets, as a payload is on AWS Lambda (a function made before 2026-10-21 gets it as event.body until it is switched).',
         code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(FN, { name: 'Tunis' }) },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT the function · ACTIVE?', title: 'The function must be ACTIVE',
         text: 'A function that doesn\'t exist gets 404; one that isn\'t ACTIVE gets 400 "Function is not active".',
@@ -801,7 +891,7 @@ const SCENARIOS = [
       { from: 'pod', to: 'worker', kind: 'req', label: 'event · deadline', title: 'The event reaches the worker',
         text: 'The event wraps your input with the details of the HTTP request; headers holds every request header, lowercased. The deadline lets context.getRemainingTimeInMillis() count down.',
         code: 'runtimes/nodejs/src/main.ts dispatch() → worker.ts',
-        msg: { kind: 'ipc', title: 'worker.postMessage(…), headers abridged', body: { type: 'invoke', id: 1, requestId: REQ, event: { body: { name: 'Tunis' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }, deadlineMs: 1792159335240 } } },
+        msg: { kind: 'ipc', title: 'worker.postMessage(…)', body: { type: 'invoke', id: 1, requestId: REQ, event: { name: 'Tunis' }, deadlineMs: 1792159335240 } } },
       { from: 'worker', to: 'worker', kind: 'int', label: 'handler(event, context)', title: 'Your handler runs',
         text: 'context uses Lambda\'s names: functionName, functionVersion, memoryLimitInMB (a string), awsRequestId, getRemainingTimeInMillis(). console.log writes to the worker\'s stdout, which the main thread forwards to the pod\'s log as it comes.',
         code: 'runtimes/nodejs/src/worker.ts · your function.ts', t: '⏱ 1.09 ms',
@@ -835,9 +925,188 @@ const SCENARIOS = [
     ],
   },
   {
+    id: 'url', title: 'A request to a function\'s URL', lanes: ['user', 'api', 'db', 'k8s', 'pod', 'worker'],
+    summary: 'GET http://<id>.fn.localhost:3001/hello?name=Amira, from a browser or curl. The backend\'s second server, the function URL gateway, finds the URL by its host, calls the function as POST /functions/:id/invoke does, with AWS Lambda\'s event for function URLs, and sends its answer back as the HTTP response.',
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.function_urls': 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5 · NONE' }),
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /hello?name=Amira · host <id>.fn.localhost', title: 'Anyone calls the URL',
+        text: 'Every name under .localhost is this machine, for browsers and curl. The gateway is a plain Node.js HTTP server in the backend, on FF_FUNCTION_URL_PORT (3001), apart from the API: none of the API\'s middleware runs here, no login, no CORS of the console\'s, no body parser. It serves hosts <32 letters and digits>.<the host of FF_FUNCTION_URL_BASE>, and customers\' own domains once DNS has proved them theirs (a CNAME to the URL\'s host, or a TXT record with the domain\'s token); any other host gets 404. In a cluster the edge sends *.fn.<domain> to it over HTTPS, with a wildcard certificate it gets through FF\'s DNS (RFC 2136 updates), or one per host on demand once this port has said the host is a URL (GET /tls/allowed?domain=).',
+        code: 'BE/src/function-urls/function-url.gateway.ts serve() · url-address.ts urlIdOf()',
+        msg: { kind: 'http', first: 'GET /hello?name=Amira HTTP/1.1', headers: { host: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5.fn.localhost:3001', 'user-agent': 'curl/8.22.0', accept: '*/*' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT function_urls · the account', title: 'The URL, by its ID',
+        text: 'The host\'s first label is the URL\'s ID, unique. Its authType is NONE, so anyone may call it; with AWS_IAM, the caller must send an API key of the account with functions:invoke, created by an owner or a developer, and anyone else gets 403 {"Message":"Forbidden"}. The account must be active, as for any invoke.',
+        code: 'function-urls.service.ts forUrlId() · function-url.gateway.ts callerOf(), accountOf()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"function_urls\" WHERE \"url_id\" = 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5' LIMIT 1;   -- function " + FN + ", NONE, no CORS\nSELECT \"id\", \"status\", \"plan_id\" FROM \"accounts\" WHERE \"id\" = '000000000001';   -- active, beta" } },
+      { from: 'api', to: 'api', kind: 'int', label: 'the rate · ACTIVE? · the credit · 6 MB', title: 'The same checks as the API\'s invoke',
+        text: 'The call counts against the plan\'s invocations per second in the throttler\'s own storage, under the account\'s key: one count for the API\'s invokes and the URL\'s calls together (429 with Retry-After past it). The function must be ACTIVE (503 otherwise), the account must have credit (402, saying nothing of the balance), and the request must fit in 6 MB, as on Lambda (413). Each refusal is a JSON {"Message": …} with x-amzn-RequestId.',
+        code: 'function-url.gateway.ts count(), functionOf(), admit() · BE/src/plans/rate-limits.ts countInvocation()' },
+      { from: 'api', to: 'api', kind: 'int', label: 'build the event (payload format 2.0)', title: 'AWS Lambda\'s event for function URLs',
+        text: 'Header names in lower case, repeated ones joined with commas, cookies apart; the query decoded, repeated parameters joined; the body as text for text, JSON and XML, base64 otherwise. requestId is chosen now, a UUID: the invocation\'s ID, the runtime\'s request ID, and the x-amzn-RequestId of the answer. The history will keep this event with the values of authorization, proxy-authorization and x-api-key as ***, and without its cookies.',
+        code: 'url-event.ts urlEvent(), eventForHistory()',
+        msg: { kind: 'ipc', title: 'the event', body: { version: '2.0', routeKey: '$default', rawPath: '/hello', rawQueryString: 'name=Amira', headers: { accept: '*/*', host: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5.fn.localhost:3001', 'user-agent': 'curl/8.22.0' }, queryStringParameters: { name: 'Amira' }, requestContext: { accountId: 'anonymous', apiId: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5', domainName: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5.fn.localhost', domainPrefix: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5', http: { method: 'GET', path: '/hello', protocol: 'HTTP/1.1', sourceIp: '127.0.0.1', userAgent: 'curl/8.22.0' }, requestId: INV, routeKey: '$default', stage: '$default', time: '16/Oct/2026:14:02:10 +0000', timeEpoch: 1792159330212 }, isBase64Encoded: false } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING, url)', title: 'Recorded as every call is',
+        text: 'From here the call is the API\'s: the same method runs it for both, and for schedules later. The row is inserted under the ID chosen above, with source url.',
+        code: 'BE/src/functions/functions.service.ts call()',
+        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"id\", \"function_id\", \"source\", \"input\", \"input_truncated\", \"status\", …)\nVALUES ('" + INV + "', '" + FN + "', 'url', '{\"version\":\"2.0\",\"rawPath\":\"/hello\",…}', false, 'RUNNING', …);" },
+        set: { 'PostgreSQL.function_invocations': 'RUNNING · url' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'POST …/services/fn-…:http/proxy/invoke', title: 'The event goes to the function\'s Service',
+        text: 'As in "Invoke (warm)", with a cold start first if no instance is ready. The body is the event, and x-ff-request-id its request ID.',
+        code: 'kubernetes.orchestrator.ts invoke()', hl: ['service'],
+        msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json', 'x-ff-request-id': INV }, body: { version: '2.0', rawPath: '/hello', '…': '…' } } },
+      { from: 'k8s', to: 'pod', kind: 'req', label: 'POST /invoke → pod :8080', title: 'The runtime takes it as it is',
+        text: 'The function takes AWS Lambda\'s events (FF_EVENT_FORMAT=lambda), so the runtime passes the event to the handler as it came; a function with FF\'s original wrapped event can\'t have a URL.',
+        code: 'runtimes/nodejs/src/main.ts', hl: ['pod-box'],
+        msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', 'x-ff-request-id': INV }, body: { version: '2.0', rawPath: '/hello', '…': '…' } } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'handler(event, context)', title: 'A handler written for Lambda\'s function URLs',
+        text: 'It reads the query from queryStringParameters and answers with a response object; anything else it returned would be sent as JSON with 200, as Lambda does.',
+        code: 'your function.ts',
+        msg: { kind: 'ipc', title: 'what the handler returns', body: { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: 'Ahlan Amira' } } },
+      { from: 'pod', to: 'api', kind: 'res', label: '200 · the response object', title: 'Back to the backend',
+        text: 'The runtime answers as for any call: the output, the duration and the memory. The invocation is COMPLETED, and its usage record is written in the same transaction, under the same ID: a URL\'s call costs what an invoke costs.',
+        code: 'functions.service.ts finish()',
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · url', 'PostgreSQL.usage_records': 'success · 128 MB · billed 2 ms' } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 text/plain · Ahlan Amira', title: 'The response, by Lambda\'s rules',
+        text: 'statusCode from 200 to 599, the headers (names checked, no line breaks in values, no length or per-connection ones), each of cookies a Set-Cookie, the body decoded from base64 when isBase64Encoded. A response that can\'t be sent, or one over 6 MB, answers 502 {"Message":"Internal Server Error"}, the reason in the backend\'s log; so does a function that throws or times out, its error left to the history, for its account to read. With CORS set, the URL answers a browser\'s preflight itself and puts the configured headers on every answer.',
+        code: 'url-response.ts urlAnswer() · url-cors.ts · function-url.gateway.ts send()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'x-amzn-RequestId': INV, 'content-type': 'text/plain', 'content-length': '11' }, body: 'Ahlan Amira' } },
+    ],
+  },
+  {
+    id: 'schedule', title: 'A function on a schedule', lanes: ['api', 'db', 'k8s', 'pod', 'worker'],
+    summary: 'A schedule, cron(0 2 * * ? *), comes due at 02:00 UTC. Within five seconds the backend\'s scheduler takes it, moves it to its next run, then calls the function with EventBridge\'s Scheduled Event, as a call like any other.',
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.schedules': 'nightly-report · next 02:00' }),
+    steps: [
+      { from: 'api', to: 'api', kind: 'int', label: 'every 5 s: the scheduler wakes', title: 'The scheduler\'s tick',
+        text: 'Every FF_SCHEDULER_INTERVAL_SECONDS (5 s), in each backend. A tick still taking its schedules makes the next wait its turn.',
+        code: 'BE/src/schedules/scheduler.service.ts tick()' },
+      { from: 'api', to: 'db', kind: 'req', label: 'SELECT … FOR UPDATE SKIP LOCKED · UPDATE next_run_at', title: 'The due schedules, taken and moved, then committed',
+        text: 'In one transaction: the enabled schedules whose next run has come, locked, those another backend holds skipped; each moved to its next run after now, its request ID chosen. Once committed, no backend takes them again: a run happens at most once, and a backend stopped before the call loses it. A schedule late by any amount runs once, then follows its expression.',
+        code: 'scheduler.service.ts takeDue() · schedule-expression.ts nextRun()',
+        msg: { kind: 'sql', text: "BEGIN;\nSELECT … FROM \"schedules\" WHERE \"enabled\" = true AND \"next_run_at\" <= now()\n  ORDER BY \"next_run_at\" LIMIT 50 FOR UPDATE SKIP LOCKED;   -- nightly-report, due 02:00\nUPDATE \"schedules\" SET \"next_run_at\" = '2026-10-23 02:00+00', \"last_run_at\" = '2026-10-22 02:00+00',\n  \"last_request_id\" = '" + INV + "', \"last_outcome\" = 'running' WHERE \"id\" = '…';\nCOMMIT;" },
+        set: { 'PostgreSQL.schedules': 'nightly-report · next 2026-10-23 02:00 · running' } },
+      { from: 'api', to: 'api', kind: 'int', label: 'the checks · the Scheduled Event', title: 'A call like the API\'s',
+        text: 'The function must be ACTIVE, the account active with credit, and the call within the plan\'s invocations per second, which the API\'s invokes and the URLs\' calls count too; else the run is skipped, and the schedule says why. The event is EventBridge\'s Scheduled Event, unless the schedule has an input of its own.',
+        code: 'scheduler.service.ts call() · scheduled-event.ts',
+        msg: { kind: 'ipc', title: 'the Scheduled Event', body: { version: '0', id: INV, 'detail-type': 'Scheduled Event', source: 'aws.events', account: '000000000001', time: '2026-10-22T02:00:00Z', region: 'tn-tunis-1', resources: ['arn:aws:events:tn-tunis-1:000000000001:rule/hello-nightly-report'], detail: {} } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING, schedule)', title: 'Recorded as every call is',
+        text: 'The same method as the API\'s invoke and the URLs\' calls, under the request ID chosen above, with source schedule.',
+        code: 'BE/src/functions/functions.service.ts call()',
+        msg: { kind: 'sql', text: "INSERT INTO \"function_invocations\" (\"id\", \"function_id\", \"source\", \"input\", \"status\", …)\nVALUES ('" + INV + "', '" + FN + "', 'schedule', '{\"detail-type\":\"Scheduled Event\",…}', 'RUNNING', …);" },
+        set: { 'PostgreSQL.function_invocations': 'RUNNING · schedule' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'POST …/services/fn-…:http/proxy/invoke', title: 'The event goes to the function',
+        text: 'As in "Invoke (warm)", a cold start first if the function had scaled to zero.',
+        code: 'kubernetes.orchestrator.ts invoke()', hl: ['service'],
+        msg: { kind: 'http', first: 'POST ' + PROXY_PATH(FN) + ' HTTP/1.1', headers: { 'content-type': 'application/json', 'x-ff-request-id': INV }, body: { 'detail-type': 'Scheduled Event', '…': '…' } } },
+      { from: 'k8s', to: 'pod', kind: 'req', label: 'POST /invoke → pod :8080', title: 'The runtime takes it as it is',
+        text: 'The function takes AWS Lambda\'s events, so its handler gets the Scheduled Event itself.',
+        code: 'runtimes/nodejs/src/main.ts', hl: ['pod-box'] },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'handler(event, context)', title: 'The handler runs',
+        text: 'A handler written for an EventBridge rule on AWS runs unchanged.',
+        code: 'your function.ts' },
+      { from: 'pod', to: 'api', kind: 'res', label: '200 · the output', title: 'The call ends',
+        text: 'The invocation is COMPLETED and its usage record written, as for any call.',
+        code: 'functions.service.ts finish()',
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · schedule', 'PostgreSQL.usage_records': 'success · 128 MB · billed 2 ms' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE schedules · last_outcome', title: 'The schedule says how it went',
+        text: 'success, error, timeout or throttled, or skipped and why; unless a later run has replaced this one. A failed run isn\'t retried: it is in the history and the metrics, where an alarm can watch it.',
+        code: 'scheduler.service.ts run()',
+        msg: { kind: 'sql', text: "UPDATE \"schedules\" SET \"last_outcome\" = 'success'\nWHERE \"id\" = '…' AND \"last_request_id\" = '" + INV + "';" },
+        set: { 'PostgreSQL.schedules': 'nightly-report · next 2026-10-23 02:00 · success' } },
+    ],
+  },
+  {
+    id: 'app', title: 'A small app, end to end',
+    lanes: ['user', 'api', 'db', 's3', 'reg', 'k8s', 'pod', 'worker', 'yourdb'],
+    summary: 'examples/orders-app, as the getting-started guide walks through it: ff deploys a folder with pg, the PostgreSQL driver, as orders-api; the database\'s address goes in a secret; a POST to the function\'s URL writes an order to the app\'s own database, outside FF; a second function, from the same package, makes a report each night at 02:00 UTC.',
+    state: {
+      [K]: { 'Secret': null },
+      'Your database': { 'orders': null },
+    },
+    initial: {
+      [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits',
+      [K + '.NetworkPolicy']: 'ff-default-deny · DNS, and the internet: the account\'s access is on',
+    },
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /packages?codeSha256=… · POST /packages', title: 'ff deploy uploads the folder\'s package, once',
+        text: 'ff deploy . --name orders-api --handler index.http: ff copied the folder to a temporary one, ran npm ci there, which installed pg and its 12 dependencies, then npm prune --omit=dev, and zipped what is left as AWS Lambda takes it, the same bytes each time for the same files. It asked for the package by its SHA-256 first: the account hadn\'t it, so the zip goes up, as application/zip.',
+        code: 'cli/src/package/mod.rs build() · cli/src/commands/deploy.rs provide() · BE/src/packages/packages.controller.ts upload()',
+        msg: { kind: 'http', first: 'POST /packages HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/zip', 'content-length': '24917', 'user-agent': 'ff-cli/0.1.0' }, body: '<the zip: index.js, package.json, package-lock.json, node_modules/pg/…>' } },
+      { from: 'api', to: 'api', kind: 'int', label: 'every entry checked', title: 'The zip, checked before it is kept',
+        text: 'Streamed to a file and hashed as it comes, 50 MB at most. Then each entry: a name that leaves the package, a link, encryption, a size or a CRC-32 that lies, more than 250 MB or 20,000 files unpacked are refused, naming the entry.',
+        code: 'BE/src/packages/packages.service.ts upload() · package-archive.ts readPackage()' },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT packages/000000000001/<hex>.zip', title: 'The zip in object storage',
+        text: 'Before its record, so that a record never names bytes that aren\'t there. A package that no function names is deleted an hour after its last use.',
+        code: 'packages.service.ts upload() · package.entity.ts packageKey()',
+        set: { 'S3 (bucket functions).package': 'packages/000000000001/1b7e…a4.zip' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT packages · audit_log', title: 'Its record, and the answer',
+        text: 'One row per account and package, its files\' paths kept for the handler\'s check; package.upload in the audit log. The answer names it by its SHA-256 in base64, as AWS Lambda\'s CodeSha256.',
+        code: 'packages.service.ts upload()',
+        msg: { kind: 'sql', text: "INSERT INTO \"packages\" (\"account_id\", \"code_sha256\", \"code_size\", \"unpacked_size\", \"file_count\", \"files\")\nVALUES ('000000000001', 'G35+…aQ=', 24917, 88203, 61, '[\"index.js\", \"node_modules/pg/lib/index.js\", …]');" },
+        set: { 'PostgreSQL.packages': 'G35+…aQ= · 24,917 bytes · 61 files' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions · codeSha256 · handler index.http', title: 'The function names the package',
+        text: 'In place of code: the package\'s SHA-256, and the handler, whose file the backend looks for in the package\'s files (index.js for index.http). The function is zip, its code size the package\'s.',
+        code: 'BE/src/functions/functions.service.ts codeOf() · code-package.ts packageHandlerProblem()',
+        msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'orders-api', runtime: 'nodejs', codeSha256: 'G35+…aQ=', handler: 'index.http', memory: 128, timeout: 5 } },
+        set: { 'PostgreSQL.functions': 'orders-api · zip · index.http · CREATING' } },
+      { from: 'api', to: 'reg', kind: 'req', label: 'push ff-code/000000000001:<hex>', title: 'The package becomes a code image',
+        text: 'The first time a function names it: the zip read again from object storage and made one tar layer, owned by root, read-only, dated at the epoch, so the same package makes the same digest; pushed with a minimal configuration, each blob skipped when the registry has it, then the manifest, tagged with the package\'s hash. The digest is kept with the package. A registry that doesn\'t answer gives 503 before anything changes.',
+        code: 'BE/src/functions/functions.service.ts codeImageOf() · BE/src/packages/code-images.service.ts imageFor() · code-layer.ts buildLayer() · registry.ts pushBlob(), pushManifest()',
+        set: { 'Registry.code image': 'ff-code/000000000001@sha256:5c0a…e9', 'PostgreSQL.packages': 'G35+…aQ= · its image sha256:5c0a…e9' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply Service, Deployment · code as an image volume', title: 'The pods mount the image at /var/task',
+        text: 'As for inline code, whose code is an image too: the code volume is the package\'s image, by digest, which the node pulls from the registry and mounts read-only at /var/task. The tenant\'s NetworkPolicy is written again with the account\'s internet access: on, it lets the pods reach any address but FF\'s own network and the private ranges.',
+        code: 'BE/src/orchestrator/kubernetes/manifests.ts deploymentManifest(), networkPolicyManifest()',
+        msg: { kind: 'ipc', title: 'the Deployment\'s code volume', body: { volumes: [{ name: 'code', image: { reference: 'ff-dev-registry:5000/ff-code/000000000001@sha256:5c0a…e9', pullPolicy: 'IfNotPresent' } }, { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } }] } },
+        set: { [K + '.Service']: 'fn-a71c… (ClusterIP :8080)', [K + '.Deployment']: 'replicas 1 · ready 0/1', [K + '.Pod']: 'pulling the code image' } },
+      { from: 'k8s', to: 'pod', kind: 'req', label: 'pull the image · start · load index.js', title: 'The runtime loads index.js',
+        text: 'FF_HANDLER=index.http: the runtime finds index.js at /var/task, and require(\'pg\') resolves in /var/task/node_modules, as on AWS Lambda. The pod is ready, the function ACTIVE, and ff deploy says created.',
+        code: 'runtimes/nodejs/src/worker.ts · functions.service.ts create()',
+        set: { [K + '.Deployment']: 'replicas 1 · ready 1/1', [K + '.Pod']: 'Running · Ready', 'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'index.js loaded · idle', 'PostgreSQL.functions': 'orders-api · zip · index.http · ACTIVE' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'PATCH /functions/:id/secrets · DATABASE_URL', title: 'The database\'s address, a secret',
+        text: 'ff secrets set orders-api DATABASE_URL reads it from a prompt or stdin, never the command line. The backend seals it in PostgreSQL with the function\'s variables, writes a Kubernetes Secret, which it never reads back, and rolls the function out to read it as an environment variable.',
+        code: 'BE/src/functions/functions.controller.ts · functions.service.ts change() · manifests.ts environmentSecretManifest()',
+        msg: { kind: 'http', first: 'PATCH /functions/a71c…/secrets HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { secrets: { DATABASE_URL: 'postgres://app:…@db.atelier.tn:5432/app' } } },
+        set: { 'PostgreSQL.functions': 'orders-api · ACTIVE · secrets: DATABASE_URL (sealed)', [K + '.Secret']: 'fn-a71c…-env-1 · DATABASE_URL' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /orders · host <id>.fn.localhost', title: 'A POST to the function\'s URL',
+        text: 'ff url enable orders-api --auth none gave it an address. A request there goes to the backend\'s gateway, which builds AWS Lambda\'s event for function URLs and calls the function as any invoke, as in "A request to a function\'s URL".',
+        code: 'BE/src/function-urls/function-url.gateway.ts serve() · url-event.ts urlEvent()',
+        msg: { kind: 'http', first: 'POST /orders HTTP/1.1', headers: { host: 'k7x2…d5.fn.localhost:3001', 'content-type': 'application/json' }, body: { item: 'harissa', quantity: 2 } } },
+      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke · the URL event', title: 'The event goes to the function',
+        text: 'Through the function\'s Service, as every call. The invocation is recorded with source url.',
+        code: 'functions.service.ts call() · kubernetes.orchestrator.ts invoke()',
+        set: { 'PostgreSQL.function_invocations': 'RUNNING · url' } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'http(event, context)', title: 'index.http reads the request',
+        text: 'requestContext.http says POST /orders; the body is the order.',
+        code: 'examples/orders-app/index.js http()' },
+      { from: 'worker', to: 'yourdb', kind: 'req', label: 'connect · CREATE TABLE IF NOT EXISTS · INSERT', title: 'Your database, over the internet',
+        text: 'The instance\'s first call connects with DATABASE_URL, from its environment, and keeps the connection for the calls after. The NetworkPolicy lets it out, the account\'s internet access being on; FF\'s own network stays out of reach. FF has no database of its own for customers yet: this one is the app\'s.',
+        code: 'examples/orders-app/index.js database()',
+        msg: { kind: 'sql', text: "CREATE TABLE IF NOT EXISTS orders (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, item text NOT NULL, …);\nINSERT INTO orders (item, quantity) VALUES ('harissa', 2) RETURNING id, item, quantity, created_at;" },
+        set: { 'Your database.orders': '1 row: harissa × 2' } },
+      { from: 'worker', to: 'user', kind: 'res', label: '201 {"id":1,"item":"harissa",…}', title: 'The order, as the response',
+        text: 'The handler answers with a response object; the gateway sends it as the HTTP response, by AWS Lambda\'s rules. The call is COMPLETED, and billed as any.',
+        code: 'url-response.ts urlAnswer() · functions.service.ts finish()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json', 'x-amzn-RequestId': INV }, body: { id: 1, item: 'harissa', quantity: 2, created_at: '2026-10-21T14:39:04.964Z' } },
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · url', 'PostgreSQL.usage_records': 'success · 128 MB' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions orders-nightly · the same codeSha256', title: 'A second function, from the same package',
+        text: 'ff deploy . --name orders-nightly --handler index.nightly: the same folder makes the same zip, which the account has, so nothing goes up; the image is the same too, already in the registry. Its secret is set as orders-api\'s, then ff schedule set orders-nightly "cron(0 2 * * ? *)".',
+        code: 'cli/src/commands/deploy.rs provide() · code-images.service.ts imageFor() · BE/src/schedules/schedules.controller.ts',
+        set: { 'PostgreSQL.schedules': 'orders-nightly · cron(0 2 * * ? *) · next 02:00' } },
+      { from: 'api', to: 'worker', kind: 'req', label: '02:00 UTC · the Scheduled Event · nightly()', title: 'The nightly run',
+        text: 'The scheduler takes the schedule when it comes due, as in "A function on a schedule", and calls orders-nightly with EventBridge\'s Scheduled Event.',
+        code: 'scheduler.service.ts tick() · examples/orders-app/index.js nightly()',
+        msg: { kind: 'ipc', title: 'the Scheduled Event', body: { 'detail-type': 'Scheduled Event', source: 'aws.events', time: '2026-10-22T02:00:00Z', '…': '…' } },
+        set: { 'PostgreSQL.function_invocations': 'RUNNING · schedule' } },
+      { from: 'worker', to: 'yourdb', kind: 'req', label: 'SELECT count(*) · DELETE older than 90 days', title: 'The report, from your database',
+        text: 'The day before the event\'s time, counted; what is older than 90 days, removed. The report goes to the log, where ff logs orders-nightly reads it, and is the call\'s output.',
+        code: 'examples/orders-app/index.js nightly()',
+        msg: { kind: 'log', lines: ['report {"day":"2026-10-21","orders":1,"items":2,"removed":0}'] },
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · schedule', 'PostgreSQL.schedules': 'orders-nightly · next 2026-10-23 02:00 · success' } },
+    ],
+  },
+  {
     id: 'cold', title: 'Cold start from zero', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod', 'worker'],
     summary: 'The same invocation after the function was scaled to zero. The backend scales it back to one instance, waits for the pod, then invokes. Measured: 7–10 s at 128 MB.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { [K + '.Deployment']: 'replicas 0 · ready 0/0', [K + '.Pod']: null, 'Runtime.main process': null, 'Runtime.worker': null }),
+    initial: activeState(FN, PKG_V1, 'code.ts', { [K + '.Deployment']: 'replicas 0 · ready 0/0', [K + '.Pod']: null, 'Runtime.main process': null, 'Runtime.worker': null }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'You invoke a sleeping function',
         text: 'Nothing tells you it is asleep: the call is the same, it just takes longer.', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(FN, { name: 'Sousse' }) },
@@ -852,7 +1121,7 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'PATCH ' + DEPLOY_PATH + '/scale?fieldManager=ff-scaler HTTP/1.1', headers: { 'content-type': 'application/merge-patch+json' }, body: { spec: { replicas: 1 } } },
         set: { [K + '.Deployment']: 'replicas 1 · ready 0/1' } },
       { from: 'k8s', to: 'node', kind: 'req', label: 'schedule · start the container', title: 'A pod is created and started',
-        text: 'The same path as on create: ReplicaSet, scheduler, kubelet, and the ConfigMap mounted at /var/task.', code: 'Kubernetes controllers and kubelet', hl: ['pod-box'],
+        text: 'The same path as on create: ReplicaSet, scheduler, kubelet, and the code image mounted read-only at /var/task. The node pulled that image for the first pod and kept it (IfNotPresent), so nothing is pulled now; a node without it, or one whose image garbage collection removed it, pulls it once from the registry. An image the registry has lost is made again only at the function\'s next create or update: until then, a pod on a node without it can\'t start.', code: 'Kubernetes controllers and kubelet', hl: ['pod-box'],
         set: { [K + '.Pod']: 'ContainerCreating' } },
       { from: 'node', to: 'pod', kind: 'req', label: 'the runtime starts', title: 'The runtime starts',
         text: '/healthz answers at once; /readyz answers 503 until the code is loaded.', code: 'runtimes/nodejs/src/main.ts',
@@ -885,7 +1154,7 @@ const SCENARIOS = [
   {
     id: 'error', title: 'The function throws', lanes: ['user', 'api', 'db', 'pod', 'worker'],
     summary: 'examples/hello.py (Python) raises ValueError for the name "error". The runtime reports it the way Lambda does, and the invocation ends as ERROR.',
-    initial: activeState(PY, HASH_PY, 'code.py'),
+    initial: activeState(PY, PKG_PY, 'code.py'),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'An input that makes the handler fail', text: 'The Python example refuses the name "error".', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(PY, { name: 'error' }) },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'Recorded as RUNNING', text: 'As for any invocation.', code: 'functions.service.ts invoke()', set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
@@ -893,7 +1162,7 @@ const SCENARIOS = [
         msg: { kind: 'http', first: 'POST /invoke HTTP/1.1', headers: { 'content-type': 'application/json', '…': '…' }, body: { name: 'error' } } },
       { from: 'pod', to: 'worker', kind: 'req', label: '["invoke", id, event, deadline]', title: 'The Python worker gets the event',
         text: 'In Python the main process and the worker process talk over a socket pair, in JSON messages with a 4-byte length prefix.', code: 'runtimes/python/ff_runtime/protocol.py · main.py Supervisor._run()',
-        msg: { kind: 'ipc', title: 'a message on the socket (a JSON array), headers abridged', body: ['invoke', REQ, { body: { name: 'error' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }, 1792159355230] },
+        msg: { kind: 'ipc', title: 'a message on the socket (a JSON array)', body: ['invoke', REQ, { name: 'error' }, 1792159355230] },
         set: { 'Runtime.worker': 'busy' } },
       { from: 'worker', to: 'worker', kind: 'int', label: 'raise ValueError(…)', title: 'The handler raises',
         text: 'The worker catches the exception and logs it as one JSON line, with the stack trace.', code: 'runtimes/python/ff_runtime/worker.py run_once(), log_error()',
@@ -917,7 +1186,7 @@ const SCENARIOS = [
   {
     id: 'timeout', title: 'The function times out', lanes: ['user', 'api', 'db', 'pod', 'worker'],
     summary: 'examples/slow.py with a 2 s timeout, asked to sleep for 5 s. The runtime stops it at 2 s and replaces the worker; the pod stays up.',
-    initial: activeState(SLOW, HASH_SLOW, 'code.py'),
+    initial: activeState(SLOW, PKG_SLOW, 'code.py'),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'An invocation that runs too long', text: 'The function\'s timeout is 2 s; the input asks for a 5 s sleep.', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(SLOW, { seconds: 5 }) },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'Recorded as RUNNING', text: 'As usual.', code: 'functions.service.ts invoke()', set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
@@ -948,7 +1217,7 @@ const SCENARIOS = [
   {
     id: 'lost', title: 'The backend stops during a call', lanes: ['user', 'api', 'db', 'pod'],
     summary: 'The backend is killed while a call runs: a crash, an out-of-memory kill, a node drained. Nobody gets the answer, and the invocation stays RUNNING until the restarted backend marks it LOST, unbilled (P-20, D6).',
-    initial: activeState(FN, HASH_V1, 'code.ts'),
+    initial: activeState(FN, PKG_V1, 'code.ts'),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions/:id/invoke', title: 'A call, as usual', text: 'Nothing about it is special.', code: 'functions.controller.ts invoke()', msg: INVOKE_REQ(FN, { name: 'Bizerte' }) },
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT invocation (RUNNING)', title: 'Recorded as RUNNING', text: 'As usual, the record exists before the call.', code: 'functions.service.ts invoke()', set: { 'PostgreSQL.function_invocations': 'RUNNING' } },
@@ -979,9 +1248,9 @@ const SCENARIOS = [
     ],
   },
   {
-    id: 'update', title: 'Update the code', lanes: ['user', 'api', 'db', 's3', 'k8s', 'node', 'pod'],
-    summary: 'PUT /functions/:id with new code: a new ConfigMap and a rolling update. The old pod keeps serving until the new one is ready, so invocations keep working. If the new version can\'t start, the previous one is put back. Measured: about 6 s.',
-    initial: activeState(FN, HASH_V1, 'code.ts'),
+    id: 'update', title: 'Update the code', lanes: ['user', 'api', 'db', 's3', 'reg', 'k8s', 'node', 'pod'],
+    summary: 'PUT /functions/:id with new code: a new package of one file, its image, and a rolling update to it. The old pod keeps serving until the new one is ready, so invocations keep working. If the new version can\'t start, the previous one is put back, its image still in the registry. Measured: about 6 s.',
+    initial: activeState(FN, PKG_V1, 'code.ts'),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'PUT /functions/:id', title: 'You send the new code',
         text: 'Any subset of the create fields. Here the greeting becomes "Marhba".', code: 'functions.controller.ts update()',
@@ -991,18 +1260,28 @@ const SCENARIOS = [
         msg: { kind: 'sql', text: "SELECT … FROM \"functions\" WHERE \"id\" = '" + FN + "' AND \"account_id\" = '000000000001' LIMIT 1;   -- the caller's account" } },
       { from: 'api', to: 'api', kind: 'int', label: 'the code changed → roll out', title: 'Does this need a rollout?',
         text: 'A change to the code, runtime, memory, or timeout rolls out a new version, when the value differs from the stored one. A function that isn\'t ACTIVE always rolls out, even unchanged, so the same code can be retried after a passing failure. Other fields are just saved.', code: 'functions.service.ts update() · ROLLOUT_FIELDS' },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT ' + shortZip(PKG_V2) + ' · INSERT packages', title: 'The new code, a new package',
+        text: 'Before anything is applied, as on create: the new code makes another zip of one file, so another SHA-256, which the account hasn\'t. Its zip goes to object storage, then its row, marked inline. The previous package stays: the record still names it.',
+        code: 'functions.service.ts change(), codeImageOf() · inline-package.ts inlinePackage() · packages.service.ts storeInline()',
+        msg: [{ kind: 'sql', text: "UPDATE \"packages\" SET \"used_at\" = now()\n WHERE \"account_id\" = '000000000001' AND \"code_sha256\" = '" + PKG_V2.sha + "'\nRETURNING \"id\";   -- no row: new code, a new package" },
+          { kind: 'http', first: 'PUT /functions/' + zipKey(PKG_V2) + '?x-id=PutObject HTTP/1.1', headers: { host: 'localhost:9003', 'content-type': 'application/zip', 'content-length': String(PKG_V2.zip), authorization: S3_SIGNED }, body: '<the zip: function.ts, ' + utf8Bytes(CODE_TS_V2) + ' bytes, stored>' },
+          { kind: 'sql', text: "INSERT INTO \"packages\" (\"account_id\", \"code_sha256\", \"code_size\", \"unpacked_size\", \"file_count\", \"files\", \"inline\")\nVALUES ('000000000001', '" + PKG_V2.sha + "', " + PKG_V2.zip + ', ' + utf8Bytes(CODE_TS_V2) + ", 1, '{function.ts}', true)\nON CONFLICT DO NOTHING;" }],
+        set: { 'S3 (bucket functions).package': zipState(PKG_V2) + ', and the previous', 'PostgreSQL.packages': shortSha(PKG_V2) + ' · inline · no image yet; and the previous' } },
+      { from: 'api', to: 'reg', kind: 'req', label: 'push ' + REPO + ':' + abbr(PKG_V2.hex, 4, 4), title: 'Its image, pushed',
+        text: 'As on create: the zip read back, made one layer of ' + PKG_V2.layer + ' bytes, and pushed with its configuration, then the manifest, tagged with the new package\'s SHA-256 in hex. A registry that can\'t be reached answers 503 here, and nothing has changed: the old pod still serves the old code. The previous image stays in the registry.',
+        code: 'functions.service.ts codeImageOf() · code-images.service.ts imageFor(), pushCodeImage()',
+        msg: [{ kind: 'http', first: 'PUT /v2/' + REPO + '/manifests/' + PKG_V2.hex + ' HTTP/1.1', headers: { host: '127.0.0.1:5056', 'content-type': 'application/vnd.oci.image.manifest.v1+json' }, body: IMAGE_MANIFEST(PKG_V2) },
+          { kind: 'http', first: 'HTTP/1.1 201 Created' },
+          { kind: 'sql', text: "UPDATE \"packages\" SET \"image_digest\" = '" + PKG_V2.digest + "' WHERE \"id\" = '…';" }],
+        set: { 'Registry.code image': REPO + '@' + shortDigest(PKG_V2) + ', and the previous ' + shortDigest(PKG_V1), 'PostgreSQL.packages': packageRow(PKG_V2) + '; and the previous' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply namespace · guardrails (no change)', title: 'The tenant is ensured again',
         text: 'Applying the same objects again changes nothing. That is why create and update can share one code path.', code: 'kubernetes.orchestrator.ts update() → apply(), ensureTenant()', hl: ['ns', 'guard'] },
-      { from: 'api', to: 'k8s', kind: 'req', label: 'apply ConfigMap …-9c9e249cb7', title: 'A new ConfigMap for the new code',
-        text: 'New code, new hash, new name. The old ConfigMap is immutable and stays: the old pod still mounts it.', code: 'manifests.ts codeConfigMapManifest()', hl: ['configmap'],
-        msg: APPLY('/api/v1/namespaces/' + NS + '/configmaps/' + cm(FN, HASH_V2), mConfigMap(HASH_V2, CODE_TS_V2)),
-        set: { [K + '.ConfigMap']: cm(FN, HASH_V2) + ' and the previous …-c4d785b397' } },
-      { from: 'api', to: 'k8s', kind: 'req', label: 'apply Deployment (new template)', title: 'The Deployment points at the new ConfigMap',
-        text: 'The pod template changes (the code volume and the ff.dev/code-sha256 annotation), which starts a rollout. The replica count is kept, since the backend read it first, but it is at least 1: a function scaled to zero gets a pod, so the wait below checks real code. Then ConfigMaps older than the previous version are deleted; here there are none.', code: 'kubernetes.orchestrator.ts apply(), collectOldConfigMaps()', hl: ['deployment'],
-        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { spec: { replicas: 1, '…': '…' }, '…': '…' } }, APPLY(DEPLOY_PATH, mDeployment(HASH_V2, 1))],
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply Deployment (new template)', title: 'The Deployment points at the new image',
+        text: 'The pod template changes: its code volume names the new image by digest, and its ff.dev/code-sha256 annotation, sha256 of the runtime and that image, changes with it, which starts a rollout. The replica count is kept, since the backend read it first, but it is at least 1: a function scaled to zero gets a pod, so the wait below checks real code. Then collectOldConfigMaps(): a function deployed before code came as images still has code ConfigMaps. The one the replaced version mounts stays while its pods serve the rollout, so that a rollback finds it, and goes at the next rollout; the others go now. This function has none.', code: 'kubernetes.orchestrator.ts apply(), collectOldConfigMaps() · naming.ts codeHash()', hl: ['deployment'],
+        msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { spec: { replicas: 1, '…': '…' }, '…': '…' } }, APPLY(DEPLOY_PATH, mDeployment(PKG_V2, 1))].concat(OLD_CONFIGMAPS(FN)),
         set: { [K + '.Deployment']: 'replicas 1 · rolling update' } },
       { from: 'k8s', to: 'node', kind: 'req', label: 'surge: start a new pod', title: 'A new pod starts next to the old one',
-        text: 'maxSurge 1 and maxUnavailable 0: the old pod keeps serving invocations while the new one loads the new code.', code: 'Deployment controller', hl: ['pod-box'],
+        text: 'maxSurge 1 and maxUnavailable 0: the old pod keeps serving invocations, the previous image still mounted, while the new one starts. The node pulls the new image first, once, as on create.', code: 'Deployment controller · containerd', hl: ['pod-box'],
         set: { [K + '.Pod']: 'old: Ready · new: starting' } },
       { from: 'node', to: 'pod', kind: 'req', label: 'new pod Ready', title: 'The new pod is ready', text: 'Its runtime loaded the new code, and /readyz answers 200.', code: 'kubelet readiness probe',
         set: { [K + '.Pod']: 'old: Ready · new: Ready' } },
@@ -1011,21 +1290,21 @@ const SCENARIOS = [
         msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-16T14:05:05.903Z', 0)] },
         set: { [K + '.Pod']: 'new: Running · Ready', [K + '.Deployment']: 'replicas 1 · ready 1/1' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'GET Deployment until rolled out', title: 'The backend waits for the rollout',
-        text: 'For up to 90 s, or until the new pod\'s runtime has logged a load error, which the backend looks for every 3 s. If the new pod isn\'t ready by then, the backend applies the previous version again and waits for it, reading only the lines of pods that run that version\'s code, not the failed pod\'s, then answers 400 with the reason: the record, the Deployment and S3 all keep the old version, and the old pod never stopped serving, because maxUnavailable is 0. A function that wasn\'t ACTIVE has no version to go back to: it keeps the attempt, stays ERROR with the new reason, and is scaled to zero.', code: 'kubernetes.orchestrator.ts waitUntilReady() · functions.service.ts rollBack()', t: '⏱ about 6 s in all',
+        text: 'For up to 90 s, or until the new pod\'s runtime has logged a load error, which the backend looks for every 3 s. If the new pod isn\'t ready by then, the backend applies the previous version again and waits for it, reading only the lines of pods that run that version\'s code, not the failed pod\'s, then answers 400 with the reason: the record, the Deployment and S3 all keep the old version, and the old pod never stopped serving, because maxUnavailable is 0. The previous version\'s image is still in the registry: the record still names its package, so the purge kept it. A function that wasn\'t ACTIVE has no version to go back to: it keeps the attempt, stays ERROR with the new reason, and is scaled to zero.', code: 'kubernetes.orchestrator.ts waitUntilReady() · functions.service.ts rollBack()', t: '⏱ about 6 s in all',
         msg: [{ kind: 'http', first: 'GET ' + DEPLOY_PATH + ' HTTP/1.1' }, { kind: 'http', first: 'HTTP/1.1 200 OK', body: { metadata: { generation: 2, '…': '…' }, status: { observedGeneration: 2, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } } }] },
-      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions (code)', title: 'The change is saved', text: 'The record changes only once the new version is live, and is then ACTIVE with no error, whatever it was before: an update also repairs a function in ERROR.', code: 'functions.service.ts update()',
-        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"code\" = '…Marhba…', \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = '" + FN + "';" },
-        set: { 'PostgreSQL.functions': 'ACTIVE (new code)' } },
-      { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced, last', text: 'Same key, new content. Only a version that went live is archived. A failure here is logged and doesn\'t fail the update: nothing reads the copy yet.', code: 'functions.service.ts archiveCode() · minio-client.service.ts uploadCode()',
-        set: { 'S3 (bucket functions).object': FN + '/code.ts (451 bytes, new)' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions (code, package_sha256)', title: 'The change is saved', text: 'The record changes only once the new version is live, and is then ACTIVE with no error, whatever it was before: an update also repairs a function in ERROR. package_sha256 names the new package now. The previous one is named by no function, unless another of the account\'s runs the same code, and the hourly purge deletes it, with its zip and its image, once an hour has passed since its last use.', code: 'functions.service.ts update(), change()',
+        msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"code\" = '…Marhba…', \"code_sha256\" = '…', \"code_size\" = " + utf8Bytes(CODE_TS_V2) + ",\n       \"package_sha256\" = '" + PKG_V2.sha + "', \"updated_at\" = CURRENT_TIMESTAMP\n WHERE \"id\" = '" + FN + "';" },
+        set: { 'PostgreSQL.functions': 'ACTIVE (new code)', 'PostgreSQL.packages': packageRow(PKG_V2) + '; and the previous, named by no function now' } },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT <id>/code.ts (new version)', title: 'The archive copy is replaced, last', text: 'Same key, new content. Only a version that went live is archived. A failure here is logged and doesn\'t fail the update: nothing reads the copy, since the pods run the image.', code: 'functions.service.ts archiveCode() · minio-client.service.ts uploadCode()',
+        set: { 'S3 (bucket functions).object': FN + '/code.ts (' + utf8Bytes(CODE_TS_V2) + ' bytes, new)' } },
       { from: 'api', to: 'user', kind: 'res', label: '200 · the function', title: 'Done', text: 'The next invocation answers "Marhba Tunis".', code: 'functions.controller.ts update()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: FN, name: 'hello', accountId: '000000000001', runtime: 'nodejs', code: '// A Node.js function in TypeScript…Marhba…', memory: 128, timeout: 5, status: 'ACTIVE', metadata: null, error: null, minInstances: 0, maxInstances: 3, scaleToZero: true, createdAt: '2026-10-16T14:00:00.106Z', updatedAt: '2026-10-16T14:05:06.120Z' } } },
     ],
   },
   {
-    id: 'delete', title: 'Delete a function', lanes: ['user', 'api', 'db', 's3', 'k8s', 'node', 'pod'],
-    summary: 'DELETE /functions/:id removes the Deployment, the Service, every ConfigMap, the archived code, and the records, except its usage records, which billing keeps. The tenant\'s namespace and guardrails stay for its other functions.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows', 'PostgreSQL.function_metrics': '3 rows', 'PostgreSQL.usage_records': '12 rows' }),
+    id: 'delete', title: 'Delete a function', lanes: ['user', 'api', 'db', 's3', 'reg', 'k8s', 'node', 'pod'],
+    summary: 'DELETE /functions/:id removes the Deployment, the Service, the environment Secrets, the copy of the code, and the records, except its usage records, which billing keeps. The tenant\'s namespace and guardrails stay for its other functions. Its package, and the image made of it, stay until the hourly purge, which deletes them once no function names them and an hour has passed since their last use.',
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows', 'PostgreSQL.function_metrics': '3 rows', 'PostgreSQL.usage_records': '12 rows' }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'DELETE /functions/:id', title: 'You delete the function', text: 'No body.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'DELETE /functions/' + FN + ' HTTP/1.1', headers: { host: 'localhost:3000' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT · in your account?', title: 'Only your account\'s function is found', text: 'Another account\'s function answers 404, as one that doesn\'t exist.', code: 'functions.service.ts remove() → findOne()',
@@ -1036,23 +1315,38 @@ const SCENARIOS = [
       { from: 'node', to: 'pod', kind: 'int', label: 'SIGTERM · drain · exit', title: 'The pod stops cleanly', text: 'kubelet sends SIGTERM; the runtime finishes any invocation in flight, then exits.', code: 'runtimes/nodejs/src/main.ts shutdown()',
         msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-16T14:20:00.412Z', 0)] },
         set: { [K + '.Pod']: null, 'Runtime.main process': null, 'Runtime.worker': null } },
-      { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Service · ConfigMaps by label', title: 'Then the Service and every code version', text: 'The ConfigMaps are deleted in one call, selected by the label ff.dev/function-id.', code: 'kubernetes.orchestrator.ts remove()', hl: ['service', 'configmap'],
-        msg: [{ kind: 'http', first: 'DELETE /api/v1/namespaces/' + NS + '/services/' + fn(FN) + ' HTTP/1.1' }, { kind: 'http', first: 'DELETE /api/v1/namespaces/' + NS + '/configmaps?' + BY_FUNCTION(FN) + ' HTTP/1.1' }],
-        set: { [K + '.Service']: null, [K + '.ConfigMap']: null } },
-      { from: 'api', to: 's3', kind: 'req', label: 'DELETE <id>/code.ts', title: 'The archived code is removed', text: 'The object goes from the functions bucket.', code: 'BE/src/minio-client/minio-client.service.ts deleteCode()',
+      { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Service · old ConfigMaps · Secrets', title: 'Then the Service, and what is left from before', text: 'The Service, by name. Then, in one call selected by the label ff.dev/function-id, any code ConfigMap left from before code came as images; a function deployed since has none. Then its two environment Secrets, by name: the backend may delete Secrets, never list them. Its code isn\'t in the namespace: it is its package\'s image, in the registry.', code: 'kubernetes.orchestrator.ts remove()', hl: ['service'],
+        msg: [{ kind: 'http', first: 'DELETE /api/v1/namespaces/' + NS + '/services/' + fn(FN) + ' HTTP/1.1' }, { kind: 'http', first: 'DELETE /api/v1/namespaces/' + NS + '/configmaps?' + BY_FUNCTION(FN) + ' HTTP/1.1' },
+          { kind: 'http', first: 'DELETE /api/v1/namespaces/' + NS + '/secrets/' + fn(FN) + '-env-0 HTTP/1.1' }, { kind: 'http', first: 'DELETE /api/v1/namespaces/' + NS + '/secrets/' + fn(FN) + '-env-1 HTTP/1.1' }],
+        set: { [K + '.Service']: null } },
+      { from: 'api', to: 's3', kind: 'req', label: 'DELETE <id>/code.ts', title: 'The copy of the code is removed', text: 'The object goes from the functions bucket.', code: 'BE/src/minio-client/minio-client.service.ts deleteCode()',
         msg: { kind: 'http', first: 'DELETE /functions/' + FN + '/code.ts?x-id=DeleteObject HTTP/1.1', headers: { host: 'localhost:9003', authorization: 'AWS4-HMAC-SHA256 Credential=<development key>/…' } },
         set: { 'S3 (bucket functions).object': null } },
       { from: 'api', to: 'db', kind: 'req', label: 'DELETE functions (CASCADE)', title: 'The records go, with their history',
-        text: 'The foreign keys of invocations and metrics are ON DELETE CASCADE, so one delete removes all of it. The usage records stay: they have no foreign key, and copy what billing needs (D6).', code: 'functions.service.ts remove()',
+        text: 'The foreign keys of invocations and metrics are ON DELETE CASCADE, so one delete removes all of it. The usage records stay: they have no foreign key, and copy what billing needs (D6). Its package stays too: another of the account\'s functions may run the same code, and so the same package.', code: 'functions.service.ts remove()',
         msg: { kind: 'sql', text: "DELETE FROM \"functions\" WHERE \"id\" = '" + FN + "';\n-- cascades to function_invocations (12 rows) and function_metrics (3 rows);\n-- usage_records keeps its 12 rows" },
-        set: { 'PostgreSQL.functions': null, 'PostgreSQL.function_invocations': null, 'PostgreSQL.function_metrics': null } },
-      { from: 'api', to: 'user', kind: 'res', label: '200', title: 'Deleted', text: 'The response has no body. The namespace, quota, limits, and network policy remain for the tenant.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-length': '0' } } },
+        set: { 'PostgreSQL.functions': null, 'PostgreSQL.function_invocations': null, 'PostgreSQL.function_metrics': null, 'PostgreSQL.packages': packageRow(PKG_V1) + ' · named by no function now' } },
+      { from: 'api', to: 'user', kind: 'res', label: '200', title: 'Deleted', text: 'The response has no body. The namespace, quota, limits, and network policy remain for the tenant; the package and its image, until the purge.', code: 'functions.controller.ts remove()', msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-length': '0' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'the hourly purge · DELETE packages', title: 'Later, the purge deletes its package',
+        text: 'The retention job, at the backend\'s start and then every hour, deletes the packages that no function names and that nothing has used for an hour: the rows first, a batch at a time, each checked again as it goes, so that a package a function has named meanwhile stays. This one\'s last use was the function\'s last rollout.',
+        code: 'BE/src/retention/retention.service.ts · BE/src/packages/packages.service.ts purgeUnused()', t: '⏱ at the job\'s next run, once its last use is an hour old',
+        msg: { kind: 'sql', text: "BEGIN;\nSELECT \"p\".\"id\" FROM \"packages\" \"p\"\n WHERE \"p\".\"used_at\" < $1   -- an hour ago\n   AND NOT EXISTS (SELECT 1 FROM \"functions\" \"f\" WHERE \"f\".\"account_id\" = \"p\".\"account_id\"\n                   AND (\"f\".\"package_sha256\" = \"p\".\"code_sha256\" OR …))\n ORDER BY \"p\".\"used_at\" LIMIT $2 FOR UPDATE OF \"p\" SKIP LOCKED;   -- 100 at a time\nDELETE FROM \"packages\" \"p\" WHERE \"p\".\"id\" = ANY($1) AND \"p\".\"used_at\" < $2 AND NOT EXISTS (…)   -- checked again\nRETURNING \"p\".\"account_id\", \"p\".\"code_sha256\", \"p\".\"image_digest\";\nCOMMIT;" },
+        set: { 'PostgreSQL.packages': null } },
+      { from: 'api', to: 's3', kind: 'req', label: 'DELETE ' + shortZip(PKG_V1), title: 'Its zip', text: 'Then, for each package deleted, its zip from object storage. One that can\'t be deleted is only logged: no row names it any more.',
+        code: 'packages.service.ts purgeUnused() · minio-client.service.ts deleteObject()',
+        msg: { kind: 'http', first: 'DELETE /functions/' + zipKey(PKG_V1) + '?x-id=DeleteObject HTTP/1.1', headers: { host: 'localhost:9003', authorization: S3_SIGNED } },
+        set: { 'S3 (bucket functions).package': null } },
+      { from: 'api', to: 'reg', kind: 'req', label: 'DELETE manifests/' + shortDigest(PKG_V1), title: 'And its image',
+        text: 'Its manifest, by digest, from the account\'s repository. The blobs no manifest names any more go when the registry collects its garbage: Zot, in production, does a day later. A node that pulled the image may keep its copy until its own image garbage collection; no pod names it now.',
+        code: 'code-images.service.ts deleteImage() · registry.ts deleteManifest()',
+        msg: [{ kind: 'http', first: 'DELETE /v2/' + REPO + '/manifests/' + PKG_V1.digest + ' HTTP/1.1', headers: { host: '127.0.0.1:5056' } }, { kind: 'http', first: 'HTTP/1.1 202 Accepted' }],
+        set: { 'Registry.code image': null } },
     ],
   },
   {
     id: 'idle', title: 'Scale to zero when idle', lanes: ['api', 'db', 'k8s', 'node', 'pod'],
     summary: 'No invocation for 15 minutes: the backend\'s idle sweep scales the function to zero and its pod stops. Nobody calls the backend for this; it runs on a timer.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': 'the last one 15 min ago' }),
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.function_invocations': 'the last one 15 min ago' }),
     steps: [
       { from: 'api', to: 'api', kind: 'int', label: 'timer: every 60 s', title: 'The metrics tick',
         text: 'Every 60 s MetricsService writes the past minute\'s metrics (none for an idle function), then sweeps for idle functions. It runs inside the API process and assumes a single backend replica.', code: 'BE/src/metrics/metrics.service.ts tick()' },
@@ -1071,13 +1365,13 @@ const SCENARIOS = [
         msg: { kind: 'log', lines: [SHUTDOWN_LOG('2026-10-16T14:18:00.377Z', 0)] },
         set: { [K + '.Pod']: null, [K + '.Deployment']: 'replicas 0 · ready 0/0', 'Runtime.main process': null, 'Runtime.worker': null } },
       { from: 'api', to: 'api', kind: 'int', label: 'still ACTIVE', title: 'The function is still ACTIVE',
-        text: 'Its record, Service, and ConfigMap stay. The next invocation cold-starts it; see "Cold start from zero".', code: 'kubernetes.orchestrator.ts invoke()' },
+        text: 'Its record, its Service, and its Deployment at zero stay, and its code image in the registry. The next invocation cold-starts it; see "Cold start from zero".', code: 'kubernetes.orchestrator.ts invoke()' },
     ],
   },
   {
     id: 'metrics', title: 'Metrics, autoscaling, and history', lanes: ['user', 'api', 'db', 'k8s'],
     summary: 'Three invocations within a minute, then the 60 s tick: one metrics row and one autoscaling decision. At 5 s into the next minute, the capacity sample. Then the console reads the history and the metrics.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '3 rows (COMPLETED)' }),
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.function_invocations': '3 rows (COMPLETED)' }),
     steps: [
       { from: 'api', to: 'api', kind: 'int', label: 'window: 3 requests, 0 errors', title: 'The invocations were recorded in memory',
         text: 'Each invocation added the backend\'s end-to-end time, the memory, and its outcome to this function\'s window: here 38, 41, and 55 ms.', code: 'metrics.service.ts recordMetric()' },
@@ -1119,7 +1413,7 @@ const SCENARIOS = [
   {
     id: 'notify', title: 'A test notification: a signed webhook and the owners\' e-mail', lanes: ['user', 'api', 'db', 'hook'],
     summary: 'An owner sends a test notification to a webhook URL and to the owners\' e-mail, as alarms send theirs (P-51, P-52). It is written as its deliveries; the worker, every 10 s, takes the ones due, signs the webhook with the account\'s secret, POSTs it, and records how each went. A failure is tried again 1, 2, 4, 8 and 16 minutes later.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.webhook_secrets': '1 row: whsec_… since 2026-10-19' }),
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.webhook_secrets': '1 row: whsec_… since 2026-10-19' }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /notifications/test', title: 'An owner asks for a test',
         text: 'A webhook URL, the owners\' e-mail, or both. The URL must be http or https, without a user or password. Owners and developers may, with a login or in development mode; an API key may not.', code: 'notifications/notifications.controller.ts test()',
@@ -1155,7 +1449,7 @@ const SCENARIOS = [
   {
     id: 'alarm', title: 'An alarm fires on a function\'s errors', lanes: ['api', 'db', 'hook'],
     summary: 'An alarm on a function\'s Errors, Sum > 0 over one minute, telling a webhook (P-52). Its function failed at 14:03:20; at 14:04:05 the evaluator judges the minute 14:03, which has been over long enough, finds 1 error, and goes from OK to ALARM: recorded with why, and told through the notifications\' queue, in one transaction. The next minute, quiet, recovers it the same way.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.alarms': '1 row: OK', 'PostgreSQL.usage_records': '1 error at 14:03:20' }),
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.alarms': '1 row: OK', 'PostgreSQL.usage_records': '1 error at 14:03:20' }),
     steps: [
       { from: 'api', to: 'db', kind: 'req', label: 'timer: UPDATE alarms … SKIP LOCKED', title: 'The evaluator takes the alarms due',
         text: 'Every minute (FF_ALARM_INTERVAL_SECONDS), each alarm not judged this round yet, marked as judged now: another backend skips the ones taken, so that no alarm is judged twice at once.', code: 'alarms/alarm-evaluator.service.ts claim()',
@@ -1181,7 +1475,7 @@ const SCENARIOS = [
   {
     id: 'usage', title: 'Read the month\'s usage', lanes: ['user', 'api', 'db'],
     summary: 'GET /usage adds up a month of usage records, by the UTC calendar: per function and in total, from one query, so the totals are the records\' own sums. Then it prices the month with the price books valid during it (P-30): each function\'s cost, the free tier, and the total. Every member reads it, and an API key with usage:read.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '5 rows', 'PostgreSQL.usage_records': '5 rows this month' }),
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.function_invocations': '5 rows', 'PostgreSQL.usage_records': '5 rows this month' }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'GET /usage?month=2026-10', title: 'You ask for a month',
         text: 'YYYY-MM, this month without it; anything else gets 400. The console asks for this month and last month.', code: 'usage/usage.controller.ts get()',
@@ -1210,7 +1504,7 @@ const SCENARIOS = [
   {
     id: 'retention', title: 'Purge the invocation history', lanes: ['user', 'api', 'db'],
     summary: 'The history holds the input and output of the customer\'s own users: personal data (P-45). At start and every hour, the backend deletes the calls older than each account\'s plan\'s history retention, 30 days on beta. Their usage records stay: they are what is billed.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '40 rows, 12 older than 30 days', 'PostgreSQL.usage_records': '40 rows' }),
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.function_invocations': '40 rows, 12 older than 30 days', 'PostgreSQL.usage_records': '40 rows' }),
     steps: [
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT plans', title: 'Each plan\'s retention',
         text: 'Each plan\'s limits, checked as every reader of them checks them. A plan whose limits can\'t be read keeps its accounts\' history, and the purge logs it.',
@@ -1499,16 +1793,19 @@ const SCENARIOS = [
     ],
   },
   {
-    id: 'loadfail', title: 'The function fails to load', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod', 'worker'],
+    id: 'loadfail', title: 'The function fails to load', lanes: ['user', 'api', 'db', 'reg', 'k8s', 'node', 'pod', 'worker'],
     summary: 'Code with a syntax error. Everything is deployed, but the runtime never reports ready. Within about 10 s the backend finds the runtime\'s reason in the log store, releases the pod, and answers 400 with the reason and the function\'s ID. An update with fixed code repairs the function.',
     initial: {},
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions (broken code)', title: 'You create a function with a syntax error', text: 'Valid JSON and valid fields; only the code itself is broken.', code: 'functions.controller.ts create()',
         msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'broken', runtime: 'nodejs', code: CODE_BAD, memory: 128, timeout: 5 } } },
-      { from: 'api', to: 'db', kind: 'req', label: 'INSERT (CREATING) · S3 copy', title: 'Recorded and archived', text: 'Nothing checks the code at this point.', code: 'functions.service.ts create()', set: { 'PostgreSQL.functions': 'CREATING', 'S3 (bucket functions).object': BAD + '/code.ts' } },
-      { from: 'api', to: 'k8s', kind: 'req', label: 'apply tenant · ConfigMap · Service · Deployment', title: 'Everything is deployed', text: 'The same applies as for any function.', code: 'kubernetes.orchestrator.ts apply()', hl: ['ns', 'guard', 'configmap', 'service', 'deployment'],
-        set: { [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits', [K + '.NetworkPolicy']: 'ff-default-deny', [K + '.ConfigMap']: cm(BAD, HASH_BAD), [K + '.Service']: fn(BAD), [K + '.Deployment']: 'replicas 1 · ready 0/1' } },
-      { from: 'k8s', to: 'node', kind: 'req', label: 'schedule · start the container', title: 'The pod starts', text: 'As for any function.', code: 'Kubernetes controllers and kubelet', hl: ['pod-box'],
+      { from: 'api', to: 'reg', kind: 'req', label: 'package of one file · push its image', title: 'Its package and its image, as any code\'s', text: 'As on create: the code made a package of one file, its zip in object storage and its row, then the package an image in the registry. Nothing checks the code itself: code that can\'t load makes a package and an image as any code does.',
+        code: 'functions.service.ts create(), codeImageOf() · packages.service.ts storeInline() · code-images.service.ts imageFor()',
+        set: { 'PostgreSQL.packages': packageRow(PKG_BAD), 'S3 (bucket functions).package': zipState(PKG_BAD), 'Registry.code image': REPO + '@' + shortDigest(PKG_BAD) } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT (CREATING) · S3 copy', title: 'Recorded and archived', text: 'The record, naming the package, then the copy of the code.', code: 'functions.service.ts create()', set: { 'PostgreSQL.functions': 'CREATING', 'S3 (bucket functions).object': BAD + '/code.ts' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply tenant · Service · Deployment', title: 'Everything is deployed', text: 'The same applies as for any function: the Deployment\'s code volume is this code\'s image, ' + shortDigest(PKG_BAD) + '.', code: 'kubernetes.orchestrator.ts apply()', hl: ['ns', 'guard', 'service', 'deployment'],
+        set: { [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits', [K + '.NetworkPolicy']: 'ff-default-deny', [K + '.Service']: fn(BAD), [K + '.Deployment']: 'replicas 1 · ready 0/1' } },
+      { from: 'k8s', to: 'node', kind: 'req', label: 'schedule · start the container', title: 'The pod starts', text: 'As for any function: the node pulls the code image, mounts it at /var/task, and starts the container.', code: 'Kubernetes controllers and kubelet', hl: ['pod-box'],
         set: { [K + '.Pod']: 'ContainerCreating' } },
       { from: 'node', to: 'pod', kind: 'req', label: 'the runtime starts', title: 'The runtime starts', text: 'Its HTTP server listens, /healthz answers 200, and /readyz answers 503 "starting".', code: 'runtimes/nodejs/src/main.ts',
         msg: { kind: 'log', lines: [BAD_LOG[0]] },
@@ -1524,7 +1821,7 @@ const SCENARIOS = [
       { from: 'api', to: 'k8s', kind: 'req', label: 'every 3 s: the pods, and the newest one\'s lines', title: 'The backend finds out why, without waiting out the timeout',
         text: 'While it polls the Deployment, every 3 s it lists the function\'s pods, takes the newest one that runs the code being deployed (its code-sha256 annotation and runtime label are the template\'s), and reads that pod\'s last lines in the log store, which has them about 5 s after the runtime wrote them. The runtime\'s "function initialization failed" line there is the function\'s own error, which its owner may see, and the wait ends with it. Without that line, the wait goes on to FF_READY_TIMEOUT_SECONDS (90 s), then says what it found: a missing RuntimeClass or an exhausted quota shows up as "no pods were created", a platform failure, which the caller only sees as a generic message with the request ID, while the details go to the server log.', code: 'kubernetes.orchestrator.ts waitUntilReady(), loadErrorSoFar(), loadErrorIn()', t: 'about 10 s',
         msg: [{ kind: 'http', first: 'GET /api/v1/namespaces/' + NS + '/pods?' + BY_FUNCTION(BAD) + ' HTTP/1.1' }, { kind: 'http', first: 'GET /api/v1/namespaces/ff-system/services/victoria-logs:9428/proxy/select/logsql/query?query=%7Bnamespace%3D%22' + NS + '%22%2C+function_id%3D%22' + BAD + '%22%7D+pod%3A%3D%22' + fn(BAD) + '-…%22+_time%3A1h… HTTP/1.1' }] },
-      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ERROR', title: 'The function is ERROR', text: 'The load error is stored in its error column. Its objects stay in the cluster, and its archived code in S3, so that an update can repair it.', code: 'functions.service.ts create() · failures.ts callersFailure()',
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE functions → ERROR', title: 'The function is ERROR', text: 'The load error is stored in its error column. Its objects stay in the cluster, its package and image too, since its record names them, and its archived code in S3, so that an update can repair it.', code: 'functions.service.ts create() · failures.ts callersFailure()',
         msg: { kind: 'sql', text: "UPDATE \"functions\" SET \"status\" = 'ERROR',\n       \"error\" = '" + LOAD_FAILED.replace(/'/g, "''") + "'\n WHERE \"id\" = '" + BAD + "';" },
         set: { 'PostgreSQL.functions': 'ERROR (with the diagnosis)' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'scale Deployment → 0', title: 'Its pod is released', text: 'A pod that can never become ready would hold its memory and CPU in the tenant\'s quota for good, since the idle sweep only scales ACTIVE functions. So the backend scales the Deployment to zero.', code: 'functions.service.ts create() → releaseInstances()', hl: ['deployment'],
@@ -1585,7 +1882,7 @@ const SCENARIOS = [
   {
     id: 'suspend', title: 'Suspend an account', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod'],
     summary: 'You, as FF\'s operator, suspend an active account from the admin dashboard, with a reason (P-71): its status changes in one transaction with its audit entry, its functions scale to zero at once, and each owner gets an e-mail. Nothing is deleted; reactivating it gives warm instances back.',
-    initial: activeState(FN, HASH_V1, 'code.ts'),
+    initial: activeState(FN, PKG_V1, 'code.ts'),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /admin/accounts/…/suspend', title: 'You suspend the account, with a reason',
         text: 'In the admin dashboard: the account\'s page, Suspend. The dialog says what happens, and that the owners will read the reason, which it needs. The global guard lets in only an operator\'s token issued to ff-admin (P-70); a change without a reason gets 400.',
@@ -1617,9 +1914,9 @@ const SCENARIOS = [
     ],
   },
   {
-    id: 'close', title: 'Close an account, and delete its data', lanes: ['user', 'api', 'db', 's3', 'k8s', 'store'],
-    summary: 'You, as FF\'s operator, close an account, with a reason. Closing is final: its functions stop at once, and its owners are told the date its data is deleted, 30 days later by default. Until then its members still read its functions, history and logs. Then a job deletes each function, with its code and history, the account\'s namespace, and its log lines; its usage, payments, invoices and audit log stay, as the law requires.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows', 'PostgreSQL.function_metrics': '3 rows', 'PostgreSQL.usage_records': '12 rows', 'PostgreSQL.payments': '1 paid', 'PostgreSQL.invoices': '1 issued' }),
+    id: 'close', title: 'Close an account, and delete its data', lanes: ['user', 'api', 'db', 's3', 'reg', 'k8s', 'store'],
+    summary: 'You, as FF\'s operator, close an account, with a reason. Closing is final: its functions stop at once, and its owners are told the date its data is deleted, 30 days later by default. Until then its members still read its functions, history and logs. Then a job deletes each function, with its code and history, the account\'s packages and their code images, its namespace, and its log lines; its usage, payments, invoices and audit log stay, as the law requires.',
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows', 'PostgreSQL.function_metrics': '3 rows', 'PostgreSQL.usage_records': '12 rows', 'PostgreSQL.payments': '1 paid', 'PostgreSQL.invoices': '1 issued' }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'POST /admin/accounts/…/close', title: 'You close the account, with a reason',
         text: 'In the admin dashboard: the account\'s page, Close. Its dialog says that closing is final, that its functions, their history and logs are deleted once the notice period set in Settings has passed, and that its usage, payments and invoices are kept.',
@@ -1639,13 +1936,13 @@ const SCENARIOS = [
         code: 'admin-accounts.service.ts ownerMail() · FE/src/lib/session.ts accountView()',
         msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { account: { id: '000000000001', status: 'closed', dataDeletionDueAt: '2026-11-17T10:32:45.123Z', dataDeletedAt: null, '…': '…' } } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT the closed accounts due', title: 'The notice period is over',
-        text: 'A job runs at the backend\'s start and every hour, after it purges old invocation history. It takes the closed accounts whose date has passed and whose data isn\'t deleted yet, the earliest first, one at a time: one that fails is logged and left for the next run.',
+        text: 'A job runs at the backend\'s start and every hour, after it purges old invocation history and unused packages. It takes the closed accounts whose date has passed and whose data isn\'t deleted yet, the earliest first, one at a time: one that fails is logged and left for the next run.',
         code: 'retention/retention.service.ts deleteClosedAccounts()', t: '⏱ 30 days later, at the job\'s next run',
         msg: { kind: 'sql', text: "SELECT … FROM \"accounts\"\n WHERE \"status\" = 'closed' AND \"data_deleted_at\" IS NULL AND \"data_deletion_due_at\" <= '2026-11-17T11:00:00.000Z'\n ORDER BY \"data_deletion_due_at\" ASC;   -- 000000000001" } },
-      { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Deployment · Service · ConfigMaps', title: 'Each function: its objects in the cluster',
-        text: 'As deleting a function does, through the same code: its Deployment, its Service and its code\'s ConfigMaps.',
-        code: 'functions.service.ts remove() · kubernetes.orchestrator.ts remove()', hl: ['deployment', 'service', 'configmap'],
-        set: { [K + '.Deployment']: null, [K + '.Service']: null, [K + '.ConfigMap']: null } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE Deployment · Service · Secrets', title: 'Each function: its objects in the cluster',
+        text: 'As deleting a function does, through the same code: its Deployment, its Service, its environment Secrets, and any code ConfigMap left from before code came as images.',
+        code: 'functions.service.ts remove() · kubernetes.orchestrator.ts remove()', hl: ['deployment', 'service'],
+        set: { [K + '.Deployment']: null, [K + '.Service']: null } },
       { from: 'api', to: 's3', kind: 'req', label: 'DELETE ' + FN.slice(0, 8) + '…/code.ts', title: 'Its code\'s copy',
         text: 'The archive copy of its code goes from object storage.', code: 'functions.service.ts remove() · minio-client.service.ts deleteCode()', hl: ['s3'],
         set: { 'S3 (bucket functions).object': null } },
@@ -1654,6 +1951,17 @@ const SCENARIOS = [
         code: 'functions.service.ts remove()',
         msg: { kind: 'sql', text: "DELETE FROM \"functions\" WHERE \"id\" = '" + FN + "';\n-- with its function_invocations (12 rows) and function_metrics (3 rows)\nINSERT INTO \"audit_log\" (…, \"actor\", \"actor_label\", \"action\", \"resource\") VALUES (…, 'system', 'FF', 'function.delete', 'function:" + FN + "');" },
         set: { 'PostgreSQL.functions': null, 'PostgreSQL.function_invocations': null, 'PostgreSQL.function_metrics': null } },
+      { from: 'api', to: 's3', kind: 'req', label: 'DELETE ' + shortZip(PKG_V1), title: 'Then its packages: each zip',
+        text: 'Then every package of the account, uploaded or made of inline code, named or not, without waiting for the hourly purge: each one\'s zip from object storage, then its image, and the rows last, so that a run that fails part way leaves rows for the next one to find.',
+        code: 'retention.service.ts deleteAccountData() · packages.service.ts deleteAll() · minio-client.service.ts deleteObject()', hl: ['s3'],
+        msg: { kind: 'http', first: 'DELETE /functions/' + zipKey(PKG_V1) + '?x-id=DeleteObject HTTP/1.1', headers: { host: 'localhost:9003', authorization: S3_SIGNED } },
+        set: { 'S3 (bucket functions).package': null } },
+      { from: 'api', to: 'reg', kind: 'req', label: 'DELETE manifests/' + shortDigest(PKG_V1) + ' · the rows', title: 'Each package\'s image, then the rows',
+        text: 'Each image\'s manifest, by digest, from the account\'s repository, ' + REPO + '; then the account\'s rows in packages.',
+        code: 'packages.service.ts deleteAll() · code-images.service.ts deleteImage() · registry.ts deleteManifest()',
+        msg: [{ kind: 'http', first: 'DELETE /v2/' + REPO + '/manifests/' + PKG_V1.digest + ' HTTP/1.1', headers: { host: '127.0.0.1:5056' } }, { kind: 'http', first: 'HTTP/1.1 202 Accepted' },
+          { kind: 'sql', text: "DELETE FROM \"packages\" WHERE \"account_id\" = '000000000001';   -- 1 row" }],
+        set: { 'Registry.code image': null, 'PostgreSQL.packages': null } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'DELETE namespace · until gone', title: 'The account\'s namespace',
         text: 'With its quota, its limits, its network policy and anything left in it. The job waits until the namespace is gone, so that nothing writes more of its lines: about 6 s on the development cluster.',
         code: 'kubernetes.orchestrator.ts removeTenant()', hl: ['ns'],
@@ -1670,13 +1978,13 @@ const SCENARIOS = [
       { from: 'api', to: 'db', kind: 'req', label: 'UPDATE data_deleted_at · INSERT audit_log', title: 'Done, once',
         text: 'The account is marked, with "account.data_delete" by FF in its audit log, once: a run that failed part way leaves it for the next, which does each step again, harmlessly. The account, its members, its usage records, payments, invoices and audit log stay.',
         code: 'retention/retention.service.ts deleteClosedAccounts()',
-        msg: { kind: 'sql', text: "BEGIN;\nUPDATE \"accounts\" SET \"data_deleted_at\" = '2026-11-17T11:00:07.402Z' WHERE \"id\" = '000000000001' AND \"data_deleted_at\" IS NULL;\nINSERT INTO \"audit_log\" (…, \"actor\", \"actor_label\", \"action\", \"resource\", \"details\") VALUES (…, 'system', 'FF', 'account.data_delete', 'account:000000000001', '{\"functions\": 1}');\nCOMMIT;" } },
+        msg: { kind: 'sql', text: "BEGIN;\nUPDATE \"accounts\" SET \"data_deleted_at\" = '2026-11-17T11:00:07.402Z' WHERE \"id\" = '000000000001' AND \"data_deleted_at\" IS NULL;\nINSERT INTO \"audit_log\" (…, \"actor\", \"actor_label\", \"action\", \"resource\", \"details\") VALUES (…, 'system', 'FF', 'account.data_delete', 'account:000000000001', '{\"functions\": 1, \"packages\": 1}');\nCOMMIT;" } },
     ],
   },
   {
     id: 'support', title: 'Look into a customer\'s call', lanes: ['user', 'api', 'db'],
     summary: 'A customer quotes a request ID from an error. You, as FF\'s operator, find the call, open its function\'s page, which shows no customer data, and look at what the call sent and got back: only for a reason, which goes to the account\'s audit log, where its owners read it as FF\'s.',
-    initial: activeState(FN, HASH_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows, 2 failed', 'PostgreSQL.usage_records': '12 rows' }),
+    initial: activeState(FN, PKG_V1, 'code.ts', { 'PostgreSQL.function_invocations': '12 rows, 2 failed', 'PostgreSQL.usage_records': '12 rows' }),
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'GET /admin/search?q=' + INV.slice(0, 8) + '…', title: 'You search for the request ID',
         text: 'From the admin dashboard\'s top bar. The same box finds an account by its ID, name or a member\'s e-mail, and a function by its ID or a part of its name. Searching looks at no customer data, so nothing is recorded.',
@@ -1721,19 +2029,19 @@ const SCENARIOS = [
 const ARCH_INFO = {
   user: ['You', 'The console (React, on :5199), Swagger UI on /api, or curl; as FF\'s operator, the admin dashboard (admin/, on :5198), whose /admin routes take only an operator\'s token issued to ff-admin. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · admin/src · docs/getting-started.md'],
   idp: ['Keycloak', 'Logs users in and signs them up, for the realm ff (development: localhost:8180). Users with the realm role ff-operator also give a one-time password (P-70). The console gets its tokens from it with the authorization code flow and PKCE; the backend checks each access token against the realm\'s public keys, which it fetches once and caches.', 'deploy/keycloak/ff-realm.json · FE/src/auth/oidc.ts · BE/src/auth/token-verifier.ts'],
-  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL, archives code in S3, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, its CapacityService samples every function\'s ready instances 5 s into every minute; its NotificationWorker sends the e-mails and webhooks due every 10 s; and its AlarmEvaluator judges every alarm every minute.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator'],
+  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL and the packages\' zips in S3, makes each package\'s code image and pushes it to the code registry, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, its CapacityService samples every function\'s ready instances 5 s into every minute; its NotificationWorker sends the e-mails and webhooks due every 10 s; and its AlarmEvaluator judges every alarm every minute.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator'],
   db: ['PostgreSQL', 'The records: accounts, their plans, users and memberships, invitations and API keys; functions, with their invocations and metrics; and tables written once and never changed: the audit log, the usage records and the capacity samples, the last two with a partition per month; the price books; and the money: the ledger, the hourly charges, the payments and the invoices. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
-  s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds an archive copy of each function\'s code, the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
+  s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds each package\'s zip, uploaded or made of inline code, from which its code image is made; a copy of each inline function\'s code; the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
   k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
   ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
   guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend\'s pods in ff-system, and lets pods reach only DNS, and public addresses once the account\'s internet egress is on.', 'manifests.ts'],
-  configmap: ['Code ConfigMap', 'fn-<id>-<hash>: immutable, one per code version, mounted read-only at /var/task. The current and the previous version are kept.', 'manifests.ts codeConfigMapManifest()'],
+  registry: ['Code registry', 'Every function\'s code as an image (ADR 0003): one per package, uploaded or made of inline code, in the repository ff-code/<account>, tagged with the package\'s SHA-256 in hex. The backend alone pushes and deletes; the nodes pull by digest over their own network, so no tenant policy opens for it. In development, the container ff-dev-registry next to the cluster: the backend pushes on 127.0.0.1:5056, the nodes pull ff-dev-registry:5000. In production, Zot in ff-system.', 'BE/src/packages/code-images.service.ts · registry.ts · hack/k8s/registry-up.sh · deploy/k8s/platform/70-code-registry.yaml'],
   service: ['Service', 'fn-<id>: ClusterIP, port http (8080). Invocations reach the ready pods through it.', 'manifests.ts serviceManifest()'],
-  deployment: ['Deployment', 'fn-<id>: the runtime image, environment, resources, probes, security context, and volumes. Its replica count changes with autoscaling, the idle sweep, and cold starts.', 'manifests.ts deploymentManifest()'],
-  'pod-box': ['Pod', 'One per instance of the function: a single container, "function", from the runtime image, with the code mounted read-only and only /tmp writable.', 'manifests.ts deploymentManifest()'],
+  deployment: ['Deployment', 'fn-<id>: the runtime image, the code image by digest, environment, resources, probes, security context, and volumes. Its replica count changes with autoscaling, the idle sweep, and cold starts.', 'manifests.ts deploymentManifest()'],
+  'pod-box': ['Pod', 'One per instance of the function: a single container, "function", from the runtime image, with the code image mounted read-only at /var/task and only /tmp writable.', 'manifests.ts deploymentManifest()'],
   pod: ['Runtime: the main process', 'Serves /healthz, /readyz, and /invoke on :8080. It queues invocations, enforces the timeout, writes the START, END, and REPORT lines, and supervises the worker.', 'runtimes/nodejs/src/main.ts · runtimes/python/ff_runtime/main.py'],
   worker: ['Worker: your handler', 'Loads your code once and runs handler(event, context) for each invocation. It is replaced after a timeout, an out-of-memory error, or a crash.', 'runtimes/nodejs/src/worker.ts · runtimes/python/ff_runtime/worker.py'],
-  node: ['Node: scheduler, kubelet, containerd', 'Places pods, starts containers from the runtime images, mounts the code, and probes /readyz and /healthz.', 'manifests.ts (probes)'],
+  node: ['Node: scheduler, kubelet, containerd', 'Places pods, starts containers from the runtime images, pulls each function\'s code image from the code registry, once per node, mounts it read-only at /var/task, and probes /readyz and /healthz.', 'manifests.ts deploymentManifest() (the code volume, the probes)'],
   logstore: ['Log store: VictoriaLogs', 'In ff-system, it keeps every function\'s log lines for 31 days, after their instance is gone; each account reads its plan\'s window (14 days on beta). Fluent Bit, on every node, reads the function containers\' logs and adds each line\'s account, function, pod, stream and call, within 2,000 lines and 1 MiB a second per account. Only the collector and the backend reach it; in development the backend queries it through the API server\'s Service proxy.', 'deploy/k8s/logging · BE/src/orchestrator/kubernetes/log-store.ts'],
 };
 
@@ -1741,7 +2049,7 @@ const TRACE = [
   ['1. What you send', 'POST /functions/:id/invoke', { input: { name: 'Tunis' } }],
   ['2. What the backend forwards', 'kubernetes.orchestrator.ts post()', { name: 'Tunis' }],
   ['3. What the runtime receives', 'POST /invoke, through the API server\'s proxy', 'POST /invoke HTTP/1.1\ncontent-type: application/json\nx-ff-request-id: ' + INV + '\n…\n\n{"name":"Tunis"}'],
-  ['4. The event your handler gets', 'runtime main → worker (headers abridged)', { body: { name: 'Tunis' }, headers: { 'content-type': 'application/json', '…': '…' }, method: 'POST', query: {}, path: '/invoke' }],
+  ['4. The event your handler gets', 'runtime main → worker: the payload itself, as on AWS Lambda', { name: 'Tunis' }],
   ['5. The context', 'worker.ts (Python: worker.py)', 'functionName: "hello"\nfunctionVersion: "$LATEST"\nmemoryLimitInMB: "128"\nawsRequestId: "' + REQ + '"\ngetRemainingTimeInMillis() → 4998'],
   ['6. What your handler returns', 'your function.ts', { message: 'Hello Tunis', requestId: REQ }],
   ['7. What the runtime answers', 'main.ts', 'HTTP/1.1 200 OK\ncontent-type: application/json\nx-ff-request-id: ' + REQ + '\nx-ff-duration-ms: 1.09\nx-ff-max-memory-used-mb: 98\n\n{"message":"Hello Tunis","requestId":"…"}'],
@@ -1770,11 +2078,13 @@ function validateScenarios() {
   const problems = [];
   const knownKey = (key) => {
     const dot = key.lastIndexOf('.');
-    const group = EMPTY[key.slice(0, dot)];
-    return Boolean(group) && Object.prototype.hasOwnProperty.call(group, key.slice(dot + 1));
+    const group = Object.assign({}, EMPTY[key.slice(0, dot)], (scenarioOf.state || {})[key.slice(0, dot)]);
+    return Object.prototype.hasOwnProperty.call(group, key.slice(dot + 1));
   };
+  let scenarioOf = {};
   const ids = new Set();
   for (const sc of SCENARIOS) {
+    scenarioOf = sc;
     if (ids.has(sc.id)) problems.push('duplicate scenario id ' + sc.id);
     ids.add(sc.id);
     if (!sc.title || !sc.summary || !sc.steps.length) problems.push(sc.id + ': title, summary, and steps are required');
@@ -1887,9 +2197,9 @@ const svgLink = (d, label, lx, ly, anchor) => '<g class="arch-link"><path d="' +
 
 /* ---------- architecture maps ---------- */
 function archBig() {
-  return '<svg class="diagram" viewBox="0 0 1000 626" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL and S3, and the Kubernetes cluster with the tenant namespace and the log store">' +
+  return '<svg class="diagram" viewBox="0 0 1000 626" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL, S3 and the code registry, and the Kubernetes cluster with the tenant namespace and the log store">' +
     '<defs>' + arrowDefs('arch-arrow', '--muted') + '</defs>' +
-    svgGroup(208, 20, 300, 420, 'Your machine or server') +
+    svgGroup(208, 20, 300, 512, 'Your machine or server') +
     svgGroup(560, 20, 428, 590, 'Kubernetes cluster (k3s)') +
     svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-27d6fbbe5c7d (dev account)', 'end') +
     svgBox('user', 16, 136, 150, 76, 'You', 'console · curl') +
@@ -1898,29 +2208,30 @@ function archBig() {
     svgComp(242, 108, 232, 36, 'Functions: controller · service') +
     svgComp(242, 152, 232, 36, 'Metrics · autoscaler · idle sweep') +
     svgComp(242, 196, 232, 36, 'Kubernetes driver · KubeClient') +
-    svgComp(242, 240, 232, 36, 'S3 client') +
-    svgBox('db', 226, 344, 124, 72, 'PostgreSQL', 'records') +
-    svgBox('s3', 366, 344, 124, 72, 'S3 storage', 'code archive') +
+    svgComp(242, 240, 232, 36, 'S3 client · registry client') +
+    svgBox('db', 226, 344, 118, 72, 'PostgreSQL', 'records') +
+    svgBox('s3', 372, 344, 118, 72, 'S3 storage', 'zips · code copies') +
+    svgBox('registry', 226, 456, 264, 60, 'Code registry', 'ff-code/<account> · an image per package') +
     svgBox('k8sapi', 578, 52, 392, 56, 'Kubernetes API server', 'RBAC · admission policy ff-controller-scope') +
     svgBox('guard', 668, 168, 286, 44, 'Guardrails', 'ResourceQuota · LimitRange · NetworkPolicy') +
     svgBox('service', 594, 224, 178, 46, 'Service', 'fn-<id> · ClusterIP :8080') +
-    svgBox('configmap', 784, 224, 170, 46, 'ConfigMap', 'fn-<id>-<hash> · code') +
-    svgBox('deployment', 784, 282, 170, 44, 'Deployment', 'fn-<id> · replicas') +
+    svgBox('deployment', 784, 224, 170, 46, 'Deployment', 'fn-<id> · its code image') +
     svgZone('pod-box', 594, 338, 360, 88, 'Pod · one container, "function"', 'end') +
     svgBox('pod', 606, 362, 166, 52, 'Runtime main', 'HTTP :8080 · probes') +
     svgBox('worker', 784, 362, 158, 52, 'Your handler', 'worker') +
-    svgBox('node', 578, 456, 392, 60, 'Node: scheduler · kubelet · containerd', 'starts pods · mounts the code · probes') +
+    svgBox('node', 578, 456, 392, 60, 'Node: scheduler · kubelet · containerd', 'pulls the code image · starts pods · probes') +
     svgBox('logstore', 578, 532, 380, 60, 'Log store: VictoriaLogs', 'ff-system · 31 days · Fluent Bit on each node feeds it') +
     svgLink('M166,174 L224,174', 'HTTP', 187, 166) +
     svgLink('M91,212 L91,250', 'login', 99, 236, 'start') +
     svgLink('M226,284 L168,284', 'keys', 197, 276) +
     svgLink('M288,296 L288,342', 'SQL', 296, 324, 'start') +
     svgLink('M428,296 L428,342', 'S3 API', 436, 324, 'start') +
+    svgLink('M358,296 L358,454', 'push', 362, 440, 'start') +
+    svgLink('M578,486 L492,486', 'pull', 535, 478) +
     svgLink('M490,80 L576,80', 'HTTPS', 534, 72) +
     svgLink('M640,108 L640,222', 'service proxy', 648, 128, 'start') +
     svgLink('M683,270 L683,360', '', 0, 0) +
-    svgLink('M869,270 L869,280', '', 0, 0) +
-    svgLink('M869,326 L869,336', '', 0, 0) +
+    svgLink('M869,270 L869,336', '', 0, 0) +
     svgLink('M772,388 L782,388', '', 0, 0) +
     svgLink('M700,456 L700,428', '', 0, 0) +
     svgLink('M768,516 L768,530', '', 0, 0) +
@@ -1929,23 +2240,23 @@ function archBig() {
 }
 function archMini() {
   const o = { inert: true };
-  return '<svg class="diagram" viewBox="0 0 420 470" role="img" aria-label="Where this step happens">' +
-    svgBox('user', 10, 10, 120, 40, 'You', '', o) +
-    svgBox('idp', 10, 60, 120, 36, 'Keycloak', '', o) +
-    svgBox('api', 140, 10, 270, 40, 'Backend API', '', o) +
-    svgBox('db', 140, 60, 130, 36, 'PostgreSQL', '', o) +
-    svgBox('s3', 280, 60, 130, 36, 'S3 storage', '', o) +
+  return '<svg class="diagram" viewBox="0 0 420 430" role="img" aria-label="Where this step happens">' +
+    svgBox('user', 10, 10, 100, 40, 'You', '', o) +
+    svgBox('idp', 10, 60, 100, 36, 'Keycloak', '', o) +
+    svgBox('api', 120, 10, 290, 40, 'Backend API', '', o) +
+    svgBox('db', 120, 60, 92, 36, 'PostgreSQL', '', o) +
+    svgBox('s3', 218, 60, 92, 36, 'S3 storage', '', o) +
+    svgBox('registry', 316, 60, 94, 36, 'Registry', '', o) +
     svgBox('k8sapi', 10, 112, 400, 38, 'Kubernetes API server', '', o) +
-    svgZone('ns', 10, 162, 400, 202, 'Namespace ff-t-…', 'start', o) +
+    svgZone('ns', 10, 162, 400, 162, 'Namespace ff-t-…', 'start', o) +
     svgBox('guard', 20, 186, 380, 32, 'Guardrails: quota · limits · network policy', '', o) +
     svgBox('service', 20, 226, 186, 32, 'Service', '', o) +
-    svgBox('configmap', 214, 226, 186, 32, 'ConfigMap (the code)', '', o) +
-    svgBox('deployment', 214, 266, 186, 32, 'Deployment', '', o) +
-    svgZone('pod-box', 20, 306, 380, 50, '', 'start', o) +
-    svgBox('pod', 28, 313, 180, 36, 'Runtime main', '', o) +
-    svgBox('worker', 214, 313, 178, 36, 'Your handler', '', o) +
-    svgBox('node', 10, 376, 400, 38, 'Node: scheduler · kubelet', '', o) +
-    svgBox('logstore', 10, 422, 400, 38, 'Log store (VictoriaLogs)', '', o) +
+    svgBox('deployment', 214, 226, 186, 32, 'Deployment', '', o) +
+    svgZone('pod-box', 20, 266, 380, 50, '', 'start', o) +
+    svgBox('pod', 28, 273, 180, 36, 'Runtime main', '', o) +
+    svgBox('worker', 214, 273, 178, 36, 'Your handler', '', o) +
+    svgBox('node', 10, 336, 400, 38, 'Node: scheduler · kubelet', '', o) +
+    svgBox('logstore', 10, 382, 400, 38, 'Log store (VictoriaLogs)', '', o) +
     '</svg>';
 }
 function mountArchBig() {
@@ -2023,6 +2334,8 @@ function renderSteps(sc) {
 
 function computeState(sc, upto) {
   const state = JSON.parse(JSON.stringify(EMPTY));
+  // What a scenario shows beyond what every one does: its groups, and fields of the common ones.
+  Object.entries(sc.state || {}).forEach(([group, fields]) => { state[group] = Object.assign(state[group] || {}, JSON.parse(JSON.stringify(fields))); });
   const put = (patch) => Object.entries(patch || {}).forEach(([key, value]) => {
     const dot = key.lastIndexOf('.');
     state[key.slice(0, dot)][key.slice(dot + 1)] = value;
@@ -2214,14 +2527,19 @@ function initSimulator() {
 
 /* ---------- data diagrams ---------- */
 function erDiagram() {
-  // Row 0: functions and what they record; rows 1 and 2: accounts and access (P-12, P-16), and the audit log (P-17); row 3: usage records (P-20), API keys (P-13) and capacity samples (P-21); row 4: price books and currencies (P-30), and the platform's settings (P-70); row 5: the ledger (P-31); row 6: the hourly rating (P-32); row 7: payments (P-35) and the low-balance e-mails (P-33); rows 8 and 9: invoices (P-36), and in row 9 the calls the rate limits refused (P-50); row 10: notifications (P-51) and alarms (P-52).
+  // Row 0: functions and what they record, and under its neighbours what else a function has: its schedules and its environment on the left, its URL and the URL's own domains on the right; rows 1 and 2: accounts and access (P-12, P-16), with the account's packages, and the audit log (P-17); row 3: usage records (P-20), API keys (P-13) and capacity samples (P-21); row 4: price books and currencies (P-30), and the platform's settings (P-70); row 5: the ledger (P-31); row 6: the hourly rating (P-32); row 7: payments (P-35) and the low-balance e-mails (P-33); rows 8 and 9: invoices (P-36), and in row 9 the calls the rate limits refused (P-50); row 10: notifications (P-51) and alarms (P-52).
   const tables = [
-    { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · …'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['input_truncated', 'bool = false'], ['output_truncated', 'bool = false'], ['error_truncated', 'bool = false'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
-    { name: 'functions', x: 350, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar · unique per account'], ['account_id', 'char(12) · FK'], ['runtime', 'nodejs · python'], ['code', 'text'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'function_invocations', x: 16, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade, indexed'], ['input', 'jsonb, null'], ['output', 'jsonb, null'], ['status', 'RUNNING · COMPLETED · ERROR · …'], ['source', 'api · url · schedule'], ['duration', 'float = 0, ms'], ['memory_used', 'float, MB, null'], ['error', 'varchar, null'], ['input_truncated', 'bool = false'], ['output_truncated', 'bool = false'], ['error_truncated', 'bool = false'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'schedules', x: 16, row: 0, below: 'function_invocations', cols: [['id', 'uuid · PK', 'pk'], ['account_id', 'char(12), no FK'], ['function_id', 'uuid · FK, cascade'], ['name', 'varchar(64) · unique per function'], ['description', 'varchar(512), null'], ['expression', 'rate(…) · cron(…)'], ['input', 'jsonb, null: the Scheduled Event'], ['enabled', 'bool = true'], ['next_run_at', 'timestamptz, null: due, indexed'], ['anchor_at', "timestamptz, null: a rate's"], ['last_run_at', 'timestamptz, null'], ['last_request_id', 'uuid, null: the invocation'], ['last_outcome', 'text, null'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'function_environments', x: 16, row: 0, below: 'schedules', cols: [['function_id', 'uuid · PK, FK, cascade', 'pk'], ['account_id', 'char(12), no FK'], ['revision', 'text: random, new at each change'], ['document', 'jsonb: variables, secrets, sealed'], ['updated_at', 'timestamptz']] },
+    { name: 'functions', x: 350, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['name', 'varchar · unique per account'], ['account_id', 'char(12) · FK'], ['runtime', 'nodejs · python'], ['code', 'text: inline code, or empty'], ['package_type', 'inline · zip'], ['handler', "varchar(128) = 'function.handler'"], ['code_sha256', "varchar(44): Lambda's CodeSha256"], ['code_size', "int: Lambda's CodeSize"], ['package_sha256', 'varchar(44), null: no FK'], ['memory', 'int, MB'], ['timeout', 'int, s'], ['status', 'CREATING · ACTIVE · ERROR'], ['event_format', 'lambda · wrapped'], ['error', 'varchar, null'], ['metadata', 'jsonb, null'], ['min_instances', 'int = 0'], ['max_instances', 'int = 3'], ['scale_to_zero', 'boolean = true'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
     { name: 'function_metrics', x: 684, row: 0, cols: [['id', 'uuid · PK', 'pk'], ['function_id', 'uuid · FK, cascade'], ['timestamp', 'timestamptz, per minute'], ['request_count', 'int'], ['error_count', 'int'], ['response_time_p50', 'float, ms'], ['response_time_p95', 'float, ms'], ['response_time_p99', 'float, ms'], ['memory_usage', 'float, MB'], ['active_instances', 'int'], ['max_concurrency', 'int, calls at once'], ['created_at', 'timestamptz']] },
+    { name: 'function_urls', x: 684, row: 0, below: 'function_metrics', cols: [['function_id', 'uuid · PK, FK, cascade', 'pk'], ['account_id', 'char(12), no FK'], ['url_id', "char(32) · unique: the host's label"], ['auth_type', 'NONE · AWS_IAM'], ['cors', 'jsonb, null'], ['invoke_mode', 'BUFFERED'], ['created_at', 'timestamptz'], ['updated_at', 'timestamptz']] },
+    { name: 'custom_domains', x: 684, row: 0, below: 'function_urls', cols: [['id', 'uuid · PK', 'pk'], ['domain', 'varchar(253) · unique per account'], ['account_id', 'char(12), no FK'], ['function_id', 'uuid · FK → its URL, cascade'], ['token', "char(32): the TXT record's"], ['status', 'pending · verified: by one account'], ['checked_at', 'timestamptz, null'], ['check_error', 'text, null'], ['verified_at', 'timestamptz, null'], ['created_at', 'timestamptz']] },
     { name: 'plans', x: 16, row: 1, cols: [['id', 'text · PK, "beta"', 'pk'], ['name', 'text'], ['limits', 'jsonb (P-15)']] },
     { name: 'accounts', x: 350, row: 1, cols: [['id', 'char(12) · PK, random digits', 'pk'], ['name', 'text'], ['status', 'pending · active · …'], ['plan_id', 'text · FK'], ['country', "char(2) = 'TN'"], ['tax_id', 'text, null'], ['internet_egress', 'bool = false'], ['use_case', 'text, null'], ['low_balance_percents', 'int[], null: FF\'s'], ['data_deletion_due_at', 'timestamptz, null: closed'], ['data_deleted_at', 'timestamptz, null'], ['created_at', 'timestamptz']] },
-    { name: 'memberships', x: 684, row: 1, cols: [['account_id', 'char(12) · PK, FK, cascade', 'pk'], ['user_id', 'uuid · PK, FK, cascade', 'pk'], ['role', 'owner · developer · viewer'], ['created_at', 'timestamptz']] },
+    { name: 'packages', x: 684, row: 1, cols: [['id', 'uuid · PK', 'pk'], ['account_id', 'char(12) · FK'], ['code_sha256', 'varchar(44) · unique per account'], ['code_size', "int: the zip's bytes"], ['unpacked_size', 'int, bytes'], ['file_count', 'int'], ['files', 'text[]: paths, read when asked'], ['inline', 'bool: made of inline code'], ['image_digest', 'varchar(71), null: sha256:…'], ['created_at', 'timestamptz'], ['used_at', 'timestamptz: the purge counts from it']] },
+    { name: 'memberships', x: 684, row: 1, below: 'packages', cols: [['account_id', 'char(12) · PK, FK, cascade', 'pk'], ['user_id', 'uuid · PK, FK, cascade', 'pk'], ['role', 'owner · developer · viewer'], ['created_at', 'timestamptz']] },
     { name: 'audit_log', x: 16, row: 2, cols: [['id', 'bigserial · PK', 'pk'], ['account_id', 'char(12), null, no FK'], ['actor', 'user:… · key:… · operator:… · dev · system'], ['actor_label', 'e-mail, or key name'], ['action', 'function.create, member.role, …'], ['resource', 'function:<id>, user:<id>, …'], ['ip', 'text, null'], ['request_id', 'text, null'], ['details', 'jsonb, null'], ['at', 'timestamptz · append-only']] },
     { name: 'invitations', x: 350, row: 2, cols: [['id', 'uuid · PK', 'pk'], ['account_id', 'char(12) · FK, cascade'], ['email', 'text, lowercase, indexed'], ['role', 'owner · developer · viewer'], ['invited_by', 'uuid · FK → users'], ['created_at', 'timestamptz'], ['expires_at', 'timestamptz, 7 days'], ['accepted_at', 'timestamptz, null'], ['accepted_by', 'uuid · FK → users, null']] },
     { name: 'usage_records', x: 16, row: 3, cols: [['request_id', 'uuid · PK: the invocation', 'pk'], ['started_at', 'timestamptz · PK, by month', 'pk'], ['account_id', 'char(12), no FK'], ['function_id', 'uuid, no FK'], ['function_name', 'text, as invoked'], ['runtime', 'text, as invoked'], ['memory_mb', 'int, as invoked'], ['min_instances', 'int, as invoked (P-30)'], ['duration_ms', 'numeric(12,3)'], ['billed_ms', 'int (D7)'], ['init_ms', 'int, null: cold start'], ['status', 'success · error · lost · …'], ['ended_at', 'timestamptz · append-only']] },
@@ -2251,14 +2569,17 @@ function erDiagram() {
   ];
   const RH = 21, W = 300, TOP = 10, HEAD = 30, GAP = 34;
   const height = (t) => HEAD + RH * t.cols.length + 6;
-  // Each row starts below the tallest table of the row above.
+  const byName = (name) => tables.find((t) => t.name === name);
+  // A table with `below` stands under that one, in its column and row; a row is as tall as its tallest column.
+  const offset = (t) => (t.below ? offset(byName(t.below)) + height(byName(t.below)) + GAP : 0);
+  const reach = (t) => offset(t) + height(t);
+  // Each row starts below the tallest column of the row above.
   const rowTop = [TOP];
   const lastRow = Math.max.apply(null, tables.map((t) => t.row));
-  for (let r = 1; r <= lastRow; r++) rowTop[r] = rowTop[r - 1] + Math.max.apply(null, tables.filter((t) => t.row === r - 1).map(height)) + GAP;
-  const top = (t) => rowTop[t.row];
-  const byName = (name) => tables.find((t) => t.name === name);
+  for (let r = 1; r <= lastRow; r++) rowTop[r] = rowTop[r - 1] + Math.max.apply(null, tables.filter((t) => t.row === r - 1).map(reach)) + GAP;
+  const top = (t) => rowTop[t.row] + offset(t);
   const colY = (name, col) => { const t = byName(name); return top(t) + HEAD + RH * t.cols.findIndex((c) => c[0] === col) + 11; };
-  const bottom = rowTop[lastRow] + Math.max.apply(null, tables.filter((t) => t.row === lastRow).map(height));
+  const bottom = rowTop[lastRow] + Math.max.apply(null, tables.filter((t) => t.row === lastRow).map(reach));
   let s = '<svg class="diagram" viewBox="0 0 1000 ' + (bottom + 16) + '" role="img" aria-label="The tables and their columns">';
   tables.forEach((t) => {
     const y0 = top(t);
@@ -2285,12 +2606,36 @@ function erDiagram() {
     '<g class="rel"><path d="M' + x + ',' + (top(from) + height(from)) + ' L' + x + ',' + top(to) + '"/>' +
     '<text x="' + (x + 10) + '" y="' + (top(from) + height(from) + 14) + '">' + a + '</text>' +
     '<text x="' + (x + 10) + '" y="' + (top(to) - 5) + '">' + b + '</text></g>';
+  // A link straight across the gap between two columns, at height y: a near x1, above the line; b near x2, below it.
+  const across = (x1, x2, y, a, b) => {
+    const dir = x2 > x1 ? 1 : -1;
+    return '<g class="rel"><path d="M' + x1 + ',' + y + ' L' + x2 + ',' + y + '"/>' +
+      '<text x="' + (x1 + dir * 4) + '" y="' + (y - 5) + '" text-anchor="' + (dir > 0 ? 'start' : 'end') + '">' + a + '</text>' +
+      '<text x="' + (x2 - dir * 4) + '" y="' + (y + 14) + '" text-anchor="' + (dir > 0 ? 'end' : 'start') + '">' + b + '</text></g>';
+  };
+  const fns = byName('functions'), fnFoot = top(fns) + height(fns);
   const y0 = colY('functions', 'id');
   s += side(350, y0, 316, y0 + RH, '1', 'n'); // functions → function_invocations
   s += side(650, y0, 684, y0 + RH, '1', 'n'); // functions → function_metrics
-  s += down(500, byName('functions'), byName('accounts'), 'n', '1'); // functions.account_id → accounts
+  // What else a function has, each deleted with it: its schedules, its URL and the URL's own domains, its environment.
+  s += across(350, 316, colY('schedules', 'function_id'), '1', 'n'); // schedules.function_id → functions
+  s += across(650, 684, colY('function_urls', 'function_id'), '1', '0..1'); // function_urls.function_id → functions
+  s += down(834, byName('function_urls'), byName('custom_domains'), '1', 'n'); // custom_domains.function_id → function_urls
+  // function_environments.function_id → functions: down from under functions, then into the table's side.
+  const envY = colY('function_environments', 'function_id');
+  s += '<g class="rel"><path d="M370,' + fnFoot + ' L370,' + (envY - 12) + ' Q370,' + envY + ' 358,' + envY + ' L316,' + envY + '"/>' +
+    '<text x="378" y="' + (fnFoot + 14) + '">1</text><text x="320" y="' + (envY - 5) + '">0..1</text></g>';
+  s += down(430, fns, byName('accounts'), 'n', '1'); // functions.account_id → accounts
+  // functions.package_sha256 → packages.code_sha256 of the same account: no foreign key, but the hourly purge reads it.
+  const pkgTop = top(byName('packages')), noteY = Math.round((fnFoot + pkgTop) / 2) - 22;
+  s += '<g class="rel"><path class="nofk" d="M630,' + fnFoot + ' L630,' + (pkgTop - 30) + ' C630,' + (pkgTop - 12) + ' 780,' + (pkgTop - 22) + ' 780,' + pkgTop + '"/>' +
+    '<text x="638" y="' + (fnFoot + 14) + '">n</text><text x="790" y="' + (pkgTop - 5) + '">0..1</text>' +
+    ['package_sha256: a package of', 'the account, by code_sha256.', 'No foreign key: the hourly', 'purge keeps those named.'].map((line, n) => '<text class="note" x="622" y="' + (noteY + 15 * n) + '" text-anchor="end">' + line + '</text>').join('') + '</g>';
+  s += side(684, colY('packages', 'account_id'), 650, colY('accounts', 'id'), 'n', '1'); // packages.account_id → accounts
   s += side(350, colY('accounts', 'plan_id'), 316, colY('plans', 'id'), 'n', '1'); // accounts.plan_id → plans
-  s += side(684, colY('memberships', 'account_id'), 650, colY('accounts', 'id'), 'n', '1'); // memberships → accounts
+  // memberships → accounts: memberships stand under packages, so the link meets accounts near its foot.
+  const acc = byName('accounts');
+  s += side(684, colY('memberships', 'account_id'), 650, top(acc) + height(acc) - 18, 'n', '1');
   s += down(834, byName('memberships'), byName('users'), 'n', '1'); // memberships.user_id → users
   s += down(500, byName('accounts'), byName('invitations'), '1', 'n'); // invitations.account_id → accounts
   s += side(650, colY('invitations', 'invited_by'), 684, colY('users', 'id'), 'n', '1'); // invitations.invited_by → users
@@ -2348,7 +2693,7 @@ function k8sObjects() {
   const arrow = (d, cls, marker) => '<path class="' + (cls || '') + '" d="' + d + '" marker-end="url(#ko-' + (marker || 'n') + ')"/>';
   const label = (x, y, t, anchor) => '<text class="lbl" x="' + x + '" y="' + y + '" text-anchor="' + (anchor || 'middle') + '">' + escText(t) + '</text>';
   const lines = (x, y, list, step) => list.map((t, n) => '<text class="s" x="' + x + '" y="' + (y + (step || 14) * n) + '">' + escText(t) + '</text>').join('');
-  return '<svg class="diagram ko" viewBox="0 0 1000 500" role="img" aria-label="Kubernetes objects of one tenant and the network rules">' +
+  return '<svg class="diagram ko" viewBox="0 0 1000 500" role="img" aria-label="Kubernetes objects of one tenant, where its code comes from, and the network rules">' +
     '<defs>' + arrowDefs('ko-n', '--muted') + arrowDefs('ko-allow', '--ok') + arrowDefs('ko-deny', '--danger') + '</defs>' +
     '<rect class="zone" x="190" y="10" width="620" height="390" rx="14"/><text class="zone" x="206" y="30">Namespace ff-t-27d6fbbe5c7d · managed by ff-controller · Pod Security "restricted"</text>' +
     obj(206, 44, 186, 44, 'ResourceQuota', 'ff-tenant-quota') + obj(406, 44, 186, 44, 'LimitRange', 'ff-tenant-limits') + obj(606, 44, 190, 44, 'NetworkPolicy', 'ff-default-deny · every pod') +
@@ -2357,13 +2702,13 @@ function k8sObjects() {
     obj(586, 130, 210, 44, 'Service fn-<id>', 'ClusterIP · http 8080') +
     obj(206, 196, 220, 44, 'ReplicaSet', 'one per pod template') +
     obj(296, 262, 270, 118, 'Pod fn-<id>-…', 'container "function" · the runtime image') +
-    lines(306, 322, ['/var/task ← the ConfigMap, read-only', '/tmp ← emptyDir, 512 Mi', 'uid 10001 · read-only root · no capabilities'], 18) +
-    obj(606, 262, 190, 44, 'ConfigMap …-c4d785b397', 'the current code · immutable') +
-    obj(606, 316, 190, 44, 'ConfigMap …-<previous>', 'kept while old pods drain') +
+    lines(306, 322, ['/var/task ← the code image, read-only', '/tmp ← emptyDir, 512 Mi', 'uid 10001 · read-only root · no capabilities'], 18) +
+    obj(826, 262, 164, 44, 'Code registry', 'outside the namespace') +
+    lines(830, 324, [REPO + '@sha256:…', 'an image per package']) +
     arrow('M316,174 L316,194') + label(324, 188, 'owns', 'start') +
     arrow('M316,240 C316,252 330,256 338,260') +
     arrow('M690,174 C690,220 540,220 522,260') + label(690, 244, 'routes to ready pods') +
-    arrow('M606,284 L568,284') +
+    arrow('M826,284 L568,284') + label(697, 276, 'the node pulls it · mounted read-only') +
     '<g><rect class="obj" x="16" y="296" width="150" height="56" rx="8"/><text x="26" y="318" font-weight="600">ff-system</text><text class="s" x="26" y="336">the backend, in a cluster</text></g>' +
     arrow('M166,322 L294,322', 'allow', 'allow') + label(230, 314, 'ingress') +
     lines(16, 372, ['In development, calls come', 'through the API server\'s', 'proxy, which k3s lets', 'through (task K-06).']) +
@@ -2373,7 +2718,7 @@ function k8sObjects() {
     arrow('M330,380 C330,405 291,405 291,428', 'allow', 'allow') +
     arrow('M450,380 C450,405 492,405 492,428', 'allow', 'allow') +
     arrow('M540,380 C540,405 707,405 707,428', 'deny', 'deny') +
-    '<text class="zone" x="830" y="300">Egress rules</text>' + lines(830, 318, ['green: allowed', 'red: blocked: 10/8, 172.16/12,', '192.168/16, 169.254/16,', '100.64/10, 127/8']) +
+    '<text class="zone" x="830" y="414">Egress rules</text>' + lines(830, 432, ['green: allowed', 'red: blocked: 10/8, 172.16/12,', '192.168/16, 169.254/16,', '100.64/10, 127/8']) +
     '</svg>';
 }
 
@@ -2387,7 +2732,7 @@ function runtimeDiagram() {
     '<rect x="6" y="6" width="628" height="418" rx="14" style="fill:none;stroke:var(--border);stroke-dasharray:5 4"/>' + label(20, 26, 'Container "function", one per pod', 'start') +
     box(20, 40, 260, 170, 'Main process', ['HTTP server on :8080', 'GET /healthz → 200 while alive', 'GET /readyz → 200 once code is loaded', 'POST /invoke → 1 running, 32 waiting', 'timer per invocation (FUNCTION_TIMEOUT)', 'START / END / REPORT log lines', 'replaces a timed-out or crashed worker', 'SIGTERM: stop accepting, drain, exit'], '--c-pod') +
     box(370, 40, 250, 130, 'Worker', ['Node.js: worker thread, heap limits', 'Python: child process, memory budget', 'loads /var/task/function.* once', 'runs handler(event, context)', 'one invocation at a time'], '--c-worker') +
-    box(370, 290, 250, 116, 'Your code', ['/var/task: the ConfigMap, read-only', 'returns JSON-serializable data', 'console.log, print → the pod log', 'writable: /tmp only'], '--c-worker') +
+    box(370, 290, 250, 116, 'Your code', ['/var/task: the code image, read-only', 'returns JSON-serializable data', 'console.log, print → the pod log', 'writable: /tmp only'], '--c-worker') +
     box(20, 290, 260, 116, 'kubelet, outside the container', ['readiness probe /readyz every 2 s', 'liveness probe /healthz every 10 s', 'SIGTERM on scale-down or rollout'], '--c-node') +
     arrow('M280,90 L368,90') + label(324, 82, 'event') +
     arrow('M368,130 L282,130') + label(324, 148, 'result') +

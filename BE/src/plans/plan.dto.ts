@@ -20,6 +20,8 @@ export class PlanLimitsView implements PlanLimits {
   @ApiProperty({ example: 30, description: 'Days of invocation history kept' }) historyRetentionDays: number;
   @ApiProperty({ example: 900, description: 'Seconds without a call before a function scales to zero' }) idleSeconds: number;
   @ApiProperty({ example: false, description: 'Whether functions may reach the internet' }) internetEgress: boolean;
+  @ApiProperty({ example: 5, description: "Customers' own domains for their functions' URLs, all together" }) customDomains: number;
+  @ApiProperty({ example: 20, description: "Functions' schedules, all together" }) schedules: number;
 }
 
 /** An account's plan. */

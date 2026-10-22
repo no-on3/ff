@@ -22,6 +22,13 @@ export enum InvocationStatus {
   LOST = 'LOST',
 }
 
+/** What brought an invocation: the API's invoke, a request to the function's URL, or one of its schedules. */
+export enum InvocationSource {
+  API = 'api',
+  URL = 'url',
+  SCHEDULE = 'schedule',
+}
+
 @Entity('function_invocations')
 // The history lists a function's invocations newest first; deleting a function finds them too.
 @Index(['functionId', 'createdAt'])
@@ -51,6 +58,10 @@ export class FunctionInvocation {
     enum: InvocationStatus,
   })
   status: InvocationStatus;
+
+  /** What brought it: the API, the function's URL, or a schedule. */
+  @Column({ type: 'enum', enum: InvocationSource, default: InvocationSource.API })
+  source: InvocationSource;
 
   @Column('float', { default: 0.0 })
   duration: number;

@@ -1,10 +1,12 @@
 /**
- * FF Node.js runtime, protocol v2. The main thread serves HTTP and supervises
+ * FF Node.js runtime, protocol v3. The main thread serves HTTP and supervises
  * one worker thread that runs user code (worker.ts):
  *
  *   GET  /healthz   liveness: the main thread is responsive
  *   GET  /readyz    readiness: user code is loaded (503 with the error if not)
- *   POST /invoke    run the handler once; invocations are serialized, as on Lambda
+ *   POST /invoke    run the handler once; invocations are serialized, as on Lambda.
+ *                   The body is the event (FF_EVENT_FORMAT=lambda, the default), or
+ *                   goes in FF's original wrapper (wrapped), for older functions.
  *
  * A timeout, out-of-memory, or crash terminates the worker and starts a fresh
  * one, so even CPU-bound infinite loops are stopped and probes keep answering.
@@ -17,7 +19,8 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
-import type { FunctionError, FunctionEvent, WorkerConfig, WorkerMessage } from './protocol';
+import { EVENT_FORMATS } from './protocol';
+import type { EventFormat, FunctionError, WorkerConfig, WorkerMessage } from './protocol';
 import { OutputRelay } from './relay';
 
 type ResultMessage = Extract<WorkerMessage, { type: 'result' }>;
@@ -28,6 +31,13 @@ const timeoutMs = Number(env.FUNCTION_TIMEOUT ?? 30_000);
 const memoryLimitMb = Number(env.FUNCTION_MEMORY_LIMIT ?? 128);
 const initTimeoutMs = Number(env.FF_INIT_TIMEOUT_MS ?? Math.max(10_000, timeoutMs));
 const maxQueue = Number(env.FF_MAX_QUEUE ?? 32);
+/** What the handler gets: the payload itself, as on AWS Lambda, or FF's original wrapper (protocol.ts). */
+const eventFormat = (env.FF_EVENT_FORMAT ?? 'lambda') as EventFormat;
+if (!EVENT_FORMATS.includes(eventFormat)) {
+  // A function given the wrong event would fail at every call, or worse, misread it: refuse to start instead.
+  console.log(JSON.stringify({ time: new Date().toISOString(), level: 'error', msg: 'unknown FF_EVENT_FORMAT', expected: EVENT_FORMATS }));
+  process.exit(1);
+}
 /**
  * How long a call may wait for the instance to be free. Then it gets 429, as on Lambda when no
  * environment is free. The backend waits this long plus the timeout, so it never gives up on
@@ -98,7 +108,7 @@ try {
 interface Invocation {
   id: number;
   requestId: string;
-  event: FunctionEvent;
+  event: unknown;
   res: http.ServerResponse;
   startedAt?: number;
   /** When the handler settled: the call's duration ends here, not when its output is all forwarded. */
@@ -428,13 +438,10 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
     id: nextId++,
     requestId: (Array.isArray(header) ? header[0] : header) || randomUUID(),
     res,
-    event: {
-      body,
-      headers: flattenHeaders(req.headers),
-      method: req.method ?? 'POST',
-      query: Object.fromEntries(url.searchParams),
-      path: url.pathname,
-    },
+    event:
+      eventFormat === 'wrapped'
+        ? { body, headers: flattenHeaders(req.headers), method: req.method ?? 'POST', query: Object.fromEntries(url.searchParams), path: url.pathname }
+        : body,
   };
   inv.queueTimer = setTimeout(() => expireQueued(inv), maxQueueWaitMs);
   queue.push(inv);
@@ -491,6 +498,7 @@ server.listen(port, () => {
     memoryLimitMb,
     heapLimitMb: heapLimits.maxOldGenerationSizeMb + heapLimits.maxYoungGenerationSizeMb,
     handler: workerConfig.handler,
-    protocol: 2,
+    protocol: 3,
+    eventFormat,
   });
 });

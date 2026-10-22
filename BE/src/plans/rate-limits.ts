@@ -47,6 +47,20 @@ export function rateLimitTracker(request: RateLimitedRequest): string {
   return `ip:${request.ip ?? 'unknown'}`;
 }
 
+/**
+ * Counts a call that didn't come through the API (a request to a function's
+ * URL) against the account's invocations per second, in the throttler's own
+ * storage and under the key the API's invokes count under: one count for the
+ * account, whichever way its calls come. Answers the seconds to wait when the
+ * call is over the limit, and undefined when it may go on.
+ */
+export async function countInvocation(storage: ThrottlerStorage, accountId: string, limit: number): Promise<number | undefined> {
+  const { ttlMs } = RATE_LIMITS.invokes;
+  // The guard's key for the account's invokes (generateKey below, with rateLimitTracker's account), its window, and a block as long.
+  const record = await storage.increment(`invokes:account:${accountId}`, ttlMs, limit, ttlMs, 'invokes');
+  return record.isBlocked ? record.timeToBlockExpire : undefined;
+}
+
 /** The plan whose limits apply: the account's, else the plan a new account gets. */
 const planOf = (plans: PlansService, request: RateLimitedRequest): Promise<PlanView> =>
   plans.get(request.principal?.planId ?? DEFAULT_PLAN);

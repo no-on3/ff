@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TRUNCATED, callValue, foundIn, lookDialog, milliseconds, outcome, searchSummary } from './support';
+import { TRUNCATED, callValue, domainsText, eventFormatText, scheduleText, foundIn, lookDialog, milliseconds, namesText, outcome, searchSummary, sourceText, urlText } from './support';
 
 describe("a look at a customer's data", () => {
   it("says what it shows, and that the account's owners see it in their audit log, with the reason", () => {
@@ -47,5 +47,39 @@ describe('a call, to read', () => {
     expect(callValue('{"rows":[1,2', true)).toBe('{"rows":[1,2');
     expect(callValue('plain', false)).toBe('"plain"');
     expect(TRUNCATED).toBe('Truncated: the history keeps the first 64 KiB.');
+  });
+});
+
+describe("a function's configuration, to read", () => {
+  it('says what brought each call', () => {
+    expect([sourceText('api'), sourceText('url'), sourceText('schedule')]).toEqual(['API', 'URL', 'Schedule']);
+  });
+
+  it('says who may call its URL, and whether it has CORS', () => {
+    const url = { functionUrl: 'https://abc.fn.example.tn/', createdAt: '2026-10-21T08:00:00Z', domains: [] };
+
+    expect(urlText({ ...url, authType: 'NONE', cors: false })).toBe('anyone may call it');
+    expect(urlText({ ...url, authType: 'AWS_IAM', cors: true })).toBe('only with an API key of the account, with CORS');
+  });
+
+  it("names the URL's own domains, each with where it stands", () => {
+    expect(domainsText([{ domain: 'shop.example.tn', status: 'verified', checkError: null }, { domain: 'example.tn', status: 'pending', checkError: 'No TXT record' }])).toBe(
+      'shop.example.tn (verified), example.tn (pending)',
+    );
+    expect(domainsText([])).toBe('none');
+  });
+
+  it('says when each schedule runs, and how its last run went', () => {
+    const when = (iso: string) => iso.slice(0, 16).replace('T', ' ');
+    const schedule = { name: 'nightly', expression: 'cron(0 2 * * ? *)', enabled: true, nextRunAt: '2026-10-22T02:00:00Z', lastRunAt: null, lastOutcome: null };
+
+    expect(scheduleText(schedule, when)).toBe('nightly: cron(0 2 * * ? *), next 2026-10-22 02:00');
+    expect(scheduleText({ ...schedule, enabled: false, lastOutcome: 'error' }, when)).toBe('nightly: cron(0 2 * * ? *), disabled; last: error');
+    expect(scheduleText({ ...schedule, nextRunAt: null }, when)).toBe('nightly: cron(0 2 * * ? *), no run left');
+  });
+
+  it('names the variables and secrets, or says there are none', () => {
+    expect([namesText(['DB_URL', 'TABLE']), namesText([])]).toEqual(['DB_URL, TABLE', 'none']);
+    expect(eventFormatText('wrapped')).toBe("FF's original wrapped event, from before AWS Lambda's");
   });
 });

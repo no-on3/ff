@@ -1,6 +1,6 @@
 // Results that JSON can't hold.
 exports.handler = async (event) => {
-  switch (event.body.kind) {
+  switch (event.kind) {
     case 'function':
       return () => 1;
     case 'symbol':

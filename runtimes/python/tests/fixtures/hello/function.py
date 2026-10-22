@@ -4,7 +4,7 @@ import os
 def handler(event, context):
     print("hello from user code")
     return {
-        "message": f"Hello {event['body'].get('name', 'world')}",
+        "message": f"Hello {event.get('name', 'world')}",
         "functionName": context.function_name,
         "memoryLimitInMB": context.memory_limit_in_mb,
         "requestId": context.aws_request_id,

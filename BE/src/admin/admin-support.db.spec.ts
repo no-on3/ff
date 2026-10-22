@@ -22,6 +22,11 @@ import { ScratchDatabase, createScratchDatabase } from '../database/scratch-data
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
+import { FunctionUrl, UrlAuthType } from '../functions/entities/function-url.entity';
+import { FunctionUrlsService } from '../function-urls/function-urls.service';
+import { CustomDomain, DomainStatus } from '../function-urls/custom-domain.entity';
+import { CustomDomainsService } from '../function-urls/custom-domains.service';
+import { Schedule } from '../schedules/schedule.entity';
 import { capturingMail } from '../mail/capturing-mail';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
@@ -59,7 +64,7 @@ run('support, for operators (L2)', () => {
       name,
       accountId,
       runtime: Runtime.NODEJS,
-      code: 'export const handler = async (event) => ({ hello: event.body.email });',
+      code: 'export const handler = async (event) => ({ hello: event.email });',
       memory: 256,
       timeout: 10,
       minInstances: 1,
@@ -116,7 +121,21 @@ run('support, for operators (L2)', () => {
       credits,
       settings,
     );
-    support = new AdminSupportService(ds.getRepository(Function), ds.getRepository(FunctionInvocation), accounts, { logs } as unknown as FunctionsService, audit);
+    // The environment's names come from its store, which other suites test; the URL from its table, here.
+    const environmentNames = async () => ({ variables: ['TABLE'], secrets: ['DB_PASSWORD'] });
+    const urls = new FunctionUrlsService(ds.getRepository(FunctionUrl), {} as never, audit, { getOrThrow: () => 'https://fn.example.tn' } as unknown as ConfigService);
+    // The domains' own rows: added and checked by their service, which other suites test.
+    const domains = { forFunction: (functionId: string) => ds.getRepository(CustomDomain).find({ where: { functionId } }) } as unknown as CustomDomainsService;
+    support = new AdminSupportService(
+      ds.getRepository(Function),
+      ds.getRepository(FunctionInvocation),
+      accounts,
+      { logs, environmentNames } as unknown as FunctionsService,
+      audit,
+      urls,
+      domains,
+      ds.getRepository(Schedule),
+    );
   });
 
   afterAll(async () => {
@@ -172,6 +191,10 @@ run('support, for operators (L2)', () => {
     const failed = await called(f, 5, InvocationStatus.ERROR, `ValidationError: no account for ${PRIVATE}`);
     const timedOut = await called(f, 2, InvocationStatus.TIMEOUT, 'Sandbox.Timedout: Task timed out after 10.00 seconds');
 
+    await db.dataSource.getRepository(FunctionUrl).insert({ functionId: f.id, accountId: id, urlId: 'u'.repeat(32), authType: UrlAuthType.AWS_IAM, cors: { allowOrigins: ['*'] } });
+    await db.dataSource.getRepository(CustomDomain).insert({ domain: 'shop.example.tn', accountId: id, functionId: f.id, token: 't'.repeat(32), status: DomainStatus.VERIFIED });
+    await db.dataSource.getRepository(Schedule).insert({ accountId: id, functionId: f.id, name: 'nightly', expression: 'cron(0 2 * * ? *)', input: { secret: PRIVATE }, lastOutcome: 'success' });
+
     const page = await support.functionPage(f.id);
 
     expect(page.function).toEqual({
@@ -183,17 +206,28 @@ run('support, for operators (L2)', () => {
       minInstances: 1,
       maxInstances: 3,
       status: 'ACTIVE',
+      eventFormat: 'lambda',
       error: null,
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
+    expect(page.url).toEqual({
+      functionUrl: `https://${'u'.repeat(32)}.fn.example.tn/`,
+      authType: 'AWS_IAM',
+      cors: true,
+      createdAt: expect.any(Date),
+      domains: [{ domain: 'shop.example.tn', status: 'verified', checkError: null }],
+    });
+    expect([page.variables, page.secrets]).toEqual([['TABLE'], ['DB_PASSWORD']]);
+    expect(page.schedules).toEqual([{ name: 'nightly', expression: 'cron(0 2 * * ? *)', enabled: true, nextRunAt: null, lastRunAt: null, lastOutcome: 'success' }]);
     expect([page.account.id, page.account.owners.map((o) => o.email)]).toEqual([id, ['owner@page-labs.test']]);
     expect(page.recentCalls.map((c) => c.id)).toEqual([timedOut, failed, ...calls.slice(-18).reverse()]);
     expect(page.recentErrors.map((c) => [c.id, c.status, c.errorType])).toEqual([
       [timedOut, 'TIMEOUT', 'Sandbox.Timedout'],
       [failed, 'ERROR', 'ValidationError'],
     ]);
-    expect(Object.keys(page.recentCalls[0]).sort()).toEqual(['createdAt', 'duration', 'errorType', 'id', 'memoryUsed', 'status']);
+    expect(Object.keys(page.recentCalls[0]).sort()).toEqual(['createdAt', 'duration', 'errorType', 'id', 'memoryUsed', 'source', 'status']);
+    expect(page.recentCalls[0].source).toBe('api');
     expect(JSON.stringify(page)).not.toContain(PRIVATE);
     expect(JSON.stringify(page)).not.toContain('export const handler');
     expect(await entriesOf(id)).toEqual([]);

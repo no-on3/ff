@@ -1,5 +1,5 @@
 """Shared by main.py and worker.py: settings, limits, logging, and the messages
-between the two processes. Runtime protocol v2.
+between the two processes. Runtime protocol v3.
 
 Messages are JSON arrays sent over a socket pair, each prefixed by its length
 as a 4-byte big-endian integer:
@@ -39,6 +39,11 @@ TASK_ROOT = os.environ.get("LAMBDA_TASK_ROOT", "/var/task")
 HANDLER = os.environ.get("FF_HANDLER", "function.handler")
 FUNCTION_NAME = os.environ.get("FUNCTION_NAME", "unknown")
 FUNCTION_VERSION = os.environ.get("FUNCTION_VERSION", "$LATEST")
+# What the handler gets: "lambda", the default, the payload of POST /invoke itself, any JSON value, as on
+# AWS Lambda; or "wrapped", FF's original event around it ({body, headers, method, query, path}), for
+# functions made before protocol 3.
+EVENT_FORMATS = ("lambda", "wrapped")
+EVENT_FORMAT = os.environ.get("FF_EVENT_FORMAT", "lambda")
 
 
 def log(**fields):

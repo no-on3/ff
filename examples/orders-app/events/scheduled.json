@@ -1,0 +1,11 @@
+{
+  "version": "0",
+  "id": "4c1e7a2b-6d3f-4e8a-9b0c-1d2e3f4a5b6c",
+  "detail-type": "Scheduled Event",
+  "source": "aws.events",
+  "account": "000000000001",
+  "time": "2026-10-22T02:00:00Z",
+  "region": "tn-tunis-1",
+  "resources": ["arn:aws:events:tn-tunis-1:000000000001:rule/orders-nightly-schedule"],
+  "detail": {}
+}

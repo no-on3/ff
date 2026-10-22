@@ -1,5 +1,4 @@
 import {
-  codeConfigMapName,
   codeHash,
   functionResourceName,
   accountHash,
@@ -25,16 +24,11 @@ describe('Kubernetes naming', () => {
     expect(() => functionResourceName(bad)).toThrow('cannot be used in a Kubernetes name');
   });
 
-  it('gives each code version its own ConfigMap name within the 63-character limit', () => {
-    const v1 = codeConfigMapName(id, codeHash('nodejs', 'a'));
-    const v2 = codeConfigMapName(id, codeHash('nodejs', 'b'));
+  it("hashes a version's code by its image and its runtime, each changing it", () => {
+    const image = 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'a'.repeat(64);
 
-    expect(v1).not.toBe(v2);
-    expect(v1.length).toBeLessThanOrEqual(63);
-    expect(v1).toMatch(new RegExp(`^fn-${id}-[0-9a-f]{10}$`));
-  });
-
-  it('includes the runtime in the code hash', () => {
-    expect(codeHash('nodejs', 'x')).not.toBe(codeHash('python', 'x'));
+    expect(codeHash('nodejs', image)).toMatch(/^[0-9a-f]{64}$/);
+    expect(codeHash('nodejs', image)).not.toBe(codeHash('nodejs', image.replace(/a$/, 'b')));
+    expect(codeHash('nodejs', image)).not.toBe(codeHash('python', image));
   });
 });

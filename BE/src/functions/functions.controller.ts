@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
 import { ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { ServerResponse } from 'node:http';
 import { Principal } from '../auth/principal';
@@ -7,13 +7,15 @@ import { Invocation } from '../plans/rate-limits';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { InvokeFunctionDto } from './dto/invoke-function.dto';
+import { ListFunctionsQuery } from './dto/list-functions.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
+import { SecretsView, UpdateSecretsDto } from './dto/secrets.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
 import { sendEvents } from './event-stream';
-import { FunctionsService } from './functions.service';
+import { FunctionView, FunctionsService } from './functions.service';
 
 /**
  * Every route acts for the caller's account (D4): without a principal it
@@ -44,24 +46,24 @@ export class FunctionsController {
       'The request was refused (validation, the plan), and nothing was saved; or the code failed to load, and `functionId` names the function saved as ERROR',
   })
   @ApiResponse({ status: 409, description: 'Another of the account\'s functions has the name: names are unique within an account. Nothing was saved' })
-  async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<Function> {
+  async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<FunctionView> {
     return this.functionsService.create(principal.accountId, createFunctionDto);
   }
 
   @Get()
   @RequireScope('functions:read')
-  @ApiOperation({ summary: "List the account's functions" })
+  @ApiOperation({ summary: "List the account's functions, newest first; with name, the one of that name" })
   @ApiResponse({ status: 200, description: 'List of functions', type: [Function] })
-  async findAll(@Principal() principal: Principal): Promise<Function[]> {
-    return this.functionsService.findAll(principal.accountId);
+  async findAll(@Query() query: ListFunctionsQuery, @Principal() principal: Principal): Promise<Function[]> {
+    return this.functionsService.findAll(principal.accountId, query.name);
   }
 
   @Get(':id')
   @RequireScope('functions:read')
   @ApiOperation({ summary: 'Get a function by ID' })
-  @ApiResponse({ status: 200, description: 'Function details', type: Function })
-  async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<Function> {
-    return this.functionsService.findOne(principal.accountId, id);
+  @ApiResponse({ status: 200, description: "Function details, with its environment variables; never its secrets' values", type: Function })
+  async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<FunctionView> {
+    return this.functionsService.describe(principal.accountId, id);
   }
 
   @Put(':id')
@@ -80,7 +82,7 @@ export class FunctionsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateFunctionDto: UpdateFunctionDto,
     @Principal() principal: Principal,
-  ): Promise<Function> {
+  ): Promise<FunctionView> {
     return this.functionsService.update(principal.accountId, id, updateFunctionDto);
   }
 
@@ -100,6 +102,7 @@ export class FunctionsController {
   @RequireActiveAccount()
   @ApiOperation({ summary: 'Invoke a function' })
   @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
+  @ApiResponse({ status: 413, description: 'The input is over 6 MB as JSON, AWS Lambda\'s limit for a synchronous call: RequestEntityTooLargeException, as Lambda names it' })
   async invoke(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() invokeFunctionDto: InvokeFunctionDto,
@@ -157,6 +160,38 @@ export class FunctionsController {
     // Every check first: another account's function is a JSON 404, before anything of the stream is sent.
     const events = await this.functionsService.liveLogs(principal.accountId, id, query, tail.signal);
     await sendEvents(res, events, () => tail.abort());
+  }
+
+  @Get(':id/secrets')
+  @RequireScope('functions:read')
+  @ApiOperation({
+    summary: "The function's secrets: each one's name, and when it was set; never a value",
+    description: 'Every member reads them, and an API key with functions:read. Nobody reads a value back, not even this API: the function alone does.',
+  })
+  @ApiResponse({ status: 200, type: SecretsView })
+  listSecrets(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<SecretsView> {
+    return this.functionsService.listSecrets(principal.accountId, id);
+  }
+
+  @Patch(':id/secrets')
+  @RequireScope('functions:write')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
+  @ApiOperation({
+    summary: 'Set secrets, and remove them with null',
+    description:
+      'The secrets named are set, or removed with null; the others stay. A change rolls out a new version, as a change of variables does, ' +
+      'and the answer comes once it is live; a value already set, or a name already gone, changes nothing. Owners and developers, and an ' +
+      'API key with functions:write.',
+  })
+  @ApiResponse({ status: 200, type: SecretsView })
+  @ApiResponse({
+    status: 400,
+    description:
+      "A name outside the rule or a variable's, or more than 4 KB with the variables; or the new version didn't start, and the previous one is still live",
+  })
+  updateSecrets(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateSecretsDto, @Principal() principal: Principal): Promise<SecretsView> {
+    return this.functionsService.updateSecrets(principal.accountId, id, dto.secrets);
   }
 
   @Get(':id/scaling-config')

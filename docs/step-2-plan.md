@@ -1,0 +1,262 @@
+# Step 2 plan: a database and file storage
+
+| | |
+|---|---|
+| **Status** | Proposed on 2026-10-21, and confirmed by you on 2026-10-22 with every choice of §9 (the [decision log](decisions.md), decisions 3 to 14). Not started: it starts after the [CLI plan](cli-plan.md)'s C-29. |
+| **Goal** | Step 2 of [What to build next](what-to-build-next.md): an app keeps its data on FF. A PostgreSQL database and buckets of files, each in AWS's shape (PostgreSQL itself, as RDS runs it; the S3 API, as AWS's SDKs speak it), within the plan's limits, billed in dinars at AWS's prices, with a way out to AWS |
+| **Parent plans** | [What to build next](what-to-build-next.md) §5 and §10; the [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): E-04 (the S3 front door), E-07 (execution credentials, its S3 part), §4.7 (the S3 store's tenancy), §6.7 (S3, and PostgreSQL rather than DynamoDB), §8.1 and §8.2 (billing units, and no deletion for non-payment), the export kit (`data/s3-sync.sh`, `data/postgres.md`) |
+| **Builds on** | The [step-1 plan](step-1-plan.md): secrets, the event shapes, packages and the `ff` command, and its small app; the [client-readiness plan](client-readiness-plan.md): plans and limits, usage records, the price book and the hourly rating, the admin app, the backups |
+| **Decision records** | ADR 0008 (customers' databases: the server, isolation, the path from functions) and ADR 0009 (buckets: the S3 front door and the store behind it), both from V-01's spike |
+
+Task numbers start with V, for *vault*: where an app keeps what it owns. The CLI plan keeps its own numbers: its C-53 (buckets) and C-54 (databases) are this plan's command-line parts.
+
+## 1. Where FF stands
+
+Checked against the code on 2026-10-21, at the end of step 1 (`feat/step-1`).
+
+| Finding | Where | Consequence |
+|---|---|---|
+| **Nothing stores a customer's data.** No route, table, page or command for a database or a bucket. FF's one bucket is its own: code, packages, invoices and withholding certificates. | `BE/src/minio-client/minio-client.service.ts`; `MINIO_BUCKET_NAME` | Both services are new, end to end. |
+| **FF's PostgreSQL and S3 run outside the cluster in production,** as the client-readiness plan's D13 decided: the platform's manifests have neither, and the backend's ClusterRole can't make a StatefulSet or a volume; its admission policy keeps its writes in tenants' namespaces. | `deploy/k8s/README.md`; `deploy/k8s/base/20-clusterrole.yaml`, `40-admission-policy.yaml` | A server for customers' databases is the operator's, as FF's own is. The backend makes databases and users inside it, never the server (D1). |
+| **A function reaches nothing private.** Its namespace's `ff-default-deny` allows DNS always, and the internet, minus FF's network and the private ranges, only when the account's access is on. | `BE/src/orchestrator/kubernetes/manifests.ts` (`networkPolicyManifest`, `BLOCKED_EGRESS_CIDRS`) | Functions must reach the database server and the S3 front door even with the account's internet access off (What to build next §10): a rule of their own, which the blocked ranges don't cancel, as NetworkPolicy rules add up (D3). |
+| **Usage is counted per function.** `usage_records` is one row per call; `capacity_samples`, one row a minute per function with ready instances; `usage_hourly`, the monthly statement and the reconciliation are keyed by function. | `BE/src/usage/`, `billing/hourly-rating.service.ts`, `billing/usage-sql.ts`, `invoices/statement.ts`, `billing/reconciliation.ts` | Storage and requests need usage records of their own, and a place in the rating and the statement that isn't a function's (D9). |
+| **A price book requires every SKU, and one that has started can't change.** A trigger refuses it; `bookPrices()` parses every book. | `billing/price-book.ts`, migration `PriceBooks` | New SKUs must be optional, priced 0 in the books from before, or every past book stops parsing (D9). |
+| **Plan limits are a strict schema of 13 keys,** which the console, the admin app and the CLI list, and their builds or tests fail on a key they don't know. A limit comes with a migration, which runs before the new backend rolls out. | `BE/src/plans/plan-limits.ts`; `FE/src/lib/plans.ts`; `admin/src/lib/plans.ts`; `cli/src/commands/account.rs`; the step-1 plan's D11 | Each new limit (D10) touches five places, as `schedules` and `customDomains` did. |
+| **An account's lifecycle knows only functions.** Suspension scales them to zero; a closed account's data deletion removes its namespace, functions and packages. | `BE/src/admin/admin-accounts.service.ts`; `BE/src/retention/retention.service.ts` | A suspended account's databases and keys must stop answering, and a closed account's go with the rest of its data, never earlier for non-payment (D12). |
+| **Backups cover FF's two databases** (WAL-G 3.0.9, a base backup each night, about 30 days of point-in-time recovery, to the second site) **and two prefixes of the bucket**; a restore is the whole server. | `deploy/backup/README.md`; `hack/backup-drill.sh` | The customers' server needs its own WAL-G; one customer's database comes back by restoring the server elsewhere and copying that database (D13). No bucket of customers is backed up today. |
+| **A function's secrets are its own,** sealed with the key ring that `sealJson` offers any record, delivered through a Kubernetes Secret the backend writes and never reads. `DATABASE_URL` is a name a function may have; `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and `AWS_REGION` are FF's to set. | `BE/src/functions/environment.store.ts`, `environment.ts`; `BE/src/encryption/` | A database's address can reach functions as their secret; credentials for buckets can use the names FF reserves (D8). |
+| **The development S3 store has one static identity, and production's engine is the operator's choice.** No use of the store's IAM anywhere. | `infrastructure/seaweedfs/s3.json`; `docker-compose.yml` (SeaweedFS 4.48); the parent plan's ADR-002 | Customers' keys can't be the store's: FF's own front door checks them and meters each request, whatever store is behind it (D6). |
+| **Every route needs rules in the L5 suite,** in its three loops, and a resource whose `{id}` isn't a function's needs a rule of its own. | `hack/e2e-tenancy.sh` | Every route this plan adds gets them in its own task. |
+| **Step 1's small app keeps its orders in a database of its own,** on a test network, reached through the account's internet access. | `examples/orders-app`; `hack/k8s/app-database.sh` | Step 2's close moves it to FF's database, and its receipts to a bucket (V-10). |
+
+## 2. Goals and non-goals
+
+**Goals:**
+- **AWS's shapes:** PostgreSQL itself, a major version RDS runs, so that `pg_dump` and a restore, or logical replication, move a database to RDS; the S3 API as AWS's SDKs and CLI speak it (SigV4, path-style and virtual-hosted addresses, AWS's XML errors), so that an S3 client works with only its endpoint changed, and a function's code with nothing changed (D8).
+- **Isolation proven:** a database and its user per database, with no way into another's; buckets and keys per account; functions reach the database server and the S3 front door, and nothing else private; every route in the L5 suite.
+- **Metered and billed as AWS bills:** storage by GB-month, sampled every hour; S3 requests by AWS's two classes; usage records written once; SKUs in the price book at AWS's list price on the book's date, with a free tier.
+- **Limits that hold:** the plan's databases, storage and connections, its buckets and their storage and request rate, and what one customer can do to the others (§8).
+- **Everything every new service needs** (What to build next §10): usage records, price, limits, console page and routes with the isolation test, admin page, backups, logs and metrics with alarms, documentation, a way out, abuse limits.
+
+**Non-goals (for now):**
+- **Bucket notifications** (step 3's queue, the parent's E-04 events), **public buckets and website hosting** (step 4's static sites), versioning, lifecycle rules, object lock, replication, ACLs and bucket policies beyond D7's keys, S3 Select, server access logs.
+- **A server per account,** high availability beyond the server's own, read replicas, a connection pooler, extensions that aren't PostgreSQL's trusted ones, PostGIS (an operator may add it later, as RDS lists it).
+- **DynamoDB,** as the parent plan decided (§6.7): FF recommends PostgreSQL.
+- **The Lambda API and STS** beyond the credentials a function gets (D8): the parent's E-06 and E-07 in full come with step 5.
+
+## 3. Decisions
+
+ADR 0008 records D1 to D5 once V-01's spike has measured them, and ADR 0009 records D6 to D8.
+
+### D1. The customers' database server is the operator's, outside the cluster
+- **A PostgreSQL server of its own,** apart from FF's: a customer's load or a full disk never reaches FF's control plane, its backups and restores are its own, and it can move to bigger hardware alone. One server to start; a server per plan tier when the plans need it, each database placed on one.
+- **The newest major version RDS runs:** PostgreSQL 18 at the time of writing (19 comes out on 2026-11-19, and RDS has it in preview only). TLS required, `password_encryption = scram-sha-256`, its data on a disk of its own.
+- **The backend holds an administrative role** on it, `CREATEDB` and `CREATEROLE` but not superuser, through new settings (`FF_DATA_DB_ADMIN_URL`, `FF_DATA_DB_HOST` as functions reach it, `FF_DATA_DB_CIDRS` for D3). The server's own settings (`max_connections`, `temp_file_limit`, `log_*`, the trusted extensions) are the operator's, in a README of its own under `deploy/`.
+- **In development:** a second PostgreSQL in `docker-compose.yml`, which the cluster's node reaches as `hack/k8s/app-database.sh` reaches its database, on a Docker network of its own.
+
+### D2. A database and its user, with names nobody else learns
+- **One user per database, its owner,** `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`, with the plan's connection limit (`CONNECTION LIMIT`). `REVOKE CONNECT ON DATABASE … FROM PUBLIC`, and the server's `pg_hba.conf` lets a user into its namesake database only (`hostssl sameuser`), from the cluster's pods and the backend.
+- **Opaque names:** every user reads `pg_database` and `pg_roles`, so the database and its user are named `ff_` and 24 random characters, the same for both, never the account or the customer's name, which FF's own table keeps (`orders`).
+- **The owner creates what it needs:** tables, schemas, and PostgreSQL's trusted extensions (`pgcrypto`, `citext`, `hstore`, `pg_trgm`, `uuid-ossp` and the others), which an owner may create without a superuser since PostgreSQL 13.
+
+### D3. Functions reach the server, whatever the account's internet access
+The tenant's NetworkPolicy gains a rule, written on every deploy as the rest is: egress to `FF_DATA_DB_CIDRS` on port 5432 only. The server, for its part, takes connections from the cluster's pods and the backend only. Between accounts, the wall is the user and its password: 32 random bytes, SCRAM, TLS.
+
+### D4. The password: made by FF, shown once, given to functions as a secret
+- **Made by the backend, shown once,** in the answer that creates the database or resets its password, as a connection string: FF keeps no copy. The backend sends the server a SCRAM verifier it computed itself (`ALTER ROLE … PASSWORD 'SCRAM-SHA-256$4096:…'`), so the password never reaches the server's logs either.
+- **Into functions as their secret:** `ff db create orders --secret-for orders-api` sets `DATABASE_URL` on the functions named, through the existing secrets route, with the string it was given once; the console offers the same. A new password rolls the functions named out with it. FF stores no link between a database and functions.
+
+### D5. A database's size: measured every hour, signalled at the plan's limit, billed above it
+PostgreSQL has no limit on a database's size, and an owner can turn any session setting back. So:
+- **Every hour,** the backend samples each database's size (`pg_database_size`) and connections, which the bill and the metrics read.
+- **At 80% and 100% of the plan's storage,** the owners are told. **Past 100%,** the database's new sessions start read-only (`ALTER DATABASE … SET default_transaction_read_only = on`): an app sees it at its next write, and a session may turn it off to delete what it no longer needs. A signal, not a wall.
+- **The wall** is the server's disk alert to the operator, and the bill: what is above the plan's storage is billed by the GB-month, as RDS bills the storage it is given. A hard wall (a tablespace per database on a disk with quotas) needs a superuser and the operator's tooling: §9 kept the signal, confirmed on 2026-10-22.
+
+### D6. Buckets behind FF's own S3 front door (the parent's E-04)
+- **A small S3 server in the backend,** on a port of its own (as the function URL gateway is), at `s3.<domain>` and `<bucket>.s3.<domain>`. It checks each request's SigV4 signature, in a header or a presigned URL, with the account's keys; knows each bucket's account; counts each request by AWS's classes and its bytes; refuses past the plan's limits; and streams the request to the store with FF's own credentials, the bucket's name mapped to the store's.
+- **Whatever store is behind it:** SeaweedFS in development, the operator's S3 in production. Customers' keys are never the store's, so its IAM, which differs from one store to another, doesn't matter; and step 3's notifications have their place here.
+- **AWS's operations that apps use:** `PutObject`, `GetObject` with ranges, `HeadObject`, `DeleteObject`, `DeleteObjects`, `CopyObject`, `ListObjectsV2`, multipart upload (`Create`, `UploadPart`, `Complete`, `Abort`, `ListParts`), `HeadBucket`, `GetBucketLocation`, `ListBuckets` (the account's), and the streaming uploads with trailing checksums that AWS's SDKs send by default. Anything else answers `NotImplemented`, in AWS's words.
+- **Buckets are made with FF's API,** the console and `ff`, which check the plan; `CreateBucket` through S3 comes later, with SAM and Terraform (CLI plan C-30, parent E-08).
+- **Names are AWS's** (3 to 63 characters, lower-case letters, digits and hyphens; no dots, so that a virtual-hosted address keeps its certificate), unique across FF, as on AWS; free again once deleted.
+
+### D7. Keys: the account's own, at most two, shown once
+An access key ID like AWS's (20 characters, `AKFF…`) and a secret of 40, shown once. The front door needs the secret itself to check signatures, so it is sealed with the key ring, as variables are. A key reaches all the account's buckets, or the ones it names, read-write or read-only. Two at most, so that one can replace the other, as IAM allows two per user.
+
+### D8. Functions get credentials without a line of code (the parent's E-07, for S3)
+Each function's pods get `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `AWS_ENDPOINT_URL_S3` in their Secret: a key of the function's own, made at its deploy, reaching its account's buckets, revoked when it is deleted. AWS's SDKs read them, so `new S3Client({})` works on FF and, without them, on Lambda with its role. Short-lived session credentials, as Lambda's role gives, wait for the parent's STS-like work (step 5); §9 gave functions these keys meanwhile, confirmed on 2026-10-22.
+
+### D9. Usage and billing beyond functions
+- **Usage records of their own,** written once: `database_samples` and `bucket_samples` (one row an hour each, size and count), and `storage_request_counts` (one row a minute per bucket and class, flushed by the front door: a request is never one row). Partitioned by month, as `usage_records` is.
+- **The rating** gains rows per resource rather than per function (`usage_hourly`'s key widened, or a table beside it), and the statement a line per database and bucket; the reconciliation sums them too.
+- **SKUs, optional in the book's schema,** priced 0 in the books from before: database storage per GB-month (RDS for PostgreSQL's gp3 storage), a monthly fee per database (0 unless §9 says otherwise), bucket storage per GB-month (S3 Standard's), and requests per 1,000 in AWS's two classes; each at AWS's us-east-1 list price on the new book's date, converted at the book's rate, as the first book was. A free tier for each (§9).
+
+### D10. Plans: new limits
+`databases` (1 on the beta plan), `databaseStorageMb` (1,024), `databaseConnections` (10 per database); `buckets` (5), `bucketStorageMb` (5,120, AWS's free tier), `storageRequestsPerSecond` (100), `maxObjectMb` (5,120, as a single `PutObject` on S3). Each comes as the step-1 plan's D11 came: a migration, the schema, and the lists of the console, the admin app and the CLI.
+
+### D11. Every way in is checked the same way
+The database's own connections aside, every S3 request goes through the front door's checks in one place: the key, the account's status and credit, the plan's rate, the bucket's owner. A suspended account's keys and its functions' keys answer `AccountProblem`, as AWS's do for a suspended account.
+
+### D12. Suspension, credit and closure
+- **Suspended:** its databases' users can't log in, and their sessions end; its keys are refused. Reactivated, both come back.
+- **Out of credit:** S3 writes answer `AccountProblem`, reads go on; databases go on, the usage billed later, as the parent plan's §8.1 keeps data for a long, contractual period.
+- **Closed:** its databases are dropped and its buckets emptied and deleted with the rest of its data, at the data deletion date the retention already sets.
+
+### D13. Backups and restores
+- **The customers' server** gets WAL-G as FF's has: a base backup each night, point-in-time recovery to the second site, 7 days by default, RDS's default retention. One customer's database comes back by restoring the server to a scratch instance at the time asked, then copying that database into a new one of the account's: a runbook section, and the monthly drill does it.
+- **Buckets** are not backed up by default: the store's own redundancy keeps them, as S3's does. Confirmed on 2026-10-22 (§9): the guide tells customers that there is no copy, and the question comes back before they keep important files on FF.
+
+### D14. Reaching the database from outside, and the way out
+- **From a developer's machine:** the server's port is reachable from the internet, TLS only, as RDS's "publicly accessible" option, so that an owner runs `psql`, a migration tool or `pg_dump`; §9 kept it so rather than to functions only, confirmed on 2026-10-22.
+- **The way out:** `pg_dump --format=custom` and `pg_restore` into RDS, or logical replication for a move without downtime: the export kit's `data/postgres.md`. Buckets: `aws s3 sync` from FF's endpoint to a local folder, then to S3: its `data/s3-sync.sh`.
+
+## 4. Data model
+
+| Table | What it holds |
+|---|---|
+| `databases` | `id`, `account_id`, `name` (the customer's, unique per account), `server`, `db_name` (opaque, D2), `status` (`creating`, `active`, `read_only`, `suspended`, `deleting`), `password_set_at`, `created_at` |
+| `database_samples` | `database_id`, `hour`, `size_bytes`, `connections`; append-only, a partition per month |
+| `buckets` | `id`, `account_id`, `name` (unique across FF), `store_name` (the store's bucket), `status`, `created_at` |
+| `storage_keys` | `id` (the access key ID), `account_id`, `function_id` (for D8's keys), `secret` (sealed), `buckets` (null for all), `read_only`, `created_at`, `last_used_at`, `revoked_at` |
+| `bucket_samples` | `bucket_id`, `hour`, `size_bytes`, `objects`; append-only, a partition per month |
+| `storage_request_counts` | `bucket_id`, `minute`, `class` (`tier1`, `tier2`), `requests`, `bytes_in`, `bytes_out`; append-only, a partition per month |
+
+The price book gains its optional SKUs, the plans their limits, the audit log its actions (`database.create`, `database.password`, `database.delete`, `bucket.create`, `bucket.delete`, `storage_key.create`, `storage_key.delete`, and the operator's `account.storage`), and API keys their scopes (`databases:read`, `databases:write`, `storage:read`, `storage:write`).
+
+## 5. API changes
+
+| Route | What it does |
+|---|---|
+| `GET`, `POST /databases`; `GET`, `DELETE /databases/:id` | List, make (its connection string, once), show (its size, connections, status), delete |
+| `POST /databases/:id/password` | A new password, shown once |
+| `GET /databases/:id/metrics` | `DatabaseConnections` and its storage, a point an hour |
+| `GET`, `POST /buckets`; `GET`, `DELETE /buckets/:name` | List, make, show (size, objects), delete (empty, or with `?force=true`, which empties it first) |
+| `GET /buckets/:name/metrics` | `BucketSizeBytes`, `NumberOfObjects`, `AllRequests`, `GetRequests`, `PutRequests`, `4xxErrors`, `5xxErrors`, `BytesDownloaded`, `BytesUploaded`, as CloudWatch names S3's |
+| `GET`, `POST /storage-keys`; `DELETE /storage-keys/:id` | The account's keys (the secret once, at creation), and revoking one |
+| `PUT /admin/accounts/:id/storage` | The operator turns an account's databases and buckets off, or on again, with a reason |
+| `https://s3.<domain>/…` | The S3 front door (D6): its own port, served by the edge |
+
+## 6. Working rules
+
+The step-1 plan's (§6 there), on a branch of this step's own: `type(scope): summary (V-xx)`, one commit per task or part of a task, `hack/check-resources.sh` before each heavy step and one heavy operation at a time, the task's tests and the backend's type-check, lint and unit tests on each commit, progress rows with their tests and documents, `hack/check-docs.py` on what changed, and no task or decision number in the code. Every new route joins the L5 suite in the task that adds it.
+
+## 7. Tasks
+
+### Phase 0: groundwork
+
+#### V-00: The plan and the baseline
+- This plan, committed; the baseline's test counts; the branch.
+- **Done when:** the plan is in `docs/` and linked from the index and the roadmap.
+
+#### V-01: Spike, ADR 0008 and ADR 0009
+- **Databases:** a PostgreSQL 18 server beside the dev cluster; a database and its user as D2 says, reached from a tenant pod through D3's rule with the account's internet access off, and not reachable as another user; the cost of sampling a thousand databases' sizes; D5's read-only signal as an app meets it; WAL-G on it, and one database restored from a point in time.
+- **Buckets:** a minimal SigV4-checking proxy in front of SeaweedFS 4.48, against AWS's SDK for JavaScript v3, boto3 and the AWS CLI: streaming uploads with trailing checksums, presigned URLs, multipart, path-style and virtual-hosted; its throughput against the store's own; how a bucket's size is measured cheaply (SeaweedFS's per-bucket size, or a walk of its listing).
+- **Done when:** ADR 0008 and ADR 0009 record what was measured and decided, and §9's questions have their facts.
+
+### Phase 1: databases
+
+#### V-02: The server, in development and for production
+- `docker-compose.yml`'s second PostgreSQL, its TLS, its `pg_hba.conf`, reached from the cluster's node; the settings `FF_DATA_DB_*`, checked at start; `deploy/data-db/README.md` for production: the version, the server's settings, the administrative role, WAL-G.
+- **Tests:** L1 for the settings' checks; L3 for a pod reaching the server through D3's rule, the account's internet access off.
+
+#### V-03: Databases in the API
+- The `databases` table; the service that makes, resets and deletes a database and its user (D2, D4), with the SCRAM verifier made in the backend; the routes, the scopes, the audit log; D10's three database limits; D3's rule in every tenant's NetworkPolicy; D12's suspension and closure.
+- **Tests:** L1 for the names, the statements sent and the verifier; L2 against a real server: made, connected to as its user, not as another, refused past the plan, deleted; suspended and reactivated; L4 through the API; L5 for every route.
+
+#### V-04: Metering and billing for databases
+- Hourly samples; D5's notifications and read-only signal; the rating's rows per resource, the statement's lines and the reconciliation (D9); the optional SKUs and the new price book from the next whole hour; the free tier.
+- **Tests:** L1 for the rating of a month with databases and functions both, and the old books still parsing; L2 for the samples, the read-only signal and its end; L4 for a database's month on the statement.
+
+#### V-05: Databases for people: the console, the admin app, `ff`, the docs, backups, the way out
+- The console's Databases page (make one, its connection string once, its size and connections, a new password, delete; setting it as a function's secret); the admin app's per account (its databases and sizes, turning storage off with a reason); the CLI plan's C-54, `ff db create|list|get|password|delete [--secret-for <function>…]`; `DatabaseConnections` and storage in the metrics and alarms.
+- The guide's "A database", `how-it-works.html`'s scenario, a page in French with "same as AWS RDS", the export kit's `data/postgres.md`; the customers' server in the backups' README, the restore runbook (one database, from a point in time) and the monthly drill.
+- **Tests:** the console's and the admin app's own; CLI L1 and L2; L3 (`hack/cli-e2e.sh`) for a database made, set as a function's secret, written by the function, read with `psql`; the drill restoring one database.
+
+### Phase 2: buckets
+
+#### V-06: The S3 front door
+- The server (D6): SigV4 in headers and presigned URLs, streaming uploads with trailing checksums, AWS's XML errors, path-style and virtual-hosted, the operations listed, streaming both ways without holding a body, the per-minute counts (D9); the edge's host `s3.<domain>` and its wildcard for virtual-hosted buckets.
+- **Tests:** L1 against AWS's SigV4 test vectors and the operations' requests as the SDKs send them; L4 with the AWS SDK for JavaScript v3, boto3 and the AWS CLI, unchanged but the endpoint: upload, download, ranges, listing, multipart of 100 MB, presigned URLs, a wrong signature, an expired URL.
+
+#### V-07: Buckets and keys in the API
+- The tables; the routes, scopes and audit log; D10's bucket limits; D11's checks; D12's suspension and closure; `?force` deletion emptying a bucket.
+- **Tests:** L1 for the names and the keys; L2 for one name across FF and the limits; L4 through the API and the front door; L5 for every route, and a key of one account refused on another's bucket.
+
+#### V-08: Functions' credentials for buckets
+- D8's key per function, made at deploy and revoked at deletion, in the function's Secret with `AWS_ENDPOINT_URL_S3` and `AWS_REGION`; the runtimes' READMEs.
+- **Tests:** L1 for the Secret's names; L4 for a function using `new S3Client({})` and `boto3.client("s3")`, unchanged, writing to its account's bucket and refused on another's.
+
+#### V-09: Metering, billing and tools for buckets
+- Hourly samples and the request counts into the rating (D9), S3 Standard's SKUs and the free tier; the console's Buckets page (buckets, keys, sizes) and the admin app's; the CLI plan's C-53 (`ff buckets create|list|delete`, `ff buckets keys`); the metrics and alarms; the guide's "Files in buckets", which says that FF keeps no copy of a bucket at the second site (D13), `how-it-works.html`, the page in French with "same as AWS S3", the export kit's `data/s3-sync.sh`.
+- **Tests:** L1 for the rating of requests by class; L2 for the counts and the samples; L3 for `ff buckets` and an upload with the AWS CLI; L4 for a bucket's month on the statement.
+
+### Phase 3: close
+
+#### V-10: The step closed
+- Step 1's small app keeps its orders in FF's database and each order's receipt in a bucket; `how-it-works.html` and the guide walk through it, `hack/cli-e2e.sh` runs it.
+- [What to build next](what-to-build-next.md) marks step 2 done, and step 3 gets its plan.
+
+## 8. Risks
+
+| Risk | Mitigation |
+|---|---|
+| One customer's heavy queries slow the others on the shared server | The plan's connection limit per database; the operator's monitoring of the server (its slowest statements, its connections, its disk); a server per plan tier when needed (D1) |
+| A customer fills the server's disk | D5's samples and signal, the bill above the limit, the operator's disk alert; a hard wall if §9 says so |
+| A database's or a user's name tells another customer something | Opaque names (D2); the customer's names stay in FF's table |
+| The server exposed to the internet (D14) is attacked | TLS only, SCRAM, passwords of 32 random bytes, `pg_hba.conf` by database; §9 can keep it to functions only |
+| The front door slows uploads, or holds memory | Streaming both ways, measured in V-01 against the store's own; its own process later if needed, as the URL gateway can (parent R-05) |
+| An SDK's request the front door reads wrongly (chunked uploads, trailing checksums, a new default) | V-01's spike against three SDKs; L4 with each, run when their versions change |
+| A key's secret must be readable to check signatures | Sealed with the key ring as variables are, never logged, never answered after creation |
+| The new SKUs break the past price books, or the rating's per-function keys | Optional SKUs priced 0 in older books; the rating's tests over a month mixing functions and resources (V-04) |
+| Restoring one database means restoring a whole server | The runbook's steps timed in the drill; RDS's own way is the same (a new instance from a point in time) |
+| A plan's new key reaches an old backend during a rollout | The migration runs before the rollout, as for every limit so far; the new backend comes up with it |
+
+## 9. Choices made for you to confirm
+
+**You confirmed them all on 2026-10-22** (the [decision log](decisions.md), decisions 4 to 14), with two notes in their rows: buckets' second-site copy, and data sent out.
+
+| Question | This plan's choice | Affects |
+|---|---|---|
+| PostgreSQL's version | 18, which RDS runs; 19 once RDS offers it | V-02 |
+| Where the customers' server runs | A server of its own outside the cluster, beside FF's, as the client-readiness plan's D13 placed FF's; the other way, a StatefulSet in the cluster run by the operator | V-01, V-02 |
+| A database past its storage | Signalled (read-only new sessions) and billed above the limit (D5); the other way, a hard wall: a tablespace per database on a disk with quotas, which needs a superuser in the operator's tooling | V-04 |
+| The database reachable from the internet | Yes, TLS only, so that owners use `psql` and `pg_dump` from their machines (D14); the other way, functions only, with an export route | V-02, V-05 |
+| Free tier | Each month, per account: 1 GB of database storage; 5 GB of bucket storage, 20,000 `GET` and 2,000 `PUT` requests, as AWS's first year, here every month | V-04, V-09 |
+| A monthly fee per database | None at first, as storage pays for it; the price book can add one | V-04 |
+| Functions' credentials for buckets | A key per function in its Secret (D8); the other way, none in this step: the account's key as a secret, set by the owner | V-08 |
+| Buckets backed up to the second site | No, at first: the store's redundancy keeps them (D13); the other way, a copy at the second site, which doubles the storage FF pays for. The guide tells customers that there is no copy, and the question comes back before they keep important files on FF | V-09 |
+| Data sent out of FF | Counted, not billed (AWS bills it past 100 GB a month); billed if FF's hosting bills FF for its traffic | V-09 |
+| Out of credit | S3 writes refused, reads and databases going on (D12) | V-07, V-04 |
+| French documentation | A page per service, in French, under `docs/fr/`, as What to build next §10 asks; nothing in French exists yet | V-05, V-09 |
+
+## 10. Effort (rough estimates, one developer)
+
+| Task | Working days | Notes |
+|---|---|---|
+| V-00 | 0.5 | |
+| V-01 | 3–4 | Two spikes, two ADRs |
+| V-02 | 2 | |
+| V-03 | 4–5 | The statements to the server, its tests against a real one, the L5 rules |
+| V-04 | 4–5 | The rating's move beyond functions is most of it |
+| V-05 | 4–5 | Three interfaces, the docs, the backups and the drill |
+| V-06 | 6–8 | SigV4 and the SDKs' streaming uploads are most of it |
+| V-07 | 3–4 | |
+| V-08 | 2–3 | |
+| V-09 | 5–6 | |
+| V-10 | 1–2 | |
+| **Total** | **35–45** | More than the roadmap's "medium, plus 2.5 weeks", as it counts what every service needs (its §10): the bill beyond functions, the admin app, backups, the way out |
+
+## 11. Progress log
+
+| Task | Status | Commit | Evidence |
+|---|---|---|---|
+| V-00 The plan and the baseline | ⏳ Confirmed on 2026-10-22; next after the CLI plan's C-29. This plan was written with step 1's close (step-1 plan, U-09) | | |
+| V-01 Spike, ADR 0008 and ADR 0009 | ⏳ Planned | | |
+| V-02 The server | ⏳ Planned | | |
+| V-03 Databases in the API | ⏳ Planned | | |
+| V-04 Metering and billing for databases | ⏳ Planned | | |
+| V-05 Databases for people | ⏳ Planned | | |
+| V-06 The S3 front door | ⏳ Planned | | |
+| V-07 Buckets and keys in the API | ⏳ Planned | | |
+| V-08 Functions' credentials for buckets | ⏳ Planned | | |
+| V-09 Metering, billing and tools for buckets | ⏳ Planned | | |
+| V-10 The step closed | ⏳ Planned | | |

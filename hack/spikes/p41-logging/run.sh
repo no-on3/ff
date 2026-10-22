@@ -74,11 +74,11 @@ as_a() { http_at "$api" "$@"; }
 as_b() { http_at "$api" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_b"; }
 
 # Each user line carries its call's request ID in its text: the call's lines are found whether or not the collector tagged them.
-node_code='export async function handler(event: { body: { lines?: number; long?: number } }, context: { awsRequestId: string }) {
+node_code='export async function handler(event: { lines?: number; long?: number }, context: { awsRequestId: string }) {
   console.log(`spike line one ${context.awsRequestId}`);
   console.log(`spike line two ${context.awsRequestId}`);
-  for (let i = 0; i < (event.body.lines ?? 0); i++) console.log(`flood ${i}`);
-  if (event.body.long) console.log("x".repeat(event.body.long));
+  for (let i = 0; i < (event.lines ?? 0); i++) console.log(`flood ${i}`);
+  if (event.long) console.log("x".repeat(event.long));
   return { requestId: context.awsRequestId };
 }'
 python_code='def handler(event, context):

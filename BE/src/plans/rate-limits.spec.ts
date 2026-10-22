@@ -7,12 +7,12 @@
 import { CanActivate, Controller, ExecutionContext, Get, INestApplication, Module, Param, Post, Put } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule, ThrottlerStorage, getStorageToken } from '@nestjs/throttler';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { RequestWithPrincipal } from '../auth/principal';
 import { PlanView } from './plan-limits';
 import { PlansService } from './plans.service';
-import { Invocation, RateLimitGuard, rateLimitOf, rateLimitOptions } from './rate-limits';
+import { Invocation, RateLimitGuard, countInvocation, rateLimitOf, rateLimitOptions } from './rate-limits';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { refusals } from '../monitoring/operator-metrics';
 import { valueOf } from '../monitoring/test-fixtures';
@@ -150,6 +150,17 @@ describe('rate limits per account (L1, P-15)', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 1100)); // the window has passed
     expect((await invoke()).status).toBe(201);
+  });
+
+  it("counts calls that come another way, to a function's URL, with the API's invokes: one count for the account", async () => {
+    const storage = app.get<ThrottlerStorage>(getStorageToken());
+    const invoke = () => call('POST', '/probe/f/invoke', 'a3', 'tight');
+
+    expect(await statuses([invoke])).toEqual([201]);
+    expect(await countInvocation(storage, 'a3', 2)).toBeUndefined(); // the second this second, of 2
+    expect(await countInvocation(storage, 'a3', 2)).toBe(1); // over: a second to wait
+    expect((await invoke()).status).toBe(429); // and the API's invokes wait with it
+    expect(await countInvocation(storage, 'a4', 2)).toBeUndefined(); // another account counts apart
   });
 
   it("gives each account its own count, though they call from the same address", async () => {

@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Installs pinned kubectl and k3d into hack/bin/ (git-ignored) after verifying
-# the SHA-256 checksums each project publishes. Idempotent: tools already at
-# the pinned version are left alone. Nothing is installed system-wide.
+# the SHA-256 checksums each project publishes, and Rust for the ff command where
+# there is none, or none recent enough: rustup and the pinned toolchain into
+# hack/.rust/ (git-ignored), rustup-init's checksum verified too; hack/ci.sh uses
+# it from there. Idempotent: tools already at the pinned version, or a Rust at
+# least as recent, are left alone. Nothing is installed system-wide.
+#   hack/install-tools.sh [kubectl] [k3d] [rust]     (all three without an argument)
 set -euo pipefail
 
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.37.1}"
 K3D_VERSION="${K3D_VERSION:-v5.9.0}"
+# The ff command's toolchain: cli/Cargo.toml's rust-version is the least it builds with.
+RUST_VERSION="${RUST_VERSION:-1.91.0}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bin_dir="$repo_root/hack/bin"
@@ -66,5 +72,38 @@ install_k3d() {
   echo "installed k3d $K3D_VERSION (sha256 verified)"
 }
 
-install_kubectl
-install_k3d
+# Rust: the one on the PATH if it is at least RUST_VERSION, else the pinned one in hack/.rust.
+install_rust() {
+  local rust_dir="$repo_root/hack/.rust" installed
+  [ -x "$rust_dir/cargo/bin/cargo" ] && export PATH="$rust_dir/cargo/bin:$PATH" RUSTUP_HOME="$rust_dir/rustup" CARGO_HOME="$rust_dir/cargo"
+  installed="$(rustc --version 2>/dev/null | cut -d' ' -f2 || true)"
+  if [ -n "$installed" ] && [ "$(printf '%s\n%s\n' "$RUST_VERSION" "$installed" | sort -V | head -1)" = "$RUST_VERSION" ]; then
+    echo "Rust $installed already installed"
+    return
+  fi
+  local triple
+  case "$os-$arch" in
+    linux-amd64) triple=x86_64-unknown-linux-gnu ;;
+    linux-arm64) triple=aarch64-unknown-linux-gnu ;;
+    darwin-amd64) triple=x86_64-apple-darwin ;;
+    darwin-arm64) triple=aarch64-apple-darwin ;;
+  esac
+  local base="https://static.rust-lang.org/rustup/dist/$triple"
+  curl -fsSL --retry 3 -o "$tmp/rustup-init" "$base/rustup-init"
+  verify "$tmp/rustup-init" "$(curl -fsSL --retry 3 "$base/rustup-init.sha256" | awk '{ print $1 }')"
+  chmod +x "$tmp/rustup-init"
+  RUSTUP_HOME="$rust_dir/rustup" CARGO_HOME="$rust_dir/cargo" "$tmp/rustup-init" -y --no-modify-path --profile minimal \
+    --default-toolchain "$RUST_VERSION" --component rustfmt,clippy >/dev/null
+  if [ "$os" = linux ]; then
+    RUSTUP_HOME="$rust_dir/rustup" CARGO_HOME="$rust_dir/cargo" "$rust_dir/cargo/bin/rustup" target add "${triple%%-*}-unknown-linux-musl" >/dev/null
+  fi
+  echo "installed Rust $RUST_VERSION in hack/.rust (rustup-init sha256 verified)"
+}
+
+[ $# -gt 0 ] || set -- kubectl k3d rust
+for tool in "$@"; do
+  case "$tool" in
+    kubectl | k3d | rust) "install_$tool" ;;
+    *) echo "unknown tool $tool: kubectl, k3d or rust" >&2; exit 2 ;;
+  esac
+done

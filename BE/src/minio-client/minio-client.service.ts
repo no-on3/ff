@@ -1,11 +1,17 @@
 import { CreateBucketCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { ConfigService } from '@nestjs/config';
 import { describeError } from '../common/describe-error';
 
+/** An object that object storage doesn't have: deleted, or lost with the store, as a restore from the second site brings back. */
+export class StoredObjectMissingError extends Error {}
+
 /**
- * Keeps a copy of each function's code in object storage, through the S3 API
- * (SeaweedFS in development). It used the MinIO client until P-09 of the
+ * Keeps a copy of each function's code, and functions' packages, in object
+ * storage, through the S3 API (SeaweedFS in development). It used the MinIO client until P-09 of the
  * client-readiness plan; the class and the MINIO_* variables keep that name.
  */
 @Injectable()
@@ -64,6 +70,27 @@ export class MinioClientService implements OnModuleInit, OnModuleDestroy {
 
   async deleteCode(path: string): Promise<void> {
     await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: path }));
+  }
+
+  /** A file, streamed from disk: a function's package, up to 50 MB. */
+  async putFile(key: string, file: string, size: number, contentType: string): Promise<void> {
+    await this.s3.send(
+      new PutObjectCommand({ Bucket: this.bucketName, Key: key, Body: createReadStream(file), ContentLength: size, ContentType: contentType }),
+    );
+  }
+
+  /** An object, streamed to a file: a package, to make its code image. StoredObjectMissingError when storage hasn't it. */
+  async getFile(key: string, file: string): Promise<void> {
+    const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key })).catch((error: unknown) => {
+      throw httpStatus(error) === 404 ? new StoredObjectMissingError(`Object storage has no ${key}`) : error;
+    });
+    if (!object.Body) throw new Error(`The object ${key} has no body`);
+    await pipeline(object.Body as Readable, createWriteStream(file, { mode: 0o600 }));
+  }
+
+  /** Removes an object; one already gone is no error, as S3 answers. */
+  async deleteObject(key: string): Promise<void> {
+    await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: key }));
   }
 
   /** A document kept for the record, such as a withholding certificate (P-35). */

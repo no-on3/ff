@@ -1,12 +1,11 @@
-import { BadRequestException, ConflictException, HttpException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, PayloadTooLargeException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
-import { MinioClientService } from '../minio-client/minio-client.service';
+import { MinioClientService, StoredObjectMissingError } from '../minio-client/minio-client.service';
 import {
-  CodeTooLargeError,
   FunctionLoadError,
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -24,9 +23,18 @@ import { CreditService } from '../billing/credit.service';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
-import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
-import { Function, FunctionStatus, Runtime } from './entities/function.entity';
+import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
+import { FunctionUrl } from './entities/function-url.entity';
+import { Schedule } from '../schedules/schedule.entity';
+import { inlineCodeFacts } from './code-package';
+import { inlinePackage } from './inline-package';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
+import { EnvironmentStore } from './environment.store';
+import { CodeImagesService } from '../packages/code-images.service';
+import { PackagesService } from '../packages/packages.service';
+import { RegistryError } from '../packages/registry';
 import { FunctionsService } from './functions.service';
+import { memoryEnvironments } from './test-fixtures';
 import { TAIL_ENDED, TAIL_UNAVAILABLE } from './live-tail';
 import { Observable } from 'rxjs';
 
@@ -44,7 +52,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     findOne: jest.fn(),
     remove: jest.fn(),
   };
-  const invocationsRepo = { create: jest.fn(), save: jest.fn(), findAndCount: jest.fn() };
+  const invocationsRepo = { create: jest.fn(), save: jest.fn(), insert: jest.fn(), findAndCount: jest.fn() };
   const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
   const metrics = { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() };
   /** The account's plan, and how many functions it has: the transaction that saves a new one counts them. */
@@ -62,8 +70,15 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const usage = { record: jest.fn() };
   /** D9's balance check (P-33): every account may invoke unless a test says otherwise. */
   const credit = { admit: jest.fn(async (_accountId: string) => undefined) };
+  /** The account's packages, and the registry their images go to. */
+  const packages = { name: jest.fn(), storeInline: jest.fn(), named: jest.fn(), restoreInlineZip: jest.fn() };
+  const codeImages = { available: true, assertAvailable: jest.fn(), imageFor: jest.fn(), ensureImage: jest.fn(), hasMounted: jest.fn() };
+  /** The image the registry gives a package, by its SHA-256. */
+  const imageOf = (codeSha256: string) => `ff-dev-registry:5000/ff-code/user-1@sha256:${Buffer.from(codeSha256, 'base64').toString('hex')}`;
   /** The transaction that ends an invocation: it locks the row, saves the final state, then writes the usage record (D6). */
   const ending = { findOne: jest.fn(), save: jest.fn() };
+  /** Each function's variables and secrets, as the service saved them. */
+  let environments: ReturnType<typeof memoryEnvironments>;
 
   const activeFunction = (): Function =>
     ({
@@ -72,6 +87,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       accountId: 'user-1',
       runtime: Runtime.NODEJS,
       code: 'export const handler = async () => 1;',
+      packageType: PackageType.INLINE,
+      handler: 'function.handler',
+      ...inlineCodeFacts('export const handler = async () => 1;'),
       memory: 128,
       timeout: 5,
       minInstances: 0,
@@ -88,6 +106,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     savedStatuses = [];
+    environments = memoryEnvironments();
     functionsRepo.create.mockImplementation((dto) => ({ ...dto }));
     functionsRepo.save.mockImplementation(async (entity) => {
       savedStatuses.push(entity.status);
@@ -96,6 +115,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
     accountPlan = plan();
     existingFunctions = 0;
+    codeImages.imageFor.mockImplementation(async (_accountId: string, codeSha256: string) => imageOf(codeSha256));
     plans.forAccount.mockImplementation(async () => accountPlan);
     underLock = false;
     plans.withTenant.mockImplementation(async (_accountId: string, write: (tenant: unknown) => Promise<unknown>) => {
@@ -115,7 +135,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     Object.assign(functionsRepo, {
       manager: { transaction: jest.fn(async (work) => work(transaction)), existsBy: jest.fn(async (_target, where: { name: string }) => named(where)) },
     });
-    invocationsRepo.create.mockImplementation((dto) => ({ ...dto, id: 'inv-1', createdAt: new Date('2026-10-17T10:00:00Z') }));
+    // The database's ID, unless the caller chose one.
+    invocationsRepo.create.mockImplementation((dto) => ({ id: 'inv-1', ...dto, createdAt: new Date('2026-10-17T10:00:00Z') }));
     ending.findOne.mockImplementation(async () => ({ status: InvocationStatus.RUNNING }));
     ending.save.mockImplementation(async (_target, entity) => invocationsRepo.save({ ...entity, updatedAt: new Date('2026-10-17T10:00:02Z') }));
     Object.assign(invocationsRepo, { manager: { transaction: jest.fn(async (work) => work(ending)) } });
@@ -132,6 +153,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       readyInstances: jest.fn(),
       desiredInstances: jest.fn(),
       readyInstancesByFunction: jest.fn(),
+      codeImagesByFunction: jest.fn(),
       applyTenantLimits: jest.fn(),
       logs: jest.fn(),
       tailLogs: jest.fn(),
@@ -152,6 +174,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { provide: AuditService, useValue: audit },
         { provide: UsageService, useValue: usage },
         { provide: CreditService, useValue: credit },
+        { provide: EnvironmentStore, useValue: environments },
+        { provide: PackagesService, useValue: packages },
+        { provide: CodeImagesService, useValue: codeImages },
       ],
     }).compile();
     service = moduleRef.get(FunctionsService);
@@ -168,6 +193,29 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 90_000);
       expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ACTIVE]);
       expect(result.status).toBe(FunctionStatus.ACTIVE);
+    });
+
+    it("makes inline code a one-file package, kept with the account's, and mounts its image; the record names that package", async () => {
+      const built = inlinePackage('x', Runtime.NODEJS);
+
+      const result = await service.create('user-42', dto);
+
+      expect(packages.storeInline).toHaveBeenCalledWith('user-42', built);
+      expect(codeImages.imageFor).toHaveBeenCalledWith('user-42', built.codeSha256);
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ codeImage: imageOf(built.codeSha256) }), TENANT);
+      expect(functionsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ packageSha256: built.codeSha256 }));
+      // The answer gives the code's own hash, as for inline code: the package is the backend's to know.
+      expect(result).toMatchObject({ packageType: PackageType.INLINE, ...inlineCodeFacts('x') });
+    });
+
+    it('refuses with 503, saving nothing, where this FF has no registry: no code reaches its pods without one', async () => {
+      codeImages.assertAvailable.mockImplementation(() => {
+        throw new ServiceUnavailableException("This FF has no code registry, so it can't deploy a function");
+      });
+
+      await expect(service.create('user-1', dto)).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(packages.storeInline).not.toHaveBeenCalled();
+      expect(functionsRepo.save).not.toHaveBeenCalled();
     });
 
     it("marks the function ERROR with its own load error, which its owner sees, and releases its pod", async () => {
@@ -216,19 +264,11 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ERROR]);
     });
 
-    it('does not try to release anything when the code was refused before reaching the cluster', async () => {
-      orchestrator.deploy.mockRejectedValue(new CodeTooLargeError(2_000_000, 921_600));
-
-      await expect(service.create('user-1', dto)).rejects.toThrow('the current limit is 921600 bytes');
-      expect(orchestrator.scale).not.toHaveBeenCalled();
-    });
-
     // The function is saved before it is deployed: a client that took the failure for "nothing
     // created" would create it again, as the console did, and the account would have two.
     it.each([
       ['its code failed to load', new FunctionLoadError('Error', 'boom at init'), 400],
       ['the platform failed', new OrchestratorError('no pods were created'), 500],
-      ['its code is too large', new CodeTooLargeError(2_000_000, 921_600), 400],
     ])('names the function it saved, as ERROR, in the failure answer when %s', async (_case, error, status) => {
       orchestrator.deploy.mockRejectedValue(error);
 
@@ -245,6 +285,260 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(failure).toBeInstanceOf(BadRequestException);
       expect(failure.getResponse()).not.toHaveProperty('functionId');
       expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it("keeps its code's hash and size, as AWS Lambda's CodeSha256 and CodeSize, and its handler, function.handler unless it names another", async () => {
+      const result = await service.create('user-42', dto);
+
+      expect(result).toMatchObject({ packageType: PackageType.INLINE, handler: 'function.handler', codeSha256: 'LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=', codeSize: 1 });
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ handler: 'function.handler' }), TENANT);
+
+      await service.create('user-42', { ...dto, name: 'main', handler: 'function.main' });
+      expect(orchestrator.deploy).toHaveBeenLastCalledWith(expect.objectContaining({ handler: 'function.main' }), TENANT);
+    });
+
+    it('refuses a handler outside the one file inline code is, before saving anything', async () => {
+      const failure = (await service.create('user-1', { ...dto, handler: 'src/app.handler' }).catch((err: unknown) => err)) as HttpException;
+
+      expect(failure).toBeInstanceOf(BadRequestException);
+      expect(failure.getResponse()).toMatchObject({
+        message: ['handler must be function.<name> for inline code, which is the file function.ts: function.handler, for example'],
+      });
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a function made from a package (CLI plan, C-23)", () => {
+    const PACKAGE = 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=';
+    const IMAGE = 'ff-dev-registry:5000/ff-code/user-1@sha256:' + 'f'.repeat(64);
+    const dto = { name: 'orders', runtime: Runtime.NODEJS, memory: 128, timeout: 5, codeSha256: PACKAGE, handler: 'src/orders.create' };
+    const refusal = async (attempt: Promise<unknown>) => {
+      const error = (await attempt.catch((err: unknown) => err)) as HttpException;
+      return [error.getStatus(), (error.getResponse() as { message: unknown }).message];
+    };
+
+    beforeEach(() => {
+      packages.name.mockResolvedValue({ codeSize: 4096, files: ['node_modules/left-pad/index.js', 'src/orders.js'] });
+      codeImages.imageFor.mockResolvedValue(IMAGE);
+    });
+
+    it("runs the account's package: zip, its size, its handler found in its files, its pods mounting its image, no inline copy", async () => {
+      const result = await service.create('user-1', dto);
+
+      expect(packages.name).toHaveBeenCalledWith('user-1', PACKAGE);
+      expect(codeImages.imageFor).toHaveBeenCalledWith('user-1', PACKAGE);
+      expect(orchestrator.deploy).toHaveBeenCalledWith(expect.objectContaining({ codeImage: IMAGE, packageType: PackageType.ZIP, handler: 'src/orders.create' }), TENANT);
+      expect(result).toMatchObject({ packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, status: FunctionStatus.ACTIVE });
+      expect(storage.uploadCode).not.toHaveBeenCalled();
+    });
+
+    it('refuses, before saving anything: code and a package both, a package the account hasn\'t, a handler the package lacks', async () => {
+      expect(await refusal(service.create('user-1', { ...dto, code: 'exports.handler = 1' }))).toEqual([
+        400,
+        ['Send code or codeSha256, not both: inline code, or a package uploaded with POST /packages'],
+      ]);
+      expect(await refusal(service.create('user-1', { ...dto, handler: 'index.handler' }))).toEqual([
+        400,
+        ['The package has no index.js, .mjs, .cjs or .ts, nor a folder index/, which the handler index.handler names'],
+      ]);
+      packages.name.mockResolvedValue(undefined);
+      expect(await refusal(service.create('user-1', dto))).toEqual([
+        400,
+        [`The account has no package ${PACKAGE}: upload it with POST /packages, which answers its SHA-256`],
+      ]);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+    });
+
+    it('refuses with 503 where this FF has no registry to run packages from, before saving anything', async () => {
+      codeImages.assertAvailable.mockImplementation(() => {
+        throw new ServiceUnavailableException("This FF has no code registry, so it can't run a package: its operator sets FF_CODE_REGISTRY (ADR 0003)");
+      });
+
+      expect((await refusal(service.create('user-1', dto)))[0]).toBe(503);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('moves an inline function to a package in one rollout with its handler, its inline copy deleted; and back with code', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      const zipped = await service.update('user-1', 'fn-1', { codeSha256: PACKAGE, handler: 'src/orders.create', memory: 256 });
+
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+      expect(orchestrator.update).toHaveBeenLastCalledWith(expect.objectContaining({ codeImage: IMAGE, handler: 'src/orders.create', memory: 256 }), TENANT);
+      expect(zipped).toMatchObject({ packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096 });
+      expect(storage.deleteCode).toHaveBeenCalledWith('fn-1/code.ts');
+      expect(storage.uploadCode).not.toHaveBeenCalled();
+
+      functionsRepo.findOne.mockResolvedValue({ ...zipped });
+      const inline = await service.update('user-1', 'fn-1', { code: 'export const main = async () => 2;', handler: 'function.main' });
+
+      // Inline code goes the same way: its one-file package, kept with the account's, and that package's image.
+      const built = inlinePackage('export const main = async () => 2;', Runtime.NODEJS);
+      expect(packages.storeInline).toHaveBeenLastCalledWith('user-1', built);
+      expect(codeImages.imageFor).toHaveBeenLastCalledWith('user-1', built.codeSha256);
+      expect(inline).toMatchObject({ packageType: PackageType.INLINE, ...inlineCodeFacts('export const main = async () => 2;') });
+      expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'export const main = async () => 2;');
+    });
+
+    it("checks a new handler or runtime against the package's files, keeping the package another hour", async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, handler: 'src/orders.create' });
+
+      expect(await refusal(service.update('user-1', 'fn-1', { runtime: Runtime.PYTHON }))).toEqual([
+        400,
+        ['The package has no src/orders.py, nor a package src/orders/, which the handler src/orders.create names'],
+      ]);
+      await service.update('user-1', 'fn-1', { handler: 'src/orders.list' });
+      expect(packages.name).toHaveBeenLastCalledWith('user-1', PACKAGE);
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ handler: 'src/orders.list', codeImage: IMAGE }), TENANT);
+    });
+
+    it("answers 503 when the registry can't be reached, and changes nothing: no function saved, no rollout, no rollback", async () => {
+      codeImages.imageFor.mockRejectedValue(new RegistryError('HEAD /v2/ff-code/user-1/manifests/sha256:… got no answer: connect ECONNREFUSED'));
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      expect(await refusal(service.create('user-1', dto))).toEqual([503, "The code registry can't be reached: nothing changed, try again in a moment"]);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+
+      const working = { ...activeFunction(), packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, handler: 'src/orders.create' };
+      functionsRepo.findOne.mockResolvedValue(working);
+      expect((await refusal(service.update('user-1', 'fn-1', { memory: 256 })))[0]).toBe(503);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rolls a failed update back to the version before, its code image included', async () => {
+      const before = { ...activeFunction(), packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, handler: 'src/orders.create' };
+      functionsRepo.findOne.mockResolvedValue(before);
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Runtime.ImportModuleError', 'boom'));
+
+      await service.update('user-1', 'fn-1', { code: 'broken', handler: 'function.handler' }).catch(() => undefined);
+
+      // The attempt ran inline code's package; the rollback, the package before.
+      expect(codeImages.imageFor.mock.calls.map(([, codeSha256]) => codeSha256)).toEqual([inlinePackage('broken', Runtime.NODEJS).codeSha256, PACKAGE]);
+      expect(orchestrator.update.mock.calls.map(([workload]) => (workload as { codeImage?: string }).codeImage)).toEqual([IMAGE, IMAGE]);
+    });
+  });
+
+  describe('the restore of code images the registry has lost (ADR 0003)', () => {
+    const UPLOADED = 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=';
+    const INLINE = inlinePackage('export const handler = async () => 1;', Runtime.NODEJS);
+    /** An image another backend made of the same package, which the registry has lost: another digest. */
+    const LOST = 'ff-dev-registry:5000/ff-code/user-1@sha256:' + '0'.repeat(64);
+    /** The advisory lock, free unless a test says another backend holds it. */
+    let lockFree: boolean;
+    const runner = { connect: jest.fn(), release: jest.fn(), query: jest.fn() };
+    /** The working functions' packages, and what each function's pods mount. */
+    let working: Array<{ id: string; accountId: string; packageSha256: string }>;
+
+    beforeEach(() => {
+      lockFree = true;
+      codeImages.available = true;
+      runner.query.mockImplementation(async (sql: string) => (sql.includes('pg_try_advisory_lock') ? [{ locked: lockFree }] : []));
+      Object.assign((functionsRepo as unknown as { manager: object }).manager, { connection: { createQueryRunner: () => runner } });
+      working = [];
+      functionsRepo.find.mockImplementation(async ({ where }: { where: { packageType?: PackageType } }) =>
+        // The functions whose code makes a one-file package; or the working functions' packages.
+        where.packageType === PackageType.INLINE ? [activeFunction()] : working,
+      );
+      codeImages.ensureImage.mockImplementation(async (_accountId: string, codeSha256: string) => ({ reference: imageOf(codeSha256), made: false }));
+      orchestrator.codeImagesByFunction.mockResolvedValue(new Map());
+    });
+
+    it("makes again the image of each package in use that the registry lost, and rolls nothing out whose pods mount it as it is", async () => {
+      packages.named.mockResolvedValue([
+        { accountId: 'user-1', codeSha256: UPLOADED, inline: false },
+        { accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true },
+      ]);
+      codeImages.ensureImage.mockImplementation(async (_accountId: string, codeSha256: string) => ({ reference: imageOf(codeSha256), made: codeSha256 === UPLOADED }));
+      working = [{ id: 'fn-1', accountId: 'user-1', packageSha256: UPLOADED }];
+      orchestrator.codeImagesByFunction.mockResolvedValue(new Map([['fn-1', imageOf(UPLOADED)]]));
+
+      expect(await service.restoreCodeImages()).toEqual({ packages: 2, imagesMade: 1, zipsMade: 0, rolledOut: 0, failures: 0 });
+      expect(codeImages.ensureImage.mock.calls).toEqual([
+        ['user-1', UPLOADED],
+        ['user-1', INLINE.codeSha256],
+      ]);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      // One backend at a time: the lock taken, and given back.
+      expect(runner.query.mock.calls.map(([sql]) => sql)).toEqual([
+        "SELECT pg_try_advisory_lock(hashtext('ff_code_images_restore')) AS \"locked\"",
+        "SELECT pg_advisory_unlock(hashtext('ff_code_images_restore'))",
+      ]);
+      expect(runner.release).toHaveBeenCalled();
+    });
+
+    it("rolls a working function whose pods mount a lost image out with its package's, as its record has it; one mounting an image the registry has stays", async () => {
+      packages.named.mockResolvedValue([{ accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true }]);
+      codeImages.ensureImage.mockResolvedValue({ reference: imageOf(INLINE.codeSha256), made: true });
+      working = [
+        { id: 'fn-1', accountId: 'user-1', packageSha256: INLINE.codeSha256 },
+        { id: 'fn-2', accountId: 'user-1', packageSha256: INLINE.codeSha256 },
+      ];
+      // fn-2's pods mount the image of an update under way, which the registry has whole.
+      const UPDATING = imageOf(UPLOADED);
+      orchestrator.codeImagesByFunction.mockResolvedValue(new Map([['fn-1', LOST], ['fn-2', UPDATING]]));
+      codeImages.hasMounted.mockImplementation(async (reference: string) => reference === UPDATING);
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      await environments.save({ id: 'fn-1', accountId: 'user-1' }, { variables: { TABLE: 'orders' }, secrets: {}, revision: 'r1' });
+
+      expect(await service.restoreCodeImages()).toMatchObject({ imagesMade: 1, rolledOut: 1, failures: 0 });
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+      expect(orchestrator.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'fn-1', codeImage: imageOf(INLINE.codeSha256), environment: { revision: 'r1', values: { TABLE: 'orders' } } }),
+        TENANT,
+      );
+      expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 90_000);
+      // Its record as it is now, still running that package; and nothing saved, nothing audited: its version is the same.
+      expect(functionsRepo.findOne).toHaveBeenCalledWith({ where: { id: 'fn-1', accountId: 'user-1', status: FunctionStatus.ACTIVE, packageSha256: INLINE.codeSha256 } });
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it("makes a one-file package's zip again of its function's code when object storage lost it too; an upload's lost zip is a failure, saying where it comes back from", async () => {
+      packages.named.mockResolvedValue([
+        { accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true },
+        { accountId: 'user-1', codeSha256: UPLOADED, inline: false },
+      ]);
+      const zipLost = () => new StoredObjectMissingError('Object storage has no packages/user-1/….zip');
+      codeImages.ensureImage
+        .mockRejectedValueOnce(zipLost())
+        .mockResolvedValueOnce({ reference: imageOf(INLINE.codeSha256), made: true })
+        .mockRejectedValueOnce(zipLost());
+
+      expect(await service.restoreCodeImages()).toEqual({ packages: 2, imagesMade: 1, zipsMade: 1, rolledOut: 0, failures: 1 });
+      expect(packages.restoreInlineZip).toHaveBeenCalledWith('user-1', INLINE);
+      expect(functionsRepo.find).toHaveBeenCalledWith({ where: { accountId: 'user-1', packageType: PackageType.INLINE, packageSha256: INLINE.codeSha256 } });
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining(`package ${UPLOADED} of account user-1 again: its zip is lost too; restore the packages from the second site`));
+    });
+
+    it('logs a function it could not roll out, and goes on to the next', async () => {
+      packages.named.mockResolvedValue([{ accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true }]);
+      working = [
+        { id: 'fn-1', accountId: 'user-1', packageSha256: INLINE.codeSha256 },
+        { id: 'fn-2', accountId: 'user-1', packageSha256: INLINE.codeSha256 },
+      ];
+      orchestrator.codeImagesByFunction.mockResolvedValue(new Map([['fn-1', LOST], ['fn-2', LOST]]));
+      codeImages.hasMounted.mockResolvedValue(false);
+      functionsRepo.findOne.mockImplementation(async ({ where }: { where: { id: string } }) => ({ ...activeFunction(), id: where.id }));
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new OrchestratorError('fn-1 did not become ready'));
+
+      expect(await service.restoreCodeImages()).toMatchObject({ rolledOut: 1, failures: 1 });
+      expect(orchestrator.update.mock.calls.map(([workload]) => workload.id)).toEqual(['fn-1', 'fn-2']);
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining('Could not roll function fn-1 out with its code image'));
+    });
+
+    it('does nothing while another backend runs it, nor where this FF has no registry', async () => {
+      lockFree = false;
+      expect(await service.restoreCodeImages()).toEqual({ packages: 0, imagesMade: 0, zipsMade: 0, rolledOut: 0, failures: 0 });
+      expect(packages.named).not.toHaveBeenCalled();
+      expect(runner.release).toHaveBeenCalled();
+
+      runner.connect.mockClear();
+      codeImages.available = false;
+      await service.restoreCodeImages();
+      expect(runner.connect).not.toHaveBeenCalled();
     });
   });
 
@@ -352,6 +646,17 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     const notReady = () => new FunctionLoadError('Error', 'boom at init');
     const errored = (): Function => ({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'old diagnosis' });
 
+    it("makes a new version of inline code a new package, which the record names once it is live", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const built = inlinePackage('v2', Runtime.NODEJS);
+
+      await service.update('user-1', 'fn-1', { code: 'v2' });
+
+      expect(packages.storeInline).toHaveBeenCalledWith('user-1', built);
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ codeImage: imageOf(built.codeSha256) }), TENANT);
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ code: 'v2', packageSha256: built.codeSha256 }));
+    });
+
     it('rolls out code changes, waits until they are live, then saves them and archives the code', async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
 
@@ -367,16 +672,68 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(result).toMatchObject({ code: 'v2', status: FunctionStatus.ACTIVE, error: null });
     });
 
+    it("keeps the new code's hash and size with it, in the version rolled out and in the record", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+
+      const result = await service.update('user-1', 'fn-1', { code: 'é' });
+
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ code: 'é', ...inlineCodeFacts('é') }), TENANT);
+      expect(result).toMatchObject({ code: 'é', codeSize: 2, codeSha256: inlineCodeFacts('é').codeSha256 });
+    });
+
     it.each([
       ['memory', { memory: 256 }],
       ['timeout', { timeout: 30 }],
       ['runtime', { runtime: Runtime.PYTHON }],
+      ['handler', { handler: 'function.main' }],
+      ["event format's", { eventFormat: EventFormat.WRAPPED }],
     ])('rolls out a %s change', async (_field, change) => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
 
       await service.update('user-1', 'fn-1', change);
 
       expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining(change), TENANT);
+    });
+
+    it("refuses the wrapped event to a function with a URL, which sends AWS Lambda's events, and rolls nothing out", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const { manager } = functionsRepo as unknown as { manager: { existsBy: jest.Mock } };
+      manager.existsBy.mockImplementation(async (target: unknown, where: { functionId?: string }) => target === FunctionUrl && where.functionId === 'fn-1');
+
+      await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
+        "The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/fn-1/url) first, or keep eventFormat lambda",
+      );
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      // Back to lambda, or another change, is no business of its URL's.
+      await service.update('user-1', 'fn-1', { eventFormat: EventFormat.LAMBDA, memory: 256 });
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses the wrapped event to a function with schedules, which send EventBridge's Scheduled Event", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const { manager } = functionsRepo as unknown as { manager: { existsBy: jest.Mock } };
+      manager.existsBy.mockImplementation(async (target: unknown, where: { functionId?: string }) => target === Schedule && where.functionId === 'fn-1');
+
+      await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
+        "The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/fn-1/schedules/{scheduleId}) first, or keep eventFormat lambda",
+      );
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses a handler its runtime can't find in inline code, checking the runtime the function will have", async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), handler: 'function.handlers.main' });
+      const refusal = (change: object) => service.update('user-1', 'fn-1', change).catch((err: unknown) => (err as HttpException).getResponse());
+
+      expect(await refusal({ runtime: Runtime.PYTHON })).toMatchObject({
+        message: ['handler must be function.<name> for inline code, which is the file function.py: function.handler, for example'],
+      });
+      expect(await refusal({ handler: 'app.handler' })).toMatchObject({
+        message: ['handler must be function.<name> for inline code, which is the file function.ts: function.handler, for example'],
+      });
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      // With a handler Python finds, the change goes through.
+      await service.update('user-1', 'fn-1', { runtime: Runtime.PYTHON, handler: 'function.main' });
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ runtime: Runtime.PYTHON, handler: 'function.main' }), TENANT);
     });
 
     it('moves the archived copy when the runtime changes', async () => {
@@ -430,6 +787,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await expect(failure).rejects.toThrow(
         'The function failed to load: Error: boom at init. The update was rolled back: the previous version is still live.',
       );
+      // Named, as a failed create names the function: the new version never served it.
+      expect(((await failure.catch((error: unknown) => error)) as HttpException).getResponse()).toMatchObject({ functionId: 'fn-1' });
       expect(orchestrator.update.mock.calls.map(([fn]) => fn.code)).toEqual(['broken', activeFunction().code]);
       expect(orchestrator.waitUntilReady).toHaveBeenCalledTimes(2);
       expect(functionsRepo.save).not.toHaveBeenCalled();
@@ -450,6 +809,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await expect(failure).rejects.toThrow(
         /^The update failed: The function failed to load: Error: boom at init\. Rolling back to the previous version failed because of an internal error \(request [0-9a-f-]{36}\)\.$/,
       );
+      expect(((await failure.catch((error: unknown) => error)) as HttpException).getResponse()).toMatchObject({ statusCode: 500, functionId: 'fn-1' });
       expect(logged).toHaveBeenCalledWith(expect.stringContaining('no pods were created: exceeded quota'), expect.anything());
       expect(functionsRepo.save).toHaveBeenCalledTimes(1);
       expect(functionsRepo.save).toHaveBeenLastCalledWith(
@@ -463,7 +823,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       functionsRepo.findOne.mockResolvedValue(errored());
       orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
 
-      await expect(service.update('user-1', 'fn-1', { code: 'still broken' })).rejects.toThrow('boom at init');
+      const failure = (await service.update('user-1', 'fn-1', { code: 'still broken' }).catch((error: unknown) => error)) as HttpException;
+
+      expect([failure.message, failure.getResponse()]).toEqual([expect.stringContaining('boom at init'), expect.objectContaining({ functionId: 'fn-1' })]);
 
       expect(orchestrator.update).toHaveBeenCalledTimes(1); // no rollback
       expect(functionsRepo.save).toHaveBeenLastCalledWith(
@@ -471,16 +833,6 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       );
       expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ code: 'still broken' }), 0);
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'still broken');
-    });
-
-    it('changes nothing when the code is refused before reaching the cluster', async () => {
-      functionsRepo.findOne.mockResolvedValue(activeFunction());
-      orchestrator.update.mockRejectedValueOnce(new CodeTooLargeError(2_000_000, 921_600));
-
-      await expect(service.update('user-1', 'fn-1', { code: 'x'.repeat(10) })).rejects.toThrow('the current limit is 921600 bytes');
-      expect(orchestrator.update).toHaveBeenCalledTimes(1);
-      expect(orchestrator.waitUntilReady).not.toHaveBeenCalled();
-      expect(functionsRepo.save).not.toHaveBeenCalled();
     });
 
     it('saves a successful update even when its code cannot be archived (the copy is not read yet)', async () => {
@@ -515,6 +867,28 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   });
 
   describe('invoke', () => {
+    it("refuses an input over 6 MB as JSON with 413, as AWS Lambda does, before reading the function or the credit", async () => {
+      const input = { data: 'x'.repeat(6 * 1024 * 1024) };
+
+      const refusal = (await service.invoke('user-1', 'fn-1', input).catch((error: unknown) => error)) as PayloadTooLargeException;
+
+      expect(refusal).toBeInstanceOf(PayloadTooLargeException);
+      expect(refusal.getResponse()).toEqual({
+        statusCode: 413,
+        error: 'RequestEntityTooLargeException',
+        message: 'Request must be smaller than 6291456 bytes for the InvokeFunction operation: the input is 6291467 bytes as JSON',
+      });
+      expect([functionsRepo.findOne.mock.calls.length, credit.admit.mock.calls.length, orchestrator.invoke.mock.calls.length]).toEqual([0, 0, 0]);
+    });
+
+    it('takes an input of 6 MB exactly', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 1, memoryUsedMb: 1 });
+      const input = 'x'.repeat(6 * 1024 * 1024 - 2); // with its quotes, 6 MB of JSON
+
+      await expect(service.invoke('user-1', 'fn-1', input)).resolves.toMatchObject({ input });
+    });
+
     it("refuses with 402 when the account's credit has run out (P-33), before anything is recorded or run", async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       const refusal = new InsufficientCreditException(
@@ -529,6 +903,57 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(credit.admit).toHaveBeenCalledWith('user-1');
       expect([invocationsRepo.save.mock.calls.length, orchestrator.invoke.mock.calls.length, usage.record.mock.calls.length]).toEqual([0, 0, 0]);
       expect(refusal.getStatus()).toBe(HttpStatus.PAYMENT_REQUIRED);
+    });
+
+    it('records a call through the API as such, under the ID the database gives it', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 1, memoryUsedMb: 1 });
+
+      await service.invoke('user-1', 'fn-1', {});
+
+      expect(invocationsRepo.create).toHaveBeenCalledWith(expect.objectContaining({ source: InvocationSource.API }));
+      expect(invocationsRepo.create.mock.calls[0][0]).not.toHaveProperty('id');
+      expect(invocationsRepo.insert).not.toHaveBeenCalled();
+    });
+
+    it('records a call that came another way under the ID its caller chose, keeping what the caller says to keep', async () => {
+      orchestrator.invoke.mockResolvedValue({ output: { statusCode: 204 }, durationMs: 3, memoryUsedMb: 10 });
+      const inserted: unknown[] = [];
+      invocationsRepo.insert.mockImplementation(async (row: object) => inserted.push({ ...row })); // as it was then
+      const event = { version: '2.0', headers: { authorization: 'Bearer their-token' } };
+
+      const outcome = await service.call(activeFunction(), event, {
+        source: InvocationSource.URL,
+        requestId: 'req-1',
+        history: { version: '2.0', headers: { authorization: '***' } },
+      });
+
+      // Inserted at once: the ID is new, and needs no lookup first.
+      expect(inserted).toEqual([
+        expect.objectContaining({ id: 'req-1', source: InvocationSource.URL, input: { version: '2.0', headers: { authorization: '***' } }, status: InvocationStatus.RUNNING }),
+      ]);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1');
+      expect(outcome).toMatchObject({ ok: true, output: { statusCode: 204 }, invocation: { id: 'req-1', status: InvocationStatus.COMPLETED } });
+      expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-1' }), ending);
+    });
+
+    it('answers a failed call as an outcome, so that each way in answers it its own way', async () => {
+      orchestrator.invoke.mockRejectedValue(new FunctionRuntimeError('TypeError', 'x is undefined', { durationMs: 2 }));
+
+      const outcome = await service.call(activeFunction(), {}, { source: InvocationSource.URL, requestId: 'req-2' });
+
+      expect(outcome).toMatchObject({ ok: false, visible: 'TypeError: x is undefined', invocation: { id: 'req-2', status: InvocationStatus.ERROR } });
+    });
+
+    it('hands the function its input as the event, any JSON value, as AWS Lambda takes a payload; {} without one', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: null, durationMs: 1, memoryUsedMb: 1 });
+
+      for (const input of ['text', 42, [1, 'two'], null, false, { a: 1 }]) await service.invoke('user-1', 'fn-1', input);
+      await service.invoke('user-1', 'fn-1');
+
+      expect(orchestrator.invoke.mock.calls.map(([, payload]) => payload)).toEqual(['text', 42, [1, 'two'], null, false, { a: 1 }, {}]);
+      expect(invocationsRepo.create.mock.calls.map(([row]) => row.input)).toEqual(['text', 42, [1, 'two'], null, false, { a: 1 }, {}]);
     });
 
     it('stores output, runtime-reported duration and memory on a COMPLETED invocation', async () => {
@@ -600,6 +1025,22 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(invocationsRepo.save).toHaveBeenLastCalledWith(
         expect.objectContaining({ status: InvocationStatus.ERROR, error: 'TypeError: bad input' }),
       );
+    });
+
+    it("answers a call that failed with the call: its ID, which finds its logs, how it ended, its duration and memory", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke
+        .mockRejectedValueOnce(new FunctionRuntimeError('Error', 'boom', { durationMs: 12, memoryUsedMb: 61 }))
+        .mockRejectedValueOnce(new FunctionTimeoutError('Task timed out after 5.00 seconds', { durationMs: 5003 }));
+
+      const raised = (await service.invoke('user-1', 'fn-1', {}).catch((error: unknown) => error)) as HttpException;
+      const timedOut = (await service.invoke('user-1', 'fn-1', {}).catch((error: unknown) => error)) as HttpException;
+
+      expect([raised.getStatus(), raised.getResponse()]).toEqual([
+        400,
+        { statusCode: 400, error: 'Bad Request', message: 'Error: boom', invocation: { id: 'inv-1', status: InvocationStatus.ERROR, duration: 12, memoryUsed: 61 } },
+      ]);
+      expect(timedOut.getResponse()).toMatchObject({ invocation: { id: 'inv-1', status: InvocationStatus.TIMEOUT, duration: 5003, memoryUsed: null } });
     });
 
     it('records a platform failure as ERROR with a generic message, in the history too; the details go to the log (D4)', async () => {
@@ -956,6 +1397,264 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
   });
 
+  describe("a function's environment variables", () => {
+    const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
+    const notReady = () => new FunctionLoadError('Error', 'boom at init');
+    /** The environment the orchestrator was given at each deploy or update, in order. */
+    const given = () => [...orchestrator.deploy.mock.calls, ...orchestrator.update.mock.calls].map(([fn]) => fn.environment);
+    const stored = (variables: Record<string, string>, revision = 'r0') =>
+      environments.saved.set('fn-1', { revision, variables, secrets: {} });
+
+    it('saves them with the new function, deploys them with a revision, and answers with them', async () => {
+      const result = await service.create('user-1', { ...dto, environment: { TABLE: 'orders', LOG_LEVEL: 'debug' } });
+
+      const saved = environments.saved.get('fn-1')!;
+      expect(saved).toEqual({ revision: expect.stringMatching(/^[0-9a-f]{16}$/), variables: { TABLE: 'orders', LOG_LEVEL: 'debug' }, secrets: {} });
+      expect(given()).toEqual([{ revision: saved.revision, values: { TABLE: 'orders', LOG_LEVEL: 'debug' } }]);
+      expect(result.environment).toEqual({ TABLE: 'orders', LOG_LEVEL: 'debug' });
+    });
+
+    it('gives a function without any no environment at all', async () => {
+      const result = await service.create('user-1', { ...dto, environment: {} });
+
+      expect(environments.saved.size).toBe(0);
+      expect(given()).toEqual([undefined]);
+      expect(result.environment).toEqual({});
+    });
+
+    it('answers GET with the variables', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+
+      expect((await service.describe('user-1', 'fn-1')).environment).toEqual({ TABLE: 'orders' });
+    });
+
+    it('rolls out new variables with a new revision, all of them replaced, and saves them once they are live', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders', OLD: 'x' });
+
+      const result = await service.update('user-1', 'fn-1', { environment: { TABLE: 'invoices' } });
+
+      const [rolledOut] = given();
+      expect(rolledOut).toEqual({ revision: expect.stringMatching(/^[0-9a-f]{16}$/), values: { TABLE: 'invoices' } });
+      expect(rolledOut!.revision).not.toBe('r0');
+      expect(environments.saved.get('fn-1')).toEqual({ revision: rolledOut!.revision, variables: { TABLE: 'invoices' }, secrets: {} });
+      expect(result.environment).toEqual({ TABLE: 'invoices' });
+    });
+
+    it('keeps the revision when the code changes and the variables do not, so their Secret stays where it is', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+
+      await service.update('user-1', 'fn-1', { code: 'v2', environment: { TABLE: 'orders' } });
+
+      expect(given()).toEqual([{ revision: 'r0', values: { TABLE: 'orders' } }]);
+    });
+
+    it('rolls nothing out when the same variables are sent again', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+
+      await service.update('user-1', 'fn-1', { environment: { TABLE: 'orders' } });
+
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(environments.saved.get('fn-1')!.revision).toBe('r0');
+    });
+
+    it('removes them all with an empty map: a version without any, and no row left', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+
+      await service.update('user-1', 'fn-1', { environment: {} });
+
+      expect(given()).toEqual([undefined]);
+      expect(environments.saved.has('fn-1')).toBe(false);
+    });
+
+    it('rolls a failed change back with the previous variables, and saves nothing', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders' });
+      orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
+
+      await expect(service.update('user-1', 'fn-1', { environment: { TABLE: 'broken' } })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(given().map((environment) => environment?.values)).toEqual([{ TABLE: 'broken' }, { TABLE: 'orders' }]);
+      expect(given()[1]!.revision).toBe('r0');
+      expect(environments.saved.get('fn-1')).toEqual({ revision: 'r0', variables: { TABLE: 'orders' }, secrets: {} });
+    });
+
+    it('keeps the variables of a failed repair with the attempt: the Deployment holds them', async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'earlier' });
+      stored({ TABLE: 'orders' });
+      orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
+
+      await expect(service.update('user-1', 'fn-1', { environment: { TABLE: 'retry' } })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(environments.saved.get('fn-1')!.variables).toEqual({ TABLE: 'retry' });
+    });
+
+    it('names the variables in the audit log, never their values', async () => {
+      await service.create('user-1', { ...dto, environment: { TABLE: 'orders', API_TOKEN: 'tok-123' } });
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ TABLE: 'orders', API_TOKEN: 'tok-123', OLD: 'gone' });
+
+      await service.update('user-1', 'fn-1', { environment: { TABLE: 'orders', API_TOKEN: 'tok-456', NEW: 'v' } });
+
+      const [created, updated] = audit.record.mock.calls.map(([event]) => event);
+      expect(created.details).toEqual({
+        name: 'hello',
+        runtime: 'nodejs',
+        handler: 'function.handler',
+        codeSha256: inlineCodeFacts('x').codeSha256,
+        memory: 128,
+        timeout: 5,
+        environment: ['API_TOKEN', 'TABLE'],
+      });
+      expect(updated.details).toEqual({ changed: ['environment'], environment: { added: ['NEW'], changed: ['API_TOKEN'], removed: ['OLD'] }, outcome: 'live' });
+      expect(JSON.stringify(audit.record.mock.calls)).not.toMatch(/tok-123|tok-456|orders/);
+    });
+  });
+
+  describe("a function's secrets", () => {
+    const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
+    const notReady = () => new FunctionLoadError('Error', 'boom at init');
+    const given = () => [...orchestrator.deploy.mock.calls, ...orchestrator.update.mock.calls].map(([fn]) => fn.environment);
+    const set = '2026-10-20T08:00:00.000Z';
+    /** Why a call was refused with 400: its messages. */
+    const refused = async (call: Promise<unknown>) => {
+      const failure = await call.catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(BadRequestException);
+      return ((failure as BadRequestException).getResponse() as { message: string[] }).message;
+    };
+    const tooLarge = (bytes: number) =>
+      `The environment is ${bytes} bytes as JSON text: AWS Lambda allows 4096 (4 KB) for a function's variables and secrets together`;
+    const stored = (secrets: Record<string, string>, variables: Record<string, string> = {}) =>
+      environments.saved.set('fn-1', {
+        revision: 'r0',
+        variables,
+        secrets: Object.fromEntries(Object.entries(secrets).map(([name, value]) => [name, { value, updatedAt: set }])),
+      });
+
+    it('are saved with the new function and given to it with its variables, and its answer holds none of them', async () => {
+      const result = await service.create('user-1', { ...dto, environment: { DB_USER: 'ff' }, secrets: { DB_PASSWORD: 'hunter2' } });
+
+      expect(environments.saved.get('fn-1')!.secrets).toEqual({ DB_PASSWORD: { value: 'hunter2', updatedAt: expect.any(String) } });
+      expect(given()).toEqual([{ revision: expect.any(String), values: { DB_USER: 'ff', DB_PASSWORD: 'hunter2' } }]);
+      expect(result.environment).toEqual({ DB_USER: 'ff' });
+      expect(JSON.stringify(result)).not.toContain('hunter2');
+      expect(audit.record.mock.calls[0][0].details).toMatchObject({ environment: ['DB_USER'], secrets: ['DB_PASSWORD'] });
+      expect(JSON.stringify(audit.record.mock.calls)).not.toContain('hunter2');
+    });
+
+    it('refuse a name that is a variable too, or 4 KB with the variables, before anything is saved or deployed', async () => {
+      expect(await refused(service.create('user-1', { ...dto, environment: { TOKEN: 'a' }, secrets: { TOKEN: 'b' } }))).toEqual([
+        'TOKEN is both a variable and a secret: a name is one or the other',
+      ]);
+      // {"BIG":"…","MORE":"…"}: 20 bytes around the values.
+      expect(await refused(service.create('user-1', { ...dto, environment: { BIG: 'x'.repeat(3000) }, secrets: { MORE: 'y'.repeat(1100) } }))).toEqual([
+        tooLarge(4120),
+      ]);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+    });
+
+    it("keep variables from taking a secret's name, or the 4 KB, in an update, which then rolls nothing out", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2' });
+
+      expect(await refused(service.update('user-1', 'fn-1', { environment: { DB_PASSWORD: 'x' } }))).toEqual([
+        'DB_PASSWORD is both a variable and a secret: a name is one or the other',
+      ]);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it('are listed by name and date, never by value', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2', API_TOKEN: 'tok' });
+
+      const listed = await service.listSecrets('user-1', 'fn-1');
+
+      expect(listed).toEqual({ secrets: [{ name: 'API_TOKEN', updatedAt: set }, { name: 'DB_PASSWORD', updatedAt: set }] });
+    });
+
+    it("of another account's function are not found, as the function isn't", async () => {
+      functionsRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.listSecrets('user-2', 'fn-1')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.updateSecrets('user-2', 'fn-1', { X_SECRET: 'v' })).rejects.toBeInstanceOf(NotFoundException);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it('set and removed by name roll out a new version with them, then are saved, and the answer names them', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2', OLD_TOKEN: 'old' }, { DB_USER: 'ff' });
+
+      const result = await service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'correct-horse', OLD_TOKEN: null, API_KEY: 'k' });
+
+      const [rolledOut] = given();
+      expect(rolledOut).toEqual({ revision: expect.stringMatching(/^[0-9a-f]{16}$/), values: { DB_USER: 'ff', DB_PASSWORD: 'correct-horse', API_KEY: 'k' } });
+      expect(rolledOut!.revision).not.toBe('r0');
+      expect(environments.saved.get('fn-1')).toMatchObject({ revision: rolledOut!.revision, variables: { DB_USER: 'ff' } });
+      expect(result.secrets.map((secret) => secret.name)).toEqual(['API_KEY', 'DB_PASSWORD']);
+      expect(JSON.stringify(result)).not.toMatch(/correct-horse|"k"/);
+    });
+
+    it('names the secrets added, changed and removed in the audit log, never their values', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2', OLD_TOKEN: 'old' });
+
+      await service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'correct-horse', OLD_TOKEN: null, API_KEY: 'k' });
+
+      expect(audit.record).toHaveBeenCalledWith({
+        accountId: 'user-1',
+        action: 'function.update',
+        resource: 'function:fn-1',
+        details: { changed: ['secrets'], secrets: { added: ['API_KEY'], changed: ['DB_PASSWORD'], removed: ['OLD_TOKEN'] }, outcome: 'live' },
+      });
+      expect(JSON.stringify(audit.record.mock.calls)).not.toMatch(/hunter2|correct-horse/);
+    });
+
+    it('roll nothing out for a value already set, or a name already gone', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2' });
+
+      const result = await service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'hunter2', NEVER_SET: null });
+
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(result).toEqual({ secrets: [{ name: 'DB_PASSWORD', updatedAt: set }] });
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('roll the function back to the previous secrets when the new version fails, and save nothing', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({ DB_PASSWORD: 'hunter2' });
+      orchestrator.waitUntilReady.mockRejectedValueOnce(notReady());
+
+      await expect(service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'broken' })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(given().map((environment) => environment?.values)).toEqual([{ DB_PASSWORD: 'broken' }, { DB_PASSWORD: 'hunter2' }]);
+      expect(environments.saved.get('fn-1')!.secrets.DB_PASSWORD.value).toBe('hunter2');
+    });
+
+    it('refuse more than 4 KB with the variables, and roll nothing out', async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      stored({}, { BIG: 'x'.repeat(4000) });
+
+      // {"BIG":"…","MORE":"…"}: 20 bytes around the values.
+      expect(await refused(service.updateSecrets('user-1', 'fn-1', { MORE: 'y'.repeat(100) }))).toEqual([tooLarge(4120)]);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it('can repair a function in ERROR: one that failed to load without its secret becomes ACTIVE with it', async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR, error: 'missing DB_PASSWORD' });
+
+      await service.updateSecrets('user-1', 'fn-1', { DB_PASSWORD: 'hunter2' });
+
+      expect(functionsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ status: FunctionStatus.ACTIVE, error: null }));
+      expect(environments.saved.get('fn-1')!.secrets.DB_PASSWORD.value).toBe('hunter2');
+    });
+  });
+
   describe('the audit log (P-17)', () => {
     const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
     const recorded = () => audit.record.mock.calls.map(([event]) => event);
@@ -971,19 +1670,24 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
           accountId: 'user-1',
           action: 'function.create',
           resource: 'function:fn-1',
-          details: { name: 'hello', runtime: 'nodejs', memory: 128, timeout: 5 },
+          details: { name: 'hello', runtime: 'nodejs', handler: 'function.handler', codeSha256: inlineCodeFacts('x').codeSha256, memory: 128, timeout: 5 },
         },
         transaction,
       );
     });
 
-    it('records the fields an update changed, with their new values but never the code', async () => {
+    it("records the fields an update changed, with their new values, but the code's hash rather than the code", async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
 
       await service.update('user-1', 'fn-1', { code: 'v2', memory: 256, timeout: 5 });
 
       expect(recorded()).toEqual([
-        { accountId: 'user-1', action: 'function.update', resource: 'function:fn-1', details: { changed: ['code', 'memory'], memory: 256, outcome: 'live' } },
+        {
+          accountId: 'user-1',
+          action: 'function.update',
+          resource: 'function:fn-1',
+          details: { changed: ['code', 'memory'], memory: 256, codeSha256: inlineCodeFacts('v2').codeSha256, outcome: 'live' },
+        },
       ]);
     });
 
@@ -1006,7 +1710,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR });
       orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Error', 'boom'));
       await service.update('user-1', 'fn-1', { code: 'still broken' }).catch(() => undefined);
-      expect(recorded()).toEqual([expect.objectContaining({ action: 'function.update', details: { changed: ['code'], outcome: 'failed, kept: ERROR' } })]);
+      expect(recorded()).toEqual([
+        expect.objectContaining({
+          action: 'function.update',
+          details: { changed: ['code'], codeSha256: inlineCodeFacts('still broken').codeSha256, outcome: 'failed, kept: ERROR' },
+        }),
+      ]);
     });
 
     it('records a deletion and a scaling change', async () => {
@@ -1080,6 +1789,14 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     it("lists only the calling account's functions", async () => {
       await expect(service.findAll('user-2')).resolves.toEqual([]);
       await expect(service.findAll('user-1')).resolves.toEqual([owned()]);
+    });
+
+    it('finds the function of a name, its own account\'s only, compared exactly', async () => {
+      const { name } = owned();
+
+      await expect(service.findAll('user-1', name)).resolves.toEqual([owned()]);
+      await expect(service.findAll('user-1', name.toUpperCase())).resolves.toEqual([]);
+      await expect(service.findAll('user-2', name)).resolves.toEqual([]);
     });
 
     describe('logs (P-43)', () => {

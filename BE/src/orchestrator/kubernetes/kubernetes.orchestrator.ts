@@ -21,8 +21,9 @@ import {
   TENANT_LIMITS_NAME,
   TENANT_NETWORK_POLICY_NAME,
   TENANT_QUOTA_NAME,
-  codeConfigMapManifest,
   deploymentManifest,
+  environmentSecretManifest,
+  hasEnvironment,
   limitRangeManifest,
   maxQueueWaitMs,
   namespaceManifest,
@@ -30,11 +31,30 @@ import {
   resourceQuotaManifest,
   serviceManifest,
 } from './manifests';
-import { ANNOTATIONS, LABELS, MANAGED_BY, accountNamespace, codeConfigMapName, codeHash, functionResourceName } from './naming';
+import {
+  ANNOTATIONS,
+  EnvironmentSlot,
+  LABELS,
+  MANAGED_BY,
+  accountNamespace,
+  codeHash,
+  environmentSecretName,
+  environmentSlotOf,
+  functionResourceName,
+} from './naming';
 
 interface Deployment extends K8sObject {
   metadata: K8sObject['metadata'] & { generation?: number };
-  spec?: { replicas?: number; template?: { metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'> } };
+  spec?: {
+    replicas?: number;
+    template?: {
+      metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'>;
+      spec?: {
+        containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }>;
+        volumes?: Array<{ name: string; configMap?: { name?: string }; image?: { reference?: string } }>;
+      };
+    };
+  };
   status?: {
     observedGeneration?: number;
     replicas?: number;
@@ -84,6 +104,15 @@ function runsTemplate(pod: Pod, deployment: Deployment): boolean {
   );
 }
 
+/** The environment Secret a Deployment's pods read, its slot, and the revision its template names; none without one. */
+function environmentInUse(fn: FunctionWorkload, deployment: Deployment | null): { name: string; slot: EnvironmentSlot; revision?: string } | undefined {
+  const template = deployment?.spec?.template;
+  const name = template?.spec?.containers?.[0]?.envFrom?.find((source) => source.secretRef?.name)?.secretRef?.name;
+  const slot = name === undefined ? undefined : environmentSlotOf(fn.id, name);
+  if (name === undefined || slot === undefined) return undefined;
+  return { name, slot, revision: template?.metadata?.annotations?.[ANNOTATIONS.environmentRevision] };
+}
+
 /** The rollout is finished: every replica runs the new template and is available (as `kubectl rollout status`). */
 export function isRolledOut(deployment: Deployment): boolean {
   const desired = deployment.spec?.replicas ?? 1;
@@ -98,8 +127,8 @@ export function isRolledOut(deployment: Deployment): boolean {
 
 /**
  * Runs each function as a Deployment in its account's namespace (one namespace
- * per user), with code in an immutable ConfigMap and a ClusterIP Service in
- * front. See docs/kubernetes-migration-plan.md, K-06.
+ * per user), its code's image mounted (ADR 0003), and a ClusterIP Service in
+ * front. See docs/kubernetes-migration-plan.md for how it came to be.
  */
 export class KubernetesOrchestrator implements Orchestrator {
   private readonly logger = new Logger(KubernetesOrchestrator.name);
@@ -159,12 +188,11 @@ export class KubernetesOrchestrator implements Orchestrator {
   private async apply(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
-    const hash = codeHash(fn.runtime, fn.code);
-    const configMap = codeConfigMapName(fn.id, hash);
-    const configMapManifest = codeConfigMapManifest(fn, ns, configMap, hash); // validates size first
+    // The code is its image, inline code's too, which names its version (ADR 0003).
+    if (!fn.codeImage) throw new OrchestratorError(`Function ${fn.id} has no code image: its code reaches its pods as one (ADR 0003)`);
+    const hash = codeHash(fn.runtime, fn.codeImage);
 
     await this.ensureTenant(fn, ns, tenant);
-    await this.api.apply(paths.core(ns, 'configmaps', configMap), configMapManifest);
     await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
 
     // Keep the current replica count (it may have been scaled since), never below
@@ -174,20 +202,56 @@ export class KubernetesOrchestrator implements Orchestrator {
     const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
     const replicas = Math.max(existing?.spec?.replicas ?? 0, fn.minInstances, 1);
     if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid minInstances ${fn.minInstances} for function ${fn.id}`);
-    await this.api.apply(
-      paths.apps(ns, 'deployments', name),
-      deploymentManifest(fn, ns, configMap, hash, this.settings, replicas),
-    );
-    await this.collectOldConfigMaps(fn, ns, configMap);
+    const environmentSecret = await this.applyEnvironment(fn, ns, existing);
+    await this.api.apply(paths.apps(ns, 'deployments', name), deploymentManifest(fn, ns, hash, this.settings, replicas, environmentSecret));
+    await this.collectOldConfigMaps(fn, ns, existing);
   }
 
-  /** Keeps the current code ConfigMap and the newest previous one (still used during rollouts). */
-  private async collectOldConfigMaps(fn: FunctionWorkload, ns: string, current: string): Promise<void> {
+  /**
+   * Writes the function's variables and secrets into the Secret that its running
+   * version doesn't read, and returns that Secret's name for the Deployment: the
+   * pods of the running version keep theirs during the rollout, and a rollback
+   * finds the old values where they were. An environment that hasn't changed
+   * stays where it is. Nothing for a function without one.
+   */
+  private async applyEnvironment(fn: FunctionWorkload, ns: string, existing: Deployment | null): Promise<string | undefined> {
+    if (!hasEnvironment(fn)) return undefined;
+    const inUse = environmentInUse(fn, existing);
+    const slot: EnvironmentSlot = !inUse ? 0 : inUse.revision === fn.environment.revision ? inUse.slot : inUse.slot === 0 ? 1 : 0;
+    const secret = environmentSecretName(fn.id, slot);
+    await this.api.apply(paths.core(ns, 'secrets', secret), environmentSecretManifest(fn, ns, secret));
+    return secret;
+  }
+
+  /**
+   * Once a rollout is complete, deletes the environment Secret that no pod reads
+   * any more, so that replaced and removed values leave the cluster; both, for a
+   * function without an environment now. Best effort: a Secret left behind is
+   * written over by the next change, and deleted with the function.
+   */
+  private async collectEnvironments(fn: FunctionWorkload, ns: string, deployment: Deployment): Promise<void> {
+    const inUse = environmentInUse(fn, deployment)?.name;
+    for (const slot of [0, 1] as const) {
+      const secret = environmentSecretName(fn.id, slot);
+      if (secret === inUse) continue;
+      try {
+        await this.api.delete(paths.core(ns, 'secrets', secret));
+      } catch (error) {
+        this.logger.warn(`Could not delete the unused environment Secret ${ns}/${secret}: ${describeError(error)}`);
+      }
+    }
+  }
+
+  /**
+   * The code ConfigMaps of a function deployed before its code came as an
+   * image: the one the replaced version mounts stays while its pods serve the
+   * rollout, and a rollback finds it; the others go, and that one goes at the
+   * next rollout, once no pod mounts any.
+   */
+  private async collectOldConfigMaps(fn: FunctionWorkload, ns: string, replaced: Deployment | null): Promise<void> {
+    const mounted = replaced?.spec?.template?.spec?.volumes?.find((volume) => volume.name === 'code')?.configMap?.name;
     const configMaps = await this.api.list<Listed>(paths.core(ns, 'configmaps'), `${LABELS.functionId}=${fn.id}`);
-    const older = configMaps
-      .filter((cm) => cm.metadata.name !== current)
-      .sort((a, b) => (b.metadata.creationTimestamp ?? '').localeCompare(a.metadata.creationTimestamp ?? ''));
-    for (const cm of older.slice(1)) {
+    for (const cm of configMaps.filter((configMap) => configMap.metadata.name !== mounted)) {
       await this.api.delete(paths.core(ns, 'configmaps', cm.metadata.name));
     }
   }
@@ -198,6 +262,8 @@ export class KubernetesOrchestrator implements Orchestrator {
     await this.api.delete(paths.apps(ns, 'deployments', name));
     await this.api.delete(paths.core(ns, 'services', name));
     await this.api.deleteCollection(paths.core(ns, 'configmaps'), `${LABELS.functionId}=${fn.id}`);
+    // By name: the backend may delete Secrets, never list them.
+    for (const slot of [0, 1] as const) await this.api.delete(paths.core(ns, 'secrets', environmentSecretName(fn.id, slot)));
   }
 
   /**
@@ -255,7 +321,8 @@ export class KubernetesOrchestrator implements Orchestrator {
   }
 
   async waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void> {
-    await this.waitFor(fn, timeoutMs, isRolledOut);
+    const deployment = await this.waitFor(fn, timeoutMs, isRolledOut);
+    await this.collectEnvironments(fn, this.namespaceOf(fn), deployment);
   }
 
   /** For a cold start: one ready instance is enough to serve the call. */
@@ -263,7 +330,8 @@ export class KubernetesOrchestrator implements Orchestrator {
     await this.waitFor(fn, timeoutMs, (deployment) => (deployment.status?.readyReplicas ?? 0) >= 1);
   }
 
-  private async waitFor(fn: FunctionWorkload, timeoutMs: number, done: (deployment: Deployment) => boolean): Promise<void> {
+  /** Waits until `done` holds for the function's Deployment, and returns it as it was then. */
+  private async waitFor(fn: FunctionWorkload, timeoutMs: number, done: (deployment: Deployment) => boolean): Promise<Deployment> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const deadline = Date.now() + timeoutMs;
@@ -272,7 +340,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     for (;;) {
       deployment = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
       if (!deployment) throw new OrchestratorError(`Deployment ${ns}/${name} does not exist`);
-      if (done(deployment)) return;
+      if (done(deployment)) return deployment;
       if (Date.now() >= deadline) break;
       // Code that fails to load never becomes ready, and its runtime says so within a second:
       // waiting out the timeout would only keep the caller waiting for the same answer.
@@ -425,7 +493,20 @@ export class KubernetesOrchestrator implements Orchestrator {
     return ready;
   }
 
-  async invoke(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<InvokeResult> {
+  async codeImagesByFunction(): Promise<Map<string, string>> {
+    // The same one list of FF's Deployments in every namespace as above.
+    const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);
+    const images = new Map<string, string>();
+    for (const deployment of deployments) {
+      const functionId = deployment.metadata.labels?.[LABELS.functionId];
+      if (!functionId || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
+      const reference = deployment.spec?.template?.spec?.volumes?.find((volume) => volume.name === 'code')?.image?.reference;
+      if (reference) images.set(functionId, reference);
+    }
+    return images;
+  }
+
+  async invoke(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<InvokeResult> {
     let initMs: number | undefined;
     try {
       const { desired, ready } = await this.instances(fn);
@@ -450,7 +531,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     }
   }
 
-  private async post(fn: FunctionWorkload, payload: Record<string, unknown>, requestId?: string): Promise<KubeResponse> {
+  private async post(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<KubeResponse> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
     const body = JSON.stringify(payload);

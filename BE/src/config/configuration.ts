@@ -12,6 +12,7 @@
 import * as fs from 'node:fs';
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import { DEVELOPMENT_KEY, EncryptionKey, parseKeyRing } from '../encryption/key-ring';
 
 /** The configuration is invalid. The message lists each problem, naming its variable. */
 export class ConfigurationError extends Error {
@@ -40,6 +41,11 @@ export const DEVELOPMENT_CREDENTIALS = {
 } as const;
 
 const DEV_CORS_ORIGIN = 'http://localhost:5199';
+/**
+ * Function URLs in development: http://<id>.fn.localhost:3001/, which every browser, and curl, takes to this
+ * machine, as any name under .localhost.
+ */
+export const DEV_FUNCTION_URL_BASE = 'http://fn.localhost:3001';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
@@ -90,6 +96,11 @@ function optionalText(rule?: { test: (value: string) => boolean; expected: strin
 /** A credential: never trimmed, and never repeated in an error message. */
 function secret(fallback?: string) {
   return z.preprocess(prepare(fallback, false), z.string({ error: 'is required' }));
+}
+
+/** A credential that may be unset: never trimmed, and never repeated in an error message. */
+function optionalSecret() {
+  return z.preprocess(prepare(undefined, false), z.string().optional());
 }
 
 /** A URL that may hold a password: may be unset, and is never repeated in an error message. */
@@ -206,6 +217,11 @@ const namespacePrefix = {
   expected: 'ff-t-, the only prefix the admission policy allows (deploy/k8s/base/40-admission-policy.yaml)',
 };
 const imageReference = { test: (v: string) => /^\S+$/.test(v), expected: 'a container image reference' };
+/** A registry as an image reference names it: a host, and a port if any. */
+const registryHost = {
+  test: (v: string) => /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/i.test(v),
+  expected: 'a registry host, and its port if any, such as ff-dev-registry:5000',
+};
 const bucketName = {
   test: (v: string) => /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(v),
   expected: 'an S3 bucket name (3 to 63 lowercase letters, digits, "." and "-")',
@@ -224,6 +240,33 @@ const iban = {
 const smtpUrl = {
   test: (v: string) => isUrl(v, ['smtp:', 'smtps:']),
   expected: 'an smtp:// or smtps:// URL, such as smtp://localhost:51025 (credentials go in it: smtps://user:password@host)',
+};
+/** A region's name, as AWS's are made: letters, then a word, then a number, such as tn-tunis-1 or eu-west-3. */
+const region = { test: (v: string) => /^[a-z]{2,4}(-[a-z]+)+-\d{1,2}$/.test(v), expected: 'a region name, such as tn-tunis-1' };
+/** An IP address, as the edge's are given. */
+const ipAddress = { test: (v: string) => isIP(v) !== 0, expected: 'IP addresses, such as 203.0.113.10 or 2001:db8::10' };
+/** A DNS server: an IP address, with a port after a colon, IPv6 in brackets then. */
+const dnsServer = {
+  test: (v: string) => {
+    const bracketed = /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(v);
+    if (bracketed) return isIP(bracketed[1]) === 6 && (!bracketed[2] || Number(bracketed[2]) <= 65535);
+    const [address, port, ...rest] = v.split(':');
+    if (isIP(v) === 6) return true;
+    return rest.length === 0 && isIP(address) === 4 && (port === undefined || (/^\d{1,5}$/.test(port) && Number(port) <= 65535));
+  },
+  expected: 'DNS servers, an IP address and a port if not 53, such as 10.43.0.10 or 127.0.0.1:5353',
+};
+/** Where function URLs live: a scheme, a host under which each URL is <id>.<host>, and a port if any; no path. */
+const functionUrlBase = {
+  test: (v: string) => {
+    try {
+      const url = new URL(v);
+      return ['http:', 'https:'].includes(url.protocol) && url.origin === v.replace(/\/$/, '') && url.hostname.includes('.');
+    } catch {
+      return false;
+    }
+  },
+  expected: 'an origin whose host has a dot, such as https://fn.example.tn, under which each function URL is https://<id>.fn.example.tn/',
 };
 const emailAddress = { test: (v: string) => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(v), expected: 'an e-mail address' };
 const mailbox = {
@@ -289,6 +332,10 @@ const appShape = {
   // How often alarms are evaluated, and how long a period has been over before it is judged; tests shorten both.
   FF_ALARM_INTERVAL_SECONDS: integer(60, 1, 3600),
   FF_ALARM_SETTLE_SECONDS: integer(60, 0, 3600),
+  // How often the scheduler takes the schedules due (0: never, a backend that runs none); and FF's region, which
+  // events name, as AWS's do theirs.
+  FF_SCHEDULER_INTERVAL_SECONDS: integer(5, 0, 60),
+  FF_REGION: text('tn-tunis-1', region),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
@@ -296,8 +343,8 @@ const appShape = {
   K8S_CA_FILE: text(`${IN_CLUSTER_SECRETS}/ca.crt`),
   K8S_INVOKE_MODE: z.preprocess(prepare(undefined), oneOf(['direct', 'proxy']).optional()),
   K8S_NAMESPACE_PREFIX: text('ff-t-', namespacePrefix),
-  K8S_RUNTIME_IMAGE_NODEJS: text('ff-runtime-nodejs:24-v2', imageReference),
-  K8S_RUNTIME_IMAGE_PYTHON: text('ff-runtime-python:3.13-v2', imageReference),
+  K8S_RUNTIME_IMAGE_NODEJS: text('ff-runtime-nodejs:24-v3', imageReference),
+  K8S_RUNTIME_IMAGE_PYTHON: text('ff-runtime-python:3.13-v3', imageReference),
   K8S_IMAGE_PULL_POLICY: oneOf(['IfNotPresent', 'Always', 'Never'], 'IfNotPresent'),
   // The sandbox customers' code runs in (gvisor); production requires one, unless K8S_ALLOW_UNSANDBOXED says otherwise.
   K8S_RUNTIME_CLASS: optionalText(dnsSubdomain),
@@ -326,6 +373,25 @@ const appShape = {
   FF_BANK_NAME: text(DEV_SELLER.FF_BANK_NAME),
   FF_BANK_IBAN: text(DEV_SELLER.FF_BANK_IBAN, iban),
   FF_BANK_BIC: optionalText(),
+
+  // Function URLs: the port of the server that answers them, apart from the API's (0: none), and where they live.
+  FF_FUNCTION_URL_PORT: integer(3001, 0, 65535),
+  FF_FUNCTION_URL_BASE: text(DEV_FUNCTION_URL_BASE, functionUrlBase),
+  // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
+  // servers that check domains' records (none: the system's).
+  FF_EDGE_ADDRESSES: list(ipAddress),
+  FF_DOMAIN_RESOLVERS: list(dnsServer),
+
+  // The keys that encrypt functions' environment variables and secrets at rest: one a line, <id>:<32 bytes in base64>,
+  // the first sealing. Unset: the development key, which production refuses.
+  FF_ENCRYPTION_KEYS_FILE: optionalText(),
+
+  // Functions' code images (ADR 0003): the registry the backend pushes them to (unset: no function can be deployed), the
+  // host the cluster's nodes pull them from (the registry's own by default), and a push's credentials, if it needs any.
+  FF_CODE_REGISTRY: optionalText(httpUrl),
+  FF_CODE_REGISTRY_PULL: optionalText(registryHost),
+  FF_CODE_REGISTRY_USERNAME: optionalText(),
+  FF_CODE_REGISTRY_PASSWORD: optionalSecret(),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -359,6 +425,13 @@ function appRules(env: AppEnv): string[] {
   const problems = databaseRules(env);
   const production = env.NODE_ENV === 'production';
 
+  if (!env.FF_CODE_REGISTRY && env.FF_CODE_REGISTRY_PULL) {
+    problems.push('FF_CODE_REGISTRY_PULL is set, but FF_CODE_REGISTRY is not: the backend pushes code images to FF_CODE_REGISTRY');
+  }
+  if (!!env.FF_CODE_REGISTRY_USERNAME !== !!env.FF_CODE_REGISTRY_PASSWORD) {
+    problems.push('FF_CODE_REGISTRY_USERNAME and FF_CODE_REGISTRY_PASSWORD go together: set both, or neither for a registry without a login');
+  }
+
   if (env.FF_DEV_USER_ID !== undefined) {
     problems.push(
       'FF_DEV_USER_ID is no longer read: set FF_AUTH_MODE=dev and FF_DEV_ACCOUNT_ID (12 digits) instead, as in BE/.env.example',
@@ -370,6 +443,16 @@ function appRules(env: AppEnv): string[] {
   }
   for (const name of ['K8S_TENANT_QUOTA_PODS', 'K8S_TENANT_QUOTA_CPU', 'K8S_TENANT_QUOTA_MEMORY'] as const) {
     if (env[name] !== undefined) problems.push(`${name} is no longer read: each account's plan sets its quota (plans.limits.quota); remove it`);
+  }
+  // FF tags its runtime images by their protocol: before 3, a runtime hands every function FF's original wrapper as
+  // its event, which a function made now, given AWS Lambda's, would misread at every call.
+  for (const [name, image] of [['K8S_RUNTIME_IMAGE_NODEJS', env.K8S_RUNTIME_IMAGE_NODEJS], ['K8S_RUNTIME_IMAGE_PYTHON', env.K8S_RUNTIME_IMAGE_PYTHON]] as const) {
+    const protocol = /:[^/:]*-v([12])$/.exec(image)?.[1];
+    if (protocol) {
+      problems.push(
+        `${name} names a runtime of protocol ${protocol} (${image}), which gives functions FF's original event: they now get AWS Lambda's, which takes protocol 3 (-v3)`,
+      );
+    }
   }
   if (env.FF_AUTH_MODE === 'dev') {
     if (production) problems.push('FF_AUTH_MODE=dev is for development only, and is refused when NODE_ENV=production');
@@ -406,6 +489,16 @@ function appRules(env: AppEnv): string[] {
         "K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production; K8S_ALLOW_UNSANDBOXED=true runs them without one, for a cluster that only tries the platform's manifests",
       );
     }
+    if (!env.FF_FUNCTION_URL_BASE.startsWith('https://')) {
+      problems.push('FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production, such as https://fn.example.tn: function URLs are served over TLS');
+    }
+    if (!env.FF_ENCRYPTION_KEYS_FILE) {
+      problems.push("FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production: its keys encrypt functions' environment variables and secrets");
+    }
+    // Every function's code reaches its pods as an image (ADR 0003): without a registry, none could be deployed.
+    if (!env.FF_CODE_REGISTRY) {
+      problems.push("FF_CODE_REGISTRY is required when NODE_ENV=production: every function's code reaches its pods as an image from the code registry (deploy/k8s/README.md, \"The code registry\")");
+    }
     if (env.FF_WEBHOOK_ALLOW_PRIVATE) {
       problems.push("FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network");
     }
@@ -426,6 +519,27 @@ function parse<S extends z.ZodType>(schema: S, env: Env): z.infer<S> {
     );
   }
   return result.data;
+}
+
+/**
+ * The platform's encryption keys: the keys file's, read and checked at start,
+ * else the development key, which production refuses (appRules). A problem
+ * names the file and its line, never a key.
+ */
+function encryptionKeys(path: string | undefined, production: boolean): EncryptionKey[] {
+  if (!path) return [DEVELOPMENT_KEY];
+  let text: string;
+  try {
+    text = fs.readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new ConfigurationError([`FF_ENCRYPTION_KEYS_FILE cannot be read: ${path} (${(error as NodeJS.ErrnoException).code ?? 'error'})`]);
+  }
+  const { ring, problems } = parseKeyRing(text);
+  if (!ring) throw new ConfigurationError(problems.map((problem) => `FF_ENCRYPTION_KEYS_FILE ${path}: ${problem}`));
+  if (production && ring.holdsDevelopmentKey()) {
+    throw new ConfigurationError([`FF_ENCRYPTION_KEYS_FILE ${path} holds the development key, which protects nothing: refused when NODE_ENV=production`]);
+  }
+  return [...ring.keys];
 }
 
 function readCertificate(name: string, path: string): string {
@@ -539,6 +653,11 @@ export default function configuration(env: Env = process.env) {
       intervalSeconds: parsed.FF_ALARM_INTERVAL_SECONDS,
       settleSeconds: parsed.FF_ALARM_SETTLE_SECONDS,
     },
+    // Schedules: how often the due ones are taken, and the region their events name.
+    schedules: {
+      intervalSeconds: parsed.FF_SCHEDULER_INTERVAL_SECONDS,
+      region: parsed.FF_REGION,
+    },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.
       smtpUrl: parsed.FF_SMTP_URL ?? '',
@@ -549,6 +668,24 @@ export default function configuration(env: Env = process.env) {
       adminUrl: parsed.FF_ADMIN_URL.replace(/\/$/, ''),
       // The console, which invitation e-mails link to (P-16).
       consoleUrl: parsed.FF_CONSOLE_URL.replace(/\/$/, ''),
+    },
+    // Function URLs: the server that answers them, and the origin under which each is <id>.<host>.
+    functionUrls: {
+      port: parsed.FF_FUNCTION_URL_PORT,
+      base: parsed.FF_FUNCTION_URL_BASE.replace(/\/$/, ''),
+      edgeAddresses: parsed.FF_EDGE_ADDRESSES,
+      domainResolvers: parsed.FF_DOMAIN_RESOLVERS,
+    },
+    // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
+    codeImages: {
+      registry: parsed.FF_CODE_REGISTRY?.replace(/\/$/, '') ?? '',
+      pullHost: parsed.FF_CODE_REGISTRY_PULL ?? (parsed.FF_CODE_REGISTRY ? new URL(parsed.FF_CODE_REGISTRY).host : ''),
+      username: parsed.FF_CODE_REGISTRY_USERNAME ?? '',
+      password: parsed.FF_CODE_REGISTRY_PASSWORD ?? '',
+    },
+    // What FF keeps encrypted at rest (functions' environments) is sealed with these keys, the first sealing.
+    encryption: {
+      keys: encryptionKeys(parsed.FF_ENCRYPTION_KEYS_FILE, production),
     },
     // Who sells, and where transfers go, as pro-formas say it (P-35).
     billing: {

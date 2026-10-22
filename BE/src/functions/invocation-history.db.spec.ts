@@ -20,6 +20,7 @@ import { FunctionInvocation, InvocationStatus } from './entities/function-invoca
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 import { HISTORY_FIELD_BYTES } from './history';
+import { memoryEnvironments, noPackages } from './test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '300000000045';
@@ -76,6 +77,8 @@ run('the invocation history (L2, P-45)', () => {
       { record: async () => undefined } as never,
       usage,
       { admit: async () => undefined } as never, // every call admitted
+      memoryEnvironments(),
+      ...noPackages(),
     );
   });
 

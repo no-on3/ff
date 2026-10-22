@@ -3,7 +3,9 @@
 # with row locks, so a second would be safe, but the beta needs one. It calls functions' Services directly
 # (K8S_INVOKE_MODE=direct). Its settings are the ConfigMap ff-backend (backend.env) and the Secret ff-backend,
 # which the deployment writes (deploy/k8s/README.md): DB_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
-# FF_SMTP_URL. It refuses to start on a schema with pending migrations: deploy.sh runs the migrations Job first.
+# FF_SMTP_URL; and the keys that encrypt functions' variables and secrets, the Secret ff-encryption-keys, as a
+# file. It refuses to start on a schema with pending migrations: deploy.sh runs the migrations Job first. Functions'
+# URLs are answered on a port of their own, 3001, which only the edge reaches.
 apiVersion: v1
 kind: Service
 metadata:
@@ -19,6 +21,9 @@ spec:
     - name: http
       port: 80
       targetPort: http
+    - name: function-urls
+      port: 3001
+      targetPort: function-urls
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -48,6 +53,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
+        # The Secrets it reads as files are its group's (mode 0440), not the world's: this makes it their group.
+        fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
       # A stopping backend finishes its calls: the longest a function may run, 15 minutes, would be too long a
@@ -64,6 +71,9 @@ spec:
           ports:
             - name: http
               containerPort: 3000
+            # FF_FUNCTION_URL_PORT
+            - name: function-urls
+              containerPort: 3001
             - name: metrics
               containerPort: 9464
           startupProbe:
@@ -101,6 +111,9 @@ spec:
             - name: log-store-key
               mountPath: /etc/ff/victoria-logs-delete-key
               readOnly: true
+            - name: encryption-keys
+              mountPath: /etc/ff/encryption-keys
+              readOnly: true
             - name: kube-api-access
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
@@ -112,6 +125,11 @@ spec:
         - name: log-store-key
           secret:
             secretName: victoria-logs-delete-key
+            defaultMode: 0440
+        # The keys that encrypt functions' variables and secrets at rest (FF_ENCRYPTION_KEYS_FILE): one a line.
+        - name: encryption-keys
+          secret:
+            secretName: ff-encryption-keys
             defaultMode: 0440
         # Where the backend looks by default (K8S_TOKEN_FILE, K8S_CA_FILE): the token, and the API server's CA.
         - name: kube-api-access

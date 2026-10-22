@@ -41,7 +41,8 @@ kubectl get pods -A
 hack/k8s/cluster-up.sh             # create (or start) the cluster, apply deploy/k8s/dev, install the log pipeline, mint credentials
 hack/k8s/cluster-up.sh --monitoring    # the same, and the operator's monitoring (below)
 hack/k8s/test-rbac.sh              # verify RBAC, the production manifests and the admission policy (35 checks)
-hack/k8s/cluster-down.sh           # delete the cluster and the local credentials
+hack/k8s/registry-up.sh            # the code registry, for a cluster made before it (cluster-up.sh runs it)
+hack/k8s/cluster-down.sh           # delete the cluster, its registry's container, and the local credentials
 ```
 
 `cluster-up.sh` creates k3s v1.37.1 with:
@@ -50,17 +51,18 @@ hack/k8s/cluster-down.sh           # delete the cluster and the local credential
 - a 2 GB node memory cap;
 - Traefik and metrics-server disabled;
 - the log pipeline (below), unless `--no-logging`;
-- the operator's monitoring (below), with `--monitoring` only.
+- the operator's monitoring (below), with `--monitoring` only;
+- the registry of functions' code images ([ADR 0003](adr/0003-code-delivery.md)), `ff-dev-registry` (`registry:3.1.2`), on the cluster's Docker network: the backend pushes to `127.0.0.1:5056`, and the node pulls from `ff-dev-registry:5000` over HTTP. `registry-up.sh` tells the node's containerd so in a `hosts.toml`, which containerd reads at each pull, and in `/etc/rancher/k3s/registries.yaml`, which has k3s write it again when it starts: a cluster made before the registry gets it without a restart. Its images are in the volume `ff-dev-registry`, which `cluster-down.sh` keeps; the backend makes an image again when the registry has lost it, at a deploy, and for every function's every hour and at its start. It takes deletes (`REGISTRY_STORAGE_DELETE_ENABLED=true`), as production's registry does, so that the purge of unused packages deletes their images too: `registry-up.sh` makes a container from before without them again, its volume kept.
 
 It is safe to re-run.
 
 ## Runtime images and integration tests
 
-Function pods use the FF runtime images `ff-runtime-nodejs:24-v2` and `ff-runtime-python:3.13-v2` (protocol and handler contracts in [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md)). In development they are built locally and imported into the cluster, so no registry is needed:
+Function pods use the FF runtime images `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3` (protocol and handler contracts in [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md)). In development they are built locally and imported into the cluster, so no registry is needed:
 
 ```bash
-runtimes/nodejs/test/container-smoke.sh    # builds ff-runtime-nodejs:24-v2 and checks it hardened
-runtimes/python/tests/container-smoke.sh   # builds ff-runtime-python:3.13-v2 and checks it hardened
+runtimes/nodejs/test/container-smoke.sh    # builds ff-runtime-nodejs:24-v3 and checks it hardened
+runtimes/python/tests/container-smoke.sh   # builds ff-runtime-python:3.13-v3 and checks it hardened
 hack/k8s/load-images.sh                    # imports every local ff-runtime-* image into ff-dev
 hack/k8s/test-it.sh                        # L3: re-imports the images, then runs BE `npm run test:it` (~6 min)
 hack/k8s/test-it.sh functions.lifecycle    # only the suites whose path matches
@@ -292,18 +294,20 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
 
 `hack/e2e-platform.sh` is L4 for `deploy/k8s` (client-readiness plan P-60): it deploys FF on a new k3d cluster, `ff-platform-e2e` (3 GB, ports 58443 and 58080 on this machine), from the manifests alone, and takes a customer's path through the edge. It doesn't touch the dev cluster, and removes everything it made on exit; it needs about 5 GB free, and 15 minutes.
 
-1. It builds the four images (`ff-backend`, `ff-console`, `ff-admin`, `ff-edge`, tagged `e2e`) and imports them, and installs gVisor in the cluster with `hack/k8s/gvisor-up.sh`, as production requires it for functions.
+1. It builds the four images (`ff-backend`, `ff-console`, `ff-admin`, `ff-edge`, tagged `e2e`) and imports them with the code registry's (Zot, as the platform pins it), and installs gVisor in the cluster with `hack/k8s/gvisor-up.sh`, as production requires it for functions. The cluster is made with its node told where code images are, as an operator tells each node (`registries.yaml`: `registry.ff.internal` at the registry's fixed address, as `ff-node`).
 2. PostgreSQL, S3 and Mailpit run as containers on the cluster's Docker network, outside it, as in production. Their passwords are made for the run; the backend gets none of development's.
-3. It applies `deploy/k8s/base` and `logging`. `deploy.sh` must first refuse a sandbox the cluster lacks, and one no node is labelled to run; then it runs `deploy/k8s/platform/deploy.sh hack/k8s/platform-e2e`. That overlay holds hostnames under `ff.test`, TLS from Caddy's own authority, and the development realm for its test client.
+3. It applies `deploy/k8s/base` and `logging`. `deploy.sh` must first refuse a sandbox the cluster lacks, and one no node is labelled to run; then it runs `deploy/k8s/platform/deploy.sh hack/k8s/platform-e2e`. That overlay holds hostnames under `ff.test`, function URLs under `fn.ff.test` with their certificates on demand, TLS from Caddy's own authority, and the development realm for its test client.
 4. It checks:
    - TLS and HSTS on the four hostnames, verified against the edge's root, and plain HTTP sent to HTTPS with a 308;
    - `/readyz`, and the login's public issuer;
    - the admin app and Keycloak's administration refused, then admitted once this machine's address is allowed;
    - a customer made, signed in, asking for an account; the operator told by e-mail through the cluster's SMTP, then approving;
    - the backend's token for the cluster's API, read in its pod, lasting an hour;
-   - a function deployed and invoked in direct mode, answering from gVisor's kernel, and its logs;
+   - a function deployed and invoked in direct mode, its inline code an image from the platform's registry, answering from gVisor's kernel, and its logs;
+   - a function made from a package, its code image pushed to the platform's registry and pulled by the node under the name it maps, answering from its package; a second from the same package, whose own code can't reach the registry;
    - the audit log naming the caller's address, not the edge's;
-   - an ordinary pod reaching the edge, and not the backend, Keycloak, the console or a function;
+   - a function URL over HTTPS through the edge, its certificate made on demand once the backend said yes, the function told the caller's address; no certificate for a host that is no URL;
+   - an ordinary pod reaching the edge, and not the backend, its port for function URLs, Keycloak, the console, the code registry or a function;
    - `deploy.sh` run again changing nothing.
 
 ```bash

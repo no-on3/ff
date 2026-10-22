@@ -1,18 +1,16 @@
-import { Runtime } from '../../functions/entities/function.entity';
-import { CodeTooLargeError } from '../orchestrator.errors';
+import { EventFormat, Runtime } from '../../functions/entities/function.entity';
 import {
   BLOCKED_EGRESS_CIDRS,
-  MAX_CODE_BYTES,
-  codeConfigMapManifest,
   cpuMillicores,
   deploymentManifest,
+  environmentSecretManifest,
   namespaceManifest,
   networkPolicyManifest,
   resourceQuotaManifest,
   serviceManifest,
 } from './manifests';
 import { accountHash } from './naming';
-import { settings, workload } from './test-fixtures';
+import { CODE_IMAGE, settings, workload } from './test-fixtures';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const podSpec = (d: any) => d.spec.template.spec;
@@ -45,7 +43,7 @@ describe('Kubernetes manifests', () => {
 
   describe('Deployment', () => {
     const build = (overrides = {}, s = settings()) =>
-      deploymentManifest(workload(overrides), 'ff-t-abc', 'fn-x-0123456789', 'hash', s, 1) as any;
+      deploymentManifest(workload(overrides), 'ff-t-abc', 'hash', s, 1) as any;
 
     it('applies the pod security baseline', () => {
       const d = build();
@@ -68,17 +66,22 @@ describe('Kubernetes manifests', () => {
       });
     });
 
-    it('uses only volume types allowed by the restricted profile, with code mounted read-only', () => {
+    it("uses only volume types allowed by the restricted profile: the code's image at /var/task, read-only, and /tmp", () => {
       const d = build();
 
       expect(podSpec(d).volumes).toEqual([
-        { name: 'code', configMap: { name: 'fn-x-0123456789', defaultMode: 0o444 } },
+        { name: 'code', image: { reference: CODE_IMAGE, pullPolicy: 'IfNotPresent' } },
         { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } },
       ]);
       expect(container(d).volumeMounts).toEqual([
         { name: 'code', mountPath: '/var/task', readOnly: true },
         { name: 'tmp', mountPath: '/tmp' },
       ]);
+    });
+
+    it("names its version by its code's hash, and refuses a function without an image of its code", () => {
+      expect(build().spec.template.metadata.annotations['ff.dev/code-sha256']).toBe('hash');
+      expect(() => build({ codeImage: undefined })).toThrow(`Function ${workload().id} has no code image`);
     });
 
     it('sets equal requests and limits from the configured memory', () => {
@@ -99,7 +102,54 @@ describe('Kubernetes manifests', () => {
         FUNCTION_MEMORY_LIMIT: '512',
         LAMBDA_TASK_ROOT: '/var/task',
         FF_HANDLER: 'function.handler',
+        FF_EVENT_FORMAT: 'lambda',
         PORT: '8080',
+      });
+    });
+
+    it('tells the runtime the handler the function names', () => {
+      const env = Object.fromEntries(container(build({ handler: 'function.main' })).env.map((e: any) => [e.name, e.value]));
+
+      expect(env.FF_HANDLER).toBe('function.main');
+    });
+
+    it("tells the runtime a function made before still gets FF's original event", () => {
+      const env = Object.fromEntries(container(build({ eventFormat: EventFormat.WRAPPED })).env.map((e: any) => [e.name, e.value]));
+
+      expect(env.FF_EVENT_FORMAT).toBe('wrapped');
+    });
+
+    describe("the function's own variables and secrets", () => {
+      const environment = { revision: 'a1b2c3d4e5f60718', values: { DB_HOST: 'db.internal', DB_PASSWORD: 'hunter2' } };
+      const withEnvironment = (values: Record<string, string> = environment.values) =>
+        deploymentManifest(workload({ environment: { ...environment, values } }), 'ff-t-abc', 'hash', settings(), 1, 'fn-x-env-1') as any;
+
+      it('come from their Secret through envFrom, and the template names their revision, so a change rolls out', () => {
+        const d = withEnvironment();
+
+        expect(container(d).envFrom).toEqual([{ secretRef: { name: 'fn-x-env-1' } }]);
+        expect(d.spec.template.metadata.annotations).toEqual({ 'ff.dev/code-sha256': 'hash', 'ff.dev/environment-revision': 'a1b2c3d4e5f60718' });
+      });
+
+      it('never put a value in the Deployment, which the backend and the cluster read', () => {
+        expect(JSON.stringify(withEnvironment())).not.toContain('hunter2');
+        expect(JSON.stringify(withEnvironment())).not.toContain('db.internal');
+      });
+
+      it("give way to nothing of FF's, but FF's UTC gives way to the function's own TZ", () => {
+        const names = (d: any) => container(d).env.map((e: any) => e.name);
+
+        expect(names(withEnvironment())).toContain('TZ');
+        expect(container(build()).env).toContainEqual({ name: 'TZ', value: 'UTC' });
+        expect(names(withEnvironment({ TZ: 'Africa/Tunis' }))).not.toContain('TZ');
+      });
+
+      it('are left out entirely for a function without any, or without the Secret named', () => {
+        const unnamed = deploymentManifest(workload({ environment }), 'ff-t-abc', 'hash', settings(), 1) as any;
+        for (const d of [build(), withEnvironment({}), unnamed]) {
+          expect(container(d).envFrom).toBeUndefined();
+          expect(d.spec.template.metadata.annotations).toEqual({ 'ff.dev/code-sha256': 'hash' });
+        }
       });
     });
 
@@ -125,27 +175,8 @@ describe('Kubernetes manifests', () => {
     });
 
     it('picks the image for the runtime and rejects unconfigured runtimes', () => {
-      expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v2');
+      expect(container(build({ runtime: Runtime.PYTHON })).image).toBe('ff-runtime-python:3.13-v3');
       expect(() => build({ runtime: 'cobol' })).toThrow('No runtime image configured for runtime "cobol"');
-    });
-  });
-
-  describe('code ConfigMap', () => {
-    it('is immutable and keyed by the runtime file name', () => {
-      const cm: any = codeConfigMapManifest(workload(), 'ff-t-abc', 'fn-x-1', 'hash');
-      const py: any = codeConfigMapManifest(workload({ runtime: Runtime.PYTHON }), 'ff-t-abc', 'fn-x-1', 'hash');
-
-      expect(cm.immutable).toBe(true);
-      expect(Object.keys(cm.data)).toEqual(['function.ts']);
-      expect(Object.keys(py.data)).toEqual(['function.py']);
-      expect(cm.metadata.labels['ff.dev/function-id']).toBe(workload().id);
-    });
-
-    it('accepts code up to the limit and rejects larger code with CodeTooLargeError', () => {
-      expect(() => codeConfigMapManifest(workload({ code: 'x'.repeat(MAX_CODE_BYTES) }), 'n', 'c', 'h')).not.toThrow();
-      expect(() => codeConfigMapManifest(workload({ code: 'x'.repeat(MAX_CODE_BYTES + 1) }), 'n', 'c', 'h')).toThrow(
-        CodeTooLargeError,
-      );
     });
   });
 
@@ -198,6 +229,28 @@ describe('Kubernetes manifests', () => {
     });
   });
 
+  it("puts a function's variables and secrets in a Secret: base64, labelled as the function's, naming only the revision", () => {
+    const fn = workload({ environment: { revision: 'a1b2c3d4e5f60718', values: { DB_PASSWORD: 'hunter2', GREETING: 'Ahlan é' } } });
+    const secret: any = environmentSecretManifest(fn as any, 'ff-t-abc', 'fn-x-env-0');
+
+    expect(secret).toMatchObject({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      type: 'Opaque',
+      metadata: {
+        name: 'fn-x-env-0',
+        namespace: 'ff-t-abc',
+        labels: { 'ff.dev/function-id': fn.id, 'app.kubernetes.io/managed-by': 'ff-controller' },
+        annotations: { 'ff.dev/environment-revision': 'a1b2c3d4e5f60718' },
+      },
+    });
+    expect(Object.fromEntries(Object.entries(secret.data).map(([k, v]) => [k, Buffer.from(v as string, 'base64').toString('utf8')]))).toEqual({
+      DB_PASSWORD: 'hunter2',
+      GREETING: 'Ahlan é',
+    });
+    expect(JSON.stringify(secret.metadata)).not.toContain('hunter2');
+  });
+
   it("sizes the tenant ResourceQuota from the account's plan, with pods as a quantity string", () => {
     const quota: any = resourceQuotaManifest('ff-t-abc', { pods: 5, cpu: '2', memory: '4Gi' });
 
@@ -207,6 +260,8 @@ describe('Kubernetes manifests', () => {
       'limits.cpu': '2',
       'requests.memory': '4Gi',
       'limits.memory': '4Gi',
+      // Two a function, for its environment.
+      secrets: '60',
     });
   });
 

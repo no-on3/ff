@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import {
-  CodeTooLargeError,
   FunctionLoadError,
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -19,7 +18,7 @@ import {
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { StoredLine, decodeCursor, pageQuery, tailQuery } from './log-store';
-import { BLOCKED_EGRESS_CIDRS, MAX_CODE_BYTES, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
+import { BLOCKED_EGRESS_CIDRS, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
 import { ANNOTATIONS, LABELS, functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
 
@@ -123,18 +122,10 @@ describe('KubernetesOrchestrator', () => {
   });
 
   describe('deploy', () => {
-    it('applies tenant guardrails first, then code, Service and Deployment', async () => {
+    it('applies tenant guardrails first, then the Service and the Deployment, which mounts the code image', async () => {
       await orchestrator.deploy(fn, tenant());
 
-      expect(api.applied.map((a) => a.manifest.kind)).toEqual([
-        'Namespace',
-        'ResourceQuota',
-        'LimitRange',
-        'NetworkPolicy',
-        'ConfigMap',
-        'Service',
-        'Deployment',
-      ]);
+      expect(api.applied.map((a) => a.manifest.kind)).toEqual(['Namespace', 'ResourceQuota', 'LimitRange', 'NetworkPolicy', 'Service', 'Deployment']);
       expect(api.applied[0].path).toBe(`/api/v1/namespaces/${ns}`);
       expect(api.applied.every((a) => a.manifest.metadata.namespace === ns || a.manifest.kind === 'Namespace')).toBe(true);
     });
@@ -161,10 +152,18 @@ describe('KubernetesOrchestrator', () => {
       expect(replicas).toEqual([1, 2]);
     });
 
-    it('rejects oversized code before touching the cluster', async () => {
-      await expect(orchestrator.deploy(workload({ code: 'x'.repeat(MAX_CODE_BYTES + 1) }), tenant())).rejects.toBeInstanceOf(
-        CodeTooLargeError,
-      );
+    it("mounts the code's image, inline code's as a package's, and writes no ConfigMap", async () => {
+      const image = 'ff-dev-registry:5000/ff-code/123456789012@sha256:' + 'e'.repeat(64);
+
+      await orchestrator.deploy(workload({ codeImage: image }), tenant());
+
+      const deployment = api.applied.find((a) => a.manifest.kind === 'Deployment')!.manifest;
+      expect(deployment.spec.template.spec.volumes[0]).toEqual({ name: 'code', image: { reference: image, pullPolicy: 'IfNotPresent' } });
+      expect(api.applied.some((a) => a.manifest.kind === 'ConfigMap')).toBe(false);
+    });
+
+    it('refuses a function without an image of its code before touching the cluster', async () => {
+      await expect(orchestrator.deploy(workload({ codeImage: undefined }), tenant())).rejects.toThrow(`Function ${fn.id} has no code image`);
       expect(api.applied).toHaveLength(0);
     });
   });
@@ -223,31 +222,126 @@ describe('KubernetesOrchestrator', () => {
       expect(deployment.spec.replicas).toBe(1);
     });
 
-    it('garbage-collects code ConfigMaps older than the current and previous versions', async () => {
-      const cm = (n: string, ts: string) => ({ metadata: { name: n, creationTimestamp: ts } });
-      await orchestrator.update(fn, tenant());
-      const current = api.applied.find((a) => a.manifest.kind === 'ConfigMap')!.manifest.metadata.name;
-      api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [
-        cm(current, '2026-10-16T10:00:00Z'),
-        cm('previous', '2026-10-16T09:00:00Z'),
-        cm('older', '2026-10-16T08:00:00Z'),
-        cm('oldest', '2026-10-16T07:00:00Z'),
-      ]);
-      api.deleted = [];
+    it('keeps the code ConfigMap the replaced version mounts, from before code came as an image, and deletes the others', async () => {
+      const cm = (n: string) => ({ metadata: { name: n, creationTimestamp: '2026-10-21T09:00:00Z' } });
+      api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [cm('fn-x-inline-now'), cm('fn-x-inline-before')]);
+      api.objects.set(deploymentPath, {
+        ...rolledOut(1),
+        spec: { replicas: 1, template: { spec: { volumes: [{ name: 'code', configMap: { name: 'fn-x-inline-now' } }] } } },
+      });
 
       await orchestrator.update(fn, tenant());
 
-      expect(api.deleted).toEqual([
-        `/api/v1/namespaces/${ns}/configmaps/older`,
-        `/api/v1/namespaces/${ns}/configmaps/oldest`,
-      ]);
+      expect(api.deleted).toEqual([`/api/v1/namespaces/${ns}/configmaps/fn-x-inline-before`]);
+    });
+
+    it('deletes the last code ConfigMap at the next rollout, once no pod mounts any', async () => {
+      api.lists.set(`/api/v1/namespaces/${ns}/configmaps`, [{ metadata: { name: 'fn-x-inline-now' } }]);
+      api.objects.set(deploymentPath, rolledOut(1));
+
+      await orchestrator.update(fn, tenant());
+
+      expect(api.deleted).toEqual([`/api/v1/namespaces/${ns}/configmaps/fn-x-inline-now`]);
     });
   });
 
-  it('remove deletes the Deployment, the Service and every code ConfigMap', async () => {
+  describe("the function's variables and secrets", () => {
+    const secretPath = (slot: number) => `/api/v1/namespaces/${ns}/secrets/${name}-env-${slot}`;
+    const withEnvironment = (revision: string, values: Record<string, string> = { DB_PASSWORD: 'hunter2' }) =>
+      workload({ environment: { revision, values } });
+    const applied = (kind: string) => api.applied.filter((a) => a.manifest.kind === kind);
+    const lastDeployment = () => applied('Deployment').at(-1)!.manifest;
+    /** The Deployment as the cluster now has it, rolled out. */
+    const rollOut = () => api.objects.set(deploymentPath, { ...lastDeployment(), ...rolledOut(1), spec: { ...lastDeployment().spec, replicas: 1 } });
+
+    it('writes them into the first Secret before the Deployment, which reads it through envFrom', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+
+      expect(api.applied.map((a) => a.manifest.kind).slice(-2)).toEqual(['Secret', 'Deployment']);
+      expect(applied('Secret')[0].path).toBe(secretPath(0));
+      expect(lastDeployment().spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: `${name}-env-0` } }]);
+    });
+
+    it('keeps an unchanged environment where it is, written again', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+
+      await orchestrator.update({ ...withEnvironment('r1'), code: 'export const handler = async () => 2;' }, tenant());
+
+      expect(applied('Secret').map((a) => a.path)).toEqual([secretPath(0), secretPath(0)]);
+    });
+
+    it("writes a new environment into the Secret the running version doesn't read, so its pods keep theirs", async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+      await orchestrator.update(withEnvironment('r2', { DB_PASSWORD: 'new' }), tenant());
+      rollOut();
+      await orchestrator.update(withEnvironment('r3', { DB_PASSWORD: 'newer' }), tenant());
+
+      expect(applied('Secret').map((a) => a.path)).toEqual([secretPath(0), secretPath(1), secretPath(0)]);
+      expect(lastDeployment().spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: `${name}-env-0` } }]);
+    });
+
+    it('deletes the Secret no pod reads once the rollout is complete, and never the one in use', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+      await orchestrator.update(withEnvironment('r2', { DB_PASSWORD: 'new' }), tenant());
+      rollOut();
+      api.deleted = [];
+
+      await orchestrator.waitUntilReady(withEnvironment('r2'), 100);
+
+      expect(api.deleted).toEqual([secretPath(0)]);
+    });
+
+    it('deletes both once the function has none any more, and writes no Secret for it', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+      await orchestrator.update(fn, tenant());
+      rollOut();
+      api.deleted = [];
+
+      await orchestrator.waitUntilReady(fn, 100);
+
+      expect(applied('Secret')).toHaveLength(1);
+      expect(lastDeployment().spec.template.spec.containers[0].envFrom).toBeUndefined();
+      expect(api.deleted).toEqual([secretPath(0), secretPath(1)]);
+    });
+
+    it('keeps both while a rollout fails: a rollback needs the old values', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      api.objects.set(deploymentPath, { ...lastDeployment(), status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 0 } });
+      api.deleted = [];
+
+      await expect(orchestrator.waitUntilReady(withEnvironment('r1'), 30)).rejects.toThrow();
+
+      expect(api.deleted).toEqual([]);
+    });
+
+    it('says only that a Secret could not be deleted, and the wait still succeeds', async () => {
+      await orchestrator.deploy(withEnvironment('r1'), tenant());
+      rollOut();
+      api.delete = async () => {
+        throw new Error('forbidden');
+      };
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      await expect(orchestrator.waitUntilReady(withEnvironment('r1'), 100)).resolves.toBeUndefined();
+
+      expect(warn).toHaveBeenCalledWith(`Could not delete the unused environment Secret ${ns}/${name}-env-1: forbidden`);
+      warn.mockRestore();
+    });
+  });
+
+  it('remove deletes the Deployment, the Service, every code ConfigMap, and both environment Secrets by name', async () => {
     await orchestrator.remove(fn);
 
-    expect(api.deleted).toEqual([deploymentPath, `/api/v1/namespaces/${ns}/services/${name}`]);
+    expect(api.deleted).toEqual([
+      deploymentPath,
+      `/api/v1/namespaces/${ns}/services/${name}`,
+      `/api/v1/namespaces/${ns}/secrets/${name}-env-0`,
+      `/api/v1/namespaces/${ns}/secrets/${name}-env-1`,
+    ]);
     expect(api.deletedCollections).toEqual([
       { path: `/api/v1/namespaces/${ns}/configmaps`, selector: `ff.dev/function-id=${fn.id}` },
     ]);
@@ -812,6 +906,29 @@ describe('KubernetesOrchestrator', () => {
       ]);
 
       expect(Object.fromEntries(await orchestrator.readyInstancesByFunction())).toEqual({ 'f-real': 1 });
+    });
+  });
+
+  describe("codeImagesByFunction: the image each function's pods mount, for the restore of lost images", () => {
+    const IMAGE = 'registry.ff.internal/ff-code/123456789012@sha256:' + 'a'.repeat(64);
+    const deployment = (namespace: string, functionId: string | undefined, volumes: unknown[]) => ({
+      metadata: { name: 'fn-x', namespace, labels: { 'app.kubernetes.io/managed-by': 'ff-controller', ...(functionId ? { 'ff.dev/function-id': functionId } : {}) } },
+      spec: { template: { spec: { volumes } } },
+    });
+
+    it("lists FF's Deployments in one call, and gives each function's code image; none for code mounted another way, or outside FF's namespaces", async () => {
+      api.lists.set('/apis/apps/v1/deployments', [
+        deployment('ff-t-aaaaaaaaaaaa', 'f-image', [{ name: 'tmp', emptyDir: {} }, { name: 'code', image: { reference: IMAGE, pullPolicy: 'IfNotPresent' } }]),
+        // A function deployed before its code came as an image: its code ConfigMap until its next rollout.
+        deployment('ff-t-aaaaaaaaaaaa', 'f-configmap', [{ name: 'code', configMap: { name: 'fn-f-configmap-code-1' } }]),
+        deployment('default', 'f-copied', [{ name: 'code', image: { reference: IMAGE } }]),
+        deployment('ff-t-aaaaaaaaaaaa', undefined, [{ name: 'code', image: { reference: IMAGE } }]),
+      ]);
+
+      const images = await orchestrator.codeImagesByFunction();
+
+      expect(api.listed).toEqual([{ path: '/apis/apps/v1/deployments', selector: 'app.kubernetes.io/managed-by=ff-controller' }]);
+      expect(Object.fromEntries(images)).toEqual({ 'f-image': IMAGE });
     });
   });
 

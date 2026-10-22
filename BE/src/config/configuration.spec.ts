@@ -1,13 +1,21 @@
 // Imported through the "@/" alias on purpose: this spec also proves the
 // Jest moduleNameMapper matches the tsconfig "paths" mapping.
 import configuration, { ConfigurationError, Env, VARIABLES, databaseConfiguration } from '@/config/configuration';
+import { DEVELOPMENT_KEY } from '@/encryption/key-ring';
 import { parse as parseEnvFile } from 'dotenv';
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 /** The smallest valid development environment: everything else has a default. */
 const dev: Env = { FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' };
+
+/** A keys file of the platform's, as production needs one: its encryption keys, one a line. */
+const keysDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-keys-'));
+const keysFile = path.join(keysDir, 'keys');
+fs.writeFileSync(keysFile, `2026-10:${randomBytes(32).toString('base64')}\n`);
+afterAll(() => fs.rmSync(keysDir, { recursive: true, force: true }));
 
 /** The smallest valid production environment. */
 const production: Env = {
@@ -27,6 +35,9 @@ const production: Env = {
   FF_BANK_NAME: 'Banque de Tunisie',
   FF_BANK_IBAN: 'TN5910006035183598478831',
   K8S_RUNTIME_CLASS: 'gvisor',
+  FF_ENCRYPTION_KEYS_FILE: keysFile,
+  FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
+  FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
 
 /** The problems a configuration is refused for; fails the test if it is accepted. */
@@ -66,7 +77,7 @@ describe('configuration', () => {
         caFile: '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt',
         invokeMode: '',
         namespacePrefix: 'ff-t-',
-        runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v2', python: 'ff-runtime-python:3.13-v2' },
+        runtimeImages: { nodejs: 'ff-runtime-nodejs:24-v3', python: 'ff-runtime-python:3.13-v3' },
         imagePullPolicy: 'IfNotPresent',
         runtimeClass: '',
         readyTimeoutSeconds: 90,
@@ -130,6 +141,39 @@ describe('configuration', () => {
     it('documents every variable, and only variables the backend reads', () => {
       expect(Object.keys(example).filter((name) => !VARIABLES.includes(name))).toEqual([]);
       expect(VARIABLES.filter((name) => !(name in example))).toEqual([]);
+    });
+  });
+
+  describe("functions' code images (ADR 0003)", () => {
+    it('has none unless FF_CODE_REGISTRY names a registry: packages then refuse to run', () => {
+      expect(configuration(dev).codeImages).toEqual({ registry: '', pullHost: '', username: '', password: '' });
+    });
+
+    it("pulls from the registry's own host unless FF_CODE_REGISTRY_PULL names the one the nodes reach", () => {
+      expect(configuration({ ...dev, FF_CODE_REGISTRY: 'https://registry.ff.example/' }).codeImages).toMatchObject({
+        registry: 'https://registry.ff.example',
+        pullHost: 'registry.ff.example',
+      });
+      expect(configuration({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_PULL: 'ff-dev-registry:5000' }).codeImages).toMatchObject({
+        registry: 'http://127.0.0.1:5056',
+        pullHost: 'ff-dev-registry:5000',
+      });
+    });
+
+    it('refuses a pull host without a registry, a login without its password, and what is no host', () => {
+      expect(problems({ ...dev, FF_CODE_REGISTRY_PULL: 'ff-dev-registry:5000' })).toEqual([
+        'FF_CODE_REGISTRY_PULL is set, but FF_CODE_REGISTRY is not: the backend pushes code images to FF_CODE_REGISTRY',
+      ]);
+      expect(problems({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_USERNAME: 'ff' })).toEqual([
+        'FF_CODE_REGISTRY_USERNAME and FF_CODE_REGISTRY_PASSWORD go together: set both, or neither for a registry without a login',
+      ]);
+      expect(problems({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_PULL: 'http://ff-dev-registry' })).toEqual([
+        expect.stringContaining('FF_CODE_REGISTRY_PULL'),
+      ]);
+    });
+
+    it('never repeats the password in a refusal', () => {
+      expect(problems({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_PASSWORD: 'hunter2' }).join(' ')).not.toContain('hunter2');
     });
   });
 
@@ -212,6 +256,9 @@ describe('configuration', () => {
       ['pro-formas with the example IBAN (P-35)', { FF_BANK_IBAN: 'TN59 1000 6035 1835 9847 8831' }, 'FF_BANK_IBAN must be set when NODE_ENV=production'],
       ["webhooks allowed into FF's own network", { FF_WEBHOOK_ALLOW_PRIVATE: 'true' }, "FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network"],
       ["customers' code on the node's own kernel, without a sandbox", { K8S_RUNTIME_CLASS: '' }, 'K8S_RUNTIME_CLASS must name the sandbox functions run in (gvisor) when NODE_ENV=production'],
+      ["functions' environments sealed with the development key", { FF_ENCRYPTION_KEYS_FILE: undefined }, 'FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production'],
+      ['function URLs without TLS, the development default', { FF_FUNCTION_URL_BASE: undefined }, 'FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production'],
+      ["no registry, which every function's code reaches its pods through", { FF_CODE_REGISTRY: undefined }, 'FF_CODE_REGISTRY is required when NODE_ENV=production'],
     ])('%s', (_label, change, expected) => {
       const found = problems({ ...production, ...change });
 
@@ -238,6 +285,122 @@ describe('configuration', () => {
       expect(message).toContain('MINIO_SECRET_KEY');
       expect(message).not.toContain('ffdevsecretkey-local-only');
       expect(message).not.toMatch(/"postgres"|: postgres/);
+    });
+  });
+
+  describe('function URLs', () => {
+    it('are served on port 3001, apart from the API, under fn.localhost in development', () => {
+      expect(configuration(dev).functionUrls).toEqual({ port: 3001, base: 'http://fn.localhost:3001', edgeAddresses: [], domainResolvers: [] });
+    });
+
+    it('take an origin with a dot in its host, a trailing slash dropped, and port 0 for none', () => {
+      expect(configuration({ ...production, FF_FUNCTION_URL_BASE: 'https://fn.example.tn/', FF_FUNCTION_URL_PORT: '0' }).functionUrls).toMatchObject({
+        port: 0,
+        base: 'https://fn.example.tn',
+      });
+    });
+
+    it("take the edge's addresses, which customers' domain apexes point to, and the DNS servers that check them", () => {
+      const settings = { ...dev, FF_EDGE_ADDRESSES: '203.0.113.10, 2001:db8::10', FF_DOMAIN_RESOLVERS: '10.43.0.10,127.0.0.1:5353,[::1]:53,2001:db8::53' };
+
+      expect(configuration(settings).functionUrls).toMatchObject({
+        edgeAddresses: ['203.0.113.10', '2001:db8::10'],
+        domainResolvers: ['10.43.0.10', '127.0.0.1:5353', '[::1]:53', '2001:db8::53'],
+      });
+    });
+
+    it.each([
+      ['FF_EDGE_ADDRESSES', 'edge.example.tn'],
+      ['FF_DOMAIN_RESOLVERS', 'dns.example.tn'],
+      ['FF_DOMAIN_RESOLVERS', '127.0.0.1:99999'],
+    ])('refuse %s=%s, which is no address', (name, value) => {
+      expect(problems({ ...dev, [name]: value })).toEqual([expect.stringContaining(`${name} must be a comma-separated list of`)]);
+    });
+
+    it.each(['https://fn.example.tn/path', 'ftp://fn.example.tn', 'https://localhost', 'fn.example.tn'])('refuse %s as where they live', (base) => {
+      expect(problems({ ...dev, FF_FUNCTION_URL_BASE: base })).toEqual([expect.stringMatching(/^FF_FUNCTION_URL_BASE must be an origin whose host has a dot/)]);
+    });
+  });
+
+  describe('schedules', () => {
+    it('are taken every 5 s, and name the region tn-tunis-1, by default', () => {
+      expect(configuration(dev).schedules).toEqual({ intervalSeconds: 5, region: 'tn-tunis-1' });
+    });
+
+    it('take another region, and 0 for a backend that runs none', () => {
+      expect(configuration({ ...dev, FF_REGION: 'eu-west-3', FF_SCHEDULER_INTERVAL_SECONDS: '0' }).schedules).toEqual({ intervalSeconds: 0, region: 'eu-west-3' });
+    });
+
+    it.each(['Tunis', 'tn_tunis_1', 'tn-tunis'])('refuse %s as a region', (region) => {
+      expect(problems({ ...dev, FF_REGION: region })).toEqual([expect.stringMatching(/^FF_REGION must be a region name, such as tn-tunis-1/)]);
+    });
+  });
+
+  describe('the runtime images', () => {
+    it('run protocol 3 by default, which hands a function the payload as its event', () => {
+      expect(configuration(dev).kubernetes.runtimeImages).toEqual({ nodejs: 'ff-runtime-nodejs:24-v3', python: 'ff-runtime-python:3.13-v3' });
+    });
+
+    it('refuses an image of protocol 1 or 2, which would hand functions the old wrapper, in every environment', () => {
+      expect(problems({ ...dev, K8S_RUNTIME_IMAGE_NODEJS: 'ff-runtime-nodejs:24-v2', K8S_RUNTIME_IMAGE_PYTHON: 'registry.local:5000/ff/ff-runtime-python:3.13-v1' })).toEqual([
+        "K8S_RUNTIME_IMAGE_NODEJS names a runtime of protocol 2 (ff-runtime-nodejs:24-v2), which gives functions FF's original event: they now get AWS Lambda's, which takes protocol 3 (-v3)",
+        "K8S_RUNTIME_IMAGE_PYTHON names a runtime of protocol 1 (registry.local:5000/ff/ff-runtime-python:3.13-v1), which gives functions FF's original event: they now get AWS Lambda's, which takes protocol 3 (-v3)",
+      ]);
+      expect(problems({ ...production, K8S_RUNTIME_IMAGE_NODEJS: 'ff-runtime-nodejs:24-v2' })).toHaveLength(1);
+    });
+
+    it('takes any other image: a registry with a port, a digest, a later protocol', () => {
+      for (const image of ['registry.local:5000/ff-runtime-nodejs:24-v3', 'ff-runtime-nodejs@sha256:' + 'a'.repeat(64), 'ff-runtime-nodejs:24-v4']) {
+        expect(configuration({ ...dev, K8S_RUNTIME_IMAGE_NODEJS: image }).kubernetes.runtimeImages.nodejs).toBe(image);
+      }
+    });
+  });
+
+  describe("the keys that encrypt functions' environments at rest", () => {
+    const write = (name: string, text: string) => {
+      const file = path.join(keysDir, name);
+      fs.writeFileSync(file, text);
+      return file;
+    };
+
+    it('uses the development key when no keys file is set, outside production', () => {
+      expect(configuration(dev).encryption.keys).toEqual([DEVELOPMENT_KEY]);
+    });
+
+    it('reads every key of the file, the first sealing', () => {
+      const [newer, older] = [randomBytes(32), randomBytes(32)];
+      const file = write('two', `# newest first\n2026-10:${newer.toString('base64')}\n2026-01:${older.toString('base64')}\n`);
+
+      const keys = configuration({ ...production, FF_ENCRYPTION_KEYS_FILE: file }).encryption.keys;
+
+      expect(keys.map((key) => key.id)).toEqual(['2026-10', '2026-01']);
+      expect(keys[0].key.equals(newer)).toBe(true);
+    });
+
+    it('refuses a file it cannot read, naming it', () => {
+      expect(problems({ ...dev, FF_ENCRYPTION_KEYS_FILE: '/nonexistent/keys' })).toEqual([
+        'FF_ENCRYPTION_KEYS_FILE cannot be read: /nonexistent/keys (ENOENT)',
+      ]);
+    });
+
+    it('refuses a malformed file, naming each line, never repeating a key', () => {
+      const short = randomBytes(16).toString('base64');
+      const file = write('bad', `a:${short}\nno separator\n`);
+
+      expect(problems({ ...dev, FF_ENCRYPTION_KEYS_FILE: file })).toEqual([
+        `FF_ENCRYPTION_KEYS_FILE ${file}: line 1: the key "a" must be 32 bytes in base64, such as \`openssl rand -base64 32\` writes`,
+        `FF_ENCRYPTION_KEYS_FILE ${file}: line 2 must be <id>:<key>, the key 32 bytes in base64`,
+      ]);
+      expect(problems({ ...dev, FF_ENCRYPTION_KEYS_FILE: file }).join(' ')).not.toContain(short);
+    });
+
+    it('refuses the development key in production, wherever it is in the file; development may use it', () => {
+      const file = write('with-dev', `2026-10:${randomBytes(32).toString('base64')}\nold:${DEVELOPMENT_KEY.key.toString('base64')}\n`);
+
+      expect(problems({ ...production, FF_ENCRYPTION_KEYS_FILE: file })).toEqual([
+        `FF_ENCRYPTION_KEYS_FILE ${file} holds the development key, which protects nothing: refused when NODE_ENV=production`,
+      ]);
+      expect(configuration({ ...dev, FF_ENCRYPTION_KEYS_FILE: file }).encryption.keys).toHaveLength(2);
     });
   });
 

@@ -59,6 +59,9 @@ account_b="$(random_account)"
 e2e_namespaces+=("$(tenant_namespace "$account_a")" "$(tenant_namespace "$account_b")")
 api="http://127.0.0.1:$(free_port)"
 api_oidc="http://127.0.0.1:$(free_port)"
+# Each backend answers function URLs on a port of its own, at http://<id>.fn.localhost:<port>/.
+url_port="$(free_port)"
+url_port_oidc="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
@@ -72,6 +75,17 @@ with_token() {
   http_at "$api_oidc" "$method" "$path" "$body" -H "Authorization: Bearer $token" "$@"
 }
 message() { jq -r .message "$work/body"; }
+# Its messages joined, for an answer that lists them.
+messages() { jq -r '.message | if type == "array" then join("; ") else . end' "$work/body"; }
+# upload_package <base URL> <zip> [curl arguments]: POST /packages, the zip as the body; its answer, its status in $work/status.
+upload_package() {
+  local base=$1 file=$2
+  shift 2
+  curl -sS -o "$work/body" -w '%{http_code}' -X POST -H 'content-type: application/zip' --data-binary @"$file" "$@" "$base/packages" >"$work/status"
+  cat "$work/body"
+}
+sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
+uri() { jq -rn --arg s "$1" '$s | @uri'; }
 # Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer.
 public_routes=("GET /healthz" "GET /readyz")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
@@ -200,17 +214,29 @@ e2e_migrate "${e2e_base_env[@]}"
 # Both send notifications every second, and may reach the receiver on this machine.
 notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
 e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" PORT="${api##*:}" \
-  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}"
+  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
-  FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}"
+  FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
+  FF_FUNCTION_URL_PORT="$url_port_oidc" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port_oidc"
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
+# call_url <function URL> [curl option...]: a GET of the URL; prints the status, and the body goes to $work/url-body.
+# --resolve takes the URL's host to this machine, whatever the system's resolver does with *.localhost.
+call_url() {
+  local url=$1 host port
+  shift
+  host="${url#http://}"
+  port="${host#*:}"
+  host="${host%%:*}"
+  curl -s -o "$work/url-body" -w '%{http_code}' --resolve "$host:${port%/}:127.0.0.1" "$@" "$url"
+}
 
 echo "== account A's function"
-code='export async function handler(event: { body: { name?: string } }) {
-  return { message: `Hello ${event.body.name ?? "world"}` };
+code='export async function handler(event: { name?: string }) {
+  return { message: `Hello ${event.name ?? "world"}` };
 }'
 function_body() { jq -cn --arg code "$code" --arg name "$1" '{name: $name, runtime: "nodejs", code: $code, memory: 128, timeout: 5}'; }
 created="$(as_a POST /functions "$(function_body l5-a)")"
@@ -224,9 +250,14 @@ check "A's usage counts the call (P-22)" "1" \
 snapshot() {
   local caller=$1 fn=$2
   jq -cn --argjson fn "$("$caller" GET "/functions/$fn")" --argjson history "$("$caller" GET "/functions/$fn/invocations")" \
+    --argjson url "$("$caller" GET "/functions/$fn/url")" \
     '{name: $fn.name, code: $fn.code, status: $fn.status, memory: $fn.memory, timeout: $fn.timeout,
-      minInstances: $fn.minInstances, maxInstances: $fn.maxInstances, invocations: $history.total}'
+      minInstances: $fn.minInstances, maxInstances: $fn.maxInstances, invocations: $history.total,
+      url: $url.functionUrl, urlAuthType: $url.authType}'
 }
+url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .functionUrl)"
+check "A gives its function a URL" "201 true" "$(status) $([[ $url_a =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
+check "which anyone may call: its host reaches A's function" '200 {"message":"Hello world"}' "$(call_url "$url_a") $(cat "$work/url-body")"
 before="$(snapshot as_a "$id")"
 missing="$(node -e "console.log(require('crypto').randomUUID())")"
 as_a GET "/functions/$missing" >/dev/null
@@ -252,6 +283,8 @@ path_for() {
   path="${path//\{functionId\}/$3}"
   path="${path//\{userId\}/$missing}"
   path="${path//\{invocationId\}/$missing}"
+  path="${path//\{domain\}/l5.example.tn}"
+  path="${path//\{scheduleId\}/$missing}"
   path="${path//\{month\}/$(date -u +%Y-%m)}"
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
@@ -259,6 +292,7 @@ path_for() {
       start) params+=("start=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)") ;;
       end) params+=("end=$(date -u +%Y-%m-%dT%H:%M:%SZ)") ;;
       q) params+=("q=l5") ;;
+      expression) params+=("expression=rate(1%20hour)") ;;
       *) fail "$method $template: no value for its required query parameter $name" ;;
     esac
   done < <(jq -r --arg path "$template" --arg method "${method,,}" \
@@ -278,6 +312,10 @@ body_for() {
     "PUT /functions/{id}") echo '{"name": "l5-taken-over"}' ;;
     "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}}' ;;
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
+    "PATCH /functions/{id}/secrets") echo '{"secrets": {"L5_SECRET": "l5"}}' ;;
+    "POST /functions/{id}/url" | "PUT /functions/{id}/url") echo '{"authType": "NONE"}' ;;
+    "POST /functions/{id}/url/domains") echo '{"domain": "l5.example.tn"}' ;;
+    "POST /functions/{id}/schedules" | "PUT /functions/{id}/schedules/{scheduleId}") echo '{"name": "l5", "expression": "rate(1 hour)"}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;
@@ -319,6 +357,16 @@ as_a POST /notifications/test "{\"webhookUrl\": \"$receiver/a\"}" >/dev/null
 check "A sends itself a test notification, to the receiver" 202 "$(status)"
 alarm_a="$(as_a POST /alarms "$(alarm_body "$id")" | jq -r .id)"
 check "A makes an alarm on its function's errors" 201 "$(status)"
+# A's package, and another for whoever uploads one in the loops below.
+python3 - "$work/package-a.zip" "$work/package-b.zip" <<'PY'
+import sys, zipfile
+for path, who in zip(sys.argv[1:], 'ab'):
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('index.js', 'exports.handler = async () => "%s";\n' % who)
+PY
+package_a="$(upload_package "$api" "$work/package-a.zip" | jq -r .codeSha256)"
+check "A uploads a package" "201 $(sha256_of "$work/package-a.zip")" "$(status) $package_a"
+package_b="$(sha256_of "$work/package-b.zip")"
 own=""
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
@@ -439,6 +487,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
       ;;
+    "GET /schedules/next-runs")
+      runs_b="$(as_b GET "$(path_for "$template" "$method" "$id" "$account_a")")"
+      check "$route: B previews an expression, which reads no account's data" "200 5" "$(status) $(jq '.runs | length' <<<"$runs_b")"
+      ;;
     "GET /notifications/webhook-secret")
       secret_b="$(as_b GET /notifications/webhook-secret | jq -r .secret)"
       check "$route: B reads its own signing secret, not A's" "200 true" "$(status) $([ "$secret_b" != "$secret_a" ] && [[ "$secret_b" == whsec_* ]] && echo true || echo false)"
@@ -465,6 +517,19 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B can't watch A's function" "404 Function with ID $id not found" "$(status) $(message)"
       as_b POST /alarms "$(alarm_body)" >/dev/null
       check "  ... but makes its own account's alarm" 201 "$(status)"
+      ;;
+    "POST /packages")
+      upload_package "$api" "$work/package-b.zip" -H "X-FF-Dev-Account: $account_b" >/dev/null
+      check "$route: B uploads a package of its own" 201 "$(status)"
+      check "  ... which A's list doesn't show" 0 "$(as_a GET /packages | jq --arg sha "$package_b" 'map(select(.codeSha256 == $sha)) | length')"
+      as_b POST /functions "$(jq -n --arg sha "$package_a" '{name: "l5-not-mine", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}')" >/dev/null
+      check "  ... and B can't name A's package in a function" \
+        "400 The account has no package $package_a: upload it with POST /packages, which answers its SHA-256" "$(status) $(messages)"
+      ;;
+    "GET /packages")
+      listed="$(as_b GET /packages | jq --arg sha "$package_a" 'map(select(.codeSha256 == $sha)) | length')"
+      check "$route: B's list doesn't show A's package, nor finds it by its SHA-256" "200 0 0" \
+        "$(status) $listed $(as_b GET "/packages?codeSha256=$(uri "$package_a")" | jq length)"
       ;;
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
@@ -562,6 +627,8 @@ grant "$account_1" 5000 "promo:l5-1"
 echo "== account 2, on account 1's function and account, on every route (${#routes[@]})"
 alarm_1="$(as_user_1 POST /alarms "$(alarm_body "$fn_1")" | jq -r .id)"
 check "account 1's owner makes an alarm on its function's errors" 201 "$(status)"
+package_1="$(upload_package "$api_oidc" "$work/package-a.zip" -H "Authorization: Bearer $token_1" | jq -r .codeSha256)"
+check "account 1's owner uploads a package" "201 $package_a" "$(status) $package_1"
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
   template="${route#* }"
@@ -708,6 +775,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
       ;;
+    "GET /schedules/next-runs")
+      runs_2="$(as_user_2 GET "$(path_for "$template" "$method" "$fn_1" "$account_1")")"
+      check "$route: user 2 previews an expression, which reads no account's data" "200 5" "$(status) $(jq '.runs | length' <<<"$runs_2")"
+      ;;
     "GET /notifications/webhook-secret")
       secret_2="$(as_user_2 GET /notifications/webhook-secret | jq -r .secret)"
       check "$route: account 2 reads its own signing secret, not account 1's" "200 true" \
@@ -734,6 +805,19 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "POST /alarms")
       as_user_2 POST /alarms "$(alarm_body "$fn_1")" >/dev/null
       check "$route: account 2 can't watch account 1's function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
+      ;;
+    "POST /packages")
+      upload_package "$api_oidc" "$work/package-b.zip" -H "Authorization: Bearer $token_2" -H "X-FF-Account: ${account_2:-}" >/dev/null
+      check "$route: account 2's member uploads a package of account 2's" 201 "$(status)"
+      check "  ... which account 1's list doesn't show" 0 "$(as_user_1 GET /packages | jq --arg sha "$package_b" 'map(select(.codeSha256 == $sha)) | length')"
+      as_user_2 POST /functions "$(jq -n --arg sha "$package_1" '{name: "l5-not-mine", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}')" >/dev/null
+      check "  ... and account 2 can't name account 1's package in a function" \
+        "400 The account has no package $package_1: upload it with POST /packages, which answers its SHA-256" "$(status) $(messages)"
+      ;;
+    "GET /packages")
+      listed="$(as_user_2 GET /packages | jq --arg sha "$package_1" 'map(select(.codeSha256 == $sha)) | length')"
+      check "$route: account 2's list doesn't show account 1's package, nor finds it by its SHA-256" "200 0 0" \
+        "$(status) $listed $(as_user_2 GET "/packages?codeSha256=$(uri "$package_1")" | jq length)"
       ;;
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
@@ -784,7 +868,11 @@ with_token "$key_1" GET /billing/pro-formas >/dev/null
 check "a key without usage:read can't list them" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
-for path in /me /api-keys /members /audit-log; do
+me_key="$(with_token "$key_1" GET /me)"
+check "a key reads GET /me whatever its scopes: itself, and only its own account, with its creator's role" \
+  "200 $key_1_id l5 reader functions:read,functions:invoke $account_1 owner 1 true" \
+  "$(status) $(jq -r '[.key.id, .key.name, (.key.scopes | join(",")), .accounts[0].id, .accounts[0].role, (.accounts | length), (.user == null)] | join(" ")' <<<"$me_key")"
+for path in /api-keys /members /audit-log; do
   with_token "$key_1" GET "$path" >/dev/null
   check "a key can't call GET $path, which takes a user's token" \
     "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
@@ -801,12 +889,25 @@ for route in "${routes[@]}"; do
   with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
   check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
+echo "== a function URL that takes the account's credentials"
+url_1="$(as_user_1 POST "/functions/$fn_1/url" '{"authType": "AWS_IAM"}' | jq -r .functionUrl)"
+check "account 1 gives its function a URL that takes its account's API keys" "201 AWS_IAM" "$(status) $(as_user_1 GET "/functions/$fn_1/url" | jq -r .authType)"
+check "account 1's key with functions:invoke calls it" '200 {"message":"Hello world"}' "$(call_url "$url_1" -H "Authorization: Bearer $key_1") $(cat "$work/url-body")"
+check "account 2's key, which may invoke account 2's functions, can't" '403 {"Message":"Forbidden"}' \
+  "$(call_url "$url_1" -H "Authorization: Bearer $key_2") $(cat "$work/url-body")"
+check "nor a key without functions:invoke, nor a user's token, nor nobody" "403 403 403" \
+  "$(call_url "$url_1" -H "Authorization: Bearer $key_usage") $(call_url "$url_1" -H "Authorization: Bearer $token_1") $(call_url "$url_1")"
+check "the call is in account 1's history as its URL's, and account 2's key reaches none of it" "url 404" \
+  "$(as_user_1 GET "/functions/$fn_1/invocations?limit=1" | jq -r '.invocations[0].source') $(with_token "$key_2" GET "/functions/$fn_1/url" >/dev/null; status)"
 as_user_1 DELETE "/api-keys/$key_1_id" >/dev/null
 check "account 1 revokes its key" 200 "$(status)"
 with_token "$key_1" GET /functions >/dev/null
 check "which stops working at once" "401 The API key was revoked" "$(status) $(message)"
-check "account 1's function was invoked once more, by its key, and is otherwise unchanged" \
-  "$(jq -c '.invocations += 1' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
+check "on the URL too" 403 "$(call_url "$url_1" -H "Authorization: Bearer $key_1")"
+as_user_1 DELETE "/functions/$fn_1/url" >/dev/null
+check "account 1 deletes the URL" 204 "$(status)"
+check "account 1's function was invoked twice more by its key, through the API and its URL, and is otherwise unchanged" \
+  "$(jq -c '.invocations += 2' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
 
 echo "== members (P-16): user 2 is invited into account 1"
 as_user_1 POST /members "$(jq -cn --arg email "$user_2" '{email: $email, role: "viewer"}')" >/dev/null
@@ -859,7 +960,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create api_key.revoke member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

@@ -1,8 +1,10 @@
-# FF function runtime for Node.js (runtime protocol v2).
-# Build:  docker build -t ff-runtime-nodejs:24-v2 runtimes/nodejs
+# FF function runtime for Node.js (runtime protocol v3).
+# Build:  docker build -t ff-runtime-nodejs:24-v3 runtimes/nodejs
 # The final image holds only the compiled runtime, TypeScript (used to
 # transpile user .ts files) and its code cache. Nothing is installed when a function starts.
-FROM node:24-alpine AS build
+# Debian's glibc, as the Python runtime's (2.41): native modules built for Linux as AWS Lambda builds them, against glibc,
+# load; Alpine's musl, the base until 2026-10-21, didn't.
+FROM node:24-trixie-slim AS build
 WORKDIR /opt/ff
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -10,9 +12,9 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
-FROM node:24-alpine
+FROM node:24-trixie-slim
 LABEL org.opencontainers.image.title="ff-runtime-nodejs" \
-      org.opencontainers.image.description="FF function runtime for Node.js, protocol v2"
+      org.opencontainers.image.description="FF function runtime for Node.js, protocol v3"
 WORKDIR /opt/ff
 COPY --from=build /opt/ff/package.json ./
 COPY --from=build /opt/ff/node_modules ./node_modules

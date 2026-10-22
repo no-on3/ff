@@ -1,6 +1,9 @@
 import axios from 'axios';
 import { config } from '../config';
 import { requestHeaders } from '../lib/session';
+import type { AuthType, FunctionUrl, UrlCors } from '../lib/function-url';
+import type { CustomDomain } from '../lib/custom-domains';
+import type { Schedule } from '../lib/schedules';
 
 const api = axios.create({
   baseURL: config.apiUrl,
@@ -49,6 +52,9 @@ api.interceptors.response.use(undefined, (error: unknown) => {
 
 export type Runtime = 'nodejs' | 'python';
 export type FunctionStatus = 'CREATING' | 'ACTIVE' | 'ERROR' | 'DELETED';
+/** How a function's code comes: inline, the one file of `code`; or zip, a package uploaded. contract.test.ts checks them against the API's. */
+export const PACKAGE_TYPES = ['inline', 'zip'] as const;
+export type PackageType = (typeof PACKAGE_TYPES)[number];
 
 /** A function, as the API returns it. */
 export interface Function {
@@ -57,7 +63,14 @@ export interface Function {
   /** The account that owns the function (D1). */
   accountId: string;
   runtime: Runtime;
+  /** Inline code; empty for a package, which the console doesn't edit. */
   code: string;
+  packageType: PackageType;
+  /** What its runtime calls, as AWS Lambda's handler: function.handler unless it names another. */
+  handler: string;
+  /** Its code's SHA-256 in base64, and its size in bytes, as AWS Lambda's CodeSha256 and CodeSize. */
+  codeSha256: string;
+  codeSize: number;
   /** MB */
   memory: number;
   /** Seconds */
@@ -68,7 +81,14 @@ export interface Function {
   minInstances: number;
   maxInstances: number;
   scaleToZero: boolean;
+  /** What its handler gets: AWS Lambda's event, the input itself; or, for a function made before, FF's original wrapper. */
+  eventFormat: EventFormat;
   metadata?: Record<string, unknown> | null;
+  /**
+   * Its environment variables, by name: in the answers of GET /functions/:id, a create and an update; not in the
+   * list. Its secrets' values are never in any answer.
+   */
+  environment?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
@@ -76,10 +96,19 @@ export interface Function {
 /** What POST /functions accepts. */
 export type NewFunction = Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'> & {
   metadata?: Record<string, unknown>;
+  environment?: Record<string, string>;
+  /** Write-only: never in any answer. */
+  secrets?: Record<string, string>;
 };
 
-/** What PUT /functions/:id accepts: any subset of these. */
-export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout'>>;
+/** What a function's handler gets as its event. contract.test.ts checks them against the API's. */
+export const EVENT_FORMATS = ['lambda', 'wrapped'] as const;
+export type EventFormat = (typeof EVENT_FORMATS)[number];
+
+/** What PUT /functions/:id accepts: any subset of these. `environment` replaces all the variables, and rolls out. */
+export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' | 'memory' | 'timeout' | 'eventFormat'>> & {
+  environment?: Record<string, string>;
+};
 
 /**
  * Every status an invocation can have: the API's, which contract.test.ts checks.
@@ -90,6 +119,10 @@ export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' 
 export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'COMPLETED', 'THROTTLED', 'LOST'] as const;
 export type InvocationStatus = (typeof INVOCATION_STATUSES)[number];
 
+/** What brought an invocation: the API's invoke, the function's URL, or one of its schedules. contract.test.ts checks them. */
+export const INVOCATION_SOURCES = ['api', 'url', 'schedule'] as const;
+export type InvocationSource = (typeof INVOCATION_SOURCES)[number];
+
 /** An invocation's fields, as the API's entity names them: contract.test.ts checks them against it. */
 export const INVOCATION_FIELDS = [
   'id',
@@ -97,6 +130,7 @@ export const INVOCATION_FIELDS = [
   'input',
   'output',
   'status',
+  'source',
   'duration',
   'memoryUsed',
   'error',
@@ -116,6 +150,8 @@ export interface FunctionInvocation {
   /** In the history, the start of its JSON text, as a string, when outputTruncated. */
   output: unknown;
   status: InvocationStatus;
+  /** What brought it: the API, the function's URL, or a schedule. */
+  source: InvocationSource;
   /** Milliseconds, as the runtime measured it. */
   duration: number;
   /** MB: the runtime's peak memory. */
@@ -141,6 +177,53 @@ export interface InvocationPage {
   total: number;
 }
 
+/**
+ * A function's secret, as the API says it: its name, and when its value was set. The value never comes back.
+ * contract.test.ts checks these names against the API's.
+ */
+export const SECRET_FIELDS = ['name', 'updatedAt'] as const;
+export type SecretView = Record<(typeof SECRET_FIELDS)[number], string>;
+
+/** GET and PATCH /functions/:id/secrets. A change rolls out a new version, and the answer comes once it is live. */
+export const secretsApi = {
+  list: (functionId: string) => api.get<{ secrets: SecretView[] }>(`/functions/${functionId}/secrets`),
+  /** Each name to its new value, or to null to remove it. */
+  change: (functionId: string, secrets: Record<string, string | null>) =>
+    api.patch<{ secrets: SecretView[] }>(`/functions/${functionId}/secrets`, { secrets }),
+};
+
+/**
+ * GET, POST, PUT and DELETE /functions/:id/url: the function's URL, as AWS
+ * Lambda's function URL configuration. GET answers 404 for a function without one.
+ */
+export const functionUrlApi = {
+  get: (functionId: string) => api.get<FunctionUrl>(`/functions/${functionId}/url`),
+  create: (functionId: string, configuration: { authType: AuthType; cors: UrlCors | null }) =>
+    api.post<FunctionUrl>(`/functions/${functionId}/url`, configuration),
+  /** What is sent changes, what is left out stays; cors null removes CORS. */
+  update: (functionId: string, configuration: { authType?: AuthType; cors?: UrlCors | null }) =>
+    api.put<FunctionUrl>(`/functions/${functionId}/url`, configuration),
+  remove: (functionId: string) => api.delete(`/functions/${functionId}/url`),
+};
+
+/** A function URL's own domains: listed, added, checked again, removed. */
+export const domainsApi = {
+  list: (functionId: string) => api.get<CustomDomain[]>(`/functions/${functionId}/url/domains`),
+  add: (functionId: string, domain: string) => api.post<CustomDomain>(`/functions/${functionId}/url/domains`, { domain }),
+  verify: (functionId: string, domain: string) => api.post<CustomDomain>(`/functions/${functionId}/url/domains/${encodeURIComponent(domain)}/verify`),
+  remove: (functionId: string, domain: string) => api.delete(`/functions/${functionId}/url/domains/${encodeURIComponent(domain)}`),
+};
+
+/** A function's schedules, and an expression's next runs for the form's preview. */
+export const schedulesApi = {
+  list: (functionId: string) => api.get<Schedule[]>(`/functions/${functionId}/schedules`),
+  create: (functionId: string, schedule: Record<string, unknown>) => api.post<Schedule>(`/functions/${functionId}/schedules`, schedule),
+  /** What is sent changes, what is left out stays. */
+  update: (functionId: string, id: string, changes: Record<string, unknown>) => api.put<Schedule>(`/functions/${functionId}/schedules/${id}`, changes),
+  remove: (functionId: string, id: string) => api.delete(`/functions/${functionId}/schedules/${id}`),
+  nextRuns: (expression: string) => api.get<{ runs: string[] }>('/schedules/next-runs', { params: { expression } }),
+};
+
 /** GET and PUT /functions/:id/scaling-config. Each instance serves one call at a time. */
 export interface ScalingConfig {
   /** Instances kept running even when idle. */
@@ -164,8 +247,8 @@ export const functionsApi = {
 
   deleteFunction: (id: string) => api.delete(`/functions/${id}`),
 
-  /** `input` becomes the handler's event.body. */
-  invokeFunction: (id: string, input: Record<string, unknown>) =>
+  /** `input` is the handler's event, any JSON value; for a function made before, its event.body. */
+  invokeFunction: (id: string, input: unknown) =>
     api.post<FunctionInvocation>(`/functions/${id}/invoke`, { input }),
 
   getFunctionInvocations: (id: string, limit = 20) =>
@@ -494,6 +577,10 @@ export interface PlanLimits {
   /** Seconds without a call before a function scales to zero. */
   idleSeconds: number;
   internetEgress: boolean;
+  /** Customers' own domains for their functions' URLs, all together. */
+  customDomains: number;
+  /** Functions' schedules, all together. */
+  schedules: number;
 }
 
 export interface Plan {
@@ -504,7 +591,7 @@ export interface Plan {
 
 /** One of the user's accounts, in GET /me. */
 /** An account's fields in GET /me, as the API's DTO names them: contract.test.ts checks them against it. */
-export const ME_ACCOUNT_FIELDS = ['id', 'name', 'status', 'role', 'plan', 'dataDeletionDueAt', 'dataDeletedAt'] as const satisfies ReadonlyArray<keyof MeAccount>;
+export const ME_ACCOUNT_FIELDS = ['id', 'name', 'status', 'role', 'plan', 'internetEgress', 'dataDeletionDueAt', 'dataDeletedAt'] as const satisfies ReadonlyArray<keyof MeAccount>;
 
 export interface MeAccount {
   /** 12 digits. */
@@ -515,6 +602,8 @@ export interface MeAccount {
   role: Role;
   /** Its plan, whose limits the API applies. */
   plan: Plan;
+  /** Whether its functions may reach the internet. */
+  internetEgress: boolean;
   /** When a closed account's functions, their history and logs are deleted; null unless closed. */
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */
