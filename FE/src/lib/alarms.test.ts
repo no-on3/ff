@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Alarm } from '../services/api';
-import { STATE_INFO, conditionText, emptyForm, formFromAlarm, formProblem, metricsFor, toBody, withMetric } from './alarms';
+import { STATE_INFO, conditionText, emptyForm, firingCount, formFromAlarm, formProblem, metricsFor, toBody, withMetric } from './alarms';
 
 const FN = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
 
@@ -90,5 +90,13 @@ describe('an alarm, as the page says it', () => {
 
   it('names each state in words, beside its tone', () => {
     expect(STATE_INFO).toEqual({ OK: { label: 'OK', tone: 'ok' }, ALARM: { label: 'In alarm', tone: 'alarm' }, INSUFFICIENT_DATA: { label: 'Insufficient data', tone: 'unknown' } });
+  });
+});
+
+describe('firingCount', () => {
+  it('counts the alarms in alarm only: neither an OK one nor one without data', () => {
+    expect(firingCount([{ state: 'ALARM' }, { state: 'OK' }, { state: 'INSUFFICIENT_DATA' }, { state: 'ALARM' }])).toBe(2);
+    expect(firingCount([{ state: 'OK' }, { state: 'INSUFFICIENT_DATA' }])).toBe(0);
+    expect(firingCount([])).toBe(0);
   });
 });
