@@ -138,7 +138,7 @@ const Sidebar: React.FC<{ firing: number; onClose?: () => void }> = ({ firing, o
                     <Icon name={item.icon} className={open ? 'text-blue-600' : 'text-gray-500'} />
                     <span>{item.label}</span>
                     {item.icon === 'alarms' && firing > 0 && (
-                      <span className="ml-auto min-w-[18px] rounded-full bg-attention px-1.5 text-center text-[11px] leading-[18px] font-semibold text-white">
+                      <span className="ml-auto min-w-[18px] rounded-full bg-attention-strong px-1.5 text-center text-[11px] leading-[18px] font-semibold text-white">
                         {firing}
                         <span className="sr-only"> in alarm</span>
                       </span>

@@ -7,7 +7,8 @@
 /**
  * Tailwind's gray, blue and green scales, redefined so that every class the pages already use follows the direction.
  * The named steps are Column's (column.com): its grays, its blue scale whole, its teal and green; the steps between
- * are derived from them.
+ * are derived from them. Gray 500, the labels', is Column's #7c7f88 darkened to #6b6e77, for WCAG's 4.5:1 on the page
+ * and the panels, which tokens.test.ts checks.
  */
 export const scales = {
   gray: {
@@ -16,7 +17,7 @@ export const scales = {
     200: '#e3e4e8',
     300: '#cfd1d7',
     400: '#a4a7af',
-    500: '#7c7f88',
+    500: '#6b6e77',
     600: '#575a64',
     700: '#3f424b',
     800: '#232730',
@@ -59,8 +60,9 @@ export const colors = {
   canvas: scales.gray[50],
   /** Borders and dividers. */
   line: scales.gray[200],
-  /** Only what needs the user, such as an alarm's count: Column's orange. */
+  /** What needs the user: Column's orange, in the charts; and darkened, under white text, as an alarm's count. */
   attention: '#ec652b',
+  'attention-strong': '#c4501d',
   /** Failures: Tailwind's red-700, which the console's red classes keep. */
   danger: '#c10007',
   /** Warnings: Tailwind's amber-600, which the console's amber classes keep. */

@@ -12,7 +12,7 @@
   --color-gray-200: #e3e4e8;
   --color-gray-300: #cfd1d7;
   --color-gray-400: #a4a7af;
-  --color-gray-500: #7c7f88;
+  --color-gray-500: #6b6e77;
   --color-gray-600: #575a64;
   --color-gray-700: #3f424b;
   --color-gray-800: #232730;
@@ -47,6 +47,7 @@
   --color-canvas: #f6f6f8;
   --color-line: #e3e4e8;
   --color-attention: #ec652b;
+  --color-attention-strong: #c4501d;
   --color-danger: #c10007;
   --color-warning: #e17100;
 
@@ -141,7 +142,7 @@
     @apply rounded-lg border border-line bg-white p-6 shadow-sm;
   }
   .input {
-    @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-sm placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100;
+    @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-sm placeholder:text-gray-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100;
   }
   /* A select drawn as the fields are, with its own chevron. */
   .select {
