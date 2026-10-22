@@ -27,7 +27,7 @@ describe('RetentionService', () => {
   let marked: number;
   let update: jest.Mock;
   let steps: string[];
-  let functions: { remove: jest.Mock };
+  let functions: { remove: jest.Mock; restoreCodeImages: jest.Mock };
   let packages: { purgeUnused: jest.Mock; deleteAll: jest.Mock };
   let orchestrator: { removeTenant: jest.Mock; deleteLogs: jest.Mock };
   let audit: { record: jest.Mock };
@@ -63,7 +63,10 @@ describe('RetentionService', () => {
       getRepository: (entity: unknown) => repositories.get(entity),
       transaction: async (work: (m: typeof manager) => Promise<unknown>) => work(manager),
     } as unknown as DataSource;
-    functions = { remove: jest.fn(async (accountId: string, id: string) => void steps.push(`function ${accountId}/${id}`)) };
+    functions = {
+      remove: jest.fn(async (accountId: string, id: string) => void steps.push(`function ${accountId}/${id}`)),
+      restoreCodeImages: jest.fn(async () => ({ packages: 0, imagesMade: 0, zipsMade: 0, rolledOut: 0, failures: 0 })),
+    };
     packages = {
       purgeUnused: jest.fn(async () => 0),
       deleteAll: jest.fn(async (accountId: string) => {
@@ -235,18 +238,44 @@ describe('RetentionService', () => {
   describe('the timer', () => {
     /** The purges of a table so far: each run purges the history, then the deliveries. */
     const purges = (table: string) => query.mock.calls.filter(([sql]: [string]) => sql.includes(`"${table}"`)).length;
-    it('runs the purge and then the closed accounts at start and every interval, until the module stops', async () => {
+    it('runs the purges, the closed accounts and the restore of lost code images at start and every interval, until the module stops', async () => {
       jest.useFakeTimers({ now: new Date('2026-10-18T10:00:00Z') });
+      const runs = () => [
+        purges('function_invocations'),
+        purges('notification_deliveries'),
+        packages.purgeUnused.mock.calls.length,
+        findAccounts.mock.calls.length,
+        functions.restoreCodeImages.mock.calls.length,
+      ];
       service.onModuleInit();
       await jest.advanceTimersByTimeAsync(0);
-      expect([purges('function_invocations'), purges('notification_deliveries'), packages.purgeUnused.mock.calls.length, findAccounts.mock.calls.length]).toEqual([1, 1, 1, 1]);
+      expect(runs()).toEqual([1, 1, 1, 1, 1]);
 
       await jest.advanceTimersByTimeAsync(3 * HOUR_MS);
-      expect([purges('function_invocations'), purges('notification_deliveries'), packages.purgeUnused.mock.calls.length, findAccounts.mock.calls.length]).toEqual([4, 4, 4, 4]);
+      expect(runs()).toEqual([4, 4, 4, 4, 4]);
 
       service.onModuleDestroy();
       await jest.advanceTimersByTimeAsync(5 * HOUR_MS);
-      expect([purges('function_invocations'), purges('notification_deliveries'), packages.purgeUnused.mock.calls.length, findAccounts.mock.calls.length]).toEqual([4, 4, 4, 4]);
+      expect(runs()).toEqual([4, 4, 4, 4, 4]);
+    });
+
+    it('restores the lost code images last, and logs a restore that fails', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-18T10:00:00Z') });
+      const order: string[] = [];
+      packages.purgeUnused.mockImplementation(async () => void order.push('unused packages'));
+      findAccounts.mockImplementation(async () => {
+        order.push('closed accounts');
+        return [];
+      });
+      functions.restoreCodeImages.mockImplementationOnce(async () => {
+        order.push('lost code images');
+        throw new Error('the registry answered 503');
+      });
+
+      service.onModuleInit();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(order).toEqual(['unused packages', 'closed accounts', 'lost code images']);
+      expect(errors).toHaveBeenCalledWith('Could not restore the lost code images: the registry answered 503');
     });
 
     it('logs a purge of the unused packages that fails, and still looks for closed accounts', async () => {

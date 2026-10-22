@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Server, createServer } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { crc32, deflateRawSync } from 'node:zlib';
+import { MEDIA_TYPES } from './registry';
 
 export interface TestEntry {
   /** As the archive names it: a folder's ends with /. */
@@ -96,7 +97,8 @@ const sha256 = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).d
 /**
  * A registry in the test's process, enough of the OCI distribution API for the
  * client: blobs uploaded in one request after a POST, manifests by tag and by
- * digest. It can fail the next uploads with 500, or drop their connection.
+ * digest. It can fail the next uploads with 500, or drop their connection; a
+ * test deletes from blobs and manifests what the registry is to have lost.
  */
 export class FakeRegistry {
   readonly blobs = new Map<string, Buffer>();
@@ -154,6 +156,11 @@ export class FakeRegistry {
           return response.writeHead(201, { 'docker-content-digest': digest }).end();
         }
         if (manifest && request.method === 'HEAD') return response.writeHead(this.manifests.has(`${manifest[1]}@${manifest[2]}`) ? 200 : 404).end();
+        if (manifest && request.method === 'GET') {
+          const found = this.manifests.get(`${manifest[1]}@${manifest[2]}`);
+          if (!found) return response.writeHead(404).end();
+          return response.writeHead(200, { 'content-type': MEDIA_TYPES.manifest }).end(found);
+        }
         if (manifest && request.method === 'DELETE') {
           const key = `${manifest[1]}@${manifest[2]}`;
           if (!this.manifests.delete(key)) return response.writeHead(404).end();

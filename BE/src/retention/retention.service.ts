@@ -29,7 +29,9 @@ export const DELIVERY_DAYS = 30;
  *   alarms, notification deliveries and webhook secret, once the notice period
  *   its closure set has passed.
  * Usage records, the ledger, invoices and the audit log are not touched: the
- * law requires keeping them for years.
+ * law requires keeping them for years. Last, the same job makes again the code
+ * images the registry has lost (FunctionsService.restoreCodeImages): hourly,
+ * and at once when the backend restarts.
  */
 @Injectable()
 export class RetentionService implements OnModuleInit, OnModuleDestroy {
@@ -58,7 +60,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     clearInterval(this.timer);
   }
 
-  /** The purges, then the closed accounts: a failure of any is logged, and the next run tries again. */
+  /** The purges, then the closed accounts, then the lost code images: a failure of any is logged, and the next run tries again. */
   private runInBackground(): void {
     if (this.running) return;
     this.running = (async () => {
@@ -66,6 +68,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       await this.purgeDeliveries().catch((error: unknown) => this.logger.error(`Could not purge the notification deliveries: ${describeError(error)}`));
       await this.packages.purgeUnused().catch((error: unknown) => this.logger.error(`Could not purge the unused packages: ${describeError(error)}`));
       await this.deleteClosedAccounts().catch((error: unknown) => this.logger.error(`Could not look for closed accounts to delete: ${describeError(error)}`));
+      await this.functions.restoreCodeImages().catch((error: unknown) => this.logger.error(`Could not restore the lost code images: ${describeError(error)}`));
     })().finally(() => (this.running = undefined));
   }
 

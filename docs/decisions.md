@@ -13,13 +13,13 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **1. Lost code images are made again automatically.** ✅ Confirmed: before production, and before step 2.
 - **What it means:** every function's code is an image in FF's registry. If the registry loses an image, running functions keep running, but no server that lacks the image can start a new copy of the function until its owner updates it. In production the registry keeps every image on one server's disk.
-- **Changed already:** nothing in the code; the [CLI plan](cli-plan.md)'s C-29 says "confirmed".
-- **Still to change (C-29):** every hour, with the purge of unused packages, and on demand (`npm run code-images:restore`), the backend checks that the registry has the image of every package a function uses, and makes each missing one again from the package's zip. If a remade image differs from the old one, the functions that use it are restarted on it.
+- **Changed already:** the [CLI plan](cli-plan.md)'s C-29. Every hour, and at once when the backend starts, the backend checks that the registry has the image of every package a function uses, whole, and makes each missing one again from the package's zip. A function whose pods still name an image the registry lost, as when the image made again differs from the old one, is rolled out with the new one. After losing the registry, restart the backend. The development registry now takes deletes, as production's does.
+- **Still to change:** nothing.
 
 **2. Uploaded code is copied to the second site too.** ✅ Confirmed: as part of C-29.
 - **What it means:** the hourly backup copies only invoices and withholding certificates to the second site. Code typed in the console is also in FF's database, which is backed up; uploaded packages are only in FF's file store, so losing that store would lose them.
-- **Changed already:** nothing in the code; C-29 in the CLI plan now includes it.
-- **Still to change (C-29):** the backup's mirror (`deploy/k8s/backup/mirror.sh`) also copies `packages/`. What FF deletes there (unused packages, a closed account's code) goes from the second site too, 30 days later, about as long as the database's backups keep what was deleted. A run that would delete too much at once stops, so an empty or replaced store never empties the copy. The restore runbook brings the packages back before the images are made again.
+- **Changed already:** C-29. The backup's hourly mirror (`deploy/k8s/backup/mirror.sh`) also copies `packages/` to the second site. What FF deletes there (unused packages, a closed account's code) goes from the second site too, 30 days later, about as long as the database's backups keep what was deleted. A run that would delete more than half of the copy stops and says so, so an empty or replaced store never empties it. The restore runbook brings the packages back, then restarts the backend. A one-file package whose zip is lost is made again of its function's code, from the database. The backup drill checks all of it.
+- **Still to change:** nothing.
 
 ### Step 2: a database and file storage
 

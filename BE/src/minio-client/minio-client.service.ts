@@ -6,6 +6,9 @@ import { pipeline } from 'node:stream/promises';
 import { ConfigService } from '@nestjs/config';
 import { describeError } from '../common/describe-error';
 
+/** An object that object storage doesn't have: deleted, or lost with the store, as a restore from the second site brings back. */
+export class StoredObjectMissingError extends Error {}
+
 /**
  * Keeps a copy of each function's code, and functions' packages, in object
  * storage, through the S3 API (SeaweedFS in development). It used the MinIO client until P-09 of the
@@ -76,9 +79,11 @@ export class MinioClientService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  /** An object, streamed to a file: a package, to make its code image. */
+  /** An object, streamed to a file: a package, to make its code image. StoredObjectMissingError when storage hasn't it. */
   async getFile(key: string, file: string): Promise<void> {
-    const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key }));
+    const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key })).catch((error: unknown) => {
+      throw httpStatus(error) === 404 ? new StoredObjectMissingError(`Object storage has no ${key}`) : error;
+    });
     if (!object.Body) throw new Error(`The object ${key} has no body`);
     await pipeline(object.Body as Readable, createWriteStream(file, { mode: 0o600 }));
   }

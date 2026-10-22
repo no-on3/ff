@@ -61,7 +61,9 @@ export async function pushCodeImage(registry: Registry, accountId: string, codeS
  * layer, which the function's pods mount at /var/task on their runtime's image.
  * Made the first time a function names the package, from its zip in object
  * storage, pushed to the registry, and its digest kept with the package; made
- * again when the registry has lost it. The same package makes the same image.
+ * again when the registry has lost it, or part of it: at a deploy, and by the
+ * hourly restore of lost images (FunctionsService.restoreCodeImages). The same
+ * backend makes the same image of a package.
  */
 @Injectable()
 export class CodeImagesService {
@@ -80,6 +82,11 @@ export class CodeImagesService {
     }
   }
 
+  /** Whether this FF has a registry, which every function's code reaches its pods through. */
+  get available(): boolean {
+    return this.registry !== undefined;
+  }
+
   /** 503 when this FF has no registry: no function's code can reach its pods, and its operator says where images go. */
   assertAvailable(): void {
     if (!this.registry) {
@@ -92,20 +99,39 @@ export class CodeImagesService {
   /**
    * The image that runs the account's package, by digest, as the cluster's
    * nodes pull it: made and pushed the first time, and again when the registry
-   * doesn't have it.
+   * doesn't have it whole.
    */
   async imageFor(accountId: string, codeSha256: string): Promise<string> {
+    return (await this.ensureImage(accountId, codeSha256)).reference;
+  }
+
+  /** The package's image, as imageFor gives it, and whether it was made now: the first time, or because the registry had lost it. */
+  async ensureImage(accountId: string, codeSha256: string): Promise<{ reference: string; made: boolean }> {
     this.assertAvailable();
     const registry = this.registry as Registry;
     const repository = codeRepository(accountId);
     const record = await this.packages.findOne({ where: { accountId, codeSha256 }, select: { id: true, imageDigest: true } });
     if (!record) throw new Error(`Account ${accountId} has no package ${codeSha256}`);
-    let digest = record.imageDigest;
-    if (!digest || !(await registry.hasManifest(repository, digest))) {
-      digest = await this.make(registry, accountId, codeSha256);
-      await this.packages.update({ id: record.id }, { imageDigest: digest });
+    if (record.imageDigest && (await registry.hasImage(repository, record.imageDigest))) {
+      return { reference: `${this.settings.pullHost}/${repository}@${record.imageDigest}`, made: false };
     }
-    return `${this.settings.pullHost}/${repository}@${digest}`;
+    const digest = await this.make(registry, accountId, codeSha256);
+    await this.packages.update({ id: record.id }, { imageDigest: digest });
+    return { reference: `${this.settings.pullHost}/${repository}@${digest}`, made: true };
+  }
+
+  /**
+   * Whether the registry has, whole, the image a function's pods mount, by the
+   * reference its nodes pull it with. No for one it lost, and for one it can't
+   * have: another registry's, or not a code image at all.
+   */
+  async hasMounted(reference: string): Promise<boolean> {
+    this.assertAvailable();
+    const prefix = `${this.settings.pullHost}/`;
+    if (!reference.startsWith(prefix)) return false;
+    const [repository, digest] = reference.slice(prefix.length).split('@');
+    if (!repository.startsWith('ff-code/') || !/^sha256:[0-9a-f]{64}$/.test(digest ?? '')) return false;
+    return (this.registry as Registry).hasImage(repository, digest);
   }
 
   /** Makes the package's image from its zip in object storage, and pushes it (pushCodeImage). Answers its digest. */

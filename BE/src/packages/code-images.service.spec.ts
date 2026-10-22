@@ -63,21 +63,36 @@ describe('CodeImagesService: a package as the image its pods mount', () => {
     expect(row.imageDigest).toBe(`sha256:${createHash('sha256').update(fake.manifests.get(`${repository}:${tag}`)!).digest('hex')}`);
   });
 
-  it('asks the registry for it after, and makes nothing again while the registry has it', async () => {
+  it('asks the registry for it after, its manifest and each blob, and makes nothing again while the registry has it whole', async () => {
     const first = await service().imageFor(ACCOUNT, SHA);
     fake.requests.length = 0;
 
-    expect(await service().imageFor(ACCOUNT, SHA)).toBe(first);
-    expect(fake.requests.map((request) => request.method)).toEqual(['HEAD']);
+    expect(await service().ensureImage(ACCOUNT, SHA)).toEqual({ reference: first, made: false });
+    expect(fake.requests.map((request) => request.method)).toEqual(['GET', 'HEAD', 'HEAD']);
     expect(storage.getFile).toHaveBeenCalledTimes(1);
   });
 
-  it('makes it again, the same, when the registry lost it', async () => {
+  it('makes it again, the same, when the registry lost it, or kept its manifest and lost its layer', async () => {
     const first = await service().imageFor(ACCOUNT, SHA);
     for (const key of [...fake.manifests.keys()]) fake.manifests.delete(key);
 
-    expect(await service().imageFor(ACCOUNT, SHA)).toBe(first);
+    expect(await service().ensureImage(ACCOUNT, SHA)).toEqual({ reference: first, made: true });
     expect(storage.getFile).toHaveBeenCalledTimes(2);
+
+    const manifest = JSON.parse(fake.manifests.get(`${codeRepository(ACCOUNT)}@${row.imageDigest}`)!.toString());
+    fake.blobs.delete(manifest.layers[0].digest);
+    expect(await service().ensureImage(ACCOUNT, SHA)).toEqual({ reference: first, made: true });
+    expect(fake.blobs.has(manifest.layers[0].digest)).toBe(true);
+  });
+
+  it("says whether the registry has the image a function's pods mount, by the reference its nodes pull: not one it lost, nor another registry's", async () => {
+    const image = await service().imageFor(ACCOUNT, SHA);
+
+    expect(await service().hasMounted(image)).toBe(true);
+    expect(await service().hasMounted(image.replace('ff-dev-registry:5000/', 'registry.example:5000/'))).toBe(false);
+    expect(await service().hasMounted('ff-dev-registry:5000/library/busybox@sha256:' + 'b'.repeat(64))).toBe(false);
+    for (const key of [...fake.manifests.keys()]) fake.manifests.delete(key);
+    expect(await service().hasMounted(image)).toBe(false);
   });
 
   it('deletes an image by its digest, which the registry collects after', async () => {
@@ -91,6 +106,7 @@ describe('CodeImagesService: a package as the image its pods mount', () => {
   it("says, with 503, that a package can't run where FF has no registry; and deletes nothing there", async () => {
     const without = service({ registry: '', pullHost: '' });
 
+    expect([without.available, service().available]).toEqual([false, true]);
     expect(() => without.assertAvailable()).toThrow(ServiceUnavailableException);
     await expect(without.imageFor(ACCOUNT, SHA)).rejects.toThrow("This FF has no code registry, so it can't deploy a function: its operator sets FF_CODE_REGISTRY (ADR 0003)");
     await expect(without.deleteImage(ACCOUNT, `sha256:${'0'.repeat(64)}`)).resolves.toBeUndefined();

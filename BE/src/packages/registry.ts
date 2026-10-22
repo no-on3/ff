@@ -32,8 +32,8 @@ const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * The OCI distribution API, as far as code images need it (ADR 0003): push a
- * blob in one request unless the registry has it, push a manifest, ask for one,
- * delete one. Over HTTP or HTTPS, anonymous or with a login (Basic); each
+ * blob in one request unless the registry has it, push a manifest, ask whether
+ * an image is there whole, delete one. Over HTTP or HTTPS, anonymous or with a login (Basic); each
  * request is tried three times when the registry fails or can't be reached.
  */
 export class Registry {
@@ -126,12 +126,21 @@ export class Registry {
     return `sha256:${createHash('sha256').update(manifest).digest('hex')}`;
   }
 
-  /** Whether the repository has the manifest of this digest. */
-  async hasManifest(repository: string, digest: string): Promise<boolean> {
-    const response = await this.request('HEAD', `/v2/${repository}/manifests/${digest}`, { accept: MEDIA_TYPES.manifest });
-    if (response.status === 200) return true;
+  /**
+   * Whether the repository has the whole image of this digest: its manifest,
+   * and each blob the manifest names, its configuration and its layers. A
+   * registry that lost a blob still serves the manifest, but no node can pull
+   * the image.
+   */
+  async hasImage(repository: string, digest: string): Promise<boolean> {
+    const response = await this.request('GET', `/v2/${repository}/manifests/${digest}`, { accept: MEDIA_TYPES.manifest });
     if (response.status === 404) return false;
-    return Registry.refused(response, `a check of manifest ${digest}`);
+    if (response.status !== 200) return Registry.refused(response, `a check of manifest ${digest}`);
+    const manifest = (await response.json()) as { config?: { digest?: string }; layers?: Array<{ digest?: string }> };
+    for (const blob of [manifest.config?.digest, ...(manifest.layers ?? []).map((layer) => layer.digest)]) {
+      if (!blob || !(await this.hasBlob(repository, blob))) return false;
+    }
+    return true;
   }
 
   /** Deletes the manifest of this digest, which the registry's garbage collection follows; one already gone is no error. */

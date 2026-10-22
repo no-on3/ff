@@ -1,6 +1,7 @@
-# The legal records' mirror (mirror.sh), hourly, as rclone 1.75.1 in ff-system: the S3 bucket's invoices and
-# withholding certificates copied to the second site. Its credentials for both sites are the Secret ff-backup-s3
-# (deploy/backup/README.md). The databases are backed up by their server or provider, not from the cluster.
+# The mirror (mirror.sh), hourly, as rclone 1.75.1 in ff-system: the S3 bucket's invoices and withholding
+# certificates copied to the second site, then functions' packages synced there. Its credentials for both sites are
+# the Secret ff-backup-s3 (deploy/backup/README.md). The databases are backed up by their server or provider, not
+# from the cluster.
 apiVersion: batch/v1
 kind: CronJob
 metadata:

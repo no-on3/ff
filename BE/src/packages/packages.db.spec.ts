@@ -4,7 +4,8 @@
  * once; its files are kept; the unused ones, which no function of the account
  * names, are counted and purged after an hour with their zips; the one-file
  * packages the backend makes of inline code are kept while a function names
- * them, as no upload; and a closed account's go. Each run works in a scratch
+ * them, as no upload; those functions name are listed for the restore of lost
+ * code images; and a closed account's go. Each run works in a scratch
  * database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
@@ -200,6 +201,30 @@ run("functions' packages (L2)", () => {
 
     expect((await rowsOf(a)).filter((code) => code === live.codeSha256 || code === replaced.codeSha256)).toEqual([live.codeSha256]);
     expect(stored.has(packageKey(a, replaced.codeSha256))).toBe(false);
+  });
+
+  it('lists the packages functions name, for the restore of lost images: a zip function\'s and inline code\'s, not an unused or a replaced one', async () => {
+    const [a, b] = [await account(), await account()];
+    const uploaded = zip('exports.handler = async () => "named";');
+    for (const bytes of [uploaded, zip('exports.handler = async () => "unused";')]) await upload(a, bytes);
+    await named(a, sha(uploaded));
+    const live = inlinePackage("export const handler = async () => 'restored';\n", Runtime.NODEJS);
+    const replaced = inlinePackage("export const handler = async () => 'before';\n", Runtime.NODEJS);
+    for (const built of [live, replaced]) await packages.storeInline(b, built);
+    await query(
+      `INSERT INTO functions (name, account_id, runtime, code, package_type, code_sha256, code_size, memory, timeout, package_sha256) VALUES ('inline', $1, 'nodejs', $2, 'inline', 'x', 1, 128, 5, $3)`,
+      [b, "export const handler = async () => 'restored';\n", live.codeSha256],
+    );
+
+    expect((await packages.named()).filter((found) => [a, b].includes(found.accountId))).toEqual([
+      { accountId: a, codeSha256: sha(uploaded), inline: false },
+      { accountId: b, codeSha256: live.codeSha256, inline: true },
+    ]);
+
+    // Its zip lost with object storage, then stored again, made of the function's code.
+    stored.delete(packageKey(b, live.codeSha256));
+    await packages.restoreInlineZip(b, live);
+    expect(stored.get(packageKey(b, live.codeSha256))).toBe(live.zip.length);
   });
 
   it("deletes all of an account's packages and their zips, and no other account's", async () => {

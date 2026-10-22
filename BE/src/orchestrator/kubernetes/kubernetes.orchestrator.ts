@@ -51,7 +51,7 @@ interface Deployment extends K8sObject {
       metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'>;
       spec?: {
         containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }>;
-        volumes?: Array<{ name: string; configMap?: { name?: string } }>;
+        volumes?: Array<{ name: string; configMap?: { name?: string }; image?: { reference?: string } }>;
       };
     };
   };
@@ -491,6 +491,19 @@ export class KubernetesOrchestrator implements Orchestrator {
       ready.set(functionId, instances);
     }
     return ready;
+  }
+
+  async codeImagesByFunction(): Promise<Map<string, string>> {
+    // The same one list of FF's Deployments in every namespace as above.
+    const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);
+    const images = new Map<string, string>();
+    for (const deployment of deployments) {
+      const functionId = deployment.metadata.labels?.[LABELS.functionId];
+      if (!functionId || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
+      const reference = deployment.spec?.template?.spec?.volumes?.find((volume) => volume.name === 'code')?.image?.reference;
+      if (reference) images.set(functionId, reference);
+    }
+    return images;
   }
 
   async invoke(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<InvokeResult> {

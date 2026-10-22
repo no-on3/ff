@@ -34,7 +34,10 @@
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
 # invokes refused with 402, a top-up, and invokes accepted again at once. Then an
 # alarm: a function's error fires it, a quiet minute recovers it, and each
-# change reaches a local webhook receiver, signed.
+# change reaches a local webhook receiver, signed. Last, code images the
+# registry lost: a function's layer, made again when the backend restarts, and
+# pulled by a node that had no copy; and a function whose pods named an image
+# the registry never had, rolled out with its package's.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -719,6 +722,7 @@ wait "$call_pid" 2>/dev/null || true
 # Restarted at once, as a supervisor would. Its reaper marks the call LOST once the longest a call can
 # take has passed (2 × 3 s + a 1 s cold-start limit + 30 s), at the next run of the minute.
 e2e_start_backend "$work/backend-restarted.log" "$api" "${be_env[@]}" "${alarm_env[@]}" K8S_READY_TIMEOUT_SECONDS=1
+restarted_pid="${e2e_pids[${#e2e_pids[@]}-1]}" # the processes started after it come after it
 state=""
 for _ in $(seq 1 120); do
   state="$(q "SELECT status FROM function_invocations WHERE id = '$lost'")"
@@ -920,5 +924,53 @@ print(bool(lines) and all({'time', 'level', 'message'} <= line.keys() for line i
       any('requestId' in line for line in queries))
 PY
 )"
+
+echo "== code images the registry lost, made again (CLI plan, C-29)"
+node="k3d-$FF_CLUSTER_NAME-server-0"
+registry="http://127.0.0.1:$FF_REGISTRY_PORT"
+small_ns="$(tenant_namespace "$small")"
+# code_image_in <namespace> <function>: the code image its pods mount. repository_of <image>: its repository.
+code_image_in() { kubectl -n "$1" get deployment "fn-$2" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'; }
+repository_of() { local path="${1#*/}"; echo "${path%@*}"; }
+# layer_status <image> <layer>: what the registry answers for the image's layer. on_node <image>: whether the node has it.
+layer_status() { curl -s -o /dev/null -w '%{http_code}' -I "$registry/v2/$(repository_of "$1")/blobs/$2"; }
+on_node() { docker exec "$node" crictl inspecti "$1" >/dev/null 2>&1 && echo true || echo false; }
+meter_image="$(code_image_of "$meter_id")"
+meter_layer="$(curl -s -H 'accept: application/vnd.oci.image.manifest.v1+json' "$registry/v2/$(repository_of "$meter_image")/manifests/${meter_image##*@}" | jq -r '.layers[0].digest')"
+small_image="$(code_image_in "$small_ns" "$small_id")"
+# Neither function has a pod, nor the node a copy of their images, as a node that never pulled them.
+kubectl -n "$tenant_ns" scale deployment "fn-$meter_id" --replicas=0 >/dev/null
+kubectl -n "$small_ns" scale deployment "fn-$small_id" --replicas=0 >/dev/null
+kubectl -n "$tenant_ns" wait --for=delete pod -l "ff.dev/function-id=$meter_id" --timeout=120s >/dev/null 2>&1 || true
+kubectl -n "$small_ns" wait --for=delete pod -l "ff.dev/function-id=$small_id" --timeout=120s >/dev/null 2>&1 || true
+for image in "$meter_image" "$small_image"; do docker exec "$node" crictl rmi "$image" >/dev/null 2>&1 || true; done
+# The registry loses the meter function's layer and keeps its manifest, as a disk that lost a file would.
+curl -s -o /dev/null -X DELETE "$registry/v2/$(repository_of "$meter_image")/blobs/$meter_layer"
+# The other function's pods name an image the registry never had, as one an earlier backend made, lost since.
+lost_image="${small_image%@*}@sha256:$(printf '0%.0s' $(seq 1 64))"
+kubectl -n "$small_ns" patch deployment "fn-$small_id" \
+  -p "{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\":\"code\",\"image\":{\"reference\":\"$lost_image\"}}]}}}}" >/dev/null
+check "the registry lost a layer of the meter function's image; the node has neither image; the other function names a lost one" \
+  "404 false false $lost_image" \
+  "$(layer_status "$meter_image" "$meter_layer") $(on_node "$meter_image") $(on_node "$small_image") $(code_image_in "$small_ns" "$small_id")"
+# Restarted, as the runbook says after losing the registry: the retention job runs at the backend's start.
+kill "$restarted_pid"
+wait "$restarted_pid" 2>/dev/null || true
+e2e_start_backend "$work/backend-restored.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
+restored=""
+for _ in $(seq 1 180); do
+  restored="$(grep -o 'Lost code images restored: [^"]*' "$work/backend-restored.log" | head -1 || true)"
+  [ -n "$restored" ] && break
+  sleep 1
+done
+check "the restarted backend restores them at once, and says what it did" \
+  "1 image(s) made again, 0 zip(s) made again of inline code; 1 function(s) rolled out with their image; 0 failure(s)" "${restored#*in use, }"
+check "the meter function's image whole again, by the digest its pods name" "200 $meter_image" \
+  "$(layer_status "$meter_image" "$meter_layer") $(code_image_of "$meter_id")"
+kubectl -n "$tenant_ns" scale deployment "fn-$meter_id" --replicas=1 >/dev/null
+check "a new pod of it starts on the node, which had no copy: pulled from the registry" "true true" \
+  "$(kubectl -n "$tenant_ns" rollout status deployment "fn-$meter_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false) $(on_node "$meter_image")"
+check "the other function rolled out with its package's image, which its new pod pulled; its record as it was" "$small_image true true ACTIVE" \
+  "$(code_image_in "$small_ns" "$small_id") $(kubectl -n "$small_ns" rollout status deployment "fn-$small_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false) $(on_node "$small_image") $(as_small GET "/functions/$small_id" | jq -r .status)"
 
 echo "e2e: $passed checks passed"

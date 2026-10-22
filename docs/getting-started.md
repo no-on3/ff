@@ -998,7 +998,7 @@ hack/cli-e2e.sh                                          # the ff command on the
 hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
 hack/k8s/test-platform-manifests.sh                      # deploy/k8s/platform checked without deploying it, about 1 min
 hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 15 min
-hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, about 2 min
+hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, the packages, about 2 min
 ```
 
 **The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). Each stage stops at its first failing step and names it:
@@ -1112,7 +1112,7 @@ cd BE && FF_LOG_FORMAT=json npm run start:dev 2>&1 | jq -rR --unbuffered '(fromj
 | `migration:run` fails with `relation "functions" already exists` | The database was created before migrations were used. Reset it once, as shown after step 7. |
 | `npm run test:db` fails with `ECONNREFUSED` | PostgreSQL isn't running: `docker compose up -d --wait postgres`. The tests read `DB_*` from `BE/.env`. |
 | Kubernetes calls fail with `Unauthorized` | The token expired: `hack/k8s/mint-token.sh`. |
-| Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. Or the node can't pull the code image (`kubectl -n <namespace> describe pod` names it): `hack/k8s/registry-up.sh` starts the registry and tells the node where it is. |
+| Function pods in `ImagePullBackOff` | The runtime image is not in the cluster: `hack/k8s/load-images.sh`. Or the node can't pull the code image (`kubectl -n <namespace> describe pod` names it): `hack/k8s/registry-up.sh` starts the registry and tells the node where it is. A registry that lost the image, its volume deleted, gets it back from the backend, which makes again the images functions use every hour and at its start: restart it. |
 | `create` or `update` answers 503 `This FF has no code registry, so it can't deploy a function` | `BE/.env` lacks the registry, as one from before 2026-10-21 does: add `FF_CODE_REGISTRY=http://127.0.0.1:5056` and `FF_CODE_REGISTRY_PULL=ff-dev-registry:5000`, as in `BE/.env.example`, and restart the backend. |
 | `create` or `update` answers 503 `The code registry can't be reached: nothing changed, try again in a moment` | The registry isn't running: `hack/k8s/registry-up.sh`, then send it again. |
 | `create` fails with `The function failed to load:` | The code didn't load: the runtime's reason follows, and `functionId` names the function, saved as `ERROR`. Fix the code and send it with `PUT /functions/<id>`, rather than create it again: see "If a function cannot load" in section 3. If the answer is 500 instead, the platform failed: see the row below about request IDs. |

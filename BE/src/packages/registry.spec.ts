@@ -77,16 +77,32 @@ describe('Registry: the OCI distribution API, as code images need it', () => {
     expect(calls().filter((call) => call.startsWith('PUT'))).toHaveLength(1);
   });
 
-  it('pushes a manifest under its tag, answers its digest, finds it by that digest, and deletes it once', async () => {
-    const manifest = Buffer.from(JSON.stringify({ schemaVersion: 2, mediaType: MEDIA_TYPES.manifest }));
+  it('pushes a manifest under its tag, answers its digest, has the image while its blobs are there too, and deletes it once', async () => {
+    const config = bytesBlob(Buffer.from('{"architecture":"amd64","os":"linux"}'));
+    const layerBytes = randomBytes(128);
+    const layer = bytesBlob(layerBytes);
+    await registry().pushBlob(REPO, config);
+    await registry().pushBlob(REPO, layer);
+    const manifest = Buffer.from(
+      JSON.stringify({
+        schemaVersion: 2,
+        mediaType: MEDIA_TYPES.manifest,
+        config: { mediaType: MEDIA_TYPES.config, digest: config.digest, size: config.size },
+        layers: [{ mediaType: MEDIA_TYPES.layer, digest: layer.digest, size: layer.size }],
+      }),
+    );
 
     const digest = await registry().pushManifest(REPO, 'abc', manifest);
 
     expect(digest).toBe(sha256(manifest));
     expect(fake.requests.at(-1)?.contentType).toBe(MEDIA_TYPES.manifest);
-    expect(await registry().hasManifest(REPO, digest)).toBe(true);
+    expect(await registry().hasImage(REPO, digest)).toBe(true);
+    // Its layer lost: the registry still has the manifest, but no node could pull the image.
+    fake.blobs.delete(layer.digest);
+    expect(await registry().hasImage(REPO, digest)).toBe(false);
+    fake.blobs.set(layer.digest, layerBytes);
     await registry().deleteManifest(REPO, digest);
-    expect(await registry().hasManifest(REPO, digest)).toBe(false);
+    expect(await registry().hasImage(REPO, digest)).toBe(false);
     // Already gone: nothing to do.
     await expect(registry().deleteManifest(REPO, digest)).resolves.toBeUndefined();
   });

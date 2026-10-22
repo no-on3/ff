@@ -12,12 +12,19 @@ network="k3d-$FF_CLUSTER_NAME"
 pull="$FF_REGISTRY_NAME:5000"
 docker network inspect "$network" >/dev/null 2>&1 || { echo "no cluster $FF_CLUSTER_NAME: run hack/k8s/cluster-up.sh" >&2; exit 1; }
 
+# Deletes allowed, as production's registry allows the backend: the purge of unused packages deletes their images,
+# and the end-to-end checks delete one to see it made again. A container made before without them is made again,
+# its volume kept.
+if docker container inspect "$FF_REGISTRY_NAME" >/dev/null 2>&1 &&
+  ! docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$FF_REGISTRY_NAME" | grep -qx 'REGISTRY_STORAGE_DELETE_ENABLED=true'; then
+  docker rm -f "$FF_REGISTRY_NAME" >/dev/null
+fi
 if ! docker container inspect "$FF_REGISTRY_NAME" >/dev/null 2>&1; then
   docker image inspect "$FF_REGISTRY_IMAGE" >/dev/null 2>&1 || docker pull -q "$FF_REGISTRY_IMAGE" >/dev/null
   # Its images in a volume of their own, kept when the container goes: a backend rebuilds a lost one from its package.
   docker run -d --name "$FF_REGISTRY_NAME" --restart unless-stopped --network "$network" \
-    -p "127.0.0.1:$FF_REGISTRY_PORT:5000" -e REGISTRY_LOG_LEVEL=warn -v "$FF_REGISTRY_NAME:/var/lib/registry" \
-    --label ff.dev/role=code-registry "$FF_REGISTRY_IMAGE" >/dev/null
+    -p "127.0.0.1:$FF_REGISTRY_PORT:5000" -e REGISTRY_LOG_LEVEL=warn -e REGISTRY_STORAGE_DELETE_ENABLED=true \
+    -v "$FF_REGISTRY_NAME:/var/lib/registry" --label ff.dev/role=code-registry "$FF_REGISTRY_IMAGE" >/dev/null
 fi
 [ "$(docker container inspect -f '{{.State.Running}}' "$FF_REGISTRY_NAME")" = true ] || docker start "$FF_REGISTRY_NAME" >/dev/null
 # A cluster made again has a new network.

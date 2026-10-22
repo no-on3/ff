@@ -14,9 +14,9 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Observable } from 'rxjs';
-import { EntityManager, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
+import { EntityManager, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
-import { MinioClientService } from '../minio-client/minio-client.service';
+import { MinioClientService, StoredObjectMissingError } from '../minio-client/minio-client.service';
 import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
 import {
@@ -74,6 +74,26 @@ import { MAX_INPUT_BYTES } from './limits';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
 const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat'] as const;
+
+/** The advisory lock the restore of lost code images holds: one backend runs it at a time. */
+const RESTORE_LOCK = `hashtext('ff_code_images_restore')`;
+
+/** A package, by its account and SHA-256, as a key. */
+const packageRef = (accountId: string, codeSha256: string): string => `${accountId}/${codeSha256}`;
+
+/** What one restore of lost code images did (FunctionsService.restoreCodeImages). */
+export interface CodeImagesRestore {
+  /** The packages that functions name, each checked in the registry. */
+  packages: number;
+  /** Their images made again: the registry hadn't them whole. */
+  imagesMade: number;
+  /** One-file packages' zips made again of their function's code: object storage had lost them. */
+  zipsMade: number;
+  /** Working functions rolled out with their package's image: their pods mounted one the registry had lost. */
+  rolledOut: number;
+  /** Packages and functions that couldn't be restored, each logged: the next run tries again. */
+  failures: number;
+}
 
 /** A function as the API answers it: its record and its variables. Its secrets' values are never part of it. */
 export type FunctionView = Function & { environment: Record<string, string> };
@@ -657,6 +677,118 @@ export class FunctionsService {
       if (previousCodePath !== codePath) await this.minioClientService.deleteCode(previousCodePath);
     } catch (error) {
       this.logger.error(`Could not archive the code of function ${function_.id}: ${describeError(error)}`);
+    }
+  }
+
+  /**
+   * Makes again what the registry has lost of functions' code images (ADR
+   * 0003), so that a function's new pods can start on any node. The retention
+   * job runs it hourly and at the backend's start, one backend at a time
+   * (PostgreSQL's advisory lock); nothing where this FF has no registry.
+   * - Each package a function names gets its image made again from its zip,
+   *   as a deploy makes it, when the registry hasn't it whole. A one-file
+   *   package whose zip object storage has lost too is made again first, of its
+   *   function's code: the same code makes the same zip.
+   * - Then each working function whose pods mount an image the registry hasn't
+   *   is rolled out with its package's image, its record unchanged: an image
+   *   made again with another digest, by a later backend or for another
+   *   function of the same package, isn't the one its pods name. Pods mounting
+   *   another image the registry has, as an update under way does, are left.
+   * A failure is logged, and the next package or function tried; the next run
+   * tries again.
+   */
+  async restoreCodeImages(): Promise<CodeImagesRestore> {
+    const report: CodeImagesRestore = { packages: 0, imagesMade: 0, zipsMade: 0, rolledOut: 0, failures: 0 };
+    if (!this.codeImages.available) return report;
+    const runner = this.functionsRepository.manager.connection.createQueryRunner();
+    await runner.connect();
+    try {
+      const [{ locked }] = (await runner.query(`SELECT pg_try_advisory_lock(${RESTORE_LOCK}) AS "locked"`)) as Array<{ locked: boolean }>;
+      if (!locked) return report;
+      try {
+        await this.rollOutLostImages(await this.restorePackageImages(report), report);
+      } finally {
+        await runner.query(`SELECT pg_advisory_unlock(${RESTORE_LOCK})`);
+      }
+    } finally {
+      await runner.release();
+    }
+    if (report.imagesMade || report.zipsMade || report.rolledOut || report.failures) {
+      this.logger.log(
+        `Lost code images restored: of ${report.packages} package(s) in use, ${report.imagesMade} image(s) made again, ${report.zipsMade} zip(s) made again of inline code; ` +
+          `${report.rolledOut} function(s) rolled out with their image; ${report.failures} failure(s)`,
+      );
+    }
+    return report;
+  }
+
+  /** Each package a function names, its image made again where the registry lost it: their references, by package. */
+  private async restorePackageImages(report: CodeImagesRestore): Promise<Map<string, string>> {
+    const references = new Map<string, string>();
+    for (const { accountId, codeSha256, inline } of await this.packages.named()) {
+      report.packages++;
+      try {
+        let image: { reference: string; made: boolean };
+        try {
+          image = await this.codeImages.ensureImage(accountId, codeSha256);
+        } catch (error) {
+          if (!(error instanceof StoredObjectMissingError) || !inline || !(await this.restoreInlineZip(accountId, codeSha256))) throw error;
+          report.zipsMade++;
+          image = await this.codeImages.ensureImage(accountId, codeSha256);
+        }
+        if (image.made) {
+          report.imagesMade++;
+          this.logger.warn(`The registry hadn't the code image of package ${codeSha256} of account ${accountId} whole: made again, ${image.reference}`);
+        }
+        references.set(packageRef(accountId, codeSha256), image.reference);
+      } catch (error) {
+        report.failures++;
+        const lostZip = error instanceof StoredObjectMissingError ? ': its zip is lost too; restore the packages from the second site (deploy/backup/README.md)' : '';
+        this.logger.error(`Could not make the code image of package ${codeSha256} of account ${accountId} again${lostZip}: ${describeError(error)}`);
+      }
+    }
+    return references;
+  }
+
+  /** Makes again, of a function's code, a one-file package whose zip object storage lost: false when no function's code makes it. */
+  private async restoreInlineZip(accountId: string, codeSha256: string): Promise<boolean> {
+    const functions = await this.functionsRepository.find({ where: { accountId, packageType: PackageType.INLINE, packageSha256: codeSha256 } });
+    for (const function_ of functions) {
+      const built = inlinePackage(function_.code, function_.runtime);
+      if (built.codeSha256 !== codeSha256) continue;
+      await this.packages.restoreInlineZip(accountId, built);
+      this.logger.warn(`Object storage had lost the one-file package ${codeSha256} of account ${accountId}: made again of function ${function_.id}'s code`);
+      return true;
+    }
+    return false;
+  }
+
+  /** Rolls each working function whose pods mount an image the registry hasn't out with its package's image. */
+  private async rollOutLostImages(references: Map<string, string>, report: CodeImagesRestore): Promise<void> {
+    const mounted = await this.orchestrator.codeImagesByFunction();
+    if (mounted.size === 0) return;
+    const working = await this.functionsRepository.find({
+      where: { status: FunctionStatus.ACTIVE, packageSha256: Not(IsNull()) },
+      select: { id: true, accountId: true, packageSha256: true },
+    });
+    for (const { id, accountId, packageSha256 } of working) {
+      const current = mounted.get(id);
+      const image = references.get(packageRef(accountId, packageSha256 as string));
+      if (!current || !image || current === image) continue;
+      try {
+        if (await this.codeImages.hasMounted(current)) continue;
+        // As its record is now, if it still runs that package: a change saved meanwhile rolled out its own image.
+        const function_ = await this.functionsRepository.findOne({ where: { id, accountId, status: FunctionStatus.ACTIVE, packageSha256: packageSha256 as string } });
+        if (!function_) continue;
+        const workload = workloadOf(function_, await this.environments.load(id), image);
+        await this.plans.withTenant(accountId, (tenant) => this.orchestrator.update(workload, tenant));
+        await this.orchestrator.waitUntilReady(function_, this.readyTimeoutMs());
+        report.rolledOut++;
+        this.logger.warn(`Function ${id}'s pods mounted ${current}, which the registry has lost: rolled out with ${image}`);
+      } catch (error) {
+        report.failures++;
+        this.logger.error(`Could not roll function ${id} out with its code image ${image}: ${describeError(error)}`);
+      }
     }
   }
 

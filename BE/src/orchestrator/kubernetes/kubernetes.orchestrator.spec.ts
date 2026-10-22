@@ -909,6 +909,29 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
+  describe("codeImagesByFunction: the image each function's pods mount, for the restore of lost images", () => {
+    const IMAGE = 'registry.ff.internal/ff-code/123456789012@sha256:' + 'a'.repeat(64);
+    const deployment = (namespace: string, functionId: string | undefined, volumes: unknown[]) => ({
+      metadata: { name: 'fn-x', namespace, labels: { 'app.kubernetes.io/managed-by': 'ff-controller', ...(functionId ? { 'ff.dev/function-id': functionId } : {}) } },
+      spec: { template: { spec: { volumes } } },
+    });
+
+    it("lists FF's Deployments in one call, and gives each function's code image; none for code mounted another way, or outside FF's namespaces", async () => {
+      api.lists.set('/apis/apps/v1/deployments', [
+        deployment('ff-t-aaaaaaaaaaaa', 'f-image', [{ name: 'tmp', emptyDir: {} }, { name: 'code', image: { reference: IMAGE, pullPolicy: 'IfNotPresent' } }]),
+        // A function deployed before its code came as an image: its code ConfigMap until its next rollout.
+        deployment('ff-t-aaaaaaaaaaaa', 'f-configmap', [{ name: 'code', configMap: { name: 'fn-f-configmap-code-1' } }]),
+        deployment('default', 'f-copied', [{ name: 'code', image: { reference: IMAGE } }]),
+        deployment('ff-t-aaaaaaaaaaaa', undefined, [{ name: 'code', image: { reference: IMAGE } }]),
+      ]);
+
+      const images = await orchestrator.codeImagesByFunction();
+
+      expect(api.listed).toEqual([{ path: '/apis/apps/v1/deployments', selector: 'app.kubernetes.io/managed-by=ff-controller' }]);
+      expect(Object.fromEntries(images)).toEqual({ 'f-image': IMAGE });
+    });
+  });
+
   describe('ping: whether the cluster answers, for the readiness probe', () => {
     it('asks the API server its version, within the time given', async () => {
       api.responses.push({ status: 200, headers: {}, body: '{"major":"1","minor":"31"}' });

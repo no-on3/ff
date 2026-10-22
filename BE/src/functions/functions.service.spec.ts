@@ -4,7 +4,7 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
-import { MinioClientService } from '../minio-client/minio-client.service';
+import { MinioClientService, StoredObjectMissingError } from '../minio-client/minio-client.service';
 import {
   FunctionLoadError,
   FunctionRuntimeError,
@@ -71,8 +71,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** D9's balance check (P-33): every account may invoke unless a test says otherwise. */
   const credit = { admit: jest.fn(async (_accountId: string) => undefined) };
   /** The account's packages, and the registry their images go to. */
-  const packages = { name: jest.fn(), storeInline: jest.fn() };
-  const codeImages = { assertAvailable: jest.fn(), imageFor: jest.fn() };
+  const packages = { name: jest.fn(), storeInline: jest.fn(), named: jest.fn(), restoreInlineZip: jest.fn() };
+  const codeImages = { available: true, assertAvailable: jest.fn(), imageFor: jest.fn(), ensureImage: jest.fn(), hasMounted: jest.fn() };
   /** The image the registry gives a package, by its SHA-256. */
   const imageOf = (codeSha256: string) => `ff-dev-registry:5000/ff-code/user-1@sha256:${Buffer.from(codeSha256, 'base64').toString('hex')}`;
   /** The transaction that ends an invocation: it locks the row, saves the final state, then writes the usage record (D6). */
@@ -153,6 +153,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       readyInstances: jest.fn(),
       desiredInstances: jest.fn(),
       readyInstancesByFunction: jest.fn(),
+      codeImagesByFunction: jest.fn(),
       applyTenantLimits: jest.fn(),
       logs: jest.fn(),
       tailLogs: jest.fn(),
@@ -417,6 +418,127 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       // The attempt ran inline code's package; the rollback, the package before.
       expect(codeImages.imageFor.mock.calls.map(([, codeSha256]) => codeSha256)).toEqual([inlinePackage('broken', Runtime.NODEJS).codeSha256, PACKAGE]);
       expect(orchestrator.update.mock.calls.map(([workload]) => (workload as { codeImage?: string }).codeImage)).toEqual([IMAGE, IMAGE]);
+    });
+  });
+
+  describe('the restore of code images the registry has lost (ADR 0003)', () => {
+    const UPLOADED = 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=';
+    const INLINE = inlinePackage('export const handler = async () => 1;', Runtime.NODEJS);
+    /** An image another backend made of the same package, which the registry has lost: another digest. */
+    const LOST = 'ff-dev-registry:5000/ff-code/user-1@sha256:' + '0'.repeat(64);
+    /** The advisory lock, free unless a test says another backend holds it. */
+    let lockFree: boolean;
+    const runner = { connect: jest.fn(), release: jest.fn(), query: jest.fn() };
+    /** The working functions' packages, and what each function's pods mount. */
+    let working: Array<{ id: string; accountId: string; packageSha256: string }>;
+
+    beforeEach(() => {
+      lockFree = true;
+      codeImages.available = true;
+      runner.query.mockImplementation(async (sql: string) => (sql.includes('pg_try_advisory_lock') ? [{ locked: lockFree }] : []));
+      Object.assign((functionsRepo as unknown as { manager: object }).manager, { connection: { createQueryRunner: () => runner } });
+      working = [];
+      functionsRepo.find.mockImplementation(async ({ where }: { where: { packageType?: PackageType } }) =>
+        // The functions whose code makes a one-file package; or the working functions' packages.
+        where.packageType === PackageType.INLINE ? [activeFunction()] : working,
+      );
+      codeImages.ensureImage.mockImplementation(async (_accountId: string, codeSha256: string) => ({ reference: imageOf(codeSha256), made: false }));
+      orchestrator.codeImagesByFunction.mockResolvedValue(new Map());
+    });
+
+    it("makes again the image of each package in use that the registry lost, and rolls nothing out whose pods mount it as it is", async () => {
+      packages.named.mockResolvedValue([
+        { accountId: 'user-1', codeSha256: UPLOADED, inline: false },
+        { accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true },
+      ]);
+      codeImages.ensureImage.mockImplementation(async (_accountId: string, codeSha256: string) => ({ reference: imageOf(codeSha256), made: codeSha256 === UPLOADED }));
+      working = [{ id: 'fn-1', accountId: 'user-1', packageSha256: UPLOADED }];
+      orchestrator.codeImagesByFunction.mockResolvedValue(new Map([['fn-1', imageOf(UPLOADED)]]));
+
+      expect(await service.restoreCodeImages()).toEqual({ packages: 2, imagesMade: 1, zipsMade: 0, rolledOut: 0, failures: 0 });
+      expect(codeImages.ensureImage.mock.calls).toEqual([
+        ['user-1', UPLOADED],
+        ['user-1', INLINE.codeSha256],
+      ]);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      // One backend at a time: the lock taken, and given back.
+      expect(runner.query.mock.calls.map(([sql]) => sql)).toEqual([
+        "SELECT pg_try_advisory_lock(hashtext('ff_code_images_restore')) AS \"locked\"",
+        "SELECT pg_advisory_unlock(hashtext('ff_code_images_restore'))",
+      ]);
+      expect(runner.release).toHaveBeenCalled();
+    });
+
+    it("rolls a working function whose pods mount a lost image out with its package's, as its record has it; one mounting an image the registry has stays", async () => {
+      packages.named.mockResolvedValue([{ accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true }]);
+      codeImages.ensureImage.mockResolvedValue({ reference: imageOf(INLINE.codeSha256), made: true });
+      working = [
+        { id: 'fn-1', accountId: 'user-1', packageSha256: INLINE.codeSha256 },
+        { id: 'fn-2', accountId: 'user-1', packageSha256: INLINE.codeSha256 },
+      ];
+      // fn-2's pods mount the image of an update under way, which the registry has whole.
+      const UPDATING = imageOf(UPLOADED);
+      orchestrator.codeImagesByFunction.mockResolvedValue(new Map([['fn-1', LOST], ['fn-2', UPDATING]]));
+      codeImages.hasMounted.mockImplementation(async (reference: string) => reference === UPDATING);
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      await environments.save({ id: 'fn-1', accountId: 'user-1' }, { variables: { TABLE: 'orders' }, secrets: {}, revision: 'r1' });
+
+      expect(await service.restoreCodeImages()).toMatchObject({ imagesMade: 1, rolledOut: 1, failures: 0 });
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+      expect(orchestrator.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'fn-1', codeImage: imageOf(INLINE.codeSha256), environment: { revision: 'r1', values: { TABLE: 'orders' } } }),
+        TENANT,
+      );
+      expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 90_000);
+      // Its record as it is now, still running that package; and nothing saved, nothing audited: its version is the same.
+      expect(functionsRepo.findOne).toHaveBeenCalledWith({ where: { id: 'fn-1', accountId: 'user-1', status: FunctionStatus.ACTIVE, packageSha256: INLINE.codeSha256 } });
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it("makes a one-file package's zip again of its function's code when object storage lost it too; an upload's lost zip is a failure, saying where it comes back from", async () => {
+      packages.named.mockResolvedValue([
+        { accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true },
+        { accountId: 'user-1', codeSha256: UPLOADED, inline: false },
+      ]);
+      const zipLost = () => new StoredObjectMissingError('Object storage has no packages/user-1/….zip');
+      codeImages.ensureImage
+        .mockRejectedValueOnce(zipLost())
+        .mockResolvedValueOnce({ reference: imageOf(INLINE.codeSha256), made: true })
+        .mockRejectedValueOnce(zipLost());
+
+      expect(await service.restoreCodeImages()).toEqual({ packages: 2, imagesMade: 1, zipsMade: 1, rolledOut: 0, failures: 1 });
+      expect(packages.restoreInlineZip).toHaveBeenCalledWith('user-1', INLINE);
+      expect(functionsRepo.find).toHaveBeenCalledWith({ where: { accountId: 'user-1', packageType: PackageType.INLINE, packageSha256: INLINE.codeSha256 } });
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining(`package ${UPLOADED} of account user-1 again: its zip is lost too; restore the packages from the second site`));
+    });
+
+    it('logs a function it could not roll out, and goes on to the next', async () => {
+      packages.named.mockResolvedValue([{ accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true }]);
+      working = [
+        { id: 'fn-1', accountId: 'user-1', packageSha256: INLINE.codeSha256 },
+        { id: 'fn-2', accountId: 'user-1', packageSha256: INLINE.codeSha256 },
+      ];
+      orchestrator.codeImagesByFunction.mockResolvedValue(new Map([['fn-1', LOST], ['fn-2', LOST]]));
+      codeImages.hasMounted.mockResolvedValue(false);
+      functionsRepo.findOne.mockImplementation(async ({ where }: { where: { id: string } }) => ({ ...activeFunction(), id: where.id }));
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new OrchestratorError('fn-1 did not become ready'));
+
+      expect(await service.restoreCodeImages()).toMatchObject({ rolledOut: 1, failures: 1 });
+      expect(orchestrator.update.mock.calls.map(([workload]) => workload.id)).toEqual(['fn-1', 'fn-2']);
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining('Could not roll function fn-1 out with its code image'));
+    });
+
+    it('does nothing while another backend runs it, nor where this FF has no registry', async () => {
+      lockFree = false;
+      expect(await service.restoreCodeImages()).toEqual({ packages: 0, imagesMade: 0, zipsMade: 0, rolledOut: 0, failures: 0 });
+      expect(packages.named).not.toHaveBeenCalled();
+      expect(runner.release).toHaveBeenCalled();
+
+      runner.connect.mockClear();
+      codeImages.available = false;
+      await service.restoreCodeImages();
+      expect(runner.connect).not.toHaveBeenCalled();
     });
   });
 

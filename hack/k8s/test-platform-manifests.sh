@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The platform's manifests (deploy/k8s/platform, and the legal records' mirror, deploy/k8s/backup), checked
+# The platform's manifests (deploy/k8s/platform, and the mirror to the second site, deploy/k8s/backup), checked
 # without deploying them, in about a minute:
 #   - every pod as Pod Security "restricted" wants it and more: non-root by number, no capability, no privilege
 #     escalation, the runtime's seccomp profile, a read-only root (Keycloak's alone may write, named here),
@@ -28,7 +28,7 @@ passed=0
 check() { # <description> <expected> <actual>
   if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else echo "  FAIL $1 (expected '$2', got '$3')"; exit 1; fi
 }
-# The platform, and the legal records' mirror (deploy/k8s/backup), which runs beside it.
+# The platform, and the mirror to the second site (deploy/k8s/backup), which runs beside it.
 { kubectl kustomize "$platform"; echo ---; kubectl kustomize "$FF_REPO_ROOT/deploy/k8s/backup"; } >"$work/platform.yaml"
 
 echo "== the pods"

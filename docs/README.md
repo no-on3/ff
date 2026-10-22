@@ -25,6 +25,6 @@
 Elsewhere in the repository:
 - [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md): the function runtimes, their protocol and their handler contracts;
 - [`deploy/k8s`](../deploy/k8s/README.md): what the backend may do in a cluster, and why; the platform's manifests and how to deploy them; the log pipeline's and the monitoring's;
-- [`deploy/backup`](../deploy/backup/README.md): the backups of both databases to a second site, the legal records' mirror, and the restore runbook.
+- [`deploy/backup`](../deploy/backup/README.md): the backups of both databases to a second site, the mirror of the legal records and functions' packages, and the restore runbook.
 
 Older documents described the platform before Kubernetes: Nomad, MinIO, the old CLI, and an auto-scaling design. They were removed because they no longer matched the code. Git history still has them, for example at commit `46f8397`.

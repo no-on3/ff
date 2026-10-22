@@ -194,6 +194,23 @@ export class PackagesService {
       .execute();
   }
 
+  /**
+   * Stores again the zip of a one-file package that object storage has lost,
+   * made again of its function's code: the same code makes the same zip, which
+   * the caller has checked by its SHA-256.
+   */
+  async restoreInlineZip(accountId: string, built: InlinePackage): Promise<void> {
+    await this.storage.putDocument(packageKey(accountId, built.codeSha256), built.zip, 'application/zip');
+  }
+
+  /** The packages that functions name, their pods running their images: each one's account and SHA-256, and whether the backend made it of inline code. */
+  async named(): Promise<Array<{ accountId: string; codeSha256: string; inline: boolean }>> {
+    const rows = await this.packages.query<Array<{ account_id: string; code_sha256: string; inline: boolean }>>(
+      `SELECT "p"."account_id", "p"."code_sha256", "p"."inline" FROM "packages" "p" WHERE ${NAMED} ORDER BY "p"."account_id", "p"."code_sha256"`,
+    );
+    return rows.map((row) => ({ accountId: row.account_id, codeSha256: row.code_sha256, inline: row.inline }));
+  }
+
   /** 400 when the account keeps as many uploaded packages as it may that no function names: one must go, or be named. */
   private async refuseTooManyUnused(accountId: string): Promise<void> {
     const [{ unused }] = await this.packages.query<Array<{ unused: number }>>(

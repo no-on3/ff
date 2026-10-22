@@ -150,6 +150,12 @@ export interface Orchestrator {
    * many: FF's capacity at this moment, from one call (P-21).
    */
   readyInstancesByFunction(): Promise<Map<string, number>>;
+  /**
+   * The code image each function's pods mount, by function ID, from one call:
+   * to find those whose image the registry has lost. None for a function whose
+   * pods mount their code from elsewhere, as a code ConfigMap from before.
+   */
+  codeImagesByFunction(): Promise<Map<string, string>>;
   /** Whether the cluster answers, within `timeoutMs`: for the readiness probe. Rejects with why not. */
   ping(timeoutMs: number): Promise<void>;
   /**
