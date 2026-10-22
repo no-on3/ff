@@ -1,0 +1,118 @@
+# Decision log
+
+| | |
+|---|---|
+| **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
+| **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
+
+## 2026-10-22: the step-1 and step-2 plans' choices, and C-29
+
+You answered "all as recommended" to the 19 questions explained to you that day. Two of them start new work, in this order: **C-29 first, then step 2.** One still needs a fact from you: FF's domain and who manages its DNS (17).
+
+### Lost code images (the CLI plan's C-29)
+
+**1. Lost code images are made again automatically.** ✅ Confirmed: before production, and before step 2.
+- **What it means:** every function's code is an image in FF's registry. If the registry loses an image, running functions keep running, but no server that lacks the image can start a new copy of the function until its owner updates it. In production the registry keeps every image on one server's disk.
+- **Changed already:** nothing in the code; the [CLI plan](cli-plan.md)'s C-29 says "confirmed".
+- **Still to change (C-29):** every hour, with the purge of unused packages, and on demand (`npm run code-images:restore`), the backend checks that the registry has the image of every package a function uses, and makes each missing one again from the package's zip. If a remade image differs from the old one, the functions that use it are restarted on it.
+
+**2. Uploaded code is copied to the second site too.** ✅ Confirmed: as part of C-29.
+- **What it means:** the hourly backup copies only invoices and withholding certificates to the second site. Code typed in the console is also in FF's database, which is backed up; uploaded packages are only in FF's file store, so losing that store would lose them.
+- **Changed already:** nothing in the code; C-29 in the CLI plan now includes it.
+- **Still to change (C-29):** the backup's mirror (`deploy/k8s/backup/mirror.sh`) also copies `packages/`. What FF deletes there (unused packages, a closed account's code) goes from the second site too, 30 days later, about as long as the database's backups keep what was deleted. A run that would delete too much at once stops, so an empty or replaced store never empties the copy. The restore runbook brings the packages back before the images are made again.
+
+### Step 2: a database and file storage
+
+**3. Step 2 starts after C-29.** ✅ Confirmed.
+- **What it means:** customers get PostgreSQL databases (like AWS RDS) and buckets for files (like AWS S3), billed in dinars at AWS's prices, within their plan, with a way out to AWS. About 35 to 45 working days.
+- **Changed already:** the [step-2 plan](step-2-plan.md), the roadmap and the indexes say "confirmed".
+- **Still to change:** the whole plan, V-00 to V-10, on a branch of its own.
+
+**4. PostgreSQL 18.** ✅ Confirmed. FF never runs a newer version than AWS RDS, so that a database can always move to AWS; it moves to 19 once RDS offers it.
+- **Still to change:** V-02, the server in development and its README for production.
+
+**5. Customers' databases on a server of their own, outside Kubernetes.** ✅ Confirmed. One customer's heavy queries or full disk can't reach FF's own database, and the server has its own backups.
+- **Still to change:** V-01, which measures it first, and V-02.
+
+**6. A database over its plan's size is warned and billed, not blocked.** ✅ Confirmed. Messages at 80% and 100%; above 100%, new connections are read-only, which the owner can turn off to clean up; the storage above the plan is billed.
+- **Still to change:** V-04.
+
+**7. Databases reachable from the internet, encrypted only.** ✅ Confirmed. Developers connect from their laptops (`psql`, migration tools, `pg_dump`), as RDS's "publicly accessible" option allows.
+- **Still to change:** V-02, the server's encryption and who may log in where; V-05, the guide.
+
+**8. Free every month, per account: 1 GB of database; 5 GB of files, 20,000 reads and 2,000 writes.** ✅ Confirmed: the plan's numbers.
+- **Still to change:** V-04 and V-09 put them in the price book.
+
+**9. No monthly fee per database.** ✅ Confirmed. Only storage is billed; the price book can add a fee later.
+- **Still to change:** V-04, which adds the fee's price line at 0.
+
+**10. Each function gets its own key to its account's buckets.** ✅ Confirmed. `new S3Client({})` works with no setup, as on AWS. The keys don't expire; short-lived ones, as AWS gives, come with step 5.
+- **Still to change:** V-08.
+
+**11. Customers' files are not copied to the second site, at first.** ✅ Confirmed, said plainly in the docs; to decide again before customers keep important files on FF.
+- **Changed already:** the step-2 plan's V-09 now has the guide say so.
+- **Still to change:** V-09.
+
+**12. Data downloaded from FF is counted, not billed.** ✅ Confirmed. If FF's hosting bills FF for its traffic, FF bills it too.
+- **Still to change:** V-09, the counts.
+
+**13. Out of credit: file uploads are refused; reading files and the databases go on.** ✅ Confirmed. FF never deletes data for non-payment, and functions are already refused without credit.
+- **Still to change:** V-07 and V-04.
+
+**14. Documentation in French, a page per service, under `docs/fr/`.** ✅ Confirmed.
+- **Still to change:** V-05 for databases, V-09 for buckets.
+
+### Step 1's choices (already built)
+
+**15. Functions made before step 1 keep FF's old event until switched.** ✅ Confirmed.
+- **What it means:** new functions receive the caller's input as `event`, as on AWS; older ones keep the old wrapper (`event.body`) until their owner switches them in the console.
+- **Changed already:** `2883be7` (U-03): the runtimes' protocol v3 (`ff-runtime-nodejs:24-v3`, `ff-runtime-python:3.13-v3`), `functions.event_format` with the migration `EventFormat`, the console's switch, and [ADR 0007](adr/0007-function-events.md).
+- **Still to change:** nothing. Once no function uses the old event, its code can go.
+
+**16. A protected function URL (`AWS_IAM`) takes an FF API key.** ✅ Confirmed, until FF checks AWS's signatures.
+- **Changed already:** `7eb725b` and `f8886c5` (U-04): function URLs, `AWS_IAM` checked as an API key of the function's account with `functions:invoke`, sent as `Authorization: Bearer ffk_…`.
+- **Still to change:** later, AWS's signatures (SigV4), with the Lambda API of step 5, or reusing the signature checks step 2 builds for buckets.
+
+**17. Certificates for function URLs: one for all of them if FF's DNS allows it, else one per URL.** ✅ Confirmed. ⏳ **Waiting for you:** FF's domain, and who manages its DNS.
+- **Changed already:** `d13581b` (U-05): the edge built with the standard module for DNS updates (RFC 2136), both ways (`wildcard`, `on-demand`), and `deploy.sh`'s checks; `d0f5604` (U-06): customers' own domains, always one certificate each.
+- **Still to change, once you answer:** DNS servers FF runs itself: settings only (`edge.env` and the Secret `ff-edge-dns`); a DNS company: its module in `deploy/edge/Dockerfile`, one line; neither: `on-demand`, about 50 new URLs a week for all customers, while the beta stays small.
+
+**18. The region is `tn-tunis-1`.** ✅ Confirmed, if FF's servers are in Tunis.
+- **Changed already:** `57101f7` (U-07): `FF_REGION`, `tn-tunis-1` by default, in each scheduled event's `region` and in its rule's name (`arn:aws:events:tn-tunis-1:…`).
+- **Still to change:** from step 2 (V-08), functions also get it as `AWS_REGION`. Before launch: the legal check of names like AWS's, and the `aws` in those names (the [parent plan](local-markets-and-aws-portability-plan.md)'s ADR-006).
+
+**19. A failed scheduled run is not retried, until step 3.** ✅ Confirmed.
+- **Changed already:** `57101f7` and `b66e09e` (U-07): each run happens at most once; a failure is kept in the history, the metrics and the schedule's last outcome.
+- **Still to change:** step 3's background calls retry, and schedules will use them; the [roadmap](what-to-build-next.md)'s step 3 says so.
+
+## Earlier decisions
+
+Each is recorded in full where it was made, and its changes are in that plan's progress log.
+
+| When | Decision | Recorded in | Built by |
+|---|---|---|---|
+| 2026-10-21 | Each function's code is an image in a registry of the platform (option C); later, customers choose among runtime versions, as on AWS | [ADR 0003](adr/0003-code-delivery.md); the [roadmap](what-to-build-next.md) §9.1 | C-23 `29f1e90`, C-28 `52c3f14`, C-24 `b1ef540` |
+| 2026-10-21 | A function's name follows AWS Lambda's rule and is unique in its account | [CLI plan](cli-plan.md) §10, question 6 | `1bd102e` |
+| 2026-10-21 | Step 1 of the roadmap first: make one function useful | [Step-1 plan](step-1-plan.md) | U-00 to U-09 |
+| 2026-10-17 | No card top-ups (Konnect) for now: credit comes by bank transfer, and from FF | [Client-readiness plan](client-readiness-plan.md), P-34 | `80cb783`: skipped, its design kept |
+| 2026-10-17 | No El Fatoora e-invoicing for now: PDF invoices, while paper invoices are allowed | Client-readiness plan, P-37 | `81dae05`: skipped, its design kept |
+| 2026-10-17 and 18 | How the work is done: one commit per task, one heavy process at a time, the plan and the docs updated with each task, tests that fail without the change, no task numbers in the code | Each plan's working rules (§6) | Every task since |
+| 2026-10-16 | Prices: AWS Lambda's, in dinars, with the same free tier, set from the admin dashboard | Client-readiness plan §9 (D8) | P-30 `e5e915f`, P-73 `5feb4fd` |
+| 2026-10-16 | During the beta, you approve every new account | Client-readiness plan §9 (D2) | P-71 `94f3b39` |
+| 2026-10-16 | A separate admin dashboard | Client-readiness plan §9 (D12) | P-70 `9b5749e` to P-76 `55af745` |
+| 2026-10-16 | Monthly invoices | Client-readiness plan §9 (D9) | P-36 `d09beae` |
+| 2026-10-16 | Functions can't reach the internet unless you turn it on for their account: the safe choice you asked for | Client-readiness plan §9 (D5) | P-62 `e3a825b` |
+| 2026-10-16 | Production uses any PostgreSQL, through settings, outside the cluster: the plan's answer to your question | Client-readiness plan §9 (D13) | P-01 `e3493b3`, P-02 `ae23168`, P-61 `10bbb7d` |
+| 2026-10-16 | Kubernetes, not Nomad, runs the functions | [ADR 0001](adr/0001-orchestrator-kubernetes.md) | The [Kubernetes migration plan](kubernetes-migration-plan.md), K-00 to K-13 |
+
+## Questions still waiting for you
+
+| Question | Where it is | What it affects |
+|---|---|---|
+| FF's domain, and who manages its DNS (decision 17) | [Step-1 plan](step-1-plan.md) §9 | How function URLs get their certificates in production |
+| Where `ff`'s downloads and the public runtime images are published, if customers can't rely on GitHub | [CLI plan](cli-plan.md) §10, question 3 | The first public release of `ff` |
+| Windows for `ff`: in its phase 4, or when a customer asks | CLI plan §10, question 5 | The CLI's phase 4 |
+| `ff login` sooner, so that the first customers never paste a key | CLI plan §10, question 7 | The order of the CLI's next tasks |
+| Your company and the Startup Act label; FF Cloud or on-premises first; the data center and the hardware budget; a bank or payment provider; the team and the launch date; the product's name | [Parent plan](local-markets-and-aws-portability-plan.md) §15, questions 1 to 5 and 7 | Priorities, not the direction |
+| Send the accountant's five questions; book the external penetration test | [Client-readiness plan](client-readiness-plan.md) §9 | VAT, invoices and withholding; the public launch |
+| Later: take away the backend's right to create ConfigMaps, once no backend older than C-24 runs anywhere | [`deploy/k8s`](../deploy/k8s/README.md) | Nothing until then |

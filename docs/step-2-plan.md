@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed on 2026-10-21, for you to confirm; not started. The choices it made for you to confirm are in §9. |
+| **Status** | Proposed on 2026-10-21, and confirmed by you on 2026-10-22 with every choice of §9 (the [decision log](decisions.md), decisions 3 to 14). Not started: it starts after the [CLI plan](cli-plan.md)'s C-29. |
 | **Goal** | Step 2 of [What to build next](what-to-build-next.md): an app keeps its data on FF. A PostgreSQL database and buckets of files, each in AWS's shape (PostgreSQL itself, as RDS runs it; the S3 API, as AWS's SDKs speak it), within the plan's limits, billed in dinars at AWS's prices, with a way out to AWS |
 | **Parent plans** | [What to build next](what-to-build-next.md) §5 and §10; the [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): E-04 (the S3 front door), E-07 (execution credentials, its S3 part), §4.7 (the S3 store's tenancy), §6.7 (S3, and PostgreSQL rather than DynamoDB), §8.1 and §8.2 (billing units, and no deletion for non-payment), the export kit (`data/s3-sync.sh`, `data/postgres.md`) |
 | **Builds on** | The [step-1 plan](step-1-plan.md): secrets, the event shapes, packages and the `ff` command, and its small app; the [client-readiness plan](client-readiness-plan.md): plans and limits, usage records, the price book and the hourly rating, the admin app, the backups |
@@ -70,7 +70,7 @@ The tenant's NetworkPolicy gains a rule, written on every deploy as the rest is:
 PostgreSQL has no limit on a database's size, and an owner can turn any session setting back. So:
 - **Every hour,** the backend samples each database's size (`pg_database_size`) and connections, which the bill and the metrics read.
 - **At 80% and 100% of the plan's storage,** the owners are told. **Past 100%,** the database's new sessions start read-only (`ALTER DATABASE … SET default_transaction_read_only = on`): an app sees it at its next write, and a session may turn it off to delete what it no longer needs. A signal, not a wall.
-- **The wall** is the server's disk alert to the operator, and the bill: what is above the plan's storage is billed by the GB-month, as RDS bills the storage it is given. A hard wall (a tablespace per database on a disk with quotas) needs a superuser and the operator's tooling: §9 asks.
+- **The wall** is the server's disk alert to the operator, and the bill: what is above the plan's storage is billed by the GB-month, as RDS bills the storage it is given. A hard wall (a tablespace per database on a disk with quotas) needs a superuser and the operator's tooling: §9 kept the signal, confirmed on 2026-10-22.
 
 ### D6. Buckets behind FF's own S3 front door (the parent's E-04)
 - **A small S3 server in the backend,** on a port of its own (as the function URL gateway is), at `s3.<domain>` and `<bucket>.s3.<domain>`. It checks each request's SigV4 signature, in a header or a presigned URL, with the account's keys; knows each bucket's account; counts each request by AWS's classes and its bytes; refuses past the plan's limits; and streams the request to the store with FF's own credentials, the bucket's name mapped to the store's.
@@ -83,7 +83,7 @@ PostgreSQL has no limit on a database's size, and an owner can turn any session 
 An access key ID like AWS's (20 characters, `AKFF…`) and a secret of 40, shown once. The front door needs the secret itself to check signatures, so it is sealed with the key ring, as variables are. A key reaches all the account's buckets, or the ones it names, read-write or read-only. Two at most, so that one can replace the other, as IAM allows two per user.
 
 ### D8. Functions get credentials without a line of code (the parent's E-07, for S3)
-Each function's pods get `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `AWS_ENDPOINT_URL_S3` in their Secret: a key of the function's own, made at its deploy, reaching its account's buckets, revoked when it is deleted. AWS's SDKs read them, so `new S3Client({})` works on FF and, without them, on Lambda with its role. Short-lived session credentials, as Lambda's role gives, wait for the parent's STS-like work (step 5); §9 asks whether functions should have even these.
+Each function's pods get `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `AWS_ENDPOINT_URL_S3` in their Secret: a key of the function's own, made at its deploy, reaching its account's buckets, revoked when it is deleted. AWS's SDKs read them, so `new S3Client({})` works on FF and, without them, on Lambda with its role. Short-lived session credentials, as Lambda's role gives, wait for the parent's STS-like work (step 5); §9 gave functions these keys meanwhile, confirmed on 2026-10-22.
 
 ### D9. Usage and billing beyond functions
 - **Usage records of their own,** written once: `database_samples` and `bucket_samples` (one row an hour each, size and count), and `storage_request_counts` (one row a minute per bucket and class, flushed by the front door: a request is never one row). Partitioned by month, as `usage_records` is.
@@ -102,11 +102,11 @@ The database's own connections aside, every S3 request goes through the front do
 - **Closed:** its databases are dropped and its buckets emptied and deleted with the rest of its data, at the data deletion date the retention already sets.
 
 ### D13. Backups and restores
-- **The customers' server** gets WAL-G as FF's has: a base backup each night, point-in-time recovery to the second site, 7 days by default (RDS's default retention; §9). One customer's database comes back by restoring the server to a scratch instance at the time asked, then copying that database into a new one of the account's: a runbook section, and the monthly drill does it.
-- **Buckets** are not backed up by default: the store's own redundancy keeps them, as S3's does; §9 asks.
+- **The customers' server** gets WAL-G as FF's has: a base backup each night, point-in-time recovery to the second site, 7 days by default, RDS's default retention. One customer's database comes back by restoring the server to a scratch instance at the time asked, then copying that database into a new one of the account's: a runbook section, and the monthly drill does it.
+- **Buckets** are not backed up by default: the store's own redundancy keeps them, as S3's does. Confirmed on 2026-10-22 (§9): the guide tells customers that there is no copy, and the question comes back before they keep important files on FF.
 
 ### D14. Reaching the database from outside, and the way out
-- **From a developer's machine:** the server's port is reachable from the internet, TLS only, as RDS's "publicly accessible" option, so that an owner runs `psql`, a migration tool or `pg_dump`; §9 asks whether to keep it to functions only, with an export route instead.
+- **From a developer's machine:** the server's port is reachable from the internet, TLS only, as RDS's "publicly accessible" option, so that an owner runs `psql`, a migration tool or `pg_dump`; §9 kept it so rather than to functions only, confirmed on 2026-10-22.
 - **The way out:** `pg_dump --format=custom` and `pg_restore` into RDS, or logical replication for a move without downtime: the export kit's `data/postgres.md`. Buckets: `aws s3 sync` from FF's endpoint to a local folder, then to S3: its `data/s3-sync.sh`.
 
 ## 4. Data model
@@ -186,7 +186,7 @@ The step-1 plan's (§6 there), on a branch of this step's own: `type(scope): sum
 - **Tests:** L1 for the Secret's names; L4 for a function using `new S3Client({})` and `boto3.client("s3")`, unchanged, writing to its account's bucket and refused on another's.
 
 #### V-09: Metering, billing and tools for buckets
-- Hourly samples and the request counts into the rating (D9), S3 Standard's SKUs and the free tier; the console's Buckets page (buckets, keys, sizes) and the admin app's; the CLI plan's C-53 (`ff buckets create|list|delete`, `ff buckets keys`); the metrics and alarms; the guide's "Files in buckets", `how-it-works.html`, the page in French with "same as AWS S3", the export kit's `data/s3-sync.sh`; D13's choice for buckets.
+- Hourly samples and the request counts into the rating (D9), S3 Standard's SKUs and the free tier; the console's Buckets page (buckets, keys, sizes) and the admin app's; the CLI plan's C-53 (`ff buckets create|list|delete`, `ff buckets keys`); the metrics and alarms; the guide's "Files in buckets", which says that FF keeps no copy of a bucket at the second site (D13), `how-it-works.html`, the page in French with "same as AWS S3", the export kit's `data/s3-sync.sh`.
 - **Tests:** L1 for the rating of requests by class; L2 for the counts and the samples; L3 for `ff buckets` and an upload with the AWS CLI; L4 for a bucket's month on the statement.
 
 ### Phase 3: close
@@ -212,6 +212,8 @@ The step-1 plan's (§6 there), on a branch of this step's own: `type(scope): sum
 
 ## 9. Choices made for you to confirm
 
+**You confirmed them all on 2026-10-22** (the [decision log](decisions.md), decisions 4 to 14), with two notes in their rows: buckets' second-site copy, and data sent out.
+
 | Question | This plan's choice | Affects |
 |---|---|---|
 | PostgreSQL's version | 18, which RDS runs; 19 once RDS offers it | V-02 |
@@ -221,8 +223,8 @@ The step-1 plan's (§6 there), on a branch of this step's own: `type(scope): sum
 | Free tier | Each month, per account: 1 GB of database storage; 5 GB of bucket storage, 20,000 `GET` and 2,000 `PUT` requests, as AWS's first year, here every month | V-04, V-09 |
 | A monthly fee per database | None at first, as storage pays for it; the price book can add one | V-04 |
 | Functions' credentials for buckets | A key per function in its Secret (D8); the other way, none in this step: the account's key as a secret, set by the owner | V-08 |
-| Buckets backed up to the second site | No, at first: the store's redundancy keeps them (D13); the other way, a copy at the second site, which doubles the storage FF pays for | V-09 |
-| Data sent out of FF | Counted, not billed (AWS bills it past 100 GB a month) | V-09 |
+| Buckets backed up to the second site | No, at first: the store's redundancy keeps them (D13); the other way, a copy at the second site, which doubles the storage FF pays for. The guide tells customers that there is no copy, and the question comes back before they keep important files on FF | V-09 |
+| Data sent out of FF | Counted, not billed (AWS bills it past 100 GB a month); billed if FF's hosting bills FF for its traffic | V-09 |
 | Out of credit | S3 writes refused, reads and databases going on (D12) | V-07, V-04 |
 | French documentation | A page per service, in French, under `docs/fr/`, as What to build next §10 asks; nothing in French exists yet | V-05, V-09 |
 
@@ -247,7 +249,7 @@ The step-1 plan's (§6 there), on a branch of this step's own: `type(scope): sum
 
 | Task | Status | Commit | Evidence |
 |---|---|---|---|
-| V-00 The plan and the baseline | ⏳ Planned: this plan was written with step 1's close (step-1 plan, U-09), for you to confirm | | |
+| V-00 The plan and the baseline | ⏳ Confirmed on 2026-10-22; next after the CLI plan's C-29. This plan was written with step 1's close (step-1 plan, U-09) | | |
 | V-01 Spike, ADR 0008 and ADR 0009 | ⏳ Planned | | |
 | V-02 The server | ⏳ Planned | | |
 | V-03 Databases in the API | ⏳ Planned | | |

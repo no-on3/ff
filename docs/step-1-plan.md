@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Started and done on 2026-10-21, on the branch `feat/step-1`, in development; [ADR 0003](adr/0003-code-delivery.md), confirmed on 2026-10-21, has since brought production's code registry (the CLI plan's C-28), and inline code onto the packages' path (C-24). What is done is in the progress log (§11). The choices this plan made for you to confirm are in §9. Step 2's plan is the [step-2 plan](step-2-plan.md). |
+| **Status** | Started and done on 2026-10-21, on the branch `feat/step-1`, in development; [ADR 0003](adr/0003-code-delivery.md), confirmed on 2026-10-21, has since brought production's code registry (the CLI plan's C-28), and inline code onto the packages' path (C-24). What is done is in the progress log (§11). You confirmed the choices of §9 on 2026-10-22 (the [decision log](decisions.md)); FF's domain, and who manages its DNS, are still to name. Step 2's plan is the [step-2 plan](step-2-plan.md). |
 | **Goal** | Step 1 of [What to build next](what-to-build-next.md): a customer can run something real on FF. A function has configuration and secrets, a public web address, a schedule, and libraries, each in AWS's shape, so the code moves to AWS as it is |
 | **Parent plans** | [What to build next](what-to-build-next.md) §4; the [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): E-01 (function URLs), E-02 (schedules), §4.6 (event sources), §4.7 (secrets), §6.2 (the runtime contract), §6.4 (event payloads), Appendix C (environment variables) and Appendix D (event payloads) |
 | **Builds on** | The [client-readiness plan](client-readiness-plan.md), done up to its pilot-launch tasks; the [CLI plan](cli-plan.md), whose phases 0 to 2 are this plan's U-08 |
@@ -386,15 +386,15 @@ The same as the client-readiness plan's (§6 there):
 
 ## 9. Choices made for you to confirm
 
-This plan had to decide these to start. Each can change; the task it affects is named.
+This plan had to decide these to start; the task each affects is named. **You confirmed them all on 2026-10-22** (the [decision log](decisions.md), decisions 15 to 19).
 
 | Question | This plan's choice | Affects |
 |---|---|---|
-| Existing functions and the new event | They keep today's wrapper until switched, one by one; new functions get Lambda's event. The other way: switch all of them now, since no customer has any yet | U-03 |
-| `AWS_IAM` on a function URL | An FF API key with `functions:invoke`, until SigV4 exists | U-04 |
-| Certificates for function URL hosts | A wildcard by DNS-01 with RFC 2136 if FF's DNS allows it, else one per host on demand. Where will FF's domain's DNS be hosted? | U-05 |
-| The region in events and ARNs | `tn-tunis-1`, until the parent's ADR-006 | U-07 |
-| A scheduled run that fails | Recorded, not retried, until step 3 | U-07 |
+| Existing functions and the new event | **Confirmed on 2026-10-22:** they keep today's wrapper until switched, one by one; new functions get Lambda's event. The other way: switch all of them now, since no customer has any yet | U-03 |
+| `AWS_IAM` on a function URL | An FF API key with `functions:invoke`, until SigV4 exists. **Confirmed on 2026-10-22** | U-04 |
+| Certificates for function URL hosts | A wildcard by DNS-01 with RFC 2136 if FF's DNS allows it, else one per host on demand. **Confirmed on 2026-10-22;** still to name: FF's domain, and who manages its DNS | U-05 |
+| The region in events and ARNs | `tn-tunis-1`, until the parent's ADR-006. **Confirmed on 2026-10-22,** if FF's servers are in Tunis | U-07 |
+| A scheduled run that fails | Recorded, not retried, until step 3, whose async invokes retry. **Confirmed on 2026-10-22** | U-07 |
 | How packaged code reaches the pods | Each version's code an image in a registry in the cluster, mounted at `/var/task` ([ADR 0003](adr/0003-code-delivery.md), after the CLI plan's C-20 spike). A registry joins the platform. **Confirmed on 2026-10-21:** C, and later, runtime versions for customers to choose from, which C keeps open. The other way measured as well: an image per version, which needs the registry too | U-08 (C-23, C-24) |
 
 ## 10. Effort (rough estimates, one developer)

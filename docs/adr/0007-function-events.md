@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted |
+| **Status** | Accepted; its choice for the functions made before, the wrapper until switched, confirmed by you on 2026-10-22 with the step-1 plan's other choices (its §9) |
 | **Date** | 2026-10-21 |
 | **Supersedes** | The event of FF's original wrapper, `{ body, headers, method, query, path }`, which the Kubernetes migration kept (K-05) |
 | **Implementation** | [Step-1 plan](../step-1-plan.md): decision D5, task U-03 |
