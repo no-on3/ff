@@ -24,6 +24,7 @@
 | [ADR 0007](adr/0007-function-events.md) | The event a function receives: AWS Lambda's, the payload itself, built by the backend for every way in; functions made before keep FF's original wrapper until switched |
 | [ADR 0008](adr/0008-customer-databases.md) | Customers' databases: a PostgreSQL 18 server of their own, a database and its user per customer with opaque names, what the backend's role may do there without being a superuser, functions reaching it with their account's internet access off, the read-only signal past the plan's storage, the connection string and certificates; measured by step 2's spike (accepted on 2026-10-23) |
 | [ADR 0009](adr/0009-buckets.md) | Buckets behind FF's S3 front door: AWS's Signature Version 4 and the SDKs' streaming uploads, checksums as S3 checks them, both addressings, an IP address for functions, requests counted by AWS's classes; measured by step 2's spike against three AWS clients (accepted on 2026-10-23) |
+| [ADR 0010](adr/0010-queue.md) | Step 3's queue: one table of FF's for every queue's messages, in FF's own database, claimed with leases, at least once, rather than pgmq's table per queue, as the spike measured both; a retried call keeping its request ID; SQS's protocol as AWS's SDKs and CLI read it |
 | [Backup drills](backup-drills.md) | The record of each monthly restore drill |
 | [En français](fr/README.md) | For FF's customers, a page per service in French: [databases](fr/bases-de-donnees.md), as AWS RDS gives them, and [files in buckets](fr/compartiments.md), as AWS S3 gives them |
 

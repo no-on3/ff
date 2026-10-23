@@ -19,7 +19,8 @@ You answered: rename the object store's settings, which still carried MinIO's na
 The [step-3 plan](step-3-plan.md)'s §9, each answered as it recommended.
 
 **24. The queue's messages live in FF's own PostgreSQL; Q-01's spike picks pgmq or FF's own tables in its shape.** ✅ Confirmed. Backed up with FF's database, and written in the same transaction as what makes them; NATS JetStream later, when throughput requires it.
-- **Still to change:** Q-01 (the spike, ADR 0010), then Q-02.
+- **Changed already:** Q-01: [ADR 0010](adr/0010-queue.md), FF's own table, pgmq's throughput the same as measured but 7 relations a queue made while FF runs.
+- **Still to change:** Q-02.
 
 **25. The account's keys, and each function's own, reach queues too.** ✅ Confirmed. One kind of key, as IAM's access keys reach every service.
 - **Still to change:** Q-04.
