@@ -4,7 +4,7 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
-import { MinioClientService, StoredObjectMissingError } from '../minio-client/minio-client.service';
+import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import {
   FunctionLoadError,
   FunctionRuntimeError,
@@ -168,7 +168,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         FunctionsService,
         { provide: getRepositoryToken(Function), useValue: functionsRepo },
         { provide: getRepositoryToken(FunctionInvocation), useValue: invocationsRepo },
-        { provide: MinioClientService, useValue: storage },
+        { provide: ObjectStoreService, useValue: storage },
         { provide: ORCHESTRATOR, useValue: orchestrator },
         // Return each key's default, as ConfigService does without overrides.
         { provide: ConfigService, useValue: { get: jest.fn((_key: string, fallback?: unknown) => fallback) } },

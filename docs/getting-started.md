@@ -457,7 +457,7 @@ curl -s -X POST "$FF/databases" -H 'content-type: application/json' -d '{"name":
 
 ### Files in buckets
 
-Buckets for files come as AWS S3 gives them ([ADR 0009](adr/0009-buckets.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers their requests on a port of its own, `FF_STORAGE_PORT` (3002), at `FF_STORAGE_BASE` (`http://s3.localhost:3002`): path-style there (`http://s3.localhost:3002/photos/a.jpg`, as boto3 and the CLI address it, and every SDK an IP address), and virtual-hosted under it (`http://photos.s3.localhost:3002/a.jpg`, as the SDK for JavaScript addresses a host name). In front of the store, SeaweedFS in development (`MINIO_*`), it:
+Buckets for files come as AWS S3 gives them ([ADR 0009](adr/0009-buckets.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers their requests on a port of its own, `FF_STORAGE_PORT` (3002), at `FF_STORAGE_BASE` (`http://s3.localhost:3002`): path-style there (`http://s3.localhost:3002/photos/a.jpg`, as boto3 and the CLI address it, and every SDK an IP address), and virtual-hosted under it (`http://photos.s3.localhost:3002/a.jpg`, as the SDK for JavaScript addresses a host name). In front of the store, SeaweedFS in development (`FF_OBJECT_STORE_*`), it:
 - checks each request's AWS Signature Version 4, in its `Authorization` header or as a presigned URL (up to 7 days), with one of the account's access keys; nothing anonymous;
 - lets a key into its own account's buckets only, those it names if it names some, and writes only with a read-write key: AWS's errors otherwise (`SignatureDoesNotMatch`, `InvalidAccessKeyId`, `AccessDenied`, `NoSuchBucket`), in S3's XML;
 - serves `PutObject`, `GetObject` with ranges, `HeadObject`, `DeleteObject`, `DeleteObjects`, `CopyObject`, `ListObjectsV2` and `ListObjects`, the multipart upload's steps, `HeadBucket`, `GetBucketLocation` (`tn-tunis-1`) and `ListBuckets`; anything else answers `NotImplemented`;
@@ -1164,7 +1164,7 @@ cd BE && FF_LOG_FORMAT=json npm run start:dev 2>&1 | jq -rR --unbuffered '(fromj
 | Symptom | Fix |
 |---|---|
 | `resources: FAIL …` | Free memory or disk first. The thresholds protect the machine; don't lower them to push through. |
-| Port 5432 or 9003 already in use | `FF_PG_PORT=55432 FF_S3_PORT=59003 docker compose up -d --wait`, then set `DB_PORT` and `MINIO_PORT` in `BE/.env` to match. |
+| Port 5432 or 9003 already in use | `FF_PG_PORT=55432 FF_S3_PORT=59003 docker compose up -d --wait`, then set `DB_PORT` and `FF_OBJECT_STORE_PORT` in `BE/.env` to match. |
 | Port 6550 already in use | `export FF_API_PORT=6551` before `hack/k8s/cluster-up.sh`, then set `K8S_API_URL=https://127.0.0.1:6551` in `BE/.env`. |
 | Port 3000 already in use | Set `PORT` in `BE/.env`, and `VITE_API_URL` in `FE/.env.local` to match (see `FE/.env.example`). |
 | `Port 5199 is already in use` | The console doesn't move to another port: the login and the backend's `CORS_ORIGIN` name this one. Stop what holds it (`ss -ltnp 'sport = :5199'`). To use another port anyway, change `CONSOLE_PORT` in `FE/vite.config.ts`, add the address to `ff-console`'s redirect URIs and web origins in Keycloak's admin console, and set `CORS_ORIGIN` in `BE/.env`. |

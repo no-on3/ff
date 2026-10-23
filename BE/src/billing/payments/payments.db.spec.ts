@@ -22,7 +22,7 @@ import { databaseConfiguration } from '../../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../../database/scratch-database';
 import { Mail } from '../../mail/mail.service';
 import { capturingMail } from '../../mail/capturing-mail';
-import { MinioClientService } from '../../minio-client/minio-client.service';
+import { ObjectStoreService } from '../../object-store/object-store.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { PaymentStatus } from './payment.entity';
 import { PaymentsService } from './payments.service';
@@ -74,7 +74,7 @@ run('bank transfers (L2, P-35)', () => {
     const storage = {
       putDocument: async (key: string, body: Buffer, contentType: string) => void documents.set(key, { body, contentType }),
       getDocument: async (key: string) => documents.get(key) as { body: Buffer; contentType: string },
-    } as unknown as MinioClientService;
+    } as unknown as ObjectStoreService;
     const config = { getOrThrow: (key: string) => (key === 'mail' ? { consoleUrl: 'https://console.ff.example' } : { seller: SELLER, bank: BANK }) } as unknown as ConfigService;
     payments = new PaymentsService(ds, ledger, new AuditService(ds.getRepository(AuditEntry)), mail, storage, config);
   });

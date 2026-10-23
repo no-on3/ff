@@ -36,8 +36,8 @@ export const logFormat = (env: Env): LogFormat =>
 /** Development defaults that production refuses (docker-compose.yml, BE/.env.example, infrastructure/seaweedfs). */
 export const DEVELOPMENT_CREDENTIALS = {
   DB_PASSWORD: ['postgres'],
-  MINIO_ACCESS_KEY: ['minioadmin', 'ffdevaccesskey'],
-  MINIO_SECRET_KEY: ['minioadmin', 'ffdevsecretkey-local-only'],
+  FF_OBJECT_STORE_ACCESS_KEY: ['minioadmin', 'ffdevaccesskey'],
+  FF_OBJECT_STORE_SECRET_KEY: ['minioadmin', 'ffdevsecretkey-local-only'],
   // The development server of customers' databases (docker-compose.yml's data-db).
   FF_DATA_DB_ADMIN_PASSWORD: ['ff-data-admin-dev'],
 } as const;
@@ -346,12 +346,19 @@ const appShape = {
   FF_OIDC_JWKS_URL: optionalText(httpUrl),
   FF_DEV_USER_ID: optionalText(),
 
-  MINIO_ENDPOINT: text('localhost'),
-  MINIO_PORT: port(9003),
-  MINIO_USE_SSL: flag(false),
-  MINIO_ACCESS_KEY: secret('minioadmin'),
-  MINIO_SECRET_KEY: secret('minioadmin'),
-  MINIO_BUCKET_NAME: text('functions', bucketName),
+  FF_OBJECT_STORE_ENDPOINT: text('localhost'),
+  FF_OBJECT_STORE_PORT: port(9003),
+  FF_OBJECT_STORE_USE_SSL: flag(false),
+  FF_OBJECT_STORE_ACCESS_KEY: secret('ffdevaccesskey'),
+  FF_OBJECT_STORE_SECRET_KEY: secret('ffdevsecretkey-local-only'),
+  FF_OBJECT_STORE_BUCKET: text('functions', bucketName),
+  // Their names from when FF's store was MinIO: read only to say what they are called now.
+  MINIO_ENDPOINT: optionalText(),
+  MINIO_PORT: optionalText(),
+  MINIO_USE_SSL: optionalText(),
+  MINIO_ACCESS_KEY: optionalText(),
+  MINIO_SECRET_KEY: optionalText(),
+  MINIO_BUCKET_NAME: optionalText(),
 
   ORCHESTRATOR: oneOf(['kubernetes'], 'kubernetes'),
   FF_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
@@ -450,6 +457,16 @@ const appShape = {
 const databaseSchema = z.object(databaseShape);
 const appSchema = z.object(appShape);
 
+/** The object store's variables from when FF's store was MinIO, and their names now. */
+export const RENAMED_VARIABLES = {
+  MINIO_ENDPOINT: 'FF_OBJECT_STORE_ENDPOINT',
+  MINIO_PORT: 'FF_OBJECT_STORE_PORT',
+  MINIO_USE_SSL: 'FF_OBJECT_STORE_USE_SSL',
+  MINIO_ACCESS_KEY: 'FF_OBJECT_STORE_ACCESS_KEY',
+  MINIO_SECRET_KEY: 'FF_OBJECT_STORE_SECRET_KEY',
+  MINIO_BUCKET_NAME: 'FF_OBJECT_STORE_BUCKET',
+} as const;
+
 /** Variables that are still recognized only to explain what replaced them. */
 export const OBSOLETE_VARIABLES = [
   'FF_DEV_USER_ID',
@@ -457,6 +474,7 @@ export const OBSOLETE_VARIABLES = [
   'K8S_TENANT_QUOTA_PODS',
   'K8S_TENANT_QUOTA_CPU',
   'K8S_TENANT_QUOTA_MEMORY',
+  ...Object.keys(RENAMED_VARIABLES),
 ];
 /** Every variable the backend reads. */
 export const VARIABLES = Object.keys(appShape).filter((name) => !OBSOLETE_VARIABLES.includes(name));
@@ -516,6 +534,9 @@ function appRules(env: AppEnv): string[] {
   for (const name of ['K8S_TENANT_QUOTA_PODS', 'K8S_TENANT_QUOTA_CPU', 'K8S_TENANT_QUOTA_MEMORY'] as const) {
     if (env[name] !== undefined) problems.push(`${name} is no longer read: each account's plan sets its quota (plans.limits.quota); remove it`);
   }
+  for (const [name, now] of Object.entries(RENAMED_VARIABLES) as Array<[keyof typeof RENAMED_VARIABLES, string]>) {
+    if (env[name] !== undefined) problems.push(`${name} is no longer read: it is ${now} now, as in BE/.env.example; rename it`);
+  }
   // FF tags its runtime images by their protocol: before 3, a runtime hands every function FF's original wrapper as
   // its event, which a function made now, given AWS Lambda's, would misread at every call.
   for (const [name, image] of [['K8S_RUNTIME_IMAGE_NODEJS', env.K8S_RUNTIME_IMAGE_NODEJS], ['K8S_RUNTIME_IMAGE_PYTHON', env.K8S_RUNTIME_IMAGE_PYTHON]] as const) {
@@ -539,7 +560,7 @@ function appRules(env: AppEnv): string[] {
   }
 
   if (production) {
-    for (const name of ['MINIO_ACCESS_KEY', 'MINIO_SECRET_KEY'] as const) {
+    for (const name of ['FF_OBJECT_STORE_ACCESS_KEY', 'FF_OBJECT_STORE_SECRET_KEY'] as const) {
       if ((DEVELOPMENT_CREDENTIALS[name] as readonly string[]).includes(env[name])) {
         problems.push(`${name} must be set, and not to a development default, when NODE_ENV=production`);
       }
@@ -736,13 +757,13 @@ export default function configuration(env: Env = process.env) {
           : undefined,
     },
     database: toDatabaseSettings(parsed),
-    minio: {
-      endPoint: parsed.MINIO_ENDPOINT,
-      port: parsed.MINIO_PORT,
-      useSSL: parsed.MINIO_USE_SSL,
-      accessKey: parsed.MINIO_ACCESS_KEY,
-      secretKey: parsed.MINIO_SECRET_KEY,
-      bucketName: parsed.MINIO_BUCKET_NAME,
+    objectStore: {
+      endPoint: parsed.FF_OBJECT_STORE_ENDPOINT,
+      port: parsed.FF_OBJECT_STORE_PORT,
+      useSSL: parsed.FF_OBJECT_STORE_USE_SSL,
+      accessKey: parsed.FF_OBJECT_STORE_ACCESS_KEY,
+      secretKey: parsed.FF_OBJECT_STORE_SECRET_KEY,
+      bucketName: parsed.FF_OBJECT_STORE_BUCKET,
     },
     orchestrator: {
       // Scheduler driver behind the ORCHESTRATOR token (see OrchestratorModule).

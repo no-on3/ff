@@ -149,7 +149,7 @@ echo "e2e:$(head -c 32 /dev/urandom | base64)" >"$work/encryption-keys"
 kubectl -n ff-system create secret generic ff-encryption-keys --from-file=keys="$work/encryption-keys" >/dev/null
 registry_password="$(random)"
 kubectl -n ff-system create secret generic ff-backend --from-literal=DB_PASSWORD="$ff_db" \
-  --from-literal=MINIO_ACCESS_KEY="$s3_key" --from-literal=MINIO_SECRET_KEY="$s3_secret" \
+  --from-literal=FF_OBJECT_STORE_ACCESS_KEY="$s3_key" --from-literal=FF_OBJECT_STORE_SECRET_KEY="$s3_secret" \
   --from-literal=FF_SMTP_URL=smtp://ff-test-smtp.ff-system.svc.cluster.local:1025 \
   --from-literal=FF_CODE_REGISTRY_PASSWORD="$registry_password" >/dev/null
 # The code registry's two users, bcrypt, as the README makes them.

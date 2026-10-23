@@ -29,7 +29,7 @@ export class StoreBuckets implements OnModuleDestroy {
   private readonly s3: S3Client;
 
   constructor(config: ConfigService) {
-    const store = config.getOrThrow<StoreSettings>('minio');
+    const store = config.getOrThrow<StoreSettings>('objectStore');
     this.s3 = new S3Client({
       endpoint: `${store.useSSL ? 'https' : 'http'}://${store.endPoint}:${store.port}`,
       // An S3-compatible store has one host: the bucket goes in the path.

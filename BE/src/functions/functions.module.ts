@@ -1,7 +1,7 @@
 import { MetricsModule } from '@/metrics/metrics.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { MinioClientModule } from '../minio-client/minio-client.module';
+import { ObjectStoreModule } from '../object-store/object-store.module';
 import { OrchestratorModule } from '../orchestrator/orchestrator.module';
 import { PlansModule } from '../plans/plans.module';
 import { AuditModule } from '../audit/audit.module';
@@ -20,7 +20,7 @@ import { FunctionsService } from './functions.service';
 @Module({
   imports: [
     TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment]),
-    MinioClientModule,
+    ObjectStoreModule,
     OrchestratorModule,
     MetricsModule,
     PlansModule,

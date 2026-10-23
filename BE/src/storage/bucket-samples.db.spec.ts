@@ -2,7 +2,7 @@
  * L2: customers' buckets measured every hour (ADR 0009, §8), on real servers:
  * FF's own PostgreSQL keeps the samples, in a scratch database dropped
  * afterwards, and the S3 store holds the buckets, as the backend reaches it
- * (MINIO_*: BE/.env's development SeaweedFS, or the CI's own). Past the plan's
+ * (FF_OBJECT_STORE_*: BE/.env's development SeaweedFS, or the CI's own). Past the plan's
  * storage, its owners told and uploads waiting for room, as the front door
  * reads the account; files deleted, and uploads let in again within a minute.
  */
@@ -39,19 +39,19 @@ const OWNER = 'owner@buckets.test';
 const MIB = 1_048_576;
 
 run("customers' buckets measured every hour (L2, ADR 0009)", () => {
-  const minio = {
-    endPoint: process.env.MINIO_ENDPOINT ?? 'localhost',
-    port: Number(process.env.MINIO_PORT ?? 9003),
-    useSSL: process.env.MINIO_USE_SSL === 'true',
-    accessKey: process.env.MINIO_ACCESS_KEY ?? 'minioadmin',
-    secretKey: process.env.MINIO_SECRET_KEY ?? 'minioadmin',
+  const objectStore = {
+    endPoint: process.env.FF_OBJECT_STORE_ENDPOINT ?? 'localhost',
+    port: Number(process.env.FF_OBJECT_STORE_PORT ?? 9003),
+    useSSL: process.env.FF_OBJECT_STORE_USE_SSL === 'true',
+    accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
+    secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
   };
-  const config = new ConfigService({ minio, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, mail: { consoleUrl: 'https://console.example.tn' } });
+  const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, mail: { consoleUrl: 'https://console.example.tn' } });
   const s3 = new S3Client({
-    endpoint: `${minio.useSSL ? 'https' : 'http'}://${minio.endPoint}:${minio.port}`,
+    endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
     region: 'us-east-1',
     forcePathStyle: true,
-    credentials: { accessKeyId: minio.accessKey, secretAccessKey: minio.secretKey },
+    credentials: { accessKeyId: objectStore.accessKey, secretAccessKey: objectStore.secretKey },
     requestChecksumCalculation: 'WHEN_REQUIRED',
   });
   let db: ScratchDatabase;

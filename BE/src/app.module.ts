@@ -21,7 +21,7 @@ import { MetricsModule } from './metrics/metrics.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AlarmsModule } from './alarms/alarms.module';
 import { MonitoringModule } from './monitoring/monitoring.module';
-import { MinioClientModule } from './minio-client/minio-client.module';
+import { ObjectStoreModule } from './object-store/object-store.module';
 import { PackagesModule } from './packages/packages.module';
 import { PlansModule } from './plans/plans.module';
 import { PlansService } from './plans/plans.service';
@@ -59,7 +59,7 @@ import { StorageModule } from './storage/storage.module';
     NotificationsModule,
     AlarmsModule,
     MonitoringModule,
-    MinioClientModule,
+    ObjectStoreModule,
     PackagesModule,
     PlansModule,
     RetentionModule,

@@ -10,30 +10,31 @@ import { describeError } from '../common/describe-error';
 export class StoredObjectMissingError extends Error {}
 
 /**
- * Keeps a copy of each function's code, and functions' packages, in object
- * storage, through the S3 API (SeaweedFS in development). It used the MinIO client until P-09 of the
- * client-readiness plan; the class and the MINIO_* variables keep that name.
+ * FF's own object store, any S3-compatible one (SeaweedFS in development),
+ * through the S3 API: a copy of each function's code, functions' packages, the
+ * invoices' PDFs and the withholding certificates. Customers' buckets live in
+ * the same store, under names of FF's (BE/src/storage).
  */
 @Injectable()
-export class MinioClientService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(MinioClientService.name);
+export class ObjectStoreService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(ObjectStoreService.name);
   private readonly s3: S3Client;
   private readonly bucketName: string;
 
   constructor(private configService: ConfigService) {
-    const endPoint = this.configService.get<string>('minio.endPoint');
-    const port = this.configService.get<number>('minio.port');
-    const useSSL = this.configService.get<boolean>('minio.useSSL');
-    const accessKey = this.configService.get<string>('minio.accessKey');
-    const secretKey = this.configService.get<string>('minio.secretKey');
-    const bucketName = this.configService.get<string>('minio.bucketName');
+    const endPoint = this.configService.get<string>('objectStore.endPoint');
+    const port = this.configService.get<number>('objectStore.port');
+    const useSSL = this.configService.get<boolean>('objectStore.useSSL');
+    const accessKey = this.configService.get<string>('objectStore.accessKey');
+    const secretKey = this.configService.get<string>('objectStore.secretKey');
+    const bucketName = this.configService.get<string>('objectStore.bucketName');
 
-    if (!endPoint) throw new Error('Minio endpoint configuration is missing');
-    if (!port) throw new Error('Minio port configuration is missing');
-    if (useSSL === undefined) throw new Error('Minio useSSL configuration is missing');
-    if (!accessKey) throw new Error('Minio access key configuration is missing');
-    if (!secretKey) throw new Error('Minio secret key configuration is missing');
-    if (!bucketName) throw new Error('Minio bucket name configuration is missing');
+    if (!endPoint) throw new Error("The object store's endpoint is missing: FF_OBJECT_STORE_ENDPOINT");
+    if (!port) throw new Error("The object store's port is missing: FF_OBJECT_STORE_PORT");
+    if (useSSL === undefined) throw new Error('Whether the object store uses TLS is missing: FF_OBJECT_STORE_USE_SSL');
+    if (!accessKey) throw new Error("The object store's access key is missing: FF_OBJECT_STORE_ACCESS_KEY");
+    if (!secretKey) throw new Error("The object store's secret key is missing: FF_OBJECT_STORE_SECRET_KEY");
+    if (!bucketName) throw new Error("The object store's bucket is missing: FF_OBJECT_STORE_BUCKET");
 
     this.s3 = new S3Client({
       endpoint: `${useSSL ? 'https' : 'http'}://${endPoint}:${port}`,

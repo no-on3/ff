@@ -137,7 +137,7 @@ stage_db() {
   # The variables win over BE/.env, which dotenv never overrides.
   export DB_HOST=127.0.0.1 DB_PORT="$port" DB_USERNAME=postgres DB_PASSWORD="$password" DB_NAME=postgres DB_SSL=false
   export FF_DATA_DB_HOST=127.0.0.1 FF_DATA_DB_PORT="$data_port" FF_DATA_DB_ADMIN_PASSWORD="$admin" FF_DATA_DB_CA_FILE="$ci_dir/data-db-ca.crt"
-  export MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$s3_port" MINIO_USE_SSL=false MINIO_ACCESS_KEY="$s3_key" MINIO_SECRET_KEY="$password"
+  export FF_OBJECT_STORE_ENDPOINT=127.0.0.1 FF_OBJECT_STORE_PORT="$s3_port" FF_OBJECT_STORE_USE_SSL=false FF_OBJECT_STORE_ACCESS_KEY="$s3_key" FF_OBJECT_STORE_SECRET_KEY="$password"
   step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" in_dir BE npm run test:db
   step "migrations: exactly the entities' schema" in_dir BE npm run migration:check
   docker rm -f -v "$name" "$data" "$s3" >/dev/null

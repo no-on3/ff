@@ -175,11 +175,11 @@ export class S3FrontDoor implements OnModuleDestroy {
     this.host = base.hostname;
     this.protocol = base.protocol;
     this.region = config.getOrThrow<string>('storage.region');
-    const minio = config.getOrThrow<{ endPoint: string; port: number; useSSL: boolean; accessKey: string; secretKey: string }>('minio');
+    const objectStore = config.getOrThrow<{ endPoint: string; port: number; useSSL: boolean; accessKey: string; secretKey: string }>('objectStore');
     this.store = new StoreClient({
-      endpoint: `${minio.useSSL ? 'https' : 'http'}://${minio.endPoint}:${minio.port}`,
-      accessKeyId: minio.accessKey,
-      secretAccessKey: minio.secretKey,
+      endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
+      accessKeyId: objectStore.accessKey,
+      secretAccessKey: objectStore.secretKey,
     });
   }
 

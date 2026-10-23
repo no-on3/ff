@@ -21,7 +21,7 @@ import { databaseConfiguration } from '../../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../../database/scratch-database';
 import { Mail } from '../../mail/mail.service';
 import { capturingMail } from '../../mail/capturing-mail';
-import { MinioClientService } from '../../minio-client/minio-client.service';
+import { ObjectStoreService } from '../../object-store/object-store.service';
 import { Currency } from '../currency.entity';
 import { LedgerService } from '../ledger/ledger.service';
 import { PaymentsService } from '../payments/payments.service';
@@ -91,7 +91,7 @@ run('monthly invoices (L2, P-36)', () => {
     const storage = {
       putDocument: async (key: string, body: Buffer, contentType: string) => void documents.set(key, { body, contentType }),
       getDocument: async (key: string) => documents.get(key) as { body: Buffer; contentType: string },
-    } as unknown as MinioClientService;
+    } as unknown as ObjectStoreService;
     const config = {
       getOrThrow: (key: string) =>
         key === 'mail' ? { consoleUrl: 'https://console.ff.example', operatorEmail: 'operator@ff.test', adminUrl: 'https://admin.ff.example' } : { seller: SELLER, bank: BANK },

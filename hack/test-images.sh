@@ -40,16 +40,22 @@ docker run -d --name "$prefix-db" -e POSTGRES_PASSWORD=images-test-password -e P
 for _ in $(seq 1 60); do docker exec "$prefix-db" pg_isready -U postgres -d ff >/dev/null 2>&1 && break; sleep 1; done
 port="$(free_port)"
 metrics_port="$(free_port)"
+# Function URLs' and buckets' ports too: with host networking, a development backend here may hold the defaults.
+url_port="$(free_port)"
+storage_port="$(free_port)"
 # The backend's cluster credentials, readable by the container's user: copies in the test's own directory, which
 # only this user may enter.
 install -m 644 "$FF_SA_TOKEN_FILE" "$work/token"
 install -m 644 "$FF_CA_FILE" "$work/ca.crt"
+# A key of the test's own for functions' variables and secrets, as production requires one, readable there too.
+printf 'images-test:%s\n' "$(openssl rand -base64 32)" >"$work/encryption-keys"
+chmod 644 "$work/encryption-keys"
 # What production requires, none of it a development default. S3 and SMTP are never reached: the backend starts
 # without them and reports their errors when it uses them. No function is deployed: the sandbox is only named.
 env=(
   -e NODE_ENV=production -e PORT="$port" -e FF_METRICS_PORT="$metrics_port" -e FF_METRICS_HOST=127.0.0.1
   -e DB_HOST=127.0.0.1 -e DB_PORT="$pg_port" -e DB_USERNAME=postgres -e DB_PASSWORD=images-test-password -e DB_NAME=ff
-  -e MINIO_ENDPOINT=127.0.0.1 -e MINIO_PORT=1 -e MINIO_USE_SSL=false -e MINIO_ACCESS_KEY=images-test -e MINIO_SECRET_KEY=images-test-secret
+  -e FF_OBJECT_STORE_ENDPOINT=127.0.0.1 -e FF_OBJECT_STORE_PORT=1 -e FF_OBJECT_STORE_USE_SSL=false -e FF_OBJECT_STORE_ACCESS_KEY=images-test -e FF_OBJECT_STORE_SECRET_KEY=images-test-secret
   -e FF_OIDC_ISSUER=https://login.ff.test/realms/ff -e FF_OIDC_AUDIENCE=ff-api -e CORS_ORIGIN=https://console.ff.test
   -e FF_SMTP_URL=smtp://127.0.0.1:1 -e FF_CONSOLE_URL=https://console.ff.test -e FF_OPERATOR_EMAIL=operator@ff.test
   -e FF_SELLER_NAME='FF test' -e FF_SELLER_TAX_ID=0000000/A/M/000 -e FF_SELLER_ADDRESS='1 rue du Test, Tunis'
@@ -57,6 +63,10 @@ env=(
   -e K8S_API_URL="https://127.0.0.1:$FF_API_PORT" -e K8S_INVOKE_MODE=proxy -e K8S_RUNTIME_CLASS=gvisor
   -e K8S_TOKEN_FILE=/etc/ff/kube/token -e K8S_CA_FILE=/etc/ff/kube/ca.crt
   -v "$work/token:/etc/ff/kube/token:ro" -v "$work/ca.crt:/etc/ff/kube/ca.crt:ro"
+  # Production's addresses are https, and every function's code comes from the code registry, never reached here.
+  -e FF_FUNCTION_URL_BASE=https://fn.ff.test -e FF_STORAGE_BASE=https://s3.ff.test -e FF_CODE_REGISTRY=http://127.0.0.1:1
+  -e FF_FUNCTION_URL_PORT="$url_port" -e FF_STORAGE_PORT="$storage_port"
+  -e FF_ENCRYPTION_KEYS_FILE=/etc/ff/keys/keys -v "$work/encryption-keys:/etc/ff/keys/keys:ro"
 )
 # Host networking: the database's and the cluster's ports are this machine's.
 migrated=0

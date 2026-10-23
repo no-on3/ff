@@ -167,7 +167,7 @@ echo "== the settings"
 problems="$(cd "$FF_REPO_ROOT/BE" && node -e "
 const fs = require('fs');
 const env = Object.fromEntries(fs.readFileSync('$platform/backend.env', 'utf8').split('\n').filter((l) => l && !l.startsWith('#')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
-Object.assign(env, { DB_PASSWORD: 'secret', MINIO_ACCESS_KEY: 'key', MINIO_SECRET_KEY: 'secret', FF_SMTP_URL: 'smtp://user:pass@smtp.example.tn:587', FF_CODE_REGISTRY_PASSWORD: 'secret' });
+Object.assign(env, { DB_PASSWORD: 'secret', FF_OBJECT_STORE_ACCESS_KEY: 'key', FF_OBJECT_STORE_SECRET_KEY: 'secret', FF_SMTP_URL: 'smtp://user:pass@smtp.example.tn:587', FF_CODE_REGISTRY_PASSWORD: 'secret' });
 try { require('./dist/config/configuration').default(env); console.log('accepted'); } catch (e) { console.log((e.problems || [e.message]).map((p) => p.split(' ')[0]).join(' ')); }
 ")"
 check "the backend's settings, with the Secret's, accepted but for the seller and the bank, which an overlay gives" \

@@ -22,20 +22,20 @@ const ACCOUNT = '710000000001';
 const OTHER = '710000000002';
 
 run("buckets and access keys, in FF's database and the store (L2)", () => {
-  // The store's settings as the backend reads them, MINIO_*, alone: BE/.env's development SeaweedFS, or the CI's own.
-  const minio = {
-    endPoint: process.env.MINIO_ENDPOINT ?? 'localhost',
-    port: Number(process.env.MINIO_PORT ?? 9003),
-    useSSL: process.env.MINIO_USE_SSL === 'true',
-    accessKey: process.env.MINIO_ACCESS_KEY ?? 'minioadmin',
-    secretKey: process.env.MINIO_SECRET_KEY ?? 'minioadmin',
+  // The store's settings as the backend reads them, FF_OBJECT_STORE_*, alone: BE/.env's development SeaweedFS, or the CI's own.
+  const objectStore = {
+    endPoint: process.env.FF_OBJECT_STORE_ENDPOINT ?? 'localhost',
+    port: Number(process.env.FF_OBJECT_STORE_PORT ?? 9003),
+    useSSL: process.env.FF_OBJECT_STORE_USE_SSL === 'true',
+    accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
+    secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
   };
-  const config = new ConfigService({ minio, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } });
+  const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } });
   const store = new S3Client({
-    endpoint: `${minio.useSSL ? 'https' : 'http'}://${minio.endPoint}:${minio.port}`,
+    endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
     region: 'us-east-1',
     forcePathStyle: true,
-    credentials: { accessKeyId: minio.accessKey, secretAccessKey: minio.secretKey },
+    credentials: { accessKeyId: objectStore.accessKey, secretAccessKey: objectStore.secretKey },
     requestChecksumCalculation: 'WHEN_REQUIRED',
   });
   const exists = (storeName: string) => store.send(new HeadBucketCommand({ Bucket: storeName })).then(() => true, () => false);

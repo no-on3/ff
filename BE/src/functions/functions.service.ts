@@ -16,7 +16,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Observable } from 'rxjs';
 import { EntityManager, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
-import { MinioClientService, StoredObjectMissingError } from '../minio-client/minio-client.service';
+import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
 import {
@@ -240,7 +240,7 @@ export class FunctionsService {
     private functionsRepository: Repository<Function>,
     @InjectRepository(FunctionInvocation)
     private invocationsRepository: Repository<FunctionInvocation>,
-    private minioClientService: MinioClientService,
+    private objectStore: ObjectStoreService,
     @Inject(ORCHESTRATOR) private orchestrator: Orchestrator,
     private configService: ConfigService,
     private metricsService: MetricsService,
@@ -285,7 +285,7 @@ export class FunctionsService {
     const savedFunction = await this.insertWithinPlan(plan, function_, environment);
     try {
       // A copy of inline code's text in object storage, beside the package its pods run; a package is there already.
-      if (savedFunction.packageType === PackageType.INLINE) await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
+      if (savedFunction.packageType === PackageType.INLINE) await this.objectStore.uploadCode(this.codePath(savedFunction), savedFunction.code);
 
       const workload = await this.workload(savedFunction, environment, codeImage);
       await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workload, tenant));
@@ -681,12 +681,12 @@ export class FunctionsService {
     const codePath = this.codePath(function_);
     try {
       if (function_.packageType === PackageType.ZIP) {
-        await this.minioClientService.deleteCode(previousCodePath);
+        await this.objectStore.deleteCode(previousCodePath);
         return;
       }
-      await this.minioClientService.uploadCode(codePath, function_.code);
+      await this.objectStore.uploadCode(codePath, function_.code);
       // A runtime change moves the copy (code.ts ↔ code.py).
-      if (previousCodePath !== codePath) await this.minioClientService.deleteCode(previousCodePath);
+      if (previousCodePath !== codePath) await this.objectStore.deleteCode(previousCodePath);
     } catch (error) {
       this.logger.error(`Could not archive the code of function ${function_.id}: ${describeError(error)}`);
     }
@@ -811,7 +811,7 @@ export class FunctionsService {
       await this.orchestrator.remove(function_);
       
       // Remove the code's copy from object storage
-      await this.minioClientService.deleteCode(this.codePath(function_));
+      await this.objectStore.deleteCode(this.codePath(function_));
       
       // Its key to its account's buckets stops working, then its record goes
       await this.functionKeys.revoke(function_.id);

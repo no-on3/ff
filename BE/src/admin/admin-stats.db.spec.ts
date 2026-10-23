@@ -25,7 +25,7 @@ import { ScratchDatabase, createScratchDatabase } from '../database/scratch-data
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { capturingMail } from '../mail/capturing-mail';
 import { Mail } from '../mail/mail.service';
-import { MinioClientService } from '../minio-client/minio-client.service';
+import { ObjectStoreService } from '../object-store/object-store.service';
 import { AdminStatsService, OVERVIEW_TTL_MS } from './admin-stats.service';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
@@ -95,7 +95,7 @@ run("the admin dashboard's overview (L2)", () => {
     const storage = {
       putDocument: async (key: string, body: Buffer) => void documents.set(key, body),
       getDocument: async (key: string) => ({ body: documents.get(key), contentType: 'application/pdf' }),
-    } as unknown as MinioClientService;
+    } as unknown as ObjectStoreService;
     const config = {
       getOrThrow: (key: string) =>
         key === 'mail'

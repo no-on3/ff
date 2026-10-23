@@ -2,7 +2,7 @@
 # namespaces and nothing else. One replica: its jobs (the rating, the alarms, the notifications) take their work
 # with row locks, so a second would be safe, but the beta needs one. It calls functions' Services directly
 # (K8S_INVOKE_MODE=direct). Its settings are the ConfigMap ff-backend (backend.env) and the Secret ff-backend,
-# which the deployment writes (deploy/k8s/README.md): DB_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
+# which the deployment writes (deploy/k8s/README.md): DB_PASSWORD, FF_OBJECT_STORE_ACCESS_KEY, FF_OBJECT_STORE_SECRET_KEY,
 # FF_SMTP_URL; and the keys that encrypt functions' variables and secrets, the Secret ff-encryption-keys, as a
 # file. It refuses to start on a schema with pending migrations: deploy.sh runs the migrations Job first. Functions'
 # URLs are answered on a port of their own, 3001, and buckets' S3 requests on another, 3002, which the edge reaches,

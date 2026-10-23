@@ -20,7 +20,7 @@ import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { createScratchDatabase } from '../database/scratch-database';
-import { MinioClientService } from '../minio-client/minio-client.service';
+import { ObjectStoreService } from '../object-store/object-store.service';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { BillingService } from './billing.service';
 import { CreditService } from './credit.service';
@@ -455,7 +455,7 @@ run("the hourly rating of customers' databases (L2, ADR 0008)", () => {
 
   it("lists them on the month's statement, by the name each had, with its GB-months and amount, and the free tier taken off", async () => {
     const config = { getOrThrow: () => ({ seller: { name: 'FF SARL', taxId: null, address: '1 rue du Lac, 1053 Tunis' }, bank: null }) } as unknown as ConfigService;
-    const invoices = new InvoicesService(w.db.dataSource, w.ledger, w.pricing, {} as AuditService, {} as never, {} as MinioClientService, config);
+    const invoices = new InvoicesService(w.db.dataSource, w.ledger, w.pricing, {} as AuditService, {} as never, {} as ObjectStoreService, config);
     const now = at('09-02T00:00:00');
 
     const statement = await invoices.statementIn(w.db.dataSource.manager, a, `${Y}-09`, now);
@@ -550,7 +550,7 @@ run("the hourly rating of customers' buckets (L2, ADR 0009)", () => {
 
   it("lists them on the month's statement and its PDF, by the name each had, with GB-months, each class's requests and the amount", async () => {
     const config = { getOrThrow: () => ({ seller: { name: 'FF SARL', taxId: null, address: '1 rue du Lac, 1053 Tunis' }, bank: null }) } as unknown as ConfigService;
-    const invoices = new InvoicesService(w.db.dataSource, w.ledger, w.pricing, {} as AuditService, {} as never, {} as MinioClientService, config);
+    const invoices = new InvoicesService(w.db.dataSource, w.ledger, w.pricing, {} as AuditService, {} as never, {} as ObjectStoreService, config);
     const now = at('09-02T00:00:00');
 
     const statement = await invoices.statementIn(w.db.dataSource.manager, a, `${Y}-09`, now);

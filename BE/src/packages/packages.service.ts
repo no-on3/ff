@@ -11,7 +11,7 @@ import { QueryFailedError, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
 import type { InlinePackage } from '../functions/inline-package';
-import { MinioClientService } from '../minio-client/minio-client.service';
+import { ObjectStoreService } from '../object-store/object-store.service';
 import { CodeImagesService } from './code-images.service';
 import { PACKAGE_LIMITS, PackageRefused, readPackage } from './package-archive';
 import { Package, packageKey } from './package.entity';
@@ -87,7 +87,7 @@ export class PackagesService {
 
   constructor(
     @InjectRepository(Package) private readonly packages: Repository<Package>,
-    private readonly storage: MinioClientService,
+    private readonly storage: ObjectStoreService,
     private readonly audit: AuditService,
     private readonly images: CodeImagesService,
   ) {}

@@ -160,7 +160,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     const storePort = await listening(store);
     const config = new ConfigService({
       storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
-      minio: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
+      objectStore: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
     frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler);
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
