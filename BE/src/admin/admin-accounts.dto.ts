@@ -133,6 +133,7 @@ export class AdminFunctionView {
 export class AdminDatabaseView {
   @ApiProperty() id: string;
   @ApiProperty({ example: 'orders' }) name: string;
+  @ApiProperty({ example: 'ff_3f9c2a1e8b7d4c6a9e5f1a2b', description: "Its name on the server of customers' databases, and its user's: what a restore of it names" }) database: string;
   @ApiProperty({ enum: DatabaseStatus }) status: DatabaseStatus;
   @ApiProperty({ nullable: true, type: Number, example: 7_634_423, description: 'Bytes; null when the server could not be asked' }) sizeBytes: number | null;
   @ApiProperty({ nullable: true, type: Number, example: 2, description: 'Sessions now; null when the server could not be asked' }) connections: number | null;

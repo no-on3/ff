@@ -106,12 +106,17 @@ export interface AccountSummary {
 export interface AccountDatabase {
   id: string;
   name: string;
+  /** Its name on the server, and its user's (ff_ and 24 hexadecimal characters): what a restore of it names. */
+  database: string;
   status: 'creating' | 'active' | 'read_only' | 'suspended' | 'deleting';
   sizeBytes: number | null;
   connections: number | null;
   storageLimitMb: number;
   createdAt: string;
 }
+
+/** The fields the API gives for each of them. */
+export const DATABASE_FIELDS = ['id', 'name', 'database', 'status', 'sizeBytes', 'connections', 'storageLimitMb', 'createdAt'] as const;
 
 /** A size in MB of 1,048,576 bytes, to a tenth: "7.3 MB"; "–" when unknown. */
 export function formatMegabytes(bytes: number | null): string {

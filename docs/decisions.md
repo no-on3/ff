@@ -80,17 +80,20 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Changed already, too:** V-02, the server, in development (`hack/k8s/data-db-up.sh`) and for production ([`deploy/data-db`](../deploy/data-db/README.md)); every tenant's network policy opens it on its port.
 - **Changed already, too:** V-03, the databases themselves, in the API: each a database and its user on that server, made within the plan, suspended with their account, dropped at its data deletion date.
 - **Changed already, too:** V-04, their hourly measures and their bill: storage by the GB-month, on the month's statement, in `GET /usage` and in the reconciliation.
-- **Still to change:** V-05, the console, the admin app, `ff db`, the guide and the backups.
+- **Changed already, too:** V-05, the people's side: the console's Databases page, the admin app's per account (with each database's name on the server, and the switch that turns an account's databases off), `ff db`, the guide and a page in French; and the backups: 7 days of point-in-time recovery for the customers' server, with a key of its own, and one database brought back from a moment into a new one of the account's, by a runbook the monthly drill runs.
+- **Still to change:** V-10, the small app on one of FF's databases.
 
 **6. A database over its plan's size is warned and billed, not blocked.** ✅ Confirmed. Messages at 80% and 100%; above 100%, new connections are read-only, which the owner can turn off to clean up; the storage above the plan is billed.
 - **Changed already:** V-01 measured the signal as an app meets it, and its statement changed: it is the user's setting in its database, which the backend may set, rather than the database's, which only its owner may; the sessions under way are ended so that a pool's come back read-only too ([ADR 0008](adr/0008-customer-databases.md), §5).
 - **Changed already, too:** V-04: each database measured every hour; at 80% and 100% of the plan's storage its owners get an e-mail in their language, once each time it reaches the share; past 100%, the signal, set again each hour while it stays past, without ending the sessions under way, and taken away once it is back under; all its storage billed by the GB-month, above the plan's too.
-- **Still to change:** V-05: the console and the admin app show it.
+- **Changed already, too:** V-05: the console says why a database is read-only, and shows its storage against the plan's; the admin app shows each database's status and size.
+- **Still to change:** nothing.
 
 **7. Databases reachable from the internet, encrypted only.** ✅ Confirmed. Developers connect from their laptops (`psql`, migration tools, `pg_dump`), as RDS's "publicly accessible" option allows.
 - **Changed already:** V-01 measured who may log in where, and how drivers read the connection string: it says `sslmode=require`, which node-postgres takes as a full check of the certificate. So the server's certificate comes from a public CA in production, or from a CA of the operator's that functions' pods get ([ADR 0008](adr/0008-customer-databases.md), §9).
 - **Changed already, too:** V-02, the server's encryption (TLS 1.2 at least) and who may log in where (`pg_hba.conf`), and the CA functions' pods get when the certificate isn't a public one; V-03, the connection string FF gives once, with `sslmode=require`.
-- **Still to change:** V-05, the guide.
+- **Changed already, too:** V-05: the guide and the French page say how to connect, from a function and with `psql` from a machine.
+- **Still to change:** nothing.
 
 **8. Free every month, per account: 1 GB of database; 5 GB of files, 20,000 reads and 2,000 writes.** ✅ Confirmed: the plan's numbers.
 - **Changed already:** V-04: all four are in the second price book, which its migration adds from the first hour of the month after it runs, with RDS's and S3's prices at AWS's list, read on 2026-10-23: 1 GB-month of databases, 5 GB-months of buckets, 2,000 `PUT` and 20,000 `GET` requests.
@@ -116,7 +119,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Still to change:** V-07, the uploads refused.
 
 **14. Documentation in French, a page per service, under `docs/fr/`.** ✅ Confirmed.
-- **Still to change:** V-05 for databases, V-09 for buckets.
+- **Changed already:** V-05, the first page: [`docs/fr/bases-de-donnees.md`](fr/bases-de-donnees.md), databases "comme AWS RDS", and the folder's index.
+- **Still to change:** V-09 for buckets.
 
 ### Step 1's choices (already built)
 
@@ -172,3 +176,4 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 | Your company and the Startup Act label; FF Cloud or on-premises first; the data center and the hardware budget (a first server, for development: 21); a bank or payment provider; the team and the launch date; the product's name | [Parent plan](local-markets-and-aws-portability-plan.md) §15, questions 1 to 5 and 7 | Priorities, not the direction |
 | Send the accountant's five questions; book the external penetration test | [Client-readiness plan](client-readiness-plan.md) §9 | VAT, invoices and withholding; the public launch |
 | Later: take away the backend's right to create ConfigMaps, once no backend older than C-24 runs anywhere | [`deploy/k8s`](../deploy/k8s/README.md) | Nothing until then |
+| Logical replication for customers' databases, so that one moves to AWS RDS without its writes stopping: offer it, or keep `pg_dump` alone. The step-2 plan named it as a way out (its D14); the server doesn't give it today: it needs users with `REPLICATION` and `wal_level = logical` for the whole server, and a limit on what an idle subscription keeps on its disk | [Step-2 plan](step-2-plan.md), D14; [`cli/templates/export/data/postgres.md`](../cli/templates/export/data/postgres.md) | A large database's move to RDS: without it, the app stops writing for the copy, minutes for a few GB |

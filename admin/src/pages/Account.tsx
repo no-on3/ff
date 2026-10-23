@@ -386,8 +386,16 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
           <EmptyState>No database.</EmptyState>
         ) : (
           <Table
-            head={['Name', 'Status', 'Size', 'Sessions', 'Plan storage', 'Created']}
-            rows={view.databases.map((d) => [d.name, d.status.replace('_', '-'), formatMegabytes(d.sizeBytes), d.connections ?? '–', `${d.storageLimitMb.toLocaleString('en-US')} MB`, whenUtc(d.createdAt)])}
+            head={['Name', 'On the server', 'Status', 'Size', 'Sessions', 'Plan storage', 'Created']}
+            rows={view.databases.map((d) => [
+              d.name,
+              <span className="font-mono text-xs">{d.database}</span>,
+              d.status.replace('_', '-'),
+              formatMegabytes(d.sizeBytes),
+              d.connections ?? '–',
+              `${d.storageLimitMb.toLocaleString('en-US')} MB`,
+              whenUtc(d.createdAt),
+            ])}
           />
         )}
       </section>

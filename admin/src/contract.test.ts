@@ -23,7 +23,7 @@ import ledgerTransactionSource from '../../BE/src/billing/ledger/ledger-transact
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
-import { ACCOUNT_STATUSES, STATUS_CHANGES } from './lib/accounts';
+import { ACCOUNT_STATUSES, DATABASE_FIELDS, STATUS_CHANGES } from './lib/accounts';
 import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
 import { CALL_FIELDS, CALL_HIT_FIELDS, DOMAIN_FIELDS, FUNCTION_HIT_FIELDS, FUNCTION_PAGE_FIELDS, FUNCTION_URL_FIELDS, SCHEDULE_FIELDS } from './lib/support';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
@@ -222,6 +222,10 @@ describe('credit grants and the account page\'s credit (P-74)', () => {
     expect(fieldsOf(adminStatsDtoSource, 'export class OverviewView {')).toEqual([...OVERVIEW_FIELDS]);
     expect(fieldsOf(adminStatsDtoSource, 'export class OverviewCapacityDay {')).toEqual(['day', 'reservedGbS', 'provisionedGbS', 'billedGbS', 'requests']);
     expect(adminStatsDtoSource).toContain('byStatus: Record<AccountStatus, number>;');
+  });
+
+  it("have the API's fields of the account's databases, their names on the server among them", () => {
+    expect(fieldsOf(adminAccountsDtoSource, 'export class AdminDatabaseView {')).toEqual([...DATABASE_FIELDS]);
   });
 
   it("have the API's credit fields on the account page", () => {

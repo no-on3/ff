@@ -24,10 +24,12 @@
 | [ADR 0008](adr/0008-customer-databases.md) | Customers' databases: a PostgreSQL 18 server of their own, a database and its user per customer with opaque names, what the backend's role may do there without being a superuser, functions reaching it with their account's internet access off, the read-only signal past the plan's storage, the connection string and certificates; measured by step 2's spike (accepted on 2026-10-23) |
 | [ADR 0009](adr/0009-buckets.md) | Buckets behind FF's S3 front door: AWS's Signature Version 4 and the SDKs' streaming uploads, checksums as S3 checks them, both addressings, an IP address for functions, requests counted by AWS's classes; measured by step 2's spike against three AWS clients (accepted on 2026-10-23) |
 | [Backup drills](backup-drills.md) | The record of each monthly restore drill |
+| [En français](fr/README.md) | For FF's customers, a page per service in French: [databases](fr/bases-de-donnees.md), as AWS RDS gives them |
 
 Elsewhere in the repository:
 - [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md): the function runtimes, their protocol and their handler contracts;
 - [`deploy/k8s`](../deploy/k8s/README.md): what the backend may do in a cluster, and why; the platform's manifests and how to deploy them; the log pipeline's and the monitoring's;
-- [`deploy/backup`](../deploy/backup/README.md): the backups of both databases to a second site, the mirror of the legal records and functions' packages, and the restore runbook.
+- [`deploy/backup`](../deploy/backup/README.md): the backups of both databases and of customers' databases to a second site, the mirror of the legal records and functions' packages, and the restore runbooks, one customer's database from a point in time among them;
+- [`deploy/data-db`](../deploy/data-db/README.md): the server of customers' databases, and how to install it.
 
 Older documents described the platform before Kubernetes: Nomad, MinIO, the old CLI, and an auto-scaling design. They were removed because they no longer matched the code. Git history still has them, for example at commit `46f8397`.

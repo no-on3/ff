@@ -148,7 +148,7 @@ run('accounts, for operators (L2, P-71)', () => {
         applyAccess: async (accountId: string) => void databaseChanges.push(`apply ${accountId}`),
         list: async (accountId: string) =>
           accountId === WITH_DATABASE
-            ? [{ id: 'db-1', name: 'orders', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z'), host: 'db.example.tn' }]
+            ? [{ id: 'db-1', name: 'orders', database: 'ff_0123456789abcdef01234567', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z'), host: 'db.example.tn' }]
             : [],
       } as never,
     );
@@ -500,10 +500,12 @@ run('accounts, for operators (L2, P-71)', () => {
     await expect(service.setStorage('999999999999', false, 'Nobody')).rejects.toThrow('Account 999999999999 not found');
   });
 
-  it("shows the account's databases on its page, their size and sessions as the server counts them", async () => {
+  it("shows the account's databases on its page, their names on the server, their size and sessions as the server counts them", async () => {
     const page = await service.detail(await account({ status: AccountStatus.ACTIVE, id: WITH_DATABASE }));
 
-    expect(page.databases).toEqual([{ id: 'db-1', name: 'orders', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z') }]);
+    expect(page.databases).toEqual([
+      { id: 'db-1', name: 'orders', database: 'ff_0123456789abcdef01234567', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z') },
+    ]);
   });
 
   it('changes nothing when the cluster refuses the NetworkPolicy; the value the account has writes nothing, but applies it again', async () => {

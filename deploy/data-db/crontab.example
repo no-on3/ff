@@ -1,0 +1,9 @@
+# The customers' server's own schedule, for the user postgres, with WAL-G's settings in its environment
+# (deploy/backup/README.md, "Customers' databases"): those of deploy/backup/postgres-walg/walg.env.example, with a
+# prefix and a key of its own. The WAL goes continuously: PostgreSQL's archive_command. With the server in Docker,
+# each line runs in its container instead: docker exec <container> wal-g …, its environment holding the settings.
+# A base backup every night: a restore replays a day of WAL at most.
+15 2 * * * . /etc/ff/walg.env && wal-g backup-push "$PGDATA" >>/var/log/ff/wal-g.log 2>&1
+# Then the last 8 base backups kept, with the WAL they need, so that any second of the last 7 days can be restored,
+# as AWS RDS keeps them by default; older ones go.
+45 3 * * * . /etc/ff/walg.env && wal-g delete retain FULL 8 --confirm >>/var/log/ff/wal-g.log 2>&1

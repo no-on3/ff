@@ -252,9 +252,10 @@ export class AdminAccountsService {
         minInstances,
         lastInvokedAt: lastInvoked.get(functionId) ?? null,
       })),
-      databases: (await this.databases.list(id)).map(({ id: databaseId, name, status, sizeBytes, connections, storageLimitMb, createdAt }) => ({
+      databases: (await this.databases.list(id)).map(({ id: databaseId, name, database, status, sizeBytes, connections, storageLimitMb, createdAt }) => ({
         id: databaseId,
         name,
+        database,
         status,
         sizeBytes,
         connections,

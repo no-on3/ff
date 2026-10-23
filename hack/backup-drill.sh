@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# The restore drill (deploy/backup/README.md): FF's database and Keycloak's, and the bucket's legal records,
-# backed up to a second site and restored, on Docker alone, in a few minutes. Monthly, and after any change to
-# the backups; --record adds its outcome to docs/backup-drills.md.
+# The restore drill (deploy/backup/README.md): FF's database and Keycloak's, one customer's database, and the
+# bucket's legal records, backed up to a second site and restored, on Docker alone, in a few minutes. Monthly, and
+# after any change to the backups; --record adds its outcome to docs/backup-drills.md.
 #   1. A primary S3 (FF's bucket) and a second site's S3, each a SeaweedFS of its own.
 #   2. The reference PostgreSQL (deploy/backup/postgres-walg), FF's schema made by its migrations (from the
 #      backend's image), and Keycloak's database beside it; WAL archived to the second site by WAL-G, encrypted.
 #   3. A base backup; then rows written, the target time noted, and rows written after it.
 #   4. A new server restored from the second site to the target time: what came before is there, what came after
 #      isn't, in both databases; the ledger still balanced; the time it took, against the 4 hours promised.
-#   5. The invoices and withholding certificates copied to the second site with rclone, one lost on the primary,
+#   5. The customers' server (deploy/data-db), archiving under a prefix and a key of its own: two customers'
+#      databases made by the backend's own code, rows deleted by mistake after a target time; the whole server
+#      restored elsewhere to that time, archiving nothing, and that one database copied into a new one of the
+#      account's, as the runbook does: the rows deleted back, its tables its new user's, the live databases untouched.
+#   6. The invoices and withholding certificates copied to the second site with rclone, one lost on the primary,
 #      and copied back, byte for byte.
-#   6. Functions' packages synced there by the same mirror: one FF deleted goes from the copy, set aside 30 days
+#   7. Functions' packages synced there by the same mirror: one FF deleted goes from the copy, set aside 30 days
 #      first; a bucket that lost them all deletes nothing at the site; they come back from it, byte for byte.
 #   hack/backup-drill.sh [--record]
 set -euo pipefail
@@ -21,8 +25,8 @@ prefix="ff-drill-$$"
 network="$prefix"
 work="$(mktemp -d)"
 cleanup() {
-  docker rm -f "$prefix-site" "$prefix-s3" "$prefix-primary" "$prefix-restored" >/dev/null 2>&1 || true
-  docker volume rm "$prefix-primary-data" "$prefix-restored-data" >/dev/null 2>&1 || true
+  docker rm -f "$prefix-site" "$prefix-s3" "$prefix-primary" "$prefix-restored" "$prefix-data" "$prefix-scratch" >/dev/null 2>&1 || true
+  docker volume rm "$prefix-primary-data" "$prefix-restored-data" "$prefix-data-data" "$prefix-scratch-data" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
@@ -37,8 +41,9 @@ random() { head -c 18 /dev/urandom | base64 | tr -d '/+=\n'; }
 
 echo "== images"
 docker build -q -t ff-postgres-walg:drill "$repo/deploy/backup/postgres-walg" >/dev/null
+docker build -q -t ff-data-db:drill "$repo/deploy/data-db" >/dev/null
 docker build -q -t ff-backend:drill "$repo/BE" >/dev/null
-echo "  ff-postgres-walg (PostgreSQL 15.19, WAL-G 3.0.9) and ff-backend built"
+echo "  ff-postgres-walg (PostgreSQL 15.19, WAL-G 3.0.9), ff-data-db (PostgreSQL 18.6, WAL-G 3.0.9) and ff-backend built"
 
 echo "== two sites"
 docker network create "$network" >/dev/null
@@ -148,6 +153,108 @@ check "Keycloak's database: the same point in time" "before ff" "$(psql_on "$pre
 check "the restored server archives too: its configuration came with the backup" "on" "$(psql_on "$prefix-restored" ff 'SHOW archive_mode')"
 check "within the 4 hours promised: $restore_seconds s here" true "$([ "$restore_seconds" -lt 14400 ] && echo true || echo false)"
 
+echo "== the customers' server, archiving to the second site under a prefix and a key of its own"
+data_admin_password="$(random)"
+data_walg=(-e WALG_S3_PREFIX=s3://ff-backups/data-db -e AWS_ENDPOINT=http://site:8333 -e AWS_REGION=us-east-1 -e AWS_S3_FORCE_PATH_STYLE=true
+  -e AWS_ACCESS_KEY_ID="$s3_key" -e AWS_SECRET_ACCESS_KEY="$s3_secret" -e WALG_LIBSODIUM_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  -e WALG_LIBSODIUM_KEY_TRANSFORM=hex -e WALG_COMPRESSION_METHOD=zstd -e PGHOST=/var/run/postgresql)
+docker run -d --name "$prefix-data" --network "$network" --network-alias data -e POSTGRES_PASSWORD="$(random)" -e FF_DATA_DB_ARCHIVE=on \
+  -e FF_DATA_DB_TLS_NAMES=DNS:data -e FF_DATA_DB_ADMIN_PASSWORD="$data_admin_password" "${data_walg[@]}" \
+  -v "$prefix-data-data:/var/lib/postgresql" ff-data-db:drill >/dev/null
+# Its first start runs initdb/ on a server that listens on its socket only: TCP answers once that is done.
+for _ in $(seq 1 90); do
+  docker exec "$prefix-data" pg_isready -q -h 127.0.0.1 -U ff_admin -d postgres 2>/dev/null && break
+  sleep 1
+done
+data_pgdata="$(docker exec "$prefix-data" printenv PGDATA)"
+check "it archives every segment, at least every 5 minutes, and takes 200 sessions" "on wal-g wal-push %p 5min 200" \
+  "$(psql_on "$prefix-data" postgres 'SHOW archive_mode') $(psql_on "$prefix-data" postgres 'SHOW archive_command') $(psql_on "$prefix-data" postgres 'SHOW archive_timeout') $(psql_on "$prefix-data" postgres 'SHOW max_connections')"
+# make_database: a customer's database and its user, made by the backend's own code (PostgresDataServer) with its role
+# on the server, over TLS, the certificate checked; prints the name and the password.
+make_database() {
+  docker run --rm --network "$network" -e ADMIN_PASSWORD="$data_admin_password" \
+    -e DATA_CA="$(docker exec "$prefix-data" cat /var/lib/postgresql/tls/ca.crt)" ff-backend:drill node -e "
+      const { PostgresDataServer } = require('./dist/databases/data-server');
+      const { scramVerifier } = require('./dist/databases/scram');
+      const { newServerName, newPassword } = require('./dist/databases/database-names');
+      const server = new PostgresDataServer({ host: 'data', port: 5432, adminHost: 'data', adminUser: 'ff_admin',
+        adminPassword: process.env.ADMIN_PASSWORD, cidrs: [], ca: process.env.DATA_CA });
+      const name = newServerName(), password = newPassword();
+      server.create(name, scramVerifier(password), 10).then(() => console.log(name, password)).finally(() => server.close())
+        .catch((error) => { console.error(error.message); process.exitCode = 1; });"
+}
+# as_customer <name> <password> <sql>: as a customer's app connects, over TLS, the server's certificate checked.
+as_customer() {
+  docker exec "$prefix-data" psql "postgresql://$1:$2@data:5432/$1?sslmode=verify-full&sslrootcert=/var/lib/postgresql/tls/ca.crt" \
+    -v ON_ERROR_STOP=1 -XqtA -c "$3"
+}
+made="$(make_database)" || fail "the backend's code could not make a database"
+read -r shop shop_password <<<"$made"
+made="$(make_database)" || fail "the backend's code could not make a database"
+read -r other other_password <<<"$made"
+marker="drill-$(random | tr -dc 'a-z0-9' | cut -c1-10)"
+as_customer "$shop" "$shop_password" "CREATE EXTENSION pgcrypto;
+  CREATE TABLE orders (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, item text NOT NULL, made text NOT NULL);
+  INSERT INTO orders (item, made) SELECT '$marker-' || g, 'before' FROM generate_series(1, 100) g" >/dev/null
+as_customer "$other" "$other_password" "CREATE TABLE notes (body text); INSERT INTO notes VALUES ('$marker-other')" >/dev/null
+check "two customers' databases, made by the backend's code, written by their own users" "100 1" \
+  "$(as_customer "$shop" "$shop_password" 'SELECT count(*) FROM orders') $(as_customer "$other" "$other_password" 'SELECT count(*) FROM notes')"
+docker exec "${data_walg[@]}" "$prefix-data" wal-g backup-push "$data_pgdata" >"$work/data-backup.log" 2>&1 ||
+  { tail -20 "$work/data-backup.log"; fail "the customers' server's base backup failed"; }
+sleep 1
+data_target="$(psql_on "$prefix-data" postgres "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'")"
+sleep 1
+# After the target, the customer's app writes 50 orders, then deletes the 100 before them by mistake.
+as_customer "$shop" "$shop_password" "INSERT INTO orders (item, made) SELECT '$marker-' || g, 'after' FROM generate_series(101, 150) g;
+  DELETE FROM orders WHERE made = 'before'" >/dev/null
+psql_on "$prefix-data" postgres 'SELECT pg_switch_wal()' >/dev/null
+for _ in $(seq 1 60); do
+  [ "$(psql_on "$prefix-data" postgres "SELECT last_archived_wal >= pg_walfile_name(pg_current_wal_lsn() - 1) FROM pg_stat_archiver")" = t ] && break
+  sleep 1
+done
+check "a base backup at the second site, the last segment archived, none failing" "1 t 0" \
+  "$(docker exec "${data_walg[@]}" "$prefix-data" wal-g backup-list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ') $(psql_on "$prefix-data" postgres "SELECT last_archived_wal >= pg_walfile_name(pg_current_wal_lsn() - 1) FROM pg_stat_archiver") $(psql_on "$prefix-data" postgres 'SELECT failed_count FROM pg_stat_archiver')"
+rclone cat --max-size 100M --include '*' site:ff-backups/data-db >"$work/data-site.bin" 2>/dev/null || true
+check "the second site holds none of their rows readable without the key" "0 true" \
+  "$(grep -ac "$marker" "$work/data-site.bin" || true) $([ -s "$work/data-site.bin" ] && echo true || echo false)"
+
+echo "== one customer's database, to the target time ($data_target), as the runbook brings it back"
+one_started="$(date +%s)"
+docker run --rm "${data_walg[@]}" --network "$network" -v "$prefix-scratch-data:/var/lib/postgresql" --entrypoint bash ff-data-db:drill -c "
+  mkdir -p '$data_pgdata' && chmod 700 '$data_pgdata' && wal-g backup-fetch '$data_pgdata' LATEST && touch '$data_pgdata/recovery.signal' &&
+  printf \"recovery_target_time = '%s'\nrecovery_target_action = 'promote'\n\" '$data_target' >>'$data_pgdata/postgresql.auto.conf'" \
+  >"$work/data-fetch.log" 2>&1 || { tail -20 "$work/data-fetch.log"; fail "the customers' server's base backup could not be fetched"; }
+# The scratch server holds every customer's data as of then: its socket only. It archives nothing, or its new timeline
+# would reach the second site beside the server's, and a later restore of the server would follow it. Its certificate
+# isn't in the backup, and its socket needs none.
+docker run -d --name "$prefix-scratch" --network "$network" "${data_walg[@]}" -v "$prefix-scratch-data:/var/lib/postgresql" ff-data-db:drill \
+  postgres -c listen_addresses= -c ssl=off -c archive_mode=off >/dev/null
+for _ in $(seq 1 120); do
+  [ "$(psql_on "$prefix-scratch" postgres 'SELECT pg_is_in_recovery()' 2>/dev/null)" = f ] && break
+  sleep 1
+done
+check "the whole server, restored elsewhere from the second site, opens at the target: the server's 200 sessions, its socket only, archiving nothing" \
+  "f 200 [] off" \
+  "$(psql_on "$prefix-scratch" postgres 'SELECT pg_is_in_recovery()') $(psql_on "$prefix-scratch" postgres 'SHOW max_connections') [$(psql_on "$prefix-scratch" postgres 'SHOW listen_addresses')] $(psql_on "$prefix-scratch" postgres 'SHOW archive_mode')"
+# The account's new database, made as any other: in production by the customer, in the console or with ff db create.
+made="$(make_database)" || fail "the backend's code could not make a database"
+read -r copy copy_password <<<"$made"
+docker exec "$prefix-scratch" pg_dump -U postgres --format=custom -d "$shop" >"$work/one.dump"
+docker exec -i "$prefix-data" pg_restore -U postgres --role="$copy" --no-owner --no-acl --exit-on-error -d "$copy" <"$work/one.dump"
+one_seconds=$(($(date +%s) - one_started))
+check "the copy, a new database of the account's: the 100 orders deleted after the target back, none of the 50 written after it" "100 0" \
+  "$(as_customer "$copy" "$copy_password" "SELECT count(*) FROM orders WHERE made = 'before'") $(as_customer "$copy" "$copy_password" "SELECT count(*) FROM orders WHERE made = 'after'")"
+check "  ... its table and extension its new user's, as if it had made them, and the extension working" \
+  "$copy $copy:pgcrypto 64" \
+  "$(as_customer "$copy" "$copy_password" "SELECT tableowner FROM pg_tables WHERE tablename = 'orders'") $(as_customer "$copy" "$copy_password" "SELECT extowner::regrole || ':' || extname FROM pg_extension WHERE extname = 'pgcrypto'") $(as_customer "$copy" "$copy_password" "SELECT length(encode(digest(item, 'sha256'), 'hex')) FROM orders LIMIT 1")"
+check "the live databases untouched: the customer's as its app left it, the other customer's as ever" "50 1" \
+  "$(as_customer "$shop" "$shop_password" 'SELECT count(*) FROM orders') $(as_customer "$other" "$other_password" 'SELECT count(*) FROM notes')"
+check "the second site got nothing from the scratch server: no timeline beside the server's" 0 \
+  "$(rclone lsf -R site:ff-backups/data-db | grep -c 'history' || true)"
+docker rm -f "$prefix-scratch" >/dev/null
+docker volume rm "$prefix-scratch-data" >/dev/null
+echo "  one database back in $one_seconds s, from the fetch to the copy; the scratch server deleted"
+
 echo "== the bucket's legal records"
 mkdir -p "$work/records/invoices/2026" "$work/records/withholding-certificates"
 head -c 40000 /dev/urandom >"$work/records/invoices/2026/FAC-2026-000001.pdf"
@@ -201,9 +308,9 @@ check "and they come back from it, byte for byte" 0 "$(rclone check site:ff-back
 sleep 1
 check "the next run finds nothing to delete" "packages copied to the second site, 0 deleted there" "$(mirror | grep -o 'packages copied to the second site, [0-9]* deleted there')"
 
-echo "backup drill: $passed checks passed; restored to the target in $restore_seconds s"
+echo "backup drill: $passed checks passed; restored to the target in $restore_seconds s, one customer's database in $one_seconds s"
 if $record; then
-  printf '| %s | %s | PostgreSQL 15.19 with WAL-G 3.0.9, both databases to a target time; the legal records and the packages with rclone 1.75.1 | %s s | %s checks passed |\n' \
-    "$(date -u +%Y-%m-%d)" "$(git -C "$repo" rev-parse --short HEAD)" "$restore_seconds" "$passed" >>"$repo/docs/backup-drills.md"
+  printf '| %s | %s | PostgreSQL 15.19 with WAL-G 3.0.9, both databases to a target time; one customer'"'"'s database from PostgreSQL 18.6 with WAL-G 3.0.9 to a target time; the legal records and the packages with rclone 1.75.1 | %s s; one database %s s | %s checks passed |\n' \
+    "$(date -u +%Y-%m-%d)" "$(git -C "$repo" rev-parse --short HEAD)" "$restore_seconds" "$one_seconds" "$passed" >>"$repo/docs/backup-drills.md"
   echo "recorded in docs/backup-drills.md"
 fi

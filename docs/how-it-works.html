@@ -30,6 +30,7 @@
     --c-idp: #7a6400;
     --c-store: #9a4a1c;
     --c-reg: #3b7a1e;
+    --c-data: #34568b;
     --code-bg: #f3f4f0;
     --j-key: #2561c9;
     --j-str: #0f6f5c;
@@ -63,6 +64,7 @@
       --c-idp: #e0c341;
       --c-store: #f0a07a;
       --c-reg: #8ccf6a;
+      --c-data: #a3bdf0;
       --code-bg: #151815;
       --j-key: #8ab4ff;
       --j-str: #6fd8bc;
@@ -96,6 +98,7 @@
     --c-idp: #e0c341;
     --c-store: #f0a07a;
     --c-reg: #8ccf6a;
+    --c-data: #a3bdf0;
     --code-bg: #151815;
     --j-key: #8ab4ff;
     --j-str: #6fd8bc;
@@ -700,8 +703,9 @@ const LANES = {
   hook:   { label: 'Your receiver', sub: 'webhook URL', color: '--c-user', map: 'user' },
   reg:    { label: 'Registry', sub: 'code images', color: '--c-reg', map: 'registry' },
   yourdb: { label: 'Your database', sub: 'PostgreSQL', color: '--c-user', map: 'user' },
+  datadb: { label: 'Databases', sub: 'PostgreSQL 18', color: '--c-data', map: 'datadb' },
 };
-const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'registry', 'k8sapi', 'ns', 'guard', 'service', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
+const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'registry', 'datadb', 'k8sapi', 'ns', 'guard', 'service', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
@@ -1078,7 +1082,7 @@ const SCENARIOS = [
         text: 'requestContext.http says POST /orders; the body is the order.',
         code: 'examples/orders-app/index.js http()' },
       { from: 'worker', to: 'yourdb', kind: 'req', label: 'connect · CREATE TABLE IF NOT EXISTS · INSERT', title: 'Your database, over the internet',
-        text: 'The instance\'s first call connects with DATABASE_URL, from its environment, and keeps the connection for the calls after. The NetworkPolicy lets it out, the account\'s internet access being on; FF\'s own network stays out of reach. FF has no database of its own for customers yet: this one is the app\'s.',
+        text: 'The instance\'s first call connects with DATABASE_URL, from its environment, and keeps the connection for the calls after. The NetworkPolicy lets it out, the account\'s internet access being on; FF\'s own network stays out of reach. This one is the app\'s own, on the internet; the next scenario keeps the orders in a database of FF\'s.',
         code: 'examples/orders-app/index.js database()',
         msg: { kind: 'sql', text: "CREATE TABLE IF NOT EXISTS orders (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, item text NOT NULL, …);\nINSERT INTO orders (item, quantity) VALUES ('harissa', 2) RETURNING id, item, quantity, created_at;" },
         set: { 'Your database.orders': '1 row: harissa × 2' } },
@@ -1101,6 +1105,81 @@ const SCENARIOS = [
         code: 'examples/orders-app/index.js nightly()',
         msg: { kind: 'log', lines: ['report {"day":"2026-10-21","orders":1,"items":2,"removed":0}'] },
         set: { 'PostgreSQL.function_invocations': 'COMPLETED · schedule', 'PostgreSQL.schedules': 'orders-nightly · next 2026-10-23 02:00 · success' } },
+    ],
+  },
+  {
+    id: 'database', title: 'A database, as AWS RDS gives one',
+    lanes: ['user', 'api', 'db', 'datadb', 'k8s', 'pod', 'worker'],
+    summary: 'ff db create orders --secret-for orders-api: the backend makes a PostgreSQL 18 database and its user on the server of customers\' databases, with its own role there, never a superuser; the connection string comes back once, and becomes the function\'s DATABASE_URL; the small app writes its orders there over TLS, its account\'s internet access off; every hour the backend measures the database, and its storage is billed by the GB-month, as RDS bills gp3.',
+    state: {
+      'PostgreSQL': { 'databases': null, 'database_samples': null, 'resource_usage_hourly': null },
+      'Customers\' server': { 'user': null, 'database': null, 'orders': null },
+      [K]: { 'Secret': null },
+    },
+    initial: {
+      'PostgreSQL.functions': 'orders-api · zip · index.http · ACTIVE',
+      [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits',
+      [K + '.NetworkPolicy']: 'ff-default-deny · DNS only: the account\'s internet access is off',
+      [K + '.Service']: 'fn-a71c… (ClusterIP :8080)', [K + '.Deployment']: 'replicas 1 · ready 1/1', [K + '.Pod']: 'Running · Ready',
+      'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'index.js loaded · idle',
+    },
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /databases · {"name":"orders"}', title: 'ff db create asks for a database',
+        text: 'The name is the account\'s, held to AWS RDS\'s rule by ff before it calls, and by the backend: 1 to 63 lower-case letters, digits and hyphens, a letter first. ff looked orders-api up first, so that a function that isn\'t there stops it before anything is made. The console\'s Databases page sends the same.',
+        code: 'cli/src/commands/db.rs create() · BE/src/databases/databases.controller.ts · database-names.ts databaseNameProblem()',
+        msg: { kind: 'http', first: 'POST /databases HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { name: 'orders' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'lock the account · count · INSERT databases', title: 'Within the plan, counted under a lock',
+        text: 'The account\'s row locked, its databases counted against the plan\'s: one on beta, of 1,024 MB and 10 sessions, so that two at once can\'t both pass. The row keeps the account\'s name for it and the server\'s, ff_ and 24 random hexadecimal characters, which say nothing of whose it is.',
+        code: 'BE/src/databases/databases.service.ts create() · database-names.ts newServerName()',
+        msg: { kind: 'sql', text: "SELECT \"id\" FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;\nSELECT count(*) FROM \"databases\" WHERE \"account_id\" = '000000000001';\nINSERT INTO \"databases\" (\"account_id\", \"name\", \"db_name\", \"status\") VALUES ('000000000001', 'orders', 'ff_3f9c2a1e8b7d4c6a9e5f1a2b', 'creating');" },
+        set: { 'PostgreSQL.databases': 'orders · ff_3f9c2a1e8b7d4c6a9e5f1a2b · creating' } },
+      { from: 'api', to: 'datadb', kind: 'req', label: 'CREATE ROLE · CREATE DATABASE … OWNER · REVOKE', title: 'Its user and the database, on a server of their own',
+        text: 'With the backend\'s role there, ff_admin, which makes roles and databases but is no superuser. The password, 32 random bytes, reaches the server only as its SCRAM verifier, which the backend computes: it is in no statement and no log. The user owns its database, and as its owner takes PUBLIC\'s rights on it away: no other customer\'s user may connect there, and pg_hba.conf lets each user into its namesake database only, over TLS.',
+        code: 'BE/src/databases/data-server.ts create() · scram.ts scramVerifier() · deploy/data-db/pg_hba.conf',
+        msg: { kind: 'sql', text: "CREATE ROLE \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS\n  CONNECTION LIMIT 10 PASSWORD 'SCRAM-SHA-256$4096:…';\nGRANT \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\" TO \"ff_admin\" WITH INHERIT FALSE, SET TRUE;\nCREATE DATABASE \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\" OWNER \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\";\nSET ROLE \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\"; REVOKE ALL ON DATABASE \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\" FROM PUBLIC; RESET ROLE;" },
+        set: { 'Customers\' server.user': 'ff_3f9c2a1e8b7d4c6a9e5f1a2b · 10 sessions at most · SCRAM', 'Customers\' server.database': 'ff_3f9c2a1e8b7d4c6a9e5f1a2b · its user\'s' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply NetworkPolicy · the server on 5432', title: 'Its functions reach it at once',
+        text: 'The account\'s NetworkPolicy, written again: besides DNS, the server\'s addresses on port 5432 only, whatever the account\'s internet access. The server sees the functions\' connections come from the cluster\'s node, which masquerades what leaves the cluster.',
+        code: 'BE/src/orchestrator/kubernetes/manifests.ts networkPolicyManifest() · kubernetes.orchestrator.ts applyTenantLimits()',
+        set: { [K + '.NetworkPolicy']: 'ff-default-deny · DNS · the customers\' server on 5432' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · the connection string, this once', title: 'Its password, shown once',
+        text: 'In this answer only: FF keeps no copy. ff db password orders makes a new one, shown once too, after which the old one opens no session. The string says sslmode=require: every driver encrypts, and node-postgres checks the server\'s certificate too.',
+        code: 'databases.service.ts create() · cli/src/commands/db.rs shown_once()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json' }, body: { name: 'orders', status: 'active', host: 'db.ffunc.tn', port: 5432, database: 'ff_3f9c2a1e8b7d4c6a9e5f1a2b', user: 'ff_3f9c2a1e8b7d4c6a9e5f1a2b', password: 'Xq3v…', connectionString: 'postgresql://ff_3f9c2a1e8b7d4c6a9e5f1a2b:Xq3v…@db.ffunc.tn:5432/ff_3f9c2a1e8b7d4c6a9e5f1a2b?sslmode=require' } },
+        set: { 'PostgreSQL.databases': 'orders · ff_3f9c2a1e8b7d4c6a9e5f1a2b · active' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'PATCH /functions/:id/secrets · DATABASE_URL', title: '--secret-for: the string, the function\'s secret',
+        text: 'ff sets it as orders-api\'s DATABASE_URL, through ff secrets\' route: sealed in PostgreSQL, written to a Kubernetes Secret, and the function rolled out to read it from its environment, as an app written for Lambda and RDS reads its own.',
+        code: 'cli/src/commands/db.rs set_secrets() · BE/src/functions/functions.service.ts change() · manifests.ts environmentSecretManifest()',
+        set: { 'PostgreSQL.functions': 'orders-api · ACTIVE · secrets: DATABASE_URL (sealed)', [K + '.Secret']: 'fn-a71c…-env-2 · DATABASE_URL' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /orders · host <id>.fn.localhost', title: 'An order comes in',
+        text: 'At the function\'s URL, as in "A small app, end to end": the gateway builds AWS Lambda\'s event for function URLs and calls the function as any invoke.',
+        code: 'BE/src/function-urls/function-url.gateway.ts serve() · url-event.ts urlEvent()',
+        msg: { kind: 'http', first: 'POST /orders HTTP/1.1', headers: { host: 'k7x2…d5.fn.localhost:3001', 'content-type': 'application/json' }, body: { item: 'makroudh', quantity: 3 } } },
+      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke · the URL event', title: 'The event goes to the function',
+        text: 'Through the function\'s Service, as every call.',
+        code: 'functions.service.ts call() · kubernetes.orchestrator.ts invoke()',
+        set: { 'PostgreSQL.function_invocations': 'RUNNING · url' } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'http(event, context)', title: 'index.http reads the order',
+        text: 'requestContext.http says POST /orders; the body is the order. The code is the small app\'s, unchanged: only its DATABASE_URL names another server.',
+        code: 'examples/orders-app/index.js http()' },
+      { from: 'worker', to: 'datadb', kind: 'req', label: 'connect over TLS · CREATE TABLE IF NOT EXISTS · INSERT', title: 'The order, in its database on FF',
+        text: 'The instance\'s first call connects with DATABASE_URL, over TLS, the server\'s certificate checked: a public CA\'s in production; in development, the server\'s own CA, which the pods get at /etc/ff/data-db/ and Node.js reads through NODE_EXTRA_CA_CERTS. The account\'s internet access is off: the policy lets the function reach this server, and nothing else outside.',
+        code: 'examples/orders-app/index.js database() · manifests.ts dataDbCaSecretManifest()',
+        msg: { kind: 'sql', text: "CREATE TABLE IF NOT EXISTS orders (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, item text NOT NULL, …);\nINSERT INTO orders (item, quantity) VALUES ('makroudh', 3) RETURNING id, item, quantity, created_at;" },
+        set: { 'Customers\' server.orders': '1 row: makroudh × 3' } },
+      { from: 'worker', to: 'user', kind: 'res', label: '201 {"id":1,"item":"makroudh",…}', title: 'The order, as the response',
+        text: 'As in the small app: the handler\'s response object is the HTTP response, and the call is billed as any.',
+        code: 'url-response.ts urlAnswer() · functions.service.ts finish()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json', 'x-amzn-RequestId': INV }, body: { id: 1, item: 'makroudh', quantity: 3, created_at: '2026-10-23T06:36:12.481Z' } },
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · url', 'PostgreSQL.usage_records': 'success · 128 MB' } },
+      { from: 'api', to: 'datadb', kind: 'req', label: 'pg_database_size · numbackends', title: 'Measured every hour',
+        text: 'Each minute, the backend measures every database not measured yet in the hour, all in one query, as ff_admin, which reads every database\'s statistics. At 80% and 100% of the plan\'s storage, the owners get an e-mail; past 100%, the database\'s new sessions start read-only, a signal rather than a wall, which a session may lift for itself to clean up: the storage past the plan is billed.',
+        code: 'BE/src/databases/database-samples.service.ts · data-server.ts use() · storage-notice.ts storageStep()',
+        msg: { kind: 'sql', text: "SELECT d.\"datname\" AS \"name\", pg_database_size(d.\"oid\")::text AS \"size\", coalesce(s.\"numbackends\", 0)::int AS \"connections\"\n  FROM \"pg_database\" d LEFT JOIN \"pg_stat_database\" s ON s.\"datid\" = d.\"oid\"\n WHERE d.\"datname\" = ANY($1);" } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT database_samples · resource_usage_hourly', title: 'Billed by the GB-month',
+        text: 'The hour\'s sample, written once, in a partition per month; the hourly rating adds it to resource_usage_hourly. The month\'s statement prices the byte-hours over 2^30 bytes and the month\'s hours, at RDS\'s gp3 price per GB-month in dinars, the first GB-month of each month free. GET /usage, the console\'s Usage page and ff usage show the month so far; GET /databases/:id/metrics gives DatabaseConnections and VolumeBytesUsed, an hour a point, which alarms watch.',
+        code: 'database-samples.service.ts · BE/src/billing/hourly-rating.service.ts · rating.ts gbMonths()',
+        set: { 'PostgreSQL.database_samples': 'orders · 06:00 · 7.3 MB · 1 session', 'PostgreSQL.resource_usage_hourly': 'orders · 06:00 · 7,634,423 byte-hours' } },
     ],
   },
   {
@@ -2034,7 +2113,7 @@ const ARCH_INFO = {
   s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds each package\'s zip, uploaded or made of inline code, from which its code image is made; a copy of each inline function\'s code; the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
   k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
   ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
-  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend\'s pods in ff-system, and lets pods reach only DNS, and public addresses once the account\'s internet egress is on.', 'manifests.ts'],
+  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend\'s pods in ff-system, and lets pods reach only DNS, the server of customers\' databases on its port, and public addresses once the account\'s internet egress is on.', 'manifests.ts'],
   registry: ['Code registry', 'Every function\'s code as an image (ADR 0003): one per package, uploaded or made of inline code, in the repository ff-code/<account>, tagged with the package\'s SHA-256 in hex. The backend alone pushes and deletes; the nodes pull by digest over their own network, so no tenant policy opens for it. In development, the container ff-dev-registry next to the cluster: the backend pushes on 127.0.0.1:5056, the nodes pull ff-dev-registry:5000. In production, Zot in ff-system.', 'BE/src/packages/code-images.service.ts · registry.ts · hack/k8s/registry-up.sh · deploy/k8s/platform/70-code-registry.yaml'],
   service: ['Service', 'fn-<id>: ClusterIP, port http (8080). Invocations reach the ready pods through it.', 'manifests.ts serviceManifest()'],
   deployment: ['Deployment', 'fn-<id>: the runtime image, the code image by digest, environment, resources, probes, security context, and volumes. Its replica count changes with autoscaling, the idle sweep, and cold starts.', 'manifests.ts deploymentManifest()'],
@@ -2042,6 +2121,7 @@ const ARCH_INFO = {
   pod: ['Runtime: the main process', 'Serves /healthz, /readyz, and /invoke on :8080. It queues invocations, enforces the timeout, writes the START, END, and REPORT lines, and supervises the worker.', 'runtimes/nodejs/src/main.ts · runtimes/python/ff_runtime/main.py'],
   worker: ['Worker: your handler', 'Loads your code once and runs handler(event, context) for each invocation. It is replaced after a timeout, an out-of-memory error, or a crash.', 'runtimes/nodejs/src/worker.ts · runtimes/python/ff_runtime/worker.py'],
   node: ['Node: scheduler, kubelet, containerd', 'Places pods, starts containers from the runtime images, pulls each function\'s code image from the code registry, once per node, mounts it read-only at /var/task, and probes /readyz and /healthz.', 'manifests.ts deploymentManifest() (the code volume, the probes)'],
+  datadb: ['Customers\' databases', 'A PostgreSQL 18 server of its own, apart from FF\'s (ADR 0008): per database, a user that owns it, both named ff_ and 24 hexadecimal characters. The backend makes them with its own role there, ff_admin, never a superuser, measures each every hour, and turns one read-only past its plan\'s storage. Functions reach it on port 5432 with their account\'s internet access off; developers from their machines; TLS only, SCRAM passwords. It archives its WAL to the second site with WAL-G, 7 days of point-in-time recovery. In development, docker compose\'s data-db, at 10.199.0.10 on a network of its own.', 'deploy/data-db · BE/src/databases'],
   logstore: ['Log store: VictoriaLogs', 'In ff-system, it keeps every function\'s log lines for 31 days, after their instance is gone; each account reads its plan\'s window (14 days on beta). Fluent Bit, on every node, reads the function containers\' logs and adds each line\'s account, function, pod, stream and call, within 2,000 lines and 1 MiB a second per account. Only the collector and the backend reach it; in development the backend queries it through the API server\'s Service proxy.', 'deploy/k8s/logging · BE/src/orchestrator/kubernetes/log-store.ts'],
 };
 
@@ -2197,9 +2277,9 @@ const svgLink = (d, label, lx, ly, anchor) => '<g class="arch-link"><path d="' +
 
 /* ---------- architecture maps ---------- */
 function archBig() {
-  return '<svg class="diagram" viewBox="0 0 1000 626" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL, S3 and the code registry, and the Kubernetes cluster with the tenant namespace and the log store">' +
+  return '<svg class="diagram" viewBox="0 0 1000 626" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL, S3, the code registry and the server of customers\' databases, and the Kubernetes cluster with the tenant namespace and the log store">' +
     '<defs>' + arrowDefs('arch-arrow', '--muted') + '</defs>' +
-    svgGroup(208, 20, 300, 512, 'Your machine or server') +
+    svgGroup(208, 20, 300, 590, 'Your machine or server') +
     svgGroup(560, 20, 428, 590, 'Kubernetes cluster (k3s)') +
     svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-27d6fbbe5c7d (dev account)', 'end') +
     svgBox('user', 16, 136, 150, 76, 'You', 'console · curl') +
@@ -2212,6 +2292,7 @@ function archBig() {
     svgBox('db', 226, 344, 118, 72, 'PostgreSQL', 'records') +
     svgBox('s3', 372, 344, 118, 72, 'S3 storage', 'zips · code copies') +
     svgBox('registry', 226, 456, 264, 60, 'Code registry', 'ff-code/<account> · an image per package') +
+    svgBox('datadb', 226, 536, 264, 58, 'Customers\' databases', 'PostgreSQL 18 · a server of its own · TLS') +
     svgBox('k8sapi', 578, 52, 392, 56, 'Kubernetes API server', 'RBAC · admission policy ff-controller-scope') +
     svgBox('guard', 668, 168, 286, 44, 'Guardrails', 'ResourceQuota · LimitRange · NetworkPolicy') +
     svgBox('service', 594, 224, 178, 46, 'Service', 'fn-<id> · ClusterIP :8080') +
@@ -2227,6 +2308,8 @@ function archBig() {
     svgLink('M288,296 L288,342', 'SQL', 296, 324, 'start') +
     svgLink('M428,296 L428,342', 'S3 API', 436, 324, 'start') +
     svgLink('M358,296 L358,454', 'push', 362, 440, 'start') +
+    svgLink('M226,291 L216,291 L216,565 L224,565', '', 0, 0) +
+    svgLink('M578,506 L540,506 L540,580 L492,580', '5432', 516, 572) +
     svgLink('M578,486 L492,486', 'pull', 535, 478) +
     svgLink('M490,80 L576,80', 'HTTPS', 534, 72) +
     svgLink('M640,108 L640,222', 'service proxy', 648, 128, 'start') +
@@ -2240,7 +2323,7 @@ function archBig() {
 }
 function archMini() {
   const o = { inert: true };
-  return '<svg class="diagram" viewBox="0 0 420 430" role="img" aria-label="Where this step happens">' +
+  return '<svg class="diagram" viewBox="0 0 420 474" role="img" aria-label="Where this step happens">' +
     svgBox('user', 10, 10, 100, 40, 'You', '', o) +
     svgBox('idp', 10, 60, 100, 36, 'Keycloak', '', o) +
     svgBox('api', 120, 10, 290, 40, 'Backend API', '', o) +
@@ -2257,6 +2340,7 @@ function archMini() {
     svgBox('worker', 214, 273, 178, 36, 'Your handler', '', o) +
     svgBox('node', 10, 336, 400, 38, 'Node: scheduler · kubelet', '', o) +
     svgBox('logstore', 10, 382, 400, 38, 'Log store (VictoriaLogs)', '', o) +
+    svgBox('datadb', 10, 428, 400, 38, 'Customers\' databases (PostgreSQL 18)', '', o) +
     '</svg>';
 }
 function mountArchBig() {
