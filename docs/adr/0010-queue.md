@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-3 plan](../step-3-plan.md)'s D1, and its choices (its §9), confirmed by you on 2026-10-23; where its messages live, measured by Q-01's spike the same day |
 | **Date** | 2026-10-23 |
-| **Implementation** | Step-3 plan: decisions D1 to D5 and D9; tasks Q-02 to Q-07 |
+| **Implementation** | Step-3 plan: decisions D1 to D5 and D9; tasks Q-02 to Q-07. As built so far: Q-02 (below) |
 | **Related** | [Parent plan](../local-markets-and-aws-portability-plan.md): ADR-003 (the queue's backend), E-03, E-05, E-04's notifications, §4.6, §6.7; [What to build next](../what-to-build-next.md) §6; the spike, [`hack/spikes/queue`](../../hack/spikes/queue/README.md) |
 
 ## Context
@@ -69,6 +69,13 @@ Lambda calls a retried event with the same request ID. FF does too: each attempt
 ### 5. SQS's protocol as measured
 
 The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, and both MD5 sums exactly, a queue's URL under its endpoint and the account.
+
+### As built (Q-02)
+
+- **The tables,** by the migration `AsyncInvoke`: `queues`, a customer's by its name in the account or a function's own by the function, which it goes with; `queue_messages`, as decision 1 says, with a partial index on when it is next visible for functions' calls, so that their worker never reads customers' queues. Each queue keeps what its messages hold together, a trigger adding and taking each message's size as it is written and deleted: the plan's limit reads the account's few queues, not its messages.
+- **The claim** (decision 2): one `UPDATE` of the messages a `SELECT … ORDER BY visible_at LIMIT n FOR UPDATE SKIP LOCKED` picks, counting the receive and setting the lease; what the claim does afterwards, delete the message or put it back for later, is guarded by the receive count it saw, so that a backend whose lease ended changes nothing. An asynchronous call's lease is the longest its attempt can take: twice its function's timeout, a cold start, and a minute.
+- **A function's events** (decision 3): kept under their request ID, the call's own; what a call's attempts were (its failures, throttles, and the claims that kept an outcome) beside the event. A claim that kept none was lost with its backend, and counts as a failed attempt at the next claim (the decision log, 32).
+- **The request ID** (decision 4): the history's `request_id`, the first attempt's row being the request's own ID as every call's was, a retry a row of its own; a row that names no request is its own, by a trigger, as every call before.
 
 ## Consequences
 

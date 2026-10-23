@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'node:crypto';
 import { Observable } from 'rxjs';
 import { EntityManager, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
@@ -853,24 +854,30 @@ export class FunctionsService {
 
   /**
    * Runs one call of an ACTIVE function, whatever brought it (the API, its URL,
-   * a schedule), and records it as every call is: the invocation and its
-   * history, the metrics and the concurrency, the usage record. The caller has
-   * checked the function, the account's credit and its rate. The call's own
-   * failure is an outcome, not an exception, as each way in answers it its own
-   * way; only a failure to record it throws. `history` is what the history
-   * keeps of the event, when not the event itself: a URL's, without its
-   * callers' credentials. `requestId` is the invocation's ID when the caller
-   * chose it first: a URL's event names it.
+   * a schedule, an asynchronous call's attempt), and records it as every call
+   * is: the invocation and its history, the metrics and the concurrency, the
+   * usage record. The caller has checked the function, the account's credit
+   * and its rate. The call's own failure is an outcome, not an exception, as
+   * each way in answers it its own way; only a failure to record it throws.
+   * `history` is what the history keeps of the event, when not the event
+   * itself: a URL's, without its callers' credentials. `requestId` is the
+   * request's ID when the caller chose it first: a URL's event names it, and
+   * an asynchronous call's attempts keep it, each with its `attempt`.
    */
   async call(
     function_: Function,
     payload: unknown,
-    options: { source: InvocationSource; history?: unknown; requestId?: string },
+    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number },
   ): Promise<CallOutcome> {
     // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
     const keptInput = keptJson(options.history === undefined ? payload : options.history);
+    const requestId = options.requestId ?? randomUUID();
+    const attempt = options.attempt ?? 1;
     const invocation = this.invocationsRepository.create({
-      ...(options.requestId === undefined ? {} : { id: options.requestId }),
+      // A request's first attempt is the invocation of its ID, as every call before retries was; a retry is an invocation of its own.
+      id: attempt === 1 ? requestId : randomUUID(),
+      requestId,
+      attempt,
       functionId: function_.id,
       source: options.source,
       input: keptInput.value,
@@ -878,16 +885,15 @@ export class FunctionsService {
       status: InvocationStatus.RUNNING,
     });
 
-    // A chosen ID is a new row: inserted, without the lookup by ID that save() makes first.
-    if (options.requestId === undefined) await this.invocationsRepository.save(invocation);
-    else await this.invocationsRepository.insert(invocation as QueryDeepPartialEntity<FunctionInvocation>);
+    // A new row: inserted, without the lookup by ID that save() makes first.
+    await this.invocationsRepository.insert(invocation as QueryDeepPartialEntity<FunctionInvocation>);
 
     // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once (D14).
     this.metricsService.invocationStarted(function_);
     const startTime = Date.now();
     try {
-      // The invocation's ID is the request's: the runtime logs it, and the usage record is keyed by it (D6).
-      const result = await this.orchestrator.invoke(function_, payload, invocation.id);
+      // The runtime logs the request's ID, and the usage record is keyed by it and the attempt's start (D6).
+      const result = await this.orchestrator.invoke(function_, payload, invocation.requestId);
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
@@ -948,7 +954,7 @@ export class FunctionsService {
       const endedAt = current ? (await manager.save(FunctionInvocation, invocation)).updatedAt : new Date();
       await this.usage.record(
         usageRecord(function_, {
-          requestId: invocation.id,
+          requestId: invocation.requestId,
           startedAt: invocation.createdAt,
           endedAt,
           status,

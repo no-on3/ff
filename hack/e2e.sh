@@ -21,7 +21,13 @@
 # and the usage records; the URL's own domains, proved through a DNS server of
 # the test's, a subdomain by its CNAME and an apex by its TXT record. Then a
 # function on schedules: rate(1 minute) within about 70 s, with EventBridge's
-# Scheduled Event or the schedule's input, a disabled one never. Then a
+# Scheduled Event or the schedule's input, a disabled one never. Then
+# asynchronous calls, as AWS Lambda's: an Event answered 202 at once and run
+# within seconds under its request ID, a DryRun that runs nothing, Lambda's
+# 1 MB limit; a failing Event retried a minute, then two minutes after its
+# failure (the waits read in FF's database, then cut short there), then
+# dropped, each attempt in the history and billed; one past its age dropped
+# without another attempt. Then a
 # customer's database on the run's own server of customers' databases: made, its
 # connection string over TLS as its own user, the plan's one database, a new
 # password, a function reaching it with its account's internet access off and
@@ -642,6 +648,67 @@ check "each schedule says how its run went, and which call it was; the disabled 
 check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM usage_records WHERE function_id = '$sched_fn'")"
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
+
+echo "== asynchronous calls (ADR 0010)"
+async_code='export const handler = async (event: { fail?: boolean }, context: { awsRequestId: string }) => { if (event.fail) throw new Error("asked to fail"); return { got: event, requestId: context.awsRequestId }; };'
+async_fn="$(http POST /functions "$(jq -n --arg code "$async_code" '{name: "e2e-async", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+# A request's attempts in the history, the first first; the n-th's end awaited, as the worker claims every second.
+attempts_of() { http GET "/functions/$async_fn/invocations?limit=50" | jq -c --arg r "$1" '[.invocations[] | select(.requestId == $r)] | sort_by(.attempt)'; }
+attempt_ended() {
+  for _ in $(seq 1 30); do
+    [ "$(attempts_of "$1" | jq --argjson n "$2" '[.[] | select(.attempt == $n and .status != "RUNNING")] | length')" = 1 ] && return 0
+    sleep 1
+  done
+}
+kept_events() { env_q "SELECT count(*) FROM queue_messages WHERE message_id = '$1'"; }
+gone_soon() { for _ in $(seq 1 15); do [ "$(kept_events "$1")" = 0 ] && return 0; sleep 1; done; }
+# The event put back after its attempt n, which the worker does a moment after the attempt's end.
+put_back() { for _ in $(seq 1 50); do [ "$(env_q "SELECT attributes->>'settled' FROM queue_messages WHERE message_id = '$1'")" = "$2" ] && return 0; sleep 0.2; done; }
+# How long the event waits after its attempt n ended, by FF's database: the next attempt's time, less the attempt's end.
+retry_wait() {
+  put_back "$1" "$2"
+  env_q "SELECT round(extract(epoch FROM m.visible_at - i.updated_at))::int FROM queue_messages m JOIN function_invocations i ON i.request_id = m.message_id AND i.attempt = $2 WHERE m.message_id = '$1'"
+}
+queued="$(http POST "/functions/$async_fn/invoke" '{"input": {"order": 7}}' -H 'X-Amz-Invocation-Type: Event' -D "$work/async-headers")"
+async_request="$(jq -r .requestId <<<"$queued")"
+check "an Event is kept and answered at once: 202 and its request ID, the answer's own" "202 true" \
+  "$(status) $(grep -qi "^x-ff-request-id: $async_request" "$work/async-headers" && echo true || echo false)"
+attempt_ended "$async_request" 1
+gone_soon "$async_request"
+check "it runs without anyone waiting, as its first attempt, the function seeing its request ID; it is kept no more" \
+  "COMPLETED async 1 true {\"order\":7} $async_request 0" \
+  "$(attempts_of "$async_request" | jq -r '.[0] | "\(.status) \(.source) \(.attempt) \(.id == .requestId) \(.output.got | tojson) \(.output.requestId)"') $(kept_events "$async_request")"
+http POST "/functions/$async_fn/invoke" '{"input": {}}' -H 'X-Amz-Invocation-Type: DryRun' >/dev/null
+check "a DryRun only checks: 204, nothing kept, nothing run" "204 0 1" \
+  "$(status) $(env_q "SELECT count(*) FROM queue_messages WHERE function_id = '$async_fn'") $(http GET "/functions/$async_fn/invocations" | jq .total)"
+xs 1048576 >"$work/async-big.txt"
+jq -n --rawfile big "$work/async-big.txt" '{input: $big}' >"$work/async-big.json"
+http POST "/functions/$async_fn/invoke" "" --data-binary @"$work/async-big.json" -H 'X-Amz-Invocation-Type: Event' >/dev/null
+check "an Event over AWS Lambda's 1 MB as JSON is refused as Lambda refuses it" "413 RequestEntityTooLargeException" "$(status) $(jq -r .error "$work/body")"
+failing="$(http POST "/functions/$async_fn/invoke" '{"input": {"fail": true}, "invocationType": "Event"}' | jq -r .requestId)"
+check "an Event named in the body is kept too" 202 "$(status)"
+attempt_ended "$failing" 1
+first_wait="$(retry_wait "$failing" 1)"
+# The rest of its wait cut short, in FF's database, so that the run needn't wait three minutes.
+env_q "UPDATE queue_messages SET visible_at = now() WHERE message_id = '$failing'" >/dev/null
+attempt_ended "$failing" 2
+second_wait="$(retry_wait "$failing" 2)"
+env_q "UPDATE queue_messages SET visible_at = now() WHERE message_id = '$failing'" >/dev/null
+attempt_ended "$failing" 3
+gone_soon "$failing"
+check "a failing Event is retried a minute after its first failure, then two minutes after its second, as Lambda retries it" "60 120" "$first_wait $second_wait"
+check "then dropped after its third attempt, each attempt in the history under its request ID" "1:ERROR 2:ERROR 3:ERROR 0" \
+  "$(attempts_of "$failing" | jq -r '[.[] | "\(.attempt):\(.status)"] | join(" ")') $(kept_events "$failing")"
+check "each attempt a call billed on its own" 3 "$(env_q "SELECT count(*) FROM usage_records WHERE request_id = '$failing'")"
+aged="$(http POST "/functions/$async_fn/invoke" '{"input": {"fail": true}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+attempt_ended "$aged" 1
+put_back "$aged" 1
+# Waiting for its retry, it is made six hours and a minute old, past Lambda's maximum age, and due at once.
+env_q "UPDATE queue_messages SET sent_at = now() - interval '6 hours 1 minute', visible_at = now() WHERE message_id = '$aged'" >/dev/null
+gone_soon "$aged"
+check "an Event past its maximum age is dropped at its next claim, without another attempt" "0 1" "$(kept_events "$aged") $(attempts_of "$aged" | jq length)"
+http DELETE "/functions/$async_fn" >/dev/null
+check "deleting the function deletes its queue" 0 "$(env_q "SELECT count(*) FROM queues WHERE function_id = '$async_fn'")"
 
 echo "== customers' databases (ADR 0008)"
 made="$(http POST /databases '{"name": "e2e-orders"}')"

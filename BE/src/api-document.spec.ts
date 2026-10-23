@@ -14,6 +14,7 @@ import { ApiKeysService } from './api-keys/api-keys.service';
 import { apiDocument } from './api-document';
 import { Principal } from './auth/principal';
 import { FunctionsController } from './functions/functions.controller';
+import { AsyncInvocationsService } from './functions/async-invocations.service';
 import { FunctionsService } from './functions/functions.service';
 import { FunctionUrlsController } from './function-urls/function-urls.controller';
 import { FunctionUrlsService } from './function-urls/function-urls.service';
@@ -111,6 +112,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
           // The live tail answers with an event stream, which ends here at once (P-43).
           useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }), liveLogs: async () => of({ data: {} }) }),
         },
+        { provide: AsyncInvocationsService, useValue: succeeding(AsyncInvocationsService, { queue: async () => ({ requestId: ID }), dryRun: async () => undefined }) },
         { provide: FunctionUrlsService, useValue: succeeding(FunctionUrlsService) },
         { provide: CustomDomainsService, useValue: succeeding(CustomDomainsService, { list: async () => [] }) },
         { provide: SchedulesService, useValue: succeeding(SchedulesService, { list: async () => [], previewRuns: () => [] }) },
@@ -191,7 +193,8 @@ describe('the OpenAPI document (L1, P-08)', () => {
     expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/url/domains', 'POST /functions/{id}/url/domains', 'POST /functions/{id}/url/domains/{domain}/verify', 'DELETE /functions/{id}/url/domains/{domain}', 'GET /functions/{id}/schedules', 'POST /functions/{id}/schedules', 'GET /functions/{id}/schedules/{scheduleId}', 'PUT /functions/{id}/schedules/{scheduleId}', 'DELETE /functions/{id}/schedules/{scheduleId}', 'GET /schedules/next-runs', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview']));
     // The scaler's per-minute table answered GET /metrics/:functionId; the metrics now come from the usage records.
     expect(checked.map((r) => r.route)).not.toContain('GET /metrics/{functionId}');
-    expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
+    // Invoke answers each of its invocation types with its own status, which the next test checks.
+    expect(checked.filter((r) => r.route !== 'POST /functions/{id}/invoke' && r.documented.join() !== String(r.answered))).toEqual([]);
   });
 
   it('serves the document at /api-json, and its viewer at /api', async () => {
@@ -204,7 +207,17 @@ describe('the OpenAPI document (L1, P-08)', () => {
     expect(await viewer.text()).toContain('swagger-ui');
   });
 
-  it("documents invoke as 201 Created, which hack/e2e.sh checks too, and 413 for an input over AWS Lambda's 6 MB", () => {
-    expect(Object.keys(document.paths['/functions/{id}/invoke'].post!.responses)).toEqual(['201', '413']);
+  it("documents invoke as 201 Created, which hack/e2e.sh checks too, 202 for an Event and 204 for a DryRun, as each answers, and 413 and 429", async () => {
+    const answered = async (type?: string) =>
+      (
+        await fetch(`${baseUrl}/functions/${ID}/invoke`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(type ? { 'x-amz-invocation-type': type } : {}) },
+          body: '{}',
+        })
+      ).status;
+
+    expect(Object.keys(document.paths['/functions/{id}/invoke'].post!.responses)).toEqual(['201', '202', '204', '413', '429']);
+    expect([await answered(), await answered('RequestResponse'), await answered('Event'), await answered('DryRun')]).toEqual([201, 201, 202, 204]);
   });
 });

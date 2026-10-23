@@ -59,6 +59,7 @@ const DATABASES = migrationNames.find((name) => name.startsWith('Databases1')) a
 const DATABASE_BILLING = migrationNames.find((name) => name.startsWith('DatabaseBilling')) as string;
 const DATABASE_OPERATIONS = migrationNames.find((name) => name.startsWith('DatabaseOperations')) as string;
 const FUNCTION_KEYS = migrationNames.find((name) => name.startsWith('FunctionKeys')) as string;
+const QUEUE_LIMITS = migrationNames.find((name) => name.startsWith('QueueLimits')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -236,8 +237,8 @@ run('database schema (L2, real PostgreSQL)', () => {
   it("the capacity-samples migration replaces P-20's partition function, and reverts with samples present (P-21)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      // P-30's price book guard, P-31's ledger check, P-33's NOTIFY and inline code's hash too, which reverting their migrations removes.
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_refuse_change']);
+      // P-30's price book guard, P-31's ledger check, P-33's NOTIFY, inline code's hash and the queues' sizes too, which reverting their migrations removes.
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_own_request', 'ff_queue_size', 'ff_refuse_change']);
       expect(await partitionsOf(dataSource, 'capacity_samples')).toEqual([
         { relname: monthPartition('capacity_samples', 0) },
         { relname: monthPartition('capacity_samples', 1) },
@@ -256,7 +257,7 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_refuse_change']);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_own_request', 'ff_queue_size', 'ff_refuse_change']);
     });
   });
 
@@ -347,6 +348,42 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'function_invocations' AND column_name LIKE '%truncated'`)).toEqual([]);
       expect(await dataSource.query(`SELECT output #>> '{}' AS output FROM function_invocations ORDER BY created_at`)).toEqual([{ output: 'x'.repeat(100000) }, { output: '{"rows":[1,2' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the async-invoke migration gives each call its own ID as its request's, the first of its attempts, and reverts with an asynchronous call and a waiting event present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, QUEUE_LIMITS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('f', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      const [{ id: before }] = await dataSource.query(`INSERT INTO function_invocations (function_id, input, status, source) VALUES ($1, '{}', 'COMPLETED', 'url') RETURNING id`, [id]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT id, request_id, attempt, source FROM function_invocations`)).toEqual([{ id: before, request_id: before, attempt: 1, source: 'url' }]);
+      // A row that names no request is its own, as every call before.
+      const [{ id: own, request_id: itsRequest }] = await dataSource.query(`INSERT INTO function_invocations (function_id, input, status) VALUES ($1, '{}', 'COMPLETED') RETURNING id, request_id`, [id]);
+      expect(itsRequest).toBe(own);
+      await dataSource.query(`DELETE FROM function_invocations WHERE id = $1`, [own]);
+      await dataSource.query(
+        `INSERT INTO function_invocations (function_id, request_id, attempt, input, status, source) VALUES ($1, $2, 2, '{}', 'ERROR', 'async')`,
+        [id, before],
+      );
+      const [{ id: queue }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind, function_id) VALUES ($1, $2::text, 'function', $2::uuid) RETURNING id`, [ACCOUNT, id]);
+      await dataSource.query(`INSERT INTO queue_messages (queue_id, function_id, message_id, body, size_bytes, expires_at) VALUES ($1, $2, gen_random_uuid(), '{}', 2, now() + interval '1 hour')`, [queue, id]);
+
+      await migrateDownTo(dataSource, QUEUE_LIMITS);
+
+      expect(await dataSource.query(`SELECT source FROM function_invocations ORDER BY created_at`)).toEqual([{ source: 'url' }, { source: 'api' }]);
+      expect(await dataSource.query(`SELECT to_regclass('queues') AS q, to_regclass('queue_messages') AS m`)).toEqual([{ q: null, m: null }]);
+      expect(await ffFunctions(dataSource)).not.toEqual(expect.arrayContaining(['ff_own_request']));
+      expect(await ffFunctions(dataSource)).not.toEqual(expect.arrayContaining(['ff_queue_size']));
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -867,6 +904,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         'plans',
         'platform_settings',
         'price_books',
+        'queue_messages',
+        'queues',
         'rate_limited_invocations',
         'rating_runs',
         'resource_usage_hourly',
@@ -893,7 +932,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets', 'queues']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

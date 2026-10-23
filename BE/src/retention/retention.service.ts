@@ -12,6 +12,7 @@ import { PackagesService } from '../packages/packages.service';
 import { DatabasesService } from '../databases/databases.service';
 import { BucketsService } from '../storage/buckets.service';
 import { parsePlanLimits } from '../plans/plan-limits';
+import { QueueStore } from '../queues/queue-store';
 
 const DAY_SECONDS = 86_400;
 /** Invocations deleted per statement: each a short transaction, holding few locks. */
@@ -26,10 +27,12 @@ export const DELIVERY_DAYS = 30;
  *   the customer's own users, so it is kept only for the account's plan's
  *   historyRetentionDays;
  * - notification deliveries, kept 30 days to show how they went;
+ * - queues' messages past their expiry: an asynchronous call an hour past
+ *   the longest age a function may give it, which its worker hasn't seen;
  * - packages that no function names, an hour after their upload;
  * - a closed account's functions, their history and logs, its packages, its
- *   databases, its alarms, notification deliveries and webhook secret, once
- *   the notice period its closure set has passed.
+ *   databases, its queues, its alarms, notification deliveries and webhook
+ *   secret, once the notice period its closure set has passed.
  * Usage records, the ledger, invoices and the audit log are not touched: the
  * law requires keeping them for years. Last, the same job makes again the code
  * images the registry has lost (FunctionsService.restoreCodeImages): hourly,
@@ -51,6 +54,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     @Inject(ORCHESTRATOR) private readonly orchestrator: Orchestrator,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    private readonly queues: QueueStore,
   ) {}
 
   onModuleInit(): void {
@@ -70,6 +74,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     this.running = (async () => {
       await this.purgeHistory().catch((error: unknown) => this.logger.error(`Could not purge the invocation history: ${describeError(error)}`));
       await this.purgeDeliveries().catch((error: unknown) => this.logger.error(`Could not purge the notification deliveries: ${describeError(error)}`));
+      await this.purgeMessages().catch((error: unknown) => this.logger.error(`Could not purge the expired messages: ${describeError(error)}`));
       await this.packages.purgeUnused().catch((error: unknown) => this.logger.error(`Could not purge the unused packages: ${describeError(error)}`));
       await this.deleteClosedAccounts().catch((error: unknown) => this.logger.error(`Could not look for closed accounts to delete: ${describeError(error)}`));
       await this.functions.restoreCodeImages().catch((error: unknown) => this.logger.error(`Could not restore the lost code images: ${describeError(error)}`));
@@ -134,6 +139,13 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     return deleted;
   }
 
+  /** Deletes the queues' messages past their expiry, before the database's now (or `now`); returns how many. */
+  async purgeMessages(now?: Date): Promise<number> {
+    const deleted = await this.queues.purgeExpired(now, PURGE_BATCH);
+    if (deleted) this.logger.log(`Deleted ${deleted} message(s) past their expiry`);
+    return deleted;
+  }
+
   /**
    * Deletes the data of each closed account whose notice period has passed by
    * `now`, the earliest first. An account that fails is logged and left for
@@ -163,7 +175,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
    * customers' database server; then its buckets, emptied, and its access keys,
    * revoked; then its namespace, so
    * that nothing writes more of its lines; then its lines in the log store. Then, at once, its
-   * alarms, notification deliveries and webhook secret go, and the account is marked,
+   * queues with their messages, its alarms, notification deliveries and webhook secret go, and the account is marked,
    * with an entry in its audit log, once. Each step may run again, so
    * a run that failed part way is finished by the next.
    */
@@ -181,6 +193,8 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       await manager.query(`DELETE FROM "notification_deliveries" WHERE "account_id" = $1`, [accountId]);
       await manager.query(`DELETE FROM "webhook_secrets" WHERE "account_id" = $1`, [accountId]);
       await manager.query(`DELETE FROM "alarms" WHERE "account_id" = $1`, [accountId]);
+      // Its functions' own went with them; any other goes with its messages.
+      await manager.query(`DELETE FROM "queues" WHERE "account_id" = $1`, [accountId]);
       const marked = await manager.update(Account, { id: accountId, dataDeletedAt: IsNull() }, { dataDeletedAt: new Date() });
       if (!marked.affected) return;
       await this.audit.record(

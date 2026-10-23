@@ -107,13 +107,26 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
    * K8S_READY_TIMEOUT_SECONDS; then 30 s more. A function changed since the
    * call started may have had a longer timeout then, so that call gets the
    * platform's maximum. Times are the database's, as the invocations' are.
+   * An asynchronous call's lost attempt is its request's: the record names
+   * the request, and the event's next claim counts the attempt as failed.
    */
   async reapLost(now?: Date): Promise<number> {
     const coldStartSeconds = this.config.get<number>('kubernetes.readyTimeoutSeconds', 90);
     const lost = await this.dataSource.query<
-      Array<{ id: string; created_at: Date; function_id: string; account_id: string; name: string; runtime: string; memory: number; timeout: number; min_instances: number }>
+      Array<{
+        id: string;
+        request_id: string;
+        created_at: Date;
+        function_id: string;
+        account_id: string;
+        name: string;
+        runtime: string;
+        memory: number;
+        timeout: number;
+        min_instances: number;
+      }>
     >(
-      `SELECT i."id", i."created_at", f."id" AS "function_id", f."account_id", f."name", f."runtime", f."memory", f."timeout", f."min_instances"
+      `SELECT i."id", i."request_id", i."created_at", f."id" AS "function_id", f."account_id", f."name", f."runtime", f."memory", f."timeout", f."min_instances"
          FROM "function_invocations" i JOIN "functions" f ON f."id" = i."function_id"
         WHERE i."status" = 'RUNNING'
           AND i."created_at" < coalesce($1::timestamptz, now())
@@ -143,7 +156,7 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
           minInstances: row.min_instances,
         };
         await this.record(
-          usageRecord(fn, { requestId: row.id, startedAt: row.created_at, endedAt: ended, status: UsageStatus.LOST, durationMs: 0 }),
+          usageRecord(fn, { requestId: row.request_id, startedAt: row.created_at, endedAt: ended, status: UsageStatus.LOST, durationMs: 0 }),
           manager,
         );
         return true;

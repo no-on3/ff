@@ -40,6 +40,8 @@ export function errorType(error: string | null | undefined): string | null {
 
 const callView = (invocation: FunctionInvocation): AdminCallView => ({
   id: invocation.id,
+  requestId: invocation.requestId,
+  attempt: invocation.attempt,
   status: invocation.status,
   source: invocation.source,
   duration: invocation.duration,
@@ -95,32 +97,35 @@ export class AdminSupportService {
     return { accounts, functions, calls: isId ? await this.callsByRequestId(q.toLowerCase()) : [] };
   }
 
+  /** A request's calls: each attempt the history keeps, the first first; else each its usage records have. */
   private async callsByRequestId(requestId: string): Promise<AdminCallHitView[]> {
-    const kept = await this.invocations.findOne({ where: { id: requestId }, relations: { function: true } });
-    if (kept) {
-      return [
-        {
-          requestId,
-          functionId: kept.functionId,
-          functionName: kept.function.name,
-          accountId: kept.function.accountId,
-          status: kept.status,
-          at: kept.createdAt,
-          inHistory: true,
-          functionExists: true,
-        },
-      ];
+    const kept = await this.invocations.find({ where: { requestId }, relations: { function: true }, order: { createdAt: 'ASC' } });
+    if (kept.length) {
+      return kept.map((call) => ({
+        requestId,
+        invocationId: call.id,
+        attempt: call.attempt,
+        functionId: call.functionId,
+        functionName: call.function.name,
+        accountId: call.function.accountId,
+        status: call.status,
+        at: call.createdAt,
+        inHistory: true,
+        functionExists: true,
+      }));
     }
     const records = await this.functions.manager.query<
       Array<{ function_id: string; function_name: string; account_id: string; status: string; started_at: Date; function_exists: boolean }>
     >(
       `SELECT u."function_id", u."function_name", u."account_id", u."status", u."started_at",
               EXISTS (SELECT 1 FROM "functions" f WHERE f."id" = u."function_id") AS "function_exists"
-         FROM "usage_records" u WHERE u."request_id" = $1`,
+         FROM "usage_records" u WHERE u."request_id" = $1 ORDER BY u."started_at"`,
       [requestId],
     );
     return records.map((row) => ({
       requestId,
+      invocationId: null,
+      attempt: null,
       functionId: row.function_id,
       functionName: row.function_name,
       accountId: row.account_id,

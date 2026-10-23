@@ -332,6 +332,23 @@ curl -s "$FF/schedules/next-runs?expression=rate(15%20minutes)" | jq -c .runs   
 - **In the console**, a function's Schedules tab lists its schedules, with when each runs next and how its last run went, in your time and in UTC, and the last run's request ID. It makes one, showing the next five runs as you type the expression, or what is wrong in it, with a few examples to start from; it changes one, disables and enables it, and deletes it. Every member sees them; owners and developers change them.
 - **The rest.** `GET /functions/<id>/schedules` lists them with their next run; `PUT …/schedules/<scheduleId>` changes what you send (`"enabled": false` stops the runs, `true` starts them again from now); `DELETE` removes one, and deleting the function removes them all. Names are unique within a function: letters, digits, `.`, `-` and `_`, as EventBridge rules'. The plan limits how many an account has (20 on the beta plan). Only functions with AWS Lambda's event can have schedules.
 
+**Call a function without waiting.** As AWS Lambda's asynchronous invoke: the invocation type `Event`, in the header `X-Amz-Invocation-Type` or as `invocationType` in the body, keeps the call and answers at once, 202, with its request ID, the answer's `x-ff-request-id` too; FF runs it within seconds:
+
+```bash
+curl -s -X POST "$FF/functions/$ID/invoke" -H 'content-type: application/json' -H 'X-Amz-Invocation-Type: Event' \
+  -d '{"input": {"name": "Tunis"}}' -w ' %{http_code}\n'
+# {"requestId":"5f0c2b9e-…"} 202
+curl -s "$FF/functions/$ID/invocations?limit=3" | jq -c '.invocations[] | {requestId, attempt, source, status}'
+# {"requestId":"5f0c2b9e-…","attempt":1,"source":"async","status":"COMPLETED"}
+```
+
+- **Retried as Lambda retries it.** A failure of the function (it threw, timed out, or couldn't load) is retried a minute after, and a second one two minutes after; after the third attempt the call is dropped, which the backend's log says. A call that found no free instance, or that FF couldn't make (the function not `ACTIVE`, the account suspended or out of credit), is tried again after 1, 2, 4… seconds, up to five minutes apart, until it is six hours old. Each attempt is a call of its own in the history, its `source` `async` and its `attempt`, under the request ID, which its log lines name; each has its usage record, and is billed as any call. The waiting isn't.
+- **At least once.** The call waits in FF's database until it ends ([ADR 0010](adr/0010-queue.md)). Two backends never run an attempt at once; one stopped during an attempt leaves the call to come back when its lease ends (twice the function's timeout, the cold start's limit and a minute), and that attempt counts as failed. A function may so see a call twice: as on Lambda, it should do its work once per request ID (`context.awsRequestId`).
+- **Limits.** The event is at most 1 MB as JSON, Lambda's limit for asynchronous calls (413 past it). The calls waiting count against the plan's room for messages (100 MB on the beta plan, its queues' messages with them): past it, 429 until some have run. The plan's invocations per second count each call when it comes, not its attempts.
+- **`DryRun`** only checks that the call could be made, the function and the input's size, and answers 204: nothing runs.
+- **The worker:** every second (`FF_ASYNC_INTERVAL_SECONDS`; 0 for a backend that runs none), each backend claims the calls due, at most ten running at once (`FF_ASYNC_CONCURRENCY`).
+- **In the console**, a function's Invocations tab invokes without waiting when "Don't wait for the answer" is ticked: it says the call's request ID, and its attempts join the history, each "asynchronously, attempt n", linked to its request's log lines.
+
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, handler, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
 ```bash
@@ -736,7 +753,7 @@ curl -s "$FF/audit-log?limit=20" -H "$AUTH" | jq -c '.entries[] | {at, actorLabe
 curl -s "$FF/audit-log?limit=20&before=<next>" -H "$AUTH"   # the next page, older; "next" is null on the last one
 ```
 
-**Usage records.** Every invocation leaves one row in `usage_records` when it ends, written in the same transaction as its final state in the history (D6 of the client-readiness plan). The row copies what the price will depend on: the account, the function's ID, name, runtime and memory at the time of the call, the runtime's duration, the billed duration, the cold start (`init_ms`), and the outcome. Its `request_id` is the invocation's ID. Rows are never changed or deleted, not even when the function changes or is deleted: the database refuses it. What is billed follows D7:
+**Usage records.** Every invocation leaves one row in `usage_records` when it ends, written in the same transaction as its final state in the history (D6 of the client-readiness plan). The row copies what the price will depend on: the account, the function's ID, name, runtime and memory at the time of the call, the runtime's duration, the billed duration, the cold start (`init_ms`), and the outcome. Its `request_id` is the request's ID, the invocation's own but for an asynchronous call's retries, which keep the first attempt's: each attempt is a row of its own, by its start. Rows are never changed or deleted, not even when the function changes or is deleted: the database refuses it. What is billed follows D7:
 
 | Outcome (`status`) | Billed duration (`billed_ms`) |
 |---|---|
@@ -850,7 +867,7 @@ docker compose exec -T postgres psql -U postgres -d serverless_platform -c "
   INSERT INTO tax_rates (kind, valid_from, percent, source) VALUES ('vat', '2027-01-01', 20, 'Finance Law 2027')"
 ```
 
-**Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known.
+**Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known. An asynchronous call's lost attempt isn't the end of it: nobody waits for its answer, so its event comes back once its lease ends, and the lost attempt counts as one that failed ("Call a function without waiting", above).
 
 **Capacity samples.** Five seconds into every minute, the backend lists FF's Deployments in one Kubernetes call and writes a row to `capacity_samples` for each function with a ready instance: how many, its memory and its `minInstances` (D6 and D8 of the client-readiness plan). A warm instance holds its memory whether or not it runs a call, and these samples show how much. Like usage records, samples are never changed or deleted, and the table has a partition per month. The capacity report weighs, per account and day, the GB-s held for ready instances against the GB-s the usage records bill:
 

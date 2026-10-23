@@ -27,6 +27,7 @@ import { PackagesService } from '../packages/packages.service';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
+import { QueueStore } from '../queues/queue-store';
 import { RetentionService } from './retention.service';
 import { memoryEnvironments, noFunctionKeys, noPackages } from '../functions/test-fixtures';
 
@@ -107,7 +108,7 @@ run('what FF keeps only for a while (L2)', () => {
     );
     const packages = new PackagesService(db.dataSource.getRepository(Package), objectStore as never, audit, { deleteImage: async () => undefined } as never);
     // An account without databases or buckets: deleting them asks no server, nor the store.
-    retention = new RetentionService(db.dataSource, functions, packages, { deleteAll: async () => 0 } as never, { deleteAll: async () => 0 } as never, orchestrator as unknown as Orchestrator, audit, config);
+    retention = new RetentionService(db.dataSource, functions, packages, { deleteAll: async () => 0 } as never, { deleteAll: async () => 0 } as never, orchestrator as unknown as Orchestrator, audit, config, new QueueStore(db.dataSource));
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
 
@@ -232,8 +233,10 @@ run('what FF keeps only for a while (L2)', () => {
     const packagesOf = (accountId: string) => count('SELECT count(*)::int AS n FROM packages WHERE account_id = $1', accountId);
     const deletedAt = async (accountId: string) =>
       (await query<Array<{ at: Date | null }>>('SELECT data_deleted_at AS at FROM accounts WHERE id = $1', [accountId]))[0].at;
-    /** A notification delivered to the account, and its webhook secret. */
+    /** A notification delivered to the account, its webhook secret, an alarm, and a queue of its own with a message. */
     const notified = async (accountId: string) => {
+      const [{ id: queue }] = await query<Array<{ id: string }>>(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [accountId]);
+      await query(`INSERT INTO queue_messages (queue_id, message_id, body, size_bytes, expires_at) VALUES ($1, gen_random_uuid(), 'hi', 2, now() + interval '4 days')`, [queue]);
       await query(
         `INSERT INTO notification_deliveries (account_id, notification_id, kind, channel, target, payload) VALUES ($1, gen_random_uuid(), 'test', 'webhook', 'https://hooks.example.tn', '{}')`,
         [accountId],
@@ -249,6 +252,7 @@ run('what FF keeps only for a while (L2)', () => {
       await count('SELECT count(*)::int AS n FROM notification_deliveries WHERE account_id = $1', accountId),
       await count('SELECT count(*)::int AS n FROM webhook_secrets WHERE account_id = $1', accountId),
       await count('SELECT count(*)::int AS n FROM alarms WHERE account_id = $1', accountId),
+      await count('SELECT count(*)::int AS n FROM queues WHERE account_id = $1', accountId),
     ];
     const auditOf = async (accountId: string) =>
       (await query<Array<{ action: string; actor: string; resource: string }>>('SELECT action, actor, resource FROM audit_log WHERE account_id = $1 ORDER BY id', [accountId])).map(
@@ -269,8 +273,8 @@ run('what FF keeps only for a while (L2)', () => {
 
       expect([await functionsOf(due.id), await historyOf(due.id), await recordsOf(due.id)]).toEqual([0, 0, 2]);
       expect([await notificationsOf(due.id), await notificationsOf(later.id)]).toEqual([
-        [0, 0, 0],
-        [1, 1, 1],
+        [0, 0, 0, 0],
+        [1, 1, 1, 1],
       ]);
       expect(removed).toEqual([node.id, python.id]);
       expect(objectStore.deleteCode.mock.calls).toEqual([[`${node.id}/code.ts`], [`${python.id}/code.py`]]);

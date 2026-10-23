@@ -471,6 +471,20 @@ describe('configuration', () => {
     });
   });
 
+  describe('asynchronous calls', () => {
+    it('are claimed every second, ten at once on each backend, by default', () => {
+      expect(configuration(dev).asyncInvoke).toEqual({ intervalSeconds: 1, concurrency: 10 });
+    });
+
+    it('take 0 for a backend that runs none, and more at once', () => {
+      expect(configuration({ ...dev, FF_ASYNC_INTERVAL_SECONDS: '0', FF_ASYNC_CONCURRENCY: '50' }).asyncInvoke).toEqual({ intervalSeconds: 0, concurrency: 50 });
+    });
+
+    it('refuse none at once, which would never run one', () => {
+      expect(problems({ ...dev, FF_ASYNC_CONCURRENCY: '0' })).toEqual([expect.stringMatching(/^FF_ASYNC_CONCURRENCY/)]);
+    });
+  });
+
   describe('the runtime images', () => {
     it('run protocol 3 by default, which hands a function the payload as its event', () => {
       expect(configuration(dev).kubernetes.runtimeImages).toEqual({ nodejs: 'ff-runtime-nodejs:24-v3', python: 'ff-runtime-python:3.13-v3' });

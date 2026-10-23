@@ -89,7 +89,7 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
   const callRows = (calls: Call[]) =>
     calls.map((call) => [
       <span className={`font-mono text-xs ${call.id === asked ? 'rounded bg-yellow-100 px-1' : ''}`}>{call.id}</span>,
-      sourceText(call.source),
+      sourceText(call.source, call.attempt),
       outcome(call),
       milliseconds(call.duration),
       whenUtc(call.createdAt),
@@ -97,7 +97,7 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
         <button type="button" className="btn btn-secondary" onClick={() => setLook({ kind: 'call', callId: call.id })}>
           View data
         </button>
-        <button type="button" className="btn btn-secondary" onClick={() => setLook({ kind: 'logs', callId: call.id })}>
+        <button type="button" className="btn btn-secondary" onClick={() => setLook({ kind: 'logs', callId: call.requestId })}>
           View logs
         </button>
       </span>,

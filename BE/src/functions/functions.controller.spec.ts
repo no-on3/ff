@@ -12,8 +12,10 @@ import { Principal } from '../auth/principal';
 import { RequestIdInterceptor } from '../common/request-context';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { INVOCATION } from '../plans/rate-limits';
-import { FunctionsController } from './functions.controller';
+import { FunctionsController, invocationTypeOf } from './functions.controller';
 import { FunctionsService } from './functions.service';
+import { AsyncInvocationsService } from './async-invocations.service';
+import { InvocationType } from './dto/invoke-function.dto';
 import { of } from 'rxjs';
 
 const reflector = new Reflector();
@@ -61,6 +63,101 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
   });
 });
 
+describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", () => {
+  const ACCOUNT = '000000000001';
+  const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
+  const functions = { invoke: jest.fn(async () => ({ id: 'inv-1', status: 'COMPLETED', output: 1 })) };
+  const asyncInvocations = { queue: jest.fn(async () => ({ requestId: 'req-1' })), dryRun: jest.fn(async () => undefined) };
+  let app: INestApplication;
+  let baseUrl: string;
+  const invoke = (body: object, type?: string) =>
+    fetch(`${baseUrl}/functions/${ID}/invoke`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(type === undefined ? {} : { 'X-Amz-Invocation-Type': type }) },
+      body: JSON.stringify(body),
+    });
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [FunctionsController],
+      providers: [
+        { provide: FunctionsService, useValue: functions },
+        { provide: AsyncInvocationsService, useValue: asyncInvocations },
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication({ logger: false });
+    app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
+      req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'developer' };
+      next();
+    });
+    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true })); // as main.ts
+    app.useGlobalInterceptors(new RequestIdInterceptor());
+    await app.listen(0, '127.0.0.1');
+    baseUrl = await app.getUrl();
+  });
+
+  afterAll(() => app.close());
+  beforeEach(() => jest.clearAllMocks());
+
+  it('waits for the call without a type, or with RequestResponse: 201 and the invocation', async () => {
+    const plain = await invoke({ input: { a: 1 } });
+    const named = await invoke({ input: 2 }, 'RequestResponse');
+
+    expect([plain.status, named.status]).toEqual([201, 201]);
+    expect(functions.invoke.mock.calls).toEqual([
+      [ACCOUNT, ID, { a: 1 }],
+      [ACCOUNT, ID, 2],
+    ]);
+    expect(asyncInvocations.queue).not.toHaveBeenCalled();
+  });
+
+  it('keeps an Event, named by the header or the body, and answers 202 with its request ID at once', async () => {
+    const byHeader = await invoke({ input: { a: 1 } }, 'Event');
+    const byBody = await invoke({ input: 'x', invocationType: 'Event' });
+
+    expect([byHeader.status, await byHeader.json(), byBody.status]).toEqual([202, { requestId: 'req-1' }, 202]);
+    expect(asyncInvocations.queue.mock.calls).toEqual([
+      [ACCOUNT, ID, { a: 1 }],
+      [ACCOUNT, ID, 'x'],
+    ]);
+    expect(functions.invoke).not.toHaveBeenCalled();
+  });
+
+  it('only checks a DryRun: 204, with no body', async () => {
+    const res = await invoke({ input: { a: 1 } }, 'DryRun');
+
+    expect([res.status, await res.text()]).toEqual([204, '']);
+    expect(asyncInvocations.dryRun).toHaveBeenCalledWith(ACCOUNT, ID, { a: 1 });
+    expect([functions.invoke.mock.calls.length, asyncInvocations.queue.mock.calls.length]).toEqual([0, 0]);
+  });
+
+  it("takes the header's type over the body's, as Lambda reads the header", async () => {
+    await invoke({ invocationType: 'Event' }, 'RequestResponse');
+
+    expect([functions.invoke.mock.calls.length, asyncInvocations.queue.mock.calls.length]).toEqual([1, 0]);
+  });
+
+  it('refuses a type Lambda has not, in the header or the body, and calls nothing', async () => {
+    const header = await invoke({}, 'Later');
+    const body = await invoke({ invocationType: 'event' });
+
+    expect([header.status, (await header.json()).message, body.status]).toEqual([
+      400,
+      'X-Amz-Invocation-Type must be RequestResponse, Event, DryRun: "Later" is none of them',
+      400,
+    ]);
+    expect([functions.invoke.mock.calls.length, asyncInvocations.queue.mock.calls.length]).toEqual([0, 0]);
+  });
+
+  it('reads the type as Lambda does: the header, else the body, else RequestResponse', () => {
+    expect([invocationTypeOf(undefined, undefined), invocationTypeOf(undefined, InvocationType.EVENT), invocationTypeOf('DryRun', InvocationType.EVENT)]).toEqual([
+      InvocationType.REQUEST_RESPONSE,
+      InvocationType.EVENT,
+      InvocationType.DRY_RUN,
+    ]);
+  });
+});
+
 describe('GET /functions/:id/logs (L1, P-40, P-43)', () => {
   const ACCOUNT = '000000000001';
   const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
@@ -74,7 +171,13 @@ describe('GET /functions/:id/logs (L1, P-40, P-43)', () => {
   const get = (query: string) => fetch(`${baseUrl}/functions/${ID}/logs${query}`);
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ controllers: [FunctionsController], providers: [{ provide: FunctionsService, useValue: functions }] }).compile();
+    const moduleRef = await Test.createTestingModule({
+      controllers: [FunctionsController],
+      providers: [
+        { provide: FunctionsService, useValue: functions },
+        { provide: AsyncInvocationsService, useValue: {} },
+      ],
+    }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
       req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'viewer' };

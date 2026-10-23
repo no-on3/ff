@@ -16,6 +16,7 @@ import {
   formatDuration,
   formatMemory,
   historyText,
+  keptCallText,
   parseInvokeInput,
   sourceText,
 } from '../lib/functions';
@@ -90,6 +91,9 @@ const FunctionDetail: React.FC = () => {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [invoking, setInvoking] = useState(false);
   const [invokeError, setInvokeError] = useState<string | null>(null);
+  /** Whether the call is waited for; else kept and run without waiting, as Lambda's invocation type Event. */
+  const [waits, setWaits] = useState(true);
+  const [kept, setKept] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = Math.max(0, TABS.indexOf(searchParams.get('tab') as (typeof TABS)[number]));
   const tab = TABS[activeTab];
@@ -134,7 +138,13 @@ const FunctionDetail: React.FC = () => {
     }
     setInvoking(true);
     setInvokeError(null);
+    setKept(null);
     try {
+      if (!waits) {
+        const { data } = await functionsApi.invokeFunctionAsync(id!, parsed.input);
+        setKept(data.requestId);
+        return;
+      }
       const { data } = await functionsApi.invokeFunction(id!, parsed.input);
       setInvocations((previous) => [data, ...previous]);
       setTotal((count) => count + 1);
@@ -392,9 +402,15 @@ const FunctionDetail: React.FC = () => {
                   rows={3}
                   spellCheck={false}
                 />
-                <button type="button" onClick={handleInvoke} disabled={invoking} className="btn btn-primary self-start">
-                  {invoking ? 'Invoking…' : 'Invoke'}
-                </button>
+                <div className="flex flex-col gap-2 self-start">
+                  <button type="button" onClick={handleInvoke} disabled={invoking} className="btn btn-primary">
+                    {invoking ? 'Invoking…' : 'Invoke'}
+                  </button>
+                  <label className="flex items-center gap-2 text-[13px] text-gray-700" title="As AWS Lambda's invocation type Event: kept, run without waiting, retried on failure">
+                    <input type="checkbox" checked={!waits} onChange={(e) => setWaits(!e.target.checked)} />
+                    Don't wait for the answer
+                  </label>
+                </div>
               </div>
             ) : (
               <p className="text-[13px] text-gray-600">As a viewer, you read the history; owners and developers invoke.</p>
@@ -402,6 +418,14 @@ const FunctionDetail: React.FC = () => {
             {invokeError && (
               <Callout tone="danger" role="alert" className="mt-4">
                 {invokeError}
+              </Callout>
+            )}
+            {kept && (
+              <Callout tone="info" role="status" className="mt-4">
+                {keptCallText(kept)}{' '}
+                <button type="button" className="text-blue-700 underline" onClick={() => void loadHistory().catch((err: unknown) => setInvokeError(apiErrorMessage(err)))}>
+                  Read the history again
+                </button>
               </Callout>
             )}
           </Panel>
@@ -436,7 +460,7 @@ const FunctionDetail: React.FC = () => {
                           <Icon name="chevron" className="-rotate-90 text-gray-400 transition-transform group-open:rotate-0" />
                           <StatusPill tone={info.tone} label={info.label} title={info.note} />
                           <span className="text-gray-800 tabular-nums">{new Date(invocation.createdAt).toLocaleString()}</span>
-                          <span className="text-gray-500">{sourceText(invocation.source)}</span>
+                          <span className="text-gray-500">{sourceText(invocation.source, invocation.attempt)}</span>
                           <span className="ml-auto flex gap-4 text-[13px] text-gray-600 tabular-nums">
                             <span title="Duration">{formatDuration(invocation.duration)}</span>
                             <span title="Most memory used">{formatMemory(invocation.memoryUsed)}</span>
@@ -445,10 +469,10 @@ const FunctionDetail: React.FC = () => {
                         <div className="space-y-3 px-5 pb-4 sm:pl-12">
                           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
                             <span>
-                              Request <code className="font-mono text-gray-700">{invocation.id}</code>
+                              Request <code className="font-mono text-gray-700">{invocation.requestId}</code>
                             </span>
                             <span>Ended {new Date(invocation.updatedAt).toLocaleTimeString()}</span>
-                            <Link to={`?${searchForFilter({ range: 'all', q: '', requestId: invocation.id }).toString()}`}>Its logs</Link>
+                            <Link to={`?${searchForFilter({ range: 'all', q: '', requestId: invocation.requestId }).toString()}`}>Its logs</Link>
                           </div>
                           <div className="grid gap-3 lg:grid-cols-2">
                             <HistoryValue label="Input" text={historyText(invocation.input, invocation.inputTruncated)} truncated={invocation.inputTruncated} />

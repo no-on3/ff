@@ -34,6 +34,15 @@ export class AdminFunctionHitView {
 /** A call found by its request ID: from the invocation history, or from its usage record once the history no longer keeps it. */
 export class AdminCallHitView {
   @ApiProperty({ format: 'uuid' }) requestId: string;
+  @ApiProperty({
+    format: 'uuid',
+    nullable: true,
+    type: String,
+    description: "The attempt's invocation, which the function's page opens: the request's own ID but for an asynchronous call's retries; null when only its usage record was found",
+  })
+  invocationId: string | null;
+  @ApiProperty({ nullable: true, type: Number, description: "Which attempt of the request it was, an asynchronous call's from 1; null when only its usage record was found" })
+  attempt: number | null;
   @ApiProperty({ format: 'uuid' }) functionId: string;
   @ApiProperty({ example: 'hello', description: "The function's name when it was called" }) functionName: string;
   @ApiProperty({ example: '000000000001' }) accountId: string;
@@ -79,9 +88,11 @@ export class AdminFunctionConfigView {
 
 /** A call, without what went in and out: those are the customer's users' data, shown only for a reason. */
 export class AdminCallView {
-  @ApiProperty({ format: 'uuid', description: 'Its request ID' }) id: string;
+  @ApiProperty({ format: 'uuid', description: "The invocation's ID: its request's, but for an asynchronous call's retries" }) id: string;
+  @ApiProperty({ format: 'uuid', description: 'Its request ID, which its log lines name: every attempt of an asynchronous call keeps the first\'s' }) requestId: string;
+  @ApiProperty({ description: "Which attempt of its request it was: an asynchronous call's from 1" }) attempt: number;
   @ApiProperty({ enum: InvocationStatus }) status: InvocationStatus;
-  @ApiProperty({ enum: InvocationSource, description: 'What brought it: the API, the function\'s URL, or a schedule' }) source: InvocationSource;
+  @ApiProperty({ enum: InvocationSource, description: "What brought it: the API, the function's URL, a schedule, or an asynchronous call" }) source: InvocationSource;
   @ApiProperty({ description: 'Milliseconds' }) duration: number;
   @ApiProperty({ nullable: true, type: Number, description: 'MB' }) memoryUsed: number | null;
   @ApiProperty() createdAt: Date;

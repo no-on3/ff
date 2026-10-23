@@ -84,6 +84,8 @@ with_token() {
   http_at "$api_oidc" "$method" "$path" "$body" -H "Authorization: Bearer $token" "$@"
 }
 message() { jq -r .message "$work/body"; }
+# What waits in a function's queue: its asynchronous calls.
+waiting_for() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "SELECT count(*) FROM queue_messages WHERE function_id = '$1'"; }
 # Its messages joined, for an answer that lists them.
 messages() { jq -r '.message | if type == "array" then join("; ") else . end' "$work/body"; }
 # upload_package <base URL> <zip> [curl arguments]: POST /packages, the zip as the body; its answer, its status in $work/status.
@@ -612,6 +614,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
 done
+for type in Event DryRun; do
+  http_at "$api" POST "/functions/$id/invoke" '{"input": {"name": "B"}}' -H "X-FF-Dev-Account: $account_b" -H "X-Amz-Invocation-Type: $type" >/dev/null
+  check "POST /functions/{id}/invoke as $type: B's call of A's function answers as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
+done
+check "  ... and nothing of B's waits in A's function's queue" 0 "$(waiting_for "$id")"
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
 as_b DELETE "/functions/$own" >/dev/null
 check "B deletes its own function" 200 "$(status)"
@@ -988,6 +995,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
 done
+for type in Event DryRun; do
+  with_token "$token_2" POST "/functions/$fn_1/invoke" '{"input": {"name": "two"}}' -H "X-FF-Account: ${account_2:-}" -H "X-Amz-Invocation-Type: $type" >/dev/null
+  check "POST /functions/{id}/invoke as $type: account 2's call of account 1's function answers as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
+done
+check "  ... and nothing of account 2's waits in account 1's function's queue" 0 "$(waiting_for "$fn_1")"
 check "account 1's function, history and limits are unchanged" "$before_1" "$(snapshot as_user_1 "$fn_1")"
 check "and so is its name" "$name_1" "$(as_user_1 GET "/accounts/$account_1" | jq -r .name)"
 check "and so are its members and invitations" "$members_1" \

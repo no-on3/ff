@@ -79,7 +79,7 @@ const Search: React.FC<{ email: string | undefined }> = ({ email }) => {
                 rows={results.calls.map((call) => [
                   <span className="font-mono text-xs">{call.requestId}</span>,
                   call.functionExists ? (
-                    <Link to={`/functions/${call.functionId}?call=${call.requestId}`} className="text-blue-700 hover:underline">
+                    <Link to={`/functions/${call.functionId}?call=${call.invocationId ?? call.requestId}`} className="text-blue-700 hover:underline">
                       {call.functionName}
                     </Link>
                   ) : (
@@ -88,7 +88,7 @@ const Search: React.FC<{ email: string | undefined }> = ({ email }) => {
                   <Link to={`/accounts/${call.accountId}`} className="font-mono text-blue-700 hover:underline">
                     {call.accountId}
                   </Link>,
-                  call.status,
+                  call.attempt && call.attempt > 1 ? `${call.status} · attempt ${call.attempt}` : call.status,
                   whenUtc(call.at),
                   foundIn(call),
                 ])}

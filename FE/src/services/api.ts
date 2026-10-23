@@ -119,13 +119,15 @@ export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' 
 export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'COMPLETED', 'THROTTLED', 'LOST'] as const;
 export type InvocationStatus = (typeof INVOCATION_STATUSES)[number];
 
-/** What brought an invocation: the API's invoke, the function's URL, or one of its schedules. contract.test.ts checks them. */
-export const INVOCATION_SOURCES = ['api', 'url', 'schedule'] as const;
+/** What brought an invocation: the API's invoke, the function's URL, one of its schedules, or an asynchronous call's attempt. contract.test.ts checks them. */
+export const INVOCATION_SOURCES = ['api', 'url', 'schedule', 'async'] as const;
 export type InvocationSource = (typeof INVOCATION_SOURCES)[number];
 
 /** An invocation's fields, as the API's entity names them: contract.test.ts checks them against it. */
 export const INVOCATION_FIELDS = [
   'id',
+  'requestId',
+  'attempt',
   'functionId',
   'input',
   'output',
@@ -144,13 +146,17 @@ export const INVOCATION_FIELDS = [
 /** An invocation, as the API returns it: from POST /functions/:id/invoke, and in the history. */
 export interface FunctionInvocation {
   id: string;
+  /** The request's ID, which its log lines name: the invocation's own, but an asynchronous call's retries keep the first attempt's. */
+  requestId: string;
+  /** Which attempt of its request it was: an asynchronous call's are counted from 1; any other call is its first. */
+  attempt: number;
   functionId: string;
   /** In the history, the start of its JSON text, as a string, when inputTruncated. */
   input: unknown;
   /** In the history, the start of its JSON text, as a string, when outputTruncated. */
   output: unknown;
   status: InvocationStatus;
-  /** What brought it: the API, the function's URL, or a schedule. */
+  /** What brought it: the API, the function's URL, a schedule, or an asynchronous call. */
   source: InvocationSource;
   /** Milliseconds, as the runtime measured it. */
   duration: number;
@@ -170,6 +176,12 @@ export interface FunctionInvocation {
 type UnlistedInvocationField = Exclude<keyof FunctionInvocation, (typeof INVOCATION_FIELDS)[number]>;
 const everyInvocationFieldListed: [UnlistedInvocationField] extends [never] ? true : never = true;
 void everyInvocationFieldListed;
+
+/** The answer to an asynchronous call, 202: its request ID, which each of its attempts keeps. contract.test.ts checks it. */
+export const ASYNC_INVOCATION_FIELDS = ['requestId'] as const satisfies ReadonlyArray<keyof AsyncInvocation>;
+export interface AsyncInvocation {
+  requestId: string;
+}
 
 /** One page of GET /functions/:id/invocations, newest first. */
 export interface InvocationPage {
@@ -250,6 +262,10 @@ export const functionsApi = {
   /** `input` is the handler's event, any JSON value; for a function made before, its event.body. */
   invokeFunction: (id: string, input: unknown) =>
     api.post<FunctionInvocation>(`/functions/${id}/invoke`, { input }),
+
+  /** The same call without waiting, as AWS Lambda's invocation type Event: kept, then run and retried on failure. */
+  invokeFunctionAsync: (id: string, input: unknown) =>
+    api.post<AsyncInvocation>(`/functions/${id}/invoke`, { input, invocationType: 'Event' }),
 
   getFunctionInvocations: (id: string, limit = 20) =>
     api.get<InvocationPage>(`/functions/${id}/invocations`, { params: { limit } }),

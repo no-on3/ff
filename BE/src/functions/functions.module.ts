@@ -10,6 +10,10 @@ import { EncryptionModule } from '../encryption/encryption.module';
 import { UsageModule } from '../usage/usage.module';
 import { PackagesModule } from '../packages/packages.module';
 import { StorageModule } from '../storage/storage.module';
+import { QueuesModule } from '../queues/queues.module';
+import { Account } from '../accounts/entities/account.entity';
+import { AsyncInvocationsService } from './async-invocations.service';
+import { AsyncInvokeWorker } from './async-invoke.worker';
 import { FunctionEnvironment } from './entities/function-environment.entity';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
@@ -19,7 +23,7 @@ import { FunctionsService } from './functions.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment]),
+    TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment, Account]),
     ObjectStoreModule,
     OrchestratorModule,
     MetricsModule,
@@ -32,9 +36,11 @@ import { FunctionsService } from './functions.service';
     PackagesModule,
     // A function's pods get a key of its own to its account's buckets.
     StorageModule,
+    // Its asynchronous calls wait in a queue of its own.
+    QueuesModule,
   ],
   controllers: [FunctionsController],
-  providers: [FunctionsService, EnvironmentStore],
+  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker],
   exports: [FunctionsService],
 })
 export class FunctionsModule {}

@@ -165,10 +165,10 @@ run('support, for operators (L2)', () => {
     expect((await support.search('ice-p')).functions).toEqual([]);
 
     expect((await support.search(kept)).calls).toEqual([
-      { requestId: kept, functionId: invoices.id, functionName: 'invoice_pdf', accountId: id, status: 'COMPLETED', at: expect.any(Date), inHistory: true, functionExists: true },
+      { requestId: kept, invocationId: kept, attempt: 1, functionId: invoices.id, functionName: 'invoice_pdf', accountId: id, status: 'COMPLETED', at: expect.any(Date), inHistory: true, functionExists: true },
     ]);
     expect((await support.search(` ${purged.toUpperCase()} `)).calls).toEqual([
-      { requestId: purged, functionId: invoices.id, functionName: 'invoice_pdf', accountId: id, status: 'ERROR', at: expect.any(Date), inHistory: false, functionExists: true },
+      { requestId: purged, invocationId: null, attempt: null, functionId: invoices.id, functionName: 'invoice_pdf', accountId: id, status: 'ERROR', at: expect.any(Date), inHistory: false, functionExists: true },
     ]);
     // Searching is no look at the customer's data: nothing recorded.
     expect(await entriesOf(id)).toEqual([]);
@@ -181,7 +181,30 @@ run('support, for operators (L2)', () => {
     await db.dataSource.getRepository(Function).delete({ id: gone.id });
 
     expect((await support.search(call)).calls).toEqual([
-      { requestId: call, functionId: gone.id, functionName: 'old-report', accountId: id, status: 'TIMEOUT', at: expect.any(Date), inHistory: false, functionExists: false },
+      { requestId: call, invocationId: null, attempt: null, functionId: gone.id, functionName: 'old-report', accountId: id, status: 'TIMEOUT', at: expect.any(Date), inHistory: false, functionExists: false },
+    ]);
+  });
+
+  it("finds each attempt of an asynchronous call by its request ID, the first first, each its own invocation to open", async () => {
+    const id = await account('Retry Labs', 'owner@retry-labs.test');
+    const f = await fn(id, 'mailer');
+    const request = await called(f, 300, InvocationStatus.ERROR);
+    const [{ id: retry }] = await db.dataSource.query(
+      `INSERT INTO function_invocations (function_id, request_id, attempt, input, status, source, created_at) VALUES ($1, $2, 2, '{}', 'COMPLETED', 'async', now() - interval '1 minute') RETURNING id`,
+      [f.id, request],
+    );
+    await db.dataSource.query(`UPDATE function_invocations SET source = 'async' WHERE id = $1`, [request]);
+
+    const { calls } = await support.search(request);
+
+    expect(calls.map(({ requestId, invocationId, attempt, status }) => [requestId, invocationId, attempt, status])).toEqual([
+      [request, request, 1, 'ERROR'],
+      [request, retry, 2, 'COMPLETED'],
+    ]);
+    const page = await support.functionPage(f.id);
+    expect(page.recentCalls.map(({ id: invocation, requestId, attempt, source }) => [invocation, requestId, attempt, source])).toEqual([
+      [retry, request, 2, 'async'],
+      [request, request, 1, 'async'],
     ]);
   });
 
@@ -228,7 +251,7 @@ run('support, for operators (L2)', () => {
       [timedOut, 'TIMEOUT', 'Sandbox.Timedout'],
       [failed, 'ERROR', 'ValidationError'],
     ]);
-    expect(Object.keys(page.recentCalls[0]).sort()).toEqual(['createdAt', 'duration', 'errorType', 'id', 'memoryUsed', 'source', 'status']);
+    expect(Object.keys(page.recentCalls[0]).sort()).toEqual(['attempt', 'createdAt', 'duration', 'errorType', 'id', 'memoryUsed', 'requestId', 'source', 'status']);
     expect(page.recentCalls[0].source).toBe('api');
     expect(JSON.stringify(page)).not.toContain(PRIVATE);
     expect(JSON.stringify(page)).not.toContain('export const handler');

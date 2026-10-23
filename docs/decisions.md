@@ -19,8 +19,8 @@ You answered: rename the object store's settings, which still carried MinIO's na
 The [step-3 plan](step-3-plan.md)'s §9, each answered as it recommended.
 
 **24. The queue's messages live in FF's own PostgreSQL; Q-01's spike picks pgmq or FF's own tables in its shape.** ✅ Confirmed. Backed up with FF's database, and written in the same transaction as what makes them; NATS JetStream later, when throughput requires it.
-- **Changed already:** Q-01: [ADR 0010](adr/0010-queue.md), FF's own table, pgmq's throughput the same as measured but 7 relations a queue made while FF runs.
-- **Still to change:** Q-02.
+- **Changed already:** Q-01: [ADR 0010](adr/0010-queue.md), FF's own table, pgmq's throughput the same as measured but 7 relations a queue made while FF runs. Q-02, part 2: the tables `queues` and `queue_messages`, claimed with leases; functions' asynchronous calls kept there.
+- **Still to change:** customers' queues, with Q-04 and Q-05.
 
 **25. The account's keys, and each function's own, reach queues too.** ✅ Confirmed. One kind of key, as IAM's access keys reach every service.
 - **Still to change:** Q-04.
@@ -32,8 +32,8 @@ The [step-3 plan](step-3-plan.md)'s §9, each answered as it recommended.
 - **Still to change:** Q-08.
 
 **28. Beta's limits:** 10 queues, 5 event source mappings a function, 100 requests a second, 100 MB of messages and waiting events per account. ✅ Confirmed.
-- **Changed already:** Q-02, part 1: the four in every plan, the beta plan's as confirmed (the migration `QueueLimits`), edited in the admin app, listed by the console's account page and `ff account`.
-- **Still to change:** each enforced with what it limits: waiting events in Q-02, requests and queues in Q-04 and Q-05, mappings in Q-06.
+- **Changed already:** Q-02, part 1: the four in every plan, the beta plan's as confirmed (the migration `QueueLimits`), edited in the admin app, listed by the console's account page and `ff account`. Part 2: what the account's messages hold, asynchronous calls waiting among them, enforced: an asynchronous call past it is refused with 429.
+- **Still to change:** each other enforced with what it limits: requests and queues in Q-04 and Q-05, mappings in Q-06.
 
 **29. FIFO queues later, once a customer asks;** standard queues first. ✅ Confirmed.
 - **Still to change:** nothing in step 3.
@@ -45,7 +45,7 @@ The [step-3 plan](step-3-plan.md)'s §9, each answered as it recommended.
 - **Still to change:** Q-03.
 
 **32. An asynchronous call lost when the backend stops is retried,** as one of its attempts; a synchronous one stays lost, as today. ✅ Confirmed.
-- **Still to change:** Q-02.
+- **Changed already:** Q-02, part 2: its event comes back when its lease ends, and the claim that kept no outcome counts as a failed attempt; the reaper marks that attempt `LOST`, unbilled, under its request.
 
 **33. The docs: the guide in English, a page in French "comme AWS SQS".** ✅ Confirmed.
 - **Still to change:** Q-09.

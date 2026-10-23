@@ -10,6 +10,7 @@ import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw
 import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
+import invokeDtoSource from '../../BE/src/functions/dto/invoke-function.dto.ts?raw';
 import functionsServiceSource from '../../BE/src/functions/functions.service.ts?raw';
 import functionEntitySource from '../../BE/src/functions/entities/function.entity.ts?raw';
 import createFunctionDtoSource from '../../BE/src/functions/dto/create-function.dto.ts?raw';
@@ -68,6 +69,7 @@ import {
   EMAIL_LANGUAGES,
   WEBHOOK_SECRET_FIELDS,
   INVOCATION_FIELDS,
+  ASYNC_INVOCATION_FIELDS,
   INVOCATION_SOURCES,
   INVOCATION_STATUSES,
   ME_ACCOUNT_FIELDS,
@@ -189,6 +191,13 @@ describe('an invocation', () => {
     // `function` is the relation, which the API never loads into an invocation it returns.
     expect(fields.filter((field) => field !== 'function')).toEqual([...INVOCATION_FIELDS]);
     expect(INVOCATION_FIELDS).toEqual(expect.arrayContaining(['inputTruncated', 'outputTruncated', 'errorTruncated']));
+  });
+});
+
+describe('an asynchronous call', () => {
+  it("is answered with the API's fields, its request ID, which the console shows; and the console names its type as the API does", () => {
+    expect(dtoFields(invokeDtoSource, 'export class AsyncInvocationView {')).toEqual([...ASYNC_INVOCATION_FIELDS]);
+    expect(invokeDtoSource).toContain("EVENT = 'Event',");
   });
 });
 

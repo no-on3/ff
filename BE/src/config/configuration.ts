@@ -375,6 +375,9 @@ const appShape = {
   // events name, as AWS's do theirs.
   FF_SCHEDULER_INTERVAL_SECONDS: integer(5, 0, 60),
   FF_REGION: text('tn-tunis-1', region),
+  // How often the backend claims the asynchronous calls due (0: never, a backend that runs none), and how many it runs at once.
+  FF_ASYNC_INTERVAL_SECONDS: integer(1, 0, 60),
+  FF_ASYNC_CONCURRENCY: integer(10, 1, 1000),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
@@ -797,6 +800,11 @@ export default function configuration(env: Env = process.env) {
     schedules: {
       intervalSeconds: parsed.FF_SCHEDULER_INTERVAL_SECONDS,
       region: parsed.FF_REGION,
+    },
+    // Asynchronous calls: how often the due ones are claimed, and how many one backend runs at once.
+    asyncInvoke: {
+      intervalSeconds: parsed.FF_ASYNC_INTERVAL_SECONDS,
+      concurrency: parsed.FF_ASYNC_CONCURRENCY,
     },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.

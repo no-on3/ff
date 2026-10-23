@@ -39,6 +39,7 @@ import { FunctionKeys1792743758847 } from './1792743758847-FunctionKeys';
 import { BucketSamples1792746521862 } from './1792746521862-BucketSamples';
 import { BucketAlarms1792748816752 } from './1792748816752-BucketAlarms';
 import { QueueLimits1792770408267 } from './1792770408267-QueueLimits';
+import { AsyncInvoke1792771678484 } from './1792771678484-AsyncInvoke';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -87,4 +88,5 @@ export const MIGRATIONS: Array<new () => object> = [
   BucketSamples1792746521862,
   BucketAlarms1792748816752,
   QueueLimits1792770408267,
+  AsyncInvoke1792771678484,
 ];
