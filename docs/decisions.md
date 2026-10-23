@@ -178,6 +178,7 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
+| Step 3's ten choices: where the queue's messages live (pgmq or FF's own tables, as a spike shows), one kind of key for buckets and queues, the SQS endpoint's place, how queue requests are billed, beta's limits, FIFO queues later, where notifications and destinations go, retrying a call lost when the backend stops, the docs' languages | [Step-3 plan](step-3-plan.md) §9, each with a recommendation | Step 3: nothing of it starts until you answer |
 | Who hosts `ffunc.tn`'s DNS: DNS servers FF runs, a DNS company, or neither (decision 17; the domain is registered, 20) | This log, 17 and 20 | How function URLs and, from step 2, buckets get their certificates in production: one for all of them, or one each |
 | Where `ff`'s downloads and the public runtime images are published, if customers can't rely on GitHub | [CLI plan](cli-plan.md) §10, question 3 | The first public release of `ff` |
 | Windows for `ff`: in its phase 4, or when a customer asks | CLI plan §10, question 5 | The CLI's phase 4 |
