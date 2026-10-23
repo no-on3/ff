@@ -4,7 +4,7 @@
 #   + the backend (built, started on a free port in development mode, which acts as the account
 #   a profile names, as hack/e2e.sh's requests do).
 # For examples/hello.ts and examples/hello.py: deploy, invoke, the handler's line in ff logs and
-# in ff logs --follow, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
+# in ff logs --follow, an asynchronous call and a dry run, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
 # exit 5 with the call's ID, which the history shows; code that fails to load exits 4, and the
 # function is kept, in ERROR, with its error. A second account finds none of the first's. Then
 # ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
@@ -127,6 +127,20 @@ for example in hello.ts hello.py; do
   check "ff logs --follow prints a new call's line as it comes, within 20 s" true "$followed"
   ff invoke "$name" --data '{"name": "raw"}' --raw
   check "--raw prints the answer only, for a pipe" "0 Hello raw" "$(code) $(out | jq -r .message)"
+  ff invoke "$name" --async --data '{"name": "Later"}' --raw
+  async_code="$(code)"
+  async_id="$(out)"
+  ran=""
+  for _ in $(seq 1 30); do
+    ff history "$name" --limit 5 --output json
+    ran="$(out | jq -r --arg r "$async_id" '[.invocations[] | select(.requestId == $r and .status == "COMPLETED")][0] | select(. != null) | "\(.source) \(.attempt) \(.output.message) \(.output.requestId == $r)"')"
+    [ -n "$ran" ] && break
+    sleep 1
+  done
+  check "ff invoke --async prints the request ID at once, and the call runs without waiting, its first attempt under that ID" \
+    "0 async 1 Hello Later true" "$async_code $ran"
+  ff invoke "$name" --dry-run
+  check "--dry-run only checks: nothing runs" "0 $name would take the call: nothing ran" "$(code) $(out)"
   ff deploy "$FF_REPO_ROOT/examples/$example" --name "$name"
   check "deploy again, unchanged, sends nothing" "0 $name: no changes ($runtime, 128 MB, 5 s, ACTIVE)" "$(code) $(out)"
   ff scale "$name" --max 2
@@ -139,7 +153,7 @@ for example in hello.ts hello.py; do
   check "the new code answers" "0 Ahlan Sfax" "$(code) $(out | sed '$d' | jq -r .message)"
   last_id="$(out | tail -1 | cut -d' ' -f2)"
   ff history "$name" --limit 2 --output json
-  check "history lists its calls, newest first, by the IDs invoke printed" "0 4 $last_id COMPLETED" \
+  check "history lists its calls, newest first, by the IDs invoke printed" "0 5 $last_id COMPLETED" \
     "$(code) $(out | jq -r '"\(.total) \(.invocations[0].id) \(.invocations[0].status)"')"
   ff get "$name" --output json
   check "get shows it: its handler, and its code's package, SHA-256 and size rather than its code" \
@@ -627,7 +641,7 @@ ff account
 check "ff account says its plan, and that its functions don't reach the internet, as beta's" "0 Beta true" \
   "$(code) $(out | sed -n 's/^plan *\([A-Za-z]*\):.*/\1/p') $(out | grep -q '^internet     off' && echo true || echo false)"
 ff usage --output json
-check "ff usage counts this month's calls of the functions deleted since, by name" "0 4 true" \
+check "ff usage counts this month's calls of the functions deleted since, by name, the asynchronous one among them" "0 5 true" \
   "$(code) $(out | jq -r '.functions[] | select(.functionName == "cli-hello-ts") | .requests') $(out | jq -r '[.functions[] | select(.functionName == "cli-hello-ts") | .deleted] | first')"
 ff usage --csv
 check "and gives the API's CSV" "0 true" "$(code) $(out | head -1 | grep -q 'requests' && echo true || echo false)"

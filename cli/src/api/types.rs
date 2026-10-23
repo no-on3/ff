@@ -112,6 +112,12 @@ impl Function {
 #[serde(rename_all = "camelCase")]
 pub struct Invocation {
     pub id: String,
+    /// The request's: an asynchronous call's attempts keep the first's. Missing from an older API, where it is the ID.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Which attempt of its request it was: an asynchronous call's from 1.
+    #[serde(default)]
+    pub attempt: Option<u32>,
     pub status: String,
     #[serde(default)]
     pub source: Option<String>,

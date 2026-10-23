@@ -348,8 +348,17 @@ pub struct InvokeArgs {
     pub raw: bool,
 
     /// Call it through its URL instead, as a browser or a webhook does: a method and a path, such as GET /orders?status=new
-    #[arg(long, num_args = 2, value_names = ["METHOD", "PATH"])]
+    #[arg(long, num_args = 2, value_names = ["METHOD", "PATH"], conflicts_with_all = ["asynchronous", "dry_run"])]
     pub http: Option<Vec<String>>,
+
+    /// Run it without waiting, as AWS Lambda's invocation type Event: its request ID at once, and the call retried on
+    /// failure; ff history shows its attempts
+    #[arg(long = "async", id = "asynchronous", conflicts_with = "dry_run")]
+    pub asynchronous: bool,
+
+    /// Only check that the call could be made, as Lambda's invocation type DryRun: nothing runs
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// With --http, a header of the request, "name: value", repeated
     #[arg(long = "header", short = 'H', requires = "http")]

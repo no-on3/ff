@@ -6,7 +6,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::{Function, FunctionView, InvocationPage, Scaling, function_named};
+use crate::api::types::{Function, FunctionView, Invocation, InvocationPage, Scaling, function_named};
 use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
 use crate::table::{first_line, table, time};
@@ -95,6 +95,14 @@ fn code(function: &Function) -> String {
     }
 }
 
+/// What brought a call, an asynchronous call's attempt with its number: `async, attempt 2`.
+fn source_text(call: &Invocation) -> String {
+    match (call.source.as_deref(), call.attempt) {
+        (Some("async"), Some(attempt)) => format!("async, attempt {attempt}"),
+        (source, _) => source.unwrap_or_default().to_owned(),
+    }
+}
+
 pub fn history(name: &str, limit: u32, context: &Context) -> Result<(), Error> {
     let client = client(context)?;
     let function = function_named(&client, name)?;
@@ -110,10 +118,10 @@ pub fn history(name: &str, limit: u32, context: &Context) -> Result<(), Error> {
             .map(|call| {
                 vec![
                     time(&call.created_at),
-                    call.id.clone(),
+                    call.request_id.clone().unwrap_or_else(|| call.id.clone()),
                     call.status.clone(),
                     call.duration.map(|duration| format!("{duration} ms")).unwrap_or_default(),
-                    call.source.clone().unwrap_or_default(),
+                    source_text(call),
                     call.error.as_deref().map(|error| first_line(error, 60)).unwrap_or_default(),
                 ]
             })

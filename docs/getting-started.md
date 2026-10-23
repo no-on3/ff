@@ -347,7 +347,7 @@ curl -s "$FF/functions/$ID/invocations?limit=3" | jq -c '.invocations[] | {reque
 - **Limits.** The event is at most 1 MB as JSON, Lambda's limit for asynchronous calls (413 past it). The calls waiting count against the plan's room for messages (100 MB on the beta plan, its queues' messages with them): past it, 429 until some have run. The plan's invocations per second count each call when it comes, not its attempts.
 - **`DryRun`** only checks that the call could be made, the function and the input's size, and answers 204: nothing runs.
 - **The worker:** every second (`FF_ASYNC_INTERVAL_SECONDS`; 0 for a backend that runs none), each backend claims the calls due, at most ten running at once (`FF_ASYNC_CONCURRENCY`).
-- **In the console**, a function's Invocations tab invokes without waiting when "Don't wait for the answer" is ticked: it says the call's request ID, and its attempts join the history, each "asynchronously, attempt n", linked to its request's log lines.
+- **In the console**, a function's Invocations tab invokes without waiting when "Don't wait for the answer" is ticked: it says the call's request ID, and its attempts join the history, each "asynchronously, attempt n", linked to its request's log lines. **With `ff`**, `ff invoke <name> --async` prints the request ID at once (`--raw`: the ID alone), `ff history <name>` lists the attempts, and `--dry-run` only checks.
 
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, handler, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
@@ -433,9 +433,10 @@ ff config set dev_account "$(curl -s "$FF/me" | jq -r '.accounts[0].id')"   # de
 ff whoami                                         # Development mode, as the owner of account …
 ff deploy examples/hello.ts                       # creates "hello", or updates it with what changed
 ff invoke hello --data '{"name": "Tunis"}'        # the answer, then its request ID, duration and memory
+ff invoke hello --async --data '{"name": "Later"}' # kept and run without waiting: its request ID at once
 ff logs hello --follow                            # its log lines as they come; Ctrl-C stops
 ff deploy examples/hello.py --name hello-py --memory 256
-ff history hello                                  # its calls, newest first, by request ID
+ff history hello                                  # its calls, newest first, by request ID, an asynchronous call's attempts numbered
 ff scale hello --min 1 --max 5
 ff list
 ff delete hello --yes

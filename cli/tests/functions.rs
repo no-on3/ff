@@ -243,6 +243,49 @@ fn a_call_refused_for_the_rate_or_the_credit_exits_6() {
 }
 
 #[test]
+fn invoke_async_keeps_the_call_and_prints_its_request_id_at_once() {
+    let api = Server::start(vec![
+        Reply::json(200, json!([function(CODE)])),
+        Reply::json(202, json!({ "requestId": "3f9c2a1e" })),
+        Reply::json(200, json!([function(CODE)])),
+        Reply::json(202, json!({ "requestId": "4a0d3b2f" })),
+    ]);
+
+    ff(&with_key(&api.url))
+        .args(["invoke", "hello", "--async", "--data", r#"{"order": 7}"#])
+        .assert()
+        .success()
+        .stdout(
+            "Kept: request 3f9c2a1e, run without waiting and retried on failure\nff history hello shows its attempts\n",
+        );
+    ff(&with_key(&api.url)).args(["invoke", "hello", "--async", "--raw"]).assert().success().stdout("4a0d3b2f\n");
+    let requests = api.requests();
+    assert_eq!(body(&requests[1]), json!({ "input": { "order": 7 }, "invocationType": "Event" }));
+    assert_eq!(body(&requests[3]), json!({ "invocationType": "Event" }));
+}
+
+#[test]
+fn invoke_dry_run_only_checks_the_call() {
+    let api = Server::start(vec![Reply::json(200, json!([function(CODE)])), Reply::text(204, "application/json", "")]);
+
+    ff(&with_key(&api.url))
+        .args(["invoke", "hello", "--dry-run"])
+        .assert()
+        .success()
+        .stdout("hello would take the call: nothing ran\n");
+    assert_eq!(body(&api.requests()[1]), json!({ "invocationType": "DryRun" }));
+}
+
+#[test]
+fn invoke_takes_one_way_of_calling_at_a_time() {
+    let api = Server::start(vec![]);
+
+    ff(&with_key(&api.url)).args(["invoke", "hello", "--async", "--dry-run"]).assert().code(2);
+    ff(&with_key(&api.url)).args(["invoke", "hello", "--async", "--http", "GET", "/"]).assert().code(2);
+    assert!(api.requests().is_empty());
+}
+
+#[test]
 fn invoke_refuses_an_event_that_isnt_json_before_calling() {
     let api = Server::start(vec![]);
 
@@ -336,17 +379,22 @@ fn get_shows_the_handler_and_the_code_as_aws_lambda_describes_them() {
 
 #[test]
 fn history_lists_the_calls_with_their_request_ids() {
-    let page = json!({ "invocations": [invocation(), { "id": "inv-9", "status": "ERROR", "source": "url", "duration": 3,
-        "error": "Error: boom\n    at handler", "output": null, "createdAt": "2026-10-21T09:09:00.000Z" }], "total": 7 });
+    let page = json!({ "invocations": [
+        { "id": "inv-12", "requestId": "req-5", "attempt": 2, "status": "COMPLETED", "source": "async", "duration": 4,
+          "output": null, "createdAt": "2026-10-21T09:11:00.000Z" },
+        invocation(),
+        { "id": "inv-9", "status": "ERROR", "source": "url", "duration": 3,
+          "error": "Error: boom\n    at handler", "output": null, "createdAt": "2026-10-21T09:09:00.000Z" }], "total": 7 });
     let api = Server::start(vec![Reply::json(200, json!([function(CODE)])), Reply::json(200, page)]);
 
-    ff(&with_key(&api.url)).args(["history", "hello", "--limit", "2"]).assert().success().stdout(
-        "TIME (UTC)           REQUEST ID  STATUS     DURATION  SOURCE  ERROR\n\
+    ff(&with_key(&api.url)).args(["history", "hello", "--limit", "3"]).assert().success().stdout(
+        "TIME (UTC)           REQUEST ID  STATUS     DURATION  SOURCE            ERROR\n\
+         2026-10-21 09:11:00  req-5       COMPLETED  4 ms      async, attempt 2\n\
          2026-10-21 09:10:00  7d1e5c1a    COMPLETED  12 ms     api\n\
-         2026-10-21 09:09:00  inv-9       ERROR      3 ms      url     Error: boom\n\
-         2 of 7 calls, newest first\n",
+         2026-10-21 09:09:00  inv-9       ERROR      3 ms      url               Error: boom\n\
+         3 of 7 calls, newest first\n",
     );
-    assert_eq!(api.requests()[1].path, "/functions/f1/invocations?limit=2");
+    assert_eq!(api.requests()[1].path, "/functions/f1/invocations?limit=3");
 }
 
 #[test]
