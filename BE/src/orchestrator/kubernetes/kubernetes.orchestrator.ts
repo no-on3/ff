@@ -146,6 +146,8 @@ export class KubernetesOrchestrator implements Orchestrator {
     private readonly api: KubeApi,
     private readonly pollIntervalMs = 1000,
     private readonly loadCheckIntervalMs = 3000,
+    /** How long a direct call keeps trying a function's Service that refuses it (post()). */
+    private readonly refusedRetryMs = 5000,
   ) {
     this.logStore = new LogStore(settings.invokeMode, api);
   }
@@ -558,7 +560,19 @@ export class KubernetesOrchestrator implements Orchestrator {
         throw error;
       }
     }
-    return postJson(`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`, body, timeoutMs, headers);
+    // Direct: the Service's own address. A pod that has just become ready joins the Service's endpoints on each node a
+    // moment later, and until then the Service refuses the connection. The call never reached the function, so it is
+    // tried again, a little later each time, for a few seconds, before it fails.
+    const url = `http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`;
+    const deadline = Date.now() + this.refusedRetryMs;
+    for (let wait = 100; ; wait = Math.min(2 * wait, 1000)) {
+      try {
+        return await postJson(url, body, timeoutMs, headers);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ECONNREFUSED' || Date.now() + wait > deadline) throw error;
+        await sleep(wait);
+      }
+    }
   }
 
   private toResult(res: KubeResponse): InvokeResult {

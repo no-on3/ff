@@ -45,7 +45,7 @@ Closing an account deletes its log lines with the delete key (P-45). The backend
 ## Platform
 
 `platform/` is FF itself in the cluster (client-readiness plan P-60):
-- the backend in `ff-system`, as `ff-controller`, calling functions' Services directly;
+- the backend in `ff-system`, as `ff-controller`, calling functions' Services directly; a Service that refuses the connection, as one does for a moment after its pod becomes ready, is tried again for up to 5 seconds, the call having reached no function;
 - its migrations, as a Job;
 - the console and the admin app, two replicas each;
 - Keycloak;
