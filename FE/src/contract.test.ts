@@ -37,6 +37,7 @@ import databaseEntitySource from '../../BE/src/databases/database.entity.ts?raw'
 import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
 import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
 import storageNamesSource from '../../BE/src/storage/storage-names.ts?raw';
+import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
@@ -48,10 +49,13 @@ import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
 import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
 import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
+import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { ENDPOINTS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
+  QUEUE_FIELDS,
+  RECEIVED_MESSAGE_FIELDS,
   BUCKET_FIELDS,
   BUCKET_REQUEST_METRICS,
   BUCKET_USAGE_FIELDS,
@@ -458,11 +462,32 @@ describe("a customer's database (ADR 0008)", () => {
   });
 });
 
+describe("a customer's queue (ADR 0010)", () => {
+  it("has the API's fields and name rule, so its pages read each one there is and the form refuses what the API would", () => {
+    expect(dtoFields(queueDtoSource, 'export class QueueView {')).toEqual([...QUEUE_FIELDS]);
+    expect(dtoFields(queueDtoSource, 'export class ReceivedMessageView {')).toEqual([...RECEIVED_MESSAGE_FIELDS]);
+    expect(dtoFields(queueDtoSource, 'export class QueueMessagesView {')).toEqual(['available', 'inFlight', 'delayed']);
+    expect(/@Matches\(\/\^\[A-Za-z0-9_-\]\+\$\//.test(queueDtoSource)).toBe(true);
+    expect(QUEUE_NAME.source).toBe('^[A-Za-z0-9_-]+$');
+  });
+
+  it("edits the attributes the API takes, within its bounds", () => {
+    // Its fields are all optional, name?: type, which dtoFields doesn't read.
+    const body = queueDtoSource.slice(queueDtoSource.indexOf('export class QueueAttributesDto {'));
+    const attributes = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+)\?: /gm)].map((match) => match[1]);
+    expect([...QUEUE_ATTRIBUTES.map(({ field }) => field), 'redrivePolicy'].sort()).toEqual([...attributes].sort());
+    for (const { field, min, max } of QUEUE_ATTRIBUTES) {
+      const declared = new RegExp(`@Min\\((\\d[\\d_]*)\\)\\s*@Max\\((\\d[\\d_]*)\\)\\s*${field}\\?:`).exec(queueDtoSource);
+      expect([field, Number(declared?.[1].replace(/_/g, '')), Number(declared?.[2].replace(/_/g, ''))]).toEqual([field, min, max]);
+    }
+  });
+});
+
 describe("a customer's bucket and its access keys (ADR 0009)", () => {
   it("have the API's fields and name rule, so the page reads each one there is and the form refuses what the API would", () => {
     expect(dtoFields(storageDtoSource, 'export class BucketView {')).toEqual([...BUCKET_FIELDS]);
     expect(dtoFields(storageDtoSource, 'export class StorageKeyView {')).toEqual([...STORAGE_KEY_FIELDS]);
-    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'region']);
+    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'region']);
     expect(/export const BUCKET_NAME = \/(.+)\/;/.exec(storageNamesSource)?.[1]).toBe(BUCKET_NAME.source);
   });
 

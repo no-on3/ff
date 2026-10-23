@@ -6,14 +6,14 @@ const labels = (role: Parameters<typeof consoleNav>[0]) => consoleNav(role).map(
 describe('consoleNav', () => {
   it("gives an owner the account's members and API keys, as the API lets owners alone manage them", () => {
     expect(labels('owner')).toEqual([
-      [null, ['Functions', 'Databases', 'Buckets', 'Alarms', 'Usage', 'Billing']],
+      [null, ['Functions', 'Databases', 'Buckets', 'Queues', 'Alarms', 'Usage', 'Billing']],
       ['Account', ['Settings', 'Notifications', 'Members', 'API keys']],
     ]);
   });
 
   it.each(['developer', 'viewer'] as const)('gives a %s the same pages without members and API keys', (role) => {
     expect(labels(role)).toEqual([
-      [null, ['Functions', 'Databases', 'Buckets', 'Alarms', 'Usage', 'Billing']],
+      [null, ['Functions', 'Databases', 'Buckets', 'Queues', 'Alarms', 'Usage', 'Billing']],
       ['Account', ['Settings', 'Notifications']],
     ]);
   });

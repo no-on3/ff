@@ -2,15 +2,16 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { AsyncSettingsForm, KEPT_MINUTES, asyncSettingsBody, asyncSettingsForm, asyncSettingsText, destinationText } from '../lib/async-settings';
 import { apiErrorMessage } from '../lib/functions';
-import { EventInvokeConfig, Function, eventInvokeConfigApi, functionsApi } from '../services/api';
+import { EventInvokeConfig, Function, eventInvokeConfigApi, functionsApi, queuesApi } from '../services/api';
 import { Callout, Panel } from './Panel';
 
 /**
  * A function's settings for its calls that don't wait, as AWS Lambda's
  * asynchronous invocation configuration: how many times a call that fails is
- * retried, how long it is kept, and another function of the account that gets
- * each call's record once it succeeds, or fails for good. Every member reads
- * them; owners and developers change them, or go back to Lambda's defaults.
+ * retried, how long it is kept, and another function or a queue of the
+ * account that gets each call's record once it succeeds, or fails for good.
+ * Every member reads them; owners and developers change them, or go back to
+ * Lambda's defaults.
  */
 export const FunctionAsyncSettings: React.FC<{ func: Function; mayChange: boolean }> = ({ func, mayChange }) => {
   /** undefined while loading; null when the function has none, and follows Lambda's defaults. */
@@ -41,8 +42,12 @@ export const FunctionAsyncSettings: React.FC<{ func: Function; mayChange: boolea
     setError(null);
     setEditing(true);
     try {
-      const { data } = await functionsApi.getAllFunctions();
-      setOthers(data.filter((other) => other.id !== func.id).map((other) => other.name).sort());
+      // The account's other functions by name, and its queues by ARN, as the API takes each.
+      const [functions, queues] = await Promise.all([functionsApi.getAllFunctions(), queuesApi.list().then((answer) => answer.data, () => [])]);
+      setOthers([
+        ...functions.data.filter((other) => other.id !== func.id).map((other) => other.name).sort(),
+        ...queues.map((queue) => queue.arn).sort(),
+      ]);
     } catch (err) {
       setError(apiErrorMessage(err));
     }

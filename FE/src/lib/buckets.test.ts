@@ -31,6 +31,7 @@ describe('an access key', () => {
     lastUsedAt: null,
     secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
     endpoint: 'https://s3.ffunc.tn',
+    sqsEndpoint: 'https://sqs.ffunc.tn',
     region: 'tn-tunis-1',
   };
 
@@ -43,10 +44,10 @@ describe('an access key', () => {
     ]).toEqual(['Buckets photos, read-only', 'Every bucket and queue', 'Queues orders', 'Buckets photos; queues orders, invoices, read-only']);
   });
 
-  it("gives the four variables AWS's SDKs and CLI read, as shell lines too", () => {
-    expect(awsVariables(key).map(([name]) => name)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'AWS_ENDPOINT_URL_S3']);
+  it("gives the five variables AWS's SDKs and CLI read, the S3 and SQS endpoints among them, as shell lines too", () => {
+    expect(awsVariables(key).map(([name]) => name)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL_SQS']);
     expect(exportLines(key)).toBe(
-      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.tn',
+      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.tn\nexport AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.tn',
     );
   });
 });

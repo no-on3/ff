@@ -1162,6 +1162,8 @@ export interface StorageKey {
 export interface CreatedStorageKey extends StorageKey {
   secretAccessKey: string;
   endpoint: string;
+  /** The SQS endpoint, AWS_ENDPOINT_URL_SQS, for the account's queues. */
+  sqsEndpoint: string;
   region: string;
 }
 
@@ -1179,8 +1181,105 @@ export const bucketsApi = {
 /** The account's access keys to its buckets: its owners alone see, make and revoke them. */
 export const storageKeysApi = {
   list: () => api.get<StorageKey[]>('/storage-keys'),
-  create: (body: { buckets?: string[]; readOnly?: boolean }) => api.post<CreatedStorageKey>('/storage-keys', body),
+  /** Naming neither buckets nor queues, it reaches all the account's; naming some, those alone. */
+  create: (body: { buckets?: string[]; queues?: string[]; readOnly?: boolean }) => api.post<CreatedStorageKey>('/storage-keys', body),
   revoke: (id: string) => api.delete(`/storage-keys/${id}`),
+};
+
+/** SQS's redrive policy: after maxReceiveCount receives, a message goes to the dead-letter queue its ARN names. */
+export interface RedrivePolicy {
+  deadLetterTargetArn: string;
+  maxReceiveCount: number;
+}
+
+/** A queue's messages, as SQS counts them, roughly. */
+export interface QueueMessages {
+  /** That can be received now. */
+  available: number;
+  /** Received and hidden for their visibility timeout. */
+  inFlight: number;
+  /** Waiting for their delay. */
+  delayed: number;
+}
+
+/** A customer's queue (ADR 0010), as GET /queues answers it: SQS's attributes by their names, in seconds and bytes. */
+export interface Queue {
+  name: string;
+  /** Its URL, which SQS's requests name, under the SQS endpoint. */
+  url: string;
+  arn: string;
+  visibilityTimeout: number;
+  messageRetentionPeriod: number;
+  delaySeconds: number;
+  maximumMessageSize: number;
+  receiveMessageWaitTimeSeconds: number;
+  redrivePolicy: RedrivePolicy | null;
+  messages: QueueMessages;
+  /** What its messages hold together, as the plan counts them. */
+  sizeBytes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A queue's fields, as the API's QueueView names them: contract.test.ts checks them. */
+export const QUEUE_FIELDS = [
+  'name',
+  'url',
+  'arn',
+  'visibilityTimeout',
+  'messageRetentionPeriod',
+  'delaySeconds',
+  'maximumMessageSize',
+  'receiveMessageWaitTimeSeconds',
+  'redrivePolicy',
+  'messages',
+  'sizeBytes',
+  'createdAt',
+  'updatedAt',
+] as const satisfies ReadonlyArray<keyof Queue>;
+
+/** The attributes a queue is made or changed with: SQS's, each left as it is when not given; a redrive policy of null removes it. */
+export type QueueAttributes = Partial<Pick<Queue, 'visibilityTimeout' | 'messageRetentionPeriod' | 'delaySeconds' | 'maximumMessageSize' | 'receiveMessageWaitTimeSeconds'>> & {
+  redrivePolicy?: RedrivePolicy | null;
+};
+
+/** A message attribute, as SQS's: its type, and a string, or binary in base64. */
+export interface MessageAttribute {
+  dataType: string;
+  stringValue?: string;
+  binaryValue?: string;
+}
+
+/** A message received: as it was sent, with the receipt handle that deletes it until it is received again. */
+export interface ReceivedMessage {
+  messageId: string;
+  receiptHandle: string;
+  body: string;
+  attributes: Record<string, MessageAttribute>;
+  /** How many times it was received, this time included. */
+  receiveCount: number;
+  /** Who sent it: an access key, an API key or a user, or a function's ARN for its destination records. */
+  senderId: string;
+  sentAt: string;
+}
+
+/** A received message's fields, as the API's ReceivedMessageView names them: contract.test.ts checks them. */
+export const RECEIVED_MESSAGE_FIELDS = ['messageId', 'receiptHandle', 'body', 'attributes', 'receiveCount', 'senderId', 'sentAt'] as const satisfies ReadonlyArray<keyof ReceivedMessage>;
+
+/** The account's queues: every member reads them; owners and developers make, change and delete them, and send and receive to debug them. */
+export const queuesApi = {
+  list: () => api.get<Queue[]>('/queues'),
+  get: (name: string) => api.get<Queue>(`/queues/${name}`),
+  create: (name: string, attributes: QueueAttributes = {}) => api.post<Queue>('/queues', { name, ...attributes }),
+  update: (name: string, attributes: QueueAttributes) => api.patch<Queue>(`/queues/${name}`, attributes),
+  remove: (name: string) => api.delete(`/queues/${name}`),
+  purge: (name: string) => api.post(`/queues/${name}/purge`),
+  send: (name: string, message: { body: string; delaySeconds?: number; attributes?: Record<string, MessageAttribute> }) =>
+    api.post<{ messageId: string; md5OfBody: string }>(`/queues/${name}/messages`, message),
+  /** Each message received is hidden for its visibility timeout and its receive counted, as any receive's. */
+  receive: (name: string, options: { maxMessages?: number; visibilityTimeout?: number; waitTimeSeconds?: number } = {}) =>
+    api.post<ReceivedMessage[]>(`/queues/${name}/receive`, options),
+  deleteMessage: (name: string, receiptHandle: string) => api.delete(`/queues/${name}/messages/${encodeURIComponent(receiptHandle)}`),
 };
 
 /** The account's alarms: every member reads them; owners and developers change them. */
