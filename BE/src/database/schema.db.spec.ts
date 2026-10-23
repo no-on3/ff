@@ -58,6 +58,7 @@ const CODE_IMAGES = migrationNames.find((name) => name.startsWith('CodeImages'))
 const DATABASES = migrationNames.find((name) => name.startsWith('Databases1')) as string;
 const DATABASE_BILLING = migrationNames.find((name) => name.startsWith('DatabaseBilling')) as string;
 const DATABASE_OPERATIONS = migrationNames.find((name) => name.startsWith('DatabaseOperations')) as string;
+const FUNCTION_KEYS = migrationNames.find((name) => name.startsWith('FunctionKeys')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -778,6 +779,30 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the bucket samples migration keeps each bucket's hours by month, append-only, and an account's buckets' storage notice at 80 or 100; it reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.getRepository(Account).save({ id: ACCOUNT, name: 'Samples', planId: 'beta', status: AccountStatus.ACTIVE });
+      const hour = `date_trunc('hour', now())`;
+      await dataSource.query(
+        `INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES (gen_random_uuid(), ${hour}, $1, 'photos', 161480253, 1204)`,
+        [ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE bucket_samples SET size_bytes = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM bucket_samples`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'bucket_samples')).toEqual([{ relname: monthPartition('bucket_samples', 0) }, { relname: monthPartition('bucket_samples', 1) }]);
+      await dataSource.query(`UPDATE accounts SET bucket_storage_notice = 100 WHERE id = $1`, [ACCOUNT]);
+      await expect(dataSource.query(`UPDATE accounts SET bucket_storage_notice = 90 WHERE id = $1`, [ACCOUNT])).rejects.toThrow(/violates check constraint/);
+
+      await migrateDownTo(dataSource, FUNCTION_KEYS);
+
+      expect(await dataSource.query(`SELECT to_regclass('bucket_samples') AS s`)).toEqual([{ s: null }]);
+      expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'accounts' AND column_name = 'bucket_storage_notice'`)).toEqual([]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   describe('after the migrations', () => {
     let db: ScratchDatabase;
 
@@ -806,13 +831,14 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples|database_samples|storage_request_counts)_\d{4}_\d{2}$/; // their partitions, one per month
+      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
         'alarms',
         'api_keys',
         'audit_log',
+        'bucket_samples',
         'buckets',
         'capacity_samples',
         'currencies',
@@ -855,6 +881,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         'webhook_secrets',
       ]);
       expect(tables.filter((table) => monthly.test(table))).toEqual([
+        monthPartition('bucket_samples', 0),
+        monthPartition('bucket_samples', 1),
         monthPartition('capacity_samples', 0),
         monthPartition('capacity_samples', 1),
         monthPartition('database_samples', 0),

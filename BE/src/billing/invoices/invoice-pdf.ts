@@ -179,7 +179,7 @@ function table(pages: Pages, columns: Column[], rows: string[][], empty?: string
   pages.rule();
 }
 
-/** The statement's pages: each function's month, each database's, then the month's lines and what it was charged. */
+/** The statement's pages: each function's month, each database's, each bucket's, then the month's lines and what it was charged. */
 function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller: Seller, attached: boolean): void {
   const money = (minor: bigint) => frenchMoney(minor, statement.exponent, statement.currency);
   if (attached) {
@@ -193,7 +193,8 @@ function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller
 
   const amount = { title: 'Montant HT', x: 460, width: RIGHT - 460, right: true };
   const databases = statement.resources.filter((resource) => resource.kind === 'database');
-  if (statement.functions.length > 0 || databases.length === 0) {
+  const buckets = statement.resources.filter((resource) => resource.kind === 'bucket');
+  if (statement.functions.length > 0 || statement.resources.length === 0) {
     table(
       pages,
       [{ title: 'Fonction', x: PAGE.margin, width: 220 }, { title: 'Requêtes', x: 275, width: 80, right: true }, { title: 'GB-secondes', x: 360, width: 95, right: true }, amount],
@@ -209,6 +210,29 @@ function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller
       pages,
       [{ title: 'Base de données', x: PAGE.margin, width: 300 }, { title: 'Go-mois', x: 360, width: 95, right: true }, amount],
       databases.map((database) => [database.name, frenchDecimal(database.gbMonths), money(database.amountMinor)]),
+    );
+  }
+  if (buckets.length > 0) {
+    if (statement.functions.length > 0 || databases.length > 0) pages.y += 10;
+    pages.room(50);
+    // As S3 bills them: storage by the GB-month, from each hour's measure; requests by its two classes, PUT, COPY,
+    // POST and LIST, then GET and the others, deletes free.
+    table(
+      pages,
+      [
+        { title: 'Bucket', x: PAGE.margin, width: 170 },
+        { title: 'Go-mois', x: 225, width: 70, right: true },
+        { title: 'PUT, LIST…', x: 300, width: 75, right: true },
+        { title: 'GET…', x: 380, width: 75, right: true },
+        amount,
+      ],
+      buckets.map((bucket) => [
+        bucket.name,
+        frenchDecimal(bucket.gbMonths),
+        groupDigits(bucket.tier1Requests.toString()),
+        groupDigits(bucket.tier2Requests.toString()),
+        money(bucket.amountMinor),
+      ]),
     );
   }
   pages.room(110);

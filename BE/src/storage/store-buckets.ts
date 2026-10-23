@@ -58,6 +58,26 @@ export class StoreBuckets implements OnModuleDestroy {
     return !uploads.Uploads?.length;
   }
 
+  /**
+   * What the bucket holds, as S3 bills its storage: its listing's sizes summed,
+   * and its objects counted, a thousand a page (ADR 0009, §8). An upload under
+   * way isn't an object yet.
+   */
+  async measure(storeName: string): Promise<{ sizeBytes: bigint; objects: bigint }> {
+    let sizeBytes = 0n;
+    let objects = 0n;
+    let token: string | undefined;
+    do {
+      const page = await this.s3.send(new ListObjectsV2Command({ Bucket: storeName, MaxKeys: 1000, ContinuationToken: token }));
+      for (const object of page.Contents ?? []) {
+        sizeBytes += BigInt(object.Size ?? 0);
+        objects++;
+      }
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+    return { sizeBytes, objects };
+  }
+
   /** Every object deleted, a thousand at a time, and every upload under way aborted; answers how many objects went. */
   async empty(storeName: string): Promise<number> {
     let deleted = 0;

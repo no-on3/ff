@@ -303,6 +303,26 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     }
   });
 
+  it("full buckets, an upload waits for room, saying so; a read and a delete go on, and once there is room the upload goes in", async () => {
+    await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'kept.txt', Body: 'kept' }));
+    const account = accounts.get(KEY.accountId)!;
+    const upload = () => client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'more.txt', Body: 'more' }));
+    try {
+      Object.assign(account, { bucketStorageNotice: 100 });
+      const failure = (await upload().catch((error: unknown) => error)) as { name: string; message: string };
+      expect([failure.name, failure.message]).toEqual([
+        'AccountProblem',
+        'There is a problem with your FF account that prevents the action from completing successfully: its buckets hold the 5,120 MB its Beta plan gives them: its files are read and deleted, and uploads wait for room.',
+      ]);
+      expect(await (await client().send(new GetObjectCommand({ Bucket: 'photos', Key: 'kept.txt' }))).Body?.transformToString()).toBe('kept');
+      expect(await refused(client().send(new DeleteObjectsCommand({ Bucket: 'photos', Delete: { Objects: [{ Key: 'kept.txt' }] } })))).toBe('accepted');
+      Object.assign(account, { bucketStorageNotice: 80 });
+      expect(await refused(upload())).toBe('accepted');
+    } finally {
+      Object.assign(account, { bucketStorageNotice: null });
+    }
+  });
+
   it("answers SlowDown past the plan's requests a second, the account's keys together", async () => {
     currentPlan = plan({ storageRequestsPerSecond: 3 });
     try {

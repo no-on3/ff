@@ -87,6 +87,46 @@ export class DatabaseUsageView {
   cost: string | null;
 }
 
+export class BucketUsageView {
+  @ApiProperty({ example: '0b6f3a1c-2d4e-4f5a-8b9c-1d2e3f4a5b6c' })
+  bucketId: string;
+
+  @ApiProperty({ example: 'photos', description: 'Its name in the month' })
+  name: string;
+
+  @ApiProperty({ description: 'The bucket was deleted since: its usage stays' })
+  deleted: boolean;
+
+  @ApiProperty({ example: 312, description: 'The hours it was measured in: what it held each hour counts for the whole hour' })
+  hours: number;
+
+  @ApiProperty({
+    example: '0.215231',
+    description: "Its storage in GB-months, as AWS S3 bills it: what it held each hour, over the month's hours, 1 GB being 2^30 bytes; to six decimals, as a string",
+  })
+  gbMonths: string;
+
+  @ApiProperty({ example: 161_480_253, description: 'What it held at its latest measure of the month, in bytes' })
+  sizeBytes: number;
+
+  @ApiProperty({ example: 1_204, description: 'Its objects then' })
+  objects: number;
+
+  @ApiProperty({ example: 2_310, description: "Its requests of S3's first class: PUT, COPY, POST and LIST" })
+  tier1Requests: number;
+
+  @ApiProperty({ example: 48_920, description: "Its requests of S3's second class: GET, HEAD and the others; deletes are free, as on S3" })
+  tier2Requests: number;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    example: '0.024',
+    description: "Its estimated cost in the estimate's currency, before the free tier, rounded to the minor unit; null without a price book",
+  })
+  cost: string | null;
+}
+
 /** The month's estimated cost at FF's prices (P-30, D8). Each amount is rounded once, from the exact ones. */
 export class UsageEstimateView {
   @ApiProperty({ example: 'TND' })
@@ -130,6 +170,9 @@ export class MonthlyUsageView {
   @ApiProperty({ type: [DatabaseUsageView], description: "Each of the account's databases measured in the month (ADR 0008), the most GB-months first" })
   databases: DatabaseUsageView[];
 
+  @ApiProperty({ type: [BucketUsageView], description: "Each of the account's buckets measured or asked something S3 bills in the month (ADR 0009), the most GB-months first" })
+  buckets: BucketUsageView[];
+
   @ApiProperty({ type: UsageAmountsView, description: "The account's calls in the month, from the same records as its functions'" })
   totals: UsageAmountsView;
 
@@ -138,7 +181,10 @@ export class MonthlyUsageView {
 }
 
 /** The month as UsageService reads it from the records, before it is priced. */
-export type UsageMonth = Omit<MonthlyUsageView, 'functions' | 'databases' | 'estimate'> & { functions: Array<Omit<FunctionUsageView, 'cost'>> };
+export type UsageMonth = Omit<MonthlyUsageView, 'functions' | 'databases' | 'buckets' | 'estimate'> & { functions: Array<Omit<FunctionUsageView, 'cost'>> };
 
 /** A database's month as UsageService reads it from its samples, before it is priced. */
 export type DatabaseMonth = Omit<DatabaseUsageView, 'cost'>;
+
+/** A bucket's month as UsageService reads it from its samples and its request counts, before it is priced. */
+export type BucketMonth = Omit<BucketUsageView, 'cost'>;

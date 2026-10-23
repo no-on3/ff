@@ -46,7 +46,7 @@ run("an account's usage in a month (L2, P-22)", () => {
       await db.dataSource.getRepository(Account).save({ id, name: `Account ${id}`, planId: 'beta', status: AccountStatus.ACTIVE });
     }
     for (const month of ['2026-09-01', '2026-10-01', '2026-11-01']) {
-      for (const table of ['usage_records', 'database_samples']) await query(`SELECT ff_ensure_month_partition($1, $2)`, [table, month]);
+      for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts']) await query(`SELECT ff_ensure_month_partition($1, $2)`, [table, month]);
     }
     kept = await db.dataSource.getRepository(Function).save({ name: 'new', accountId: A, runtime: Runtime.NODEJS, code: 'x', memory: 256, timeout: 5 });
     const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
@@ -153,6 +153,51 @@ run("an account's usage in a month (L2, P-22)", () => {
       { databaseId: deleted, name: 'audit', deleted: true, hours: 2, gbMonths: '0.040323', sizeBytes: Number(20n * GIB) },
     ]);
     expect(await usage.monthlyDatabases(A, '2026-12')).toEqual([]);
+  });
+
+  it("measures each of the account's buckets in the month: GB-months from its hourly samples, what it held last, and its requests by S3's class, deletes free", async () => {
+    const GIB = 1_073_741_824n;
+    const sample = (accountId: string, bucketId: string, name: string, hour: string, sizeBytes: bigint, objects: number) =>
+      query(`INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES ($1, $2, $3, $4, $5, $6)`, [
+        bucketId,
+        hour,
+        accountId,
+        name,
+        sizeBytes.toString(),
+        objects,
+      ]);
+    const requests = (accountId: string, bucketId: string, name: string, minute: string, kind: string, count: number) =>
+      query(
+        `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
+         VALUES ($1, $2, $3, gen_random_uuid(), $4, $5, $6, 0, 0, 0, 0, 0, 0)`,
+        [bucketId, minute, kind, accountId, name, count],
+      );
+    const [{ id: photos }] = await query<Array<{ id: string }>>(
+      `INSERT INTO buckets (account_id, name, store_name) VALUES ($1, 'photos', 'ff-00000000000000000000000a') RETURNING id`,
+      [A],
+    );
+    const deleted = '4d5e6f7a-8b9c-4d0e-9f1a-3b4c5d6e7f8a';
+    const asked = '5e6f7a8b-9c0d-4e1f-8a2b-4c5d6e7f8a9b'; // deleted too, asked something and never measured
+    // October has 744 hours: 372 GB for an hour is half a GB-month.
+    await sample(A, photos, 'photos', '2026-10-01T00:00:00Z', 372n * GIB, 10);
+    await sample(A, photos, 'photos', '2026-10-31T23:00:00Z', 744n * GIB, 12);
+    await sample(A, deleted, 'logs', '2026-10-02T00:00:00Z', 30n * GIB, 3);
+    await sample(A, photos, 'photos', '2026-11-01T00:00:00Z', 744n * GIB, 12); // November's
+    await sample(B, '6f7a8b9c-0d1e-4f2a-9b3c-5d6e7f8a9b0c', 'b-bucket', '2026-10-05T00:00:00Z', GIB, 1); // account B's
+    await requests(A, photos, 'photos', '2026-10-01T00:05:00Z', 'tier1', 2_000);
+    await requests(A, photos, 'photos', '2026-10-31T23:59:00Z', 'tier2', 30_000);
+    await requests(A, photos, 'photos', '2026-10-10T08:00:00Z', 'free', 40);
+    await requests(A, photos, 'photos', '2026-11-01T00:00:00Z', 'tier2', 1_000); // November's
+    await requests(A, asked, 'temp', '2026-10-20T12:00:00Z', 'tier2', 5);
+    await requests(A, deleted, 'logs', '2026-10-21T12:00:00Z', 'free', 3);
+
+    expect(await usage.monthlyBuckets(A, '2026-10')).toEqual([
+      { bucketId: photos, name: 'photos', deleted: false, hours: 2, gbMonths: '1.5', sizeBytes: Number(744n * GIB), objects: 12, tier1Requests: 2_000, tier2Requests: 30_000 },
+      // 30 GB-hours over 744: 0.04032258…
+      { bucketId: deleted, name: 'logs', deleted: true, hours: 1, gbMonths: '0.040323', sizeBytes: Number(30n * GIB), objects: 3, tier1Requests: 0, tier2Requests: 0 },
+      { bucketId: asked, name: 'temp', deleted: true, hours: 0, gbMonths: '0', sizeBytes: 0, objects: 0, tier1Requests: 0, tier2Requests: 5 },
+    ]);
+    expect(await usage.monthlyBuckets(A, '2026-12')).toEqual([]);
   });
 
   it("counts only the account's own records, and each month by the UTC calendar", async () => {

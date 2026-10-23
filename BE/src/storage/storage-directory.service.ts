@@ -54,9 +54,12 @@ export class StorageDirectory {
     return { id: key.id, accountId: key.accountId, functionId: key.functionId, buckets: key.buckets, readOnly: key.readOnly, secret: this.secretOf(key) };
   }
 
-  /** The account a key belongs to: its status, and whether FF turned its storage off; null for none. */
-  account(accountId: string): Promise<Pick<Account, 'id' | 'status' | 'planId' | 'storageDisabledAt' | 'storageDisabledReason'> | null> {
-    return this.buckets.manager.findOne(Account, { where: { id: accountId }, select: { id: true, status: true, planId: true, storageDisabledAt: true, storageDisabledReason: true } });
+  /** The account a key belongs to: its status, whether FF turned its storage off, and whether its buckets are full; null for none. */
+  account(accountId: string): Promise<Pick<Account, 'id' | 'status' | 'planId' | 'storageDisabledAt' | 'storageDisabledReason' | 'bucketStorageNotice'> | null> {
+    return this.buckets.manager.findOne(Account, {
+      where: { id: accountId },
+      select: { id: true, status: true, planId: true, storageDisabledAt: true, storageDisabledReason: true, bucketStorageNotice: true },
+    });
   }
 
   /** The active bucket of that name, whoever's it is. */

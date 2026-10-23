@@ -3,12 +3,28 @@ import { MonthlyUsageView } from './usage.dto';
 
 export { csvField, wantsCsv } from '../common/csv';
 
-const COLUMNS = ['kind', 'id', 'name', 'deleted', 'requests', 'billed_ms', 'gb_seconds', 'gb_months', 'throttled', 'platform_errors', 'lost', 'cost'];
+const COLUMNS = [
+  'kind',
+  'id',
+  'name',
+  'deleted',
+  'requests',
+  'billed_ms',
+  'gb_seconds',
+  'gb_months',
+  'tier1_requests',
+  'tier2_requests',
+  'throttled',
+  'platform_errors',
+  'lost',
+  'cost',
+];
 
 /**
  * GET /usage as CSV (P-22): a header, then one line per function, then one
- * per database, each with its cost, and the columns that aren't its kind's
- * left empty. No total line, which a spreadsheet's sum would count twice.
+ * per database, then one per bucket, each with its cost, and the columns that
+ * aren't its kind's left empty. No total line, which a spreadsheet's sum would
+ * count twice.
  */
 export function usageCsv(view: MonthlyUsageView): string {
   const functions = view.functions.map((usage) => [
@@ -19,6 +35,8 @@ export function usageCsv(view: MonthlyUsageView): string {
     csvField(usage.requests),
     csvField(usage.billedMs),
     csvField(usage.gbSeconds),
+    '',
+    '',
     '',
     csvField(usage.throttled),
     csvField(usage.platformErrors),
@@ -37,7 +55,25 @@ export function usageCsv(view: MonthlyUsageView): string {
     '',
     '',
     '',
+    '',
+    '',
     csvField(usage.cost),
   ]);
-  return csvLines([COLUMNS, ...functions, ...databases]);
+  const buckets = view.buckets.map((usage) => [
+    'bucket',
+    csvField(usage.bucketId),
+    csvField(usage.name, true),
+    csvField(usage.deleted),
+    '',
+    '',
+    '',
+    csvField(usage.gbMonths),
+    csvField(usage.tier1Requests),
+    csvField(usage.tier2Requests),
+    '',
+    '',
+    '',
+    csvField(usage.cost),
+  ]);
+  return csvLines([COLUMNS, ...functions, ...databases, ...buckets]);
 }

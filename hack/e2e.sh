@@ -34,8 +34,10 @@
 # bucket); a read-only key, a revoked one, a suspended account and one whose
 # storage is off refused; two functions, AWS's SDK for JavaScript v3 and boto3
 # with no setting at all, writing to the account's bucket with keys of their own
-# and refused another's, a function's key revoked with it; the requests counted
-# by the minute; a bucket deleted empty, or emptied first when asked. Then plans:
+# and refused another's, a function's key revoked with it; the bucket measured
+# within a minute; an account past its plan's storage, its uploads waiting for
+# room and let in again once it has some; the requests counted by the minute; a
+# bucket deleted empty, or emptied first when asked. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -43,7 +45,7 @@
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
 # Then GET /usage (P-22) against the raw records, as JSON and as CSV, the deleted
-# database's month in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
+# database's and bucket's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
 # since the first book rated as the backend started, in shadow mode, the balance,
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
 # invokes refused with 402, a top-up, and invokes accepted again at once. Then an
@@ -697,6 +699,7 @@ made="$(http POST /buckets '{"name": "e2e-photos"}')"
 check "a bucket is made: its endpoint, its own address, FF's region" "201 e2e-photos active $s3_endpoint http://e2e-photos.s3.localhost:$storage_port tn-tunis-1" \
   "$(status) $(jq -r '"\(.name) \(.status) \(.endpoint) \(.url) \(.region)"' <<<"$made")"
 store_name="$(env_q "SELECT store_name FROM buckets WHERE name = 'e2e-photos'")"
+photos_id="$(env_q "SELECT id FROM buckets WHERE name = 'e2e-photos'")"
 # The store itself, with FF's own credentials: what it really keeps.
 store_s3() { AWS_ACCESS_KEY_ID=ffdevaccesskey AWS_SECRET_ACCESS_KEY=ffdevsecretkey-local-only AWS_DEFAULT_REGION=us-east-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
   "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$FF_S3_PORT" "$@"; }
@@ -862,6 +865,32 @@ storage_off="$(aws_ff s3 ls s3://e2e-photos 2>&1 >/dev/null || true)"
 sql_e2e "UPDATE accounts SET storage_disabled_at = NULL, storage_disabled_reason = NULL WHERE id = '$tenant'"
 check "a suspended account's keys, and those of an account whose storage FF turned off, AccountProblem, saying why" "true true true" \
   "$(grep -q AccountProblem <<<"$suspended" && echo true || echo false) $(grep -q AccountProblem <<<"$storage_off" && echo true || echo false) $(grep -q 'E2E check' <<<"$storage_off" && echo true || echo false)"
+# Each minute, the buckets not measured yet in the hour are: this one within a minute, whatever its files.
+for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")" = 1 ] && break; sleep 1; done
+check "its hourly measure, within a minute: once in the hour, by its name" "1|e2e-photos" \
+  "$(env_q "SELECT count(*), max(name) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")"
+# The plan's storage, an account's buckets together: the other account on a plan of 1 MB, its bucket holding 1.2 MB once
+# a new bucket of its own has it measured, within a minute. Uploads wait for room; reads and deletes go on.
+other_key="$(as_other POST /storage-keys '{}')"
+as_other_s3() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
+head -c 600000 /dev/urandom >"$work/part.bin"
+as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/one.bin --only-show-errors
+as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/two.bin --only-show-errors
+sql_e2e "INSERT INTO plans (id, name, limits) SELECT 'e2e-files', 'E2E files', limits || '{\"bucketStorageMb\": 1}' FROM plans WHERE id = 'beta'"
+sql_e2e "UPDATE accounts SET plan_id = 'e2e-files' WHERE id = '$other'"
+storage_notice() { env_q "SELECT coalesce(bucket_storage_notice, 0) FROM accounts WHERE id = '$other'"; }
+as_other POST /buckets '{"name": "e2e-theirs-more"}' >/dev/null
+for _ in $(seq 75); do [ "$(storage_notice)" = 100 ] && break; sleep 1; done
+full="$(as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin 2>&1 >/dev/null || true)"
+check "its buckets past the plan's storage together: an upload waits for room, AccountProblem saying why" "100 true true" \
+  "$(storage_notice) $(grep -q AccountProblem <<<"$full" && echo true || echo false) $(grep -q 'its buckets hold the 1 MB its E2E files plan gives them' <<<"$full" && echo true || echo false)"
+check "  ... a read and a delete go on" "accepted accepted" \
+  "$(as_other_s3 outcome aws_ff s3 cp s3://e2e-theirs/one.bin "$work/one.out") $(as_other_s3 outcome aws_ff s3 rm s3://e2e-theirs/two.bin)"
+# A full account is measured every minute: room made, its uploads go in again within one.
+for _ in $(seq 75); do [ "$(storage_notice)" != 100 ] && break; sleep 1; done
+check "  ... and once there is room, within a minute, the upload goes in" "0 accepted" \
+  "$(storage_notice) $(as_other_s3 outcome aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin)"
+sql_e2e "UPDATE accounts SET plan_id = 'beta' WHERE id = '$other'"
 # Each minute, the front door writes the minutes that are over: these within two.
 for _ in $(seq 150); do
   [ "$(env_q "SELECT count(DISTINCT class) FROM storage_request_counts WHERE name = 'e2e-photos'")" = 3 ] && break
@@ -1023,10 +1052,19 @@ check "the Python function, deleted earlier, keeps its usage, marked deleted" "t
   "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
 check "the database, deleted earlier, keeps its month: its hours sampled and GB-months, at nothing before the book that prices databases" "true e2e-orders true true 0.000" \
   "$(jq -r --arg id "$db_id" '.databases[] | select(.databaseId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \((.gbMonths | tonumber) > 0) \(.cost)"' <<<"$usage")"
+photos_requests="$(env_q "SELECT coalesce(sum(requests) FILTER (WHERE class = 'tier1'), 0) || ' ' || coalesce(sum(requests) FILTER (WHERE class = 'tier2'), 0)
+                           FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
+# Its GB-months as its samples give them: what it held each hour, over the month's hours, 1 GB being 2^30 bytes, to six decimals.
+photos_gb="$(env_q "SELECT trim_scale(round(coalesce(sum(size_bytes), 0)::numeric / 1073741824
+                      / (extract(epoch FROM date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month' - date_trunc('month', now() AT TIME ZONE 'UTC')) / 3600), 6))
+                      FROM bucket_samples WHERE bucket_id = '$photos_id'")"
+check "the bucket, deleted earlier, keeps its month: its hours measured, GB-months, its requests by S3's two classes as counted, at nothing before the book that prices buckets" \
+  "true e2e-photos true $photos_gb $photos_requests 0.000" \
+  "$(jq -r --arg id "$photos_id" '.buckets[] | select(.bucketId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \(.gbMonths) \(.tier1Requests) \(.tier2Requests) \(.cost)"' <<<"$usage")"
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
-check "as CSV: a download, its header, the meter function's line and the database's" \
-  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,throttled,platform_errors,lost,cost|true|true" \
-  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,0\.000$" && echo true || echo false)"
+check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
+  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,throttled,platform_errors,lost,cost|true|true|true" \
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},,,,0\.000$" && echo true || echo false)"
 empty="$(http GET '/usage?month=2001-01')"
 check "a month without calls is empty, and before the first price book, unpriced" "200 0 0 null" \
   "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"

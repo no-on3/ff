@@ -378,11 +378,14 @@ run('usage records (L2, P-20)', () => {
       'database_samples_2031_02',
       'database_samples_2031_03',
       'database_samples_2031_04',
+      'bucket_samples_2031_02',
+      'bucket_samples_2031_03',
+      'bucket_samples_2031_04',
       'storage_request_counts_2031_02',
       'storage_request_counts_2031_03',
       'storage_request_counts_2031_04',
     ]);
-    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(12); // again: nothing to do
+    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(15); // again: nothing to do
 
     const fn = await newFunction();
     const at = async (startedAt: string, requestId: string) => {

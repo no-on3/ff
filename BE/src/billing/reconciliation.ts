@@ -18,9 +18,12 @@ export interface ReconciledAccount {
   /** Billed calls, as usage_hourly sums them and as the usage records count them. */
   ratedRequests: bigint;
   rawRequests: bigint;
-  /** Customers' databases' storage, in byte-hours, as resource_usage_hourly sums it and as their hourly samples do. */
+  /** Customers' databases' and buckets' storage, in byte-hours, as resource_usage_hourly sums it and as their hourly samples do. */
   ratedByteHours: bigint;
   sampledByteHours: bigint;
+  /** Buckets' requests that S3 bills, its two classes together, as resource_usage_hourly sums them and as the front door counted them. */
+  ratedStorageRequests: bigint;
+  countedStorageRequests: bigint;
 }
 
 export interface Reconciliation {
@@ -30,17 +33,20 @@ export interface Reconciliation {
   accounts: ReconciledAccount[];
 }
 
-/** Whether an account's charges and its usage agree: the parent's criterion, rated usage equals raw usage (B-01), calls and storage. */
+/** Whether an account's charges and its usage agree: the parent's criterion, rated usage equals raw usage (B-01), calls, storage and buckets' requests. */
 export const reconciled = (account: ReconciledAccount): boolean =>
-  account.chargedMinor === account.estimatedMinor && account.ratedRequests === account.rawRequests && account.ratedByteHours === account.sampledByteHours;
+  account.chargedMinor === account.estimatedMinor &&
+  account.ratedRequests === account.rawRequests &&
+  account.ratedByteHours === account.sampledByteHours &&
+  account.ratedStorageRequests === account.countedStorageRequests;
 
 /**
  * A month's charges against its raw usage (P-32): per account, what the
  * hourly rating charged, against the month to the end of the last hour rated
  * as P-30's estimate prices it from the usage records and samples, the
- * databases' hourly samples too. They differ only if usage reached the
- * database after its hour was rated: a call's record later than its hour's
- * settle time.
+ * databases' and buckets' hourly samples and the buckets' request counts too.
+ * They differ only if usage reached the database after its hour was rated: a
+ * call's record later than its hour's settle time.
  */
 export async function reconcile(dataSource: DataSource, pricing: PricingService, month: string): Promise<Reconciliation> {
   const { from, to } = monthBounds(month);
@@ -51,7 +57,16 @@ export async function reconcile(dataSource: DataSource, pricing: PricingService,
   if (!latest) return { month, ratedUntil: null, accounts: [] };
   const ratedUntil = new Date(latest.getTime() + HOUR_MS);
   const rows = await dataSource.query<
-    Array<{ account_id: string; charged: string | null; rated_requests: string | null; raw_requests: string | null; rated_storage: string | null; sampled_storage: string | null }>
+    Array<{
+      account_id: string;
+      charged: string | null;
+      rated_requests: string | null;
+      raw_requests: string | null;
+      rated_storage: string | null;
+      sampled_storage: string | null;
+      rated_s3: string | null;
+      counted_s3: string | null;
+    }>
   >(
     `WITH charged AS (SELECT "account_id", sum("amount_minor") AS "charged" FROM "usage_charges"
                        WHERE "hour" >= $1 AND "hour" < $2 GROUP BY "account_id"),
@@ -60,19 +75,26 @@ export async function reconcile(dataSource: DataSource, pricing: PricingService,
           raw AS (SELECT "account_id", count(*) AS "requests" FROM "usage_records"
                    WHERE "started_at" >= $1 AND "started_at" < $2 AND ${BILLED_CALL} GROUP BY "account_id"),
           sampled AS (SELECT DISTINCT "account_id" FROM "capacity_samples" WHERE "minute" >= $1 AND "minute" < $2),
-          stored AS (SELECT "account_id", sum("byte_hours") AS "byte_hours" FROM "resource_usage_hourly"
+          stored AS (SELECT "account_id", sum("byte_hours") AS "byte_hours", sum("tier1_requests" + "tier2_requests") AS "s3" FROM "resource_usage_hourly"
                       WHERE "hour" >= $1 AND "hour" < $2 GROUP BY "account_id"),
-          measured AS (SELECT "account_id", sum("size_bytes") AS "byte_hours" FROM "database_samples"
-                        WHERE "hour" >= $1 AND "hour" < $2 GROUP BY "account_id")
+          measured AS (SELECT "account_id", sum("size_bytes") AS "byte_hours" FROM
+                         (SELECT "account_id", "size_bytes" FROM "database_samples" WHERE "hour" >= $1 AND "hour" < $2
+                          UNION ALL SELECT "account_id", "size_bytes" FROM "bucket_samples" WHERE "hour" >= $1 AND "hour" < $2) samples
+                        GROUP BY "account_id"),
+          counted AS (SELECT "account_id", sum("requests") AS "s3" FROM "storage_request_counts"
+                       WHERE "minute" >= $1 AND "minute" < $2 AND "class" <> 'free' GROUP BY "account_id")
      SELECT a."account_id", charged."charged"::text AS "charged", rated."requests"::text AS "rated_requests", raw."requests"::text AS "raw_requests",
-            stored."byte_hours"::text AS "rated_storage", measured."byte_hours"::text AS "sampled_storage"
+            stored."byte_hours"::text AS "rated_storage", measured."byte_hours"::text AS "sampled_storage",
+            stored."s3"::text AS "rated_s3", counted."s3"::text AS "counted_s3"
        FROM (SELECT "account_id" FROM charged UNION SELECT "account_id" FROM rated UNION SELECT "account_id" FROM raw
-             UNION SELECT "account_id" FROM sampled UNION SELECT "account_id" FROM stored UNION SELECT "account_id" FROM measured) a
+             UNION SELECT "account_id" FROM sampled UNION SELECT "account_id" FROM stored UNION SELECT "account_id" FROM measured
+             UNION SELECT "account_id" FROM counted) a
        LEFT JOIN charged ON charged."account_id" = a."account_id"
        LEFT JOIN rated ON rated."account_id" = a."account_id"
        LEFT JOIN raw ON raw."account_id" = a."account_id"
        LEFT JOIN stored ON stored."account_id" = a."account_id"
        LEFT JOIN measured ON measured."account_id" = a."account_id"
+       LEFT JOIN counted ON counted."account_id" = a."account_id"
       ORDER BY a."account_id"`,
     [from, ratedUntil],
   );
@@ -90,6 +112,8 @@ export async function reconcile(dataSource: DataSource, pricing: PricingService,
       rawRequests: BigInt(row.raw_requests ?? '0'),
       ratedByteHours: BigInt(row.rated_storage ?? '0'),
       sampledByteHours: BigInt(row.sampled_storage ?? '0'),
+      ratedStorageRequests: BigInt(row.rated_s3 ?? '0'),
+      countedStorageRequests: BigInt(row.counted_s3 ?? '0'),
     });
   }
   return { month, ratedUntil, accounts };
@@ -108,7 +132,7 @@ export function formatReconciliation({ month, ratedUntil, accounts }: Reconcilia
     const [whole, fraction] = Decimal.ratio(byteHours, BYTES_PER_GB).toFixed(3).split('.');
     return `${BigInt(whole).toLocaleString('en-US')}.${fraction}`;
   };
-  const header = ['Account', 'Charged', 'From usage', 'Requests rated', 'Requests used', 'GB-h rated', 'GB-h sampled', ''];
+  const header = ['Account', 'Charged', 'From usage', 'Requests rated', 'Requests used', 'GB-h rated', 'GB-h sampled', 'S3 requests rated', 'S3 requests counted', ''];
   const lines = accounts.map((account) => [
     account.accountId,
     `${formatMinor(account.chargedMinor, account.exponent)} ${account.currency}`,
@@ -117,6 +141,8 @@ export function formatReconciliation({ month, ratedUntil, accounts }: Reconcilia
     account.rawRequests.toLocaleString('en-US'),
     gbHours(account.ratedByteHours),
     gbHours(account.sampledByteHours),
+    account.ratedStorageRequests.toLocaleString('en-US'),
+    account.countedStorageRequests.toLocaleString('en-US'),
     reconciled(account) ? 'ok' : 'DIFFERENT',
   ]);
   const widths = header.map((title, column) => Math.max(title.length, ...lines.map((line) => line[column].length)));

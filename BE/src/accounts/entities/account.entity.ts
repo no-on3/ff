@@ -18,6 +18,7 @@ export enum AccountStatus {
 @Check(`"data_deleted_at" IS NULL OR "data_deletion_due_at" IS NOT NULL`)
 // Storage turned off has its reason, and only then.
 @Check(`("storage_disabled_at" IS NULL) = ("storage_disabled_reason" IS NULL)`)
+@Check(`"bucket_storage_notice" IN (80, 100)`)
 export class Account {
   /** 12 random digits, the AWS-shaped format of ADR 0004. */
   @PrimaryColumn({ type: 'char', length: 12 })
@@ -80,6 +81,14 @@ export class Account {
   /** The operator's reason, which the account's members read too. */
   @Column({ type: 'text', nullable: true })
   storageDisabledReason: string | null;
+
+  /**
+   * The share of its plan's storage that its buckets reached together at their
+   * last measure, which its owners were told of: 80, or 100, when uploads wait
+   * for room; null under 80% (ADR 0009).
+   */
+  @Column({ type: 'smallint', nullable: true })
+  bucketStorageNotice: 80 | 100 | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

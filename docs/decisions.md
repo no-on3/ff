@@ -97,7 +97,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **8. Free every month, per account: 1 GB of database; 5 GB of files, 20,000 reads and 2,000 writes.** ✅ Confirmed: the plan's numbers.
 - **Changed already:** V-04: all four are in the second price book, which its migration adds from the first hour of the month after it runs, with RDS's and S3's prices at AWS's list, read on 2026-10-23: 1 GB-month of databases, 5 GB-months of buckets, 2,000 `PUT` and 20,000 `GET` requests.
-- **Still to change:** V-09, the buckets' measures, which use the last three.
+- **Changed already, too:** V-09: buckets measured every hour and their requests counted by S3's two classes, rated against the last three; the statement, `GET /usage` and its CSV show each bucket's month.
+- **Still to change:** nothing.
 
 **9. No monthly fee per database.** ✅ Confirmed. Only storage is billed; the price book can add a fee later.
 - **Changed already:** V-04: the fee's price line is in the second book at 0; a book that sets one charges it by the hours each database existed.

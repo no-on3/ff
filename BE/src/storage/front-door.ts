@@ -16,6 +16,7 @@ import { countStorageRequest } from '../plans/rate-limits';
 import { ChunkedBodyReader, ExpectedChecksum, PlainBodyChecker, STREAMING_SIGNED, STREAMING_SIGNED_TRAILER, STREAMING_UNSIGNED_TRAILER, isStreaming } from './aws-chunked';
 import { Bucket } from './bucket.entity';
 import { CHECKSUM_ALGORITHMS, isChecksumAlgorithm } from './checksums';
+import { fullBuckets } from './bucket-storage';
 import { S3Error, accessDenied, accountProblem, errorDocument, internalError, invalidAccessKeyId, invalidRequest, noSuchBucket, notImplemented } from './s3-error';
 import { S3Address, S3Operation, addressOf, operationOf } from './s3-requests';
 import { RequestSignature, SigningChain, UNSIGNED_PAYLOAD, checkSignature, decodeEscapes, readSignature } from './sigv4';
@@ -281,7 +282,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     if (!key) throw invalidAccessKeyId();
     const chain = checkSignature({ method, rawPath, rawQuery, rawHeaders: request.rawHeaders }, signature, key.secret, new Date());
     this.directory.touch(key.id);
-    const plan = await this.admitAccount(key.accountId);
+    const { plan, bucketsFull } = await this.admitAccount(key.accountId);
 
     const operation = operationOf(method, address, query, request.headers);
     if (operation.name === 'NotImplemented') throw notImplemented();
@@ -293,8 +294,11 @@ export class S3FrontDoor implements OnModuleDestroy {
     exchange.bucket = bucket;
     exchange.operation = operation;
     if (operation.writes && key.readOnly) throw accessDenied();
-    // Out of credit, uploads wait for it; reads, and deletes that lower the bill, go on.
-    if (operation.writes && operation.class === 'tier1') await this.admitUpload(key.accountId);
+    // Full buckets, or no credit, and uploads wait for room or for credit; reads, and deletes that make room and lower the bill, go on.
+    if (operation.writes && operation.class === 'tier1') {
+      if (bucketsFull) throw accountProblem(fullBuckets(plan.limits.bucketStorageMb, plan.name));
+      await this.admitUpload(key.accountId);
+    }
     if (operation.name === 'GetBucketLocation') return this.document(exchange, 200, locationDocument(this.region));
     if (operation.name === 'HeadBucket') {
       exchange.response.writeHead(200, { 'x-amz-request-id': exchange.id, 'x-amz-bucket-region': this.region, 'content-length': 0 });
@@ -304,8 +308,12 @@ export class S3FrontDoor implements OnModuleDestroy {
     return this.forward(exchange, signature, chain, key, bucket, operation, plan);
   }
 
-  /** The key's account, as every key is checked: active, its storage on, within the plan's requests per second. Answers its plan. */
-  private async admitAccount(accountId: string): Promise<PlanView> {
+  /**
+   * The key's account, as every key is checked: active, its storage on, within
+   * the plan's requests per second. Answers its plan, and whether its buckets
+   * hold all of the plan's storage at their last measure.
+   */
+  private async admitAccount(accountId: string): Promise<{ plan: PlanView; bucketsFull: boolean }> {
     const account = await this.directory.account(accountId);
     if (!account || account.status !== AccountStatus.ACTIVE) throw accountProblem(`it is ${account?.status ?? 'gone'}`);
     if (account.storageDisabledAt) throw accountProblem(`FF turned its databases and buckets off: ${account.storageDisabledReason}`);
@@ -313,7 +321,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     if ((await countStorageRequest(this.throttler, account.id, plan.limits.storageRequestsPerSecond)) !== undefined) {
       throw new S3Error(503, 'SlowDown', `Please reduce your request rate: the ${plan.name} plan allows ${plan.limits.storageRequestsPerSecond} requests a second.`);
     }
-    return plan;
+    return { plan, bucketsFull: account.bucketStorageNotice === 100 };
   }
 
   private async admitUpload(accountId: string): Promise<void> {

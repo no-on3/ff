@@ -155,6 +155,22 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
        ON CONFLICT DO NOTHING`,
       [hour, book.id],
     );
+    // Each bucket sampled in the hour, or asked something in it: its size for one hour, its requests by S3's two classes
+    // (deletes free), and its name then. One asked only for free requests costs nothing, and has no row.
+    await this.dataSource.query(
+      `INSERT INTO "resource_usage_hourly" ("account_id", "hour", "resource_id", "kind", "name", "price_book_id", "byte_hours", "hours", "tier1_requests", "tier2_requests")
+       SELECT coalesce(s."account_id", r."account_id"), $1, coalesce(s."bucket_id", r."bucket_id"), 'bucket', coalesce(s."name", r."name"), $2,
+              coalesce(s."size_bytes", 0), CASE WHEN s."bucket_id" IS NULL THEN 0 ELSE 1 END, coalesce(r."tier1", 0), coalesce(r."tier2", 0)
+         FROM (SELECT "bucket_id", "account_id", "name", "size_bytes" FROM "bucket_samples" WHERE "hour" = $1) s
+         FULL JOIN (SELECT "bucket_id", max("account_id") AS "account_id", max("name") AS "name",
+                           coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0) AS "tier1",
+                           coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0) AS "tier2"
+                      FROM "storage_request_counts" WHERE "minute" >= $1 AND "minute" < $3 GROUP BY "bucket_id") r
+           ON r."bucket_id" = s."bucket_id"
+        WHERE s."bucket_id" IS NOT NULL OR r."tier1" > 0 OR r."tier2" > 0
+       ON CONFLICT DO NOTHING`,
+      [hour, book.id, new Date(hour.getTime() + HOUR_MS)],
+    );
   }
 
   /** An account's charge for the hour: its month to the hour's end, rated and rounded once, less the month's earlier charges. */

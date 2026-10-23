@@ -53,7 +53,7 @@ export interface StorageFacts {
 }
 
 /** Megabytes to a tenth, as the plan counts them: "1024.5", "819.2", "7". */
-function megabytes(bytes: bigint): string {
+export function megabytes(bytes: bigint): string {
   const tenths = (bytes * 10n + BYTES_PER_MB / 2n) / BYTES_PER_MB;
   return tenths % 10n === 0n ? (tenths / 10n).toString() : `${tenths / 10n}.${tenths % 10n}`;
 }
