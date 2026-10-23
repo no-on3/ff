@@ -31,6 +31,7 @@
     --c-store: #9a4a1c;
     --c-reg: #3b7a1e;
     --c-data: #34568b;
+    --c-front: #8f3b76;
     --code-bg: #f3f4f0;
     --j-key: #2561c9;
     --j-str: #0f6f5c;
@@ -65,6 +66,7 @@
       --c-store: #f0a07a;
       --c-reg: #8ccf6a;
       --c-data: #a3bdf0;
+      --c-front: #f08cd0;
       --code-bg: #151815;
       --j-key: #8ab4ff;
       --j-str: #6fd8bc;
@@ -99,6 +101,7 @@
     --c-store: #f0a07a;
     --c-reg: #8ccf6a;
     --c-data: #a3bdf0;
+    --c-front: #f08cd0;
     --code-bg: #151815;
     --j-key: #8ab4ff;
     --j-str: #6fd8bc;
@@ -704,6 +707,7 @@ const LANES = {
   reg:    { label: 'Registry', sub: 'code images', color: '--c-reg', map: 'registry' },
   yourdb: { label: 'Your database', sub: 'PostgreSQL', color: '--c-user', map: 'user' },
   datadb: { label: 'Databases', sub: 'PostgreSQL 18', color: '--c-data', map: 'datadb' },
+  front:  { label: 'S3 front door', sub: 'backend :3002', color: '--c-front', map: 'api' },
 };
 const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'registry', 'datadb', 'k8sapi', 'ns', 'guard', 'service', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
 
@@ -1180,6 +1184,81 @@ const SCENARIOS = [
         text: 'The hour\'s sample, written once, in a partition per month; the hourly rating adds it to resource_usage_hourly. The month\'s statement prices the byte-hours over 2^30 bytes and the month\'s hours, at RDS\'s gp3 price per GB-month in dinars, the first GB-month of each month free. GET /usage, the console\'s Usage page and ff usage show the month so far; GET /databases/:id/metrics gives DatabaseConnections and VolumeBytesUsed, an hour a point, which alarms watch.',
         code: 'database-samples.service.ts · BE/src/billing/hourly-rating.service.ts · rating.ts gbMonths()',
         set: { 'PostgreSQL.database_samples': 'orders · 06:00 · 7.3 MB · 1 session', 'PostgreSQL.resource_usage_hourly': 'orders · 06:00 · 7,634,423 byte-hours' } },
+    ],
+  },
+  {
+    id: 'bucket', title: 'Files in a bucket, as AWS S3 keeps them',
+    lanes: ['user', 'api', 'db', 'front', 's3'],
+    summary: 'ff buckets create photos, then a key whose secret ff prints once as the variables AWS\'s tools read, then aws s3 cp with nothing else changed: the backend\'s S3 front door, a port of its own, checks the signature with the key, the key\'s account and plan, and the bucket, then streams the file to the store under a name of FF\'s, checking it on the way; it counts each request by S3\'s two classes, and every hour the backend measures the bucket, which is billed by the GB-month and the request, as S3 Standard is.',
+    state: {
+      'PostgreSQL': { 'buckets': null, 'storage_keys': null, 'storage_request_counts': null, 'bucket_samples': null, 'resource_usage_hourly': null },
+      'S3 (customers\' buckets)': { 'bucket': null, 'object': null },
+    },
+    initial: {},
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /buckets · {"name":"photos"}', title: 'ff buckets create asks for a bucket',
+        text: 'The name is held to AWS\'s rule by ff before it calls, and by the backend: 3 to 63 lower-case letters, digits and hyphens, a letter or a digit first and last, and none of the prefixes and suffixes AWS keeps for itself. Without dots on FF, so that the bucket\'s own address, photos.s3.<domain>, keeps the wildcard certificate; any name FF takes, S3 takes too. The console\'s Buckets page sends the same.',
+        code: 'cli/src/commands/buckets.rs create() · BE/src/storage/buckets.controller.ts · storage-names.ts bucketNameProblem()',
+        msg: { kind: 'http', first: 'POST /buckets HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { name: 'photos' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'lock the account · count · INSERT buckets', title: 'Within the plan, its name unique across FF',
+        text: 'The account\'s row locked and its buckets counted against the plan\'s, five on beta, so that two at once can\'t both pass. The name is unique across FF, as on AWS: a unique index refuses one that another account has, with 409, until that one is deleted. The row keeps a name of FF\'s for the store, ff- and 24 random hexadecimal characters, which says nothing of whose it is.',
+        code: 'BE/src/storage/buckets.service.ts create() · storage-names.ts newStoreName() · bucket.entity.ts',
+        msg: { kind: 'sql', text: "SELECT \"id\" FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;\nSELECT count(*) FROM \"buckets\" WHERE \"account_id\" = '000000000001';\nINSERT INTO \"buckets\" (\"account_id\", \"name\", \"store_name\") VALUES ('000000000001', 'photos', 'ff-7927db049ca09e024ab4426c');   -- active" },
+        set: { 'PostgreSQL.buckets': 'photos · ff-7927db049ca09e024ab4426c · active' } },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT /ff-7927… (CreateBucket)', title: 'The bucket in the store, under FF\'s name',
+        text: 'With FF\'s own key to the store, which no customer has. If the store can\'t make it, the row is taken back and the answer is 503: no row names a bucket the store hasn\'t. The audit log names bucket.create.',
+        code: 'buckets.service.ts create() · store-buckets.ts create() · store-client.ts',
+        msg: { kind: 'http', first: 'PUT /ff-7927db049ca09e024ab4426c HTTP/1.1', headers: { host: 'localhost:9003', 'x-amz-content-sha256': '<SHA-256 of the empty body>', authorization: S3_SIGNED } },
+        set: { 'S3 (customers\' buckets).bucket': 'ff-7927db049ca09e024ab4426c · empty' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · its endpoint and addresses', title: 'Where AWS\'s tools reach it',
+        text: 'ff prints the endpoint, the bucket\'s own address (virtual-hosted, as the SDK for JavaScript addresses a host name), the path-style one (as boto3 and the AWS CLI address it, and every SDK at an IP address), and the region. Not measured yet: the first measure comes within a minute.',
+        code: 'buckets.service.ts view() · cli/src/commands/buckets.rs reach()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'photos', status: 'active', region: 'tn-tunis-1', endpoint: 'http://s3.localhost:3002', url: 'http://photos.s3.localhost:3002', sizeBytes: null, objects: null, measuredAt: null, createdAt: '2026-10-23T06:30:02.114Z' } } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /storage-keys · {"buckets":["photos"]}', title: 'An access key, for this bucket alone',
+        text: 'ff buckets keys create --bucket photos. Without buckets, a key reaches all the account\'s; with readOnly, it reads and lists only. Only owners see, make and revoke keys.',
+        code: 'cli/src/commands/buckets.rs keys_create() · BE/src/storage/storage-keys.controller.ts',
+        msg: { kind: 'http', first: 'POST /storage-keys HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { buckets: ['photos'] } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'lock · count · INSERT storage_keys', title: 'Two keys at most, the secret sealed',
+        text: 'An ID like AWS\'s, AKFF and 16 characters of base32, and a secret of 40. An account has two keys at most, as IAM gives a user, so that one can replace the other; a function\'s own key isn\'t counted. The front door needs the secret itself to check signatures, so FF can\'t keep only a hash of it, as it does of API keys: it is sealed, a data key of its own encrypting it with AES-256-GCM, for that key ID alone.',
+        code: 'BE/src/storage/storage-keys.service.ts create() · storage-directory.service.ts sealSecret() · BE/src/encryption/envelope.ts',
+        msg: { kind: 'sql', text: "SELECT \"id\" FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;\nSELECT count(*) FROM \"storage_keys\" WHERE \"account_id\" = '000000000001' AND \"function_id\" IS NULL AND \"revoked_at\" IS NULL;\nINSERT INTO \"storage_keys\" (\"id\", \"account_id\", \"secret\", \"buckets\", \"read_only\")\nVALUES ('AKFF7Q2MXRWN4D6KJ3TA', '000000000001', '{\"v\":1,\"kid\":…,\"key\":…,\"iv\":…,\"data\":…}', '{photos}', false);" },
+        set: { 'PostgreSQL.storage_keys': 'AKFF7Q2MXRWN4D6KJ3TA · photos · read-write · sealed' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · the secret, this once', title: 'The four variables AWS\'s tools read',
+        text: 'The secret is in this answer only. ff prints it as export lines, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and AWS_ENDPOINT_URL_S3, for eval "$(ff buckets keys create … | grep \'^export \')" or a function\'s secrets. AWS\'s SDKs and CLI read the endpoint from the last, so no code needs to name FF. The audit log names storage_key.create.',
+        code: 'storage-keys.service.ts create() · cli/src/commands/buckets.rs keys_create()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: 'AKFF7Q2MXRWN4D6KJ3TA', buckets: ['photos'], readOnly: false, createdAt: '2026-10-23T06:30:09.502Z', lastUsedAt: null, secretAccessKey: 'wJal…', endpoint: 'http://s3.localhost:3002', region: 'tn-tunis-1' } } },
+      { from: 'user', to: 'front', kind: 'req', label: 'PUT /photos/2026/cat.jpg · SigV4', title: 'aws s3 cp, its endpoint the only change',
+        text: 'The AWS CLI as it is, with those variables: AWS_ENDPOINT_URL_S3 sends it to FF\'s front door, which the backend serves on a port of its own (FF_STORAGE_PORT, 3002), path-style at that address. It signs with AWS Signature Version 4, the body\'s SHA-256 among what it signs, adds the CRC-64/NVME checksum AWS\'s tools now send, and waits for 100 Continue before it sends the body.',
+        code: 'BE/src/storage/front-door.ts serve() · s3-requests.ts operationOf()',
+        msg: { kind: 'http', first: 'PUT /photos/2026/cat.jpg HTTP/1.1', headers: { host: 's3.localhost:3002', 'content-type': 'image/jpeg', 'content-length': '2481337', expect: '100-continue', 'x-amz-date': '20261023T063015Z', 'x-amz-content-sha256': '71680691…09af44', 'x-amz-checksum-crc64nvme': 'V9WiTp/A9Yc=', 'x-amz-sdk-checksum-algorithm': 'CRC64NVME', authorization: 'AWS4-HMAC-SHA256 Credential=AKFF7Q2MXRWN4D6KJ3TA/20261023/tn-tunis-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-checksum-crc64nvme;x-amz-content-sha256;x-amz-date;x-amz-sdk-checksum-algorithm, Signature=…' }, body: '<2,481,337 bytes, once the front door answers 100 Continue>' } },
+      { from: 'front', to: 'db', kind: 'req', label: 'the key · its account · the bucket', title: 'Every request checked the same way',
+        text: 'The key of that ID, unless it is revoked (InvalidAccessKeyId otherwise); its secret opened, and the signature checked, its time within 15 minutes of the front door\'s (SignatureDoesNotMatch, RequestTimeTooSkewed). Its account must be active and its storage on (AccountProblem, saying why), within the plan\'s requests a second (SlowDown, 100 on beta). The bucket must be the key\'s account\'s, and one the key names (AccessDenied; NoSuchBucket for none). An upload needs a read-write key, room in the plan\'s storage at the last measure, and credit, as an invocation does; reading and deleting go on without. Only then does the front door answer 100 Continue. Nothing is anonymous: a request without a signature is refused.',
+        code: 'front-door.ts answer() admitAccount() bucketFor() · storage-directory.service.ts key() · sigv4.ts checkSignature()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"storage_keys\" WHERE \"id\" = 'AKFF7Q2MXRWN4D6KJ3TA' AND \"revoked_at\" IS NULL LIMIT 1;\nSELECT \"id\", \"status\", \"plan_id\", \"storage_disabled_at\", \"storage_disabled_reason\", \"bucket_storage_notice\" FROM \"accounts\" WHERE \"id\" = '000000000001';\nSELECT … FROM \"buckets\" WHERE \"name\" = 'photos' AND \"status\" = 'active' LIMIT 1;" },
+        set: { 'PostgreSQL.storage_keys': 'AKFF7Q2MXRWN4D6KJ3TA · photos · read-write · last used 06:30' } },
+      { from: 'front', to: 's3', kind: 'req', label: 'PUT /ff-7927…/2026/cat.jpg', title: 'To the store, checked as it streams',
+        text: 'Under the store\'s name for the bucket, signed again with FF\'s own key. The body streams through, its SHA-256 and its CRC-64/NVME computed on the way and compared at its end: a body that doesn\'t match is cut off before its last byte, so the store never completes it, and the client gets XAmzContentSHA256Mismatch or BadDigest. The store gets neither the client\'s checksum nor the customer\'s name for the bucket.',
+        code: 'front-door.ts forward() body() · aws-chunked.ts PlainBodyChecker · checksums.ts · sigv4.ts signedForStore()',
+        msg: { kind: 'http', first: 'PUT /ff-7927db049ca09e024ab4426c/2026/cat.jpg HTTP/1.1', headers: { host: 'localhost:9003', 'content-type': 'image/jpeg', 'content-length': '2481337', 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD', authorization: S3_SIGNED }, body: '<the same 2,481,337 bytes, as they arrive>' },
+        set: { 'S3 (customers\' buckets).bucket': 'ff-7927db049ca09e024ab4426c · 1 object', 'S3 (customers\' buckets).object': '2026/cat.jpg · 2,481,337 bytes' } },
+      { from: 'front', to: 'user', kind: 'res', label: '200 · ETag', title: 'The store\'s answer, in the customer\'s names',
+        text: 'The store\'s status and the headers S3 gives, ETag among them, with the front door\'s own request ID; in an XML answer, the store\'s name for the bucket becomes the customer\'s. The AWS CLI prints upload: ./cat.jpg to s3://photos/2026/cat.jpg.',
+        code: 'front-door.ts relay()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { etag: '"5f2b…"', 'x-amz-request-id': '4F1A9C2E7B3D8E60', 'content-length': '0' } } },
+      { from: 'front', to: 'db', kind: 'req', label: 'INSERT storage_request_counts', title: 'Counted, by S3\'s two classes',
+        text: 'Each request let into a bucket is counted in memory, in its minute and its class: the first (PUT, COPY, POST, LIST), the second (GET, HEAD and the others), or free (DELETE), with its status and its bytes in and out. Once a minute the minutes that are over are written, a row each per bucket and class, and whatever is left when the backend stops; a row that can\'t be written goes back for the next turn. GET /buckets/photos/metrics reads them: AllRequests, GetRequests, PutRequests, 4xxErrors, 5xxErrors, BytesDownloaded and BytesUploaded, as CloudWatch names S3\'s.',
+        code: 'front-door.ts serve() · BE/src/storage/storage-request-counts.service.ts flush() · s3-requests.ts',
+        msg: { kind: 'sql', text: "INSERT INTO \"storage_request_counts\" (\"bucket_id\", \"minute\", \"class\", \"writer\", \"account_id\", \"name\", \"requests\", \"gets\", \"puts\", \"errors4xx\", \"errors5xx\", \"bytes_in\", \"bytes_out\")\nVALUES ('9d3e…', '2026-10-23 06:30:00+00', 'tier1', '<this backend>', '000000000001', 'photos', 1, 0, 1, 0, 0, 2481337, 0);" },
+        set: { 'PostgreSQL.storage_request_counts': 'photos · 06:30 · tier1 · 1 PUT · 2,481,337 bytes in' } },
+      { from: 'api', to: 's3', kind: 'req', label: 'ListObjectsV2 ff-7927… · each hour', title: 'Measured every hour',
+        text: 'Each minute, the backend measures the buckets of every account that has one not measured yet in the hour, all of that account\'s together: the store\'s listing, page by page, its objects\' sizes summed and counted. One backend at a time, the one that holds PostgreSQL\'s advisory lock. A closed account\'s buckets aren\'t measured, a suspended one\'s are, and billed; an account whose buckets hold the plan\'s storage is measured every minute, so that uploads go in again soon after files are deleted.',
+        code: 'BE/src/storage/bucket-samples.service.ts sampleDue() · store-buckets.ts measure()',
+        msg: { kind: 'http', first: 'GET /ff-7927db049ca09e024ab4426c?list-type=2 HTTP/1.1', headers: { host: 'localhost:9003', authorization: S3_SIGNED } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT bucket_samples · resource_usage_hourly', title: 'Billed as S3 Standard is',
+        text: 'The hour\'s sample, written once, in a partition per month. Together, the account\'s buckets set its storage notice: its owners get an e-mail at 80% and at 100% of the plan\'s storage, 5 GB on beta, and from 100% uploads answer AccountProblem until the buckets hold less. The hourly rating adds each bucket\'s hour to resource_usage_hourly, its byte-hours from the sample and each class\'s requests from the counts. The month\'s statement prices the GB-months in S3 Standard\'s tiers and the requests by the thousand, at S3\'s prices in dinars, the first 5 GB-months, 2,000 requests of the first class and 20,000 of the second free each month. GET /usage, the console\'s Usage page and ff usage show the month so far, with the bytes each bucket\'s requests sent out, counted and not billed. FF keeps no copy of a bucket at the second site: the store\'s own redundancy keeps it, as S3\'s does.',
+        code: 'bucket-samples.service.ts measureAccount() · bucket-storage.ts · BE/src/billing/hourly-rating.service.ts · rating.ts gbMonths() · price-book.ts',
+        msg: { kind: 'sql', text: "INSERT INTO \"bucket_samples\" (\"bucket_id\", \"hour\", \"account_id\", \"name\", \"size_bytes\", \"objects\")\nVALUES ('9d3e…', '2026-10-23 06:00:00+00', '000000000001', 'photos', 2481337, 1) ON CONFLICT DO NOTHING;" },
+        set: { 'PostgreSQL.bucket_samples': 'photos · 06:00 · 2.5 MB · 1 object', 'PostgreSQL.resource_usage_hourly': 'bucket photos · 06:00 · 2,481,337 byte-hours · 1 + 0 requests' } },
     ],
   },
   {
@@ -2108,12 +2187,12 @@ const SCENARIOS = [
 const ARCH_INFO = {
   user: ['You', 'The console (React, on :5199), Swagger UI on /api, or curl; as FF\'s operator, the admin dashboard (admin/, on :5198), whose /admin routes take only an operator\'s token issued to ff-admin. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · admin/src · docs/getting-started.md'],
   idp: ['Keycloak', 'Logs users in and signs them up, for the realm ff (development: localhost:8180). Users with the realm role ff-operator also give a one-time password (P-70). The console gets its tokens from it with the authorization code flow and PKCE; the backend checks each access token against the realm\'s public keys, which it fetches once and caches.', 'deploy/keycloak/ff-realm.json · FE/src/auth/oidc.ts · BE/src/auth/token-verifier.ts'],
-  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL and the packages\' zips in S3, makes each package\'s code image and pushes it to the code registry, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, its CapacityService samples every function\'s ready instances 5 s into every minute; its NotificationWorker sends the e-mails and webhooks due every 10 s; and its AlarmEvaluator judges every alarm every minute.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator'],
+  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL and the packages\' zips in S3, makes each package\'s code image and pushes it to the code registry, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, its CapacityService samples every function\'s ready instances 5 s into every minute; its NotificationWorker sends the e-mails and webhooks due every 10 s; and its AlarmEvaluator judges every alarm every minute. On a port of its own, :3002, it is the S3 front door (ADR 0009): AWS\'s SDKs and CLI reach customers\' buckets there, each request\'s signature checked with one of the account\'s access keys, its account and plan, before it streams to the store; its BucketSamplesService measures every bucket each hour.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator · BE/src/storage'],
   db: ['PostgreSQL', 'The records: accounts, their plans, users and memberships, invitations and API keys; functions, with their invocations and metrics; and tables written once and never changed: the audit log, the usage records and the capacity samples, the last two with a partition per month; the price books; and the money: the ledger, the hourly charges, the payments and the invoices. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
-  s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds each package\'s zip, uploaded or made of inline code, from which its code image is made; a copy of each inline function\'s code; the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
+  s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds each package\'s zip, uploaded or made of inline code, from which its code image is made; a copy of each inline function\'s code; the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Customers\' buckets are there too, each under a name of FF\'s, ff- and 24 hexadecimal characters, reached only through the backend\'s S3 front door, never directly; the store\'s own redundancy keeps them, and no copy goes to the second site. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client · BE/src/storage/store-buckets.ts'],
   k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
   ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
-  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend\'s pods in ff-system, and lets pods reach only DNS, the server of customers\' databases on its port, and public addresses once the account\'s internet egress is on.', 'manifests.ts'],
+  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend\'s pods in ff-system, and lets pods reach only DNS, the server of customers\' databases and the S3 front door, each on its port, and public addresses once the account\'s internet egress is on.', 'manifests.ts'],
   registry: ['Code registry', 'Every function\'s code as an image (ADR 0003): one per package, uploaded or made of inline code, in the repository ff-code/<account>, tagged with the package\'s SHA-256 in hex. The backend alone pushes and deletes; the nodes pull by digest over their own network, so no tenant policy opens for it. In development, the container ff-dev-registry next to the cluster: the backend pushes on 127.0.0.1:5056, the nodes pull ff-dev-registry:5000. In production, Zot in ff-system.', 'BE/src/packages/code-images.service.ts · registry.ts · hack/k8s/registry-up.sh · deploy/k8s/platform/70-code-registry.yaml'],
   service: ['Service', 'fn-<id>: ClusterIP, port http (8080). Invocations reach the ready pods through it.', 'manifests.ts serviceManifest()'],
   deployment: ['Deployment', 'fn-<id>: the runtime image, the code image by digest, environment, resources, probes, security context, and volumes. Its replica count changes with autoscaling, the idle sweep, and cold starts.', 'manifests.ts deploymentManifest()'],
@@ -2284,13 +2363,13 @@ function archBig() {
     svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-27d6fbbe5c7d (dev account)', 'end') +
     svgBox('user', 16, 136, 150, 76, 'You', 'console · curl') +
     svgBox('idp', 16, 252, 150, 64, 'Keycloak', 'login · realm ff') +
-    svgBox('api', 226, 52, 264, 244, 'Backend API', 'NestJS · :3000', { top: true }) +
+    svgBox('api', 226, 52, 264, 244, 'Backend API', 'NestJS · :3000 · S3 front door :3002', { top: true }) +
     svgComp(242, 108, 232, 36, 'Functions: controller · service') +
     svgComp(242, 152, 232, 36, 'Metrics · autoscaler · idle sweep') +
     svgComp(242, 196, 232, 36, 'Kubernetes driver · KubeClient') +
     svgComp(242, 240, 232, 36, 'S3 client · registry client') +
     svgBox('db', 226, 344, 118, 72, 'PostgreSQL', 'records') +
-    svgBox('s3', 372, 344, 118, 72, 'S3 storage', 'zips · code copies') +
+    svgBox('s3', 372, 344, 118, 72, 'S3 storage', 'zips · buckets') +
     svgBox('registry', 226, 456, 264, 60, 'Code registry', 'ff-code/<account> · an image per package') +
     svgBox('datadb', 226, 536, 264, 58, 'Customers\' databases', 'PostgreSQL 18 · a server of its own · TLS') +
     svgBox('k8sapi', 578, 52, 392, 56, 'Kubernetes API server', 'RBAC · admission policy ff-controller-scope') +

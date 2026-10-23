@@ -3,3 +3,4 @@
 Une page par service, pour les clients de FF ; la documentation de référence, plus complète, est en anglais ([`docs/`](../README.md)).
 
 - [Bases de données PostgreSQL](bases-de-donnees.md), comme AWS RDS.
+- [Fichiers dans des compartiments](compartiments.md), comme AWS S3.

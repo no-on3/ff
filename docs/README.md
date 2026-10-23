@@ -24,7 +24,7 @@
 | [ADR 0008](adr/0008-customer-databases.md) | Customers' databases: a PostgreSQL 18 server of their own, a database and its user per customer with opaque names, what the backend's role may do there without being a superuser, functions reaching it with their account's internet access off, the read-only signal past the plan's storage, the connection string and certificates; measured by step 2's spike (accepted on 2026-10-23) |
 | [ADR 0009](adr/0009-buckets.md) | Buckets behind FF's S3 front door: AWS's Signature Version 4 and the SDKs' streaming uploads, checksums as S3 checks them, both addressings, an IP address for functions, requests counted by AWS's classes; measured by step 2's spike against three AWS clients (accepted on 2026-10-23) |
 | [Backup drills](backup-drills.md) | The record of each monthly restore drill |
-| [En français](fr/README.md) | For FF's customers, a page per service in French: [databases](fr/bases-de-donnees.md), as AWS RDS gives them |
+| [En français](fr/README.md) | For FF's customers, a page per service in French: [databases](fr/bases-de-donnees.md), as AWS RDS gives them, and [files in buckets](fr/compartiments.md), as AWS S3 gives them |
 
 Elsewhere in the repository:
 - [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md): the function runtimes, their protocol and their handler contracts;

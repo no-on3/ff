@@ -127,7 +127,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **14. Documentation in French, a page per service, under `docs/fr/`.** ✅ Confirmed.
 - **Changed already:** V-05, the first page: [`docs/fr/bases-de-donnees.md`](fr/bases-de-donnees.md), databases "comme AWS RDS", and the folder's index.
-- **Still to change:** V-09 for buckets.
+- **Changed already, too:** V-09: [`docs/fr/compartiments.md`](fr/compartiments.md), files in buckets "comme AWS S3".
+- **Still to change:** a page for each service a later step adds.
 
 ### Step 1's choices (already built)
 

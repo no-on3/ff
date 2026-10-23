@@ -455,7 +455,7 @@ curl -s -X POST "$FF/databases" -H 'content-type: application/json' -d '{"name":
 
 **Backups and the way out:** the server is backed up as FF's own is, to a second site, 7 days of point-in-time recovery. An owner asks FF for a database as it was at a moment of those 7 days, from the e-mail address FF knows them by; it comes back as a new database of the account's, as RDS restores to a new instance, by the runbook in [`deploy/backup`](../deploy/backup/README.md), which the monthly drill runs. To move a database to AWS RDS, `pg_dump` and `pg_restore`, the writes stopped for the copy: [`cli/templates/export/data/postgres.md`](../cli/templates/export/data/postgres.md), which `ff export` will put in its kit. Logical replication, which moves one without stopping them, needs what the server doesn't give customers today: a user with `REPLICATION`, and `wal_level` at `logical`. In French: [Bases de données](fr/bases-de-donnees.md).
 
-### Buckets
+### Files in buckets
 
 Buckets for files come as AWS S3 gives them ([ADR 0009](adr/0009-buckets.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers their requests on a port of its own, `FF_STORAGE_PORT` (3002), at `FF_STORAGE_BASE` (`http://s3.localhost:3002`): path-style there (`http://s3.localhost:3002/photos/a.jpg`, as boto3 and the CLI address it, and every SDK an IP address), and virtual-hosted under it (`http://photos.s3.localhost:3002/a.jpg`, as the SDK for JavaScript addresses a host name). In front of the store, SeaweedFS in development (`MINIO_*`), it:
 - checks each request's AWS Signature Version 4, in its `Authorization` header or as a presigned URL (up to 7 days), with one of the account's access keys; nothing anonymous;
@@ -490,7 +490,7 @@ ff usage                       # its month: GB-months, its requests by S3's two 
 
 **An access key** (`POST /storage-keys`) is an ID like AWS's, `AKFF` and 16 characters, and a secret of 40, in that answer only: FF keeps it sealed, as the front door needs it to check signatures. It reaches all the account's buckets, or those `buckets` names, read-write or, with `readOnly`, reading and listing only. An account has two at most, as IAM gives a user, so that one can replace the other; `DELETE /storage-keys/<id>` revokes one, at once. Only owners see, make and revoke them; owners and developers make and delete buckets; every member lists them. An API key needs `storage:read` and `storage:write`. The audit log names each `bucket.create`, `bucket.delete`, `storage_key.create` and `storage_key.delete`.
 
-**Every request is checked the same way:** the key's account must be active and its storage on, or the front door answers `AccountProblem`, saying why; past the plan's requests a second, `SlowDown`; out of credit, uploads wait for credit, while reading and deleting go on. A closed account's buckets are emptied and deleted with the rest of its data, at its data deletion date, and its keys revoked. No bucket is copied to the second site: the store's own redundancy keeps them, as S3's does ([decision 11](decisions.md)).
+**Every request is checked the same way:** the key's account must be active and its storage on, or the front door answers `AccountProblem`, saying why; past the plan's requests a second, `SlowDown`; out of credit, uploads wait for credit, while reading and deleting go on. A closed account's buckets are emptied and deleted with the rest of its data, at its data deletion date, and its keys revoked.
 
 **Measured every hour, billed as S3 Standard bills them:** each bucket's listing is measured once an hour, its objects' sizes summed and counted (`bucket_samples`), and each hour of it is rated from that and from its requests by S3's two classes, PUT, COPY, POST and LIST, then GET and the others, deletes free. The price book has S3 Standard's prices in TND, and each month's free tier, as AWS gives it the first year: 5 GB-months, 2,000 requests of the first class and 20,000 of the second. `GET /usage` lists each bucket's month (its GB-months, what it held last, each class's requests, its estimated cost, and the bytes its requests sent out and brought in, `bytesDownloaded` and `bytesUploaded`, counted, not billed, as [decision 12](decisions.md) has it), its CSV a line each, and the month's statement a table of them; the console's Usage page and `ff usage` show what each sent out. The plan's storage, 5 GB on beta, counts the account's buckets together: its owners are told at 80% and at 100%, and from 100% uploads answer `AccountProblem`, saying why, until the buckets hold less; reading and deleting go on, and once files are deleted, uploads go in again within a minute.
 
@@ -504,6 +504,13 @@ FF_STORAGE_FUNCTION_CIDRS=172.18.0.1/32
 ```
 
 In production the backend runs in the cluster, and functions reach its pods through the Service `ff-storage`, at a fixed address, `10.43.0.251` ([deploy/k8s/README.md](../deploy/k8s/README.md), "Buckets from functions").
+
+**Backups and the way out:** no bucket is copied to the second site ([decision 11](decisions.md)). The store's own redundancy keeps the files through a failed disk, as S3's does, but not through a file deleted or replaced by mistake, since FF keeps no versions of them, nor through the loss of the store. Keep your own copy of the files that matter: `aws s3 sync s3://photos ./photos`, with one of the account's keys in the environment, which is what the first half of [`cli/templates/export/data/s3-sync.sh`](../cli/templates/export/data/s3-sync.sh) does. To move a bucket to AWS S3, the same script then copies that folder to a bucket on S3 with the AWS CLI's own settings, FF's variables dropped first; run again, it copies only what changed, and `--delete-gone` deletes what FF no longer has. `ff export` will put it in its kit. Then point the code at S3 (on AWS Lambda, a role and no endpoint) and delete the bucket on FF. In French: [Fichiers dans des compartiments](fr/compartiments.md).
+
+```bash
+eval "$(ff buckets keys create --read-only | grep '^export ')"
+cli/templates/export/data/s3-sync.sh photos my-photos-on-s3     # my-photos-on-s3 made on S3 first
+```
 
 ### A small app, end to end
 

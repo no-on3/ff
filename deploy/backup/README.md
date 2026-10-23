@@ -9,6 +9,8 @@ Nor its customers' code: the packages their functions run, in the bucket (`packa
 
 Nor its customers' databases, on a server of their own ([`deploy/data-db`](../data-db/README.md)): any second of the last 7 days can be brought back, as AWS RDS keeps them by default, the whole server or one database.
 
+Customers' buckets are not copied to the second site: the store's own redundancy keeps them, as S3's does, and the getting-started guide tells customers so, and how to keep a copy of their own ([decision 11](../../docs/decisions.md)). A lost store loses them; whether FF copies them is decided again before customers keep important files on FF.
+
 **The targets:** at most 15 minutes of data lost when the database's server fails (recovery point), and FF serving again within 4 hours (recovery time); the same for the customers' server. A restore drill proves both every month: [`docs/backup-drills.md`](../../docs/backup-drills.md) records each.
 
 **A second site:** each backup lives at another provider, or at least in another region, than what it backs up. A key that only FF holds encrypts it before it leaves.
