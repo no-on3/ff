@@ -5,7 +5,7 @@
  */
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
-import { PriceDocument, priceDocumentProblems } from './price-book';
+import { PriceDocument, priceDocumentProblems, priceDocumentSchema, storageKeysMissing } from './price-book';
 
 const withPrices = (prices: Partial<PriceDocument['prices']>, source: Record<string, unknown> = FIRST_PRICE_BOOK.source) => ({
   ...FIRST_PRICE_BOOK,
@@ -53,6 +53,16 @@ describe("a price book's problems (L1, P-73)", () => {
     expect(priceDocumentProblems(priced)).toEqual([]);
     expect(tiers([{ upToGbMonths: 10, price: '1' }])).toEqual([problem]);
     expect(tiers([{ upToGbMonths: 10, price: '1' }, { upToGbMonths: 5, price: '1' }, { upToGbMonths: null, price: '1' }])).toEqual([problem]);
+  });
+
+  it("names the storage prices and free tier a book lacks that the book before it has, and nothing between books without them", () => {
+    const priced = priceDocumentSchema.parse(withStoragePrices(FIRST_PRICE_BOOK));
+    const first = priceDocumentSchema.parse(FIRST_PRICE_BOOK);
+    const noFee = { ...priced, prices: { ...priced.prices, databaseMonthlyFee: undefined }, freeTier: { ...priced.freeTier, requestsTier2: undefined } };
+
+    expect([storageKeysMissing(priced, priced), storageKeysMissing(first, first), storageKeysMissing(first, priced)]).toEqual([[], [], []]);
+    expect(storageKeysMissing(priced, noFee)).toEqual(['prices.databaseMonthlyFee', 'freeTier.requestsTier2']);
+    expect(storageKeysMissing(priced, first)).toHaveLength(9);
   });
 
   it("names the schema's problems before any of AWS's", () => {

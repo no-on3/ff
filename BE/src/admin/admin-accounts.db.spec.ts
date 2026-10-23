@@ -68,6 +68,8 @@ run('accounts, for operators (L2, P-71)', () => {
     },
   } as unknown as Orchestrator;
   let n = 0;
+  /** The account whose databases the stand-in for the server of customers' databases lists. */
+  const WITH_DATABASE = '300000009999';
 
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
   /** A user; in English unless said otherwise, as most of the e-mails these tests read. */
@@ -143,6 +145,11 @@ run('accounts, for operators (L2, P-71)', () => {
       {
         suspendAccount: async (accountId: string) => void databaseChanges.push(`suspend ${accountId}`),
         reactivateAccount: async (accountId: string) => void databaseChanges.push(`reactivate ${accountId}`),
+        applyAccess: async (accountId: string) => void databaseChanges.push(`apply ${accountId}`),
+        list: async (accountId: string) =>
+          accountId === WITH_DATABASE
+            ? [{ id: 'db-1', name: 'orders', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z'), host: 'db.example.tn' }]
+            : [],
       } as never,
     );
   });
@@ -245,6 +252,7 @@ run('accounts, for operators (L2, P-71)', () => {
       ['active', 'operator@ff.test', 'Use case checked'],
     ]);
     expect(page.balances).toEqual([]);
+    expect([page.databases, page.account.storageDisabledAt, page.account.storageDisabledReason]).toEqual([[], null, null]);
     expect(page.credit).toEqual({
       currency: 'TND',
       balance: '0.000',
@@ -467,6 +475,35 @@ run('accounts, for operators (L2, P-71)', () => {
       { accountId: id, tenant: { quota: BETA_LIMITS.quota, internetEgress: true } },
       { accountId: id, tenant: { quota: BETA_LIMITS.quota, internetEgress: false } },
     ]);
+  });
+
+  it("turns the account's databases and buckets off and on, its reason on the page and in the log, the databases following each time, a retry too, the owners told of each change", async () => {
+    const id = await account({ status: AccountStatus.ACTIVE }, [[await user(`storage-owner-${++n}@ff.test`), 'owner'], [await user(`storage-dev-${++n}@ff.test`), 'developer']]);
+
+    const off = await service.setStorage(id, false, 'Files shared against our terms');
+    await service.setStorage(id, false, 'Again, as a retry');
+    const on = await service.setStorage(id, true, 'Cleared with the owner');
+
+    expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([
+      [expect.stringMatching(/^storage-owner-/), `The databases and buckets of your FF account are off: ${off.account.name}`],
+      [expect.stringMatching(/^storage-owner-/), `The databases and buckets of your FF account are on again: ${off.account.name}`],
+    ]);
+
+    expect([off.account.storageDisabledAt instanceof Date, off.account.storageDisabledReason]).toEqual([true, 'Files shared against our terms']);
+    expect([on.account.storageDisabledAt, on.account.storageDisabledReason]).toEqual([null, null]);
+    expect((await entriesOf(id)).map((entry) => [entry.action, entry.details])).toEqual([
+      ['account.storage', { reason: 'Files shared against our terms', changes: { storageEnabled: { from: true, to: false } } }],
+      ['account.storage', { reason: 'Cleared with the owner', changes: { storageEnabled: { from: false, to: true } } }],
+    ]);
+    expect(databaseChanges).toEqual([`apply ${id}`, `apply ${id}`, `apply ${id}`]);
+    await expect(query(`UPDATE accounts SET storage_disabled_at = now() WHERE id = $1`, [id])).rejects.toThrow(/violates check constraint/); // no reason
+    await expect(service.setStorage('999999999999', false, 'Nobody')).rejects.toThrow('Account 999999999999 not found');
+  });
+
+  it("shows the account's databases on its page, their size and sessions as the server counts them", async () => {
+    const page = await service.detail(await account({ status: AccountStatus.ACTIVE, id: WITH_DATABASE }));
+
+    expect(page.databases).toEqual([{ id: 'db-1', name: 'orders', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z') }]);
   });
 
   it('changes nothing when the cluster refuses the NetworkPolicy; the value the account has writes nothing, but applies it again', async () => {

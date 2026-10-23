@@ -1,10 +1,12 @@
-import type { MetricsView } from '../metrics/customer-metrics';
+import type { DatabaseMetricsView, MetricsView } from '../metrics/customer-metrics';
+import { DATABASE_PERIOD } from '../metrics/customer-metrics';
 
 /**
  * An alarm's rules, as CloudWatch's: a metric and its statistic over a
  * period, compared with a threshold, "M out of N" periods breaching, and what
  * a period without a datapoint counts as. The metrics are those of the
- * metrics API, and two of the account's money, read as they are.
+ * metrics API, a database's among them, and two of the account's money, read
+ * as they are.
  */
 
 /** The metrics an alarm watches, and the statistics each has. */
@@ -15,6 +17,9 @@ export const STATISTICS = {
   ColdStarts: ['Sum'],
   Duration: ['Average', 'Maximum', 'p50', 'p95', 'p99'],
   Instances: ['Maximum', 'Average'],
+  // A customer's database's, a point an hour, as CloudWatch names RDS's and Aurora's.
+  DatabaseConnections: ['Maximum', 'Average'],
+  VolumeBytesUsed: ['Maximum', 'Average'],
   // The account's money, in the prices' currency, read as it is at each evaluation.
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
@@ -25,6 +30,8 @@ export const METRICS = Object.keys(STATISTICS) as Metric[];
 export const ALL_STATISTICS = [...new Set(Object.values(STATISTICS).flat())] as Statistic[];
 /** The account's money: account-wide, one datapoint, read as it is. */
 export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharges'];
+/** A database's: the alarm names it, and judges hours. */
+export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
 
 export const COMPARISONS = ['GreaterThanThreshold', 'GreaterThanOrEqualToThreshold', 'LessThanThreshold', 'LessThanOrEqualToThreshold'] as const;
 export type Comparison = (typeof COMPARISONS)[number];
@@ -45,6 +52,7 @@ export const MAX_ALARMS = 50;
 
 export interface AlarmRule {
   functionId: string | null;
+  databaseId: string | null;
   metric: Metric;
   statistic: Statistic;
   period: number;
@@ -55,11 +63,17 @@ export interface AlarmRule {
   treatMissingData: MissingData;
 }
 
-/** Why an alarm can't be, or null: a statistic its metric has, its periods, and a billing metric's own rules. */
+/** Why an alarm can't be, or null: a statistic its metric has, its periods, and a billing or database metric's own rules. */
 export function alarmProblem(rule: AlarmRule): string | null {
   const statistics = STATISTICS[rule.metric] as readonly string[];
   if (!statistics.includes(rule.statistic)) return `${rule.metric} has the statistic${statistics.length > 1 ? 's' : ''} ${statistics.join(', ')}, not ${rule.statistic}`;
   if (rule.datapointsToAlarm > rule.evaluationPeriods) return `datapointsToAlarm (${rule.datapointsToAlarm}) can't be more than evaluationPeriods (${rule.evaluationPeriods})`;
+  if (DATABASE_METRICS.includes(rule.metric)) {
+    if (!rule.databaseId || rule.functionId) return `${rule.metric} is a database's: the alarm names a databaseId, and no function`;
+    if (rule.period !== DATABASE_PERIOD) return `A database's metrics have a point an hour: period must be ${DATABASE_PERIOD}`;
+  } else if (rule.databaseId) {
+    return `A databaseId goes with ${DATABASE_METRICS.join(' and ')} only`;
+  }
   if (BILLING_METRICS.includes(rule.metric)) {
     if (rule.functionId) return `${rule.metric} is the account's: a billing alarm names no function`;
     if (rule.evaluationPeriods !== 1 || rule.datapointsToAlarm !== 1) return `${rule.metric} is read as it is: evaluationPeriods and datapointsToAlarm must be 1`;
@@ -135,6 +149,12 @@ export function stateReason(rule: Pick<AlarmRule, 'metric' | 'statistic' | 'peri
 
 /** Whether a change of state is told: into ALARM, and out of it. */
 export const notifies = (from: AlarmState, to: AlarmState): boolean => from !== to && (to === 'ALARM' || from === 'ALARM');
+
+/** A database's metric's datapoints, oldest first: null for an hour it wasn't sampled in. */
+export function databaseDatapointsOf(view: DatabaseMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
+  if (metric !== 'DatabaseConnections' && metric !== 'VolumeBytesUsed') throw new Error(`${metric} isn't a database's metric`);
+  return view.metrics[metric][statistic as 'Maximum' | 'Average'];
+}
 
 /** A metric's datapoints in a metrics answer, oldest first: a count's every period, a duration's null where no call was measured. */
 export function datapointsOf(view: MetricsView, metric: Metric, statistic: Statistic): Array<number | null> {

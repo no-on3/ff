@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -11,7 +12,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isIP } from 'node:net';
 import { In, Not, QueryFailedError, Repository } from 'typeorm';
-import { Account } from '../accounts/entities/account.entity';
+import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
 import { DataDbSettings } from '../config/configuration';
@@ -74,6 +75,8 @@ export class DatabasesService {
    */
   async create(accountId: string, dto: CreateDatabaseDto): Promise<DatabaseWithPassword> {
     const server = this.serverOrRefuse();
+    const account = await this.databases.manager.findOneBy(Account, { id: accountId });
+    if (account?.storageDisabledAt) throw new ForbiddenException(`FF turned this account's databases and buckets off: ${account.storageDisabledReason}`);
     const plan = await this.plans.forAccount(accountId);
     let row: Database;
     try {
@@ -139,13 +142,23 @@ export class DatabasesService {
     });
   }
 
-  /** A reactivated account: its users log in again, read-write until the next hourly sample finds one past the plan. */
+  /**
+   * A reactivated account, or its storage on again: its users log in again, read-write until the next hourly sample
+   * finds one past the plan; unless the account isn't active, or FF turned its storage off.
+   */
   async reactivateAccount(accountId: string): Promise<void> {
+    if (!(await this.loginAllowed(accountId))) return;
     await this.eachOf(accountId, [DatabaseStatus.SUSPENDED], 'reactivate', async (server, row) => {
       await server.setLogin(row.dbName, true);
       await server.setReadOnly(row.dbName, false);
       await this.databases.update({ id: row.id }, { status: DatabaseStatus.ACTIVE });
     });
+  }
+
+  /** The account's databases as its status and its storage switch say: their users let in, or kept out. */
+  async applyAccess(accountId: string): Promise<void> {
+    if (await this.loginAllowed(accountId)) await this.reactivateAccount(accountId);
+    else await this.suspendAccount(accountId);
   }
 
   /** A closed account's databases, at its data deletion date: every one dropped, then its row. Answers how many; a failure stops it, for the next run. */
@@ -158,6 +171,12 @@ export class DatabasesService {
       await this.databases.delete({ id: row.id });
     }
     return rows.length;
+  }
+
+  /** Whether the account's databases' users may log in: an active account whose storage FF hasn't turned off. */
+  private async loginAllowed(accountId: string): Promise<boolean> {
+    const account = await this.databases.manager.findOneBy(Account, { id: accountId });
+    return account?.status === AccountStatus.ACTIVE && account.storageDisabledAt === null;
   }
 
   private serverOrRefuse(): DataServer {

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import { InstancesRow, MetricsView, MetricsWindow, PeriodRow, metricsView } from './customer-metrics';
+import { DatabaseMetricsView, InstancesRow, MetricsView, MetricsWindow, PeriodRow, databaseMetricsView, metricsView } from './customer-metrics';
 
 /** A call that ran: measured by the runtime, and so in the duration's statistics. */
 const RAN = "('success', 'error', 'timeout')";
@@ -15,7 +15,8 @@ interface Scope {
 
 /**
  * The metrics of a function, or of a whole account, from its usage records,
- * its rate-limited invocations and its capacity samples (customer-metrics.ts).
+ * its rate-limited invocations and its capacity samples; and of a customer's
+ * database, from its hourly samples (customer-metrics.ts).
  */
 @Injectable()
 export class CustomerMetricsService {
@@ -31,6 +32,31 @@ export class CustomerMetricsService {
   /** The account's, all its functions together, those deleted since included. */
   forAccount(accountId: string, window: MetricsWindow): Promise<MetricsView> {
     return this.metrics(window, { where: 't."account_id" = $4', parameters: [accountId] });
+  }
+
+  /** A database's, for its own account only: another account's database, or one deleted, is not found. */
+  async forDatabase(accountId: string, databaseId: string, window: MetricsWindow): Promise<DatabaseMetricsView> {
+    const found = await this.dataSource.query<unknown[]>('SELECT 1 FROM "databases" WHERE "id" = $1 AND "account_id" = $2', [databaseId, accountId]);
+    if (found.length === 0) throw new NotFoundException(`Database ${databaseId} not found`);
+    const rows = await this.dataSource.query<Array<{ bucket: string; connections_max: number; connections_avg: string; bytes_max: string; bytes_avg: string }>>(
+      `SELECT floor(extract(epoch FROM t."hour") / $3)::bigint * $3 AS "bucket",
+              max(t."connections") AS "connections_max", avg(t."connections") AS "connections_avg",
+              max(t."size_bytes") AS "bytes_max", avg(t."size_bytes") AS "bytes_avg"
+         FROM "database_samples" t
+        WHERE t."hour" >= $1 AND t."hour" < $2 AND t."account_id" = $4 AND t."database_id" = $5
+        GROUP BY 1`,
+      [window.start, window.end, window.period, accountId, databaseId],
+    );
+    return databaseMetricsView(
+      window,
+      rows.map((row) => ({
+        bucket: Number(row.bucket),
+        connectionsMaximum: Number(row.connections_max),
+        connectionsAverage: Number(row.connections_avg),
+        bytesMaximum: Number(row.bytes_max),
+        bytesAverage: Number(row.bytes_avg),
+      })),
+    );
   }
 
   private async metrics(window: MetricsWindow, scope: Scope): Promise<MetricsView> {

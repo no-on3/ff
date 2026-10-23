@@ -3,8 +3,8 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireScope } from '../auth/route-rules';
 import { CustomerMetricsService } from './customer-metrics.service';
-import { MetricsWindow, metricsWindow } from './customer-metrics';
-import { MetricsQuery, MetricsView } from './dto/metrics-query.dto';
+import { DATABASE_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
+import { DatabaseMetricsView, MetricsQuery, MetricsView } from './dto/metrics-query.dto';
 
 /** A window the request names, or 400 saying why it can't be. */
 function windowOf(query: MetricsQuery): MetricsWindow {
@@ -15,7 +15,8 @@ function windowOf(query: MetricsQuery): MetricsWindow {
 
 /**
  * The account's metrics, as CloudWatch names Lambda's, from its usage records
- * and capacity samples: a function's, or all its functions' together.
+ * and capacity samples: a function's, or all its functions' together; and a
+ * database's, as CloudWatch names RDS's, from its hourly samples.
  */
 @ApiTags('metrics')
 @Controller()
@@ -36,5 +37,18 @@ export class MetricsController {
   @ApiResponse({ status: 200, type: MetricsView })
   forAccount(@Query() query: MetricsQuery, @Principal() principal: Principal) {
     return this.metrics.forAccount(principal.accountId, windowOf(query));
+  }
+
+  @Get('databases/:id/metrics')
+  @RequireScope('metrics:read')
+  @ApiOperation({
+    summary: "A database's DatabaseConnections and VolumeBytesUsed, as CloudWatch names RDS's and Aurora's: a point an hour",
+    description: 'From its hourly samples: its sessions, and the bytes it uses, each hour; null for an hour it was not sampled in. The period is an hour, 3600 s, its default here.',
+  })
+  @ApiResponse({ status: 200, type: DatabaseMetricsView })
+  @ApiResponse({ status: 404, description: 'No such database in the account' })
+  forDatabase(@Param('id', ParseUUIDPipe) id: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
+    if (query.period !== undefined && query.period !== DATABASE_PERIOD) throw new BadRequestException(`A database's metrics have a point an hour: period must be ${DATABASE_PERIOD}`);
+    return this.metrics.forDatabase(principal.accountId, id, windowOf({ ...query, period: DATABASE_PERIOD }));
   }
 }

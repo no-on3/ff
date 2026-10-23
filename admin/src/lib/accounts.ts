@@ -95,7 +95,33 @@ export interface AccountSummary {
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */
   dataDeletedAt: string | null;
+  /** When an operator turned its databases and buckets off; null while they are on. */
+  storageDisabledAt: string | null;
+  /** Why, which its members read too. */
+  storageDisabledReason: string | null;
   owners: AccountPerson[];
+}
+
+/** One of the account's databases: its size and sessions now, as the server counts them; null when it couldn't be asked. */
+export interface AccountDatabase {
+  id: string;
+  name: string;
+  status: 'creating' | 'active' | 'read_only' | 'suspended' | 'deleting';
+  sizeBytes: number | null;
+  connections: number | null;
+  storageLimitMb: number;
+  createdAt: string;
+}
+
+/** A size in MB of 1,048,576 bytes, to a tenth: "7.3 MB"; "–" when unknown. */
+export function formatMegabytes(bytes: number | null): string {
+  if (bytes === null) return '–';
+  return `${(Math.round((bytes / 1_048_576) * 10) / 10).toLocaleString('en-US', { maximumFractionDigits: 1 })} MB`;
+}
+
+/** What the page says of the account's databases and buckets: on, or off since when and why. */
+export function storageLabel(account: Pick<AccountSummary, 'storageDisabledAt' | 'storageDisabledReason'>, when: (at: string) => string): string {
+  return account.storageDisabledAt ? `Off since ${when(account.storageDisabledAt)}: ${account.storageDisabledReason ?? ''}` : 'On';
 }
 
 /** What the account page says of a closed account's data: when it goes, or when it went. Nothing for an account not closed. */
@@ -119,6 +145,8 @@ export interface AccountView {
   account: AccountSummary;
   members: Array<AccountPerson & { userId: string; role: 'owner' | 'developer' | 'viewer'; joinedAt: string }>;
   functions: Array<{ id: string; name: string; runtime: string; memory: number; status: string; minInstances: number; lastInvokedAt: string | null }>;
+  /** Its databases, by name. */
+  databases: AccountDatabase[];
   usage: { month: string; totals: UsageTotals };
   /** Each wallet's balance (P-31), with its currency's decimals; none before the account's first credit or debit. */
   balances: Array<{ currency: string; balance: string }>;

@@ -18,6 +18,7 @@ import { PricingService } from '../billing/pricing.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
+import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
 import { BETA_LIMITS } from '../plans/test-fixtures';
@@ -28,12 +29,14 @@ const OPERATOR = { id: 'kc-op-1', email: 'operator@ff.test' };
 /** Next year: whatever day the tests run, its months are in the future. */
 const Y = new Date().getUTCFullYear() + 1;
 const NOW = new Date(`${Y}-02-10T10:15:00Z`);
-/** The first book, its on-demand duration price doubled: a draft. */
+/** The migrations' last book, the first one with customers' databases' and buckets' prices. */
+const LATEST = withStoragePrices(FIRST_PRICE_BOOK) as unknown as typeof FIRST_PRICE_BOOK;
+/** That book, its on-demand duration price doubled: a draft. */
 const DOUBLED = {
-  ...FIRST_PRICE_BOOK,
+  ...LATEST,
   source: { kind: 'manual', note: 'twice the duration' },
   prices: {
-    ...FIRST_PRICE_BOOK.prices,
+    ...LATEST.prices,
     gbSecond: [
       { upToGbSeconds: 6_000_000_000, price: '0.0001002668672' },
       { upToGbSeconds: 15_000_000_000, price: '0.00009024' },
@@ -114,6 +117,24 @@ run('price books and plans, for operators (L2, P-73)', () => {
       await expect(prices.create(new Date(`${Y + 1}-01-01T00:00:00Z`), DOUBLED, OPERATOR, 'again', NOW)).rejects.toThrow(
         new ConflictException(`A price book already starts at ${Y + 1}-01-01T00:00:00.000Z`),
       );
+    });
+
+    it("is refused when it lacks prices of customers' databases and buckets that the book before it has, each named", async () => {
+      const refused = await prices.create(new Date(`${Y + 1}-05-01T00:00:00Z`), { ...FIRST_PRICE_BOOK, source: { kind: 'manual' } }, OPERATOR, 'x y z', NOW).catch((error) => error);
+
+      expect((refused as BadRequestException).getResponse()).toMatchObject({
+        message: [
+          'prices.databaseStorageGbMonth: the book before this one has it, so this one must too',
+          'prices.databaseMonthlyFee: the book before this one has it, so this one must too',
+          'prices.bucketStorageGbMonth: the book before this one has it, so this one must too',
+          'prices.requestsTier1PerThousand: the book before this one has it, so this one must too',
+          'prices.requestsTier2PerThousand: the book before this one has it, so this one must too',
+          'freeTier.databaseStorageGbMonths: the book before this one has it, so this one must too',
+          'freeTier.bucketStorageGbMonths: the book before this one has it, so this one must too',
+          'freeTier.requestsTier1: the book before this one has it, so this one must too',
+          'freeTier.requestsTier2: the book before this one has it, so this one must too',
+        ],
+      });
     });
   });
 

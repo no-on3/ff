@@ -597,7 +597,18 @@ export interface Plan {
 
 /** One of the user's accounts, in GET /me. */
 /** An account's fields in GET /me, as the API's DTO names them: contract.test.ts checks them against it. */
-export const ME_ACCOUNT_FIELDS = ['id', 'name', 'status', 'role', 'plan', 'internetEgress', 'dataDeletionDueAt', 'dataDeletedAt'] as const satisfies ReadonlyArray<keyof MeAccount>;
+export const ME_ACCOUNT_FIELDS = [
+  'id',
+  'name',
+  'status',
+  'role',
+  'plan',
+  'internetEgress',
+  'dataDeletionDueAt',
+  'dataDeletedAt',
+  'storageDisabledAt',
+  'storageDisabledReason',
+] as const satisfies ReadonlyArray<keyof MeAccount>;
 
 export interface MeAccount {
   /** 12 digits. */
@@ -614,6 +625,10 @@ export interface MeAccount {
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */
   dataDeletedAt: string | null;
+  /** When FF turned the account's databases and buckets off: their users can't log in. null while they are on. */
+  storageDisabledAt: string | null;
+  /** FF's reason for it. */
+  storageDisabledReason: string | null;
 }
 // A field missing from ME_ACCOUNT_FIELDS stops the build.
 type UnlistedMeAccountField = Exclude<keyof MeAccount, (typeof ME_ACCOUNT_FIELDS)[number]>;
@@ -829,6 +844,8 @@ export interface AlarmBody {
   name: string;
   /** null: the account's, all its functions together, or its money. */
   functionId: string | null;
+  /** The database watched, for DatabaseConnections and VolumeBytesUsed, an hour at a time; null otherwise. */
+  databaseId?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -847,6 +864,7 @@ export const ALARM_FIELDS = [
   'id',
   'name',
   'functionId',
+  'databaseId',
   'metric',
   'statistic',
   'period',

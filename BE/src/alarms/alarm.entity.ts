@@ -1,5 +1,6 @@
 import { Check, Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
+import { Database } from '../databases/database.entity';
 import { Function } from '../functions/entities/function.entity';
 import type { AlarmState, Comparison, Evaluation, Metric, MissingData, Statistic } from './alarm-rules';
 
@@ -10,9 +11,10 @@ export interface AlarmActions {
 }
 
 /**
- * An alarm on a metric, as CloudWatch's: a function's, or the account's
- * when it names none; evaluated every minute, telling its actions when it
- * goes into ALARM and when it leaves it. It goes with its function.
+ * An alarm on a metric, as CloudWatch's: a function's, a database's, or the
+ * account's when it names neither; evaluated every minute, telling its
+ * actions when it goes into ALARM and when it leaves it. It goes with its
+ * function or database.
  */
 @Entity('alarms')
 @Check(`"state" IN ('OK', 'ALARM', 'INSUFFICIENT_DATA')`)
@@ -39,6 +41,15 @@ export class Alarm {
   @ManyToOne(() => Function, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({ name: 'function_id' })
   function?: Function;
+
+  /** A customer's database, for DatabaseConnections and VolumeBytesUsed; null otherwise. */
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  databaseId: string | null;
+
+  @ManyToOne(() => Database, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'database_id' })
+  database?: Database;
 
   @Column({ type: 'text' })
   name: string;

@@ -55,3 +55,22 @@ export class MetricsView {
   @ApiProperty({ type: [Date], description: "Each period's start" }) timestamps: Date[];
   @ApiProperty({ type: MetricSeries }) metrics: MetricSeries;
 }
+
+class DatabaseStatisticSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "The most of the hour's samples; null for an hour without one" }) Maximum: Array<number | null>;
+  @ApiProperty({ type: [Number], nullable: true, description: "The mean of the hour's samples; null for an hour without one" }) Average: Array<number | null>;
+}
+
+class DatabaseMetricSeries {
+  @ApiProperty({ type: DatabaseStatisticSeries, description: 'Its sessions, as the server counts them' }) DatabaseConnections: DatabaseStatisticSeries;
+  @ApiProperty({ type: DatabaseStatisticSeries, description: 'The bytes it uses: pg_database_size' }) VolumeBytesUsed: DatabaseStatisticSeries;
+}
+
+/** A database's metrics: a point an hour of the window, oldest first. */
+export class DatabaseMetricsView {
+  @ApiProperty({ example: 3600 }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each hour's start" }) timestamps: Date[];
+  @ApiProperty({ type: DatabaseMetricSeries }) metrics: DatabaseMetricSeries;
+}

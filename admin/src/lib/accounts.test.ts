@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { ACCOUNT_STATUSES, AccountStatus, STATUS_CHANGES, StatusChange, changedNotice, changesFor, dataDeletion, isAccountId, ownersOf, ownersSee, statusLabel } from './accounts';
+import {
+  ACCOUNT_STATUSES,
+  AccountStatus,
+  STATUS_CHANGES,
+  StatusChange,
+  changedNotice,
+  changesFor,
+  dataDeletion,
+  formatMegabytes,
+  isAccountId,
+  ownersOf,
+  ownersSee,
+  statusLabel,
+  storageLabel,
+} from './accounts';
 
 describe('the status changes an account offers (P-71)', () => {
   it('follow its status: a pending account is approved or rejected, an active one suspended, a suspended one reactivated; any but a closed one closed', () => {
@@ -29,6 +43,20 @@ describe('the status changes an account offers (P-71)', () => {
       'The owners get an e-mail that gives your reason, and see it in their audit log.',
       'The owners get an e-mail, and see your reason in their audit log.',
     ]);
+  });
+});
+
+describe("an account's databases and buckets, to read", () => {
+  it('says they are on, or off since when and why', () => {
+    const when = (at: string) => at.slice(0, 10);
+    expect(storageLabel({ storageDisabledAt: null, storageDisabledReason: null }, when)).toBe('On');
+    expect(storageLabel({ storageDisabledAt: '2026-10-23T08:00:00Z', storageDisabledReason: 'Files shared against our terms' }, when)).toBe(
+      'Off since 2026-10-23: Files shared against our terms',
+    );
+  });
+
+  it("gives a database's size in MB to a tenth, and a dash when the server couldn't say", () => {
+    expect([formatMegabytes(7_634_423), formatMegabytes(1_073_741_824), formatMegabytes(0), formatMegabytes(null)]).toEqual(['7.3 MB', '1,024 MB', '0 MB', '–']);
   });
 });
 

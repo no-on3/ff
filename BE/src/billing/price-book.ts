@@ -228,3 +228,20 @@ export function priceDocumentProblems(value: unknown): string[] {
   if (!parsed.success) return parsed.error.issues.map((issue) => `${issue.path.join('.') || 'document'}: ${issue.message}`);
   return awsPriceProblems(parsed.data);
 }
+
+/** Customers' databases' and buckets' SKUs and free tiers, which a book may lack, pricing them at nothing. */
+const STORAGE_PRICES = ['databaseStorageGbMonth', 'databaseMonthlyFee', 'bucketStorageGbMonth', 'requestsTier1PerThousand', 'requestsTier2PerThousand'] as const;
+const STORAGE_FREE_TIER = ['databaseStorageGbMonths', 'bucketStorageGbMonths', 'requestsTier1', 'requestsTier2'] as const;
+
+/**
+ * Those of the book before that a new one lacks, by their paths: a book that
+ * follows one with them must have them too, its free tier included, or
+ * customers' databases and buckets would be priced at nothing from it on,
+ * which no operator means by leaving a field out.
+ */
+export function storageKeysMissing(before: PriceDocument, after: PriceDocument): string[] {
+  return [
+    ...STORAGE_PRICES.filter((key) => before.prices[key] !== undefined && after.prices[key] === undefined).map((key) => `prices.${key}`),
+    ...STORAGE_FREE_TIER.filter((key) => before.freeTier[key] !== undefined && after.freeTier[key] === undefined).map((key) => `freeTier.${key}`),
+  ];
+}

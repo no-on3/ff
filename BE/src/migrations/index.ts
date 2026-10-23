@@ -32,6 +32,7 @@ import { CodeImages1792586195192 } from './1792586195192-CodeImages';
 import { InlineCodePackages1792596918071 } from './1792596918071-InlineCodePackages';
 import { Databases1792724178089 } from './1792724178089-Databases';
 import { DatabaseBilling1792727200566 } from './1792727200566-DatabaseBilling';
+import { DatabaseOperations1792731046155 } from './1792731046155-DatabaseOperations';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -73,4 +74,5 @@ export const MIGRATIONS: Array<new () => object> = [
   InlineCodePackages1792596918071,
   Databases1792724178089,
   DatabaseBilling1792727200566,
+  DatabaseOperations1792731046155,
 ];

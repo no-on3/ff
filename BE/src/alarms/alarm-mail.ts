@@ -8,6 +8,8 @@ export interface AlarmChange {
   alarm: Pick<AlarmRule, 'metric' | 'statistic' | 'period' | 'comparison' | 'threshold' | 'evaluationPeriods' | 'datapointsToAlarm'> & { name: string };
   /** The alarm's function's name, or null for the account's. */
   functionName: string | null;
+  /** The alarm's database's name, for a database's metric; null otherwise. */
+  databaseName?: string | null;
   from: AlarmState;
   to: AlarmState;
   evaluation: Evaluation;
@@ -26,7 +28,11 @@ export function alarmMail(change: AlarmChange, language: Language): Omit<Mail, '
   const allMissing = e.missing === e.datapoints.length;
   if (language === 'fr') {
     const account = `du compte « ${change.account.name} » (${change.account.id})`;
-    const on = change.functionName ? `la fonction « ${change.functionName} » ${account}` : `le compte « ${change.account.name} » (${change.account.id})`;
+    const on = change.functionName
+      ? `la fonction « ${change.functionName} » ${account}`
+      : change.databaseName
+        ? `la base de données « ${change.databaseName} » ${account}`
+        : `le compte « ${change.account.name} » (${change.account.id})`;
     const reason = allMissing
       ? `Aucune donnée pour ${what} dans les ${e.datapoints.length} dernière(s) période(s) de ${alarm.period} s.`
       : billing
@@ -44,7 +50,9 @@ export function alarmMail(change: AlarmChange, language: Language): Omit<Mail, '
   }
   const on = change.functionName
     ? `the function "${change.functionName}" of the account "${change.account.name}" (${change.account.id})`
-    : `the account "${change.account.name}" (${change.account.id})`;
+    : change.databaseName
+      ? `the database "${change.databaseName}" of the account "${change.account.name}" (${change.account.id})`
+      : `the account "${change.account.name}" (${change.account.id})`;
   const breach = `${what} ${SYMBOL[alarm.comparison]} ${alarm.threshold}`;
   const reason = allMissing
     ? `No datapoint for ${what} in the last ${e.datapoints.length} period(s) of ${alarm.period} s.`

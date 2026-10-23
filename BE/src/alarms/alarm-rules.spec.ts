@@ -5,11 +5,12 @@
  * evaluator runs against PostgreSQL in alarms.db.spec.ts.
  */
 import { alarmMail } from './alarm-mail';
-import { AlarmRule, alarmProblem, datapointsOf, evaluate, evaluationWindow, notifies, stateReason } from './alarm-rules';
-import type { MetricsView } from '../metrics/customer-metrics';
+import { AlarmRule, alarmProblem, databaseDatapointsOf, datapointsOf, evaluate, evaluationWindow, notifies, stateReason } from './alarm-rules';
+import { databaseMetricsView, type MetricsView } from '../metrics/customer-metrics';
 
 const RULE: AlarmRule = {
   functionId: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
+  databaseId: null,
   metric: 'Errors',
   statistic: 'Sum',
   period: 60,
@@ -44,6 +45,38 @@ describe('what an alarm may be', () => {
       'Balance is read as it is: evaluationPeriods and datapointsToAlarm must be 1',
       'Balance has the statistic Latest, not Sum',
     ]);
+  });
+});
+
+describe("an alarm on a customer's database", () => {
+  const sessions = { ...RULE, functionId: null, databaseId: '7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f', metric: 'DatabaseConnections' as const, statistic: 'Maximum' as const, period: 3600 };
+
+  it('names the database, judges hours, and takes the Maximum or the Average of its sessions or of the bytes it uses', () => {
+    expect([alarmProblem(sessions), alarmProblem({ ...sessions, metric: 'VolumeBytesUsed', statistic: 'Average', evaluationPeriods: 24, datapointsToAlarm: 3 })]).toEqual([null, null]);
+    expect([
+      alarmProblem({ ...sessions, databaseId: null }),
+      alarmProblem({ ...sessions, functionId: RULE.functionId }),
+      alarmProblem({ ...sessions, period: 300 }),
+      alarmProblem({ ...sessions, statistic: 'Sum' }),
+      alarmProblem({ ...RULE, databaseId: sessions.databaseId }),
+    ]).toEqual([
+      "DatabaseConnections is a database's: the alarm names a databaseId, and no function",
+      "DatabaseConnections is a database's: the alarm names a databaseId, and no function",
+      "A database's metrics have a point an hour: period must be 3600",
+      'DatabaseConnections has the statistics Maximum, Average, not Sum',
+      'A databaseId goes with DatabaseConnections and VolumeBytesUsed only',
+    ]);
+  });
+
+  it("reads its datapoints from the database's hourly metrics, an hour without a sample missing", () => {
+    const window = { start: new Date('2026-10-20T08:00:00Z'), end: new Date('2026-10-20T10:00:00Z'), period: 3600 as const };
+    const view = databaseMetricsView(window, [{ bucket: window.start.getTime() / 1000, connectionsMaximum: 9, connectionsAverage: 9, bytesMaximum: 7_634_423, bytesAverage: 7_634_423 }]);
+
+    expect([databaseDatapointsOf(view, 'DatabaseConnections', 'Maximum'), databaseDatapointsOf(view, 'VolumeBytesUsed', 'Average')]).toEqual([
+      [9, null],
+      [7_634_423, null],
+    ]);
+    expect(() => databaseDatapointsOf(view, 'Errors', 'Sum')).toThrow("Errors isn't a database's metric");
   });
 });
 
@@ -163,6 +196,15 @@ describe("an alarm's e-mail", () => {
         'Vos alarmes : https://console.ff.tn/alarms',
       ].join('\n'),
     });
+  });
+
+  it("names a database's alarm by the database, in both languages", () => {
+    const sessions = { ...change, alarm: { ...RULE, metric: 'DatabaseConnections' as const, statistic: 'Maximum' as const, period: 3600, name: 'Sessions' }, functionName: null, databaseName: 'orders' };
+
+    expect(alarmMail(sessions, 'en').text.split('\n')[0]).toBe('Your alarm "Sessions" on the database "orders" of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
+    expect(alarmMail(sessions, 'fr').text.split('\n')[0]).toBe(
+      'Votre alarme « Sessions » sur la base de données « orders » du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.',
+    );
   });
 
   it("names the account's alarms as the account's, the money's value as it is, and a recovery with no data", () => {

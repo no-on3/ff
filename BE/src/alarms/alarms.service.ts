@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { Database } from '../databases/database.entity';
 import { Function } from '../functions/entities/function.entity';
 import { webhookUrlProblem } from '../notifications/webhook-target';
 import { Alarm } from './alarm.entity';
@@ -11,6 +12,7 @@ export const alarmView = (alarm: Alarm): AlarmView => ({
   id: alarm.id,
   name: alarm.name,
   functionId: alarm.functionId,
+  databaseId: alarm.databaseId,
   metric: alarm.metric,
   statistic: alarm.statistic,
   period: alarm.period,
@@ -31,7 +33,7 @@ export const alarmView = (alarm: Alarm): AlarmView => ({
 /** What an alarm is: the rule, its name and its actions. */
 type AlarmDefinition = Pick<
   Alarm,
-  'name' | 'functionId' | 'metric' | 'statistic' | 'period' | 'comparison' | 'threshold' | 'evaluationPeriods' | 'datapointsToAlarm' | 'treatMissingData' | 'actions'
+  'name' | 'functionId' | 'databaseId' | 'metric' | 'statistic' | 'period' | 'comparison' | 'threshold' | 'evaluationPeriods' | 'datapointsToAlarm' | 'treatMissingData' | 'actions'
 >;
 
 /** An alarm's definition, from the request. */
@@ -39,6 +41,7 @@ function definition(dto: AlarmDto): AlarmDefinition {
   return {
     name: dto.name.trim(),
     functionId: dto.functionId ?? null,
+    databaseId: dto.databaseId ?? null,
     metric: dto.metric,
     statistic: dto.statistic,
     period: dto.period,
@@ -113,12 +116,15 @@ export class AlarmsService {
     return alarm;
   }
 
-  /** The rule's own problems, a function the account doesn't have, and a webhook URL the notifications wouldn't take. */
+  /** The rule's own problems, a function or database the account doesn't have, and a webhook URL the notifications wouldn't take. */
   private async check(manager: EntityManager, accountId: string, alarm: AlarmRule & { actions: { webhookUrls: string[] } }): Promise<void> {
     const problem = alarmProblem(alarm) ?? alarm.actions.webhookUrls.map(webhookUrlProblem).find(Boolean);
     if (problem) throw new BadRequestException(problem);
     if (alarm.functionId && !(await manager.getRepository(Function).existsBy({ id: alarm.functionId, accountId }))) {
       throw new NotFoundException(`Function with ID ${alarm.functionId} not found`);
+    }
+    if (alarm.databaseId && !(await manager.getRepository(Database).existsBy({ id: alarm.databaseId, accountId }))) {
+      throw new NotFoundException(`Database ${alarm.databaseId} not found`);
     }
   }
 }

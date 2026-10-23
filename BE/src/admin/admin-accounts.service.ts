@@ -41,8 +41,8 @@ export interface AccountsFilter {
 const person = (membership: Membership): AccountPersonView => ({ email: membership.user?.email ?? '', name: membership.user?.name ?? null });
 
 function summary(account: Account, owners: AccountPersonView[]): AdminAccountSummaryView {
-  const { id, name, status, planId, country, taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt } = account;
-  return { id, name, status, planId, country: country.trim(), taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt, owners };
+  const { id, name, status, planId, country, taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason } = account;
+  return { id, name, status, planId, country: country.trim(), taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason, owners };
 }
 
 const DAY_MS = 86_400_000;
@@ -122,6 +122,45 @@ function frenchOwnerMail(account: Pick<Account, 'id' | 'name' | 'dataDeletionDue
   };
   const [what, text] = lines[change];
   return { subject: `Votre compte FF ${what} : ${account.name}`, text: text.join('\n') };
+}
+
+/**
+ * The e-mail an account's owners get when an operator turns its databases and
+ * buckets off, with the reason, or on again, in their language.
+ */
+export function storageMail(account: Pick<Account, 'id' | 'name'>, enabled: boolean, reason: string, consoleUrl: string, language: Language): Omit<Mail, 'to'> {
+  if (language === 'fr') {
+    const which = `votre compte « ${account.name} » (${account.id})`;
+    return enabled
+      ? {
+          subject: `Les bases de données et compartiments de votre compte FF sont réactivés : ${account.name}`,
+          text: [`Les bases de données et les compartiments de ${which} sont réactivés : leurs utilisateurs peuvent de nouveau se connecter.`, '', `La console : ${consoleUrl}`].join('\n'),
+        }
+      : {
+          subject: `Les bases de données et compartiments de votre compte FF sont désactivés : ${account.name}`,
+          text: [
+            `FF a désactivé les bases de données et les compartiments de ${which} : leurs utilisateurs ne peuvent plus se connecter, et leurs sessions ont été fermées ; aucune base ne peut être créée entre-temps. Leurs données sont conservées, et facturées ; vos fonctions continuent.`,
+            `Motif : ${reason}`,
+            '',
+            `La console : ${consoleUrl}`,
+          ].join('\n'),
+        };
+  }
+  const which = `your account "${account.name}" (${account.id})`;
+  return enabled
+    ? {
+        subject: `The databases and buckets of your FF account are on again: ${account.name}`,
+        text: [`The databases and buckets of ${which} are on again: their users can log in.`, '', `The console: ${consoleUrl}`].join('\n'),
+      }
+    : {
+        subject: `The databases and buckets of your FF account are off: ${account.name}`,
+        text: [
+          `FF turned off the databases and buckets of ${which}: their users can't log in, and their sessions were ended; no database can be made meanwhile. Their data are kept, and billed; your functions go on.`,
+          `Why: ${reason}`,
+          '',
+          `The console: ${consoleUrl}`,
+        ].join('\n'),
+      };
 }
 
 /**
@@ -213,6 +252,15 @@ export class AdminAccountsService {
         minInstances,
         lastInvokedAt: lastInvoked.get(functionId) ?? null,
       })),
+      databases: (await this.databases.list(id)).map(({ id: databaseId, name, status, sizeBytes, connections, storageLimitMb, createdAt }) => ({
+        id: databaseId,
+        name,
+        status,
+        sizeBytes,
+        connections,
+        storageLimitMb,
+        createdAt,
+      })),
       usage: { month, totals },
       balances: (await this.ledger.balances(id)).map(({ currency, exponent, balanceMinor }) => ({ currency, balance: formatMinor(balanceMinor, exponent) })),
       credit: await this.credits.view(id),
@@ -301,6 +349,36 @@ export class AdminAccountsService {
       const plan = await this.plans.get(current.planId);
       await this.orchestrator.applyTenantLimits(id, tenantLimits(plan.limits, internetEgress));
     });
+    return this.detail(id);
+  }
+
+  /**
+   * PUT /admin/accounts/:id/storage: the account's databases and buckets off,
+   * with a reason, or on again, recorded with its audit entry under the
+   * account's lock. Then the databases follow: off, their users can't log in
+   * and their sessions end; on, they log in again, unless the account is
+   * suspended or closed. Each owner gets an e-mail of a change. The value the
+   * account has already applies it again, and tells no one: a retry.
+   */
+  async setStorage(id: string, enabled: boolean, reason: string): Promise<AdminAccountView> {
+    const changed = await this.accounts.manager.transaction(async (manager) => {
+      const current = await manager.findOne(Account, { where: { id }, lock: { mode: 'pessimistic_write' } });
+      if (!current) throw new NotFoundException(`Account ${id} not found`);
+      const wasEnabled = current.storageDisabledAt === null;
+      if (wasEnabled === enabled) return null;
+      await manager.update(Account, { id }, enabled ? { storageDisabledAt: null, storageDisabledReason: null } : { storageDisabledAt: new Date(), storageDisabledReason: reason });
+      await this.audit.record(
+        { accountId: id, action: 'account.storage', resource: `account:${id}`, details: { reason, changes: { storageEnabled: { from: wasEnabled, to: enabled } } } },
+        manager,
+      );
+      return current;
+    });
+    await this.databases.applyAccess(id);
+    if (changed) {
+      const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
+      const owners = await this.memberships.find({ where: { accountId: id, role: 'owner' }, relations: { user: true } });
+      await this.mail.sendEach(recipientsOf(owners), (language) => storageMail(changed, enabled, reason, consoleUrl, language));
+    }
     return this.detail(id);
   }
 

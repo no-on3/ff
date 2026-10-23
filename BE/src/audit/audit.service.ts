@@ -23,6 +23,8 @@ export type AuditAction =
   | 'support.view_invocation'
   | 'support.view_logs'
   | 'account.egress'
+  // An operator turned the account's databases and buckets off, or on again.
+  | 'account.storage'
   | 'function.create'
   | 'function.update'
   | 'function.delete'

@@ -23,6 +23,8 @@ const account = (id: string, status: MeAccount['status'] = 'active'): MeAccount 
   internetEgress: false,
   dataDeletionDueAt: null,
   dataDeletedAt: null,
+  storageDisabledAt: null,
+  storageDisabledReason: null,
 });
 
 describe('requestHeaders', () => {

@@ -9,6 +9,8 @@ export const STATISTICS = {
   ColdStarts: ['Sum'],
   Duration: ['Average', 'Maximum', 'p50', 'p95', 'p99'],
   Instances: ['Maximum', 'Average'],
+  DatabaseConnections: ['Maximum', 'Average'],
+  VolumeBytesUsed: ['Maximum', 'Average'],
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
 } as const;
@@ -16,6 +18,8 @@ export type Metric = keyof typeof STATISTICS;
 export const METRICS = Object.keys(STATISTICS) as Metric[];
 /** The account's money, read as it is: no function, one datapoint. */
 export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharges'];
+/** A customer's database's, an hour at a time: alarms on them are made on the database's page. */
+export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
 
 /** Each metric's unit, as the threshold is written. */
 export const UNITS: Record<Metric, string> = {
@@ -25,6 +29,8 @@ export const UNITS: Record<Metric, string> = {
   ColdStarts: 'calls',
   Duration: 'ms',
   Instances: 'instances',
+  DatabaseConnections: 'sessions',
+  VolumeBytesUsed: 'bytes',
   Balance: 'TND',
   MonthToDateCharges: 'TND',
 };
@@ -103,8 +109,9 @@ export const formFromAlarm = (alarm: Alarm): AlarmForm => ({
   webhookUrls: alarm.actions.webhookUrls.join('\n'),
 });
 
-/** The metrics a scope offers: a function's calls, durations and instances; the account's too, and its money. */
-export const metricsFor = (functionId: string): Metric[] => (functionId ? METRICS.filter((metric) => !BILLING_METRICS.includes(metric)) : METRICS);
+/** The metrics a scope offers: a function's calls, durations and instances; the account's too, and its money. A database's are its page's. */
+export const metricsFor = (functionId: string): Metric[] =>
+  METRICS.filter((metric) => !DATABASE_METRICS.includes(metric) && !(functionId && BILLING_METRICS.includes(metric)));
 
 /** The form once the metric changes: a statistic it has, and for the money the account's, one datapoint. */
 export function withMetric(form: AlarmForm, metric: Metric): AlarmForm {

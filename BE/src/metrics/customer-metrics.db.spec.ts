@@ -3,7 +3,8 @@
  * dropped after, each figure worked out by hand from the rows written here:
  * the counts, the duration's statistics (percentiles interpolated), the
  * throttles of both kinds, the cold starts and the instances, a function's
- * and its account's, quiet periods and the window's edges.
+ * and its account's, quiet periods and the window's edges; and a customer's
+ * database's, from its hourly samples.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -48,7 +49,7 @@ run('metrics (L2)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples']) await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
+    for (const table of ['usage_records', 'capacity_samples', 'database_samples']) await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
     for (const [id, name] of [[A, 'A'], [B, 'B']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
     metrics = new CustomerMetricsService(db.dataSource);
     f1 = await fn(A, 'f1');
@@ -127,6 +128,37 @@ run('metrics (L2)', () => {
     expect(view.metrics.Duration).toEqual({ Average: [41.667, null, 7.5], Maximum: [100, null, 7.5], p50: [35, null, 7.5], p95: [87.5, null, 7.5], p99: [97.5, null, 7.5] });
     // Each minute's instances added up first: 2, then 3 + 1: at most 4, 6 instance-minutes over 5 minutes.
     expect(view.metrics.Instances).toEqual({ Maximum: [4, 0, 1], Average: [1.2, 0, 0.2] });
+  });
+
+  it("gives a database's sessions and bytes a point an hour, from its samples, none where it wasn't sampled, and no other account's", async () => {
+    const [{ id: orders }] = await query<Array<{ id: string }>>(
+      `INSERT INTO databases (account_id, name, db_name, status) VALUES ($1, 'orders', 'ff_00000000000000000000000b', 'active') RETURNING id`,
+      [A],
+    );
+    const [{ id: theirs }] = await query<Array<{ id: string }>>(
+      `INSERT INTO databases (account_id, name, db_name, status) VALUES ($1, 'orders', 'ff_00000000000000000000000c', 'active') RETURNING id`,
+      [B],
+    );
+    const sampleOf = (databaseId: string, accountId: string, hour: string, sizeBytes: number, connections: number) =>
+      query(`INSERT INTO database_samples (database_id, hour, account_id, name, size_bytes, connections) VALUES ($1, $2, $3, 'orders', $4, $5)`, [
+        databaseId,
+        hour,
+        accountId,
+        sizeBytes,
+        connections,
+      ]);
+    await sampleOf(orders, A, '2026-10-01T08:00:00Z', 7_634_423, 2);
+    await sampleOf(orders, A, '2026-10-01T10:00:00Z', 8_000_000, 5);
+    await sampleOf(theirs, B, '2026-10-01T09:00:00Z', 1, 1);
+    const hours: MetricsWindow = { start: new Date('2026-10-01T08:00:00Z'), end: new Date('2026-10-01T11:00:00Z'), period: 3600 };
+
+    const view = await metrics.forDatabase(A, orders, hours);
+
+    expect(view.metrics).toEqual({
+      DatabaseConnections: { Maximum: [2, null, 5], Average: [2, null, 5] },
+      VolumeBytesUsed: { Maximum: [7_634_423, null, 8_000_000], Average: [7_634_423, null, 8_000_000] },
+    });
+    await expect(metrics.forDatabase(A, theirs, hours)).rejects.toThrow(new NotFoundException(`Database ${theirs} not found`));
   });
 
   it("answers another account's function, and one that doesn't exist, with 404", async () => {

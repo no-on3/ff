@@ -127,7 +127,7 @@ run("customers' databases measured every hour (L2, ADR 0008)", () => {
   afterEach(async () => {
     // Each test's databases go, and their samples stay, as a deleted database's do.
     for (const made of await db.dataSource.getRepository(Database).find()) await server.drop(made.dbName).catch(() => undefined);
-    await db.dataSource.getRepository(Database).clear();
+    await db.dataSource.query('DELETE FROM databases'); // not TRUNCATE: alarms may name them
     limits = {};
   });
 

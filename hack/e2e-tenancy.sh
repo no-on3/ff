@@ -22,8 +22,10 @@
 #     and stops when revoked; account 2's key gets 404 on account 1's function.
 #   - Customers' databases (ADR 0008), on the suite's own server: each account's
 #     own; another account gets 404 on every route, and the owner's password
-#     still works; a key needs databases:read and databases:write; a closed
-#     account's user is kept out, then its database dropped with its data.
+#     still works; a key needs databases:read and databases:write; the
+#     operator turns an account's databases off, its user kept out and its
+#     members told why, and on again; a closed account's user is kept out,
+#     then its database dropped with its data.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -338,6 +340,7 @@ body_for() {
     "PUT /admin/settings") echo '{"settings": {"gracePeriodHours": 1}, "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/plan") echo '{"planId": "beta", "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/egress") echo '{"internetEgress": true, "reason": "l5 tries"}' ;;
+    "PUT /admin/accounts/{id}/storage") echo '{"enabled": false, "reason": "l5 tries"}' ;;
     "POST /admin/accounts/{id}/credits") echo '{"kind": "promo", "amount": "1", "reason": "l5 tries", "idempotencyKey": "00000000-0000-4000-8000-000000000000"}' ;;
     "POST /admin/accounts/"*) echo '{"reason": "l5 tries"}' ;;
     "POST /admin/plans") echo '{"id": "l5-tries", "name": "L5 tries", "limits": {}, "reason": "l5 tries"}' ;;
@@ -498,7 +501,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B makes a database of its own, of the name A's has: names are each account's" 201 "$(status)"
       check "  ... which A's list doesn't show" 0 "$(as_a GET /databases | jq --arg id "$db_b" 'map(select(.id == $id)) | length')"
       ;;
-    "GET /databases/{id}" | "DELETE /databases/{id}" | "POST /databases/{id}/password")
+    "GET /databases/{id}" | "DELETE /databases/{id}" | "POST /databases/{id}/password" | "GET /databases/{id}/metrics")
       as_b "$method" "${template//\{id\}/$db_a}" >/dev/null
       check "$route: B gets 404 for A's database" "404 Database $db_a not found" "$(status) $(message)"
       database_now="$(as_a GET "/databases/$db_a")"
@@ -807,7 +810,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: user 2 makes account 2's own database" 201 "$(status)"
       check "  ... which account 1's list doesn't show" 0 "$(as_user_1 GET /databases | jq --arg id "$db_2" 'map(select(.id == $id)) | length')"
       ;;
-    "GET /databases/{id}" | "DELETE /databases/{id}" | "POST /databases/{id}/password")
+    "GET /databases/{id}" | "DELETE /databases/{id}" | "POST /databases/{id}/password" | "GET /databases/{id}/metrics")
       as_user_2 "$method" "${template//\{id\}/$db_1}" >/dev/null
       check "$route: account 2 gets 404 for account 1's database" "404 Database $db_1 not found" "$(status) $(message)"
       database_now="$(as_user_1 GET "/databases/$db_1")"
@@ -1164,6 +1167,15 @@ egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '
 check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out" "200 true 0.0.0.0/0 except 6" \
   "$(status) $(jq -r .account.internetEgress <<<"$egress") $(internet_rule "$account_1")"
 check "and account 2's functions still reach nothing beyond DNS" none "$(internet_rule "$account_2")"
+storage="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": false, "reason": "l5: files shared against the terms"}')"
+check "the operator turns account 1's databases and buckets off: its database's user can't log in, and its members read why in GET /me" \
+  "200 suspended true l5: files shared against the terms" \
+  "$(status) $(jq -r --arg id "$db_1" '.databases[] | select(.id == $id) | .status' <<<"$storage") $( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false) $(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .storageDisabledReason')"
+as_user_1 POST /databases '{"name": "l5-while-off"}' >/dev/null
+check "  ... and no database is made meanwhile" "403 FF turned this account's databases and buckets off: l5: files shared against the terms" "$(status) $(message)"
+with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": true, "reason": "l5: cleared with the owner"}' >/dev/null
+check "  ... on again: the user logs in, and account 1's log names both, as FF's" "200 1 account.storage,account.storage" \
+  "$(status) $(data_db_psql "$conn_1" 'select 1') $(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action == "account.storage") | .action] | join(",")')"
 plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
   "$(jq -cn --argjson limits "$beta_limits" '{limits: ($limits | .quota = {pods: 32, cpu: "16", memory: "16Gi"}), reason: "l5: pilots need more"}')")"
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
@@ -1249,22 +1261,27 @@ check "its owner reads each look in the account's audit log, as FF's, with the r
 
 echo "== the operator's price books (P-73)"
 books="$(with_token "$operator_token" GET /admin/price-books)"
-check "the first price book is active: AWS's prices at the BCT's rate" "200 1 active aws-lambda 3.0080" \
-  "$(status) $(jq -r '"\(length) \(.[0].status) \(.[0].document.source.kind) \(.[0].document.source.usdRate)"' <<<"$books")"
+check "the first price book is active: AWS's prices at the BCT's rate; the migrations' second, with databases' and buckets' prices, starts next month" \
+  "200 2 active aws-lambda 3.0080 scheduled 0.34592" \
+  "$(status) $(jq -r '"\(length) \(.[0].status) \(.[0].document.source.kind) \(.[0].document.source.usdRate) \(.[1].status) \(.[1].document.prices.databaseStorageGbMonth)"' <<<"$books")"
 first_book="$(jq -c '.[0].document' <<<"$books")"
+latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
-created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
-check "the operator adds a book for next year: scheduled, made by the operator" "201 scheduled true" \
+with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
+check "a book after one with databases' and buckets' prices is refused without them, each named" \
+  "400 9 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
+check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"
-with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: ($doc | .prices.requestsPerMillion = "1"), reason: "l5 tries"}')" >/dev/null
+with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: ($doc | .prices.requestsPerMillion = "1"), reason: "l5 tries"}')" >/dev/null
 check "a book that says AWS's prices, but isn't them, is refused" "400 prices.requestsPerMillion: must be 0.20 × 3.0080 = 0.6016" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
-preview="$(with_token "$operator_token" POST /admin/price-books/preview "$(jq -cn --argjson doc "$first_book" '{document: $doc}')")"
+preview="$(with_token "$operator_token" POST /admin/price-books/preview "$(jq -cn --argjson doc "$latest_book" '{document: $doc}')")"
 check "the operator previews it on last month, with no reason asked, as it changes nothing" "200 $(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m) TND" \
   "$(status) $(jq -r '"\(.month) \(.currency)"' <<<"$preview")"
 with_token "$operator_token" DELETE "/admin/price-books/$(jq -r '.[0].id' <<<"$books")" '{"reason": "l5 tries"}' >/dev/null
 check "the active book is never removed" 409 "$(status)"
 with_token "$operator_token" DELETE "/admin/price-books/$(jq -r .id <<<"$created")" '{"reason": "l5: not yet"}' >/dev/null
-check "a scheduled one is" "200 1" "$(status) $(with_token "$operator_token" GET /admin/price-books | jq length)"
+check "a scheduled one is" "200 2" "$(status) $(with_token "$operator_token" GET /admin/price-books | jq length)"
 echo "== bank transfers (P-35)"
 typed="$(tr 'A-Z' 'a-z' <<<"${ref_1//-/}")"
 found="$(with_token "$operator_token" GET "/admin/payments?reference=$typed")"
@@ -1438,7 +1455,7 @@ check "and the grants, as FF's, with their reasons (P-74)" "credit.promo:FF:l5: 
   "$(jq -r '[.entries[] | select(.action | startswith("credit.")) | "\(.action):\(.actorLabel):\(.details.reason)"] | reverse | join("|")' <<<"$log_invoices")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress account.storage account.storage support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -1446,7 +1463,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 24 account.approve,account.egress,account.plan,account.reactivate,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
+  "200 26 account.approve,account.egress,account.plan,account.reactivate,account.storage,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

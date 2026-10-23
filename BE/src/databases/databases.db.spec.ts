@@ -167,6 +167,25 @@ run("customers' databases, on the server of customers' databases (L2)", () => {
     await service().remove(A, made.id);
   });
 
+  it("keeps a user out while FF has the account's storage off, an account reactivated too, makes no database then, and lets it in once storage is on", async () => {
+    const made = await service().create(A, { name: 'switched' });
+    const storage = (reason: string | null) =>
+      db.dataSource.query(`UPDATE accounts SET storage_disabled_at = $2, storage_disabled_reason = $3 WHERE id = $1`, [A, reason ? new Date() : null, reason]);
+
+    await storage('Files shared against our terms');
+    await service().applyAccess(A);
+    await expect(as(made, async () => 'in')).rejects.toThrow(/is not permitted to log in/);
+    await service().reactivateAccount(A); // as an operator reactivating the account would: storage is still off
+    await expect(as(made, async () => 'in')).rejects.toThrow(/is not permitted to log in/);
+    await expect(service({ databases: 2 }).create(A, { name: 'another' })).rejects.toThrow("FF turned this account's databases and buckets off: Files shared against our terms");
+
+    await storage(null);
+    await service().applyAccess(A);
+    await expect(as(made, async (client) => (await client.query('SELECT 1 AS "one"')).rows[0].one)).resolves.toBe(1);
+    expect((await service().get(A, made.id)).status).toBe(DatabaseStatus.ACTIVE);
+    await service().remove(A, made.id);
+  });
+
   it('tells its size and sessions now', async () => {
     const made = await service().create(A, { name: 'measured' });
     const open = await connect(made.connectionString);

@@ -56,6 +56,7 @@ const FUNCTION_ENVIRONMENTS = migrationNames.find((name) => name.startsWith('Fun
 const SCHEDULES = migrationNames.find((name) => name.startsWith('Schedules')) as string;
 const CODE_IMAGES = migrationNames.find((name) => name.startsWith('CodeImages')) as string;
 const DATABASES = migrationNames.find((name) => name.startsWith('Databases1')) as string;
+const DATABASE_BILLING = migrationNames.find((name) => name.startsWith('DatabaseBilling')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -710,6 +711,39 @@ run('database schema (L2, real PostgreSQL)', () => {
         { id: expect.any(String), valid_from: next, prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'system' },
         { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'test' },
       ]);
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the database-operations migration lets an alarm watch a database and go with it, and an account's storage be off with its reason only; it reverts with both present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id, storage_disabled_at, storage_disabled_reason) VALUES ($1, 'A', 'active', 'beta', now(), 'Abuse')`, [ACCOUNT]);
+      await expect(dataSource.query(`UPDATE accounts SET storage_disabled_reason = NULL`)).rejects.toThrow(/violates check constraint/);
+      const database = async (name: string, dbName: string) =>
+        (await dataSource.query(`INSERT INTO databases (account_id, name, db_name, status) VALUES ($1, $2, $3, 'active') RETURNING id`, [ACCOUNT, name, dbName]))[0].id as string;
+      const alarm = (databaseId: string | null, metric: string, period: number) =>
+        dataSource.query(
+          `INSERT INTO alarms (account_id, database_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+           VALUES ($1, $2, $3, $3, 'Maximum', $4, 'GreaterThanThreshold', 8, 1, 1, '{"email": true, "webhookUrls": []}')`,
+          [ACCOUNT, databaseId, metric, period],
+        );
+      const gone = await database('gone', 'ff_0123456789abcdef01234567');
+      await alarm(gone, 'DatabaseConnections', 3600);
+      await dataSource.query(`DELETE FROM databases WHERE id = $1`, [gone]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM alarms`)).toEqual([{ n: 0 }]); // it went with its database
+      await alarm(await database('kept', 'ff_0123456789abcdef01234568'), 'VolumeBytesUsed', 3600);
+      await alarm(null, 'Instances', 60);
+
+      await migrateDownTo(dataSource, DATABASE_BILLING);
+
+      expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Instances' }]); // the account's alarm stays
+      const columns = await dataSource.query(
+        `SELECT table_name, column_name FROM information_schema.columns
+          WHERE table_name IN ('alarms', 'accounts') AND column_name IN ('database_id', 'storage_disabled_at', 'storage_disabled_reason') ORDER BY 1, 2`,
+      );
+      expect(columns).toEqual([]);
+      await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });

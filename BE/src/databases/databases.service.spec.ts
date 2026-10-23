@@ -1,5 +1,6 @@
-import { Logger, ServiceUnavailableException } from '@nestjs/common';
+import { ForbiddenException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AccountStatus } from '../accounts/entities/account.entity';
 import { DataDbSettings } from '../config/configuration';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { onePlan, plan } from '../plans/test-fixtures';
@@ -9,6 +10,13 @@ import { Database, DatabaseStatus } from './database.entity';
 import { DatabasesService, NO_DATA_SERVER } from './databases.service';
 
 const ACCOUNT = '500000000001';
+/** The account as the service reads it: active, its storage on unless a test turns it off. */
+const account: { id: string; status: AccountStatus; storageDisabledAt: Date | null; storageDisabledReason: string | null } = {
+  id: ACCOUNT,
+  status: AccountStatus.ACTIVE,
+  storageDisabledAt: null,
+  storageDisabledReason: null,
+};
 const SETTINGS: DataDbSettings = { host: 'db.ff.example', port: 5432, adminHost: 'db.ff.example', adminUser: 'ff_admin', adminPassword: 'x', cidrs: ['203.0.113.20/32'] };
 
 /** The rows a repository holds, with the few calls the service makes. */
@@ -27,7 +35,7 @@ function fakeRepository() {
   return {
     rows,
     repository: {
-      manager: { transaction: async (work: (m: typeof manager) => Promise<unknown>) => work(manager) },
+      manager: { transaction: async (work: (m: typeof manager) => Promise<unknown>) => work(manager), findOneBy: async () => account },
       update: async (criteria: { id: string }, values: Partial<Database>) => Object.assign(rows.find((row) => row.id === criteria.id) as Database, values),
       delete: async (criteria: { id: string }) => void rows.splice(rows.findIndex((row) => row.id === criteria.id), 1),
       // As TypeORM's In() and Not() select the rows, by status.
@@ -138,5 +146,42 @@ describe('DatabasesService', () => {
     // Read-write again, as if it had been past the plan before: the next hourly sample says.
     expect(calls).toEqual([`nologin ${second.database}`, `login ${second.database}`, `read-write ${second.database}`]);
     expect(rows.map((row) => row.status)).toEqual([DatabaseStatus.ACTIVE, DatabaseStatus.ACTIVE]);
+  });
+
+  describe("with the account's storage turned off by FF", () => {
+    afterEach(() => Object.assign(account, { status: AccountStatus.ACTIVE, storageDisabledAt: null, storageDisabledReason: null }));
+
+    it('makes no database, saying why, and asks the server nothing', async () => {
+      const { repository, rows } = fakeRepository();
+      const { server, calls } = fakeServer();
+      const service = new DatabasesService(repository as never, server, orchestrator, onePlan(), audit as never, config(SETTINGS));
+      Object.assign(account, { storageDisabledAt: new Date(), storageDisabledReason: 'Files shared against our terms' });
+
+      await expect(service.create(ACCOUNT, { name: 'orders' })).rejects.toThrow(
+        new ForbiddenException("FF turned this account's databases and buckets off: Files shared against our terms"),
+      );
+      expect([rows, calls]).toEqual([[], []]);
+    });
+
+    it("keeps its users out when the account is reactivated, lets them in once storage is on again, and follows a suspension too", async () => {
+      const { repository, rows } = fakeRepository();
+      const { server, calls } = fakeServer();
+      const service = new DatabasesService(repository as never, server, orchestrator, onePlan(), audit as never, config(SETTINGS));
+      const made = await service.create(ACCOUNT, { name: 'orders' });
+      calls.length = 0;
+
+      Object.assign(account, { storageDisabledAt: new Date(), storageDisabledReason: 'Abuse' });
+      await service.applyAccess(ACCOUNT);
+      await service.reactivateAccount(ACCOUNT); // the account was never suspended: storage keeps them out
+      expect([calls, rows[0].status]).toEqual([[`nologin ${made.database}`], DatabaseStatus.SUSPENDED]);
+
+      Object.assign(account, { status: AccountStatus.SUSPENDED, storageDisabledAt: null, storageDisabledReason: null });
+      await service.applyAccess(ACCOUNT); // storage on, the account suspended meanwhile: still out
+      expect(calls).toEqual([`nologin ${made.database}`]);
+
+      account.status = AccountStatus.ACTIVE;
+      await service.applyAccess(ACCOUNT);
+      expect([calls.slice(1), rows[0].status]).toEqual([[`login ${made.database}`, `read-write ${made.database}`], DatabaseStatus.ACTIVE]);
+    });
   });
 });

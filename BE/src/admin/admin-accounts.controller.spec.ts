@@ -30,6 +30,7 @@ describe('the admin account routes (L1, P-71)', () => {
     changeStatus: jest.fn(async () => VIEW),
     changePlan: jest.fn(async () => VIEW),
     setEgress: jest.fn(async () => VIEW),
+    setStorage: jest.fn(async () => VIEW),
   };
   const plans = { list: jest.fn(async () => [{ id: 'beta', name: 'Beta', limits: {} }]) };
   const credits = { grant: jest.fn(async () => GRANT) };
@@ -139,6 +140,18 @@ describe('the admin account routes (L1, P-71)', () => {
       ['internetEgress must be a boolean value'],
     ]);
     expect(accounts.setEgress).toHaveBeenCalledTimes(1);
+  });
+
+  it("PUT /admin/accounts/:id/storage turns the account's databases and buckets off or on, with a reason, and takes only true or false", async () => {
+    await call('PUT', `/admin/accounts/${ID}/storage`, { enabled: false, reason: 'Files shared against our terms' });
+    expect(accounts.setStorage).toHaveBeenCalledWith(ID, false, 'Files shared against our terms');
+
+    expect(await refusal(await call('PUT', `/admin/accounts/${ID}/storage`, { enabled: 'off', reason: 'Files shared against our terms' }))).toEqual([
+      400,
+      ['enabled must be a boolean value'],
+    ]);
+    expect((await call('PUT', `/admin/accounts/${ID}/storage`, { enabled: true })).status).toBe(400); // no reason
+    expect(accounts.setStorage).toHaveBeenCalledTimes(1);
   });
 
   describe('POST /admin/accounts/:id/credits (P-74)', () => {

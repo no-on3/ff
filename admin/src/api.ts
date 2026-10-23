@@ -92,6 +92,8 @@ export const accountsApi = {
   change: (id: string, change: StatusChange, reason: string) => api.post<AccountView>(`${accountPath(id)}/${change}`, { reason }),
   plan: (id: string, planId: string, reason: string) => api.put<AccountView>(`${accountPath(id)}/plan`, { planId, reason }),
   egress: (id: string, internetEgress: boolean, reason: string) => api.put<AccountView>(`${accountPath(id)}/egress`, { internetEgress, reason }),
+  /** The account's databases and buckets off, or on again. */
+  storage: (id: string, enabled: boolean, reason: string) => api.put<AccountView>(`${accountPath(id)}/storage`, { enabled, reason }),
   /** Credit FF gives (P-74): the grant, and the account page after it. */
   grant: (id: string, request: GrantRequest) => api.post<{ grant: Grant; account: AccountView }>(`${accountPath(id)}/credits`, request),
 };

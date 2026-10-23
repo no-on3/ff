@@ -85,6 +85,9 @@ class MeAccount {
   @ApiProperty({ nullable: true, type: Date, description: "When a closed account's functions, their invocation history and logs are deleted: its closure plus the notice period set then. Null unless the account is closed" })
   dataDeletionDueAt: Date | null;
   @ApiProperty({ nullable: true, type: Date, description: 'When they were deleted; null until then' }) dataDeletedAt: Date | null;
+  @ApiProperty({ nullable: true, type: Date, description: "When FF turned the account's databases and buckets off: their users can't log in. Null while they are on" })
+  storageDisabledAt: Date | null;
+  @ApiProperty({ nullable: true, type: String, description: "FF's reason for it; null while they are on" }) storageDisabledReason: string | null;
 }
 
 /** The API key a request came with, as GET /me shows it to the key itself. */

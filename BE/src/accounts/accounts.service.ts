@@ -121,8 +121,8 @@ export class AccountsService {
     });
     const accounts = [];
     for (const { account, role } of memberships) {
-      const { id, name, status, planId, internetEgress, dataDeletionDueAt, dataDeletedAt } = account as Account;
-      accounts.push({ id, name, status, role, plan: await this.plans.get(planId), internetEgress, dataDeletionDueAt, dataDeletedAt });
+      const { id, name, status, planId, internetEgress, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason } = account as Account;
+      accounts.push({ id, name, status, role, plan: await this.plans.get(planId), internetEgress, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason });
     }
     return { user: { id: user.id, email: user.email, name: user.name, locale: user.locale }, key: null, accounts };
   }
@@ -135,17 +135,23 @@ export class AccountsService {
 
   /** GET /me in development mode: its account, as owner. */
   async developmentMe(principal: Principal): Promise<MeView> {
-    const { id, name, status, planId, internetEgress, dataDeletionDueAt, dataDeletedAt } = await this.developmentAccount(principal.accountId);
-    return { user: null, key: null, accounts: [{ id, name, status, role: 'owner', plan: await this.plans.get(planId), internetEgress, dataDeletionDueAt, dataDeletedAt }] };
+    const { id, name, status, planId, internetEgress, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason } = await this.developmentAccount(principal.accountId);
+    return {
+      user: null,
+      key: null,
+      accounts: [{ id, name, status, role: 'owner', plan: await this.plans.get(planId), internetEgress, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason }],
+    };
   }
 
   /** GET /me with an API key: the key, and the account it acts for, with its creator's role, which bounds the key. */
   async keyMe(principal: Principal & { keyId: string }): Promise<MeView> {
-    const { id, name, status, planId, internetEgress, dataDeletionDueAt, dataDeletedAt } = await this.accounts.findOneOrFail({ where: { id: principal.accountId } });
+    const { id, name, status, planId, internetEgress, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason } = await this.accounts.findOneOrFail({
+      where: { id: principal.accountId },
+    });
     return {
       user: null,
       key: { id: principal.keyId, name: principal.keyName ?? '', scopes: principal.scopes ?? [] },
-      accounts: [{ id, name, status, role: principal.role, plan: await this.plans.get(planId), internetEgress, dataDeletionDueAt, dataDeletedAt }],
+      accounts: [{ id, name, status, role: principal.role, plan: await this.plans.get(planId), internetEgress, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason }],
     };
   }
 

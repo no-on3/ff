@@ -124,3 +124,54 @@ export function metricsView(window: MetricsWindow, rows: PeriodRow[], instances:
   }
   return view;
 }
+
+/** A database's metrics have a point an hour: its samples' (ADR 0008). */
+export const DATABASE_PERIOD = 3600;
+
+/**
+ * A customer's database's metrics, as CloudWatch names RDS's and Aurora's:
+ * its sessions (DatabaseConnections) and the storage it uses
+ * (VolumeBytesUsed), from its hourly samples. An hour without a sample has
+ * none: null.
+ */
+export interface DatabaseMetricsView {
+  period: number;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: {
+    DatabaseConnections: { Maximum: Array<number | null>; Average: Array<number | null> };
+    VolumeBytesUsed: { Maximum: Array<number | null>; Average: Array<number | null> };
+  };
+}
+
+/** An hour's samples of a database, as the query gives them: their most and their mean. */
+export interface DatabaseHourRow {
+  bucket: number;
+  connectionsMaximum: number;
+  connectionsAverage: number;
+  bytesMaximum: number;
+  bytesAverage: number;
+}
+
+/** The series of the window, a point an hour, null where the database wasn't sampled. */
+export function databaseMetricsView(window: MetricsWindow, rows: DatabaseHourRow[]): DatabaseMetricsView {
+  const byBucket = new Map(rows.map((row) => [row.bucket, row]));
+  const view: DatabaseMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: { DatabaseConnections: { Maximum: [], Average: [] }, VolumeBytesUsed: { Maximum: [], Average: [] } },
+  };
+  const m = view.metrics;
+  for (let bucket = window.start.getTime() / 1000; bucket < window.end.getTime() / 1000; bucket += window.period) {
+    const row = byBucket.get(bucket);
+    view.timestamps.push(new Date(bucket * 1000));
+    m.DatabaseConnections.Maximum.push(row ? row.connectionsMaximum : null);
+    m.DatabaseConnections.Average.push(row ? round3(row.connectionsAverage) : null);
+    m.VolumeBytesUsed.Maximum.push(row ? row.bytesMaximum : null);
+    m.VolumeBytesUsed.Average.push(row ? Math.round(row.bytesAverage) : null);
+  }
+  return view;
+}
