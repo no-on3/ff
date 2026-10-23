@@ -1067,17 +1067,19 @@ check "the database, deleted earlier, keeps its month: its hours sampled and GB-
   "$(jq -r --arg id "$db_id" '.databases[] | select(.databaseId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \((.gbMonths | tonumber) > 0) \(.cost)"' <<<"$usage")"
 photos_requests="$(env_q "SELECT coalesce(sum(requests) FILTER (WHERE class = 'tier1'), 0) || ' ' || coalesce(sum(requests) FILTER (WHERE class = 'tier2'), 0)
                            FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
+# The bytes its requests sent out and brought in, every request's: its files were uploaded and read, so neither is 0.
+photos_bytes="$(env_q "SELECT coalesce(sum(bytes_out), 0) || ' ' || coalesce(sum(bytes_in), 0) FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
 # Its GB-months as its samples give them: what it held each hour, over the month's hours, 1 GB being 2^30 bytes, to six decimals.
 photos_gb="$(env_q "SELECT trim_scale(round(coalesce(sum(size_bytes), 0)::numeric / 1073741824
                       / (extract(epoch FROM date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month' - date_trunc('month', now() AT TIME ZONE 'UTC')) / 3600), 6))
                       FROM bucket_samples WHERE bucket_id = '$photos_id'")"
-check "the bucket, deleted earlier, keeps its month: its hours measured, GB-months, its requests by S3's two classes as counted, at nothing before the book that prices buckets" \
-  "true e2e-photos true $photos_gb $photos_requests 0.000" \
-  "$(jq -r --arg id "$photos_id" '.buckets[] | select(.bucketId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \(.gbMonths) \(.tier1Requests) \(.tier2Requests) \(.cost)"' <<<"$usage")"
+check "the bucket, deleted earlier, keeps its month: its hours measured, GB-months, its requests by S3's two classes and its bytes as counted, at nothing before the book that prices buckets" \
+  "true e2e-photos true $photos_gb $photos_requests $photos_bytes true 0.000" \
+  "$(jq -r --arg id "$photos_id" '.buckets[] | select(.bucketId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \(.gbMonths) \(.tier1Requests) \(.tier2Requests) \(.bytesDownloaded) \(.bytesUploaded) \(.bytesDownloaded > 0 and .bytesUploaded > 0) \(.cost)"' <<<"$usage")"
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
 check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
-  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,throttled,platform_errors,lost,cost|true|true|true" \
-  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},,,,0\.000$" && echo true || echo false)"
+  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,throttled,platform_errors,lost,cost|true|true|true" \
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,0\.000$" && echo true || echo false)"
 empty="$(http GET '/usage?month=2001-01')"
 check "a month without calls is empty, and before the first price book, unpriced" "200 0 0 null" \
   "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"

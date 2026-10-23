@@ -112,11 +112,13 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 **11. Customers' files are not copied to the second site, at first.** ✅ Confirmed, said plainly in the docs; to decide again before customers keep important files on FF.
 - **Changed already:** the step-2 plan's V-09 now has the guide say so.
 - **Changed already, too:** V-07: the guide's "Buckets" says it, beside the API that makes them.
-- **Still to change:** V-09, the console and `ff` saying it too; the decision itself, again, before customers keep important files on FF.
+- **Changed already, too:** V-09: the console's Buckets page says it, and `ff buckets create`.
+- **Still to change:** the decision itself, again, before customers keep important files on FF.
 
 **12. Data downloaded from FF is counted, not billed.** ✅ Confirmed. If FF's hosting bills FF for its traffic, FF bills it too.
 - **Changed already:** V-06, the S3 front door, counts each bucket's bytes in and out by the minute, with its requests.
-- **Still to change:** V-09, the counts shown, on the console's Usage page and in `GET /usage`.
+- **Changed already, too:** V-09: `GET /usage` gives each bucket's month of them, `bytesDownloaded` and `bytesUploaded`, and its CSV; the console's Usage page and `ff usage` show what each bucket sent out. Nothing prices them.
+- **Still to change:** nothing, unless FF's hosting bills FF for its traffic.
 
 **13. Out of credit: file uploads are refused; reading files and the databases go on.** ✅ Confirmed. FF never deletes data for non-payment, and functions are already refused without credit.
 - **Changed already:** V-04: a database's storage is rated and debited whatever the balance, which goes below zero, as a function's `minInstances` do; nothing stops a database for its balance.

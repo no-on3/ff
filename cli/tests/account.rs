@@ -94,11 +94,12 @@ fn usage_shows_each_database_after_the_functions() {
 }
 
 #[test]
-fn usage_shows_each_bucket_after_the_databases_its_requests_by_s3s_classes() {
+fn usage_shows_each_bucket_after_the_databases_its_requests_by_s3s_classes_and_what_it_sent_out() {
     let mut month = usage();
     month["buckets"] = json!([
         { "bucketId": "b1", "name": "photos", "deleted": false, "hours": 312, "gbMonths": "0.215231", "sizeBytes": 161_480_253, "objects": 1204,
-          "tier1Requests": 2310, "tier2Requests": 48920, "cost": "0.108" },
+          "tier1Requests": 2310, "tier2Requests": 48920, "bytesDownloaded": 2_831_155_200u64, "bytesUploaded": 734_003_200, "cost": "0.108" },
+        // As an API before what buckets sent out was shown answers: nothing sent out.
         { "bucketId": "b2", "name": "tmp", "deleted": true, "hours": 0, "gbMonths": "0", "sizeBytes": 0, "objects": 0, "tier1Requests": 0, "tier2Requests": 5, "cost": "0.000" }
     ]);
     let api = Server::start(vec![Reply::json(200, month)]);
@@ -108,8 +109,8 @@ fn usage_shows_each_bucket_after_the_databases_its_requests_by_s3s_classes() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
         text.contains(
-            "total          15        3.14375     1           0.852\nBUCKET         GB-MONTHS  PUT, LIST…  GET…   COST\n\
-             photos         0.215231   2310        48920  0.108\ntmp (deleted)  0          0           5      0.000\nestimated cost:"
+            "total          15        3.14375     1           0.852\nBUCKET         GB-MONTHS  PUT, LIST…  GET…   SENT OUT  COST\n\
+             photos         0.215231   2310        48920  2.6 GB    0.108\ntmp (deleted)  0          0           5      0 MB      0.000\nestimated cost:"
         ),
         "{text}"
     );

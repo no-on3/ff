@@ -32,7 +32,19 @@ const ORDERS = '7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f';
 const DATABASES: DatabaseMonth[] = [{ databaseId: ORDERS, name: 'orders', deleted: false, hours: 312, gbMonths: '0.003182', sizeBytes: 7_634_423 }];
 const PHOTOS = '0b6f3a1c-2d4e-4f5a-8b9c-1d2e3f4a5b6c';
 const BUCKETS: BucketMonth[] = [
-  { bucketId: PHOTOS, name: 'photos', deleted: false, hours: 312, gbMonths: '0.215231', sizeBytes: 161_480_253, objects: 1_204, tier1Requests: 2_310, tier2Requests: 48_920 },
+  {
+    bucketId: PHOTOS,
+    name: 'photos',
+    deleted: false,
+    hours: 312,
+    gbMonths: '0.215231',
+    sizeBytes: 161_480_253,
+    objects: 1_204,
+    tier1Requests: 2_310,
+    tier2Requests: 48_920,
+    bytesDownloaded: 2_831_155_200,
+    bytesUploaded: 734_003_200,
+  },
 ];
 const d = (text: string) => Decimal.parse(text);
 const costOf = (total: string) => ({ requests: Decimal.ZERO, duration: d(total), provisioned: Decimal.ZERO, idle: Decimal.ZERO, total: d(total) });

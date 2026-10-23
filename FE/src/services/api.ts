@@ -389,6 +389,8 @@ export const BUCKET_USAGE_FIELDS = [
   'objects',
   'tier1Requests',
   'tier2Requests',
+  'bytesDownloaded',
+  'bytesUploaded',
   'cost',
 ] as const satisfies ReadonlyArray<keyof BucketUsage>;
 /** A customer's bucket in the month, as its hourly measures and the front door's counts counted it. */
@@ -407,6 +409,9 @@ export interface BucketUsage {
   /** S3's first class of request (PUT, COPY, POST, LIST) and its second (GET and the others); deletes are free. */
   tier1Requests: number;
   tier2Requests: number;
+  /** The bytes its requests sent out, counted and not billed, and those they brought in, free as on S3. */
+  bytesDownloaded: number;
+  bytesUploaded: number;
   /** Before the free tier; null without a price book. */
   cost: string | null;
 }
@@ -419,7 +424,7 @@ export interface MonthlyUsage {
   functions: FunctionUsage[];
   /** Each of the account's databases measured in the month, the most GB-months first. */
   databases: DatabaseUsage[];
-  /** Each of its buckets measured, or asked something S3 bills, in the month, the most GB-months first. */
+  /** Each of its buckets measured, or asked anything, in the month, the most GB-months first. */
   buckets: BucketUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */

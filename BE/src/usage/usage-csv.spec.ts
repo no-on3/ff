@@ -21,27 +21,29 @@ describe('usage as CSV (P-22, P-30)', () => {
         objects: 1_204,
         tier1Requests: 2_310,
         tier2Requests: 48_920,
+        bytesDownloaded: 2_831_155_200,
+        bytesUploaded: 734_003_200,
         cost: '0.108',
       },
     ],
     totals: amounts,
     estimate: null,
   };
-  const HEADER = 'kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,throttled,platform_errors,lost,cost\r\n';
+  const HEADER = 'kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,throttled,platform_errors,lost,cost\r\n';
 
   it("has a header, a line per function, then per database, then per bucket, each with its estimated cost and the other kinds' columns empty, ends lines with CRLF, and leaves the total out", () => {
     expect(usageCsv(view)).toBe(
       HEADER +
-        'function,3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f,"resize, ""fast""",false,3,1016,0.127,,,,1,0,2,0.008\r\n' +
-        `function,a7d4e2c1-6b3f-4d8e-9a1b-2c3d4e5f6a7b,"'=HYPERLINK(""http://x"")",true,3,1016,0.0008818359375,,,,1,0,2,0.000\r\n` +
-        'database,7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f,orders,false,,,,0.003182,,,,,,0.001\r\n' +
-        'bucket,0b6f3a1c-2d4e-4f5a-8b9c-1d2e3f4a5b6c,photos,true,,,,0.215231,2310,48920,,,,0.108\r\n',
+        'function,3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f,"resize, ""fast""",false,3,1016,0.127,,,,,,1,0,2,0.008\r\n' +
+        `function,a7d4e2c1-6b3f-4d8e-9a1b-2c3d4e5f6a7b,"'=HYPERLINK(""http://x"")",true,3,1016,0.0008818359375,,,,,,1,0,2,0.000\r\n` +
+        'database,7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f,orders,false,,,,0.003182,,,,,,,,0.001\r\n' +
+        'bucket,0b6f3a1c-2d4e-4f5a-8b9c-1d2e3f4a5b6c,photos,true,,,,0.215231,2310,48920,2831155200,734003200,,,,0.108\r\n',
     );
   });
 
   it('leaves the cost empty without a price book', () => {
     expect(usageCsv({ ...view, functions: [{ ...view.functions[0], cost: null }] }).split('\r\n')[1]).toBe(
-      'function,3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f,"resize, ""fast""",false,3,1016,0.127,,,,1,0,2,',
+      'function,3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f,"resize, ""fast""",false,3,1016,0.127,,,,,,1,0,2,',
     );
   });
 

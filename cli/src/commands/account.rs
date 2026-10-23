@@ -171,6 +171,9 @@ struct BucketUsage {
     gb_months: String,
     tier1_requests: u64,
     tier2_requests: u64,
+    /// What its requests sent out, counted and not billed. Absent from an API before it was shown.
+    #[serde(default)]
+    bytes_downloaded: u64,
     cost: Option<String>,
 }
 
@@ -267,7 +270,8 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
                 .collect();
             format!("\n{}", table(&["DATABASE", "HOURS", "GB-MONTHS", "COST"], &rows))
         };
-        // As S3 bills them: storage by the GB-month, PUT, COPY, POST and LIST in its first class, GET and the others in its second.
+        // As S3 bills them: storage by the GB-month, PUT, COPY, POST and LIST in its first class, GET and the others in its second;
+        // what each sent out, counted and not billed.
         let buckets = if usage.buckets.is_empty() {
             String::new()
         } else {
@@ -280,11 +284,12 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
                         bucket.gb_months.clone(),
                         bucket.tier1_requests.to_string(),
                         bucket.tier2_requests.to_string(),
+                        super::db::size(Some(bucket.bytes_downloaded)),
                         bucket.cost.clone().unwrap_or_default(),
                     ]
                 })
                 .collect();
-            format!("\n{}", table(&["BUCKET", "GB-MONTHS", "PUT, LIST…", "GET…", "COST"], &rows))
+            format!("\n{}", table(&["BUCKET", "GB-MONTHS", "PUT, LIST…", "GET…", "SENT OUT", "COST"], &rows))
         };
         format!(
             "{}\n{}{databases}{buckets}\n{estimate}",

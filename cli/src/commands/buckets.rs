@@ -117,7 +117,8 @@ pub fn create(name: &str, context: &Context) -> Result<(), Error> {
     let bucket: Bucket = client.json(&Call::post("/buckets", json!({ "name": name })))?;
     context.out.result(&bucket, || {
         format!(
-            "{} made\n{}\n`ff buckets keys create` makes an access key for AWS's SDKs and CLI",
+            "{} made\n{}\n`ff buckets keys create` makes an access key for AWS's SDKs and CLI\n\
+             FF keeps no copy of its files at a second site: keep your own of those that matter (`aws s3 sync`)",
             bucket.name,
             reach(&bucket)
         )

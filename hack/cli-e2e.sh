@@ -541,11 +541,11 @@ check "ff buckets keys list names what it reaches, never its secret" "0 $key_id 
 for _ in $(seq 75); do "$ff_bin" buckets get cli-photos --output json 2>/dev/null | jq -e '.measuredAt != null' >/dev/null && break; sleep 1; done
 ff buckets get cli-photos
 check "ff buckets get says what it held at its last measure" "0 true" "$(code) $(out | grep -qE '^held +[0-9.]+ MB, [01] objects?, as measured at ' && echo true || echo false)"
-# Its month: the requests the front door counted, by S3's classes, once their minute is written.
+# Its month: the requests the front door counted, by S3's classes, and the bytes they sent out, once their minute is written.
 for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.buckets[] | select(.name == "cli-photos" and .tier1Requests > 0 and .tier2Requests > 0)' >/dev/null && break; sleep 1; done
 ff usage
-check "ff usage lists its month after the databases: GB-months, each class's requests" "0 true" \
-  "$(code) $(out | grep -qE '^cli-photos +[0-9.]+ +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' && echo true || echo false)"
+check "ff usage lists its month after the databases: GB-months, each class's requests, what it sent out" "0 true true" \
+  "$(code) $(out | grep -qE '^cli-photos +[0-9.]+ +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+ [MG]B +[0-9.]+$' && echo true || echo false) $("$ff_bin" usage --output json | jq '.buckets[] | select(.name == "cli-photos") | .bytesDownloaded > 0')"
 # The export kit's way out to AWS S3, both halves: the bucket to a folder with the key's variables, then the folder to
 # "S3", here another bucket behind an AWS CLI profile whose key reaches that one alone, so that a second half still
 # holding FF's variables would be refused there. The script calls the AWS CLI by name: the one above.

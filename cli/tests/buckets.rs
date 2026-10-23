@@ -29,12 +29,13 @@ fn key(id: &str, buckets: Value, read_only: bool) -> Value {
 const KEY_ID: &str = "AKFF7Q2MLKX4RTZB3W5N";
 
 #[test]
-fn create_makes_it_and_says_where_aws_tools_reach_it() {
+fn create_makes_it_and_says_where_aws_tools_reach_it_and_that_ff_keeps_no_copy() {
     let api = Server::start(vec![Reply::json(201, bucket("photos"))]);
 
     ff(&with_key(&api.url)).args(["buckets", "create", "photos"]).assert().success().stdout(
         "photos made\nendpoint  https://s3.example.tn\naddress   https://photos.s3.example.tn (and https://s3.example.tn/photos path-style)\n\
-         region    tn-tunis-1\n`ff buckets keys create` makes an access key for AWS's SDKs and CLI\n",
+         region    tn-tunis-1\n`ff buckets keys create` makes an access key for AWS's SDKs and CLI\n\
+         FF keeps no copy of its files at a second site: keep your own of those that matter (`aws s3 sync`)\n",
     );
     let requests = api.requests();
     assert_eq!(format!("{} {}", requests[0].method, requests[0].path), "POST /buckets");

@@ -155,7 +155,7 @@ run("an account's usage in a month (L2, P-22)", () => {
     expect(await usage.monthlyDatabases(A, '2026-12')).toEqual([]);
   });
 
-  it("measures each of the account's buckets in the month: GB-months from its hourly samples, what it held last, and its requests by S3's class, deletes free", async () => {
+  it("measures each of the account's buckets in the month: GB-months from its hourly samples, what it held last, its requests by S3's class, deletes free, and the bytes of every request", async () => {
     const GIB = 1_073_741_824n;
     const sample = (accountId: string, bucketId: string, name: string, hour: string, sizeBytes: bigint, objects: number) =>
       query(`INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES ($1, $2, $3, $4, $5, $6)`, [
@@ -166,11 +166,11 @@ run("an account's usage in a month (L2, P-22)", () => {
         sizeBytes.toString(),
         objects,
       ]);
-    const requests = (accountId: string, bucketId: string, name: string, minute: string, kind: string, count: number) =>
+    const requests = (accountId: string, bucketId: string, name: string, minute: string, kind: string, count: number, bytesIn = 0, bytesOut = 0) =>
       query(
         `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
-         VALUES ($1, $2, $3, gen_random_uuid(), $4, $5, $6, 0, 0, 0, 0, 0, 0)`,
-        [bucketId, minute, kind, accountId, name, count],
+         VALUES ($1, $2, $3, gen_random_uuid(), $4, $5, $6, 0, 0, 0, 0, $7, $8)`,
+        [bucketId, minute, kind, accountId, name, count, bytesIn, bytesOut],
       );
     const [{ id: photos }] = await query<Array<{ id: string }>>(
       `INSERT INTO buckets (account_id, name, store_name) VALUES ($1, 'photos', 'ff-00000000000000000000000a') RETURNING id`,
@@ -178,24 +178,77 @@ run("an account's usage in a month (L2, P-22)", () => {
     );
     const deleted = '4d5e6f7a-8b9c-4d0e-9f1a-3b4c5d6e7f8a';
     const asked = '5e6f7a8b-9c0d-4e1f-8a2b-4c5d6e7f8a9b'; // deleted too, asked something and never measured
+    const emptied = '7a8b9c0d-1e2f-4a3b-8c4d-6e7f8a9b0c1d'; // deleted too, its month only deletes: free, their bytes counted
     // October has 744 hours: 372 GB for an hour is half a GB-month.
     await sample(A, photos, 'photos', '2026-10-01T00:00:00Z', 372n * GIB, 10);
     await sample(A, photos, 'photos', '2026-10-31T23:00:00Z', 744n * GIB, 12);
     await sample(A, deleted, 'logs', '2026-10-02T00:00:00Z', 30n * GIB, 3);
     await sample(A, photos, 'photos', '2026-11-01T00:00:00Z', 744n * GIB, 12); // November's
     await sample(B, '6f7a8b9c-0d1e-4f2a-9b3c-5d6e7f8a9b0c', 'b-bucket', '2026-10-05T00:00:00Z', GIB, 1); // account B's
-    await requests(A, photos, 'photos', '2026-10-01T00:05:00Z', 'tier1', 2_000);
-    await requests(A, photos, 'photos', '2026-10-31T23:59:00Z', 'tier2', 30_000);
-    await requests(A, photos, 'photos', '2026-10-10T08:00:00Z', 'free', 40);
-    await requests(A, photos, 'photos', '2026-11-01T00:00:00Z', 'tier2', 1_000); // November's
-    await requests(A, asked, 'temp', '2026-10-20T12:00:00Z', 'tier2', 5);
+    // 5 GiB sent out, more than a 32-bit count holds, as the front door counts bytes each minute.
+    await requests(A, photos, 'photos', '2026-10-01T00:05:00Z', 'tier1', 2_000, 700_000_000, 1_500);
+    await requests(A, photos, 'photos', '2026-10-31T23:59:00Z', 'tier2', 30_000, 0, Number(5n * GIB));
+    await requests(A, photos, 'photos', '2026-10-10T08:00:00Z', 'free', 40, 8_400, 0);
+    await requests(A, photos, 'photos', '2026-11-01T00:00:00Z', 'tier2', 1_000, 0, 9_999); // November's
+    await requests(B, '6f7a8b9c-0d1e-4f2a-9b3c-5d6e7f8a9b0c', 'b-bucket', '2026-10-05T00:01:00Z', 'tier2', 9, 0, 9_999); // account B's
+    await requests(A, asked, 'temp', '2026-10-20T12:00:00Z', 'tier2', 5, 0, 120);
     await requests(A, deleted, 'logs', '2026-10-21T12:00:00Z', 'free', 3);
+    await requests(A, emptied, 'scratch', '2026-10-22T09:00:00Z', 'free', 2, 1_200, 400);
 
     expect(await usage.monthlyBuckets(A, '2026-10')).toEqual([
-      { bucketId: photos, name: 'photos', deleted: false, hours: 2, gbMonths: '1.5', sizeBytes: Number(744n * GIB), objects: 12, tier1Requests: 2_000, tier2Requests: 30_000 },
+      {
+        bucketId: photos,
+        name: 'photos',
+        deleted: false,
+        hours: 2,
+        gbMonths: '1.5',
+        sizeBytes: Number(744n * GIB),
+        objects: 12,
+        tier1Requests: 2_000,
+        tier2Requests: 30_000,
+        bytesDownloaded: Number(5n * GIB) + 1_500,
+        bytesUploaded: 700_008_400,
+      },
       // 30 GB-hours over 744: 0.04032258…
-      { bucketId: deleted, name: 'logs', deleted: true, hours: 1, gbMonths: '0.040323', sizeBytes: Number(30n * GIB), objects: 3, tier1Requests: 0, tier2Requests: 0 },
-      { bucketId: asked, name: 'temp', deleted: true, hours: 0, gbMonths: '0', sizeBytes: 0, objects: 0, tier1Requests: 0, tier2Requests: 5 },
+      {
+        bucketId: deleted,
+        name: 'logs',
+        deleted: true,
+        hours: 1,
+        gbMonths: '0.040323',
+        sizeBytes: Number(30n * GIB),
+        objects: 3,
+        tier1Requests: 0,
+        tier2Requests: 0,
+        bytesDownloaded: 0,
+        bytesUploaded: 0,
+      },
+      {
+        bucketId: emptied,
+        name: 'scratch',
+        deleted: true,
+        hours: 0,
+        gbMonths: '0',
+        sizeBytes: 0,
+        objects: 0,
+        tier1Requests: 0,
+        tier2Requests: 0,
+        bytesDownloaded: 400,
+        bytesUploaded: 1_200,
+      },
+      {
+        bucketId: asked,
+        name: 'temp',
+        deleted: true,
+        hours: 0,
+        gbMonths: '0',
+        sizeBytes: 0,
+        objects: 0,
+        tier1Requests: 0,
+        tier2Requests: 5,
+        bytesDownloaded: 120,
+        bytesUploaded: 0,
+      },
     ]);
     expect(await usage.monthlyBuckets(A, '2026-12')).toEqual([]);
   });

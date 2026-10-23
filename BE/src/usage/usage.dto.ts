@@ -119,6 +119,15 @@ export class BucketUsageView {
   tier2Requests: number;
 
   @ApiProperty({
+    example: 2_831_155_200,
+    description: "The bytes its requests sent out, as the front door counted them (CloudWatch's BytesDownloaded): counted, not billed",
+  })
+  bytesDownloaded: number;
+
+  @ApiProperty({ example: 734_003_200, description: "The bytes its requests brought in (CloudWatch's BytesUploaded): free, as on S3" })
+  bytesUploaded: number;
+
+  @ApiProperty({
     nullable: true,
     type: String,
     example: '0.024',
@@ -170,7 +179,7 @@ export class MonthlyUsageView {
   @ApiProperty({ type: [DatabaseUsageView], description: "Each of the account's databases measured in the month (ADR 0008), the most GB-months first" })
   databases: DatabaseUsageView[];
 
-  @ApiProperty({ type: [BucketUsageView], description: "Each of the account's buckets measured or asked something S3 bills in the month (ADR 0009), the most GB-months first" })
+  @ApiProperty({ type: [BucketUsageView], description: "Each of the account's buckets measured or asked anything in the month (ADR 0009), the most GB-months first" })
   buckets: BucketUsageView[];
 
   @ApiProperty({ type: UsageAmountsView, description: "The account's calls in the month, from the same records as its functions'" })

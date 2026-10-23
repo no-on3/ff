@@ -228,17 +228,31 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
     const from = new Date(Date.UTC(year, number - 1, 1));
     const to = new Date(Date.UTC(year, number, 1));
     const rows = await this.records.manager.query<
-      Array<{ id: string; name: string; deleted: boolean; hours: number; byte_hours: string; size_bytes: string; objects: string; tier1: string; tier2: string }>
+      Array<{
+        id: string;
+        name: string;
+        deleted: boolean;
+        hours: number;
+        byte_hours: string;
+        size_bytes: string;
+        objects: string;
+        tier1: string;
+        tier2: string;
+        bytes_out: string;
+        bytes_in: string;
+      }>
     >(
+      // The bytes of every request, deletes' too; the requests of the two classes billed.
       `WITH s AS (SELECT "bucket_id", (array_agg("name" ORDER BY "hour" DESC))[1] AS "name", count(*)::int AS "hours", sum("size_bytes") AS "byte_hours",
                          (array_agg("size_bytes" ORDER BY "hour" DESC))[1] AS "size_bytes", (array_agg("objects" ORDER BY "hour" DESC))[1] AS "objects"
                     FROM "bucket_samples" WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3 GROUP BY "bucket_id"),
             r AS (SELECT "bucket_id", max("name") AS "name", coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0) AS "tier1",
-                         coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0) AS "tier2"
-                    FROM "storage_request_counts" WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3 AND "class" <> 'free' GROUP BY "bucket_id")
+                         coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0) AS "tier2", sum("bytes_out") AS "bytes_out", sum("bytes_in") AS "bytes_in"
+                    FROM "storage_request_counts" WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3 GROUP BY "bucket_id")
        SELECT coalesce(s."bucket_id", r."bucket_id") AS "id", coalesce(s."name", r."name") AS "name", b."id" IS NULL AS "deleted",
               coalesce(s."hours", 0) AS "hours", coalesce(s."byte_hours", 0)::text AS "byte_hours", coalesce(s."size_bytes", 0)::text AS "size_bytes",
-              coalesce(s."objects", 0)::text AS "objects", coalesce(r."tier1", 0)::text AS "tier1", coalesce(r."tier2", 0)::text AS "tier2"
+              coalesce(s."objects", 0)::text AS "objects", coalesce(r."tier1", 0)::text AS "tier1", coalesce(r."tier2", 0)::text AS "tier2",
+              coalesce(r."bytes_out", 0)::text AS "bytes_out", coalesce(r."bytes_in", 0)::text AS "bytes_in"
          FROM s FULL JOIN r ON r."bucket_id" = s."bucket_id"
          LEFT JOIN "buckets" b ON b."id" = coalesce(s."bucket_id", r."bucket_id")
         ORDER BY coalesce(s."byte_hours", 0) DESC, 2, 1`,
@@ -254,6 +268,8 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
       objects: Number(row.objects),
       tier1Requests: Number(row.tier1),
       tier2Requests: Number(row.tier2),
+      bytesDownloaded: Number(row.bytes_out),
+      bytesUploaded: Number(row.bytes_in),
     }));
   }
 
