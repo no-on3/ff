@@ -581,6 +581,12 @@ export interface PlanLimits {
   customDomains: number;
   /** Functions' schedules, all together. */
   schedules: number;
+  /** Customers' PostgreSQL databases, all together. */
+  databases: number;
+  /** What one database may hold, in MB, before its new sessions start read-only. */
+  databaseStorageMb: number;
+  /** The sessions one database may have at once. */
+  databaseConnections: number;
 }
 
 export interface Plan {
@@ -655,7 +661,18 @@ export interface AccountUpdate {
   taxId?: string | null;
 }
 
-export const SCOPES = ['functions:read', 'functions:write', 'functions:invoke', 'logs:read', 'metrics:read', 'alarms:read', 'alarms:write', 'usage:read'] as const;
+export const SCOPES = [
+  'functions:read',
+  'functions:write',
+  'functions:invoke',
+  'logs:read',
+  'metrics:read',
+  'alarms:read',
+  'alarms:write',
+  'usage:read',
+  'databases:read',
+  'databases:write',
+] as const;
 export type Scope = (typeof SCOPES)[number];
 
 /** An API key, as GET /api-keys lists it: never its secret. */

@@ -20,6 +20,10 @@
 #     in the reader's language.
 #   - API keys (P-13): account 1's key reads and invokes (L4), within its scopes,
 #     and stops when revoked; account 2's key gets 404 on account 1's function.
+#   - Customers' databases (ADR 0008), on the suite's own server: each account's
+#     own; another account gets 404 on every route, and the owner's password
+#     still works; a key needs databases:read and databases:write; a closed
+#     account's user is kept out, then its database dropped with its data.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -183,6 +187,8 @@ approve() {
 
 e2e_dependencies keycloak mailpit
 e2e_cluster
+# Customers' databases (ADR 0008): the suite's own server, on 10.199.2.0/24, which no other run uses.
+e2e_data_db 10.199.2.0/24 10.199.2.10
 
 echo "== a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
 receiver_port="$(free_port)"
@@ -213,11 +219,11 @@ e2e_migrate "${e2e_base_env[@]}"
 # Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
 # Both send notifications every second, and may reach the receiver on this machine.
 notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
-e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" PORT="${api##*:}" \
+e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api##*:}" \
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
-e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
+e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
   FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
@@ -259,6 +265,12 @@ url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .function
 check "A gives its function a URL" "201 true" "$(status) $([[ $url_a =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
 check "which anyone may call: its host reaches A's function" '200 {"message":"Hello world"}' "$(call_url "$url_a") $(cat "$work/url-body")"
 before="$(snapshot as_a "$id")"
+database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
+check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"
+db_a="$(jq -r .id <<<"$database_a")"
+conn_a="$(jq -r .connectionString <<<"$database_a")"
+check "  ... which its connection string reaches, over TLS, as its own user" "$(jq -r .user <<<"$database_a")|t" \
+  "$(data_db_psql "$conn_a" 'select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()')"
 missing="$(node -e "console.log(require('crypto').randomUUID())")"
 as_a GET "/functions/$missing" >/dev/null
 check "a function that doesn't exist answers 404" "404 Function with ID $missing not found" "$(status) $(message)"
@@ -477,6 +489,21 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: development mode has no operator" "$no_operator" "$(status) $(message)"
       ;;
+    "GET /databases")
+      listed="$(as_b GET /databases | jq --arg id "$db_a" 'map(select(.id == $id)) | length')"
+      check "$route: B's list doesn't show A's database" "200 0" "$(status) $listed"
+      ;;
+    "POST /databases")
+      db_b="$(as_b POST /databases '{"name": "l5-orders"}' | jq -r .id)"
+      check "$route: B makes a database of its own, of the name A's has: names are each account's" 201 "$(status)"
+      check "  ... which A's list doesn't show" 0 "$(as_a GET /databases | jq --arg id "$db_b" 'map(select(.id == $id)) | length')"
+      ;;
+    "GET /databases/{id}" | "DELETE /databases/{id}" | "POST /databases/{id}/password")
+      as_b "$method" "${template//\{id\}/$db_a}" >/dev/null
+      check "$route: B gets 404 for A's database" "404 Database $db_a not found" "$(status) $(message)"
+      database_now="$(as_a GET "/databases/$db_a")"
+      check "  ... which A still has, its password unchanged" "200 active 1" "$(status) $(jq -r .status <<<"$database_now") $(data_db_psql "$conn_a" 'select 1')"
+      ;;
     "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
       as_b "$method" "/alarms/$alarm_a" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
       check "$route: B gets 404 for A's alarm" "404 Alarm $alarm_a not found" "$(status) $(message)"
@@ -537,6 +564,8 @@ done
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
 as_b DELETE "/functions/$own" >/dev/null
 check "B deletes its own function" 200 "$(status)"
+as_b DELETE "/databases/$db_b" >/dev/null
+check "B deletes its own database" 204 "$(status)"
 
 echo "== nobody authenticated, through the guard, on every route (${#routes[@]})"
 for route in "${routes[@]}"; do
@@ -629,6 +658,10 @@ alarm_1="$(as_user_1 POST /alarms "$(alarm_body "$fn_1")" | jq -r .id)"
 check "account 1's owner makes an alarm on its function's errors" 201 "$(status)"
 package_1="$(upload_package "$api_oidc" "$work/package-a.zip" -H "Authorization: Bearer $token_1" | jq -r .codeSha256)"
 check "account 1's owner uploads a package" "201 $package_a" "$(status) $package_1"
+database_1="$(as_user_1 POST /databases '{"name": "l5-one"}')"
+check "account 1's owner makes a database" "201 active" "$(status) $(jq -r .status <<<"$database_1")"
+db_1="$(jq -r .id <<<"$database_1")"
+conn_1="$(jq -r .connectionString <<<"$database_1")"
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
   template="${route#* }"
@@ -765,6 +798,21 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 DELETE "/members/invitations/$invitation_1" >/dev/null
       check "$route: account 2 can't cancel account 1's invitation" "404 Invitation $invitation_1 not found" "$(status) $(message)"
       ;;
+    "GET /databases")
+      listed="$(as_user_2 GET /databases | jq --arg id "$db_1" 'map(select(.id == $id)) | length')"
+      check "$route: account 2's list doesn't show account 1's database" "200 0" "$(status) $listed"
+      ;;
+    "POST /databases")
+      db_2="$(as_user_2 POST /databases '{"name": "l5-one"}' | jq -r .id)"
+      check "$route: user 2 makes account 2's own database" 201 "$(status)"
+      check "  ... which account 1's list doesn't show" 0 "$(as_user_1 GET /databases | jq --arg id "$db_2" 'map(select(.id == $id)) | length')"
+      ;;
+    "GET /databases/{id}" | "DELETE /databases/{id}" | "POST /databases/{id}/password")
+      as_user_2 "$method" "${template//\{id\}/$db_1}" >/dev/null
+      check "$route: account 2 gets 404 for account 1's database" "404 Database $db_1 not found" "$(status) $(message)"
+      database_now="$(as_user_1 GET "/databases/$db_1")"
+      check "  ... which account 1 still has, its password unchanged" "200 active 1" "$(status) $(jq -r .status <<<"$database_now") $(data_db_psql "$conn_1" 'select 1')"
+      ;;
     "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
       as_user_2 "$method" "/alarms/$alarm_1" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
       check "$route: account 2 gets 404 for account 1's alarm" "404 Alarm $alarm_1 not found" "$(status) $(message)"
@@ -866,6 +914,10 @@ with_token "$key_1" GET "/functions/$fn_1/logs" >/dev/null
 check "a key without logs:read can't read a function's logs (P-40)" "403 This API key lacks the scope logs:read" "$(status) $(message)"
 with_token "$key_1" GET /billing/pro-formas >/dev/null
 check "a key without usage:read can't list them" "403 This API key lacks the scope usage:read" "$(status) $(message)"
+with_token "$key_1" GET /databases >/dev/null
+check "a key without databases:read can't list the account's databases" "403 This API key lacks the scope databases:read" "$(status) $(message)"
+with_token "$key_1" POST /databases '{"name": "by-key"}' >/dev/null
+check "nor make one without databases:write" "403 This API key lacks the scope databases:write" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 me_key="$(with_token "$key_1" GET /me)"
@@ -960,7 +1012,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
@@ -1095,13 +1147,19 @@ check "the operator moves account 1 to a larger plan, and its quota follows at o
   "$(status) $(jq -r .account.planId <<<"$moved") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
 with_token "$operator_token" PUT "/admin/accounts/$account_1/plan" '{"planId": "imaginary", "reason": "l5 tries"}' >/dev/null
 check "a plan that doesn't exist is refused" "404 Plan imaginary not found" "$(status) $(message)"
-# Where an account's NetworkPolicy lets its functions go beyond DNS: an address range, and how many ranges it keeps
-# out (FF's own network, the cloud's metadata addresses); "none" when only DNS.
+# Where an account's NetworkPolicy lets its functions go beyond DNS and FF's services, on any port: an address range,
+# and how many ranges it keeps out (FF's own network, the cloud's metadata addresses); "none" when nowhere.
 internet_rule() { # <account>
   kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
-    jq -r '[.spec.egress[].to[]?.ipBlock | select(.) | "\(.cidr) except \(.except | length)"] | if length == 0 then "none" else join(",") end'
+    jq -r '[.spec.egress[] | select(.ports == null) | .to[]?.ipBlock | select(.) | "\(.cidr) except \(.except | length)"] | if length == 0 then "none" else join(",") end'
 }
-check "account 1's functions reach nothing beyond DNS, as every account starts" none "$(internet_rule "$account_1")"
+# FF's services the account's functions reach whatever its internet access, each address and its one port.
+service_rules() { # <account>
+  kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
+    jq -r '[.spec.egress[] | select(.ports != null and (.to | any(.ipBlock != null))) | "\(.to[].ipBlock.cidr):\(.ports[0].port)"] | join(",")'
+}
+check "account 1's functions reach nothing beyond DNS on any port, as every account starts" none "$(internet_rule "$account_1")"
+check "but customers' database server, on its port only, whatever the account's internet access (ADR 0008)" "10.199.2.10/32:5432" "$(service_rules "$account_1")"
 egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '{"internetEgress": true, "reason": "l5: calls a payment API"}')"
 check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out" "200 true 0.0.0.0/0 except 6" \
   "$(status) $(jq -r .account.internetEgress <<<"$egress") $(internet_rule "$account_1")"
@@ -1446,6 +1504,8 @@ check "the owner's e-mail says when, and what is kept" "Your FF account is close
 check "and so does GET /me, for the console's banner" "$due_1" "$(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .dataDeletionDueAt')"
 as_user_1 GET "/functions/$fn_1" >/dev/null
 check "until then, its members still read its functions" 200 "$(status)"
+check "but its database's user can't log in any more (ADR 0008)" true \
+  "$( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false)"
 # The notice period passes.
 sql "UPDATE accounts SET data_deletion_due_at = now() WHERE id = '$account_1'" >/dev/null
 deleted=""
@@ -1462,6 +1522,8 @@ check "its functions are gone, with their history; the account itself stays, rea
   "$listed_status $listed_1 $(status) $(sql "SELECT count(*) FROM function_invocations WHERE function_id = '$fn_1'")"
 check "its namespace is gone from the cluster, its code from object storage, and its lines from the log store" "false empty 0" \
   "$(kubectl get namespace "$ns_1" >/dev/null 2>&1 && echo true || echo false) $([ -z "$(archived "$fn_1/code.ts")" ] && echo empty || echo kept) $(store_lines "$ns_1")"
+check "its database is gone from the server, with its user" "0 0" \
+  "$(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$(jq -r .database <<<"$database_1")') || ' ' || (select count(*) from pg_roles where rolname = '$(jq -r .user <<<"$database_1")')")"
 check "its usage records, payments and invoices are kept, as the law requires" "$kept_1" \
   "$(sql "SELECT (SELECT count(*) FROM usage_records WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM payments WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM invoices WHERE account_id = '$account_1')")"
 check "its owner reads in its audit log what FF deleted, as FF" "function.delete:function:$fn_1:FF account.data_delete:account:$account_1:FF" \

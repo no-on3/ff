@@ -16,6 +16,9 @@ export interface PlanLimits {
   internetEgress: boolean;
   customDomains: number;
   schedules: number;
+  databases: number;
+  databaseStorageMb: number;
+  databaseConnections: number;
 }
 
 export interface Plan {
@@ -43,6 +46,9 @@ export const LIMIT_FIELDS: Array<{ path: [keyof PlanLimits] | ['quota', keyof Pl
   { path: ['internetEgress'], label: 'Internet egress, by default', kind: 'boolean' },
   { path: ['customDomains'], label: "Customers' own domains", unit: "for their functions' URLs, all together", kind: 'whole' },
   { path: ['schedules'], label: 'Schedules', unit: 'all functions together', kind: 'whole' },
+  { path: ['databases'], label: 'Databases', unit: 'PostgreSQL, all together', kind: 'whole' },
+  { path: ['databaseStorageMb'], label: 'Storage per database', unit: 'MB: past it, new sessions read-only', kind: 'whole' },
+  { path: ['databaseConnections'], label: 'Sessions per database', unit: 'at once', kind: 'whole' },
 ];
 
 const QUANTITY = /^\d+(\.\d+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$/;

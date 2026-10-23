@@ -13,6 +13,7 @@ import { ApiExceptionFilter } from './common/api-exception.filter';
 import { RequestIdInterceptor } from './common/request-context';
 import configuration, { DatabaseSettings, LogFormat } from './config/configuration';
 import { backendDataSourceOptions } from './database/database.options';
+import { DatabasesModule } from './databases/databases.module';
 import { FunctionsModule } from './functions/functions.module';
 import { FunctionUrlsModule } from './function-urls/function-urls.module';
 import { HealthController } from './health/health.controller';
@@ -50,6 +51,7 @@ import { SchedulesModule } from './schedules/schedules.module';
     AdminModule,
     ApiKeysModule,
     AuditModule,
+    DatabasesModule,
     FunctionsModule,
     FunctionUrlsModule,
     MetricsModule,

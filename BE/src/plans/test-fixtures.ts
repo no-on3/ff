@@ -18,6 +18,9 @@ export const BETA_LIMITS: PlanLimits = {
   internetEgress: false,
   customDomains: 5,
   schedules: 20,
+  databases: 1,
+  databaseStorageMb: 1024,
+  databaseConnections: 10,
 };
 
 /** A plan: the beta plan, with the given limits changed. */

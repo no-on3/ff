@@ -704,6 +704,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'capacity_samples',
         'currencies',
         'custom_domains',
+        'databases',
         'function_environments',
         'function_invocations',
         'function_metrics',

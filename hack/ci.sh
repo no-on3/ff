@@ -107,18 +107,28 @@ stage_unit() {
 
 stage_db() {
   "$repo/hack/check-resources.sh"
-  local name="ff-ci-postgres-$$" password port
+  local name="ff-ci-postgres-$$" data="ff-ci-data-db-$$" password port admin data_port
   password="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
-  # shellcheck disable=SC2064 # the name is fixed now
-  trap "docker rm -f $name >/dev/null 2>&1 || true" EXIT
+  admin="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
+  # shellcheck disable=SC2064 # the names are fixed now
+  trap "docker rm -f -v $name $data >/dev/null 2>&1 || true" EXIT
   docker run -d --name "$name" -e POSTGRES_PASSWORD="$password" -p 127.0.0.1::5432 "$POSTGRES_IMAGE" >/dev/null
   port="$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')"
+  # Customers' database server (ADR 0008), its certificate from a CA of its own, for the suites that make databases.
+  docker build -q -t ff-data-db:ci "$repo/deploy/data-db" >/dev/null
+  docker run -d --name "$data" -e POSTGRES_PASSWORD="$password" -e FF_DATA_DB_ADMIN_PASSWORD="$admin" \
+    -e FF_DATA_DB_TLS_NAMES=DNS:localhost,IP:127.0.0.1 -p 127.0.0.1::5432 ff-data-db:ci >/dev/null
+  data_port="$(docker port "$data" 5432/tcp | head -1 | sed 's/.*://')"
   for _ in $(seq 1 60); do docker exec "$name" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+  for _ in $(seq 1 60); do docker exec "$data" pg_isready -q -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
+  mkdir -p "$ci_dir"
+  docker cp -q "$data:/var/lib/postgresql/tls/ca.crt" "$ci_dir/data-db-ca.crt"
   # The variables win over BE/.env, which dotenv never overrides.
   export DB_HOST=127.0.0.1 DB_PORT="$port" DB_USERNAME=postgres DB_PASSWORD="$password" DB_NAME=postgres DB_SSL=false
-  step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}" in_dir BE npm run test:db
+  export FF_DATA_DB_HOST=127.0.0.1 FF_DATA_DB_PORT="$data_port" FF_DATA_DB_ADMIN_PASSWORD="$admin" FF_DATA_DB_CA_FILE="$ci_dir/data-db-ca.crt"
+  step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18" in_dir BE npm run test:db
   step "migrations: exactly the entities' schema" in_dir BE npm run migration:check
-  docker rm -f "$name" >/dev/null
+  docker rm -f -v "$name" "$data" >/dev/null
   trap - EXIT
 }
 

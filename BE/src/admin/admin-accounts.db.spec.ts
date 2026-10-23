@@ -52,6 +52,8 @@ run('accounts, for operators (L2, P-71)', () => {
   const sent: Mail[] = [];
   /** [function ID, replicas] of each scale call. */
   const scaled: Array<[string, number]> = [];
+  // What the account's databases were told: their users suspended, or let in again.
+  const databaseChanges: string[] = [];
   const applied: Array<{ accountId: string; tenant: TenantLimits }> = [];
   let failScaleOf: string | null = null;
   let failLimitsOf: string | null = null;
@@ -138,6 +140,10 @@ run('accounts, for operators (L2, P-71)', () => {
       config,
       credits,
       settings,
+      {
+        suspendAccount: async (accountId: string) => void databaseChanges.push(`suspend ${accountId}`),
+        reactivateAccount: async (accountId: string) => void databaseChanges.push(`reactivate ${accountId}`),
+      } as never,
     );
   });
 
@@ -148,6 +154,7 @@ run('accounts, for operators (L2, P-71)', () => {
   beforeEach(() => {
     sent.length = 0;
     scaled.length = 0;
+    databaseChanges.length = 0;
     applied.length = 0;
     failScaleOf = null;
     failLimitsOf = null;
@@ -320,7 +327,7 @@ run('accounts, for operators (L2, P-71)', () => {
       await expect(service.changePlan(missing, 'beta', 'x')).rejects.toThrow(new NotFoundException(message));
     });
 
-    it('suspend: working functions scaled to zero; reactivate: warm instances back, the others left to their next call', async () => {
+    it("suspend: working functions scaled to zero, the databases' users kept out; reactivate: warm instances back, the others left to their next call, the users let in", async () => {
       const id = await account({ status: AccountStatus.ACTIVE }, [[await user('suspended@ff.test'), 'owner']]);
       const cold = await fn(id);
       const warm = await fn(id, { minInstances: 2 });
@@ -334,6 +341,7 @@ run('accounts, for operators (L2, P-71)', () => {
       scaled.length = 0;
       await service.changeStatus(id, 'reactivate', 'Owner removed the miner');
       expect([await statusOf(id), scaled]).toEqual(['active', [[warm.id, 2]]]);
+      expect(databaseChanges).toEqual([`suspend ${id}`, `reactivate ${id}`]);
     });
 
     it("keep the change when a function can't be scaled: the others are, and the minute's hold catches up", async () => {
@@ -369,7 +377,7 @@ run('accounts, for operators (L2, P-71)', () => {
 
       const page = await service.changeStatus(id, 'close', 'Owner asked');
 
-      expect([await statusOf(id), scaled]).toEqual(['closed', [[left.id, 0]]]);
+      expect([await statusOf(id), scaled, databaseChanges]).toEqual(['closed', [[left.id, 0]], [`suspend ${id}`]]);
       const due = page.account.dataDeletionDueAt as Date;
       expect(due.getTime() - before).toBeGreaterThanOrEqual(30 * DAY_MS);
       expect(due.getTime() - before).toBeLessThan(30 * DAY_MS + 60_000);

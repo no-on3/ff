@@ -15,6 +15,9 @@ const BETA: PlanLimits = {
   internetEgress: false,
   customDomains: 5,
   schedules: 20,
+  databases: 1,
+  databaseStorageMb: 1024,
+  databaseConnections: 10,
 };
 
 describe("a plan's limits, in a form (P-73)", () => {

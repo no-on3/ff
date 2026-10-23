@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # L4 end-to-end test of the whole stack, driven through the public REST API:
-#   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003)
+#   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003), customers' database server (10.199.1.10)
 #   + the k3d dev cluster + the backend (built, started on a free port).
 # The backend first refuses the new database, then the migrations run from the
 # build, as a deploy step would. Scenario: create → invoke → history → update →
@@ -21,7 +21,11 @@
 # and the usage records; the URL's own domains, proved through a DNS server of
 # the test's, a subdomain by its CNAME and an apex by its TXT record. Then a
 # function on schedules: rate(1 minute) within about 70 s, with EventBridge's
-# Scheduled Event or the schedule's input, a disabled one never. Then plans:
+# Scheduled Event or the schedule's input, a disabled one never. Then a
+# customer's database on the run's own server of customers' databases: made, its
+# connection string over TLS as its own user, the plan's one database, a new
+# password, a function reaching it with its account's internet access off and
+# trusting its certificate, then deleted from the server. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -67,6 +71,9 @@ code_configmaps() { kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-i
 
 e2e_dependencies
 e2e_cluster
+# Customers' databases (ADR 0008): the run's own server, on 10.199.1.0/24, which no other run uses.
+data_db_address=10.199.1.10
+e2e_data_db 10.199.1.0/24 "$data_db_address"
 
 echo "== backend"
 e2e_build
@@ -81,7 +88,7 @@ dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
   FF_METRICS_HOST="$metrics_host" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
-  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1)
+  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -615,6 +622,53 @@ check "each schedule says how its run went, and which call it was; the disabled 
 check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM usage_records WHERE function_id = '$sched_fn'")"
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
+
+echo "== customers' databases (ADR 0008)"
+made="$(http POST /databases '{"name": "e2e-orders"}')"
+check "a database is made: active, the password and the connection string in the answer, TLS asked" "201 active true true" \
+  "$(status) $(jq -r '. as $d | "\($d.status) \($d.connectionString | startswith("postgresql://\($d.user):\($d.password)@")) \($d.connectionString | endswith("?sslmode=require"))"' <<<"$made")"
+db_id="$(jq -r .id <<<"$made")"
+db_name="$(jq -r .database <<<"$made")"
+db_conn="$(jq -r .connectionString <<<"$made")"
+check "the string reaches it over TLS, as its own user, the database's owner" "$db_name|$db_name|t" \
+  "$(data_db_psql "$db_conn" "select current_user, (select pg_get_userbyid(datdba) from pg_database where datname = current_database()), (select ssl from pg_stat_ssl where pid = pg_backend_pid())")"
+data_db_psql "$db_conn" 'create table orders (id int primary key); insert into orders values (1)' >/dev/null
+shown="$(http GET "/databases/$db_id")"
+check "GET shows its size, its sessions and the plan's limits, never its password" "200 true 10 1024 false false" \
+  "$(status) $(jq -r '"\(.sizeBytes > 1000000) \(.connectionLimit) \(.storageLimitMb) \(has("password")) \(has("connectionString"))"' <<<"$shown")"
+http POST /databases '{"name": "e2e-second"}' >/dev/null
+check "a second database, past the beta plan's one, is refused" "400 The Beta plan allows 1 database, and the account has 1: delete one first" "$(status) $(jq -r .message "$work/body")"
+http POST /databases '{"name": "Not_A_Name"}' >/dev/null
+check "a name RDS wouldn't take is refused, saying what a name is" "400 name must be 1 to 63 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last, as AWS RDS names its databases" \
+  "$(status) $(jq -r '.message | if type == "array" then join("; ") else . end' "$work/body")"
+reset="$(http POST "/databases/$db_id/password")"
+new_conn="$(jq -r .connectionString <<<"$reset")"
+check "a new password: the old one opens no session, the new one does, the data kept" "200 true 1" \
+  "$(status) $( (data_db_psql "$db_conn" 'select 1' || true) | grep -q 'password authentication failed' && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
+probe='import * as net from "node:net";
+import * as tls from "node:tls";
+// The server of customers'"'"' databases, as a function reaches it: its port, then TLS after PostgreSQL'"'"'s SSLRequest, its certificate checked.
+export async function handler(event: { host: string }) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: event.host, port: 5432 });
+    socket.setTimeout(3000, () => { socket.destroy(); resolve("timeout"); });
+    socket.once("error", (error) => resolve(error.message));
+    socket.once("connect", () => socket.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47])));
+    socket.once("data", (answer) => {
+      if (answer.toString() !== "S") return resolve("no TLS");
+      const secure = tls.connect({ socket, host: event.host });
+      secure.once("secureConnect", () => { resolve(secure.authorized ? "trusted" : String(secure.authorizationError)); secure.destroy(); });
+      secure.once("error", (error) => resolve(error.message));
+    });
+  });
+}'
+probe_fn="$(http POST /functions "$(jq -n --arg code "$probe" '{name: "e2e-data-db-probe", runtime: "nodejs", code: $code, memory: 128, timeout: 10}')" | jq -r .id)"
+check "a function reaches it, the account's internet access off, and trusts its certificate" '"trusted"' \
+  "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg host "$data_db_address" '{input: {host: $host}}')" | jq -c .output)"
+http DELETE "/functions/$probe_fn" >/dev/null
+http DELETE "/databases/$db_id" >/dev/null
+check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
+  "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account

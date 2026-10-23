@@ -85,6 +85,9 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("idleSeconds", &|n| format!("scaled to zero after {} min idle", n / 60));
     add("customDomains", &|n| format!("{n} custom domains"));
     add("schedules", &|n| format!("{n} schedules"));
+    add("databases", &|n| if n == 1 { "1 database".to_string() } else { format!("{n} databases") });
+    add("databaseStorageMb", &|n| format!("{n} MB a database"));
+    add("databaseConnections", &|n| format!("{n} sessions a database"));
     lines
 }
 

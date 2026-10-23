@@ -19,5 +19,8 @@ export const BETA_PLAN: Plan = {
     internetEgress: false,
     customDomains: 5,
     schedules: 20,
+    databases: 1,
+    databaseStorageMb: 1024,
+    databaseConnections: 10,
   },
 };

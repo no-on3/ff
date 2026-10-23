@@ -9,6 +9,7 @@ import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PackagesService } from '../packages/packages.service';
+import { DatabasesService } from '../databases/databases.service';
 import { parsePlanLimits } from '../plans/plan-limits';
 
 const DAY_SECONDS = 86_400;
@@ -26,8 +27,8 @@ export const DELIVERY_DAYS = 30;
  * - notification deliveries, kept 30 days to show how they went;
  * - packages that no function names, an hour after their upload;
  * - a closed account's functions, their history and logs, its packages, its
- *   alarms, notification deliveries and webhook secret, once the notice period
- *   its closure set has passed.
+ *   databases, its alarms, notification deliveries and webhook secret, once
+ *   the notice period its closure set has passed.
  * Usage records, the ledger, invoices and the audit log are not touched: the
  * law requires keeping them for years. Last, the same job makes again the code
  * images the registry has lost (FunctionsService.restoreCodeImages): hourly,
@@ -44,6 +45,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     private readonly dataSource: DataSource,
     private readonly functions: FunctionsService,
     private readonly packages: PackagesService,
+    private readonly databases: DatabasesService,
     @Inject(ORCHESTRATOR) private readonly orchestrator: Orchestrator,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
@@ -155,7 +157,8 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
   /**
    * A closed account's data: each function, with its objects, its code in
    * object storage, its row and its history (FunctionsService.remove(), which
-   * records each in the audit log); then its packages; then its namespace, so
+   * records each in the audit log); then its packages; then its databases, from
+   * customers' database server; then its namespace, so
    * that nothing writes more of its lines; then its lines in the log store. Then, at once, its
    * alarms, notification deliveries and webhook secret go, and the account is marked,
    * with an entry in its audit log, once. Each step may run again, so
@@ -165,6 +168,8 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     const functions = await this.dataSource.getRepository(Function).find({ where: { accountId }, order: { createdAt: 'ASC' } });
     for (const fn of functions) await this.functions.remove(accountId, fn.id);
     const packages = await this.packages.deleteAll(accountId);
+    // Its databases, with their data, from customers' database server (ADR 0008).
+    const databases = await this.databases.deleteAll(accountId);
     await this.orchestrator.removeTenant(accountId);
     await this.orchestrator.deleteLogs(accountId);
     await this.dataSource.transaction(async (manager) => {
@@ -174,7 +179,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       const marked = await manager.update(Account, { id: accountId, dataDeletedAt: IsNull() }, { dataDeletedAt: new Date() });
       if (!marked.affected) return;
       await this.audit.record(
-        { accountId, action: 'account.data_delete', resource: `account:${accountId}`, details: { functions: functions.length, packages } },
+        { accountId, action: 'account.data_delete', resource: `account:${accountId}`, details: { functions: functions.length, packages, databases } },
         manager,
       );
     });

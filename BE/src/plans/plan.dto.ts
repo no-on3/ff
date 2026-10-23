@@ -22,6 +22,9 @@ export class PlanLimitsView implements PlanLimits {
   @ApiProperty({ example: false, description: 'Whether functions may reach the internet' }) internetEgress: boolean;
   @ApiProperty({ example: 5, description: "Customers' own domains for their functions' URLs, all together" }) customDomains: number;
   @ApiProperty({ example: 20, description: "Functions' schedules, all together" }) schedules: number;
+  @ApiProperty({ example: 1, description: "Customers' PostgreSQL databases, all together" }) databases: number;
+  @ApiProperty({ example: 1024, description: 'What one database may hold, in MB, before its new sessions start read-only' }) databaseStorageMb: number;
+  @ApiProperty({ example: 10, description: 'The sessions one database may have at once' }) databaseConnections: number;
 }
 
 /** An account's plan. */

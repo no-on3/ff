@@ -15,6 +15,9 @@ export const PLAN_LIMIT_KEYS = [
   'internetEgress',
   'customDomains',
   'schedules',
+  'databases',
+  'databaseStorageMb',
+  'databaseConnections',
 ] as const satisfies ReadonlyArray<keyof PlanLimits>;
 
 // A limit missing from the list above stops the build.
@@ -27,6 +30,13 @@ export function formatSeconds(seconds: number): string {
   if (seconds % 60 !== 0) return `${seconds} s`;
   const minutes = seconds / 60;
   return minutes === 1 ? '1 minute' : `${minutes} minutes`;
+}
+
+/** "1 GB", "512 MB", "1.5 GB": a size in MB as the plans give it. */
+export function formatMegabytes(mb: number): string {
+  if (mb < 1024) return `${mb} MB`;
+  const gb = mb / 1024;
+  return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
 }
 
 /** What the account page shows of a plan: each limit as a label and a value. */
@@ -46,5 +56,8 @@ export function planLimitRows({ limits }: Pick<Plan, 'limits'>): Array<[label: s
     ['Internet access for functions', limits.internetEgress ? 'Yes, unless turned off for the account' : 'No, unless turned on for the account'],
     ["Your own domains for functions' URLs", String(limits.customDomains)],
     ['Schedules', String(limits.schedules)],
+    ['Databases', String(limits.databases)],
+    ['Storage per database', `${formatMegabytes(limits.databaseStorageMb)}, then its new sessions are read-only`],
+    ['Sessions per database', `up to ${limits.databaseConnections} at once`],
   ];
 }

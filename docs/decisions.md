@@ -78,7 +78,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 **5. Customers' databases on a server of their own, outside Kubernetes.** ✅ Confirmed. One customer's heavy queries or full disk can't reach FF's own database, and the server has its own backups.
 - **Changed already:** V-01 measured it ([ADR 0008](adr/0008-customer-databases.md)): a database and its user per customer, their names opaque, the backend's role no superuser, a tenant pod reaching the server through a rule of its own with its account's internet access off, and nothing else private.
 - **Changed already, too:** V-02, the server, in development (`hack/k8s/data-db-up.sh`) and for production ([`deploy/data-db`](../deploy/data-db/README.md)); every tenant's network policy opens it on its port.
-- **Still to change:** V-03, the databases themselves.
+- **Changed already, too:** V-03, the databases themselves, in the API: each a database and its user on that server, made within the plan, suspended with their account, dropped at its data deletion date.
+- **Still to change:** V-04, their samples and their bill; V-05, the console, the admin app, `ff db`, the guide and the backups.
 
 **6. A database over its plan's size is warned and billed, not blocked.** ✅ Confirmed. Messages at 80% and 100%; above 100%, new connections are read-only, which the owner can turn off to clean up; the storage above the plan is billed.
 - **Changed already:** V-01 measured the signal as an app meets it, and its statement changed: it is the user's setting in its database, which the backend may set, rather than the database's, which only its owner may; the sessions under way are ended so that a pool's come back read-only too ([ADR 0008](adr/0008-customer-databases.md), §5).
@@ -86,7 +87,7 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **7. Databases reachable from the internet, encrypted only.** ✅ Confirmed. Developers connect from their laptops (`psql`, migration tools, `pg_dump`), as RDS's "publicly accessible" option allows.
 - **Changed already:** V-01 measured who may log in where, and how drivers read the connection string: it says `sslmode=require`, which node-postgres takes as a full check of the certificate. So the server's certificate comes from a public CA in production, or from a CA of the operator's that functions' pods get ([ADR 0008](adr/0008-customer-databases.md), §9).
-- **Changed already, too:** V-02, the server's encryption (TLS 1.2 at least) and who may log in where (`pg_hba.conf`), and the CA functions' pods get when the certificate isn't a public one.
+- **Changed already, too:** V-02, the server's encryption (TLS 1.2 at least) and who may log in where (`pg_hba.conf`), and the CA functions' pods get when the certificate isn't a public one; V-03, the connection string FF gives once, with `sslmode=require`.
 - **Still to change:** V-05, the guide.
 
 **8. Free every month, per account: 1 GB of database; 5 GB of files, 20,000 reads and 2,000 writes.** ✅ Confirmed: the plan's numbers.

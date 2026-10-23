@@ -42,6 +42,10 @@ export type AuditAction =
   | 'schedule.create'
   | 'schedule.update'
   | 'schedule.delete'
+  // A customer's database: made, its password changed, deleted (ADR 0008).
+  | 'database.create'
+  | 'database.password'
+  | 'database.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

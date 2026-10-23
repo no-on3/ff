@@ -9,6 +9,7 @@ import { AuditPage, AuditService } from '../audit/audit.service';
 import { LedgerService } from '../billing/ledger/ledger.service';
 import { formatMinor } from '../billing/money';
 import { describeError } from '../common/describe-error';
+import { DatabasesService } from '../databases/databases.service';
 import { frenchTime } from '../common/french';
 import { likeLiteral } from '../common/like';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
@@ -145,6 +146,7 @@ export class AdminAccountsService {
     private readonly config: ConfigService,
     private readonly credits: AdminCreditsService,
     private readonly settings: PlatformSettingsService,
+    private readonly databases: DatabasesService,
   ) {}
 
   /** GET /admin/accounts: newest first, a page at a time, each with its owners. */
@@ -252,9 +254,16 @@ export class AdminAccountsService {
       );
       return { ...current, status: rule.to, dataDeletionDueAt: dataDeletionDueAt ?? current.dataDeletionDueAt };
     });
-    if (stopsFunctions(rule.to)) await this.scaleFunctions(id, () => 0, `its account is ${rule.to}`);
+    if (stopsFunctions(rule.to)) {
+      await this.scaleFunctions(id, () => 0, `its account is ${rule.to}`);
+      // Its databases' users can't log in, and their sessions end: a closed account's go at its data deletion date.
+      await this.databases.suspendAccount(id);
+    }
     // Warm instances come back; the other functions start at their next call.
-    if (change === 'reactivate') await this.scaleFunctions(id, (function_) => function_.minInstances, 'its account is active again', (function_) => function_.minInstances > 0);
+    if (change === 'reactivate') {
+      await this.scaleFunctions(id, (function_) => function_.minInstances, 'its account is active again', (function_) => function_.minInstances > 0);
+      await this.databases.reactivateAccount(id);
+    }
     await this.tellOwners(account, change, reason);
     return this.detail(id);
   }

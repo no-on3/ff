@@ -47,6 +47,12 @@ export const planLimitsSchema = z.strictObject({
   customDomains: z.number().int().min(0),
   /** Functions' schedules, all the account's together. */
   schedules: z.number().int().min(0),
+  /** Customers' databases, the account's together (ADR 0008). */
+  databases: z.number().int().min(0),
+  /** What one database may hold, in MB: past it, its new sessions start read-only, and what is above is billed. */
+  databaseStorageMb: positive,
+  /** The sessions one database may have at once: its user's CONNECTION LIMIT on the server. */
+  databaseConnections: positive,
 });
 
 export type PlanLimits = z.infer<typeof planLimitsSchema>;

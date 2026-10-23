@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { Plan } from '../accounts/entities/plan.entity';
 import { AuditService } from '../audit/audit.service';
+import { DatabasesService } from '../databases/databases.service';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
@@ -29,6 +30,7 @@ describe('RetentionService', () => {
   let steps: string[];
   let functions: { remove: jest.Mock; restoreCodeImages: jest.Mock };
   let packages: { purgeUnused: jest.Mock; deleteAll: jest.Mock };
+  let databases: { deleteAll: jest.Mock };
   let orchestrator: { removeTenant: jest.Mock; deleteLogs: jest.Mock };
   let audit: { record: jest.Mock };
   let service: RetentionService;
@@ -74,6 +76,12 @@ describe('RetentionService', () => {
         return 1;
       }),
     };
+    databases = {
+      deleteAll: jest.fn(async (accountId: string) => {
+        steps.push(`databases ${accountId}`);
+        return 1;
+      }),
+    };
     orchestrator = {
       removeTenant: jest.fn(async (accountId: string) => void steps.push(`namespace ${accountId}`)),
       deleteLogs: jest.fn(async (accountId: string) => void steps.push(`logs ${accountId}`)),
@@ -84,6 +92,7 @@ describe('RetentionService', () => {
       dataSource,
       functions as unknown as FunctionsService,
       packages as unknown as PackagesService,
+      databases as unknown as DatabasesService,
       orchestrator as unknown as Orchestrator,
       audit as unknown as AuditService,
       config,
@@ -155,7 +164,7 @@ describe('RetentionService', () => {
   });
 
   describe("closed accounts' data", () => {
-    it('deletes each function, then its packages, the namespace, the logs, then marks the account and records it once', async () => {
+    it('deletes each function, then its packages, its databases, the namespace, the logs, then marks the account and records it once', async () => {
       dueAccounts = [{ id: '300000000001' }];
       functionsOf = { '300000000001': [{ id: 'f-1' }, { id: 'f-2' }] };
 
@@ -165,6 +174,7 @@ describe('RetentionService', () => {
         'function 300000000001/f-1',
         'function 300000000001/f-2',
         'packages 300000000001',
+        'databases 300000000001',
         'namespace 300000000001',
         'logs 300000000001',
         'deliveries 300000000001',
@@ -174,7 +184,7 @@ describe('RetentionService', () => {
         'audit account.data_delete 300000000001',
       ]);
       expect(audit.record).toHaveBeenCalledWith(
-        { accountId: '300000000001', action: 'account.data_delete', resource: 'account:300000000001', details: { functions: 2, packages: 1 } },
+        { accountId: '300000000001', action: 'account.data_delete', resource: 'account:300000000001', details: { functions: 2, packages: 1, databases: 1 } },
         expect.anything(),
       );
       // Marked only while not marked yet: of two runs at once, one records it.
@@ -190,8 +200,10 @@ describe('RetentionService', () => {
       expect(orchestrator.deleteLogs).toHaveBeenCalledWith('300000000001');
       expect(steps).toEqual([
         'packages 300000000001',
+        'databases 300000000001',
         'namespace 300000000001',
         'packages 300000000002',
+        'databases 300000000002',
         'namespace 300000000002',
         'logs 300000000002',
         'deliveries 300000000002',
@@ -212,6 +224,7 @@ describe('RetentionService', () => {
       // Deleting its notifications again changes nothing: they went with the first run.
       expect(steps).toEqual([
         'packages 300000000001',
+        'databases 300000000001',
         'namespace 300000000001',
         'logs 300000000001',
         'deliveries 300000000001',
@@ -347,6 +360,7 @@ describe('RetentionService', () => {
         { query, getRepository: (entity: unknown) => ({ find: async () => (entity === Plan ? plans : []) }) } as unknown as DataSource,
         functions as unknown as FunctionsService,
         packages as unknown as PackagesService,
+        databases as unknown as DatabasesService,
         orchestrator as unknown as Orchestrator,
         audit as unknown as AuditService,
         config,

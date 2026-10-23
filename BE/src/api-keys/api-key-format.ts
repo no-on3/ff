@@ -4,7 +4,18 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 export const API_KEY = /^ffk_([0-9a-f]{12})_([A-Za-z0-9_-]{43})$/;
 
 /** What a key may do (D3). A user's token may do all that its role allows. */
-export const SCOPES = ['functions:read', 'functions:write', 'functions:invoke', 'logs:read', 'metrics:read', 'alarms:read', 'alarms:write', 'usage:read'] as const;
+export const SCOPES = [
+  'functions:read',
+  'functions:write',
+  'functions:invoke',
+  'logs:read',
+  'metrics:read',
+  'alarms:read',
+  'alarms:write',
+  'usage:read',
+  'databases:read',
+  'databases:write',
+] as const;
 export type Scope = (typeof SCOPES)[number];
 
 /** A new key. The whole key is shown once; only the secret's hash is kept. */

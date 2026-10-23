@@ -6,6 +6,7 @@ import { Currency } from '../billing/currency.entity';
 import { PriceBook } from '../billing/price-book.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { AuditModule } from '../audit/audit.module';
+import { DatabasesModule } from '../databases/databases.module';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
 import { Schedule } from '../schedules/schedule.entity';
@@ -36,6 +37,7 @@ import { PlatformSettingsModule } from './platform-settings.module';
   imports: [
     TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, PriceBook, Currency, Schedule]),
     AuditModule,
+    DatabasesModule,
     BillingModule,
     FunctionsModule,
     FunctionUrlsModule,
