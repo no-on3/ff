@@ -25,6 +25,10 @@ describe('planLimitRows', () => {
       ['Storage of the buckets', '5 GB together'],
       ['Requests to the buckets', '100 per second'],
       ['Largest file in one upload', '5 GB; more in parts'],
+      ['Queues', '10'],
+      ['Queues one function reads', '5'],
+      ['Requests to the queues', '100 per second'],
+      ['Messages waiting', '100 MB together, asynchronous calls included'],
     ]);
   });
 

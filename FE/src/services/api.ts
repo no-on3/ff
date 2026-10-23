@@ -656,6 +656,14 @@ export interface PlanLimits {
   storageRequestsPerSecond: number;
   /** The largest object one PutObject may send, in MB. */
   maxObjectMb: number;
+  /** Customers' queues, all together. */
+  queues: number;
+  /** The queues one function may read in batches. */
+  eventSourceMappingsPerFunction: number;
+  /** SQS requests per second, all the keys together. */
+  queueRequestsPerSecond: number;
+  /** What the account's messages may hold together, in MB, its functions' waiting asynchronous calls among them. */
+  queueStorageMb: number;
 }
 
 export interface Plan {

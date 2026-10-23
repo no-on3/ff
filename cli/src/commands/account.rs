@@ -92,6 +92,10 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("bucketStorageMb", &|n| format!("{n} MB in the buckets"));
     add("storageRequestsPerSecond", &|n| format!("{n} requests to the buckets a second"));
     add("maxObjectMb", &|n| format!("{n} MB a file in one upload"));
+    add("queues", &|n| if n == 1 { "1 queue".to_string() } else { format!("{n} queues") });
+    add("eventSourceMappingsPerFunction", &|n| format!("{n} queues read by a function"));
+    add("queueRequestsPerSecond", &|n| format!("{n} requests to the queues a second"));
+    add("queueStorageMb", &|n| format!("{n} MB of messages waiting"));
     lines
 }
 

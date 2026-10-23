@@ -32,7 +32,8 @@ The [step-3 plan](step-3-plan.md)'s §9, each answered as it recommended.
 - **Still to change:** Q-08.
 
 **28. Beta's limits:** 10 queues, 5 event source mappings a function, 100 requests a second, 100 MB of messages and waiting events per account. ✅ Confirmed.
-- **Still to change:** Q-02 (waiting events), Q-05.
+- **Changed already:** Q-02, part 1: the four in every plan, the beta plan's as confirmed (the migration `QueueLimits`), edited in the admin app, listed by the console's account page and `ff account`.
+- **Still to change:** each enforced with what it limits: waiting events in Q-02, requests and queues in Q-04 and Q-05, mappings in Q-06.
 
 **29. FIFO queues later, once a customer asks;** standard queues first. ✅ Confirmed.
 - **Still to change:** nothing in step 3.
