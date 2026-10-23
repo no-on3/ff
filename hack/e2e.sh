@@ -21,7 +21,8 @@
 # and the usage records; the URL's own domains, proved through a DNS server of
 # the test's, a subdomain by its CNAME and an apex by its TXT record. Then a
 # function on schedules: rate(1 minute) within about 70 s, with EventBridge's
-# Scheduled Event or the schedule's input, a disabled one never. Then
+# Scheduled Event or the schedule's input, a disabled one never, and a failing
+# run retried a minute after, as an asynchronous call. Then
 # asynchronous calls, as AWS Lambda's: an Event answered 202 at once and run
 # within seconds under its request ID, a DryRun that runs nothing, Lambda's
 # 1 MB limit; a failing Event retried a minute, then two minutes after its
@@ -630,6 +631,9 @@ http POST "/functions/$sched_fn/schedules" '{"name": "off", "expression": "rate(
 check "and one with an input of its own, and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
 http PUT "/functions/$sched_fn" '{"eventFormat": "wrapped"}' >/dev/null
 check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
+# A function whose runs fail: each run is an asynchronous call, retried.
+failing_sched_fn="$(http POST /functions "$(jq -n '{name: "e2e-scheduled-fails", runtime: "nodejs", code: "export const handler = async () => { throw new Error(\"the report failed\"); };", memory: 128, timeout: 5}')" | jq -r .id)"
+http POST "/functions/$failing_sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}' >/dev/null
 # Within about 70 s: a minute, and the scheduler's tick, every 5 s.
 for _ in $(seq 1 30); do
   [ "$(http GET "/functions/$sched_fn/invocations?limit=10" | jq '[.invocations[] | select(.source == "schedule")] | length')" -ge 2 ] && break
@@ -648,6 +652,22 @@ check "each schedule says how its run went, and which call it was; the disabled 
   "every-minute success true off null with-input success" \
   "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
 check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM usage_records WHERE function_id = '$sched_fn'")"
+# The attempts of its runs that have ended, or of the one run whose request ID is given.
+sched_attempts() {
+  http GET "/functions/$failing_sched_fn/invocations?limit=10" |
+    jq -r --arg r "${1:-}" '[.invocations[] | select(.status != "RUNNING" and ($r == "" or .requestId == $r))] | sort_by(.attempt) | map("\(.source):\(.attempt):\(.status)") | join(" ")'
+}
+for _ in $(seq 1 20); do [ -n "$(sched_attempts)" ] && break; sleep 1; done
+first_run="$(http GET "/functions/$failing_sched_fn/schedules" | jq -r '.[0] | "\(.lastOutcome) \(.lastRequestId)"')"
+check "a run that fails is the schedule's call, its outcome on the schedule" "schedule:1:ERROR error" "$(sched_attempts) ${first_run% *}"
+# Its retry, a minute after, as an asynchronous call's: cut short in FF's database, so that the run needn't wait.
+for _ in $(seq 1 25); do [ "$(env_q "SELECT attributes->>'settled' FROM queue_messages WHERE message_id = '${first_run#* }'")" = 1 ] && break; sleep 0.2; done
+run_wait="$(env_q "SELECT round(extract(epoch FROM m.visible_at - i.updated_at))::int FROM queue_messages m JOIN function_invocations i ON i.request_id = m.message_id AND i.attempt = 1 WHERE m.message_id = '${first_run#* }'")"
+env_q "UPDATE queue_messages SET visible_at = now() WHERE message_id = '${first_run#* }'" >/dev/null
+for _ in $(seq 1 20); do [[ "$(sched_attempts "${first_run#* }")" == *":2:"* ]] && break; sleep 1; done
+check "  ... retried as an asynchronous call is, a minute after its failure, under the run's request ID" "60 schedule:1:ERROR schedule:2:ERROR" \
+  "$run_wait $(sched_attempts "${first_run#* }")"
+http DELETE "/functions/$failing_sched_fn" >/dev/null
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
 

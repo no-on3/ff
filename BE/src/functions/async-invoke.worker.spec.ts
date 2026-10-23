@@ -22,6 +22,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
   let functions: { findOne: jest.Mock; call: jest.Mock };
   let credit: { admit: jest.Mock };
   let accounts: { findOne: jest.Mock };
+  let schedules: { update: jest.Mock };
   let warnings: jest.SpyInstance;
   let worker: AsyncInvokeWorker;
 
@@ -54,6 +55,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       credit as never,
       accounts as never,
       configs as never,
+      schedules as never,
     );
   /** The record the worker handed its destination, as the destination's event. */
   const handed = () => JSON.parse(queues.deleteEventAndSend.mock.calls[0][3] as string) as Record<string, unknown>;
@@ -73,6 +75,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     functions = { findOne: jest.fn(async () => fn), call: jest.fn(async () => ({ ok: true, output: 1, invocation: {} })) };
     credit = { admit: jest.fn(async () => undefined) };
     accounts = { findOne: jest.fn(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE })) };
+    schedules = { update: jest.fn(async () => ({ affected: 1 })) };
     warnings = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     worker = make();
@@ -219,6 +222,38 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event());
 
     expect(warnings).toHaveBeenCalledWith('The attempt of asynchronous call req-1 ended after its lease: another claim has the event, which stands');
+  });
+
+  it("runs a schedule's run as the schedule's call, and says each attempt's outcome on the schedule, unless a later run has replaced it there", async () => {
+    const run = (id: string) => event({ id, requestId: `req-${id}`, attributes: { origin: 'schedule', scheduleId: 's-1' } });
+    functions.call
+      .mockResolvedValueOnce({ ok: true, output: null, invocation: {} })
+      .mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'boom'), invocation: { status: 'ERROR' } })
+      .mockResolvedValueOnce({ ok: false, error: new FunctionTimeoutError('Task timed out after 5.00 seconds'), invocation: { status: 'TIMEOUT' } })
+      .mockResolvedValueOnce({ ok: false, error: new FunctionThrottledError('Rate exceeded'), visible: 'Rate exceeded', invocation: {} });
+    accounts.findOne.mockResolvedValueOnce({ id: ACCOUNT, status: AccountStatus.ACTIVE });
+    accounts.findOne.mockResolvedValueOnce({ id: ACCOUNT, status: AccountStatus.ACTIVE });
+    accounts.findOne.mockResolvedValueOnce({ id: ACCOUNT, status: AccountStatus.ACTIVE });
+    accounts.findOne.mockResolvedValueOnce({ id: ACCOUNT, status: AccountStatus.ACTIVE });
+    accounts.findOne.mockResolvedValueOnce({ id: ACCOUNT, status: AccountStatus.SUSPENDED });
+
+    for (const id of ['1', '2', '3', '4', '5']) await tick(run(id));
+    await tick(event({ id: '6', requestId: 'req-6' }));
+
+    expect(functions.call.mock.calls.map(([, , options]) => options.source)).toEqual([
+      InvocationSource.SCHEDULE,
+      InvocationSource.SCHEDULE,
+      InvocationSource.SCHEDULE,
+      InvocationSource.SCHEDULE,
+      InvocationSource.ASYNC,
+    ]);
+    expect(schedules.update.mock.calls).toEqual([
+      [{ id: 's-1', lastRequestId: 'req-1' }, { lastOutcome: 'success' }],
+      [{ id: 's-1', lastRequestId: 'req-2' }, { lastOutcome: 'error' }],
+      [{ id: 's-1', lastRequestId: 'req-3' }, { lastOutcome: 'timeout' }],
+      [{ id: 's-1', lastRequestId: 'req-4' }, { lastOutcome: 'throttled' }],
+      [{ id: 's-1', lastRequestId: 'req-5' }, { lastOutcome: 'waiting: the account is not active' }],
+    ]);
   });
 
   it("follows the function's own settings: no retry when it allows none", async () => {

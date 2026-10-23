@@ -198,7 +198,7 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **19. A failed scheduled run is not retried, until step 3.** ✅ Confirmed.
 - **Changed already:** `57101f7` and `b66e09e` (U-07): each run happens at most once; a failure is kept in the history, the metrics and the schedule's last outcome.
-- **Still to change:** step 3's background calls retry, and schedules will use them (the [step-3 plan](step-3-plan.md)'s Q-03, its D3).
+- **Changed already:** the step-3 plan's Q-03, part 2: each run is kept in its function's queue in the transaction that moves its schedule on, then run as an asynchronous call, so retried, and lost by no backend's stop (D3).
 
 ## Earlier decisions
 

@@ -9,7 +9,8 @@
  * messages gone with their function, or past their expiry; a lost attempt
  * marked under its request; a function's own settings, and the record of a
  * call that ended handed to its destination function in the transaction that
- * deletes it, which then runs it. Each run works in a scratch database, dropped
+ * deletes it, which then runs it; a schedule's run, the schedule's call. Each
+ * run works in a scratch database, dropped
  * afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
@@ -27,6 +28,7 @@ import { UsageService } from '../usage/usage.service';
 import { AsyncInvokeWorker } from './async-invoke.worker';
 import { FunctionEventInvokeConfig } from './entities/function-event-invoke-config.entity';
 import { EventInvokeConfigService } from './event-invoke-config.service';
+import { Schedule } from '../schedules/schedule.entity';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
@@ -58,6 +60,7 @@ run('asynchronous calls, in the database (L2)', () => {
       { admit: async () => undefined } as never,
       db.dataSource.getRepository(Account),
       configs,
+      db.dataSource.getRepository(Schedule),
     );
   const send = (fn: Function, requestId: string, body = '{"order":1}', expiresAt = new Date(Date.now() + 7 * HOUR)) => queues.sendEvent(fn, requestId, body, expiresAt);
   const message = async (requestId: string) =>
@@ -343,5 +346,29 @@ run('asynchronous calls, in the database (L2)', () => {
     await configs.put(ACCOUNT, orders.id, { maximumEventAgeInSeconds: 60 });
     await db.dataSource.getRepository(Function).delete({ id: orders.id });
     expect(await db.dataSource.getRepository(FunctionEventInvokeConfig).countBy({ functionId: orders.id })).toBe(0);
+  });
+  it("runs a schedule's run as the schedule's call, its outcome on the schedule", async () => {
+    const fn = await newFunction();
+    const requestId = uuid(1000);
+    const schedule = await db.dataSource.getRepository(Schedule).save({
+      accountId: ACCOUNT,
+      functionId: fn.id,
+      name: 'nightly',
+      expression: 'rate(1 hour)',
+      lastRequestId: requestId,
+      lastOutcome: 'running',
+    });
+    await queues.sendEvent(fn, requestId, '{"detail-type":"Scheduled Event"}', new Date(Date.now() + 7 * HOUR), {
+      attributes: { origin: 'schedule', scheduleId: schedule.id },
+    });
+    invoke.mockResolvedValueOnce({ output: 'reported', durationMs: 1 });
+    const w = worker();
+
+    await w.tick(new Date(Date.now() + 1000));
+    await w.settled();
+
+    const call = await db.dataSource.getRepository(FunctionInvocation).findOneByOrFail({ requestId });
+    expect([call.id, call.source, call.attempt, call.status]).toEqual([requestId, InvocationSource.SCHEDULE, 1, InvocationStatus.COMPLETED]);
+    expect((await db.dataSource.getRepository(Schedule).findOneByOrFail({ id: schedule.id })).lastOutcome).toBe('success');
   });
 });

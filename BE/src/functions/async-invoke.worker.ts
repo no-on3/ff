@@ -25,7 +25,8 @@ import {
   lastResponseOf,
   onClaim,
 } from './async-invoke';
-import { InvocationSource } from './entities/function-invocation.entity';
+import { Schedule } from '../schedules/schedule.entity';
+import { InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
 import { AsyncSettings, EventInvokeConfigService } from './event-invoke-config.service';
 import { FunctionsService } from './functions.service';
@@ -37,11 +38,16 @@ const ENDS: Record<Exclude<EventEnd, EventEnd.SUCCEEDED>, string> = {
   [EventEnd.FUNCTION_GONE]: 'its function is gone',
 };
 
-/** An attempt's outcome, and how it answered, for the event's record. */
+/** An attempt's outcome, how it answered, for the event's record, and in a word, for a schedule's last outcome. */
 interface Attempted {
   outcome: AttemptOutcome;
   response: AttemptResponse;
+  word: string;
 }
+
+/** What its queue keeps beside a schedule's run (SchedulerService): its schedule. */
+const scheduleOf = (attributes: Record<string, unknown> | null): string | undefined =>
+  attributes?.origin === 'schedule' && typeof attributes.scheduleId === 'string' ? attributes.scheduleId : undefined;
 
 /**
  * Runs functions' asynchronous calls (ADR 0010). Every
@@ -55,8 +61,10 @@ interface Attempted {
  * settings, else Lambda's defaults (async-invoke.ts, EventInvokeConfigService).
  * An event that ends hands its record, Lambda's, to the destination its
  * function names for how it ended, in the transaction that deletes it. A
- * backend that stops during an attempt leaves its event to come back when its
- * lease ends, the attempt counted as failed.
+ * schedule's run is the schedule's call, its source `schedule`, and each
+ * attempt's outcome goes on the schedule, unless a later run has replaced it.
+ * A backend that stops during an attempt leaves its event to come back when
+ * its lease ends, the attempt counted as failed.
  */
 @Injectable()
 export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
@@ -76,6 +84,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     private readonly credit: CreditService,
     @InjectRepository(Account) private readonly accounts: Repository<Account>,
     private readonly configs: EventInvokeConfigService,
+    @InjectRepository(Schedule) private readonly schedules: Repository<Schedule>,
   ) {
     const settings = config.getOrThrow<{ intervalSeconds: number; concurrency: number }>('asyncInvoke');
     this.intervalSeconds = settings.intervalSeconds;
@@ -131,6 +140,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
         const claim = onClaim(attemptsOf(event.attributes), event.receiveCount, event.sentAt, claimedAt, settings.policy);
         if (!('run' in claim)) return this.settle(event, claim, { fn, settings, response: lastResponseOf(event.attributes), at: now() });
         const attempted = await this.run(fn, event);
+        await this.tellSchedule(event, attempted.word);
         const settlement = afterAttempt(claim.run, attempted.outcome, event.sentAt, now(), settings.policy);
         await this.settle(event, settlement, { fn, settings, response: attempted.response, at: now() });
       });
@@ -155,7 +165,11 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
   private async run(fn: Function, event: ClaimedEvent): Promise<Attempted> {
     const waits = (why: string): Attempted => {
       this.logger.log(`Asynchronous call ${event.requestId} of function ${event.functionId} waits: ${why}`);
-      return { outcome: AttemptOutcome.SYSTEM_ERROR, response: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: `FF couldn't make the call: ${why}` } } };
+      return {
+        outcome: AttemptOutcome.SYSTEM_ERROR,
+        response: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: `FF couldn't make the call: ${why}` } },
+        word: `waiting: ${why}`,
+      };
     };
     if (fn.status !== FunctionStatus.ACTIVE) return waits('the function is not ACTIVE');
     const account = await this.accounts.findOne({ where: { id: event.accountId }, select: { id: true, status: true } });
@@ -167,22 +181,40 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       throw error;
     }
     const outcome = await this.functions.call(fn, JSON.parse(event.body) as unknown, {
-      source: InvocationSource.ASYNC,
+      source: scheduleOf(event.attributes) ? InvocationSource.SCHEDULE : InvocationSource.ASYNC,
       requestId: event.requestId,
       attempt: event.receiveCount,
     });
-    if (outcome.ok) return { outcome: AttemptOutcome.SUCCESS, response: { statusCode: 200, payload: outcome.output } };
+    if (outcome.ok) return { outcome: AttemptOutcome.SUCCESS, response: { statusCode: 200, payload: outcome.output }, word: 'success' };
     if (outcome.error instanceof FunctionThrottledError) {
-      return { outcome: AttemptOutcome.THROTTLED, response: { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: outcome.visible } } };
+      return {
+        outcome: AttemptOutcome.THROTTLED,
+        response: { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: outcome.visible } },
+        word: 'throttled',
+      };
     }
     if (outcome.error instanceof FunctionRuntimeError) {
       const failed = outcome.error;
       return {
         outcome: AttemptOutcome.FUNCTION_ERROR,
         response: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: failed.errorType, errorMessage: failed.message } },
+        word: outcome.invocation.status === InvocationStatus.TIMEOUT ? 'timeout' : 'error',
       };
     }
-    return { outcome: AttemptOutcome.SYSTEM_ERROR, response: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: outcome.visible } } };
+    return {
+      outcome: AttemptOutcome.SYSTEM_ERROR,
+      response: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: outcome.visible } },
+      word: 'error',
+    };
+  }
+
+  /** A schedule's run: its attempt's outcome on the schedule, unless a later run has replaced it there. */
+  private async tellSchedule(event: ClaimedEvent, word: string): Promise<void> {
+    const scheduleId = scheduleOf(event.attributes);
+    if (!scheduleId) return;
+    await this.schedules
+      .update({ id: scheduleId, lastRequestId: event.requestId }, { lastOutcome: word })
+      .catch((error: unknown) => this.logger.warn(`Could not record the outcome of schedule ${scheduleId}'s run: ${describeError(error)}`));
   }
 
   /**
