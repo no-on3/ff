@@ -28,9 +28,9 @@ const PendingApproval: React.FC = () => {
   };
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-2xl">
+    <div className="page max-w-2xl">
       <div className="card">
-        <h1 className="text-2xl font-bold mb-4">Waiting for approval</h1>
+        <h1 className="mb-4">Waiting for approval</h1>
         <p className="mb-3">
           Your account <strong>{account?.name}</strong> ({account?.id}) is waiting for approval. During the beta, we approve each
           new account by hand.{' '}

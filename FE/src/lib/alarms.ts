@@ -172,3 +172,6 @@ export const STATE_INFO: Record<AlarmState, { label: string; tone: 'ok' | 'alarm
   ALARM: { label: 'In alarm', tone: 'alarm' },
   INSUFFICIENT_DATA: { label: 'Insufficient data', tone: 'unknown' },
 };
+
+/** How many alarms are in alarm: the sidebar's count beside Alarms, the one thing it shows in orange. */
+export const firingCount = (alarms: ReadonlyArray<Pick<Alarm, 'state'>>): number => alarms.filter((alarm) => alarm.state === 'ALARM').length;

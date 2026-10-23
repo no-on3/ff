@@ -1,24 +1,26 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Tabs, Tab, Box } from '@mui/material';
+import { Tabs, Tab } from '@mui/material';
 import {
   EditableFields,
   FUNCTION_NAME_PATTERN,
+  INVOCATION_STATUS_INFO,
   eventFormatText,
   FUNCTION_NAME_RULE,
   MAX_FUNCTION_NAME_LENGTH,
   TRUNCATED_NOTE,
   apiErrorMessage,
   changedFields,
-  codeText,
+  formatBytes,
   formatDuration,
   formatMemory,
   historyText,
   parseInvokeInput,
   sourceText,
 } from '../lib/functions';
-import { Function, FunctionInvocation, InvocationStatus, functionsApi } from '../services/api';
+import { RUNTIME_LABELS, STATUS_INFO } from '../lib/function-list';
+import { Function, FunctionInvocation, functionsApi } from '../services/api';
 import { can } from '../lib/session';
 import { useSession } from '../session/session';
 import { updateFunction } from '../store/functionSlice';
@@ -29,8 +31,12 @@ import { FunctionUrlTab } from './FunctionUrl';
 import { FunctionSchedules } from './FunctionSchedules';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
+import Icon from './Icon';
 import { MetricsDashboard } from './MetricsDashboard';
+import { Page, PageHeader } from './Page';
+import { Callout, Panel } from './Panel';
 import { ScalingConfiguration } from './ScalingConfiguration';
+import StatusPill from './StatusPill';
 
 /** How many invocations the history shows, newest first. */
 const HISTORY_PAGE = 20;
@@ -48,22 +54,23 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   scaling: 'Scaling',
 };
 
-const GREEN = 'bg-green-100 text-green-800';
-const BLUE = 'bg-blue-100 text-blue-800';
-const RED = 'bg-red-100 text-red-800';
-/** A function's status: ready, starting, or anything else, which is a failure. */
-const FUNCTION_STYLES: Record<string, string> = { ACTIVE: GREEN, CREATING: BLUE };
-const statusStyle = (status: string) => FUNCTION_STYLES[status] ?? RED;
-/** Every invocation status has its own: a new one fails the type check until it gets one. */
-const INVOCATION_STYLES: Record<InvocationStatus, string> = {
-  SUCCESS: GREEN,
-  COMPLETED: GREEN,
-  RUNNING: BLUE,
-  ERROR: RED,
-  TIMEOUT: RED,
-  THROTTLED: 'bg-amber-100 text-amber-800', // not billed: try again
-  LOST: 'bg-gray-200 text-gray-800', // not billed: its answer is unknown
-};
+/** A field's label above it, as every form of the page has them. */
+const FieldLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => <span className="text-[13px] font-medium text-gray-700">{children}</span>;
+
+/** An input, an output or an error the history kept: its JSON, or its start when it kept only that. */
+const HistoryValue: React.FC<{ label: string; text: string; truncated: boolean; danger?: boolean }> = ({ label, text, truncated, danger }) => (
+  <div className="min-w-0">
+    <h3 className={`mb-1 text-xs font-medium ${danger ? 'text-red-700' : 'text-gray-600'}`}>{label}</h3>
+    <pre
+      className={`max-h-64 overflow-auto rounded-md border px-3 py-2 font-mono text-xs leading-5 break-all whitespace-pre-wrap ${
+        danger ? 'border-red-100 bg-red-50 text-red-800' : 'border-line bg-gray-50 text-gray-800'
+      }`}
+    >
+      {text}
+    </pre>
+    {truncated && <p className="mt-1 text-xs text-gray-500">{TRUNCATED_NOTE}</p>}
+  </div>
+);
 
 const FunctionDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -166,297 +173,305 @@ const FunctionDetail: React.FC = () => {
   };
 
   if (loading) {
-    return <div className="flex justify-center items-center h-64">Loading...</div>;
+    return (
+      <Page>
+        <p className="py-16 text-center text-gray-500">Loading…</p>
+      </Page>
+    );
   }
 
   if (loadError) {
-    return <div className="text-red-600 p-4">{loadError}</div>;
+    return (
+      <Page>
+        <Callout tone="danger" role="alert" title="This function can't be read">
+          {loadError}
+        </Callout>
+      </Page>
+    );
   }
 
   if (!func || !form) {
-    return <div className="text-gray-600 p-4">Function not found</div>;
+    return (
+      <Page>
+        <p className="py-16 text-center text-gray-600">Function not found</p>
+      </Page>
+    );
   }
 
+  const status = STATUS_INFO[func.status];
+
   return (
-    <div className="container mx-auto px-4 py-8">
+    <Page>
+      <PageHeader
+        crumbs={[{ label: 'Functions', to: '/functions' }]}
+        title={func.name}
+        aside={<StatusPill tone={status.tone} label={status.label} title={func.error ?? undefined} />}
+        description={
+          <span className="flex flex-wrap gap-x-4 gap-y-1 text-[13px]">
+            <span>{RUNTIME_LABELS[func.runtime]}</span>
+            <span>
+              Handler <code className="font-mono text-gray-800">{func.handler}</code>
+            </span>
+            <span>{func.memory} MB</span>
+            <span>{func.timeout} s timeout</span>
+            <span>{func.packageType === 'zip' ? `Package, ${formatBytes(func.codeSize)}` : 'Inline code'}</span>
+          </span>
+        }
+      />
+
       {/* On a phone the tabs don't fit: the bar scrolls by touch. Scroll buttons would appear after the open tab is scrolled into view, and hide it. */}
-      <Tabs value={activeTab} onChange={handleTabChange} variant="scrollable" scrollButtons={false}>
+      <Tabs value={activeTab} onChange={handleTabChange} variant="scrollable" scrollButtons={false} sx={{ mb: 3 }}>
         {TABS.map((name) => (
           <Tab key={name} label={TAB_LABELS[name]} />
         ))}
       </Tabs>
 
       {tab === 'overview' && (
-        <div className="mb-8">
-          <div className="flex items-center gap-3 mb-4">
-            <h1 className="text-2xl font-bold">{func.name}</h1>
-            <span className={`px-2 py-1 rounded-full text-sm ${statusStyle(func.status)}`}>{func.status}</span>
-            <span className="text-sm text-gray-500">
-              {func.runtime} · {func.memory} MB · {func.timeout} s
-            </span>
-          </div>
-          <p className="text-sm text-gray-600 mb-4 break-all">
-            Handler <code>{func.handler}</code> · {codeText(func)}
-          </p>
-
-          <FunctionAlarms functionId={func.id} mayChange={mayChange} />
-
+        <div className="space-y-5">
           {func.eventFormat === 'wrapped' && (
-            <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded mb-4">
-              <p className="font-medium">This function gets {eventFormatText(func)}.</p>
-              <p className="text-sm mt-1">
-                It was made before functions got AWS Lambda&apos;s event, the input itself, which every new function gets, and which a web
-                address or a schedule needs. To move it, change its handler to read <code>event</code> where it reads{' '}
-                <code>event.body</code>, and choose AWS Lambda&apos;s event below, in the same update: the new version rolls out, and the
-                previous one stays if it can&apos;t start.
-              </p>
-            </div>
+            <Callout tone="warning" title={`This function gets ${eventFormatText(func)}.`}>
+              It was made before functions got AWS Lambda&apos;s event, the input itself, which every new function gets, and which a web address or a
+              schedule needs. To move it, change its handler to read <code>event</code> where it reads <code>event.body</code>, and choose AWS
+              Lambda&apos;s event below, in the same update: the new version rolls out, and the previous one stays if it can&apos;t start.
+            </Callout>
           )}
 
           {func.status === 'ERROR' && func.error && (
-            <div className="bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded mb-4">
-              <p className="font-medium">This function can't run:</p>
-              <pre className="whitespace-pre-wrap text-sm mt-1">{func.error}</pre>
-              <p className="text-sm mt-2">Fix the code and update the function. An update without changes retries the same code.</p>
-            </div>
+            <Callout tone="danger" role="alert" title="This function can't run:">
+              <pre className="font-mono text-xs break-all whitespace-pre-wrap">{func.error}</pre>
+              <p className="mt-2">Fix the code and update the function. An update without changes retries the same code.</p>
+            </Callout>
           )}
 
-          {saveError && (
-            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">{saveError}</div>
-          )}
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <Panel title="Configuration">
+              <form onSubmit={handleUpdate}>
+                <fieldset disabled={!mayChange} className="space-y-4">
+                  <label className="block">
+                    <FieldLabel>Name</FieldLabel>
+                    <input
+                      type="text"
+                      value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      className="input mt-1"
+                      maxLength={MAX_FUNCTION_NAME_LENGTH}
+                      // Only a new name must follow the rule: one given before it keeps until it changes.
+                      pattern={form.name !== func.name ? FUNCTION_NAME_PATTERN : undefined}
+                      title={FUNCTION_NAME_RULE}
+                    />
+                  </label>
 
-          <form onSubmit={handleUpdate}>
-            <fieldset disabled={!mayChange} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Name</label>
-              <input
-                type="text"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                className="input mt-1"
-                maxLength={MAX_FUNCTION_NAME_LENGTH}
-                // Only a new name must follow the rule: one given before it keeps until it changes.
-                pattern={form.name !== func.name ? FUNCTION_NAME_PATTERN : undefined}
-                title={FUNCTION_NAME_RULE}
-              />
-            </div>
+                  {func.packageType === 'zip' ? (
+                    <Callout tone="neutral" title="This function runs a package, its libraries in it: its code isn't edited here.">
+                      A new version is a new package: <code>ff deploy</code> with its folder, or <code>POST /packages</code> with its zip, then an update
+                      naming its SHA-256 in <code>codeSha256</code>.
+                    </Callout>
+                  ) : (
+                    <label className="block">
+                      <FieldLabel>Code</FieldLabel>
+                      <textarea
+                        value={form.code}
+                        onChange={(e) => setForm({ ...form, code: e.target.value })}
+                        className="input mt-1 font-mono text-[13px] leading-5"
+                        rows={14}
+                        spellCheck={false}
+                      />
+                    </label>
+                  )}
 
-            {func.packageType === 'zip' ? (
-              <div className="bg-gray-50 border border-gray-200 px-4 py-3 rounded text-sm text-gray-700">
-                <p className="font-medium">This function runs a package, its libraries in it: its code isn&apos;t edited here.</p>
-                <p className="mt-1">
-                  A new version is a new package: <code>ff deploy</code> with its folder, or <code>POST /packages</code> with its zip, then an
-                  update naming its SHA-256 in <code>codeSha256</code>.
-                </p>
-              </div>
-            ) : (
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Code</label>
-                <textarea
-                  value={form.code}
-                  onChange={(e) => setForm({ ...form, code: e.target.value })}
-                  className="input mt-1 font-mono"
-                  rows={10}
-                />
-              </div>
-            )}
-
-            <div className="flex gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Memory (MB)</label>
-                <input
-                  type="number"
-                  min={128}
-                  max={Math.max(plan.limits.memoryMb, func.memory)}
-                  value={form.memory}
-                  onChange={(e) => setForm({ ...form, memory: Number(e.target.value) })}
-                  className="input mt-1"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Timeout (s)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={Math.max(plan.limits.timeoutSeconds, func.timeout)}
-                  value={form.timeout}
-                  onChange={(e) => setForm({ ...form, timeout: Number(e.target.value) })}
-                  className="input mt-1"
-                />
-              </div>
-            </div>
-            <p className="text-sm text-gray-500">
-              The {plan.name} plan allows up to {plan.limits.memoryMb} MB and {plan.limits.timeoutSeconds} s per function.
-            </p>
-            {func.eventFormat === 'wrapped' && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Event</label>
-                <select
-                  value={form.eventFormat}
-                  onChange={(e) => setForm({ ...form, eventFormat: e.target.value as EditableFields['eventFormat'] })}
-                  className="input mt-1"
-                >
-                  <option value="wrapped">FF&apos;s original: the input in event.body</option>
-                  <option value="lambda">AWS Lambda&apos;s: the input itself</option>
-                </select>
-              </div>
-            )}
-            </fieldset>
-
-            {mayChange ? (
-              <button type="submit" className="btn btn-primary mt-4" disabled={saving}>
-                {saving ? 'Updating… (waits until the new version is live)' : 'Update Function'}
-              </button>
-            ) : (
-              <p className="mt-4 text-sm text-gray-600">As a viewer, you read this function; owners and developers change it.</p>
-            )}
-          </form>
-        </div>
-      )}
-
-      {tab === 'environment' && (
-        <Box p={3}>
-          <EnvironmentTab func={func} mayChange={mayChange} onSaved={setFunc} />
-        </Box>
-      )}
-
-      {tab === 'url' && (
-        <Box p={3}>
-          <FunctionUrlTab func={func} mayChange={mayChange} />
-        </Box>
-      )}
-
-      {tab === 'schedules' && (
-        <Box p={3}>
-          <FunctionSchedules func={func} mayChange={mayChange} />
-        </Box>
-      )}
-
-      {tab === 'invocations' && (
-        <div className="mt-12">
-          <h2 className="text-xl font-bold mb-4">Invoke Function</h2>
-          {!mayChange && <p className="text-sm text-gray-600">As a viewer, you read the history; owners and developers invoke.</p>}
-          <div className={mayChange ? 'flex gap-4' : 'hidden'}>
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder={
-                func.eventFormat === 'wrapped'
-                  ? 'Any JSON value, which the handler gets as event.body, e.g. {"name": "Tunis"}; empty means {}'
-                  : 'The event: any JSON value, e.g. {"name": "Tunis"}; empty means {}'
-              }
-              className="input flex-grow font-mono"
-              rows={3}
-            />
-            <button onClick={handleInvoke} disabled={invoking} className="btn btn-primary self-start">
-              {invoking ? 'Invoking…' : 'Invoke'}
-            </button>
-          </div>
-          {invokeError && (
-            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mt-4">{invokeError}</div>
-          )}
-
-          <div className="mt-12">
-            <h2 className="text-xl font-bold mb-4">
-              Invocation History
-              {total > invocations.length && (
-                <span className="text-sm font-normal text-gray-500"> (the latest {invocations.length} of {total})</span>
-              )}
-            </h2>
-            <p className="text-sm text-gray-500 -mt-2 mb-4">
-              Each call is kept for your plan&apos;s history retention (<Link to="/account">Account</Link>), with up to 64 KiB of its input, output
-              and error.
-            </p>
-            <div className="space-y-4">
-              {invocations.map((invocation) => (
-                <div key={invocation.id} className="card">
-                  <div className="flex justify-between items-start mb-4">
-                    <span className="text-sm text-gray-500">
-                      {new Date(invocation.createdAt).toLocaleString()} · {sourceText(invocation.source)}
-                    </span>
-                    <span className="flex items-center gap-3">
-                      <Link to={`?${searchForFilter({ range: 'all', q: '', requestId: invocation.id }).toString()}`} className="text-sm">
-                        Logs
-                      </Link>
-                      <span className={`px-2 py-1 rounded-full text-sm ${INVOCATION_STYLES[invocation.status] ?? RED}`}>
-                        {invocation.status}
-                      </span>
-                    </span>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <label className="block">
+                      <FieldLabel>Memory (MB)</FieldLabel>
+                      <input
+                        type="number"
+                        min={128}
+                        max={Math.max(plan.limits.memoryMb, func.memory)}
+                        value={form.memory}
+                        onChange={(e) => setForm({ ...form, memory: Number(e.target.value) })}
+                        className="input mt-1"
+                      />
+                    </label>
+                    <label className="block">
+                      <FieldLabel>Timeout (s)</FieldLabel>
+                      <input
+                        type="number"
+                        min={1}
+                        max={Math.max(plan.limits.timeoutSeconds, func.timeout)}
+                        value={form.timeout}
+                        onChange={(e) => setForm({ ...form, timeout: Number(e.target.value) })}
+                        className="input mt-1"
+                      />
+                    </label>
                   </div>
+                  <p className="text-[13px] text-gray-500">
+                    The {plan.name} plan allows up to {plan.limits.memoryMb} MB and {plan.limits.timeoutSeconds} s per function.
+                  </p>
+                  {func.eventFormat === 'wrapped' && (
+                    <label className="block">
+                      <FieldLabel>Event</FieldLabel>
+                      <select
+                        value={form.eventFormat}
+                        onChange={(e) => setForm({ ...form, eventFormat: e.target.value as EditableFields['eventFormat'] })}
+                        className="select mt-1 w-full"
+                      >
+                        <option value="wrapped">FF&apos;s original: the input in event.body</option>
+                        <option value="lambda">AWS Lambda&apos;s: the input itself</option>
+                      </select>
+                    </label>
+                  )}
+                </fieldset>
 
-                  <div className="grid grid-cols-2 gap-4 mb-4">
-                    <div className="space-y-2">
-                      <div>
-                        <h3 className="text-sm font-medium text-gray-700">Input:</h3>
-                        <pre className="bg-gray-50 p-2 rounded mt-1 text-sm max-h-64 overflow-auto whitespace-pre-wrap break-all">{historyText(invocation.input, invocation.inputTruncated)}</pre>
-                        {invocation.inputTruncated && <p className="text-xs text-gray-500 mt-1">{TRUNCATED_NOTE}</p>}
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-medium text-gray-700">Output:</h3>
-                        <pre className="bg-gray-50 p-2 rounded mt-1 text-sm max-h-64 overflow-auto whitespace-pre-wrap break-all">{historyText(invocation.output, invocation.outputTruncated)}</pre>
-                        {invocation.outputTruncated && <p className="text-xs text-gray-500 mt-1">{TRUNCATED_NOTE}</p>}
-                      </div>
-                    </div>
+                {saveError && (
+                  <Callout tone="danger" role="alert" className="mt-4">
+                    {saveError}
+                  </Callout>
+                )}
 
-                    <div className="bg-gray-50 rounded-lg p-4">
-                      <h3 className="text-sm font-medium text-gray-700 mb-3">Metrics:</h3>
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <span className="text-sm text-gray-600">Max memory used:</span>
-                          <span className="text-sm font-medium">{formatMemory(invocation.memoryUsed)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-sm text-gray-600">Duration:</span>
-                          <span className="text-sm font-medium">{formatDuration(invocation.duration)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-sm text-gray-600">Start Time:</span>
-                          <span className="text-sm font-medium">{new Date(invocation.createdAt).toLocaleTimeString()}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-sm text-gray-600">End Time:</span>
-                          <span className="text-sm font-medium">{new Date(invocation.updatedAt).toLocaleTimeString()}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {invocation.error && (
-                    <div className="mt-2">
-                      <h3 className="text-sm font-medium text-red-700">Error:</h3>
-                      <pre className="bg-red-50 text-red-700 p-2 rounded mt-1 text-sm max-h-64 overflow-auto whitespace-pre-wrap break-all">{invocation.error}</pre>
-                      {invocation.errorTruncated && <p className="text-xs text-gray-500 mt-1">{TRUNCATED_NOTE}</p>}
-                    </div>
+                <div className="mt-5 border-t border-line pt-4">
+                  {mayChange ? (
+                    <button type="submit" className="btn btn-primary" disabled={saving}>
+                      {saving ? 'Updating… (waits until the new version is live)' : 'Update function'}
+                    </button>
+                  ) : (
+                    <p className="text-[13px] text-gray-600">As a viewer, you read this function; owners and developers change it.</p>
                   )}
                 </div>
-              ))}
+              </form>
+            </Panel>
 
-              {invocations.length === 0 && (
-                <div className="text-center text-gray-500">No invocations in the history. Try invoking the function!</div>
-              )}
+            <div className="space-y-5">
+              <Panel title="Code">
+                <dl className="space-y-3 text-[13px]">
+                  <div>
+                    <dt className="text-gray-500">What runs</dt>
+                    <dd className="text-gray-800">
+                      {func.packageType === 'zip' ? 'A package' : 'Inline code'}, {formatBytes(func.codeSize)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-500">SHA-256</dt>
+                    <dd className="font-mono text-xs break-all text-gray-800">{func.codeSha256}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-500">Event</dt>
+                    <dd className="text-gray-800">{eventFormatText(func)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-500">Last change</dt>
+                    <dd className="text-gray-800">{new Date(func.updatedAt).toLocaleString()}</dd>
+                  </div>
+                </dl>
+              </Panel>
+              <FunctionAlarms functionId={func.id} mayChange={mayChange} />
             </div>
           </div>
         </div>
       )}
 
-      {tab === 'logs' && (
-        <Box p={3}>
-          <FunctionLogs functionId={id!} filter={logsFilter} onFilterChange={showLogs} />
-        </Box>
+      {tab === 'environment' && <EnvironmentTab func={func} mayChange={mayChange} onSaved={setFunc} />}
+
+      {tab === 'url' && <FunctionUrlTab func={func} mayChange={mayChange} />}
+
+      {tab === 'schedules' && <FunctionSchedules func={func} mayChange={mayChange} />}
+
+      {tab === 'invocations' && (
+        <div className="space-y-5">
+          <Panel title="Invoke">
+            {mayChange ? (
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  aria-label="Event"
+                  placeholder={
+                    func.eventFormat === 'wrapped'
+                      ? 'Any JSON value, which the handler gets as event.body, e.g. {"name": "Tunis"}; empty means {}'
+                      : 'The event: any JSON value, e.g. {"name": "Tunis"}; empty means {}'
+                  }
+                  className="input min-h-[84px] flex-grow font-mono text-[13px]"
+                  rows={3}
+                  spellCheck={false}
+                />
+                <button type="button" onClick={handleInvoke} disabled={invoking} className="btn btn-primary self-start">
+                  {invoking ? 'Invoking…' : 'Invoke'}
+                </button>
+              </div>
+            ) : (
+              <p className="text-[13px] text-gray-600">As a viewer, you read the history; owners and developers invoke.</p>
+            )}
+            {invokeError && (
+              <Callout tone="danger" role="alert" className="mt-4">
+                {invokeError}
+              </Callout>
+            )}
+          </Panel>
+
+          <Panel
+            flush
+            title="History"
+            description={
+              <>
+                Each call is kept for your plan&apos;s history retention (<Link to="/account">Account</Link>), with up to 64 KiB of its input, output and
+                error.
+              </>
+            }
+            actions={
+              total > invocations.length && (
+                <span className="text-xs text-gray-500">
+                  The latest {invocations.length} of {total.toLocaleString('en-US')}
+                </span>
+              )
+            }
+          >
+            {invocations.length === 0 ? (
+              <p className="px-5 py-10 text-center text-gray-500">No invocations in the history yet.{mayChange && ' Invoke the function above.'}</p>
+            ) : (
+              <ul className="divide-y divide-gray-100">
+                {invocations.map((invocation) => {
+                  const info = INVOCATION_STATUS_INFO[invocation.status];
+                  return (
+                    <li key={invocation.id}>
+                      <details className="group">
+                        <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-4 gap-y-1 px-5 py-3 hover:bg-gray-50/70 [&::-webkit-details-marker]:hidden">
+                          <Icon name="chevron" className="-rotate-90 text-gray-400 transition-transform group-open:rotate-0" />
+                          <StatusPill tone={info.tone} label={info.label} title={info.note} />
+                          <span className="text-gray-800 tabular-nums">{new Date(invocation.createdAt).toLocaleString()}</span>
+                          <span className="text-gray-500">{sourceText(invocation.source)}</span>
+                          <span className="ml-auto flex gap-4 text-[13px] text-gray-600 tabular-nums">
+                            <span title="Duration">{formatDuration(invocation.duration)}</span>
+                            <span title="Most memory used">{formatMemory(invocation.memoryUsed)}</span>
+                          </span>
+                        </summary>
+                        <div className="space-y-3 px-5 pb-4 sm:pl-12">
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
+                            <span>
+                              Request <code className="font-mono text-gray-700">{invocation.id}</code>
+                            </span>
+                            <span>Ended {new Date(invocation.updatedAt).toLocaleTimeString()}</span>
+                            <Link to={`?${searchForFilter({ range: 'all', q: '', requestId: invocation.id }).toString()}`}>Its logs</Link>
+                          </div>
+                          <div className="grid gap-3 lg:grid-cols-2">
+                            <HistoryValue label="Input" text={historyText(invocation.input, invocation.inputTruncated)} truncated={invocation.inputTruncated} />
+                            <HistoryValue label="Output" text={historyText(invocation.output, invocation.outputTruncated)} truncated={invocation.outputTruncated} />
+                          </div>
+                          {invocation.error && <HistoryValue danger label="Error" text={invocation.error} truncated={invocation.errorTruncated} />}
+                        </div>
+                      </details>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </Panel>
+        </div>
       )}
 
-      {tab === 'metrics' && (
-        <Box p={3}>
-          <MetricsDashboard functionId={id!} />
-        </Box>
-      )}
+      {tab === 'logs' && <FunctionLogs functionId={id!} filter={logsFilter} onFilterChange={showLogs} />}
 
-      {tab === 'scaling' && (
-        <Box p={3}>
-          <ScalingConfiguration functionId={id!} />
-        </Box>
-      )}
-    </div>
+      {tab === 'metrics' && <MetricsDashboard functionId={id!} />}
+
+      {tab === 'scaling' && <ScalingConfiguration functionId={id!} />}
+    </Page>
   );
 };
 

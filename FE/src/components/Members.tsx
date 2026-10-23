@@ -12,8 +12,8 @@ const ROLES: ReadonlyArray<{ role: Role; what: string }> = [
 ];
 
 const Page: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="container mx-auto px-4 py-8 max-w-5xl">
-    <h1 className="text-2xl font-bold mb-6">Members</h1>
+  <div className="page max-w-5xl">
+    <h1 className="mb-6">Members</h1>
     {children}
   </div>
 );
@@ -116,7 +116,7 @@ const Members: React.FC = () => {
       )}
 
       <form onSubmit={handleInvite} className="card mb-6 space-y-4">
-        <h2 className="text-lg font-semibold">Invite</h2>
+        <h2 className="text-[15px] leading-6 font-semibold text-ink">Invite</h2>
         <div className="grid gap-4 sm:grid-cols-[2fr_1fr_auto] sm:items-end">
           <div>
             <label htmlFor="invite-email" className="block text-sm font-medium text-gray-700 mb-1">
@@ -150,11 +150,11 @@ const Members: React.FC = () => {
       </form>
 
       <div className="card mb-6 overflow-x-auto">
-        <h2 className="text-lg font-semibold mb-4">Members</h2>
+        <h2 className="text-[15px] leading-6 font-semibold text-ink mb-4">Members</h2>
         {list === null ? (
           <p>Loading…</p>
         ) : (
-          <table className="w-full text-left text-sm">
+          <table className="data-table">
             <thead className="text-gray-500">
               <tr>
                 <th className="py-2 pr-4 font-medium">E-mail</th>
@@ -204,8 +204,8 @@ const Members: React.FC = () => {
 
       {list && list.invitations.length > 0 && (
         <div className="card overflow-x-auto">
-          <h2 className="text-lg font-semibold mb-4">Invitations</h2>
-          <table className="w-full text-left text-sm">
+          <h2 className="text-[15px] leading-6 font-semibold text-ink mb-4">Invitations</h2>
+          <table className="data-table">
             <thead className="text-gray-500">
               <tr>
                 <th className="py-2 pr-4 font-medium">E-mail</th>

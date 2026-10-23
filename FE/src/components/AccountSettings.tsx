@@ -48,9 +48,9 @@ const AccountSettings: React.FC = () => {
 
   if (!login) {
     return (
-      <div className="container mx-auto px-4 py-8 max-w-3xl">
+      <div className="page max-w-3xl">
         <div className="card">
-          <h1 className="text-2xl font-bold mb-4">Account</h1>
+          <h1 className="mb-4">Account</h1>
           <dl className="grid gap-4 sm:grid-cols-3 mb-6">
             <Field label="Name">{chosen.name}</Field>
             <Field label="ID">{chosen.id}</Field>
@@ -88,8 +88,8 @@ const AccountSettings: React.FC = () => {
   };
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-3xl">
-      <h1 className="text-2xl font-bold mb-6">Account</h1>
+    <div className="page max-w-3xl">
+      <h1 className="mb-6">Account</h1>
       {error && (
         <div role="alert" className="mb-4 text-red-600">
           {error}
@@ -114,7 +114,7 @@ const AccountSettings: React.FC = () => {
             )}
           </div>
           <div className="card mb-6">
-            <h2 className="text-lg font-semibold mb-1">The {chosen.plan.name} plan</h2>
+            <h2 className="text-[15px] leading-6 font-semibold text-ink mb-1">The {chosen.plan.name} plan</h2>
             <p className="mb-4 text-sm text-gray-500">What this account may use. The API refuses what goes beyond, and says which limit.</p>
             <dl className="grid gap-4 sm:grid-cols-3">
               {planLimitRows(chosen.plan).map(([label, value]) => (
@@ -126,7 +126,7 @@ const AccountSettings: React.FC = () => {
           </div>
           <EmailLanguage />
           <form onSubmit={handleSubmit} className="card space-y-4">
-            <h2 className="text-lg font-semibold">Details</h2>
+            <h2 className="text-[15px] leading-6 font-semibold text-ink">Details</h2>
             {!owner && <p className="text-sm text-gray-500">Only the account's owners change these.</p>}
             <div>
               <label htmlFor="settings-name" className="block text-sm font-medium text-gray-700 mb-1">

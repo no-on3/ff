@@ -131,9 +131,9 @@ const ProFormaPage: React.FC = () => {
   if (!account) return null;
   const state = proForma && proFormaState(proForma);
   return (
-    <div className="container mx-auto px-4 space-y-6 print:px-0">
+    <div className="page space-y-6 print:p-0">
       <div className="flex flex-wrap items-center justify-between gap-3 print:hidden">
-        <h1 className="text-2xl font-bold">Pro-forma {proForma?.reference}</h1>
+        <h1>Pro-forma {proForma?.reference}</h1>
         <div className="flex gap-3">
           <Link to="/billing" className="btn btn-secondary">
             Billing

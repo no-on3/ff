@@ -1,27 +1,86 @@
 @import "tailwindcss";
 
 /*
+ * The console's tokens (docs/console-design-plan.md, "navy and paper"), the same as src/theme/tokens.ts, which
+ * tokens.test.ts checks: Tailwind's gray, blue and green scales redefined, so that every class the pages use follows
+ * the direction; the colors with a role of their own (text-ink, bg-canvas, border-line, bg-attention, text-danger);
+ * Geist; and soft navy-tinted shadows in place of Tailwind's grey ones.
+ */
+@theme {
+  --color-gray-50: #f6f6f8;
+  --color-gray-100: #eeeff2;
+  --color-gray-200: #e3e4e8;
+  --color-gray-300: #cfd1d7;
+  --color-gray-400: #a4a7af;
+  --color-gray-500: #6b6e77;
+  --color-gray-600: #575a64;
+  --color-gray-700: #3f424b;
+  --color-gray-800: #232730;
+  --color-gray-900: #12161e;
+  --color-gray-950: #0a0d14;
+
+  --color-blue-50: #eef4fb;
+  --color-blue-100: #d4e3f7;
+  --color-blue-200: #c4d6f2;
+  --color-blue-300: #a2c1ed;
+  --color-blue-400: #7ea7e9;
+  --color-blue-500: #4575cd;
+  --color-blue-600: #1e4199;
+  --color-blue-700: #1b2d70;
+  --color-blue-800: #111a4a;
+  --color-blue-900: #080b32;
+  --color-blue-950: #05071f;
+
+  --color-green-50: #effaf6;
+  --color-green-100: #e3f4ee;
+  --color-green-200: #c3e7da;
+  --color-green-300: #94d4bd;
+  --color-green-400: #44b48b;
+  --color-green-500: #279a74;
+  --color-green-600: #167e6c;
+  --color-green-700: #12665a;
+  --color-green-800: #0f5249;
+  --color-green-900: #0c433c;
+  --color-green-950: #062823;
+
+  --color-ink: #111a4a;
+  --color-canvas: #f6f6f8;
+  --color-line: #e3e4e8;
+  --color-attention: #ec652b;
+  --color-attention-strong: #c4501d;
+  --color-danger: #c10007;
+  --color-warning: #e17100;
+
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --shadow-sm: 0 1px 3px rgba(17, 26, 74, 0.08), 0 1px 2px rgba(17, 26, 74, 0.04);
+  --shadow-md: 0 1px 3px rgba(17, 26, 74, 0.08), 0 1px 2px rgba(17, 26, 74, 0.04);
+  --shadow-raised: 0 1px 3px rgba(17, 26, 74, 0.1), 0 8px 24px rgba(17, 26, 74, 0.12);
+}
+
+/*
  * The page's defaults go in the base layer, so the component classes below
  * and the utilities win over them: unlayered, these rules would beat every
  * layer, whatever its specificity.
  */
 @layer base {
   :root {
-    font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+    font-family: var(--font-sans);
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     color-scheme: light;
-    @apply text-gray-900 bg-gray-50;
+    @apply text-gray-800 bg-canvas;
   }
 
-  /* A plain block: the old `flex items-center` shrank the whole console to a narrow column. */
+  /* A plain block: the old `flex items-center` shrank the whole console to a narrow column. 14 px interface text. */
   body {
-    @apply m-0 min-h-screen;
+    @apply m-0 min-h-screen text-sm;
   }
 
   h1 {
-    @apply text-4xl leading-tight;
+    @apply text-[28px] leading-[34px] font-semibold tracking-[-0.03em] text-ink;
   }
 
   a {
@@ -37,8 +96,9 @@
   button:disabled {
     @apply cursor-not-allowed opacity-60;
   }
-  button:focus-visible {
-    @apply outline-none ring-2 ring-blue-600;
+  button:focus-visible,
+  a:focus-visible {
+    @apply outline-none ring-2 ring-blue-500 ring-offset-2 ring-offset-white;
   }
 }
 
@@ -49,20 +109,48 @@
  * button showed the old global button rule's white text on light grey.
  */
 @layer components {
+  /*
+   * A page's column: up to 1200 px wide, with the same margins on every page; narrower pages add their max-w-*. Every
+   * page starts at the same left edge, so that the titles stay put from one page to the next.
+   */
+  .page {
+    @apply w-full max-w-[1200px] px-4 py-6 sm:px-6 lg:px-9 lg:py-8;
+  }
+  /* A table of records: small grey headings, hairlines between the rows, figures in tabular numbers. Cells keep their own padding. */
+  .data-table {
+    @apply w-full text-left text-[13px] tabular-nums;
+  }
+  .data-table thead {
+    @apply text-xs text-gray-500;
+  }
+  .data-table th {
+    @apply font-medium whitespace-nowrap;
+  }
+  .data-table tbody tr {
+    @apply border-t border-gray-100;
+  }
   .btn {
-    @apply inline-flex items-center justify-center rounded-md px-4 py-2 font-medium transition-colors duration-200;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-transparent px-3.5 py-2 text-sm leading-5 font-medium transition-colors duration-150;
   }
   .btn-primary {
-    @apply bg-blue-600 text-white hover:bg-blue-700;
+    @apply bg-ink text-white shadow-sm hover:bg-blue-700 hover:text-white;
   }
   .btn-secondary {
-    @apply bg-gray-200 text-gray-800 hover:bg-gray-300;
+    @apply border-line bg-white text-gray-800 shadow-sm hover:border-gray-300 hover:bg-gray-50 hover:text-gray-900;
   }
   .card {
-    @apply rounded-lg bg-white p-6 shadow-md;
+    @apply rounded-lg border border-line bg-white p-6 shadow-sm;
   }
   .input {
-    @apply w-full rounded-md border border-gray-300 bg-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500;
+    @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-sm placeholder:text-gray-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100;
+  }
+  /* A select drawn as the fields are, with its own chevron. */
+  .select {
+    @apply appearance-none rounded-lg border border-line bg-white py-2 pr-8 pl-3 text-sm text-gray-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%237c7f88' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 8 3 3 3-3'/%3E%3C/svg%3E");
+    background-position: right 0.5rem center;
+    background-repeat: no-repeat;
+    background-size: 1rem;
   }
 }
 

@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
@@ -12,4 +13,6 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: { port: CONSOLE_PORT, strictPort: true },
   preview: { port: CONSOLE_PORT, strictPort: true },
+  // Vitest empties CSS files unless told otherwise: the tokens' test reads index.css's text, raw.
+  test: { css: { include: [/index\.css\?raw$/] } },
 })

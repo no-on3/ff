@@ -6,9 +6,9 @@ import { useSession } from '../session/session';
 const AccountRejected: React.FC = () => {
   const { account } = useSession();
   return (
-    <div className="container mx-auto px-4 py-8 max-w-2xl">
+    <div className="page max-w-2xl">
       <div className="card">
-        <h1 className="text-2xl font-bold mb-4">Account not approved</h1>
+        <h1 className="mb-4">Account not approved</h1>
         <p className="mb-6">
           Your account <strong>{account?.name}</strong> ({account?.id}) was not approved, so it can't deploy or invoke functions.
         </p>

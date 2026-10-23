@@ -5,6 +5,13 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-10-22, last: the console's look
+
+**22. The console's look: direction A, "navy and paper".** ✅ Your choice, from two previews of the functions page.
+- **What it means:** the console takes Column's calm palette (navy ink, a blue scale, a teal for what is healthy, an orange only for what needs you), the Geist fonts, soft navy shadows and 8 px corners. A sidebar replaces the row of links across the top, and lists become tables. The other direction, B, a dark one, stays written down in case a dark mode is wanted later.
+- **Changed already:** the [console design plan](console-design-plan.md) (W-00 `8fff4cc`), with the direction as the build's contract and where each color comes from; built the same day: the tokens and the theme (W-01 `0be984e`), the sidebar (W-02 `0cf9efc`), the functions page (W-03 `3f3fc4f`), a function's page (W-04 `4a5587b`), the other pages (W-05 `eff29e9`), phones, focus and contrast (W-06 `e525e05`). Two of Column's colors were darkened for WCAG's contrast: the labels' grey and the orange under an alarm's count. No API change.
+- **Still to change:** nothing, but merging `feat/console-redesign` into `master`, when you say.
+
 ## 2026-10-22, later: FF's domain and its first server
 
 You named both, and asked to record them and to merge step 1 into `master`. Two things found while recording them need you: nobody has registered the domain yet (20), and the server is in Canada, while the plans promise hosting in Tunisia (21).

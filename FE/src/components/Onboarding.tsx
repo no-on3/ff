@@ -15,9 +15,9 @@ const Onboarding: React.FC = () => {
 
   if (!login) {
     return (
-      <div className="container mx-auto px-4 py-8 max-w-2xl">
+      <div className="page max-w-2xl">
         <div className="card">
-          <h1 className="text-2xl font-bold mb-4">New account</h1>
+          <h1 className="mb-4">New account</h1>
           <p>Development mode acts as one account, without a user. Accounts are created by a logged-in user: see "Log in with Keycloak" in the getting-started guide.</p>
         </div>
       </div>
@@ -41,9 +41,9 @@ const Onboarding: React.FC = () => {
   };
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-2xl">
+    <div className="page max-w-2xl">
       <div className="card">
-        <h1 className="text-2xl font-bold mb-2">{first ? 'Create your account' : 'New account'}</h1>
+        <h1 className="mb-2">{first ? 'Create your account' : 'New account'}</h1>
         <p className="text-gray-600 mb-6">
           An account holds functions and API keys, and you are its owner. During the beta, we approve each new account before it
           can deploy.

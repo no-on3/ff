@@ -23,14 +23,15 @@ import {
 import { apiErrorMessage } from '../lib/functions';
 import { can } from '../lib/session';
 import { Alarm, AlarmState, Function, alarmsApi, functionsApi } from '../services/api';
+import StatusPill from './StatusPill';
 import { useSession } from '../session/session';
 
-const TONE = { ok: 'bg-green-100 text-green-800', alarm: 'bg-red-100 text-red-800', unknown: 'bg-gray-200 text-gray-700' } as const;
+const TONE = { ok: 'ok', alarm: 'failed', unknown: 'idle' } as const;
 /** How often the list is read again: alarms are judged every minute. */
 const REFRESH_MS = 20_000;
 
 export const StateBadge: React.FC<{ state: AlarmState }> = ({ state }) => (
-  <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${TONE[STATE_INFO[state].tone]}`}>{STATE_INFO[state].label}</span>
+  <StatusPill tone={TONE[STATE_INFO[state].tone]} label={STATE_INFO[state].label} />
 );
 
 const Field: React.FC<{ id: string; label: string; hint?: string; children: React.ReactNode }> = ({ id, label, hint, children }) => (
@@ -70,7 +71,7 @@ const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functio
 
   return (
     <form onSubmit={save} className="card mb-6 space-y-4" aria-label={editing ? `Change ${editing.name}` : 'New alarm'}>
-      <h2 className="text-lg font-semibold">{editing ? `Change "${editing.name}"` : 'New alarm'}</h2>
+      <h2 className="text-[15px] leading-6 font-semibold text-ink">{editing ? `Change "${editing.name}"` : 'New alarm'}</h2>
       <div className="grid gap-4 md:grid-cols-2">
         <Field id="alarm-name" label="Name">
           <input id="alarm-name" className="input" maxLength={100} value={form.name} onChange={(e) => set({ name: e.target.value })} />
@@ -244,9 +245,9 @@ const Alarms: React.FC = () => {
   };
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-5xl">
+    <div className="page max-w-5xl">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Alarms</h1>
+        <h1>Alarms</h1>
         {writer && !editing && (
           <button type="button" className="btn btn-primary" onClick={() => setEditing({ alarm: null, form: emptyForm() })}>
             New alarm
