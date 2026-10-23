@@ -1131,6 +1131,34 @@ http PUT "/functions/$failing_fn/event-invoke-config" "$(jq -cn --arg arn "arn:a
 check "  ... never another account's queue" "400 destinationConfig.onFailure.destination must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$tenant:e2e-cli-orders" \
   "$(status) $(jq -r .message "$work/body")"
 http DELETE "/functions/$failing_fn" >/dev/null
+# FF's API beside the endpoint: the same queues, through SQS's own operations.
+api_queue="$(http POST /queues '{"name": "e2e-api-orders", "visibilityTimeout": 45}')"
+check "FF's API makes a queue, its URL under the endpoint, which the AWS CLI finds" \
+  "201 $sqs_endpoint/$tenant/e2e-api-orders 45 $sqs_endpoint/$tenant/e2e-api-orders" \
+  "$(status) $(jq -r '"\(.url) \(.visibilityTimeout)"' <<<"$api_queue") $(aws_sqs get-queue-url --queue-name e2e-api-orders --query QueueUrl --output text)"
+api_url="$sqs_endpoint/$tenant/e2e-api-orders"
+http POST /queues/e2e-api-orders/messages '{"body": "from the API", "attributes": {"via": {"dataType": "String", "stringValue": "api"}}}' >/dev/null
+check "  ... sends a message the AWS CLI receives, with its attribute" "201 from the API api" \
+  "$(status) $(aws_sqs receive-message --queue-url "$api_url" --message-attribute-names All --query 'Messages[0].[Body, MessageAttributes.via.StringValue]' --output text | tr '\t' ' ')"
+check "  ... and counts it in flight, hidden for the queue's 45 s" "0 1 0" "$(http GET /queues/e2e-api-orders | jq -r '"\(.messages.available) \(.messages.inFlight) \(.messages.delayed)"')"
+aws_sqs send-message --queue-url "$api_url" --message-body 'from the CLI' >/dev/null
+api_received="$(http POST /queues/e2e-api-orders/receive '{"maxMessages": 10}')"
+check "  ... receives what the CLI sent, its sender the CLI's key, and deletes it by its handle" "200 from the CLI $queue_key_id 204" \
+  "$(status) $(jq -r '.[0] | "\(.body) \(.senderId)"' <<<"$api_received") $(http DELETE "/queues/e2e-api-orders/messages/$(jq -r '.[0].receiptHandle' <<<"$api_received")" >/dev/null; status)"
+http POST /queues '{"name": "e2e-api-orders"}' >/dev/null
+check "  ... refuses a name the account has" '409 The account has a queue named "e2e-api-orders" already' "$(status) $(jq -r .message "$work/body")"
+# A key that names a queue reaches it alone.
+named_key="$(http POST /storage-keys '{"queues": ["e2e-api-orders"]}')"
+named_sqs() { AWS_KEY="$(jq -r .id <<<"$named_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$named_key")" "$@"; }
+check "a key that names a queue lists it alone, and is refused another, AccessDenied" "201 e2e-api-orders $api_url refused AccessDenied" \
+  "$(status) $(jq -r '.queues | join(",")' <<<"$named_key") $(named_sqs aws_sqs list-queues --query 'QueueUrls' --output text) $(named_sqs outcome_sqs aws_sqs get-queue-url --queue-name e2e-fn-records)"
+http DELETE "/storage-keys/$(jq -r .id <<<"$named_key")" >/dev/null
+http POST /queues/e2e-api-orders/purge >/dev/null
+check "FF's API purges a queue, and deletes it, which the CLI then doesn't find" "204 0 204 refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$(status) $(http GET /queues/e2e-api-orders | jq -r .sizeBytes) $(http DELETE /queues/e2e-api-orders >/dev/null; status) $(outcome_sqs aws_sqs get-queue-url --queue-name e2e-api-orders)"
+check "the audit log names each change of a queue, whichever way it came: the CLI's under its access key, the API's as its caller" \
+  "queue.create access_key:$queue_key_id|queue.create dev|queue.purge dev|queue.delete dev" \
+  "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
 for queue in e2e-cli-orders e2e-fn-orders e2e-fn-records; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
 as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
 check "the queues deleted, their messages with them" "0 0" \

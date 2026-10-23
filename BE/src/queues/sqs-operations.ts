@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { AuditAction, AuditService } from '../audit/audit.service';
+import { Actor } from '../common/request-context';
 import { PlanView } from '../plans/plan-limits';
+import { KeyNames, reachesQueue } from '../storage/key-reach';
 import { CustomerQueues, MessageMeta, Outgoing, Received } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueStore } from './queue-store';
@@ -29,6 +32,11 @@ export interface Caller {
   signal?: AbortSignal;
   /** The endpoint the caller reached, which the queues' URLs answered to it begin with; FF_SQS_BASE when none is given. */
   endpoint?: string;
+  /** What the caller's key names of the account's; none for a caller that reaches every queue, as FF's API does. */
+  reach?: KeyNames;
+  /** Who the audit log names for the caller's changes, and from where; by default, the request's caller, as FF's API's. */
+  actor?: Actor;
+  ip?: string;
 }
 
 type Input = Record<string, unknown>;
@@ -103,9 +111,15 @@ export class SqsOperations {
     private readonly queues: CustomerQueues,
     private readonly store: QueueStore,
     private readonly events: QueueEvents,
+    private readonly audit: AuditService,
     private readonly base: string,
     private readonly region: string,
   ) {}
+
+  /** A change of a queue, in the audit log, whichever way it came. */
+  private record(caller: Caller, action: AuditAction, queue: string, details?: Record<string, unknown>): Promise<void> {
+    return this.audit.record({ accountId: caller.accountId, action, resource: `queue:${queue}`, ...(details ? { details } : {}), ...(caller.actor ? { actor: caller.actor } : {}), ...(caller.ip ? { ip: caller.ip } : {}) });
+  }
 
   /** The operation's answer, by SQS's name for it. */
   async run(operation: string, input: Input, caller: Caller): Promise<Output> {
@@ -127,15 +141,21 @@ export class SqsOperations {
     SetQueueAttributes: async (input, caller) => {
       const queue = await this.queueOf(input, caller);
       if (input.Attributes === undefined) throw missingParameter('Attributes');
-      await this.queues.setAttributes(queue, settingsOf(input.Attributes, this.region, caller.accountId), this.region);
+      const settings = settingsOf(input.Attributes, this.region, caller.accountId);
+      await this.queues.setAttributes(queue, settings, this.region);
+      await this.record(caller, 'queue.update', queue.name, { attributes: settings });
       return {};
     },
     DeleteQueue: async (input, caller) => {
-      await this.queues.delete(await this.queueOf(input, caller));
+      const queue = await this.queueOf(input, caller);
+      await this.queues.delete(queue);
+      await this.record(caller, 'queue.delete', queue.name);
       return {};
     },
     PurgeQueue: async (input, caller) => {
-      await this.queues.purge(await this.queueOf(input, caller));
+      const queue = await this.queueOf(input, caller);
+      await this.queues.purge(queue);
+      await this.record(caller, 'queue.purge', queue.name);
       return {};
     },
     SendMessage: (input, caller) => this.sendMessage(input, caller),
@@ -184,16 +204,26 @@ export class SqsOperations {
     }
     const match = /^\/(\d{12})\/([A-Za-z0-9_-]{1,80})\/?$/.exec(path);
     if (!match || match[1] !== caller.accountId) throw queueDoesNotExist();
+    this.reach(caller, match[2], url);
     const queue = await this.queues.find(caller.accountId, match[2]);
     if (!queue) throw queueDoesNotExist();
     return queue;
   }
 
+  /** A queue the caller's key doesn't name, as IAM refuses one: before it is looked for, whether it is there or not. */
+  private reach(caller: Caller, name: string, resource: string): void {
+    if (caller.reach && !reachesQueue(caller.reach, name)) {
+      throw accessDenied(`Access to the resource ${resource} is denied: the access key names the queues it reaches, and not this one.`);
+    }
+  }
+
   private async createQueue(input: Input, caller: Caller): Promise<Output> {
     const name = checkQueueName(input.QueueName);
+    this.reach(caller, name, this.urlOf({ accountId: caller.accountId, name }, caller.endpoint));
     if (input.tags !== undefined && Object.keys(input.tags as object).length > 0) throw invalidParameter("FF's queues have no tags yet.");
     const settings = settingsOf(input.Attributes, this.region, caller.accountId);
-    const queue = await this.queues.create(caller.accountId, name, settings, { limit: caller.plan.limits.queues, name: caller.plan.name }, this.region);
+    const { queue, created } = await this.queues.create(caller.accountId, name, settings, { limit: caller.plan.limits.queues, name: caller.plan.name }, this.region);
+    if (created) await this.record(caller, 'queue.create', queue.name, { attributes: settings });
     return { QueueUrl: this.urlOf(queue, caller.endpoint) };
   }
 
@@ -202,6 +232,7 @@ export class SqsOperations {
     if (!name) throw missingParameter('QueueName');
     const owner = text(input, 'QueueOwnerAWSAccountId');
     if (owner !== undefined && owner !== caller.accountId) throw queueDoesNotExist();
+    this.reach(caller, name, this.urlOf({ accountId: caller.accountId, name }, caller.endpoint));
     const queue = await this.queues.find(caller.accountId, name);
     if (!queue) throw queueDoesNotExist();
     return { QueueUrl: this.urlOf(queue, caller.endpoint) };
@@ -210,8 +241,10 @@ export class SqsOperations {
   private async listQueues(input: Input, caller: Caller): Promise<Output> {
     const max = integer(input, 'MaxResults', 1, 1000, 1000);
     const page = await this.queues.list(caller.accountId, text(input, 'QueueNamePrefix') ?? '', max, text(input, 'NextToken'));
+    // A key that names its queues lists those alone.
+    const reached = page.queues.filter((queue) => !caller.reach || reachesQueue(caller.reach, queue.name));
     return {
-      ...(page.queues.length ? { QueueUrls: page.queues.map((queue) => this.urlOf(queue, caller.endpoint)) } : {}),
+      ...(reached.length ? { QueueUrls: reached.map((queue) => this.urlOf(queue, caller.endpoint)) } : {}),
       ...(page.nextToken ? { NextToken: page.nextToken } : {}),
     };
   }

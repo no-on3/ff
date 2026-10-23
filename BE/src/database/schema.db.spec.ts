@@ -62,6 +62,7 @@ const FUNCTION_KEYS = migrationNames.find((name) => name.startsWith('FunctionKey
 const QUEUE_LIMITS = migrationNames.find((name) => name.startsWith('QueueLimits')) as string;
 const EVENT_INVOKE_CONFIGS = migrationNames.find((name) => name.startsWith('EventInvokeConfigs')) as string;
 const CUSTOMER_QUEUES = migrationNames.find((name) => name.startsWith('CustomerQueues')) as string;
+const ASYNC_NOTIFY = migrationNames.find((name) => name.startsWith('AsyncNotify')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -479,6 +480,29 @@ run('database schema (L2, real PostgreSQL)', () => {
       await migrateDownTo(dataSource, CUSTOMER_QUEUES);
       expect(await heard()).toEqual([`ff_queue ${orders}`, `ff_queue ${own}`]);
 
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the key-queues migration gives each key the queues it names, none for a key made before it, and reverts revoking a key that named queues alone, which would reach every bucket", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, ASYNC_NOTIFY);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO storage_keys (id, account_id, secret, buckets) VALUES ('AKFFAAAAAAAAAAAAAAAA', $1, '{}', '{photos}')`, [ACCOUNT]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT buckets, queues FROM storage_keys`)).toEqual([{ buckets: ['photos'], queues: null }]);
+      await dataSource.query(`INSERT INTO storage_keys (id, account_id, secret, queues) VALUES ('AKFFBBBBBBBBBBBBBBBB', $1, '{}', '{orders}')`, [ACCOUNT]);
+
+      await migrateDownTo(dataSource, ASYNC_NOTIFY);
+
+      expect(await dataSource.query(`SELECT id, buckets, revoked_at IS NOT NULL AS revoked FROM storage_keys ORDER BY id`)).toEqual([
+        { id: 'AKFFAAAAAAAAAAAAAAAA', buckets: ['photos'], revoked: false },
+        { id: 'AKFFBBBBBBBBBBBBBBBB', buckets: null, revoked: true },
+      ]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

@@ -5,6 +5,7 @@ import { ThrottlerStorage } from '@nestjs/throttler';
 import { createServer, request as httpRequest } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
+import { AuditService } from '../audit/audit.service';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { onePlan, plan } from '../plans/test-fixtures';
@@ -15,9 +16,10 @@ import { QueueStore } from './queue-store';
 import { Queue, QueueKind } from './queue.entity';
 import { DEFAULT_SETTINGS } from './sqs-attributes';
 import { SqsFrontDoor } from './sqs-front-door';
+import { SqsOperations } from './sqs-operations';
 
 const BASE = 'http://localhost:3003';
-const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, readOnly: false, secret: 'a'.repeat(40) };
+const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, queues: null, readOnly: false, secret: 'a'.repeat(40) };
 const OTHERS: ActiveKey = { ...KEY, id: 'AKFFCCCCCCCCCCCCCCCC', accountId: '000000000002' };
 const URL_ = `${BASE}/${KEY.accountId}/orders`;
 const ORDERS: Queue = Object.assign(new Queue(), {
@@ -70,9 +72,14 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     new SqsFrontDoor(
       new ConfigService({ sqs }),
       directory,
-      queues as unknown as CustomerQueues,
-      { accountBytes: async () => 0 } as unknown as QueueStore,
-      events as unknown as QueueEvents,
+      new SqsOperations(
+        queues as unknown as CustomerQueues,
+        { accountBytes: async () => 0 } as unknown as QueueStore,
+        events as unknown as QueueEvents,
+        { record: async () => undefined } as unknown as AuditService,
+        sqs.base,
+        sqs.region,
+      ),
       onePlan(),
       credit,
       throttler,

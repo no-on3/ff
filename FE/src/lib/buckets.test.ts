@@ -25,6 +25,7 @@ describe('an access key', () => {
   const key: CreatedStorageKey = {
     id: 'AKFF7Q2MLKX4RTZB3W5N',
     buckets: ['photos'],
+    queues: null,
     readOnly: true,
     createdAt: '2026-10-23T06:36:00.000Z',
     lastUsedAt: null,
@@ -33,8 +34,13 @@ describe('an access key', () => {
     region: 'tn-tunis-1',
   };
 
-  it('says what it reaches', () => {
-    expect([keyReach(key), keyReach({ buckets: null, readOnly: false })]).toEqual(['photos, read-only', 'Every bucket']);
+  it('says what it reaches: every bucket and queue when it names neither, else those it names', () => {
+    expect([
+      keyReach(key),
+      keyReach({ buckets: null, queues: null, readOnly: false }),
+      keyReach({ buckets: null, queues: ['orders'], readOnly: false }),
+      keyReach({ buckets: ['photos'], queues: ['orders', 'invoices'], readOnly: true }),
+    ]).toEqual(['Buckets photos, read-only', 'Every bucket and queue', 'Queues orders', 'Buckets photos; queues orders, invoices, read-only']);
   });
 
   it("gives the four variables AWS's SDKs and CLI read, as shell lines too", () => {

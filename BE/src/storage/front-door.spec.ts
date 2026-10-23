@@ -30,10 +30,12 @@ import { StorageRequestCountsService } from './storage-request-counts.service';
 
 const STORE_KEY = 'storekey';
 const STORE_SECRET = 'store-secret';
-const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, readOnly: false, secret: 'a'.repeat(40) };
+const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, queues: null, readOnly: false, secret: 'a'.repeat(40) };
 const READ_ONLY: ActiveKey = { ...KEY, id: 'AKFFBBBBBBBBBBBBBBBB', readOnly: true };
 const OTHERS: ActiveKey = { ...KEY, id: 'AKFFCCCCCCCCCCCCCCCC', accountId: '000000000002' };
 const NARROW: ActiveKey = { ...KEY, id: 'AKFFDDDDDDDDDDDDDDDD', buckets: ['photos'] };
+/** A key that names queues alone: it reaches no bucket. */
+const QUEUES_ONLY: ActiveKey = { ...KEY, id: 'AKFFEEEEEEEEEEEEEEEE', queues: ['orders'] };
 const bucket = (name: string, accountId: string, storeName: string): Bucket =>
   Object.assign(new Bucket(), { id: `id-${name}`, accountId, name, storeName, status: BucketStatus.ACTIVE, createdAt: new Date('2026-10-23T06:00:00Z') });
 const BUCKETS = [bucket('photos', KEY.accountId, 'ff-000000000000000000000001'), bucket('exports', KEY.accountId, 'ff-000000000000000000000002'), bucket('theirs', OTHERS.accountId, 'ff-000000000000000000000003')];
@@ -113,7 +115,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   let endpoint: string;
   const seen: StoreRequestSeen[] = [];
   const counted: CountedRequest[] = [];
-  const keys = new Map([KEY, READ_ONLY, OTHERS, NARROW].map((key) => [key.id, key]));
+  const keys = new Map([KEY, READ_ONLY, OTHERS, NARROW, QUEUES_ONLY].map((key) => [key.id, key]));
   const directory = {
     key: async (id: string) => keys.get(id) ?? null,
     bucket: async (name: string) => BUCKETS.find((b) => b.name === name) ?? null,
@@ -242,23 +244,26 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   it("answers ListBuckets, GetBucketLocation and HeadBucket itself, from FF's own records", async () => {
     const listed = await client().send(new ListBucketsCommand({}));
     const narrow = await client(NARROW).send(new ListBucketsCommand({}));
+    const queuesOnly = await client(QUEUES_ONLY).send(new ListBucketsCommand({}));
     const location = await client().send(new GetBucketLocationCommand({ Bucket: 'photos' }));
     const head = await client().send(new HeadBucketCommand({ Bucket: 'photos' }));
 
     expect(listed.Buckets?.map((b) => b.Name)).toEqual(['photos', 'exports']);
     expect(narrow.Buckets?.map((b) => b.Name)).toEqual(['photos']);
+    expect(queuesOnly.Buckets ?? []).toEqual([]);
     expect(location.LocationConstraint).toBe('tn-tunis-1');
     expect(head.$metadata.httpStatusCode).toBe(200);
     expect(seen).toEqual([]);
   });
 
-  it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, another account's bucket, a bucket the key doesn't name, a write with a read-only key, none at all", async () => {
+  it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, another account's bucket, a bucket the key doesn't reach, a write with a read-only key, none at all", async () => {
     const get = new GetObjectCommand({ Bucket: 'photos', Key: 'range.txt' });
 
     expect(await refused(client(KEY, 'b'.repeat(40)).send(get))).toBe('403 SignatureDoesNotMatch');
     expect(await refused(client({ ...KEY, id: 'AKFFZZZZZZZZZZZZZZZZ' }).send(get))).toBe('403 InvalidAccessKeyId');
     expect(await refused(client().send(new GetObjectCommand({ Bucket: 'theirs', Key: 'x' })))).toBe('403 AccessDenied');
     expect(await refused(client(NARROW).send(new ListObjectsV2Command({ Bucket: 'exports' })))).toBe('403 AccessDenied');
+    expect(await refused(client(QUEUES_ONLY).send(new ListObjectsV2Command({ Bucket: 'photos' })))).toBe('403 AccessDenied');
     expect(await refused(client(READ_ONLY).send(new PutObjectCommand({ Bucket: 'photos', Key: 'x', Body: 'x' })))).toBe('403 AccessDenied');
     expect(await refused(client().send(new GetObjectCommand({ Bucket: 'nowhere', Key: 'x' })))).toBe('404 NoSuchBucket');
     expect(await refused(client().send(new PutBucketPolicyCommand({ Bucket: 'photos', Policy: '{}' })))).toBe('501 NotImplemented');

@@ -23,6 +23,7 @@ e2e_cleanups=()
 e2e_teardown=false
 passed=0
 mkdir -p "$work"
+: >"$work/ports-given"
 
 # The backend's settings, explicit so that BE/.env (read for any missing variable)
 # can't change the test. Callers add the port and the authentication mode.
@@ -140,8 +141,18 @@ http_at() {
 status() { cat "$work/status"; }
 # archived <path>: an object of the "functions" bucket, read through SeaweedFS's filer inside the s3 container.
 archived() { "${compose[@]}" exec -T s3 wget -qO- "http://127.0.0.1:8888/buckets/functions/$1" 2>/dev/null || true; }
-# A free port chosen by the OS, so the test never collides with other servers on the machine.
-free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
+# free_port: a free port chosen by the OS, so the test never collides with other servers on the machine, and none
+# this run was given before: the ports are all chosen before anything listens, and the OS may offer a port it just
+# offered again. A command substitution runs it in a subshell, so the ports given are kept in a file.
+free_port() {
+  local port
+  for _ in $(seq 1 20); do
+    port="$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"
+    grep -qx "$port" "$work/ports-given" 2>/dev/null || break
+  done
+  echo "$port" >>"$work/ports-given"
+  echo "$port"
+}
 # A random account (12 digits, ADR 0004), so runs never share a namespace.
 random_account() { node -e "console.log(String(require('crypto').randomInt(1e12)).padStart(12, '0'))"; }
 tenant_namespace() { printf 'ff-t-%s' "$(printf %s "$1" | sha256sum | cut -c1-12)"; }

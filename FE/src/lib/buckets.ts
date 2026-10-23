@@ -14,10 +14,11 @@ export function bucketNameProblem(name: string): string | null {
   return null;
 }
 
-/** What a key reaches, in words. */
-export function keyReach(key: Pick<StorageKey, 'buckets' | 'readOnly'>): string {
-  const buckets = key.buckets ? key.buckets.join(', ') : 'Every bucket';
-  return key.readOnly ? `${buckets}, read-only` : buckets;
+/** What a key reaches, in words: every bucket and queue of the account when it names neither, else those it names. */
+export function keyReach(key: Pick<StorageKey, 'buckets' | 'queues' | 'readOnly'>): string {
+  const named = [key.buckets && `buckets ${key.buckets.join(', ')}`, key.queues && `queues ${key.queues.join(', ')}`].filter(Boolean).join('; ');
+  const reach = named ? named.charAt(0).toUpperCase() + named.slice(1) : 'Every bucket and queue';
+  return key.readOnly ? `${reach}, read-only` : reach;
 }
 
 /** The variables AWS's SDKs and CLI read, for a key just made: to export in a shell, or set as a function's secrets. */

@@ -14,6 +14,8 @@ export const SCOPE_INFO: Record<Scope, string> = {
   'databases:write': 'Create and delete databases, and give them new passwords',
   'storage:read': "List and read buckets, and the account's access keys to them",
   'storage:write': "Create and delete buckets, and make and revoke the account's access keys to them",
+  'queues:read': 'List and read queues, with their attributes and messages counted',
+  'queues:write': 'Create, change, purge and delete queues, and send and receive their messages',
 };
 
 export type KeyState = 'active' | 'revoked' | 'expired';

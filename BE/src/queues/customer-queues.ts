@@ -75,8 +75,9 @@ export class CustomerQueues {
    * that name there is, when it has the same values for the attributes given,
    * as SQS's CreateQueue answers; else QueueNameExists, naming the first that
    * differs. Within the plan's queues, counted under the account's lock.
+   * Answers whether it was made now.
    */
-  create(accountId: string, name: string, settings: Partial<QueueSettings>, plan: { limit: number; name: string }, region: string): Promise<Queue> {
+  create(accountId: string, name: string, settings: Partial<QueueSettings>, plan: { limit: number; name: string }, region: string): Promise<{ queue: Queue; created: boolean }> {
     return this.dataSource.transaction(async (manager) => {
       await manager.query('SELECT 1 FROM "accounts" WHERE "id" = $1 FOR NO KEY UPDATE', [accountId]);
       const existing = await manager.findOneBy(Queue, { accountId, name, kind: QueueKind.CUSTOMER });
@@ -85,14 +86,15 @@ export class CustomerQueues {
         if (different) {
           throw new SqsError(400, 'QueueNameExists', `A queue already exists with the same name and a different value for attribute ${different}`, 'QueueAlreadyExists');
         }
-        return existing;
+        return { queue: existing, created: false };
       }
       if (settings.redrivePolicy) await this.checkDeadLetterQueue(manager, accountId, name, settings.redrivePolicy.deadLetterTargetArn, region);
       const count = await manager.countBy(Queue, { accountId, kind: QueueKind.CUSTOMER });
       if (count >= plan.limit) {
         throw overLimit(`The ${plan.name} plan allows ${plan.limit === 1 ? '1 queue' : `${plan.limit} queues`} per account: delete one first.`);
       }
-      return manager.save(Queue, manager.create(Queue, { accountId, name, kind: QueueKind.CUSTOMER, functionId: null, ...DEFAULT_SETTINGS, ...settings }));
+      const queue = await manager.save(Queue, manager.create(Queue, { accountId, name, kind: QueueKind.CUSTOMER, functionId: null, ...DEFAULT_SETTINGS, ...settings }));
+      return { queue, created: true };
     });
   }
 
@@ -135,6 +137,21 @@ export class CustomerQueues {
   /** Deletes every message of the queue. */
   async purge(queue: Queue): Promise<void> {
     await this.dataSource.query('DELETE FROM "queue_messages" WHERE "queue_id" = $1', [queue.id]);
+  }
+
+  /** Each queue of the account's counts, as counts() gives one's, by the queue's ID: a queue with no message has none. */
+  async countsOf(accountId: string, now: Date): Promise<Map<string, QueueCounts>> {
+    const rows = await this.dataSource.query<Array<{ queue_id: string; visible: string; not_visible: string; delayed: string }>>(
+      `SELECT m."queue_id",
+              count(*) FILTER (WHERE m."visible_at" <= $2) AS "visible",
+              count(*) FILTER (WHERE m."visible_at" > $2 AND m."receive_count" > 0) AS "not_visible",
+              count(*) FILTER (WHERE m."visible_at" > $2 AND m."receive_count" = 0) AS "delayed"
+         FROM "queue_messages" m JOIN "queues" q ON q."id" = m."queue_id"
+        WHERE q."account_id" = $1 AND q."kind" = 'customer' AND m."expires_at" > $2
+        GROUP BY m."queue_id"`,
+      [accountId, now],
+    );
+    return new Map(rows.map((row) => [row.queue_id, { visible: Number(row.visible), notVisible: Number(row.not_visible), delayed: Number(row.delayed) }]));
   }
 
   /** How many of its messages can be received now, are received and hidden, and wait for their delay, as SQS counts them, roughly. */

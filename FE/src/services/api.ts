@@ -810,6 +810,8 @@ export const SCOPES = [
   'databases:write',
   'storage:read',
   'storage:write',
+  'queues:read',
+  'queues:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 
@@ -1110,7 +1112,7 @@ export const databasesApi = {
 export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
 
 /** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
-export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
+export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'queues', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
 
 /** A bucket, as AWS S3 gives one, behind FF's S3 front door (ADR 0009). */
 export interface Bucket {
@@ -1147,8 +1149,10 @@ export interface BucketMetrics {
 export interface StorageKey {
   /** AWS_ACCESS_KEY_ID: AKFF and 16 characters. */
   id: string;
-  /** The buckets it reaches; null for all the account's. */
+  /** The buckets it names; null for none named. Naming neither buckets nor queues, it reaches all the account's. */
   buckets: string[] | null;
+  /** The queues it names; null for none named. */
+  queues: string[] | null;
   readOnly: boolean;
   createdAt: string;
   lastUsedAt: string | null;

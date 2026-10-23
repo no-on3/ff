@@ -56,6 +56,11 @@ export type AuditAction =
   | 'bucket.delete'
   | 'storage_key.create'
   | 'storage_key.delete'
+  // A customer's queue, made, changed, purged and deleted through FF's API or the SQS endpoint's (ADR 0010).
+  | 'queue.create'
+  | 'queue.update'
+  | 'queue.purge'
+  | 'queue.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

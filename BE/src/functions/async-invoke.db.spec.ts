@@ -354,7 +354,7 @@ run('asynchronous calls, in the database (L2)', () => {
 
   it("hands the record of a call that failed for good to a queue of the account, its body Lambda's record, in the transaction that deletes it", async () => {
     const orders = await newFunction();
-    const failed = await customerQueues.create(ACCOUNT, `failed-${++n}`, {}, { limit: 10, name: 'Beta' }, 'tn-tunis-1');
+    const { queue: failed } = await customerQueues.create(ACCOUNT, `failed-${++n}`, {}, { limit: 10, name: 'Beta' }, 'tn-tunis-1');
     await configs.put(ACCOUNT, orders.id, { maximumRetryAttempts: 0, destinationConfig: { onFailure: { destination: queueArn('tn-tunis-1', ACCOUNT, failed.name) } } });
     const requestId = uuid(850);
     await send(orders, requestId, '{"order":85}');

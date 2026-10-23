@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { AuditService } from '../audit/audit.service';
 import { plan } from '../plans/test-fixtures';
 import { CustomerQueues, Outgoing, Received } from './customer-queues';
 import { QueueEvents } from './queue-events';
@@ -44,7 +45,7 @@ function setup(options: { bytes?: number; receives?: Received[][] } = {}) {
   const receives = [...(options.receives ?? [])];
   const queues = {
     find: jest.fn(async (accountId: string, name: string) => (accountId === ACCOUNT && name === 'orders' ? ORDERS : null)),
-    create: jest.fn(async (accountId: string, name: string, settings: object) => Object.assign(new Queue(), { ...ORDERS, accountId, name, ...settings })),
+    create: jest.fn(async (accountId: string, name: string, settings: object) => ({ queue: Object.assign(new Queue(), { ...ORDERS, accountId, name, ...settings }), created: true })),
     setAttributes: jest.fn(async () => undefined),
     list: jest.fn(async () => ({ queues: [ORDERS] })),
     delete: jest.fn(async () => undefined),
@@ -57,8 +58,9 @@ function setup(options: { bytes?: number; receives?: Received[][] } = {}) {
   };
   const store = { accountBytes: jest.fn(async () => options.bytes ?? 0) };
   const events = { wait: jest.fn(async (): Promise<void> => undefined) };
-  const operations = new SqsOperations(queues as unknown as CustomerQueues, store as unknown as QueueStore, events as unknown as QueueEvents, BASE, REGION);
-  return { operations, queues, store, events, sent };
+  const audit = { record: jest.fn(async (_event: object): Promise<void> => undefined) };
+  const operations = new SqsOperations(queues as unknown as CustomerQueues, store as unknown as QueueStore, events as unknown as QueueEvents, audit as unknown as AuditService, BASE, REGION);
+  return { operations, queues, store, events, sent, audit };
 }
 
 const caller = (extra: Partial<Caller> = {}): Caller => ({ accountId: ACCOUNT, keyId: 'AKFFAAAAAAAAAAAAAAAA', readOnly: false, plan: plan(), ...extra });
@@ -308,6 +310,52 @@ describe("SQS's operations on an account's queues", () => {
       expect((await refusal(operations.run('ChangeMessageVisibility', { QueueUrl: URL_, ReceiptHandle: handle, VisibilityTimeout: 120 }, caller()))).type).toBe('MessageNotInflight');
       expect((await refusal(operations.run('ChangeMessageVisibility', { QueueUrl: URL_, ReceiptHandle: handle }, caller()))).type).toBe('MissingParameter');
     });
+  });
+
+  describe("a key's reach", () => {
+    const naming = (queues: string[] | null, buckets: string[] | null = null) => caller({ reach: { buckets, queues } });
+
+    it('lets a key that names queues reach those alone, refusing another before it is looked for, as IAM refuses one', async () => {
+      const { operations, queues } = setup();
+      const key = naming(['invoices']);
+      expect(await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x' }, key))).toMatchObject({
+        type: 'AccessDenied',
+        status: 403,
+        message: `Access to the resource ${URL_} is denied: the access key names the queues it reaches, and not this one.`,
+      });
+      expect(queues.find).not.toHaveBeenCalled();
+      expect((await refusal(operations.run('GetQueueUrl', { QueueName: 'orders' }, key))).type).toBe('AccessDenied');
+      expect((await refusal(operations.run('CreateQueue', { QueueName: 'orders' }, key))).type).toBe('AccessDenied');
+      await expect(operations.run('ListQueues', {}, key)).resolves.toEqual({});
+      await expect(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(['orders']))).resolves.toEqual({ QueueUrl: URL_ });
+    });
+
+    it('lets a key that names buckets alone reach no queue, and one that names neither every one', async () => {
+      const { operations } = setup();
+      expect((await refusal(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(null, ['photos'])))).type).toBe('AccessDenied');
+      await expect(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(null))).resolves.toEqual({ QueueUrl: URL_ });
+    });
+  });
+
+  it('writes each change of a queue in the audit log, as the caller given: made, changed, purged and deleted, but not made again', async () => {
+    const { operations, queues, audit } = setup();
+    const key = caller({ actor: { id: 'access_key:AKFFAAAAAAAAAAAAAAAA', label: 'access key AKFFAAAAAAAAAAAAAAAA' }, ip: '203.0.113.7' });
+
+    await operations.run('CreateQueue', { QueueName: 'invoices', Attributes: { DelaySeconds: '5' } }, key);
+    queues.create.mockResolvedValueOnce({ queue: ORDERS, created: false });
+    await operations.run('CreateQueue', { QueueName: 'orders' }, key);
+    await operations.run('SetQueueAttributes', { QueueUrl: URL_, Attributes: { VisibilityTimeout: '60' } }, key);
+    await operations.run('PurgeQueue', { QueueUrl: URL_ }, key);
+    await operations.run('DeleteQueue', { QueueUrl: URL_ }, caller());
+
+    const who = { actor: key.actor, ip: '203.0.113.7' };
+    expect(audit.record.mock.calls.map(([event]) => event)).toEqual([
+      { accountId: ACCOUNT, action: 'queue.create', resource: 'queue:invoices', details: { attributes: { delaySeconds: 5 } }, ...who },
+      { accountId: ACCOUNT, action: 'queue.update', resource: 'queue:orders', details: { attributes: { visibilityTimeout: 60 } }, ...who },
+      { accountId: ACCOUNT, action: 'queue.purge', resource: 'queue:orders', ...who },
+      // FF's API names no caller: the audit log takes its request's.
+      { accountId: ACCOUNT, action: 'queue.delete', resource: 'queue:orders' },
+    ]);
   });
 
   it("answers ListQueues' URLs, and GetQueueAttributes' counts", async () => {

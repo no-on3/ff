@@ -12,9 +12,6 @@ import { PlansService } from '../plans/plans.service';
 import { countQueueRequest } from '../plans/rate-limits';
 import { originForm } from '../storage/front-door';
 import { StorageDirectory } from '../storage/storage-directory.service';
-import { CustomerQueues } from './customer-queues';
-import { QueueEvents } from './queue-events';
-import { QueueStore } from './queue-store';
 import { SqsError, accessDenied, internalError, invalidClientTokenId, invalidParameter, missingAuthenticationToken, requestThrottled } from './sqs-error';
 import { Caller, SENDING_OPERATIONS, SqsOperations } from './sqs-operations';
 import { checkSqsSignature, readSqsSignature } from './sqs-signature';
@@ -58,17 +55,17 @@ function bodyOf(request: IncomingMessage, limit: number): Promise<Buffer> {
  * answers AWS's SDKs and CLI as Amazon SQS does, in its JSON protocol, with
  * only the endpoint changed: POST /, the operation in X-Amz-Target, signed
  * with Signature Version 4 for the service sqs by one of FF's access keys,
- * which reach the account's queues, a read-only one only reading them. Every
- * key is checked the same way as at the S3 front door: its account active,
- * its databases, buckets and queues on, the plan's queue requests per second;
- * sending, the account's credit too, while receiving and deleting go on.
+ * which reach the account's queues, or those they name, a read-only one only
+ * reading them. Every key is checked the same way as at the S3 front door:
+ * its account active, its databases, buckets and queues on, the plan's queue
+ * requests per second; sending, the account's credit too, while receiving
+ * and deleting go on.
  * Each answer carries its request ID, x-amzn-RequestId; each error SQS's two
  * names for it, the body's __type and the x-amzn-query-error header.
  */
 @Injectable()
 export class SqsFrontDoor implements OnModuleDestroy {
   private readonly logger = new Logger(SqsFrontDoor.name);
-  private readonly operations: SqsOperations;
   private server?: Server;
   /** Each request under way's way to end a long poll, should the server stop. */
   private readonly polls = new Set<AbortController>();
@@ -81,17 +78,14 @@ export class SqsFrontDoor implements OnModuleDestroy {
   constructor(
     config: ConfigService,
     private readonly directory: StorageDirectory,
-    queues: CustomerQueues,
-    store: QueueStore,
-    events: QueueEvents,
+    private readonly operations: SqsOperations,
     private readonly plans: PlansService,
     private readonly credit: CreditService,
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
   ) {
-    const sqs = config.getOrThrow<{ base: string; region: string; functionEndpoint?: string }>('sqs');
+    const sqs = config.getOrThrow<{ base: string; functionEndpoint?: string }>('sqs');
     this.base = sqs.base;
     this.functionEndpoint = { url: sqs.functionEndpoint ?? '', host: sqs.functionEndpoint ? new URL(sqs.functionEndpoint).host : '' };
-    this.operations = new SqsOperations(queues, store, events, sqs.base, sqs.region);
   }
 
   /** Starts answering on the port; main.ts calls it once the API listens. Port 0 takes any free one, as the tests do. */
@@ -179,7 +173,14 @@ export class SqsFrontDoor implements OnModuleDestroy {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalidParameter('The request body must be a JSON object.');
     const operation = target.slice(TARGET_PREFIX.length);
     const caller = await this.admit(key.accountId, key.id, key.readOnly, SENDING_OPERATIONS.has(operation), signal);
-    return this.operations.run(operation, input, { ...caller, endpoint: this.endpointOf(request) });
+    return this.operations.run(operation, input, {
+      ...caller,
+      endpoint: this.endpointOf(request),
+      reach: { buckets: key.buckets, queues: key.queues },
+      // Changes are the key's in the audit log, which a request here doesn't name otherwise.
+      actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` },
+      ip: request.socket.remoteAddress,
+    });
   }
 
   /**

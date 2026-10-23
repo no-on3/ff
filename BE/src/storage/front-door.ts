@@ -21,6 +21,7 @@ import { S3Error, accessDenied, accountProblem, errorDocument, internalError, in
 import { S3Address, S3Operation, addressOf, operationOf } from './s3-requests';
 import { RequestSignature, SigningChain, UNSIGNED_PAYLOAD, checkSignature, decodeEscapes, readSignature } from './sigv4';
 import { StoreClient } from './store-client';
+import { reachesBucket } from './key-reach';
 import { ActiveKey, StorageDirectory } from './storage-directory.service';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { listBucketsDocument, locationDocument, replacing } from './xml';
@@ -287,7 +288,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     const operation = operationOf(method, address, query, request.headers);
     if (operation.name === 'NotImplemented') throw notImplemented();
     if (operation.name === 'ListBuckets') {
-      const buckets = (await this.directory.bucketsOf(key.accountId)).filter((bucket) => !key.buckets || key.buckets.includes(bucket.name));
+      const buckets = (await this.directory.bucketsOf(key.accountId)).filter((bucket) => reachesBucket(key, bucket.name));
       return this.document(exchange, 200, listBucketsDocument(key.accountId, buckets, this.region));
     }
     const bucket = await this.bucketFor(address.bucket, key);
@@ -333,11 +334,11 @@ export class S3FrontDoor implements OnModuleDestroy {
     }
   }
 
-  /** The bucket of that name, if the key reaches it: none answers NoSuchBucket; another account's, or one the key doesn't name, AccessDenied, as S3 answers. */
+  /** The bucket of that name, if the key reaches it: none answers NoSuchBucket; another account's, or one the key doesn't reach, AccessDenied, as S3 answers. */
   private async bucketFor(name: string, key: ActiveKey): Promise<Bucket> {
     const bucket = name ? await this.directory.bucket(name) : null;
     if (!bucket) throw noSuchBucket();
-    if (bucket.accountId !== key.accountId || (key.buckets && !key.buckets.includes(bucket.name))) throw accessDenied();
+    if (bucket.accountId !== key.accountId || !reachesBucket(key, bucket.name)) throw accessDenied();
     return bucket;
   }
 

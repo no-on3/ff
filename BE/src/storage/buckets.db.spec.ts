@@ -158,17 +158,18 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
 
   it('gives an account two access keys at most, each secret shown once and sealed, opening for the front door alone, and revokes them', async () => {
     const first = await keys().create(ACCOUNT, {});
-    const second = await keys().create(ACCOUNT, { buckets: ['photos'], readOnly: true });
+    const second = await keys().create(ACCOUNT, { buckets: ['photos'], queues: ['orders'], readOnly: true });
 
     await expect(keys().create(ACCOUNT, {})).rejects.toThrow(ConflictException);
     expect(first).toMatchObject({ id: expect.stringMatching(/^AKFF[A-Z2-7]{16}$/), secretAccessKey: expect.stringMatching(/^[A-Za-z0-9+/]{40}$/), endpoint: 'https://s3.example.tn', region: 'tn-tunis-1' });
     expect(await keys().list(ACCOUNT)).toEqual([
-      { id: first.id, buckets: null, readOnly: false, createdAt: expect.any(Date), lastUsedAt: null },
-      { id: second.id, buckets: ['photos'], readOnly: true, createdAt: expect.any(Date), lastUsedAt: null },
+      { id: first.id, buckets: null, queues: null, readOnly: false, createdAt: expect.any(Date), lastUsedAt: null },
+      { id: second.id, buckets: ['photos'], queues: ['orders'], readOnly: true, createdAt: expect.any(Date), lastUsedAt: null },
     ]);
     const row = await db.dataSource.getRepository(StorageKey).findOneByOrFail({ id: first.id });
     expect(JSON.stringify(row.secret)).not.toContain(first.secretAccessKey);
-    expect(await directory.key(first.id)).toMatchObject({ accountId: ACCOUNT, secret: first.secretAccessKey, buckets: null, readOnly: false });
+    expect(await directory.key(first.id)).toMatchObject({ accountId: ACCOUNT, secret: first.secretAccessKey, buckets: null, queues: null, readOnly: false });
+    expect(await directory.key(second.id)).toMatchObject({ buckets: ['photos'], queues: ['orders'] });
 
     await expect(keys().revoke(OTHER, first.id)).rejects.toThrow(NotFoundException);
     await keys().revoke(ACCOUNT, first.id);

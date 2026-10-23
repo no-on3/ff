@@ -32,6 +32,9 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
+import { Principal } from '../auth/principal';
+import { AuditEntry } from '../audit/audit-entry.entity';
+import { AuditService } from '../audit/audit.service';
 import { CreditService } from '../billing/credit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
@@ -46,6 +49,8 @@ import { QueueEvents } from './queue-events';
 import { QueueStore } from './queue-store';
 import { Queue } from './queue.entity';
 import { SqsFrontDoor } from './sqs-front-door';
+import { QueuesService } from './queues.service';
+import { SqsOperations } from './sqs-operations';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '800000000001';
@@ -65,6 +70,10 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
   const key = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const reader = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const theirs = { id: newAccessKeyId(), secret: newSecretAccessKey() };
+  /** A key that names one queue, and one that names a bucket alone. */
+  const ordersOnly = { id: newAccessKeyId(), secret: newSecretAccessKey() };
+  const photosOnly = { id: newAccessKeyId(), secret: newSecretAccessKey() };
+  let api: QueuesService;
   const clients: SQSClient[] = [];
   /** A client as a customer's code makes one: its endpoint, its region and a key, nothing else. */
   const client = (credentials = key) => {
@@ -109,20 +118,31 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
       { id: key.id, accountId: ACCOUNT, secret: directory.sealSecret(key.id, key.secret) },
       { id: reader.id, accountId: ACCOUNT, readOnly: true, secret: directory.sealSecret(reader.id, reader.secret) },
       { id: theirs.id, accountId: OTHER, secret: directory.sealSecret(theirs.id, theirs.secret) },
+      { id: ordersOnly.id, accountId: ACCOUNT, queues: ['orders'], secret: directory.sealSecret(ordersOnly.id, ordersOnly.secret) },
+      { id: photosOnly.id, accountId: ACCOUNT, buckets: ['photos'], secret: directory.sealSecret(photosOnly.id, photosOnly.secret) },
     ]);
     events = new QueueEvents(db.dataSource);
     await events.onModuleInit();
     store = new QueueStore(db.dataSource);
+    const customerQueues = new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue));
+    const operations = new SqsOperations(customerQueues, store, events, new AuditService(db.dataSource.getRepository(AuditEntry)), BASE, REGION);
     // Every account on that plan, with credit, and as many requests a second as it sends: the checks of each have their own tests.
     frontDoor = new SqsFrontDoor(
       new ConfigService({ sqs: { base: BASE, region: REGION } }),
       directory,
-      new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue)),
-      store,
-      events,
+      operations,
       onePlan(PLAN),
       { admit: async () => undefined } as unknown as CreditService,
       { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) },
+    );
+    // FF's API over the same operations, as the module makes it.
+    api = new QueuesService(
+      operations,
+      customerQueues,
+      onePlan(PLAN),
+      { admit: async () => undefined } as unknown as CreditService,
+      directory,
+      new ConfigService({ sqs: { base: BASE, region: REGION } }),
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
     sqs = client();
@@ -379,6 +399,59 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
     });
   });
 
+  describe("FF's API, beside the endpoint", () => {
+    const owner: Principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'owner', userId: 'u-1' };
+
+    it('makes a queue that AWS\'s SDK finds, receives what the SDK sent with its attributes, and deletes it by its handle', async () => {
+      const made = await api.create(owner, { name: 'orders', visibilityTimeout: 45 });
+      expect(made).toMatchObject({ name: 'orders', url: `${BASE}/${ACCOUNT}/orders`, arn: `arn:aws:sqs:${REGION}:${ACCOUNT}:orders`, visibilityTimeout: 45 });
+      expect((await sqs.send(new GetQueueUrlCommand({ QueueName: 'orders' }))).QueueUrl).toBe(made.url);
+      await sqs.send(new SendMessageCommand({ QueueUrl: made.url, MessageBody: 'from the SDK', MessageAttributes: { item: { DataType: 'String', StringValue: 'harissa' } } }));
+      await api.send(owner, 'orders', { body: 'from the API', attributes: { size: { dataType: 'Number', stringValue: '2' } } });
+
+      expect((await api.get(ACCOUNT, 'orders')).messages).toEqual({ available: 2, inFlight: 0, delayed: 0 });
+      const received = await api.receive(owner, 'orders', { maxMessages: 10 });
+      expect(received.map((message) => [message.body, message.attributes, message.senderId, message.receiveCount])).toEqual([
+        ['from the SDK', { item: { dataType: 'String', stringValue: 'harissa' } }, key.id, 1],
+        ['from the API', { size: { dataType: 'Number', stringValue: '2' } }, 'user:u-1', 1],
+      ]);
+      expect((await api.list(ACCOUNT)).map((queue) => [queue.name, queue.messages])).toEqual([['orders', { available: 0, inFlight: 2, delayed: 0 }]]);
+      for (const message of received) await api.deleteMessage(owner, 'orders', message.receiptHandle);
+      expect((await api.get(ACCOUNT, 'orders')).messages).toEqual({ available: 0, inFlight: 0, delayed: 0 });
+    });
+
+    it("refuses a name the account has, a queue it hasn't, and changes, purges and deletes what the SDK sees", async () => {
+      await api.create(owner, { name: 'orders' });
+      await expect(api.create(owner, { name: 'orders' })).rejects.toThrow('The account has a queue named "orders" already');
+      await expect(api.get(ACCOUNT, 'invoices')).rejects.toThrow('The account has no queue named "invoices"');
+      await api.update(owner, 'orders', { delaySeconds: 3 });
+      const { Attributes } = await sqs.send(new GetQueueAttributesCommand({ QueueUrl: `${BASE}/${ACCOUNT}/orders`, AttributeNames: ['DelaySeconds'] }));
+      expect(Attributes).toEqual({ DelaySeconds: '3' });
+      await api.send(owner, 'orders', { body: 'to purge' });
+      await api.purge(owner, 'orders');
+      expect((await api.get(ACCOUNT, 'orders')).sizeBytes).toBe(0);
+      await api.remove(owner, 'orders');
+      expect((await failure(sqs.send(new GetQueueUrlCommand({ QueueName: 'orders' })))).name).toBe('QueueDoesNotExist');
+    });
+
+    it("writes each change in the audit log, an SDK's under its access key, from its address", async () => {
+      await sqs.send(new CreateQueueCommand({ QueueName: 'audited' }));
+      await sqs.send(new SetQueueAttributesCommand({ QueueUrl: `${BASE}/${ACCOUNT}/audited`, Attributes: { VisibilityTimeout: '90' } }));
+      await api.purge(owner, 'audited');
+      await sqs.send(new DeleteQueueCommand({ QueueUrl: `${BASE}/${ACCOUNT}/audited` }));
+
+      const entries = await db.dataSource.getRepository(AuditEntry).find({ where: { accountId: ACCOUNT, resource: 'queue:audited' }, order: { at: 'ASC' } });
+      expect(entries.map((entry) => [entry.action, entry.actor])).toEqual([
+        ['queue.create', `access_key:${key.id}`],
+        ['queue.update', `access_key:${key.id}`],
+        ['queue.purge', 'system'],
+        ['queue.delete', `access_key:${key.id}`],
+      ]);
+      expect(entries[0]).toMatchObject({ actorLabel: `access key ${key.id}`, ip: '127.0.0.1', details: { attributes: {} } });
+      expect(entries[1].details).toEqual({ attributes: { visibilityTimeout: 90 } });
+    });
+  });
+
   describe('keys', () => {
     it("lets a read-only key read and receive, but not send or delete", async () => {
       const QueueUrl = await newQueue();
@@ -399,6 +472,19 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
       expect((await failure(other.send(new SendMessageCommand({ QueueUrl, MessageBody: 'not yours' })))).name).toBe('QueueDoesNotExist');
       expect((await failure(other.send(new GetQueueUrlCommand({ QueueName: `queue-${n}`, QueueOwnerAWSAccountId: ACCOUNT })))).name).toBe('QueueDoesNotExist');
       expect((await failure(other.send(new GetQueueUrlCommand({ QueueName: `queue-${n}` })))).name).toBe('QueueDoesNotExist');
+    });
+
+    it('lets a key that names a queue reach it alone, list it alone, and a key that names a bucket alone reach none', async () => {
+      const ordersUrl = (await sqs.send(new CreateQueueCommand({ QueueName: 'orders' }))).QueueUrl as string;
+      const QueueUrl = await newQueue();
+      const named = client(ordersOnly);
+
+      await expect(named.send(new SendMessageCommand({ QueueUrl: ordersUrl, MessageBody: 'to the queue it names' }))).resolves.toHaveProperty('MessageId');
+      expect((await failure(named.send(new SendMessageCommand({ QueueUrl, MessageBody: 'not named' })))).name).toBe('AccessDenied');
+      expect((await failure(named.send(new CreateQueueCommand({ QueueName: 'another' })))).name).toBe('AccessDenied');
+      expect((await named.send(new ListQueuesCommand({}))).QueueUrls).toEqual([ordersUrl]);
+      expect((await failure(client(photosOnly).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).name).toBe('AccessDenied');
+      expect((await client(photosOnly).send(new ListQueuesCommand({}))).QueueUrls).toBeUndefined();
     });
 
     it('refuses a revoked key, as one it never knew', async () => {

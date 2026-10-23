@@ -291,6 +291,21 @@ check "  ... which its connection string reaches, over TLS, as its own user" "$(
   "$(data_db_psql "$conn_a" 'select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()')"
 as_a POST /buckets '{"name": "l5-photos-a"}' >/dev/null
 check "A makes a bucket" 201 "$(status)"
+as_a POST /queues '{"name": "l5-orders-a"}' >/dev/null
+check "A makes a queue" 201 "$(status)"
+as_a POST /queues/l5-orders-a/messages '{"body": "A'"'"'s own"}' >/dev/null
+check "  ... and sends it a message" 201 "$(status)"
+# kept_by <as_…> <queue>: the queue's name and its messages that can be received, as its own account reads them.
+kept_by() { "$1" GET "/queues/$2" | jq -r '"\(.name) \(.messages.available)"'; }
+# queue_body <route>: a body each queue route takes, so that only the queue's owner decides its answer.
+queue_body() {
+  case "$1" in
+    "PATCH /queues/{name}") echo '{"delaySeconds": 5}' ;;
+    "POST /queues/{name}/messages") echo '{"body": "not mine"}' ;;
+    POST*) echo '{}' ;;
+    *) echo '' ;;
+  esac
+}
 key_a="$(as_a POST /storage-keys '{}')"
 check "  ... and an access key to it, its secret in the answer" "201 true" "$(status) $(jq -r '.secretAccessKey | test("^[A-Za-z0-9+/]{40}$")' <<<"$key_a")"
 key_a_id="$(jq -r .id <<<"$key_a")"
@@ -322,7 +337,8 @@ path_for() {
   path="${path//\{domain\}/l5.example.tn}"
   path="${path//\{scheduleId\}/$missing}"
   path="${path//\{month\}/$(date -u +%Y-%m)}"
-  path="${path//\{name\}/l5-photos-a}" # a bucket's
+  path="${path//\{name\}/l5-photos-a}" # a bucket's, or a queue's
+  path="${path//\{receiptHandle\}/bm90LWEtaGFuZGxl}"
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
     case $name in
@@ -536,6 +552,24 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B gets 404 for A's bucket's metrics" '404 The account has no bucket l5-photos-a' "$(status) $(message)"
       check "  ... which A reads" "true 200" "$(as_a GET /buckets/l5-photos-a/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
       ;;
+    "GET /queues")
+      listed="$(as_b GET /queues | jq 'map(select(.name == "l5-orders-a")) | length')"
+      check "$route: B's list doesn't show A's queue" "200 0" "$(status) $listed"
+      ;;
+    "POST /queues")
+      as_b POST /queues '{"name": "l5-orders-b"}' >/dev/null
+      check "$route: B makes a queue of its own, which A's list doesn't show" "201 0" "$(status) $(as_a GET /queues | jq 'map(select(.name == "l5-orders-b")) | length')"
+      ;;
+    "GET /queues/{name}" | "PATCH /queues/{name}" | "DELETE /queues/{name}" | "POST /queues/{name}/purge" | "POST /queues/{name}/messages" | "POST /queues/{name}/receive")
+      as_b "$method" "${template/\{name\}/l5-orders-a}" "$(queue_body "$route")" >/dev/null
+      check "$route: B gets 404 for A's queue" '404 The account has no queue named "l5-orders-a"' "$(status) $(message)"
+      check "  ... which A still has, its message still there and not received" "l5-orders-a 1 200" "$(kept_by as_a l5-orders-a) $(status)"
+      ;;
+    "DELETE /queues/{name}/messages/{receiptHandle}")
+      as_b DELETE /queues/l5-orders-a/messages/bm90LWEtaGFuZGxl >/dev/null
+      check "$route: B gets 404 for A's queue's message" '404 The account has no queue named "l5-orders-a"' "$(status) $(message)"
+      check "  ... whose message A still has" "l5-orders-a 1 200" "$(kept_by as_a l5-orders-a) $(status)"
+      ;;
     "GET /storage-keys")
       listed="$(as_b GET /storage-keys | jq --arg id "$key_a_id" 'map(select(.id == $id)) | length')"
       check "$route: B's list doesn't show A's key" "200 0" "$(status) $listed"
@@ -693,12 +727,15 @@ check "  ... nor by its name, naming its owner" "refused AWS.SimpleQueueService.
   "$(sqs_with "$key_b_id" "$key_b_secret" get-queue-url --queue-name l5-orders --queue-owner-aws-account-id "$account_a" --query QueueUrl)"
 check "  ... nor purged, nor deleted: A's message is there still" "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue A's own" \
   "$(sqs_with "$key_b_id" "$key_b_secret" purge-queue --queue-url "$queue_a") $(sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_a") $(sqs_with "$key_a_id" "$key_a_secret" receive-message --queue-url "$queue_a" --query 'Messages[].Body')"
-check "ListQueues lists each key's own account's queues alone" "$queue_a $queue_b" \
-  "$(sqs_with "$key_a_id" "$key_a_secret" list-queues --query QueueUrls) $(sqs_with "$key_b_id" "$key_b_secret" list-queues --query QueueUrls)"
+# Each lists its own: this queue, and the one its account made through FF's API above.
+listed_by() { sqs_with "$1" "$2" list-queues --query QueueUrls | tr '\t' ' '; }
+check "ListQueues lists each key's own account's queues alone" \
+  "$queue_a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a $queue_b http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
+  "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
 sqs_with "$key_a_id" "$key_a_secret" delete-queue --queue-url "$queue_a" >/dev/null
 sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_b" >/dev/null
-check "each deletes its own queue" "None None" \
-  "$(sqs_with "$key_a_id" "$key_a_secret" list-queues --query QueueUrls) $(sqs_with "$key_b_id" "$key_b_secret" list-queues --query QueueUrls)"
+check "each deletes its own queue" "http://127.0.0.1:$sqs_port/$account_a/l5-orders-a http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
+  "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
 
 echo "== nobody authenticated, through the guard, on every route (${#routes[@]})"
 for route in "${routes[@]}"; do
@@ -797,6 +834,10 @@ db_1="$(jq -r .id <<<"$database_1")"
 conn_1="$(jq -r .connectionString <<<"$database_1")"
 as_user_1 POST /buckets '{"name": "l5-photos-1"}' >/dev/null
 check "account 1's owner makes a bucket" 201 "$(status)"
+as_user_1 POST /queues '{"name": "l5-orders-1"}' >/dev/null
+check "account 1's owner makes a queue" 201 "$(status)"
+as_user_1 POST /queues/l5-orders-1/messages '{"body": "account 1'"'"'s own"}' >/dev/null
+check "  ... and sends it a message" 201 "$(status)"
 key_1_s3="$(as_user_1 POST /storage-keys '{}')"
 check "  ... and an access key to it" 201 "$(status)"
 key_1_s3_id="$(jq -r .id <<<"$key_1_s3")"
@@ -957,6 +998,24 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2 gets 404 for account 1's bucket's metrics" '404 The account has no bucket l5-photos-1' "$(status) $(message)"
       check "  ... which account 1 reads" "true 200" "$(as_user_1 GET /buckets/l5-photos-1/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
       ;;
+    "GET /queues")
+      listed="$(as_user_2 GET /queues | jq 'map(select(.name == "l5-orders-1")) | length')"
+      check "$route: account 2's list doesn't show account 1's queue" "200 0" "$(status) $listed"
+      ;;
+    "POST /queues")
+      as_user_2 POST /queues '{"name": "l5-orders-2"}' >/dev/null
+      check "$route: account 2 makes a queue of its own, which account 1's list doesn't show" "201 0" "$(status) $(as_user_1 GET /queues | jq 'map(select(.name == "l5-orders-2")) | length')"
+      ;;
+    "GET /queues/{name}" | "PATCH /queues/{name}" | "DELETE /queues/{name}" | "POST /queues/{name}/purge" | "POST /queues/{name}/messages" | "POST /queues/{name}/receive")
+      as_user_2 "$method" "${template/\{name\}/l5-orders-1}" "$(queue_body "$route")" >/dev/null
+      check "$route: account 2 gets 404 for account 1's queue" '404 The account has no queue named "l5-orders-1"' "$(status) $(message)"
+      check "  ... which account 1 still has, its message still there and not received" "l5-orders-1 1 200" "$(kept_by as_user_1 l5-orders-1) $(status)"
+      ;;
+    "DELETE /queues/{name}/messages/{receiptHandle}")
+      as_user_2 DELETE /queues/l5-orders-1/messages/bm90LWEtaGFuZGxl >/dev/null
+      check "$route: account 2 gets 404 for account 1's queue's message" '404 The account has no queue named "l5-orders-1"' "$(status) $(message)"
+      check "  ... whose message account 1 still has" "l5-orders-1 1 200" "$(kept_by as_user_1 l5-orders-1) $(status)"
+      ;;
     "GET /storage-keys")
       listed="$(as_user_2 GET /storage-keys | jq --arg id "$key_1_s3_id" 'map(select(.id == $id)) | length')"
       check "$route: account 2's list doesn't show account 1's key" "200 0" "$(status) $listed"
@@ -1105,6 +1164,10 @@ with_token "$key_1" GET /buckets >/dev/null
 check "a key without storage:read can't list the account's buckets" "403 This API key lacks the scope storage:read" "$(status) $(message)"
 with_token "$key_1" POST /buckets '{"name": "l5-by-key"}' >/dev/null
 check "nor make one without storage:write" "403 This API key lacks the scope storage:write" "$(status) $(message)"
+with_token "$key_1" GET /queues >/dev/null
+check "a key without queues:read can't list the account's queues" "403 This API key lacks the scope queues:read" "$(status) $(message)"
+with_token "$key_1" POST /queues/l5-orders-1/messages '{"body": "by key"}' >/dev/null
+check "nor send to one without queues:write" "403 This API key lacks the scope queues:write" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 me_key="$(with_token "$key_1" GET /me)"
@@ -1209,7 +1272,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create queue.create storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
