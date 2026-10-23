@@ -56,15 +56,19 @@ describe('EventInvokeConfigService: a function\'s settings for its asynchronous 
     });
   });
 
-  it("takes another function of the account as a destination, by its ARN, $LATEST or not", async () => {
+  it("takes another function of the account as a destination, by its ARN, $LATEST or not, or by its name, and keeps its ARN", async () => {
     const view = await service.put(ACCOUNT, 'fn-1', { destinationConfig: { onSuccess: { destination: arn('failed-orders') }, onFailure: { destination: `${arn('failed-orders')}:$LATEST` } } });
+    const byName = await service.put(ACCOUNT, 'fn-1', { destinationConfig: { onFailure: { destination: 'failed-orders' } } });
 
     expect(view.destinationConfig).toEqual({ onSuccess: { destination: arn('failed-orders') }, onFailure: { destination: arn('failed-orders') } });
+    expect(byName.destinationConfig).toEqual({ onSuccess: {}, onFailure: { destination: arn('failed-orders') } });
     expect(functions.findAll).toHaveBeenCalledWith(ACCOUNT, 'failed-orders');
   });
 
   it("refuses a destination that is no function of the account, saying what it must be", async () => {
-    expect(await refusal('failed-orders')).toBe(`destinationConfig.onFailure.destination must be the ARN of a function of the account, as Lambda's: ${arn('<name>')}`);
+    expect(await refusal('failed orders')).toBe(
+      `destinationConfig.onFailure.destination must be another function of the account: its name, or its ARN, as Lambda's: ${arn('<name>')}`,
+    );
     expect(await refusal(`arn:aws:sqs:tn-tunis-1:${ACCOUNT}:failed`)).toBe(
       "destinationConfig.onFailure.destination: a queue becomes a destination with FF's queues; for now, name another function of the account",
     );
@@ -72,6 +76,7 @@ describe('EventInvokeConfigService: a function\'s settings for its asynchronous 
     expect(await refusal(arn('failed-orders', ACCOUNT, 'eu-west-3'))).toBe(`destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: ${arn('failed-orders')}`);
     expect(await refusal(arn('orders'))).toBe("destinationConfig.onFailure.destination: a function can't be its own destination, as each record would call it again");
     expect(await refusal(arn('missing'))).toBe('destinationConfig.onFailure.destination: the account has no function named "missing"');
+    expect(await refusal('orders')).toBe("destinationConfig.onFailure.destination: a function can't be its own destination, as each record would call it again");
     expect([configs.save.mock.calls.length, audit.record.mock.calls.length]).toEqual([0, 0]);
   });
 

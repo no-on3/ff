@@ -32,7 +32,7 @@ export class EventInvokeConfigController {
     summary: "Set the function's settings for its asynchronous calls",
     description:
       "As AWS Lambda's PutFunctionEventInvokeConfig, they are replaced whole: what is left out goes back to Lambda's default (2 retries, 6 hours, " +
-      "no destination). A destination is another function of the account, by its ARN; it gets the call's record, Lambda's, as an asynchronous " +
+      "no destination). A destination is another function of the account, by its ARN or its name; it gets the call's record, Lambda's, as an asynchronous " +
       'call of its own: onSuccess once the call succeeded, onFailure once its retries are used up or it is too old. Calls waiting already follow the new settings.',
   })
   @ApiResponse({ status: 200, type: EventInvokeConfigView })

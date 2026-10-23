@@ -398,6 +398,23 @@ fn history_lists_the_calls_with_their_request_ids() {
 }
 
 #[test]
+fn history_as_json_gives_each_call_as_the_api_keeps_it_its_event_included() {
+    let page = json!({ "invocations": [invocation()], "total": 1 });
+    let api = Server::start(vec![Reply::json(200, json!([function(CODE)])), Reply::json(200, page)]);
+
+    let out = ff(&with_key(&api.url))
+        .args(["history", "hello", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let listed: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!((&listed["invocations"][0]["input"], &listed["total"]), (&json!({ "name": "Tunis" }), &json!(1)));
+}
+
+#[test]
 fn scale_sets_what_it_is_given() {
     let api = Server::start(vec![
         Reply::json(200, json!([function(CODE)])),

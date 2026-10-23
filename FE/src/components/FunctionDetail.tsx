@@ -30,6 +30,7 @@ import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
 import { EnvironmentTab } from './FunctionEnvironment';
 import { FunctionUrlTab } from './FunctionUrl';
 import { FunctionSchedules } from './FunctionSchedules';
+import { FunctionAsyncSettings } from './FunctionAsyncSettings';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
 import Icon from './Icon';
@@ -429,6 +430,8 @@ const FunctionDetail: React.FC = () => {
               </Callout>
             )}
           </Panel>
+
+          <FunctionAsyncSettings func={func} mayChange={mayChange} />
 
           <Panel
             flush

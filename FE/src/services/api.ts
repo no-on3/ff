@@ -226,6 +226,31 @@ export const domainsApi = {
   remove: (functionId: string, domain: string) => api.delete(`/functions/${functionId}/url/domains/${encodeURIComponent(domain)}`),
 };
 
+/**
+ * A function's settings for its calls that don't wait, as AWS Lambda's
+ * EventInvokeConfig: null values are Lambda's defaults. contract.test.ts checks
+ * the fields against the API's.
+ */
+export const EVENT_INVOKE_CONFIG_FIELDS = ['functionArn', 'maximumRetryAttempts', 'maximumEventAgeInSeconds', 'destinationConfig', 'lastModified'] as const satisfies ReadonlyArray<
+  keyof EventInvokeConfig
+>;
+export interface EventInvokeConfig {
+  functionArn: string;
+  maximumRetryAttempts: number | null;
+  maximumEventAgeInSeconds: number | null;
+  /** Each destination's ARN, another function of the account; none when it has none. */
+  destinationConfig: { onSuccess: { destination?: string }; onFailure: { destination?: string } };
+  lastModified: string;
+}
+
+/** GET, PUT and DELETE /functions/:id/event-invoke-config. GET answers 404 for a function without settings: its calls follow Lambda's defaults. */
+export const eventInvokeConfigApi = {
+  get: (functionId: string) => api.get<EventInvokeConfig>(`/functions/${functionId}/event-invoke-config`),
+  /** Replaced whole, as Lambda's PutFunctionEventInvokeConfig: what is left out goes back to Lambda's default. */
+  put: (functionId: string, body: Record<string, unknown>) => api.put<EventInvokeConfig>(`/functions/${functionId}/event-invoke-config`, body),
+  remove: (functionId: string) => api.delete(`/functions/${functionId}/event-invoke-config`),
+};
+
 /** A function's schedules, and an expression's next runs for the form's preview. */
 export const schedulesApi = {
   list: (functionId: string) => api.get<Schedule[]>(`/functions/${functionId}/schedules`),

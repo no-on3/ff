@@ -1,6 +1,7 @@
 //! One file per command.
 
 mod account;
+mod async_config;
 mod buckets;
 mod completion;
 mod config;
@@ -50,6 +51,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Deploy(args) => deploy::run(args, context),
         Command::Package(args) => package::run(args, context),
         Command::Invoke(args) => invoke::run(args, context),
+        Command::AsyncConfig(args) => async_config::run(args, context),
         Command::List => functions::list(context),
         Command::Get { name } => functions::get(&name, context),
         Command::Logs(args) => logs::run(args, context),

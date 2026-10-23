@@ -5,7 +5,8 @@ import { IsInt, IsOptional, IsString, Max, MaxLength, Min, ValidateNested } from
 export class DestinationDto {
   @ApiProperty({
     example: 'arn:aws:lambda:tn-tunis-1:000000000001:function:failed-orders',
-    description: "Another function of the account, by its ARN, as Lambda's; it gets the call's record as an asynchronous call of its own",
+    description:
+      "Another function of the account, by its ARN, as Lambda's, or by its name, kept as its ARN; it gets the call's record as an asynchronous call of its own",
   })
   @IsString()
   @MaxLength(256)

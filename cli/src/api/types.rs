@@ -125,6 +125,9 @@ pub struct Invocation {
     pub duration: Option<f64>,
     #[serde(default)]
     pub memory_used: Option<f64>,
+    /// The event, as the history keeps it: up to 64 KiB of it, a string of its start when cut.
+    #[serde(default)]
+    pub input: serde_json::Value,
     #[serde(default)]
     pub output: serde_json::Value,
     #[serde(default)]

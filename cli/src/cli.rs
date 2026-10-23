@@ -181,6 +181,10 @@ pub enum Command {
     #[command(subcommand)]
     Schedule(ScheduleCommand),
 
+    /// A function's settings for its calls that don't wait: their retries, how long one is kept, and where each one's
+    /// record goes, as AWS Lambda's asynchronous invocation settings
+    AsyncConfig(AsyncConfigArgs),
+
     /// The account's PostgreSQL databases, as AWS RDS gives them
     #[command(subcommand)]
     Db(DbCommand),
@@ -363,6 +367,40 @@ pub struct InvokeArgs {
     /// With --http, a header of the request, "name: value", repeated
     #[arg(long = "header", short = 'H', requires = "http")]
     pub headers: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct AsyncConfigArgs {
+    /// The function's name
+    pub name: String,
+
+    /// How many times a call that fails is retried: 0, 1 or 2
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=2))]
+    pub retries: Option<u8>,
+
+    /// How long a call is kept at most, from 1m to 6h, such as 30m
+    #[arg(long)]
+    pub max_age: Option<String>,
+
+    /// Another function of the account, by name or ARN, which gets the record of each call that succeeds
+    #[arg(long, conflicts_with = "no_on_success")]
+    pub on_success: Option<String>,
+
+    /// No destination for the calls that succeed
+    #[arg(long)]
+    pub no_on_success: bool,
+
+    /// Another function of the account, by name or ARN, which gets the record of each call that fails for good
+    #[arg(long, conflicts_with = "no_on_failure")]
+    pub on_failure: Option<String>,
+
+    /// No destination for the calls that fail for good
+    #[arg(long)]
+    pub no_on_failure: bool,
+
+    /// Back to AWS Lambda's defaults: retried twice, kept 6 hours, no destination
+    #[arg(long, conflicts_with_all = ["retries", "max_age", "on_success", "no_on_success", "on_failure", "no_on_failure"])]
+    pub reset: bool,
 }
 
 #[derive(Args)]

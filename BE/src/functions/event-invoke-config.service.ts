@@ -10,6 +10,9 @@ import { FunctionEventInvokeConfig } from './entities/function-event-invoke-conf
 import { Function } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 
+/** A function's name, as AWS Lambda's rule has it: a destination given so is the account's function of that name. */
+const FUNCTION_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
 /** What the worker follows for a function's asynchronous calls: its retries and maximum age, and its destinations' ARNs. */
 export interface AsyncSettings {
   policy: RetryPolicy;
@@ -21,8 +24,9 @@ export interface AsyncSettings {
  * A function's settings for its asynchronous calls, as AWS Lambda's
  * EventInvokeConfig (ADR 0010): put whole, read, deleted, each change in the
  * audit log. A destination is another function of the account, in FF's
- * region, named by its ARN, which must exist when it is set; a function gone
- * since is a record not delivered, as Lambda's DestinationDeliveryFailures.
+ * region, named by its ARN as on Lambda, or by its name, and kept as its ARN;
+ * it must exist when it is set. A function gone since is a record not
+ * delivered, as Lambda's DestinationDeliveryFailures.
  */
 @Injectable()
 export class EventInvokeConfigService {
@@ -99,15 +103,18 @@ export class EventInvokeConfigService {
   }
 
   /** A destination's ARN, as kept: another function of the account, in FF's region, there now; null for none. */
-  private async destination(fn: Function, which: 'onSuccess' | 'onFailure', arn: string | undefined): Promise<string | null> {
-    if (arn === undefined) return null;
+  private async destination(fn: Function, which: 'onSuccess' | 'onFailure', given: string | undefined): Promise<string | null> {
+    if (given === undefined) return null;
     const field = `destinationConfig.${which}.destination`;
+    const arn = FUNCTION_NAME.test(given) ? this.arnOf({ accountId: fn.accountId, name: given }) : given;
     const named = parseFunctionArn(arn);
     if (!named) {
       if (arn.startsWith('arn:aws:sqs:')) {
         throw new BadRequestException(`${field}: a queue becomes a destination with FF's queues; for now, name another function of the account`);
       }
-      throw new BadRequestException(`${field} must be the ARN of a function of the account, as Lambda's: ${this.arnOf({ accountId: fn.accountId, name: '<name>' })}`);
+      throw new BadRequestException(
+        `${field} must be another function of the account: its name, or its ARN, as Lambda's: ${this.arnOf({ accountId: fn.accountId, name: '<name>' })}`,
+      );
     }
     if (named.region !== this.region || named.accountId !== fn.accountId) {
       throw new BadRequestException(`${field} must be a function of this account, in ${this.region}: ${this.arnOf({ accountId: fn.accountId, name: named.name })}`);

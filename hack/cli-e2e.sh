@@ -5,7 +5,8 @@
 #   a profile names, as hack/e2e.sh's requests do).
 # For examples/hello.ts and examples/hello.py: deploy, invoke, the handler's line in ff logs and
 # in ff logs --follow, an asynchronous call and a dry run, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
-# exit 5 with the call's ID, which the history shows; code that fails to load exits 4, and the
+# exit 5 with the call's ID, which the history shows, the Python one's calls that don't wait set
+# by ff async-config to go on to another function; code that fails to load exits 4, and the
 # function is kept, in ERROR, with its error. A second account finds none of the first's. Then
 # ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
@@ -177,6 +178,25 @@ check "a function that raises exits 5, with its error and the call's ID" "5 erro
   "$(code) $(err | head -1) $([ -n "$raised_id" ] && echo true || echo false)"
 ff history cli-raises --output json
 check "which the history shows, as ERROR" "$raised_id ERROR" "$(out | jq -r '"\(.invocations[0].id) \(.invocations[0].status)"')"
+# Its calls that don't wait: no retry, and another function, by name, gets the record of each that fails.
+ff deploy "$FF_REPO_ROOT/examples/hello.ts" --name cli-records
+ff async-config cli-raises --retries 0 --on-failure cli-records
+check "ff async-config sets no retry, and another function, by its name, as the destination of the calls that fail" \
+  "0 cli-raises: a call that fails is not retried, and kept 6 hours at most; one that fails for good to cli-records" "$(code) $(out)"
+ff invoke cli-raises --async --data '{"name": "error"}' --raw
+failed_id="$(out)"
+record=""
+for _ in $(seq 1 30); do
+  ff history cli-records --limit 5 --output json
+  record="$(out | jq -r --arg r "$failed_id" '[.invocations[] | select(.status == "COMPLETED" and .input.requestContext.requestId == $r)][0] | select(. != null) | .input | "\(.requestContext.condition) \(.responseContext.functionError) \(.responsePayload.errorType)"')"
+  [ -n "$record" ] && break
+  sleep 1
+done
+check "the call that failed goes on to cli-records at once, Lambda's record of it its event" "RetriesExhausted Unhandled ValueError" "$record"
+ff async-config cli-raises --reset
+check "--reset goes back to AWS Lambda's defaults" \
+  "0 cli-raises: a call that fails is retried twice, and kept 6 hours at most, going nowhere once it ends (AWS Lambda's defaults)" "$(code) $(out)"
+ff delete cli-records --yes
 ff deploy "$FF_REPO_ROOT/examples/slow.py" --name cli-slow --timeout 2
 ff invoke cli-slow --data '{"seconds": 5}'
 slow_id="$(err | sed -n 's/^request ID: //p')"
