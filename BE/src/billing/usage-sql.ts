@@ -1,3 +1,5 @@
+import type { ResourceUsage } from './rating';
+
 /**
  * How billed usage is summed in SQL (D7, D8): the same expressions for the
  * month's estimate (P-30) and the hourly rating (P-32), so the two never
@@ -24,3 +26,35 @@ export const SAMPLE_SUMS = [
   `sum(LEAST("instances", "min_instances")::bigint * "memory_mb" * 60000) AS "provisionedTimeMbMs"`,
   `sum(GREATEST("instances" - "min_instances", 0)::bigint * "memory_mb" * 60000) AS "reservedMbMs"`,
 ].join(', ');
+
+/** A database's or bucket's rated hours with one book, summed, as RESOURCE_SUMS selects them. */
+export interface ResourceRow {
+  resourceId: string;
+  kind: 'database' | 'bucket';
+  priceBookId: string;
+  byteHours: string;
+  hours: string;
+  tier1: string;
+  tier2: string;
+}
+
+/** Over resource_usage_hourly, grouped by "resource_id", "kind" and "price_book_id": the hourly rating's sums and the statement's alike. */
+export const RESOURCE_SUMS = [
+  `"resource_id" AS "resourceId"`,
+  `"kind"`,
+  `"price_book_id" AS "priceBookId"`,
+  `sum("byte_hours")::text AS "byteHours"`,
+  `sum("hours")::text AS "hours"`,
+  `sum("tier1_requests")::text AS "tier1"`,
+  `sum("tier2_requests")::text AS "tier2"`,
+].join(', ');
+
+/** The same, as the rater takes them. */
+export const resourceUsage = (row: ResourceRow): ResourceUsage => ({
+  resourceId: row.resourceId,
+  kind: row.kind,
+  byteHours: BigInt(row.byteHours),
+  hours: BigInt(row.hours),
+  tier1Requests: BigInt(row.tier1),
+  tier2Requests: BigInt(row.tier2),
+});

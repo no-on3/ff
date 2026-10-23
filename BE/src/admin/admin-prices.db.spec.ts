@@ -131,12 +131,16 @@ run('price books and plans, for operators (L2, P-73)', () => {
 
   it('lists the books oldest first: the one that prices usage now is active, the earlier past, the later scheduled', async () => {
     const statuses = (await prices.list(NOW)).map((book) => [book.validFrom.toISOString().slice(0, 10), book.status]);
+    // The migrations' second book starts the month after they ran: customers' databases' and buckets' SKUs.
+    const today = new Date();
+    const nextMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
 
     expect(statuses).toEqual([
-      ['2026-10-01', 'active'],
+      ['2026-10-01', 'past'],
+      [nextMonth, 'active'],
       [`${Y + 1}-01-01`, 'scheduled'],
     ]);
-    expect((await prices.list(new Date(`${Y + 1}-06-01T00:00:00Z`))).map((book) => book.status)).toEqual(['past', 'active']);
+    expect((await prices.list(new Date(`${Y + 1}-06-01T00:00:00Z`))).map((book) => book.status)).toEqual(['past', 'past', 'active']);
   });
 
   it("previews a draft on last month: each account at the draft, next to the books valid then and what was charged, and the totals", async () => {
@@ -157,6 +161,7 @@ run('price books and plans, for operators (L2, P-73)', () => {
       [big],
     );
 
+    const books = await db.dataSource.getRepository(PriceBook).count();
     const preview = await prices.preview(DOUBLED, NOW);
 
     // 19,600,000 billed GB-s at the first book's 0.0000501334336, then at twice that; small was never rated.
@@ -169,7 +174,7 @@ run('price books and plans, for operators (L2, P-73)', () => {
       ],
       totals: { current: '982.615', charged: '982.615', draft: '1965.231' },
     });
-    expect(await db.dataSource.getRepository(PriceBook).count()).toBe(2); // nothing saved
+    expect(await db.dataSource.getRepository(PriceBook).count()).toBe(books); // nothing saved
   });
 
   describe('plans', () => {

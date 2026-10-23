@@ -2,7 +2,8 @@
  * L2: an account's usage in a month (client-readiness plan, P-22) against a
  * real PostgreSQL server, in a scratch database that is dropped after: the
  * totals are the raw records' own sums, exactly, the month is the UTC
- * calendar's, and only the account's records count.
+ * calendar's, and only the account's records count; its databases from their
+ * hourly samples.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -44,7 +45,9 @@ run("an account's usage in a month (L2, P-22)", () => {
     for (const id of [A, B]) {
       await db.dataSource.getRepository(Account).save({ id, name: `Account ${id}`, planId: 'beta', status: AccountStatus.ACTIVE });
     }
-    for (const month of ['2026-09-01', '2026-10-01', '2026-11-01']) await query(`SELECT ff_ensure_month_partition('usage_records', $1)`, [month]);
+    for (const month of ['2026-09-01', '2026-10-01', '2026-11-01']) {
+      for (const table of ['usage_records', 'database_samples']) await query(`SELECT ff_ensure_month_partition($1, $2)`, [table, month]);
+    }
     kept = await db.dataSource.getRepository(Function).save({ name: 'new', accountId: A, runtime: Runtime.NODEJS, code: 'x', memory: 256, timeout: 5 });
     const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
     usage = new UsageService(db.dataSource.getRepository(UsageRecord), db.dataSource, config);
@@ -119,6 +122,37 @@ run("an account's usage in a month (L2, P-22)", () => {
       functions: [],
       totals: { requests: 0, billedMs: 0, gbSeconds: '0', throttled: 0, platformErrors: 0, lost: 0 },
     });
+  });
+
+  it("measures each of the account's databases in the month by its hourly samples: GB-months, the latest size and name, a deleted one's too, the most first", async () => {
+    const GIB = 1_073_741_824n;
+    const sample = (accountId: string, databaseId: string, name: string, hour: string, sizeBytes: bigint) =>
+      query(`INSERT INTO database_samples (database_id, hour, account_id, name, size_bytes, connections) VALUES ($1, $2, $3, $4, $5, 0)`, [
+        databaseId,
+        hour,
+        accountId,
+        name,
+        sizeBytes.toString(),
+      ]);
+    const [{ id: orders }] = await query<Array<{ id: string }>>(
+      `INSERT INTO databases (account_id, name, db_name, status) VALUES ($1, 'orders', 'ff_00000000000000000000000a', 'active') RETURNING id`,
+      [A],
+    );
+    const deleted = '2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e';
+    // October has 744 hours: 372 GB for an hour is half a GB-month.
+    await sample(A, orders, 'orders', '2026-10-01T00:00:00Z', 372n * GIB);
+    await sample(A, orders, 'orders', '2026-10-31T23:00:00Z', 744n * GIB);
+    await sample(A, deleted, 'old-name', '2026-10-02T00:00:00Z', 10n * GIB);
+    await sample(A, deleted, 'audit', '2026-10-03T00:00:00Z', 20n * GIB);
+    await sample(A, orders, 'orders', '2026-11-01T00:00:00Z', 744n * GIB); // November's
+    await sample(B, '3c4d5e6f-7a8b-4c9d-8e0f-2a3b4c5d6e7f', 'b-db', '2026-10-05T00:00:00Z', GIB); // account B's
+
+    expect(await usage.monthlyDatabases(A, '2026-10')).toEqual([
+      { databaseId: orders, name: 'orders', deleted: false, hours: 2, gbMonths: '1.5', sizeBytes: Number(744n * GIB) },
+      // 30 GB-hours over 744: 0.04032258…
+      { databaseId: deleted, name: 'audit', deleted: true, hours: 2, gbMonths: '0.040323', sizeBytes: Number(20n * GIB) },
+    ]);
+    expect(await usage.monthlyDatabases(A, '2026-12')).toEqual([]);
   });
 
   it("counts only the account's own records, and each month by the UTC calendar", async () => {

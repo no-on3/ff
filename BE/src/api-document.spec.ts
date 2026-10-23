@@ -122,6 +122,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
           provide: UsageService,
           useValue: succeeding(UsageService, {
             monthly: async () => ({ month: '2026-10', functions: [], totals: { requests: 0, billedMs: 0, gbSeconds: '0', throttled: 0, platformErrors: 0, lost: 0 } }),
+            monthlyDatabases: async () => [],
           }),
         },
         { provide: PricingService, useValue: succeeding(PricingService, { estimate: async () => null }) },

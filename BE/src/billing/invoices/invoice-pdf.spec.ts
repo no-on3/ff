@@ -20,6 +20,7 @@ const STATEMENT: Statement = {
     { functionId: 'f-2', name: 'hello', requests: 2_000_000n, gbSeconds: '1000000', amountMinor: 51_337n },
     { functionId: 'f-1', name: 'resize-images', requests: 10n, gbSeconds: '0.00125', amountMinor: 0n },
   ],
+  resources: [],
   usageMinor: 51_337n,
   freeTierMinor: -20_655n,
   volumeTiersMinor: 0n,
@@ -105,6 +106,22 @@ describe('the invoice PDF (L1, P-36)', () => {
       "Montants hors taxe : la TVA a été facturée à l'achat du crédit prépayé, qui règle cette consommation.",
       'FF SARL · 1 rue du Lac, 1053 Tunis · Matricule fiscal : 1234567/A/M/000 · FAC-2026-000001 · Page 2/2',
     ]);
+  });
+
+  it('lists the databases after the functions, each with its GB-months and amount', async () => {
+    const resources = [
+      { resourceId: 'd-1', kind: 'database' as const, name: 'audit', gbMonths: '0.268817', tier1Requests: 0n, tier2Requests: 0n, amountMinor: 93n },
+      { resourceId: 'd-2', kind: 'database' as const, name: 'orders', gbMonths: '1234.5', tier1Requests: 0n, tier2Requests: 0n, amountMinor: 427_038n },
+    ];
+
+    const [page] = await read(renderStatementPdf({ ...STATEMENT, resources }, SELLER, BUYER));
+    const [alone] = await read(renderStatementPdf({ ...STATEMENT, functions: [], resources }, SELLER, BUYER));
+
+    const rows = page.slice(page.indexOf('resize-images | 10 | 0,00125 | 0,000 TND') + 1);
+    expect(rows.slice(0, 4)).toEqual(['Base de données | Go-mois | Montant HT', 'audit | 0,268817 | 0,093 TND', 'orders | 1 234,5 | 427,038 TND', 'Consommation | 51,337 TND']);
+    // Without a function, only the databases' table: no line saying there was nothing.
+    expect(alone).toEqual(expect.arrayContaining(['Base de données | Go-mois | Montant HT']));
+    expect(alone.join('\n')).not.toMatch(/Fonction|Aucune consommation/);
   });
 
   it('writes a credit note as such: the invoice it corrects, its lines and total, its reason, and no stamp duty', async () => {

@@ -7,7 +7,8 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { PLATFORM_LIMITS } from '../plans/plan-limits';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
-import { UsageAmountsView, UsageMonth } from './usage.dto';
+import { DatabaseMonth, UsageAmountsView, UsageMonth } from './usage.dto';
+import { gbMonths, hoursIn } from '../billing/rating';
 import { coldStartSeconds, invocationSeconds, invocations } from '../monitoring/operator-metrics';
 
 /** The outcomes of a call that ran, measured by the runtime. */
@@ -43,8 +44,8 @@ const amounts = (row: UsageRow): UsageAmountsView => ({
   lost: Number(row.lost),
 });
 
-/** The tables partitioned by month, written once and never changed: usage records (P-20) and capacity samples (P-21). */
-const MONTHLY_TABLES = ['usage_records', 'capacity_samples'];
+/** The tables partitioned by month, written once and never changed: usage records, capacity samples and customers' databases' samples. */
+const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples'];
 
 /**
  * Usage records (client-readiness plan, P-20, D6): written once per
@@ -185,6 +186,35 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
       .map((row) => ({ functionId: row.function_id as string, functionName: row.function_name as string, deleted: row.deleted, ...amounts(row) }));
     const total = rows.find((row) => row.total);
     return { month, functions, totals: amounts(total as UsageRow) };
+  }
+
+  /**
+   * An account's databases in a month by the UTC calendar (ADR 0008), from
+   * their hourly samples: each one's hours measured, GB-months, and size at
+   * its latest sample, the most GB-months first.
+   */
+  async monthlyDatabases(accountId: string, month: string): Promise<DatabaseMonth[]> {
+    const [year, number] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(year, number - 1, 1));
+    const to = new Date(Date.UTC(year, number, 1));
+    const rows = await this.records.manager.query<Array<{ id: string; name: string; deleted: boolean; hours: number; byte_hours: string; size_bytes: string }>>(
+      `SELECT s."database_id" AS "id", (array_agg(s."name" ORDER BY s."hour" DESC))[1] AS "name", bool_and(d."id" IS NULL) AS "deleted",
+              count(*)::int AS "hours", sum(s."size_bytes")::text AS "byte_hours", (array_agg(s."size_bytes" ORDER BY s."hour" DESC))[1]::text AS "size_bytes"
+         FROM "database_samples" s
+         LEFT JOIN "databases" d ON d."id" = s."database_id"
+        WHERE s."account_id" = $1 AND s."hour" >= $2 AND s."hour" < $3
+        GROUP BY s."database_id"
+        ORDER BY sum(s."size_bytes") DESC, 2, 1`,
+      [accountId, from, to],
+    );
+    return rows.map((row) => ({
+      databaseId: row.id,
+      name: row.name,
+      deleted: row.deleted,
+      hours: row.hours,
+      gbMonths: gbMonths(BigInt(row.byte_hours), hoursIn(month)).round(6).toString(),
+      sizeBytes: Number(row.size_bytes),
+    }));
   }
 
   /**

@@ -154,7 +154,32 @@ function parties(pages: Pages, seller: Seller, buyer: Buyer): void {
   pages.y = Math.max(left, pages.y) + 18;
 }
 
-/** The statement's pages: each function's month, then the month's lines and what it was charged. */
+interface Column {
+  title: string;
+  x: number;
+  width: number;
+  right?: boolean;
+}
+
+/** One of the statement's tables: its header again at the top of each new page, a line per row, as tall as its first cell. */
+function table(pages: Pages, columns: Column[], rows: string[][], empty?: string): void {
+  const header = () => {
+    for (const column of columns) pages.text(column.x, column.title, { font: BOLD, width: column.width, align: column.right ? 'right' : 'left' });
+    pages.y += 14;
+    pages.rule();
+  };
+  header();
+  if (rows.length === 0 && empty) pages.y += pages.text(PAGE.margin, empty) + 6;
+  for (const row of rows) {
+    pages.room(18);
+    if (pages.y === PAGE.margin) header();
+    const heights = row.map((cell, index) => pages.text(columns[index].x, cell, { width: columns[index].width, align: columns[index].right ? 'right' : 'left' }));
+    pages.y += Math.max(heights[0], 12) + 4;
+  }
+  pages.rule();
+}
+
+/** The statement's pages: each function's month, each database's, then the month's lines and what it was charged. */
 function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller: Seller, attached: boolean): void {
   const money = (minor: bigint) => frenchMoney(minor, statement.exponent, statement.currency);
   if (attached) {
@@ -166,28 +191,26 @@ function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller
   if (!attached) parties(pages, seller, buyer);
   else pages.y += pages.text(PAGE.margin, `${buyer.name} · Compte FF : ${buyer.accountId}`) + 12;
 
-  const header = () => {
-    pages.text(PAGE.margin, 'Fonction', { font: BOLD, width: 220 });
-    pages.text(275, 'Requêtes', { font: BOLD, width: 80, align: 'right' });
-    pages.text(360, 'GB-secondes', { font: BOLD, width: 95, align: 'right' });
-    pages.text(460, 'Montant HT', { font: BOLD, width: RIGHT - 460, align: 'right' });
-    pages.y += 14;
-    pages.rule();
-  };
-  header();
-  if (statement.functions.length === 0) {
-    pages.y += pages.text(PAGE.margin, 'Aucune consommation ce mois-ci.') + 6;
+  const amount = { title: 'Montant HT', x: 460, width: RIGHT - 460, right: true };
+  const databases = statement.resources.filter((resource) => resource.kind === 'database');
+  if (statement.functions.length > 0 || databases.length === 0) {
+    table(
+      pages,
+      [{ title: 'Fonction', x: PAGE.margin, width: 220 }, { title: 'Requêtes', x: 275, width: 80, right: true }, { title: 'GB-secondes', x: 360, width: 95, right: true }, amount],
+      statement.functions.map((fn) => [fn.name, groupDigits(fn.requests.toString()), frenchDecimal(fn.gbSeconds), money(fn.amountMinor)]),
+      'Aucune consommation ce mois-ci.',
+    );
   }
-  for (const fn of statement.functions) {
-    pages.room(18);
-    if (pages.y === PAGE.margin) header();
-    const height = pages.text(PAGE.margin, fn.name, { width: 220 });
-    pages.text(275, groupDigits(fn.requests.toString()), { width: 80, align: 'right' });
-    pages.text(360, frenchDecimal(fn.gbSeconds), { width: 95, align: 'right' });
-    pages.text(460, money(fn.amountMinor), { width: RIGHT - 460, align: 'right' });
-    pages.y += Math.max(height, 12) + 4;
+  if (databases.length > 0) {
+    if (statement.functions.length > 0) pages.y += 10;
+    pages.room(50);
+    // Storage by the GB-month, as RDS bills it: the size measured each hour, over the month's hours.
+    table(
+      pages,
+      [{ title: 'Base de données', x: PAGE.margin, width: 300 }, { title: 'Go-mois', x: 360, width: 95, right: true }, amount],
+      databases.map((database) => [database.name, frenchDecimal(database.gbMonths), money(database.amountMinor)]),
+    );
   }
-  pages.rule();
   pages.room(110);
   pages.pair('Consommation', money(statement.usageMinor));
   if (statement.freeTierMinor !== 0n) pages.pair('Franchise gratuite', money(statement.freeTierMinor));

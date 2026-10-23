@@ -5,7 +5,7 @@ export const SCRAM_ITERATIONS = 4096;
 
 /**
  * The SCRAM-SHA-256 verifier of a password, as PostgreSQL stores one: the backend sends the server this, never the
- * password, so the password reaches no log of the server's (ADR 0008, §3). The password must be ASCII, which SASLprep,
+ * password, so the password reaches no log of the server's (ADR 0008). The password must be ASCII, which SASLprep,
  * the normalization PostgreSQL applies first, leaves as it is; FF's are base64url.
  */
 export function scramVerifier(password: string, salt: Buffer = randomBytes(16), iterations = SCRAM_ITERATIONS): string {

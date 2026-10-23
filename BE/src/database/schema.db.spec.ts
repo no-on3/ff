@@ -16,6 +16,8 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { MIGRATIONS } from '../migrations';
+import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
+import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
@@ -53,6 +55,7 @@ const ALARMS = migrationNames.find((name) => name.startsWith('Alarms')) as strin
 const FUNCTION_ENVIRONMENTS = migrationNames.find((name) => name.startsWith('FunctionEnvironments')) as string;
 const SCHEDULES = migrationNames.find((name) => name.startsWith('Schedules')) as string;
 const CODE_IMAGES = migrationNames.find((name) => name.startsWith('CodeImages')) as string;
+const DATABASES = migrationNames.find((name) => name.startsWith('Databases1')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -666,6 +669,51 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the database-billing migration gives books not started yet databases' and buckets' SKUs, adds its own from next month's first hour, keeps samples append-only, and reverts with them present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: database }] = await dataSource.query(
+        `INSERT INTO databases (account_id, name, db_name, status, storage_notice) VALUES ($1, 'orders', 'ff_0123456789abcdef01234567', 'read_only', 100) RETURNING id`,
+        [ACCOUNT],
+      );
+      const hour = `date_trunc('hour', now())`;
+      await dataSource.query(`INSERT INTO database_samples (database_id, hour, account_id, name, size_bytes, connections) VALUES ($1, ${hour}, $2, 'orders', 7634423, 2)`, [database, ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO resource_usage_hourly (account_id, hour, resource_id, kind, name, price_book_id, byte_hours, hours, tier1_requests, tier2_requests)
+         VALUES ($1, ${hour}, $2, 'database', 'orders', (SELECT id FROM price_books LIMIT 1), 7634423, 1, 0, 0)`,
+        [ACCOUNT, database],
+      );
+      await expect(dataSource.query(`UPDATE database_samples SET size_bytes = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM resource_usage_hourly`)).rejects.toThrow('resource_usage_hourly is append-only: DELETE refused');
+      await expect(dataSource.query(`UPDATE databases SET storage_notice = 90`)).rejects.toThrow(/violates check constraint/);
+
+      await migrateDownTo(dataSource, DATABASES);
+
+      const left = await dataSource.query(
+        `SELECT to_regclass('database_samples') AS s, to_regclass('resource_usage_hourly') AS r,
+                (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'databases' AND column_name = 'storage_notice') AS c,
+                (SELECT count(*)::int FROM price_books WHERE prices -> 'source' ? 'storagePriceLists') AS b`,
+      );
+      expect(left).toEqual([{ s: null, r: null, c: 0, b: 0 }]);
+      // A book that hasn't started, without the SKUs, as an operator may have added one: applied again, it gains them.
+      const [{ id: future }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T00:00:00Z', $1, 'test') RETURNING id`, [
+        JSON.stringify(FIRST_PRICE_BOOK),
+      ]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
+      expect(books).toEqual([
+        { id: expect.any(String), valid_from: next, prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'test' },
+      ]);
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   describe('after the migrations', () => {
     let db: ScratchDatabase;
 
@@ -694,7 +742,7 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples)_\d{4}_\d{2}$/; // their partitions, one per month (P-20, P-21)
+      const monthly = /^(usage_records|capacity_samples|database_samples)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
@@ -704,6 +752,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'capacity_samples',
         'currencies',
         'custom_domains',
+        'database_samples',
         'databases',
         'function_environments',
         'function_invocations',
@@ -729,6 +778,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'price_books',
         'rate_limited_invocations',
         'rating_runs',
+        'resource_usage_hourly',
         'schedules',
         'tax_rates',
         'usage_charges',
@@ -740,6 +790,8 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(tables.filter((table) => monthly.test(table))).toEqual([
         monthPartition('capacity_samples', 0),
         monthPartition('capacity_samples', 1),
+        monthPartition('database_samples', 0),
+        monthPartition('database_samples', 1),
         usagePartition(0),
         usagePartition(1),
       ]);

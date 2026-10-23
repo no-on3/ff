@@ -49,6 +49,20 @@ export class Decimal {
     return new Decimal((numerator * 10n ** BigInt(scale)) / denominator, scale);
   }
 
+  /**
+   * numerator ÷ denominator to `places` decimals, half away from zero: for a
+   * quantity whose exact value may have no finite decimal form, such as
+   * byte-hours over a month's hours in GB-months.
+   */
+  static quotient(numerator: bigint, denominator: bigint, places: number): Decimal {
+    if (denominator <= 0n) throw new Error(`Cannot divide by ${denominator}`);
+    const scaled = numerator * 10n ** BigInt(places);
+    const magnitude = scaled < 0n ? -scaled : scaled;
+    let kept = magnitude / denominator;
+    if ((magnitude % denominator) * 2n >= denominator) kept++;
+    return new Decimal(scaled < 0n ? -kept : kept, places);
+  }
+
   plus(other: Decimal): Decimal {
     const [a, b, scale] = Decimal.align(this, other);
     return new Decimal(a + b, scale);

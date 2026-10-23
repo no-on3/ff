@@ -4,12 +4,15 @@
  * the same months computed by hand with AWS's formula, in US$, times the
  * book's rate. Then each of D8's knobs above zero, the duration tiers, and a
  * book that starts in the middle of a month. The minimum billed duration
- * applies to each call, in the aggregation's SQL: pricing.db.spec.ts.
+ * applies to each call, in the aggregation's SQL: pricing.db.spec.ts. Then
+ * customers' databases and buckets, with the book of their SKUs, likewise
+ * against AWS's RDS and S3 prices by hand.
  */
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
+import { STORAGE_FREE_TIER, STORAGE_USD_PRICES, withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { Decimal } from './decimal';
-import { BookPrices, PriceDocument, bookPrices } from './price-book';
-import { FunctionUsage, rateMonth } from './rating';
+import { BookPrices, PriceDocument, awsPriceProblems, bookPrices, priceDocumentSchema } from './price-book';
+import { FunctionUsage, ResourceUsage, hoursIn, rateMonth } from './rating';
 
 const d = (text: string) => Decimal.parse(text);
 const RATE = d('3.0080');
@@ -26,6 +29,21 @@ const usage = (functionId: string, parts: Partial<Omit<FunctionUsage, 'functionI
   reservedMbMs: 0n,
   ...parts,
 });
+/** The book with databases' and buckets' SKUs, as its migration makes it from the book before. */
+const WITH_STORAGE = bookPrices({ id: 'with-storage', validFrom: new Date('2026-11-01T00:00:00Z'), prices: withStoragePrices(FIRST_PRICE_BOOK) });
+const GIB = 1_073_741_824n;
+/** A database or bucket of `gb` GB through `hours` hours, sampled each hour. */
+const stored = (resourceId: string, gb: number, hours: number, kind: ResourceUsage['kind'] = 'database', requests: { tier1?: bigint; tier2?: bigint } = {}): ResourceUsage => ({
+  resourceId,
+  kind,
+  byteHours: BigInt(gb) * GIB * BigInt(hours),
+  hours: BigInt(hours),
+  tier1Requests: requests.tier1 ?? 0n,
+  tier2Requests: requests.tier2 ?? 0n,
+});
+const STORAGE_DOCUMENT = priceDocumentSchema.parse(withStoragePrices(FIRST_PRICE_BOOK));
+const OCTOBER = hoursIn('2026-10');
+const NOVEMBER = hoursIn('2026-11');
 
 describe('rating a month (L1, P-30)', () => {
   it("prices AWS's first example as AWS's formula does, at the book's rate: 3 million calls of 120 ms at 1,536 MB", () => {
@@ -121,6 +139,136 @@ describe('rating a month (L1, P-30)', () => {
     const fn = usage('fn', { onDemand: { requests: 1n, mbMs: 200n * 1_024_000n }, reservedMbMs: 120n * 1_024_000n, provisionedMbMs: 1_000n * 1_024_000n });
 
     expect(rateMonth([{ book: book({ idleInstanceGbSecond: '1' }), functions: [fn] }], null).functions.get('fn')?.idle.isZero()).toBe(true);
+  });
+});
+
+describe("rating a month of customers' databases and buckets (L1, ADR 0008, ADR 0009)", () => {
+  it("prices a database's storage by the GB-month, as RDS does: 10 GB all month, less the free GB-month", () => {
+    const month = rateMonth([{ book: WITH_STORAGE, functions: [], resources: [stored('orders', 10, OCTOBER)] }], WITH_STORAGE, OCTOBER);
+
+    // RDS for PostgreSQL, gp3, Single-AZ: (10 − 1 free) GB-months × $0.115 = $1.035.
+    const byHand = d('9').times(d(STORAGE_USD_PRICES.databaseStorageGbMonth));
+    expect(byHand.toString()).toBe('1.035');
+    expect(month.total.toString()).toBe(byHand.times(RATE).toString());
+    expect(month.total.toFixed(3)).toBe('3.113');
+    expect(month.resources.get('orders')).toMatchObject({ kind: 'database' });
+    expect([month.resources.get('orders')?.gbMonths.toString(), month.usage.toString(), month.freeTier.toString()]).toEqual(['10', '3.4592', '-0.34592']);
+  });
+
+  it("rates a month of functions and databases together: each priced as alone, the free tiers each their own", () => {
+    const calls = usage('backend', { onDemand: { requests: 3_000_000n, mbMs: mbMs(3_000_000, 120, 1536) } });
+
+    const month = rateMonth([{ book: WITH_STORAGE, functions: [calls], resources: [stored('orders', 10, OCTOBER)] }], WITH_STORAGE, OCTOBER);
+
+    // AWS's first Lambda example, 8.221880704 TND, and the database's 9 GB-months, 3.11328 TND.
+    expect(month.total.toString()).toBe('11.335160704');
+    expect(month.functions.get('backend')?.total.toString()).toBe('28.876854144');
+    expect(month.resources.get('orders')?.total.toString()).toBe('3.4592');
+  });
+
+  it("measures a database's part of the month by its hours sampled, and shares the account's free GB-month among its databases", () => {
+    // 1 GB for 432 of November's 720 hours, 0.6 GB-month; another for 504 hours, 0.7: 0.3 past the free one.
+    const month = rateMonth([{ book: WITH_STORAGE, functions: [], resources: [stored('a', 1, 432), stored('b', 1, 504)] }], WITH_STORAGE, NOVEMBER);
+
+    expect([month.resources.get('a')?.gbMonths.toString(), month.resources.get('b')?.gbMonths.toString()]).toEqual(['0.6', '0.7']);
+    expect(month.total.toString()).toBe(d('0.3').times(WITH_STORAGE.databaseStorageGbMonth).toString());
+  });
+
+  it("rounds GB-months to twelve decimals, a month's hours being no power of ten's divisor, and prices that exactly", () => {
+    // 2 GB for 100 of October's 744 hours: 200 / 744 = 0.268817204301075…
+    const month = rateMonth([{ book: WITH_STORAGE, functions: [], resources: [stored('new', 2, 100)] }], WITH_STORAGE, OCTOBER);
+
+    expect(month.resources.get('new')?.gbMonths.toString()).toBe('0.268817204301');
+    expect(month.resources.get('new')?.storage.toString()).toBe(d('0.268817204301').times(d('0.34592')).toString());
+    expect(month.total.isZero()).toBe(true); // all of it in the free GB-month
+  });
+
+  it("prices databases at nothing, with no free tier, in a book from before their SKUs", () => {
+    const month = rateMonth([{ book: FIRST, functions: [], resources: [stored('orders', 10, OCTOBER)] }], FIRST, OCTOBER);
+
+    expect([month.total.toString(), month.resources.get('orders')?.gbMonths.toString()]).toEqual(['0', '10']);
+  });
+
+  it("counts the free GB-month from the month's start through a book that starts mid-month", () => {
+    // The first half at the book before, free; the second half at the new book, the free GB-month taken by the first.
+    const half = stored('orders', 2, OCTOBER / 2);
+
+    const month = rateMonth([{ book: FIRST, functions: [], resources: [half] }, { book: WITH_STORAGE, functions: [], resources: [half] }], FIRST, OCTOBER);
+
+    expect(month.resources.get('orders')?.gbMonths.toString()).toBe('2');
+    expect(month.total.toString()).toBe(WITH_STORAGE.databaseStorageGbMonth.toString());
+  });
+
+  it("charges a book's monthly fee per database by the hours it existed", () => {
+    const fee = bookPrices({ id: 'fee', validFrom: new Date('2026-11-01T00:00:00Z'), prices: { ...withStoragePrices(FIRST_PRICE_BOOK), prices: { ...STORAGE_DOCUMENT.prices, databaseMonthlyFee: '0.500' } } });
+
+    const month = rateMonth([{ book: fee, functions: [], resources: [stored('half', 0, OCTOBER / 2)] }], fee, OCTOBER);
+
+    expect([month.resources.get('half')?.fee.toString(), month.total.toString()]).toEqual(['0.25', '0.25']);
+  });
+
+  it("prices buckets as S3 Standard: storage in tiers by the account's GB-months, and requests by class, each past its free tier", () => {
+    // 60 TB for all of October: 51,200 GB-months at the first tier (5 of them free), 10,240 at the second; 12,000 PUT and 120,000 GET.
+    const month = rateMonth(
+      [{ book: WITH_STORAGE, functions: [], resources: [stored('photos', 61_440, OCTOBER, 'bucket', { tier1: 12_000n, tier2: 120_000n })] }],
+      WITH_STORAGE,
+      OCTOBER,
+    );
+
+    // S3: (51,200 − 5) × $0.023 + 10,240 × $0.022 + (12,000 − 2,000) / 1,000 × $0.005 + (120,000 − 20,000) / 1,000 × $0.0004 = $1,402.855.
+    const byHand = d('51195').times(d('0.023')).plus(d('10240').times(d('0.022'))).plus(d('10').times(d('0.005'))).plus(d('100').times(d('0.0004')));
+    expect(byHand.toString()).toBe('1402.855');
+    expect(month.total.toString()).toBe(byHand.times(RATE).toString());
+    expect(month.volumeTiers.toString()).toBe(d('10240').times(d('-0.003008')).toString());
+    expect(month.resources.get('photos')?.requests.toString()).toBe(d('12000').times(d('0.00001504')).plus(d('120000').times(d('0.0000012032'))).toString());
+  });
+
+  it("needs the month's hours to price storage", () => {
+    expect(() => rateMonth([{ book: WITH_STORAGE, functions: [], resources: [stored('orders', 1, 1)] }], WITH_STORAGE)).toThrow("A month's hours are needed to price storage by the GB-month");
+    expect(rateMonth([{ book: WITH_STORAGE, functions: [] }], WITH_STORAGE).total.isZero()).toBe(true);
+  });
+
+  it('counts the hours of each month by the UTC calendar', () => {
+    expect(['2026-10', '2026-11', '2027-02', '2028-02'].map(hoursIn)).toEqual([744, 720, 672, 696]);
+  });
+});
+
+describe("the book of customers' databases' and buckets' SKUs (ADR 0008, ADR 0009)", () => {
+  it("is AWS's US$ prices for RDS and S3 times the book's own rate, exactly, and its checks find nothing", () => {
+    const { source, prices } = STORAGE_DOCUMENT;
+    expect(source.usdRate).toBe(FIRST_PRICE_BOOK.source.usdRate);
+    const times = (usd: string) => Decimal.parse(usd).times(Decimal.parse(FIRST_PRICE_BOOK.source.usdRate)).toString();
+
+    expect(prices.databaseStorageGbMonth).toBe(times(STORAGE_USD_PRICES.databaseStorageGbMonth));
+    expect(prices.bucketStorageGbMonth?.map((tier) => [tier.upToGbMonths, tier.price])).toEqual(STORAGE_USD_PRICES.bucketStorageGbMonth.map((tier) => [tier.upToGbMonths, times(tier.price)]));
+    expect([prices.requestsTier1PerThousand, prices.requestsTier2PerThousand]).toEqual([times('0.005'), times('0.0004')]);
+    expect(prices.databaseMonthlyFee).toBe('0');
+    expect(awsPriceProblems(STORAGE_DOCUMENT)).toEqual([]);
+  });
+
+  it('keeps the functions\' SKUs and free tier of the book it copies, and adds the free tier you confirmed', () => {
+    expect(STORAGE_DOCUMENT.prices.gbSecond).toEqual(FIRST_PRICE_BOOK.prices.gbSecond);
+    expect(STORAGE_DOCUMENT.freeTier).toEqual({ ...FIRST_PRICE_BOOK.freeTier, ...STORAGE_FREE_TIER });
+    expect(STORAGE_FREE_TIER).toEqual({ databaseStorageGbMonths: 1, bucketStorageGbMonths: 5, requestsTier1: 2_000, requestsTier2: 20_000 });
+  });
+
+  it("finds a price that isn't AWS's times the rate, a SKU in one place only, and bucket tiers that differ", () => {
+    const changed = (prices: Partial<PriceDocument['prices']>, usd: Record<string, unknown> = {}): PriceDocument => ({
+      ...STORAGE_DOCUMENT,
+      source: { ...STORAGE_DOCUMENT.source, usdPrices: { ...(STORAGE_DOCUMENT.source.usdPrices as object), ...usd } },
+      prices: { ...STORAGE_DOCUMENT.prices, ...prices },
+    });
+
+    expect(awsPriceProblems(changed({ databaseStorageGbMonth: '0.35' }))).toEqual([expect.stringMatching(/^prices\.databaseStorageGbMonth: /)]);
+    expect(awsPriceProblems(changed({}, { requestsTier1PerThousand: undefined }))).toEqual(['prices.requestsTier1PerThousand: must be in both prices and source.usdPrices, or in neither']);
+    expect(awsPriceProblems(changed({ bucketStorageGbMonth: [{ upToGbMonths: null, price: '0.069184' }] }))).toEqual([
+      'prices.bucketStorageGbMonth: must have the tiers of source.usdPrices.bucketStorageGbMonth',
+    ]);
+  });
+
+  it('reads every book from before, without the new SKUs, as pricing them at nothing', () => {
+    expect(priceDocumentSchema.safeParse(FIRST_PRICE_BOOK).success).toBe(true);
+    expect([FIRST.databaseStorageGbMonth, FIRST.perTier1Request, FIRST.freeDatabaseGbMonths, FIRST.bucketStorageTiers[0].price].map(String)).toEqual(['0', '0', '0', '0']);
   });
 });
 

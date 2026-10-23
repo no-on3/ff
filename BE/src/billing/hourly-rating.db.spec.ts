@@ -5,8 +5,9 @@
  * month's earlier charges; hours rated again, a price change at a whole hour,
  * the free tier at a month's start, minInstances and the monthly fee, shadow
  * mode, and the parent's reconciliation criterion (rated usage equals raw
- * usage); then the job: settling, catching up, two backends at once, and what
- * an account reads of its money.
+ * usage); customers' databases, from their hourly samples to the month's
+ * statement; then the job: settling, catching up, two backends at once, and
+ * what an account reads of its money.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -19,11 +20,14 @@ import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { createScratchDatabase } from '../database/scratch-database';
+import { MinioClientService } from '../minio-client/minio-client.service';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { BillingService } from './billing.service';
 import { CreditService } from './credit.service';
 import { Currency } from './currency.entity';
 import { HourlyRatingService } from './hourly-rating.service';
+import { InvoicesService } from './invoices/invoices.service';
+import { pdfRows } from './invoices/pdf-text';
 import { LedgerEvents } from './ledger/ledger-events';
 import { LedgerService } from './ledger/ledger.service';
 import { PriceBook } from './price-book.entity';
@@ -43,8 +47,10 @@ const SETTLE = 33 * MINUTE;
 async function ratingWorld() {
   const db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
   await db.dataSource.runMigrations({ transaction: 'each' });
-  for (let month = 1; month <= 8; month++) {
-    for (const table of ['usage_records', 'capacity_samples']) await db.dataSource.query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-${String(month).padStart(2, '0')}-01`]);
+  for (let month = 1; month <= 9; month++) {
+    for (const table of ['usage_records', 'capacity_samples', 'database_samples']) {
+      await db.dataSource.query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-${String(month).padStart(2, '0')}-01`]);
+    }
   }
   const ds = db.dataSource;
   const state = { shadow: true };
@@ -76,6 +82,15 @@ async function ratingWorld() {
          VALUES (gen_random_uuid(), $1, $1, $2, $3, 'fn', 'nodejs', $4, $5, $6::numeric, $6::int, $7)`,
         [start, accountId, functionId, fields.memoryMb ?? 128, fields.minInstances ?? 0, fields.billedMs ?? 0, fields.status ?? 'success'],
       ),
+    /** A customer's database's hourly sample: its name and size then. */
+    databaseSample: (accountId: string, databaseId: string, name: string, hour: Date, sizeBytes: bigint) =>
+      query('INSERT INTO database_samples (database_id, hour, account_id, name, size_bytes, connections) VALUES ($1, $2, $3, $4, $5, 1)', [
+        databaseId,
+        hour,
+        accountId,
+        name,
+        sizeBytes.toString(),
+      ]),
     sample: (accountId: string, functionId: string, minute: Date, instances: number, minInstances: number, memoryMb: number) =>
       query('INSERT INTO capacity_samples (function_id, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, $5, $6)', [
         functionId,
@@ -86,7 +101,7 @@ async function ratingWorld() {
         memoryMb,
       ]),
     /** A book from `validFrom`, on the first book's, with these prices and free tier. */
-    addBook: (validFrom: Date, prices: Partial<PriceDocument['prices']>, freeTier = { requests: 0, gbSeconds: 0 }) =>
+    addBook: (validFrom: Date, prices: Partial<PriceDocument['prices']>, freeTier: PriceDocument['freeTier'] = { requests: 0, gbSeconds: 0 }) =>
       ds.getRepository(PriceBook).save({
         currency: 'TND',
         validFrom,
@@ -369,6 +384,87 @@ run('the hourly rating (L2, P-32)', () => {
       expect([late.rawRequests - late.ratedRequests, [451n, 452n].includes(late.estimatedMinor - late.chargedMinor)]).toEqual([1n, true]);
       expect(result.accounts.filter((account) => !reconciled(account)).map((account) => account.accountId)).toEqual([accounts[1]]);
     });
+  });
+});
+
+run("the hourly rating of customers' databases (L2, ADR 0008)", () => {
+  let w: Awaited<ReturnType<typeof ratingWorld>>;
+  const first = at('09-01T00:00:00');
+  const GIB = 1_073_741_824n;
+  const [orders, audit] = [randomUUID(), randomUUID()];
+  let a: string;
+
+  beforeAll(async () => {
+    w = await ratingWorld();
+    // RDS's gp3 storage at its US$ price times 3.0080, 1 GB-month free, and calls free: only storage costs here.
+    await w.addBook(first, { ...REQUESTS_ONLY('0'), databaseStorageGbMonth: '0.34592' }, { requests: 0, gbSeconds: 0, databaseStorageGbMonths: 1 });
+    a = await w.account();
+    // September has 720 hours: 720 GB for an hour is 1 GB-month. "orders" at 00:00 and 01:00; "audit", deleted since, at 01:00 only.
+    await w.databaseSample(a, orders, 'orders', first, 720n * GIB);
+    await w.databaseSample(a, orders, 'orders', at('09-01T01:00:00'), 720n * GIB);
+    await w.databaseSample(a, audit, 'audit', at('09-01T01:00:00'), 360n * GIB);
+    await w.call(a, randomUUID(), at('09-01T01:30:00'));
+    await w.startAt(first);
+    w.state.shadow = false;
+    for (let i = 0; i < 3; i++) await w.rating.rateHour(new Date(first.getTime() + i * HOUR_MS));
+  });
+
+  afterAll(async () => {
+    await w?.db.drop();
+  });
+
+  it('rates each database sampled in an hour by its size for the hour and its name then, beside the functions', async () => {
+    const rows = await w.query(
+      `SELECT hour, resource_id AS id, kind, name, byte_hours::text AS "byteHours", hours, price_book_id = (SELECT id FROM price_books WHERE valid_from = $2) AS book
+         FROM resource_usage_hourly WHERE account_id = $1 ORDER BY hour, name`,
+      [a, first],
+    );
+
+    expect(rows).toEqual([
+      { hour: first, id: orders, kind: 'database', name: 'orders', byteHours: String(720n * GIB), hours: 1, book: true },
+      { hour: at('09-01T01:00:00'), id: audit, kind: 'database', name: 'audit', byteHours: String(360n * GIB), hours: 1, book: true },
+      { hour: at('09-01T01:00:00'), id: orders, kind: 'database', name: 'orders', byteHours: String(720n * GIB), hours: 1, book: true },
+    ]);
+    expect(await w.query(`SELECT on_demand_requests::int AS requests FROM usage_hourly WHERE account_id = $1`, [a])).toEqual([{ requests: 1 }]);
+  });
+
+  it('charges each hour the month so far less the free GB-month: nothing for the first, then 1.5 GB-months, and nothing for an hour without a sample', async () => {
+    // 00:00: 1 GB-month, all free. 01:00: 2.5 GB-months, 1.5 past the free one: 0.51888 TND.
+    expect(await w.charges(a)).toEqual([
+      ['09-01T00', 0, 0, false, false],
+      ['09-01T01', 519, 519, false, true],
+    ]);
+    expect(await w.ledger.balance(a, 'TND')).toBe(-519n);
+  });
+
+  it("lists them on the month's statement, by the name each had, with its GB-months and amount, and the free tier taken off", async () => {
+    const config = { getOrThrow: () => ({ seller: { name: 'FF SARL', taxId: null, address: '1 rue du Lac, 1053 Tunis' }, bank: null }) } as unknown as ConfigService;
+    const invoices = new InvoicesService(w.db.dataSource, w.ledger, w.pricing, {} as AuditService, {} as never, {} as MinioClientService, config);
+    const now = at('09-02T00:00:00');
+
+    const statement = await invoices.statementIn(w.db.dataSource.manager, a, `${Y}-09`, now);
+
+    expect(statement.resources.map((r) => [r.kind, r.name, r.gbMonths, r.amountMinor])).toEqual([
+      ['database', 'audit', '0.5', 173n], // 0.17296 TND
+      ['database', 'orders', '2', 692n], // 0.69184 TND
+    ]);
+    expect([statement.usageMinor, statement.freeTierMinor, statement.totalMinor, statement.debitedMinor]).toEqual([865n, -346n, 519n, 519n]);
+    const [page] = pdfRows(await invoices.statementPdf(a, `${Y}-09`, now)).map((rows) => rows.map((row) => row.replaceAll(String.fromCharCode(0xa0), ' ')));
+    expect(page).toEqual(expect.arrayContaining(['Base de données | Go-mois | Montant HT', 'audit | 0,5 | 0,173 TND', 'orders | 2 | 0,692 TND', 'Total HT | 0,519 TND']));
+  });
+
+  it('reconciles them: the storage rated equals the storage sampled, and a sample written after its hour was rated shows', async () => {
+    const before = await reconcile(w.db.dataSource, w.pricing, `${Y}-09`);
+    expect(before.accounts.map((account) => [account.accountId, reconciled(account), account.ratedByteHours === 1800n * GIB])).toEqual([[a, true, true]]);
+
+    await w.databaseSample(a, randomUUID(), 'late', first, 720n * GIB);
+
+    const after = await reconcile(w.db.dataSource, w.pricing, `${Y}-09`);
+    expect([reconciled(after.accounts[0]), after.accounts[0].sampledByteHours - after.accounts[0].ratedByteHours, after.accounts[0].estimatedMinor - after.accounts[0].chargedMinor]).toEqual([
+      false,
+      720n * GIB,
+      346n,
+    ]);
   });
 });
 

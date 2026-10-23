@@ -11,10 +11,10 @@ import { bookPrices } from './price-book';
 import { PriceBook } from './price-book.entity';
 import { PricingService, monthBounds } from './pricing.service';
 import { HOUR_MS, dueHours, settleMs, usageKey } from './rating-hours';
-import { FunctionUsage, rateMonth } from './rating';
+import { FunctionUsage, hoursIn, rateMonth } from './rating';
 import { RatingRun } from './rating-run.entity';
 import { UsageCharge } from './usage-charge.entity';
-import { BILLED_CALL, SAMPLE_SUMS, callSums } from './usage-sql';
+import { BILLED_CALL, RESOURCE_SUMS, ResourceRow, SAMPLE_SUMS, callSums, resourceUsage } from './usage-sql';
 
 const MINUTE_MS = 60_000;
 /** One backend rates at a time: the others skip their turn (parent §4.3). */
@@ -33,7 +33,8 @@ interface HourlyRow {
 
 /**
  * The hourly rating (P-32, D9). Once an hour has settled, its usage is summed
- * into usage_hourly, and each account that used something in it is charged:
+ * into usage_hourly, its databases' samples into resource_usage_hourly, and
+ * each account that used something in it is charged:
  * its month so far, rated with the books of P-30 and rounded once, less what
  * the month's earlier hours were charged. The free tier and the duration
  * tiers count from the month's start, and the month's charges add up to its
@@ -121,7 +122,10 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
     let accounts: string[] = [];
     if (book) {
       await this.sumHour(hour, book);
-      const rows = await this.dataSource.query<Array<{ account_id: string }>>(`SELECT DISTINCT "account_id" FROM "usage_hourly" WHERE "hour" = $1 ORDER BY 1`, [hour]);
+      const rows = await this.dataSource.query<Array<{ account_id: string }>>(
+        `SELECT "account_id" FROM "usage_hourly" WHERE "hour" = $1 UNION SELECT "account_id" FROM "resource_usage_hourly" WHERE "hour" = $1 ORDER BY 1`,
+        [hour],
+      );
       accounts = rows.map((row) => row.account_id);
       for (const accountId of accounts) await this.dataSource.transaction((manager) => this.chargeHour(manager, accountId, hour, shadow));
     }
@@ -143,6 +147,13 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
            ON s."account_id" = c."account_id" AND s."function_id" = c."function_id"
        ON CONFLICT DO NOTHING`,
       [hour, new Date(hour.getTime() + HOUR_MS), book.id, bookPrices(book).minimumBilledMs],
+    );
+    // Each database sampled in the hour: its size for one hour, and its name then, which the statement shows.
+    await this.dataSource.query(
+      `INSERT INTO "resource_usage_hourly" ("account_id", "hour", "resource_id", "kind", "name", "price_book_id", "byte_hours", "hours", "tier1_requests", "tier2_requests")
+       SELECT "account_id", $1, "database_id", 'database', "name", $2, "size_bytes", 1, 0, 0 FROM "database_samples" WHERE "hour" = $1
+       ON CONFLICT DO NOTHING`,
+      [hour, book.id],
     );
   }
 
@@ -173,11 +184,20 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
       provisionedMbMs: BigInt(row.provisionedTimeMbMs),
       reservedMbMs: BigInt(row.reservedMbMs),
     });
+    const resourceRows = await manager.query<ResourceRow[]>(
+      `SELECT ${RESOURCE_SUMS} FROM "resource_usage_hourly" WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3 GROUP BY "resource_id", "kind", "price_book_id"`,
+      [accountId, from, end],
+    );
     // Each book prices its own hours, in time order, as P-30's estimate does; the monthly fee is the first book's.
     const prices = books.map(bookPrices);
     const monthSoFar = rateMonth(
-      prices.map((book) => ({ book, functions: rows.filter((row) => row.priceBookId === book.id).map(usage) })),
+      prices.map((book) => ({
+        book,
+        functions: rows.filter((row) => row.priceBookId === book.id).map(usage),
+        resources: resourceRows.filter((row) => row.priceBookId === book.id).map(resourceUsage),
+      })),
       prices[0],
+      hoursIn(hour.toISOString().slice(0, 7)),
     );
     const monthToDateMinor = toMinor(monthSoFar.total, exponent);
     const [{ before }] = await manager.query<Array<{ before: string }>>(

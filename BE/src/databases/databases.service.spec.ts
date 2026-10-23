@@ -49,7 +49,7 @@ function fakeServer(overrides: Partial<DataServer> = {}) {
     setPassword: async (name) => void calls.push(`password ${name}`),
     setConnectionLimit: async () => undefined,
     setLogin: async (name, allowed) => void calls.push(`${allowed ? 'login' : 'nologin'} ${name}`),
-    setReadOnly: async () => undefined,
+    setReadOnly: async (name, readOnly) => void calls.push(`${readOnly ? 'read-only' : 'read-write'} ${name}`),
     drop: async (name) => void calls.push(`drop ${name}`),
     use: async () => new Map(),
     ...overrides,
@@ -135,7 +135,8 @@ describe('DatabasesService', () => {
     expect(rows.map((row) => row.status)).toEqual([DatabaseStatus.ACTIVE, DatabaseStatus.SUSPENDED]);
     failing.name = '';
     await service.reactivateAccount(ACCOUNT);
-    expect(calls).toEqual([`nologin ${second.database}`, `login ${second.database}`]);
+    // Read-write again, as if it had been past the plan before: the next hourly sample says.
+    expect(calls).toEqual([`nologin ${second.database}`, `login ${second.database}`, `read-write ${second.database}`]);
     expect(rows.map((row) => row.status)).toEqual([DatabaseStatus.ACTIVE, DatabaseStatus.ACTIVE]);
   });
 });

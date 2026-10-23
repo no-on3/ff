@@ -20,6 +20,7 @@ import { vatOf } from '../payments/pro-forma';
 import { bookPrices } from '../price-book';
 import { monthBounds, PricingService } from '../pricing.service';
 import { stampDutyOn } from '../tax-rates';
+import { RESOURCE_SUMS, ResourceRow, resourceUsage } from '../usage-sql';
 import { lastDay, MONTH, previousMonth, tunisDay } from '../tunisia';
 import { frenchDay } from '../../common/french';
 import { InvoiceLine } from './invoice-line.entity';
@@ -411,6 +412,12 @@ export class InvoicesService {
         names.set(row.id, row.name);
       }
     }
+    const resources = await manager.query<Array<ResourceRow & { name: string }>>(
+      `SELECT ${RESOURCE_SUMS}, (array_agg("name" ORDER BY "hour" DESC))[1] AS "name"
+         FROM "resource_usage_hourly" WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3
+        GROUP BY "resource_id", "kind", "price_book_id"`,
+      [accountId, from, to],
+    );
     const [charges] = await manager.query<Array<{ debited: string; shadow: string; latest: Date | null }>>(
       `SELECT coalesce(sum("amount_minor") FILTER (WHERE NOT "shadow"), 0)::text AS "debited",
               coalesce(sum("amount_minor") FILTER (WHERE "shadow"), 0)::text AS "shadow",
@@ -432,6 +439,7 @@ export class InvoicesService {
         reservedMbMs: BigInt(row.reservedMbMs),
       })),
       names,
+      resources: resources.map((row) => ({ ...resourceUsage(row), priceBookId: row.priceBookId, name: row.name })),
       charges: {
         debitedMinor: BigInt(charges.debited),
         shadowMinor: BigInt(charges.shadow),

@@ -79,11 +79,13 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Changed already:** V-01 measured it ([ADR 0008](adr/0008-customer-databases.md)): a database and its user per customer, their names opaque, the backend's role no superuser, a tenant pod reaching the server through a rule of its own with its account's internet access off, and nothing else private.
 - **Changed already, too:** V-02, the server, in development (`hack/k8s/data-db-up.sh`) and for production ([`deploy/data-db`](../deploy/data-db/README.md)); every tenant's network policy opens it on its port.
 - **Changed already, too:** V-03, the databases themselves, in the API: each a database and its user on that server, made within the plan, suspended with their account, dropped at its data deletion date.
-- **Still to change:** V-04, their samples and their bill; V-05, the console, the admin app, `ff db`, the guide and the backups.
+- **Changed already, too:** V-04, their hourly measures and their bill: storage by the GB-month, on the month's statement, in `GET /usage` and in the reconciliation.
+- **Still to change:** V-05, the console, the admin app, `ff db`, the guide and the backups.
 
 **6. A database over its plan's size is warned and billed, not blocked.** ✅ Confirmed. Messages at 80% and 100%; above 100%, new connections are read-only, which the owner can turn off to clean up; the storage above the plan is billed.
 - **Changed already:** V-01 measured the signal as an app meets it, and its statement changed: it is the user's setting in its database, which the backend may set, rather than the database's, which only its owner may; the sessions under way are ended so that a pool's come back read-only too ([ADR 0008](adr/0008-customer-databases.md), §5).
-- **Still to change:** V-04.
+- **Changed already, too:** V-04: each database measured every hour; at 80% and 100% of the plan's storage its owners get an e-mail in their language, once each time it reaches the share; past 100%, the signal, set again each hour while it stays past, without ending the sessions under way, and taken away once it is back under; all its storage billed by the GB-month, above the plan's too.
+- **Still to change:** V-05: the console and the admin app show it.
 
 **7. Databases reachable from the internet, encrypted only.** ✅ Confirmed. Developers connect from their laptops (`psql`, migration tools, `pg_dump`), as RDS's "publicly accessible" option allows.
 - **Changed already:** V-01 measured who may log in where, and how drivers read the connection string: it says `sslmode=require`, which node-postgres takes as a full check of the certificate. So the server's certificate comes from a public CA in production, or from a CA of the operator's that functions' pods get ([ADR 0008](adr/0008-customer-databases.md), §9).
@@ -91,10 +93,12 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Still to change:** V-05, the guide.
 
 **8. Free every month, per account: 1 GB of database; 5 GB of files, 20,000 reads and 2,000 writes.** ✅ Confirmed: the plan's numbers.
-- **Still to change:** V-04 and V-09 put them in the price book.
+- **Changed already:** V-04: all four are in the second price book, which its migration adds from the first hour of the month after it runs, with RDS's and S3's prices at AWS's list, read on 2026-10-23: 1 GB-month of databases, 5 GB-months of buckets, 2,000 `PUT` and 20,000 `GET` requests.
+- **Still to change:** V-09, the buckets' measures, which use the last three.
 
 **9. No monthly fee per database.** ✅ Confirmed. Only storage is billed; the price book can add a fee later.
-- **Still to change:** V-04, which adds the fee's price line at 0.
+- **Changed already:** V-04: the fee's price line is in the second book at 0; a book that sets one charges it by the hours each database existed.
+- **Still to change:** nothing.
 
 **10. Each function gets its own key to its account's buckets.** ✅ Confirmed. `new S3Client({})` works with no setup, as on AWS. The keys don't expire; short-lived ones, as AWS gives, come with step 5.
 - **Changed already:** V-01 found how: the endpoint functions get is an IP address inside the cluster, which every SDK addresses path-style by itself, so that no DNS name of FF's is needed there ([ADR 0009](adr/0009-buckets.md), §4).
@@ -108,7 +112,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Still to change:** V-09, the counts.
 
 **13. Out of credit: file uploads are refused; reading files and the databases go on.** ✅ Confirmed. FF never deletes data for non-payment, and functions are already refused without credit.
-- **Still to change:** V-07 and V-04.
+- **Changed already:** V-04: a database's storage is rated and debited whatever the balance, which goes below zero, as a function's `minInstances` do; nothing stops a database for its balance.
+- **Still to change:** V-07, the uploads refused.
 
 **14. Documentation in French, a page per service, under `docs/fr/`.** ✅ Confirmed.
 - **Still to change:** V-05 for databases, V-09 for buckets.

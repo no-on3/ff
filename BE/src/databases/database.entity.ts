@@ -5,7 +5,7 @@ export enum DatabaseStatus {
   /** Being made on the server: counted against the plan, not yet usable. */
   CREATING = 'creating',
   ACTIVE = 'active',
-  /** Past its plan's storage: its new sessions start read-only, a signal (ADR 0008, §5). */
+  /** Past its plan's storage: its new sessions start read-only, a signal rather than a wall (ADR 0008). */
   READ_ONLY = 'read_only',
   /** Its account is suspended or closed: its user can't log in. */
   SUSPENDED = 'suspended',
@@ -22,6 +22,7 @@ export enum DatabaseStatus {
 @Entity('databases')
 @Index(['accountId', 'name'], { unique: true })
 @Check(`"status" IN ('creating', 'active', 'read_only', 'suspended', 'deleting')`)
+@Check(`"storage_notice" IN (80, 100)`)
 export class Database {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -48,6 +49,10 @@ export class Database {
   /** When its password was last made: at creation, then at each reset. */
   @Column({ type: 'timestamptz', nullable: true })
   passwordSetAt: Date | null;
+
+  /** The share of its plan's storage its owners were last told it reached: 80, then 100; null below 80%. */
+  @Column({ type: 'smallint', nullable: true })
+  storageNotice: 80 | 100 | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

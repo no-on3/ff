@@ -65,16 +65,18 @@ describe("customers' database server, the statements it is sent (ADR 0008)", () 
     expect(nothing.statements).toHaveLength(1);
   });
 
-  it('turns new sessions read-only as the user\'s setting in its database, ending those under way; back, resets it', async () => {
+  it('turns new sessions read-only as the user\'s setting in its database, ending those under way; sets it again, leaving them be; back, resets it', async () => {
     const { pool, statements } = fakePool();
     const server = new PostgresDataServer(SETTINGS, pool);
 
     await server.setReadOnly(NAME, true);
+    await server.setReadOnly(NAME, true, false);
     await server.setReadOnly(NAME, false);
 
     expect(statements).toEqual([
       `ALTER ROLE "${NAME}" IN DATABASE "${NAME}" SET default_transaction_read_only = on`,
       expect.stringContaining('pg_terminate_backend'),
+      `ALTER ROLE "${NAME}" IN DATABASE "${NAME}" SET default_transaction_read_only = on`,
       `ALTER ROLE "${NAME}" IN DATABASE "${NAME}" RESET default_transaction_read_only`,
     ]);
   });

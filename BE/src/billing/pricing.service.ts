@@ -4,7 +4,7 @@ import { LessThan, LessThanOrEqual, Repository } from 'typeorm';
 import { Currency } from './currency.entity';
 import { PriceBook } from './price-book.entity';
 import { BookPrices, bookPrices } from './price-book';
-import { BookSegment, FunctionUsage, MonthEstimate, rateMonth } from './rating';
+import { BookSegment, FunctionUsage, MonthEstimate, ResourceUsage, hoursIn, rateMonth } from './rating';
 import { BILLED_CALL, SAMPLE_SUMS, callSums } from './usage-sql';
 
 /** A month by the UTC calendar: its first instant and the next month's. */
@@ -38,10 +38,17 @@ interface CapacityRow {
   reservedMbMs: string;
 }
 
+interface SampleRow {
+  databaseId: string;
+  byteHours: string;
+  hours: string;
+}
+
 /**
  * Prices usage with FF's price books (P-30, D8): each part of a month with the
- * book valid then, from the usage records (P-20) and the capacity samples
- * (P-21). The amounts are estimates until rating debits them (P-32).
+ * book valid then, from the usage records (P-20), the capacity samples (P-21)
+ * and customers' databases' hourly samples. The amounts are estimates until
+ * rating debits them (P-32).
  */
 @Injectable()
 export class PricingService {
@@ -89,11 +96,11 @@ export class PricingService {
     for (const [index, book] of prices.entries()) {
       const start = book.validFrom > from ? book.validFrom : from;
       const end = prices[index + 1]?.validFrom ?? to;
-      segments.push({ book, functions: await this.usage(accountId, start, end, book) });
+      segments.push({ book, functions: await this.usage(accountId, start, end, book), resources: await this.resourceUsage(accountId, start, end) });
     }
     const pricedFrom = prices[0].validFrom > from ? prices[0].validFrom : from;
     return {
-      ...rateMonth(segments, prices[0]),
+      ...rateMonth(segments, prices[0], hoursIn(month)),
       currency: currency.code,
       exponent: currency.exponent,
       pricedFrom,
@@ -101,12 +108,13 @@ export class PricingService {
     };
   }
 
-  /** The accounts that used something in the month: a call, or an instance sampled. */
+  /** The accounts that used something in the month: a call, an instance sampled, or a database. */
   async accountsWithUsage(month: string): Promise<string[]> {
     const { from, to } = monthBounds(month);
     const rows = await this.books.manager.query<Array<{ account_id: string }>>(
       `SELECT "account_id" FROM "usage_records" WHERE "started_at" >= $1 AND "started_at" < $2
        UNION SELECT "account_id" FROM "capacity_samples" WHERE "minute" >= $1 AND "minute" < $2
+       UNION SELECT "account_id" FROM "database_samples" WHERE "hour" >= $1 AND "hour" < $2
        ORDER BY 1`,
       [from, to],
     );
@@ -150,5 +158,17 @@ export class PricingService {
     }
     for (const row of samples) Object.assign(of(row.functionId), { provisionedMbMs: BigInt(row.provisionedTimeMbMs), reservedMbMs: BigInt(row.reservedMbMs) });
     return [...usage.values()];
+  }
+
+  /** The account's databases in [start, end), from their hourly samples: each one's byte-hours, and the hours it was sampled in. */
+  private async resourceUsage(accountId: string, start: Date, end: Date): Promise<ResourceUsage[]> {
+    const rows = await this.books.manager.query<SampleRow[]>(
+      `SELECT "database_id" AS "databaseId", sum("size_bytes")::text AS "byteHours", count(*)::text AS "hours"
+         FROM "database_samples"
+        WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3
+        GROUP BY "database_id"`,
+      [accountId, start, end],
+    );
+    return rows.map((row) => ({ resourceId: row.databaseId, kind: 'database', byteHours: BigInt(row.byteHours), hours: BigInt(row.hours), tier1Requests: 0n, tier2Requests: 0n }));
   }
 }

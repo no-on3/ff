@@ -25,8 +25,11 @@ export interface DataServer {
   setConnectionLimit(name: string, connectionLimit: number): Promise<void>;
   /** Whether its user may log in; when it may not, its sessions end. */
   setLogin(name: string, allowed: boolean): Promise<void>;
-  /** Its new sessions read-only, or not; when they turn read-only, the sessions under way end, so that each starts so again. */
-  setReadOnly(name: string, readOnly: boolean): Promise<void>;
+  /**
+   * Its new sessions read-only, or not. When they turn read-only, the sessions under way end, so that each starts so
+   * again; `endSessions` false sets it again and leaves them be.
+   */
+  setReadOnly(name: string, readOnly: boolean, endSessions?: boolean): Promise<void>;
   /** The database and its user, gone, its sessions ended; nothing for one that doesn't exist. */
   drop(name: string): Promise<void>;
   /** The size and sessions of each of these databases the server has. */
@@ -104,13 +107,13 @@ export class PostgresDataServer implements DataServer {
     if (!allowed) await this.endSessions(name);
   }
 
-  async setReadOnly(name: string, readOnly: boolean): Promise<void> {
+  async setReadOnly(name: string, readOnly: boolean, endSessions = readOnly): Promise<void> {
     const id = quoted(name);
     // The user's setting in its database, which its admin may set; the database's own needs its owner.
     await this.pool.query(
       readOnly ? `ALTER ROLE ${id} IN DATABASE ${id} SET default_transaction_read_only = on` : `ALTER ROLE ${id} IN DATABASE ${id} RESET default_transaction_read_only`,
     );
-    if (readOnly) await this.endSessions(name);
+    if (readOnly && endSessions) await this.endSessions(name);
   }
 
   async drop(name: string): Promise<void> {

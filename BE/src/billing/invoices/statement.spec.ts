@@ -1,12 +1,25 @@
 /**
  * L1: a month's usage statement (client-readiness plan, P-36, D9), priced as
- * the hourly rating prices the month: each function's usage and cost, the
- * free tier, the total rounded once, and what the rating debited or only
- * rated in shadow mode.
+ * the hourly rating prices the month: each function's usage and cost, each
+ * database's, the free tier, the total rounded once, and what the rating
+ * debited or only rated in shadow mode.
  */
 import { Decimal } from '../decimal';
-import { BookPrices } from '../price-book';
+import { BookPrices, NO_RESOURCE_PRICES } from '../price-book';
 import { buildStatement, StatementInput } from './statement';
+
+const GIB = 1_073_741_824n;
+/** A database of `gb` GB through `hours` of the month's hours, with one book. */
+const database = (resourceId: string, name: string, priceBookId: string, gb: bigint, hours: bigint) => ({
+  resourceId,
+  kind: 'database' as const,
+  name,
+  priceBookId,
+  byteHours: gb * GIB * hours,
+  hours,
+  tier1Requests: 0n,
+  tier2Requests: 0n,
+});
 
 const book = (id: string, validFrom: string, perMillion: string): BookPrices => ({
   id,
@@ -20,6 +33,7 @@ const book = (id: string, validFrom: string, perMillion: string): BookPrices => 
   minimumBilledMs: 0,
   idleInstanceGbSecond: Decimal.ZERO,
   monthlyPlanFee: Decimal.ZERO,
+  ...NO_RESOURCE_PRICES,
 });
 const usage = (functionId: string, priceBookId: string, requests: bigint, mbMs: bigint) => ({
   functionId,
@@ -39,6 +53,7 @@ const OCTOBER: StatementInput = {
     ['f-1', 'resize-images'],
     ['f-2', 'hello'],
   ]),
+  resources: [],
   charges: { debitedMinor: 20_655n, shadowMinor: 0n, ratedUntil: new Date('2026-11-01T00:00:00Z') },
   monthEnd: new Date('2026-11-01T00:00:00Z'),
 };
@@ -85,6 +100,25 @@ describe("a month's usage statement (L1, P-36)", () => {
 
     expect([statement.debitedMinor, statement.shadowMinor, statement.complete]).toEqual([120n, 20_535n, false]);
     expect(buildStatement({ ...OCTOBER, charges: { ...OCTOBER.charges, ratedUntil: null } }).complete).toBe(false);
+  });
+
+  it("lists each database by name, its GB-months and cost before the free tier, and takes its free GB-month off", () => {
+    // RDS's gp3 at 0.115 US$ times 3.0080 per GB-month, and 1 GB-month free in the month.
+    const priced = { ...book('b1', '2026-10-01T00:00:00Z', '0.6016'), databaseStorageGbMonth: Decimal.parse('0.34592'), freeDatabaseGbMonths: Decimal.of(1) };
+
+    const statement = buildStatement({
+      ...OCTOBER,
+      books: [priced],
+      rows: [],
+      resources: [database('d-2', 'orders', 'b1', 10n, 744n), database('d-1', 'audit', 'b1', 2n, 100n)],
+    });
+
+    expect(statement.resources).toEqual([
+      // 2 GB for 100 of October's 744 hours: 0.268817 GB-month, 0.092989 TND; 10 GB all month: 3.4592 TND.
+      { resourceId: 'd-1', kind: 'database', name: 'audit', gbMonths: '0.268817', tier1Requests: 0n, tier2Requests: 0n, amountMinor: 93n },
+      { resourceId: 'd-2', kind: 'database', name: 'orders', gbMonths: '10', tier1Requests: 0n, tier2Requests: 0n, amountMinor: 3_459n },
+    ]);
+    expect([statement.functions, statement.usageMinor, statement.freeTierMinor, statement.totalMinor]).toEqual([[], 3_552n, -346n, 3_206n]);
   });
 
   it("names a function by its ID when its name is gone, and lists nothing for a month without usage", () => {

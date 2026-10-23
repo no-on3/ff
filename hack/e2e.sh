@@ -25,15 +25,16 @@
 # customer's database on the run's own server of customers' databases: made, its
 # connection string over TLS as its own user, the plan's one database, a new
 # password, a function reaching it with its account's internet access off and
-# trusting its certificate, then deleted from the server. Then plans:
+# trusting its certificate, its hourly sample within a minute, then deleted
+# from the server. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
-# Then GET /usage (P-22) against the raw records, as JSON and as CSV, priced with
-# the first price book (P-30). Then the hourly rating (P-32): every hour settled
+# Then GET /usage (P-22) against the raw records, as JSON and as CSV, the deleted
+# database's month in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
 # since the first book rated as the backend started, in shadow mode, the balance,
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
 # invokes refused with 402, a top-up, and invokes accepted again at once. Then an
@@ -666,6 +667,10 @@ probe_fn="$(http POST /functions "$(jq -n --arg code "$probe" '{name: "e2e-data-
 check "a function reaches it, the account's internet access off, and trusts its certificate" '"trusted"' \
   "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg host "$data_db_address" '{input: {host: $host}}')" | jq -c .output)"
 http DELETE "/functions/$probe_fn" >/dev/null
+# Every minute, each database not measured yet in the hour is: a new one within a minute.
+for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM database_samples WHERE database_id = '$db_id'")" = 1 ] && break; sleep 1; done
+check "its hourly sample, within a minute: once in the hour, by its name, its size as the server counts it" "1|e2e-orders|t" \
+  "$(env_q "SELECT count(*), max(name), bool_and(size_bytes > 1000000) FROM database_samples WHERE database_id = '$db_id'")"
 http DELETE "/databases/$db_id" >/dev/null
 check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
   "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
@@ -814,10 +819,12 @@ check "the account's totals are its records' own sums" \
 # Its two calls: handler's, then lambda_handler's.
 check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 2" \
   "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
+check "the database, deleted earlier, keeps its month: its hours sampled and GB-months, at nothing before the book that prices databases" "true e2e-orders true true 0.000" \
+  "$(jq -r --arg id "$db_id" '.databases[] | select(.databaseId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \((.gbMonths | tonumber) > 0) \(.cost)"' <<<"$usage")"
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
-check "as CSV: a download, its header, and the meter function's line" \
-  "text/csv; charset=utf-8|function_id,function_name,deleted,requests,billed_ms,gb_seconds,throttled,platform_errors,lost,cost|true" \
-  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)"
+check "as CSV: a download, its header, the meter function's line and the database's" \
+  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,throttled,platform_errors,lost,cost|true|true" \
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,0\.000$" && echo true || echo false)"
 empty="$(http GET '/usage?month=2001-01')"
 check "a month without calls is empty, and before the first price book, unpriced" "200 0 0 null" \
   "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"
@@ -835,7 +842,7 @@ check "the meter function's cost: its billed requests and GB-s at the book's pri
 check "the free tier covers the month: usage, the free tier taking it all off, and nothing to pay" "true 0.000" \
   "$(jq -r '.estimate | "\((.usage | tonumber) + (.freeTier | tonumber) == 0) \(.total)"' <<<"$usage")"
 check "and the CSV has each function's cost" true \
-  "$(tr -d '\r' <<<"$csv" | grep -q "^$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" && echo true || echo false)"
+  "$(tr -d '\r' <<<"$csv" | grep -q "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" && echo true || echo false)"
 
 echo "== the hourly rating (P-32)"
 # As it started, the backend rated every hour since the first book that had settled: ended 33 minutes ago at least.

@@ -139,10 +139,11 @@ export class DatabasesService {
     });
   }
 
-  /** A reactivated account: its users log in again. */
+  /** A reactivated account: its users log in again, read-write until the next hourly sample finds one past the plan. */
   async reactivateAccount(accountId: string): Promise<void> {
     await this.eachOf(accountId, [DatabaseStatus.SUSPENDED], 'reactivate', async (server, row) => {
       await server.setLogin(row.dbName, true);
+      await server.setReadOnly(row.dbName, false);
       await this.databases.update({ id: row.id }, { status: DatabaseStatus.ACTIVE });
     });
   }
@@ -192,7 +193,7 @@ export class DatabasesService {
     }
   }
 
-  /** Every function of the account reaches the server from now on: its policy written again, with the rule (ADR 0008, §4). */
+  /** Every function of the account reaches the server from now on: its policy written again, with the rule that opens the server to them. */
   private async openPolicy(accountId: string): Promise<void> {
     try {
       await this.plans.withTenant(accountId, (tenant) => this.orchestrator.applyTenantLimits(accountId, tenant));
