@@ -124,6 +124,8 @@ Then `deploy/k8s/platform/deploy.sh <overlay>`. It checks the sandbox, the funct
 
 The test overlay (`hack/k8s/platform-e2e`) uses `on-demand` with Caddy's own authority, offline, and a DNS server of its own for a customer's domain.
 
+**Customers' databases** ([ADR 0008](../../docs/adr/0008-customer-databases.md)) live on a server of their own, outside the cluster, as FF's own database does: [`deploy/data-db`](../data-db/README.md) says how to install it. The backend reaches it with its own role there (`FF_DATA_DB_*` in `backend.env`, the password in the Secret `ff-backend`), and every tenant's NetworkPolicy opens the server's addresses, `FF_DATA_DB_CIDRS`, on its port, whatever the account's internet access: the addresses its name resolves to from the cluster's nodes. When its certificate comes from a CA of the operator's (`FF_DATA_DB_CA_FILE`), the backend writes the CA into a Secret of each tenant's, `ff-data-db-ca`, which functions' pods mount at `/etc/ff/data-db/` and Node.js trusts through `NODE_EXTRA_CA_CERTS`; with a public CA's certificate, there is nothing to write.
+
 **The first operator:**
 1. In Keycloak's admin console (`https://<login>/admin`, from an address `FF_ADMIN_ALLOW` names), as the bootstrap administrator, make the user.
 2. Give them the realm role `ff-operator`; they set up their one-time password at their first login.

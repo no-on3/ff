@@ -2,6 +2,7 @@
  * Pure builders for every Kubernetes object FF creates. Conventions are
  * documented in docs/kubernetes-migration-plan.md §4.
  */
+import { Runtime } from '../../functions/entities/function.entity';
 import { FunctionWorkload, TenantLimits, WorkloadEnvironment } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
 import { ANNOTATIONS, LABELS, MANAGED_BY, accountHash, functionResourceName } from './naming';
@@ -23,6 +24,11 @@ export const RUNTIME_PORT = 8080;
 export const TENANT_QUOTA_NAME = 'ff-tenant-quota';
 export const TENANT_LIMITS_NAME = 'ff-tenant-limits';
 export const TENANT_NETWORK_POLICY_NAME = 'ff-default-deny';
+/** The Secret, in each tenant namespace, with the CA of customers' database server's certificate (ADR 0008). */
+export const DATA_DB_CA_SECRET = 'ff-data-db-ca';
+/** Where functions' pods find that CA, and what NODE_EXTRA_CA_CERTS names for Node.js functions. */
+export const DATA_DB_CA_DIR = '/etc/ff/data-db';
+export const DATA_DB_CA_FILE = `${DATA_DB_CA_DIR}/ca.crt`;
 /** Never reachable from functions: pod/service CIDRs, node IPs, API server, metadata endpoints. */
 export const BLOCKED_EGRESS_CIDRS = [
   '10.0.0.0/8',
@@ -121,7 +127,10 @@ export function limitRangeManifest(namespace: string): K8sObject {
 /**
  * The account's NetworkPolicy. Its functions resolve names, and reach the internet only when the account's own
  * setting allows it (the operator turns it on) and the platform's K8S_EGRESS_INTERNET doesn't forbid it for
- * every account. Never FF's own network, nor the cloud's metadata addresses (BLOCKED_EGRESS_CIDRS).
+ * every account. Never FF's own network, nor the cloud's metadata addresses (BLOCKED_EGRESS_CIDRS), but for the
+ * platform's services that functions use, each at its addresses on its one port, whatever the account's internet
+ * access: customers' database server. NetworkPolicy rules add up, so the ranges the internet rule leaves out don't
+ * cancel them.
  */
 export function networkPolicyManifest(namespace: string, settings: KubernetesSettings, internetEgress: boolean): K8sObject {
   // Only the backend calls a function: never the other platform pods in ff-system (Keycloak, the console, the
@@ -148,6 +157,9 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
       ],
     },
   ];
+  for (const service of settings.platformEgress) {
+    egress.push({ to: service.cidrs.map((cidr) => ({ ipBlock: { cidr } })), ports: [{ protocol: 'TCP', port: service.port }] });
+  }
   if (settings.egressInternet && internetEgress) {
     egress.push({ to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }] });
   }
@@ -190,6 +202,20 @@ export function environmentSecretManifest(fn: FunctionWorkload & { environment: 
   };
 }
 
+/**
+ * The CA of customers' database server's certificate, in the tenant namespace, for the functions' pods to mount: the
+ * server's certificate comes from it when it isn't a public one, as in development (ADR 0008).
+ */
+export function dataDbCaSecretManifest(namespace: string, ca: string): K8sObject {
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: { name: DATA_DB_CA_SECRET, namespace, labels: managedLabels() },
+    type: 'Opaque',
+    data: { 'ca.crt': Buffer.from(ca, 'utf8').toString('base64') },
+  };
+}
+
 export function serviceManifest(fn: FunctionWorkload, namespace: string): K8sObject {
   return {
     apiVersion: 'v1',
@@ -222,7 +248,12 @@ export function deploymentManifest(
   const labels = functionLabels(fn);
   const environment = environmentSecret && hasEnvironment(fn) ? fn.environment : undefined;
   // FF's runtimes run in UTC, unless the function sets TZ itself, as AWS Lambda lets it: its envFrom would lose to env.
-  const timeZone = environment && Object.prototype.hasOwnProperty.call(environment.values, 'TZ') ? [] : [{ name: 'TZ', value: 'UTC' }];
+  const own = (name: string) => environment !== undefined && Object.prototype.hasOwnProperty.call(environment.values, name);
+  const timeZone = own('TZ') ? [] : [{ name: 'TZ', value: 'UTC' }];
+  // Node.js trusts the CA of customers' database server, as AWS Lambda's Node.js runtime keeps RDS's for this variable,
+  // unless the function names CAs of its own. A Python driver reads the file where the guide says.
+  const dataDbCa = settings.dataDbCa !== '';
+  const extraCas = dataDbCa && fn.runtime === Runtime.NODEJS && !own('NODE_EXTRA_CA_CERTS') ? [{ name: 'NODE_EXTRA_CA_CERTS', value: DATA_DB_CA_FILE }] : [];
   return {
     apiVersion: 'apps/v1',
     kind: 'Deployment',
@@ -272,6 +303,7 @@ export function deploymentManifest(
                 { name: 'FF_EVENT_FORMAT', value: fn.eventFormat },
                 { name: 'PORT', value: String(RUNTIME_PORT) },
                 ...timeZone,
+                ...extraCas,
               ],
               // The function's own variables and secrets. FF's names above are reserved, so none of them is overridden.
               ...(environment ? { envFrom: [{ secretRef: { name: environmentSecret } }] } : {}),
@@ -294,6 +326,7 @@ export function deploymentManifest(
               volumeMounts: [
                 { name: 'code', mountPath: '/var/task', readOnly: true },
                 { name: 'tmp', mountPath: '/tmp' },
+                ...(dataDbCa ? [{ name: 'data-db-ca', mountPath: DATA_DB_CA_DIR, readOnly: true }] : []),
               ],
             },
           ],
@@ -301,6 +334,8 @@ export function deploymentManifest(
             // The code's image, read-only, pulled by the node like the runtime's (ADR 0003).
             { name: 'code', image: { reference: codeImage, pullPolicy: 'IfNotPresent' } },
             { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } },
+            // The tenant's copy, which every deploy writes first (dataDbCaSecretManifest).
+            ...(dataDbCa ? [{ name: 'data-db-ca', secret: { secretName: DATA_DB_CA_SECRET, optional: true } }] : []),
           ],
         },
       },

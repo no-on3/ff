@@ -1,7 +1,10 @@
 import { EventFormat, Runtime } from '../../functions/entities/function.entity';
 import {
   BLOCKED_EGRESS_CIDRS,
+  DATA_DB_CA_DIR,
+  DATA_DB_CA_SECRET,
   cpuMillicores,
+  dataDbCaSecretManifest,
   deploymentManifest,
   environmentSecretManifest,
   namespaceManifest,
@@ -153,6 +156,35 @@ describe('Kubernetes manifests', () => {
       });
     });
 
+    describe("the CA of customers' database server's certificate (ADR 0008)", () => {
+      const withCa = settings({ dataDbCa: '-----BEGIN CERTIFICATE-----\n' });
+      const caVolume = { name: 'data-db-ca', secret: { secretName: DATA_DB_CA_SECRET, optional: true } };
+
+      it('is mounted read-only from the tenant\'s Secret, and Node.js trusts it through NODE_EXTRA_CA_CERTS', () => {
+        const d: any = deploymentManifest(workload(), 'ff-t-abc', 'sha', withCa, 1);
+
+        expect(podSpec(d).volumes).toContainEqual(caVolume);
+        expect(container(d).volumeMounts).toContainEqual({ name: 'data-db-ca', mountPath: DATA_DB_CA_DIR, readOnly: true });
+        expect(container(d).env).toContainEqual({ name: 'NODE_EXTRA_CA_CERTS', value: `${DATA_DB_CA_DIR}/ca.crt` });
+      });
+
+      it("gives way to a Node.js function's own NODE_EXTRA_CA_CERTS, and names nothing for Python, whose drivers read the file", () => {
+        const own: any = deploymentManifest(workload({ environment: { revision: 'r1', values: { NODE_EXTRA_CA_CERTS: '/var/task/ca.pem' } } }), 'ff-t-abc', 'sha', withCa, 1, 'env-0');
+        const python: any = deploymentManifest(workload({ runtime: Runtime.PYTHON }), 'ff-t-abc', 'sha', withCa, 1);
+
+        expect(container(own).env.filter((e: any) => e.name === 'NODE_EXTRA_CA_CERTS')).toEqual([]);
+        expect(container(python).env.filter((e: any) => e.name === 'NODE_EXTRA_CA_CERTS')).toEqual([]);
+        expect(podSpec(python).volumes).toContainEqual(caVolume);
+      });
+
+      it('is left out when the certificate is a public one', () => {
+        const d: any = deploymentManifest(workload(), 'ff-t-abc', 'sha', settings(), 1);
+
+        expect(podSpec(d).volumes.map((v: any) => v.name)).toEqual(['code', 'tmp']);
+        expect(container(d).env.map((e: any) => e.name)).not.toContain('NODE_EXTRA_CA_CERTS');
+      });
+    });
+
     it('probes readiness on /readyz and liveness on /healthz', () => {
       const c = container(build());
 
@@ -198,6 +230,15 @@ describe('Kubernetes manifests', () => {
       ]);
     });
 
+    it("lets functions reach the platform's services at their addresses, on their one port, whatever the account's internet access", () => {
+      const np: any = networkPolicyManifest('ff-t-abc', settings({ platformEgress: [{ cidrs: ['10.199.0.10/32', '203.0.113.7/32'], port: 5432 }] }), false);
+
+      expect(np.spec.egress).toEqual([
+        expect.objectContaining({ ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] }),
+        { to: [{ ipBlock: { cidr: '10.199.0.10/32' } }, { ipBlock: { cidr: '203.0.113.7/32' } }], ports: [{ protocol: 'TCP', port: 5432 }] },
+      ]);
+    });
+
     it('adds configured ingress CIDRs', () => {
       const np: any = networkPolicyManifest('ff-t-abc', settings({ ingressAllowCidrs: ['10.42.0.1/32'] }), false);
 
@@ -227,6 +268,13 @@ describe('Kubernetes manifests', () => {
 
       expect(np.spec.egress).toEqual([expect.objectContaining({ ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] })]);
     });
+  });
+
+  it("puts the CA of customers' database server's certificate in a Secret of the tenant's, labelled as FF's", () => {
+    const secret: any = dataDbCaSecretManifest('ff-t-abc', '-----BEGIN CERTIFICATE-----\nMIIB\n');
+
+    expect(secret).toMatchObject({ kind: 'Secret', metadata: { name: DATA_DB_CA_SECRET, namespace: 'ff-t-abc', labels: { 'app.kubernetes.io/managed-by': 'ff-controller' } } });
+    expect(Buffer.from(secret.data['ca.crt'], 'base64').toString()).toBe('-----BEGIN CERTIFICATE-----\nMIIB\n');
   });
 
   it("puts a function's variables and secrets in a Secret: base64, labelled as the function's, naming only the revision", () => {

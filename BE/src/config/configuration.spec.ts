@@ -177,6 +177,78 @@ describe('configuration', () => {
     });
   });
 
+  describe("customers' database server (ADR 0008)", () => {
+    const server: Env = { ...dev, FF_DATA_DB_HOST: '10.199.0.10', FF_DATA_DB_ADMIN_PASSWORD: 'ff-data-admin-dev', FF_DATA_DB_CIDRS: '10.199.0.10/32' };
+    let dir: string;
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-data-db-'));
+      fs.writeFileSync(path.join(dir, 'ca.crt'), '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n');
+    });
+
+    afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    it('has none unless FF_DATA_DB_HOST names it: functions then reach nothing more', () => {
+      const config = configuration(dev);
+
+      expect(config.dataDb).toBeNull();
+      expect(config.kubernetes).toMatchObject({ platformEgress: [], dataDbCa: '' });
+    });
+
+    it("reaches it as named, on 5432, as ff_admin; functions at its addresses, on its port; no CA for a public certificate", () => {
+      const config = configuration(server);
+
+      expect(config.dataDb).toEqual({
+        host: '10.199.0.10',
+        port: 5432,
+        adminHost: '10.199.0.10',
+        adminUser: 'ff_admin',
+        adminPassword: 'ff-data-admin-dev',
+        cidrs: ['10.199.0.10/32'],
+      });
+      expect(config.kubernetes).toMatchObject({ platformEgress: [{ cidrs: ['10.199.0.10/32'], port: 5432 }], dataDbCa: '' });
+    });
+
+    it('takes another port, another address for the backend, and the CA of its certificate, which functions get too', () => {
+      const config = configuration({
+        ...server,
+        FF_DATA_DB_HOST: 'db.ff.example',
+        FF_DATA_DB_PORT: '6432',
+        FF_DATA_DB_ADMIN_HOST: '10.0.5.4',
+        FF_DATA_DB_CIDRS: '203.0.113.7/32,10.0.5.4/32',
+        FF_DATA_DB_CA_FILE: path.join(dir, 'ca.crt'),
+      });
+
+      expect(config.dataDb).toMatchObject({ host: 'db.ff.example', port: 6432, adminHost: '10.0.5.4', ca: expect.stringContaining('BEGIN CERTIFICATE') });
+      expect(config.kubernetes.platformEgress).toEqual([{ cidrs: ['203.0.113.7/32', '10.0.5.4/32'], port: 6432 }]);
+      expect(config.kubernetes.dataDbCa).toContain('BEGIN CERTIFICATE');
+    });
+
+    it("needs the backend role's password and the addresses functions reach it at", () => {
+      expect(problems({ ...dev, FF_DATA_DB_HOST: '10.199.0.10' })).toEqual([
+        "FF_DATA_DB_ADMIN_PASSWORD is required when FF_DATA_DB_HOST is set: it is the backend's role's on customers' database server",
+        "FF_DATA_DB_CIDRS is required when FF_DATA_DB_HOST is set: functions reach customers' database server only at these addresses, through their NetworkPolicy",
+      ]);
+    });
+
+    it('refuses its other settings without it, a CA it cannot read, and what is no host or role', () => {
+      expect(problems({ ...dev, FF_DATA_DB_ADMIN_PASSWORD: 'x', FF_DATA_DB_CIDRS: '10.199.0.10/32' })).toEqual([
+        "FF_DATA_DB_ADMIN_PASSWORD is set, but FF_DATA_DB_HOST is not: it names customers' database server",
+        "FF_DATA_DB_CIDRS is set, but FF_DATA_DB_HOST is not: it names customers' database server",
+      ]);
+      expect(problems({ ...server, FF_DATA_DB_CA_FILE: '/nonexistent/ca.crt' })).toEqual([expect.stringContaining('FF_DATA_DB_CA_FILE cannot be read: /nonexistent/ca.crt')]);
+      expect(problems({ ...server, FF_DATA_DB_HOST: 'db.ff.example:5432' })).toEqual([expect.stringContaining('FF_DATA_DB_HOST must be a host name or an IP address')]);
+      expect(problems({ ...server, FF_DATA_DB_ADMIN_USER: 'FF-Admin' })).toEqual([expect.stringContaining('FF_DATA_DB_ADMIN_USER must be a PostgreSQL role name')]);
+    });
+
+    it('refuses the development password in production, and never repeats a password', () => {
+      const found = problems({ ...production, ...server, NODE_ENV: 'production', FF_AUTH_MODE: 'oidc', FF_DEV_ACCOUNT_ID: undefined });
+
+      expect(found).toEqual(['FF_DATA_DB_ADMIN_PASSWORD must not be the development default when NODE_ENV=production']);
+      expect(problems({ ...dev, FF_DATA_DB_ADMIN_PASSWORD: 'hunter2' }).join(' ')).not.toContain('hunter2');
+    });
+  });
+
   it('has no schema synchronization switch: the schema comes only from migrations', () => {
     expect(configuration(dev).database).not.toHaveProperty('synchronize');
   });

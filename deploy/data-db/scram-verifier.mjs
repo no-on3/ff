@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// A PostgreSQL SCRAM-SHA-256 verifier for a password, as the backend will compute it (the step-2 plan's D4):
+// A PostgreSQL SCRAM-SHA-256 verifier for a password, as the backend computes its own (ADR 0008):
 // the server is sent the verifier, never the password, so the password reaches no log.
-//   node scram-verifier.mjs <password>   → SCRAM-SHA-256$4096:<salt>$<StoredKey>:<ServerKey>
+//   node deploy/data-db/scram-verifier.mjs <password>   → SCRAM-SHA-256$4096:<salt>$<StoredKey>:<ServerKey>
+// for the backend role's FF_DATA_DB_ADMIN_VERIFIER (README.md).
 // The password must be ASCII: SASLprep, which PostgreSQL applies first, leaves ASCII as it is.
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 

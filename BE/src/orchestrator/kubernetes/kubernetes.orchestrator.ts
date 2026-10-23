@@ -17,10 +17,12 @@ import { KubernetesSettings } from './kubernetes.settings';
 import { LogStore, namespaceFilter, pageQuery, quoted, tailQuery, toLine, toPage } from './log-store';
 import {
   K8sObject,
+  DATA_DB_CA_SECRET,
   RUNTIME_PORT,
   TENANT_LIMITS_NAME,
   TENANT_NETWORK_POLICY_NAME,
   TENANT_QUOTA_NAME,
+  dataDbCaSecretManifest,
   deploymentManifest,
   environmentSecretManifest,
   hasEnvironment,
@@ -169,6 +171,12 @@ export class KubernetesOrchestrator implements Orchestrator {
       paths.networking(ns, 'networkpolicies', TENANT_NETWORK_POLICY_NAME),
       networkPolicyManifest(ns, this.settings, tenant.internetEgress),
     );
+    await this.applyDataDbCa(ns);
+  }
+
+  /** The CA of customers' database server's certificate, for the tenant's pods: only when it isn't a public one. */
+  private async applyDataDbCa(ns: string): Promise<void> {
+    if (this.settings.dataDbCa) await this.api.apply(paths.core(ns, 'secrets', DATA_DB_CA_SECRET), dataDbCaSecretManifest(ns, this.settings.dataDbCa));
   }
 
   /**
@@ -183,6 +191,7 @@ export class KubernetesOrchestrator implements Orchestrator {
       paths.networking(ns, 'networkpolicies', TENANT_NETWORK_POLICY_NAME),
       networkPolicyManifest(ns, this.settings, tenant.internetEgress),
     );
+    await this.applyDataDbCa(ns);
   }
 
   private async apply(fn: FunctionWorkload, tenant: TenantLimits): Promise<void> {

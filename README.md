@@ -16,7 +16,7 @@ FF deploys and runs Node.js (TypeScript or JavaScript) and Python functions with
 
   Functions scale out when calls arrive together (one instance per call in flight, up to `maxInstances`), scale to zero when idle, and start again on the next invocation.
 - **Kubernetes orchestration** ([ADR 0001](docs/adr/0001-orchestrator-kubernetes.md)):
-  - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy: its functions reach the internet only once you turn the account's egress on, and never FF's own network;
+  - each tenant gets its own namespace with a quota, container limits, and a default-deny network policy: its functions reach the internet only once you turn the account's egress on, and never FF's own network, but for the server of customers' databases, on its port, whatever the account's internet access ([ADR 0008](docs/adr/0008-customer-databases.md));
   - the backend uses a least-privilege ServiceAccount, confined to tenant namespaces by an admission policy;
   - every function's code runs as an image in the cluster's registry, which its pods mount read-only at `/var/task` ([ADR 0003](docs/adr/0003-code-delivery.md)): a package's, a zip with its libraries as AWS Lambda takes one (50 MB, 250 MB unpacked), checked entry by entry when it is uploaded; and inline code's, one file of up to 3 MiB, as AWS Lambda's console takes, which the backend makes a one-file package of. An invocation's input may have 6 MB as JSON, as on AWS Lambda.
 - **Runtimes** `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`, runtime protocol 3 ([Node.js](runtimes/nodejs/README.md), [Python](runtimes/python/README.md)):
@@ -52,6 +52,7 @@ Nomad is no longer used; its development VM was removed.
 | `admin/` | Admin dashboard for FF's operators (React, Vite, Tailwind): a separate app, behind its own login (P-70) |
 | `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol 3 |
 | `cli/` | The `ff` command (Rust): one binary that works through the API only, being built as the [CLI plan](docs/cli-plan.md) says |
+| `deploy/data-db/` | The server of customers' databases: PostgreSQL 18 with WAL-G, TLS and SCRAM only, who may log in where, and how to install it ([ADR 0008](docs/adr/0008-customer-databases.md)) |
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs), `logging/` (the log pipeline), `monitoring/` (the operator's metrics, alerts and dashboards), `platform/` (the backend, the apps, Keycloak and the edge proxy, with their deploy script), `backup/` (the legal records' mirror) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
 | `infrastructure/` | SeaweedFS (S3) identities for `docker-compose.yml` |
@@ -66,6 +67,7 @@ You need Docker 24+, Node.js 24.15 or newer, Python 3.11+ (for the Python runtim
 
 ```bash
 docker compose up -d --wait                 # PostgreSQL (127.0.0.1:5432) + SeaweedFS S3 (127.0.0.1:9003)
+# hack/k8s/data-db-up.sh                    # optional: the server of customers' databases, PostgreSQL 18
 hack/k8s/cluster-up.sh                      # k3d cluster (k3s v1.37.1), RBAC, admission policy, credentials
 runtimes/nodejs/test/container-smoke.sh     # builds ff-runtime-nodejs:24-v3 and checks it
 runtimes/python/tests/container-smoke.sh    # builds ff-runtime-python:3.13-v3 and checks it

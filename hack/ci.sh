@@ -122,7 +122,7 @@ stage_db() {
   trap - EXIT
 }
 
-# Every image FF builds: the platform's, the runtimes', the edge's and the backup's, each with its build
+# Every image FF builds: the platform's, the runtimes', the edge's, the backup's and customers' database server's, each with its build
 # arguments. The apps bake their addresses in: any will do for a scan.
 apps=(--build-arg VITE_API_URL=https://api.ff.test --build-arg VITE_OIDC_AUTHORITY=https://login.ff.test/realms/ff)
 IMAGES=(
@@ -133,6 +133,7 @@ IMAGES=(
   "ff-runtime-nodejs:ci runtimes/nodejs"
   "ff-runtime-python:ci runtimes/python"
   "ff-postgres-walg:ci deploy/backup/postgres-walg"
+  "ff-data-db:ci deploy/data-db"
 )
 
 # The scanners run as this user: what they write here stays this user's.

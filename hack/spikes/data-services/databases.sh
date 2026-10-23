@@ -160,7 +160,7 @@ note "Data directory \`$pgdata\`; the server's settings: \`${server_args[*]}\`, 
 # The backend's role: makes databases and users, never a superuser. It reads every database's size and may end a
 # customer's sessions through two of PostgreSQL's predefined roles.
 admin_password="$(secret)"
-admin_verifier="$(node "$here/scram-verifier.mjs" "$admin_password")"
+admin_verifier="$(node "$repo/deploy/data-db/scram-verifier.mjs" "$admin_password")"
 super -c "CREATE ROLE ff_admin LOGIN CREATEDB CREATEROLE PASSWORD '$admin_verifier'" >/dev/null
 super -c "GRANT pg_read_all_stats, pg_signal_backend TO ff_admin" >/dev/null
 
@@ -173,7 +173,7 @@ expect refused "the superuser over TCP, even with TLS" psql "host=127.0.0.1 port
 
 make_database() { # name password → makes the user and its database as the backend would
   local db="$1" password="$2" verifier
-  verifier="$(node "$here/scram-verifier.mjs" "$password")"
+  verifier="$(node "$repo/deploy/data-db/scram-verifier.mjs" "$password")"
   admin -c "CREATE ROLE $db LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 10 PASSWORD '$verifier'" \
     -c "GRANT $db TO ff_admin WITH INHERIT FALSE, SET TRUE" \
     -c "CREATE DATABASE $db OWNER $db" \
@@ -184,7 +184,7 @@ a_password="$(secret)"
 b="$(opaque)"
 b_password="$(secret)"
 probe="$(opaque)"
-admin -c "CREATE ROLE $probe LOGIN PASSWORD '$(node "$here/scram-verifier.mjs" "$(secret)")'" >/dev/null
+admin -c "CREATE ROLE $probe LOGIN PASSWORD '$(node "$repo/deploy/data-db/scram-verifier.mjs" "$(secret)")'" >/dev/null
 expect refused "CREATE DATABASE … OWNER another role, without the right to SET ROLE to it (PostgreSQL 16 and later)" admin -c "CREATE DATABASE $probe OWNER $probe"
 admin -c "DROP ROLE $probe" >/dev/null
 expect ok "a customer's user and database: CREATE ROLE, GRANT … WITH INHERIT FALSE, SET TRUE, CREATE DATABASE … OWNER, then as its owner REVOKE ALL FROM PUBLIC" make_database "$a" "$a_password"

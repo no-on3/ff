@@ -127,6 +127,15 @@ hack/k8s/gvisor-up.sh                                       # about 80 s the fir
 sed -i 's/^K8S_RUNTIME_CLASS=.*/K8S_RUNTIME_CLASS=gvisor/' BE/.env
 ```
 
+**10. Customers' databases (optional).** Customers' PostgreSQL databases live on a server of their own, apart from FF's ([ADR 0008](adr/0008-customer-databases.md)). In development it is `docker-compose.yml`'s `data-db`, PostgreSQL 18 with TLS only, on a Docker network of its own (10.199.0.0/24) that the cluster's node joins, so that functions reach it at its address there, as the backend and `psql` on this machine do. The script builds and starts it, joins the node, copies the CA of its certificate to `hack/.data-db/ca.crt`, and prints four lines for `BE/.env`; restart the backend after adding them. Without them, FF has no databases.
+
+```bash
+hack/k8s/data-db-up.sh            # about 2 minutes the first time: it builds its image
+```
+
+- Functions reach it whatever their account's internet access: their NetworkPolicy opens its address on port 5432, and nothing else of that network. Node.js functions trust its certificate through `NODE_EXTRA_CA_CERTS`, which FF sets to the CA it mounts in their pods; a Python driver finds the CA at `/etc/ff/data-db/ca.crt`.
+- `hack/k8s/data-db-up.sh psql` opens `psql` in it as its superuser; `hack/k8s/data-db-up.sh down` stops it, and `down --volumes` deletes its data too, as `docker compose down -v` does.
+
 **Check the whole setup** with the end-to-end test. It uses its own compose project, ports, and backend, so it can run next to your dev stack. It takes about 3 minutes and needs 3.5 GB of free memory.
 
 ```bash

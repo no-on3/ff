@@ -18,7 +18,7 @@ import {
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { StoredLine, decodeCursor, pageQuery, tailQuery } from './log-store';
-import { BLOCKED_EGRESS_CIDRS, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
+import { BLOCKED_EGRESS_CIDRS, DATA_DB_CA_SECRET, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
 import { ANNOTATIONS, LABELS, functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
 
@@ -191,6 +191,34 @@ describe('KubernetesOrchestrator', () => {
       await orchestrator.applyTenantLimits(fn.accountId, tenant({ pods: 40 }));
 
       expect(api.applied).toEqual([]);
+    });
+  });
+
+  describe("customers' database server (ADR 0008)", () => {
+    const pem = '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n';
+    const caPath = `/api/v1/namespaces/${ns}/secrets/${DATA_DB_CA_SECRET}`;
+
+    it("writes the CA of the server's certificate into the tenant namespace before the Deployment, which mounts it", async () => {
+      orchestrator = new KubernetesOrchestrator(settings({ dataDbCa: pem }), api, 5);
+      await orchestrator.deploy(fn, tenant());
+
+      expect(api.applied.map((a) => a.manifest.kind)).toEqual(['Namespace', 'ResourceQuota', 'LimitRange', 'NetworkPolicy', 'Secret', 'Service', 'Deployment']);
+      expect(api.applied[4].path).toBe(caPath);
+      expect(Buffer.from(api.applied[4].manifest.data['ca.crt'], 'base64').toString()).toBe(pem);
+    });
+
+    it('writes it again with a plan or egress change, for the namespaces that exist', async () => {
+      orchestrator = new KubernetesOrchestrator(settings({ dataDbCa: pem }), api, 5);
+      api.objects.set(`/api/v1/namespaces/${ns}`, { metadata: { name: ns } });
+      await orchestrator.applyTenantLimits(fn.accountId, tenant());
+
+      expect(api.applied.map((a) => a.path)).toContain(caPath);
+    });
+
+    it('writes no Secret when its certificate is a public one, as production has', async () => {
+      await orchestrator.deploy(fn, tenant());
+
+      expect(api.applied.some((a) => a.manifest.kind === 'Secret')).toBe(false);
     });
   });
 
