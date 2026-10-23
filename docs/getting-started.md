@@ -514,54 +514,64 @@ cli/templates/export/data/s3-sync.sh photos my-photos-on-s3     # my-photos-on-s
 
 ### A small app, end to end
 
-[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and written to PostgreSQL, through a secret that holds the database's address, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, makes its two functions. Here the app uses a database of its own, which its functions reach over the internet, once the account's internet access is on; on one of FF's, as the section before shows, they reach it with that access off, the app unchanged but for its `DATABASE_URL`.
+[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and kept in PostgreSQL, each order's receipt kept in a bucket, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, and `@aws-sdk/client-s3`, AWS's S3 client, makes its two functions. On FF it keeps its orders in one of FF's databases and its receipts in one of FF's buckets, as it would in RDS and S3 on AWS: its functions reach both with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL` and `RECEIPTS_BUCKET`. In development, functions get their own keys to buckets once the backend knows where they reach the front door (`FF_STORAGE_FUNCTION_ENDPOINT`, in "Files in buckets" above), and the customers' databases' server runs (setup's step 10).
 
-**The database.** A function never reaches a private address, FF's own network included. In development, `hack/k8s/app-database.sh up` runs a PostgreSQL that the cluster's functions reach as they would one on the internet: on a Docker network of its own in 198.18.0.0/15, the range set aside for tests, which the cluster's node joins (Docker 28 or later). It prints the database's address, which the functions get as a secret.
-
-```bash
-DATABASE_URL=$(hack/k8s/app-database.sh up)       # postgres://app:…@198.18.0.10:5432/app
-```
-
-**Its internet access.** The beta plan's accounts have none. FF's operator turns it on in the admin dashboard, on the account's page (`PUT /admin/accounts/<id>/egress`). In development mode, with no operator, the database stands in, and the next deploy applies it to the account's namespace:
-
-```bash
-docker compose exec -T postgres psql -U postgres -d serverless_platform \
-  -c "UPDATE accounts SET internet_egress = true WHERE id = '$(curl -s "$FF/me" | jq -r '.accounts[0].id')'"
-```
-
-**The web address.** From the app's folder:
+**The two functions.** From the app's folder; the second has the same package, so nothing goes up again:
 
 ```bash
 cd examples/orders-app
-ff deploy . --name orders-api --handler index.http     # npm installs pg in a copy of the folder; the package goes up
-printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
-ff url enable orders-api --auth none                    # its address: http://<id>.fn.localhost:3001/
-ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}'
-# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…"}
-ff invoke orders-api --http GET /orders                 # or curl http://<id>.fn.localhost:3001/orders
-../../hack/k8s/app-database.sh psql -c 'SELECT * FROM orders'
+ff deploy . --name orders-api --handler index.http          # npm installs pg and the S3 client in a copy of the folder; the package goes up
+ff deploy . --name orders-nightly --handler index.nightly   # "package: …, which the account had"
 ```
 
-Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the address the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after.
-
-**The nightly report.** The same folder makes the second function, with the other handler. Its package is the same, so nothing goes up again:
+**Its database and its bucket.** `ff db create` makes the database and sets its connection string as both functions' `DATABASE_URL`, rolling each out; the bucket keeps the receipts, its name in a variable. Each function has a key of its own to the account's buckets, with the region and the front door's address, in its environment, so `new S3Client({})` needs nothing more, as on AWS Lambda with a role:
 
 ```bash
-ff deploy . --name orders-nightly --handler index.nightly   # "package: …, which the account had"
-printf '%s\n' "$DATABASE_URL" | ff secrets set orders-nightly DATABASE_URL
-ff schedule set orders-nightly "cron(0 2 * * ? *)"          # every night at 02:00 UTC; it says the next runs
-ff invoke orders-nightly --data @events/scheduled.json      # a night's run, now, with EventBridge's Scheduled Event
-ff logs orders-nightly                                      # report {"day":"2026-10-21","orders":1,"items":2,"removed":0}
+ff db create orders --secret-for orders-api --secret-for orders-nightly
+ff buckets create shop-receipts                             # a name of yours: bucket names are unique across FF
+ff env set orders-api RECEIPTS_BUCKET=shop-receipts
+ff env set orders-nightly RECEIPTS_BUCKET=shop-receipts
 ```
 
-The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. At 02:00 UTC the scheduler calls the function with that event itself; the run is in `ff history orders-nightly`, and `ff schedule list orders-nightly` says how it went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
+**The web address.**
+
+```bash
+ff url enable orders-api --auth none                        # its address: http://<id>.fn.localhost:3001/
+ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}'
+# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…","receipt":"s3://shop-receipts/receipts/1.txt"}
+ff invoke orders-api --http GET /orders                     # or curl http://<id>.fn.localhost:3001/orders
+ff invoke orders-api --http GET /orders/1/receipt           # Order 1, 2 × harissa, and its time
+```
+
+Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the string the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after. The order is written first, then its receipt, `receipts/<id>.txt`: a receipt that can't be written leaves the order, with `"receipt": null` in the answer and a line in the log. With one of the account's keys, the AWS CLI reads it as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
+
+**The nightly report.**
+
+```bash
+ff schedule set orders-nightly "cron(0 2 * * ? *)"          # every night at 02:00 UTC; it says the next runs
+ff invoke orders-nightly --data @events/scheduled.json      # a night's run, now, with EventBridge's Scheduled Event
+ff logs orders-nightly                                      # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
+```
+
+The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself; the run is in `ff history orders-nightly`, and `ff schedule list orders-nightly` says how it went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
 
 ```bash
 ff delete orders-nightly --yes && ff delete orders-api --yes
-../../hack/k8s/app-database.sh down                     # the database, with its data
+ff db delete orders --yes                                   # the database, with its data
+ff buckets delete shop-receipts --force --yes               # the bucket, with its receipts
 ```
 
-**In production** the database is yours, at an address on the internet, with TLS (`sslmode=require` in its address) and its password in the secret; FF's operator turns the account's internet access on. The same folder runs on AWS Lambda with an RDS database: `ff package` writes its zip.
+**A database of your own, elsewhere,** works as well, through the same secret, once the account's internet access is on. A function never reaches a private address, FF's own network included, so in development `hack/k8s/app-database.sh up` runs a PostgreSQL that the cluster's functions reach as they would one on the internet: on a Docker network of its own in 198.18.0.0/15, the range set aside for tests, which the cluster's node joins (Docker 28 or later). It prints the database's address. FF's operator turns the account's internet access on in the admin dashboard, on the account's page (`PUT /admin/accounts/<id>/egress`); in development mode, with no operator, the database stands in, and the next deploy applies it to the account's namespace:
+
+```bash
+DATABASE_URL=$(hack/k8s/app-database.sh up)                 # postgres://app:…@198.18.0.10:5432/app
+docker compose exec -T postgres psql -U postgres -d serverless_platform \
+  -c "UPDATE accounts SET internet_egress = true WHERE id = '$(curl -s "$FF/me" | jq -r '.accounts[0].id')'"
+printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
+hack/k8s/app-database.sh down                               # afterwards: the database, with its data
+```
+
+**In production** the database and the bucket are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on. The same folder runs on AWS Lambda with an RDS database and an S3 bucket: `ff package` writes its zip, and the function's role gives the S3 client its credentials.
 
 ## 4. Look inside the cluster
 

@@ -11,15 +11,18 @@
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
-# ff package --compile, whose zip runs on FF as it is; the getting-started guide's small app
-# (examples/orders-app), its functions writing to a database as one on the internet would be
+# ff package --compile, whose zip runs on FF as it is; the small app (examples/orders-app), its
+# functions writing to a database of its own as one on the internet would be
 # (hack/k8s/app-database.sh), in an account whose internet access is on; ff db, with the run's own
 # server of customers' databases: one made, its string a function's secret, the app writing its
 # order there with its account's internet access off, read with psql, a new password, its month
 # in ff usage, then deleted; ff buckets: one made, a key whose secret ff prints once as the
 # variables AWS's tools read, the AWS CLI uploading with them alone, what the bucket held at its
 # measure and its month in ff usage, the export kit's s3-sync.sh copying it out to a folder and on
-# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; and ff local, in
+# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; the getting-started
+# guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
+# each one's receipt written to a bucket with the function's own key, read back by a GET and by the
+# AWS CLI, both gone after the night 90 days on; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -40,6 +43,9 @@ e2e_namespaces+=("$(tenant_namespace "$account_a")" "$(tenant_namespace "$accoun
 
 e2e_dependencies
 e2e_cluster
+# This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front
+# door there with their own keys, at an IP address, where AWS's SDKs address buckets path-style by themselves.
+cluster_gateway="$(docker network inspect "k3d-$FF_CLUSTER_NAME" --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | awk '{print $1}')"
 # Customers' databases (ADR 0008): the run's own server, on 10.199.3.0/24, which no other run uses.
 data_db_address=10.199.3.10
 e2e_data_db 10.199.3.0/24 "$data_db_address"
@@ -54,7 +60,8 @@ url_port="$(free_port)"
 storage_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
-  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" "${e2e_data_db_env[@]}")
+  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
+  FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32" "${e2e_data_db_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -426,8 +433,9 @@ ff invoke cli-pkg-ts --data '{"ms": 60000}'
 check "and run on FF as they would on Lambda" "0 1m" "$(code) $(out | sed '$d' | jq -r .took)"
 ff delete cli-pkg-ts --yes
 
-echo "== a small app, as the guide walks through it: a package with a driver, a secret, a URL that writes to a database, a nightly schedule"
-# The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own.
+echo "== the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
+# The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own. No
+# bucket is named, so its orders go without receipts.
 export FF_APP_DB_NAME="$E2E_PROJECT-app-db" FF_APP_DB_SUBNET=198.18.1.0/24 FF_APP_DB_ADDRESS=198.18.1.10
 e2e_cleanups+=("$FF_REPO_ROOT/hack/k8s/app-database.sh down")
 database_url="$("$FF_REPO_ROOT/hack/k8s/app-database.sh" up)"
@@ -573,6 +581,44 @@ ff buckets keys revoke "$key_id" --yes
 # The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
 refused="$(aws_with_key s3 ls 2>&1 || true)"
 check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
+
+echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt in a bucket"
+# In account A, whose functions don't reach the internet: FF's database and the S3 front door, they do.
+ff deploy "$app" --name shop-api --handler index.http
+check "examples/orders-app, the S3 client among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff deploy "$app" --name shop-nightly --handler index.nightly
+ff db create shop --secret-for shop-api --secret-for shop-nightly --output json
+check "ff db create: FF's database, its connection string both functions' DATABASE_URL" "0 active shop-api,shop-nightly" \
+  "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
+ff buckets create cli-receipts
+ff env set shop-api RECEIPTS_BUCKET=cli-receipts
+ff env set shop-nightly RECEIPTS_BUCKET=cli-receipts
+ff env list shop-nightly
+check "a bucket for the receipts, its name each function's RECEIPTS_BUCKET" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
+ff url enable shop-api --auth none
+ff invoke shop-api --http POST /orders --data '{"item": "bsissa", "quantity": 4}'
+check "a POST writes the order to FF's database, then its receipt to the bucket with the function's own key" \
+  "0 HTTP 201 bsissa 4 s3://cli-receipts/receipts/1.txt" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
+order_day="$(out | tail -1 | jq -r '.created_at[0:10]')"
+ff invoke shop-api --http GET /orders/1/receipt
+check "  ... and a GET reads the receipt back from the bucket" "0 HTTP 200 Order 1|4 × bsissa" "$(code) $(out | head -1) $(out | sed -n '3,4p' | paste -sd'|')"
+# The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
+ff buckets keys create --bucket cli-receipts --read-only
+out | grep '^export AWS_' >"$work/receipts.env"
+receipts_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/receipts.env")"
+aws_receipts() { (set -a; . "$work/receipts.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+check "the AWS CLI reads that receipt in the account's bucket, as the function wrote it" "Order 1" "$(aws_receipts s3 cp s3://cli-receipts/receipts/1.txt - 2>/dev/null | head -1)"
+# The night 91 days after the order's day: the order is older than 90 days, so it goes, its receipt with it.
+jq --arg time "$(date -u -d "$order_day + 91 days" +%Y-%m-%dT02:00:00Z)" '.time = $time' "$app/events/scheduled.json" >"$work/night.json"
+ff invoke shop-nightly --data "@$work/night.json"
+check "the night 91 days on removes the order and its receipt, which the bucket no longer has" "0 1 1 0" \
+  "$(code) $(out | sed '$d' | jq -r '"\(.removed) \(.receipts)"') $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
+ff buckets keys revoke "$receipts_key" --yes
+ff buckets delete cli-receipts --force --yes
+ff db delete shop --yes
+ff delete shop-nightly --yes
+ff delete shop-api --yes
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts
