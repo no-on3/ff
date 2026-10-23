@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { apiErrorMessage } from '../lib/functions';
-import { estimateLines, formatBilledDuration, formatGbSeconds, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from '../lib/usage';
+import { estimateLines, formatBilledDuration, formatGbMonths, formatGbSeconds, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from '../lib/usage';
 import { MonthlyUsage, usageApi } from '../services/api';
 import { useSession } from '../session/session';
+import { formatSize } from '../lib/databases';
 import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { saveFile } from '../lib/download';
 
@@ -100,8 +101,8 @@ const Usage: React.FC = () => {
                 ))}
               </dl>
               <p className="text-xs text-gray-500 mt-3">
-                Each function's cost is before the free tier, which comes off the month's total. Each amount is rounded to the
-                millime on its own. {pricedFromNote(usage.month, usage.estimate)}
+                Each function's and database's cost is before the free tier, which comes off the month's total. Each amount is rounded to
+                the millime on its own. {pricedFromNote(usage.month, usage.estimate)}
               </p>
             </div>
           ) : (
@@ -150,6 +151,89 @@ const Usage: React.FC = () => {
               </table>
             )}
           </div>
+
+          {usage.databases.length > 0 && (
+            <div className="card overflow-x-auto mb-4" aria-label="Databases">
+              <table className="data-table">
+                <thead className="text-gray-500">
+                  <tr>
+                    <th className="py-2 pr-4 font-medium">Database</th>
+                    <th className="py-2 pr-4 font-medium text-right">Hours measured</th>
+                    <th className="py-2 pr-4 font-medium text-right">GB-months</th>
+                    <th className="py-2 pr-4 font-medium text-right">Size, last measured</th>
+                    <th className="py-2 font-medium text-right">Cost (estimated)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.databases.map((database) => (
+                    <tr key={database.databaseId} data-database-id={database.databaseId} className="border-t border-gray-200">
+                      <td className="py-2 pr-4">
+                        {database.deleted ? (
+                          <>
+                            {database.name} <span className="text-gray-500">(deleted)</span>
+                          </>
+                        ) : (
+                          <Link to={`/databases/${database.databaseId}`} className="text-blue-700 hover:underline">
+                            {database.name}
+                          </Link>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{database.hours.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right">{formatGbMonths(database.gbMonths)}</td>
+                      <td className="py-2 pr-4 text-right whitespace-nowrap">{formatSize(database.sizeBytes)}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{database.cost !== null && usage.estimate ? formatMoney(database.cost, usage.estimate.currency) : '–'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-500 mt-3">Storage is billed by the GB-month, as AWS RDS bills it: each database's size every hour, over the month's hours.</p>
+            </div>
+          )}
+
+          {usage.buckets.length > 0 && (
+            <div className="card overflow-x-auto mb-4" aria-label="Buckets">
+              <table className="data-table">
+                <thead className="text-gray-500">
+                  <tr>
+                    <th className="py-2 pr-4 font-medium">Bucket</th>
+                    <th className="py-2 pr-4 font-medium text-right">GB-months</th>
+                    <th className="py-2 pr-4 font-medium text-right">Size, last measured</th>
+                    <th className="py-2 pr-4 font-medium text-right">PUT, COPY, POST, LIST</th>
+                    <th className="py-2 pr-4 font-medium text-right">GET and others</th>
+                    <th className="py-2 pr-4 font-medium text-right">Sent out</th>
+                    <th className="py-2 font-medium text-right">Cost (estimated)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.buckets.map((bucket) => (
+                    <tr key={bucket.bucketId} data-bucket-id={bucket.bucketId} className="border-t border-gray-200">
+                      <td className="py-2 pr-4">
+                        {bucket.deleted ? (
+                          <>
+                            {bucket.name} <span className="text-gray-500">(deleted)</span>
+                          </>
+                        ) : (
+                          <Link to={`/buckets/${bucket.name}`} className="text-blue-700 hover:underline">
+                            {bucket.name}
+                          </Link>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{formatGbMonths(bucket.gbMonths)}</td>
+                      <td className="py-2 pr-4 text-right whitespace-nowrap">{bucket.hours > 0 ? formatSize(bucket.sizeBytes) : '–'}</td>
+                      <td className="py-2 pr-4 text-right">{bucket.tier1Requests.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right">{bucket.tier2Requests.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right whitespace-nowrap">{formatSize(bucket.bytesDownloaded)}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{bucket.cost !== null && usage.estimate ? formatMoney(bucket.cost, usage.estimate.currency) : '–'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-500 mt-3">
+                As AWS S3 bills Standard storage: what each bucket held every hour, by the GB-month, and its requests by S3's two classes; deleting is free. What
+                each sent out is counted, not billed.
+              </p>
+            </div>
+          )}
 
           <button type="button" className="btn btn-secondary" onClick={downloadCsv} disabled={downloading}>
             {downloading ? 'Preparing…' : `Download ${monthLabel(usage.month)} as CSV`}

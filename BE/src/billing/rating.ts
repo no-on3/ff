@@ -3,6 +3,18 @@ import { BookPrices } from './price-book';
 
 /** MB-ms per GB-second: 1,024 MB × 1,000 ms (D7). */
 const MB_MS_PER_GB_SECOND = 1_024_000n;
+/** Bytes in a GB, as AWS bills storage: 2^30. */
+export const BYTES_PER_GB = 1_073_741_824n;
+/**
+ * GB-months are byte-hours over a GB and the month's hours, which have no
+ * finite decimal form (744 = 2³ × 3 × 31): so the quantity is rounded, to a
+ * millionth of a millionth of a GB-month, and the amounts priced from it are
+ * exact, and rounded once, as the others are.
+ */
+const GB_MONTH_PLACES = 12;
+
+/** Byte-hours in GB-months, over a month's hours, as the rater counts them. */
+export const gbMonths = (byteHours: bigint, hoursInMonth: number): Decimal => Decimal.quotient(byteHours, BYTES_PER_GB * BigInt(hoursInMonth), GB_MONTH_PLACES);
 
 /** One function's usage in the part of a month that one book prices. */
 export interface FunctionUsage {
@@ -21,10 +33,29 @@ export interface FunctionUsage {
   reservedMbMs: bigint;
 }
 
+/**
+ * One customer's database's or bucket's usage in the part of a month that one
+ * book prices (ADR 0008, ADR 0009): its size summed over the hours sampled,
+ * which over the month's hours make its GB-months, as AWS bills storage; and,
+ * for a bucket, its requests by S3's two classes.
+ */
+export interface ResourceUsage {
+  resourceId: string;
+  kind: 'database' | 'bucket';
+  /** Bytes held, summed over the hours sampled. */
+  byteHours: bigint;
+  /** The hours it was sampled in: a database's monthly fee is prorated by them. */
+  hours: bigint;
+  tier1Requests: bigint;
+  tier2Requests: bigint;
+}
+
 /** The part of a month that one book prices, in time order. */
 export interface BookSegment {
   book: BookPrices;
   functions: FunctionUsage[];
+  /** Customers' databases and buckets, if the account has any. */
+  resources?: ResourceUsage[];
 }
 
 export interface FunctionCost {
@@ -38,15 +69,28 @@ export interface FunctionCost {
   total: Decimal;
 }
 
+/** A database's or a bucket's cost, before the free tier: storage at the first tier's price, requests, a database's fee. */
+export interface ResourceCost {
+  kind: 'database' | 'bucket';
+  /** Its GB-months: byte-hours over the month's hours. */
+  gbMonths: Decimal;
+  storage: Decimal;
+  requests: Decimal;
+  fee: Decimal;
+  total: Decimal;
+}
+
 /** A month, priced (P-30): exact amounts, which are rounded once, to the currency's minor unit, where shown. */
 export interface MonthEstimate {
   /** Each function's cost, at the first duration tier's price, before the free tier. */
   functions: Map<string, FunctionCost>;
-  /** All the functions together. */
+  /** Each database's and bucket's cost, before the free tier. */
+  resources: Map<string, ResourceCost>;
+  /** All the functions, databases and buckets together. */
   usage: Decimal;
-  /** What the free tier takes off, zero or less: requests and GB-s of calls without provisioned concurrency. */
+  /** What the free tier takes off, zero or less: requests and GB-s of calls without provisioned concurrency, databases' and buckets' GB-months, S3's requests. */
   freeTier: Decimal;
-  /** What the duration tiers above the first take off, zero or less. */
+  /** What the duration tiers above the first take off, and S3 Standard's storage tiers above its first, zero or less. */
   volumeTiers: Decimal;
   /** D8's knob: the monthly fee, from the book valid when the month starts, else the month's first. */
   monthlyFee: Decimal;
@@ -62,21 +106,43 @@ function overlap(start: Decimal, end: Decimal, low: Decimal, high: Decimal | nul
   return to.compare(from) > 0 ? to.minus(from) : Decimal.ZERO;
 }
 
+/** What lies in [low, high) of `tiers` between `from` and `to` of the month's quantity, priced above the first tier, the free part left out. */
+function aboveFirstTier(from: Decimal, to: Decimal, tiers: Array<{ upTo: Decimal | null; price: Decimal }>, free: Decimal): Decimal {
+  let extra = Decimal.ZERO;
+  let low = Decimal.ZERO;
+  const first = tiers[0].price;
+  for (const tier of tiers) {
+    const inTier = overlap(from, to, low, tier.upTo);
+    const freeInTier = overlap(from, to, low, tier.upTo === null ? free : tier.upTo.min(free));
+    extra = extra.plus(inTier.minus(freeInTier).times(tier.price.minus(first)));
+    if (tier.upTo !== null) low = tier.upTo;
+  }
+  return extra;
+}
+
 /**
  * An account's month, priced as AWS prices Lambda (D8): requests, on-demand
  * duration in tiers, provisioned concurrency and its duration, and D8's
- * knobs. The free tier and the tiers count the account's on-demand usage
- * from the month's start, through every book's part of the month: a book
- * that starts mid-month prices what follows with the counts reached so far.
+ * knobs; and, as RDS and S3 price them, its databases' and buckets' storage by
+ * the GB-month, over `hoursInMonth`, S3's requests by its two classes, and a
+ * database's monthly fee by the hours it existed. The free tier and the tiers
+ * count the account's usage from the month's start, through every book's
+ * part of the month: a book that starts mid-month prices what follows with
+ * the counts reached so far.
  */
-export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null): MonthEstimate {
+export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, hoursInMonth = 0): MonthEstimate {
   const functions = new Map<string, FunctionCost>();
+  const resources = new Map<string, ResourceCost>();
   let freeTier = Decimal.ZERO;
   let volumeTiers = Decimal.ZERO;
   let requestsSoFar = Decimal.ZERO;
   let gbSecondsSoFar = Decimal.ZERO;
+  let databaseGbMonthsSoFar = Decimal.ZERO;
+  let bucketGbMonthsSoFar = Decimal.ZERO;
+  let tier1SoFar = Decimal.ZERO;
+  let tier2SoFar = Decimal.ZERO;
 
-  for (const { book, functions: usage } of segments) {
+  for (const { book, functions: usage, resources: held = [] } of segments) {
     const firstTier = book.gbSecondTiers[0].price;
     let requests = 0n;
     let mbMs = 0n;
@@ -102,18 +168,56 @@ export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null): 
     const gbSecondsEnd = gbSecondsSoFar.plus(gbSeconds(mbMs));
     freeTier = freeTier.minus(overlap(gbSecondsSoFar, gbSecondsEnd, Decimal.ZERO, book.freeGbSeconds).times(firstTier));
     // The tiers: what is billed in each tier above the first costs that tier's price, not the first's.
-    let low = Decimal.ZERO;
-    for (const tier of book.gbSecondTiers) {
-      const inTier = overlap(gbSecondsSoFar, gbSecondsEnd, low, tier.upTo);
-      const freeInTier = overlap(gbSecondsSoFar, gbSecondsEnd, low, tier.upTo === null ? book.freeGbSeconds : tier.upTo.min(book.freeGbSeconds));
-      volumeTiers = volumeTiers.plus(inTier.minus(freeInTier).times(tier.price.minus(firstTier)));
-      if (tier.upTo !== null) low = tier.upTo;
-    }
+    volumeTiers = volumeTiers.plus(aboveFirstTier(gbSecondsSoFar, gbSecondsEnd, book.gbSecondTiers, book.freeGbSeconds));
     requestsSoFar = requestsEnd;
     gbSecondsSoFar = gbSecondsEnd;
+
+    // Databases and buckets: storage by the GB-month, at the first tier's price; S3's requests; a database's fee by its hours.
+    if (held.length > 0 && hoursInMonth <= 0) throw new Error("A month's hours are needed to price storage by the GB-month");
+    let databaseGbMonths = Decimal.ZERO;
+    let bucketGbMonths = Decimal.ZERO;
+    let tier1 = 0n;
+    let tier2 = 0n;
+    for (const resource of held) {
+      const stored = gbMonths(resource.byteHours, hoursInMonth);
+      const database = resource.kind === 'database';
+      const cost = {
+        gbMonths: stored,
+        storage: stored.times(database ? book.databaseStorageGbMonth : book.bucketStorageTiers[0].price),
+        requests: Decimal.of(resource.tier1Requests).times(book.perTier1Request).plus(Decimal.of(resource.tier2Requests).times(book.perTier2Request)),
+        fee: database ? Decimal.quotient(resource.hours, BigInt(hoursInMonth), GB_MONTH_PLACES).times(book.databaseMonthlyFee) : Decimal.ZERO,
+      };
+      const before = resources.get(resource.resourceId);
+      const sum = (part: keyof typeof cost) => (before ? before[part].plus(cost[part]) : cost[part]);
+      const next = { gbMonths: sum('gbMonths'), storage: sum('storage'), requests: sum('requests'), fee: sum('fee') };
+      resources.set(resource.resourceId, { kind: resource.kind, ...next, total: next.storage.plus(next.requests).plus(next.fee) });
+      if (database) databaseGbMonths = databaseGbMonths.plus(stored);
+      else bucketGbMonths = bucketGbMonths.plus(stored);
+      tier1 += resource.tier1Requests;
+      tier2 += resource.tier2Requests;
+    }
+    const databaseEnd = databaseGbMonthsSoFar.plus(databaseGbMonths);
+    freeTier = freeTier.minus(overlap(databaseGbMonthsSoFar, databaseEnd, Decimal.ZERO, book.freeDatabaseGbMonths).times(book.databaseStorageGbMonth));
+    const bucketEnd = bucketGbMonthsSoFar.plus(bucketGbMonths);
+    freeTier = freeTier.minus(overlap(bucketGbMonthsSoFar, bucketEnd, Decimal.ZERO, book.freeBucketGbMonths).times(book.bucketStorageTiers[0].price));
+    volumeTiers = volumeTiers.plus(aboveFirstTier(bucketGbMonthsSoFar, bucketEnd, book.bucketStorageTiers, book.freeBucketGbMonths));
+    const tier1End = tier1SoFar.plus(Decimal.of(tier1));
+    freeTier = freeTier.minus(overlap(tier1SoFar, tier1End, Decimal.ZERO, book.freeTier1Requests).times(book.perTier1Request));
+    const tier2End = tier2SoFar.plus(Decimal.of(tier2));
+    freeTier = freeTier.minus(overlap(tier2SoFar, tier2End, Decimal.ZERO, book.freeTier2Requests).times(book.perTier2Request));
+    databaseGbMonthsSoFar = databaseEnd;
+    bucketGbMonthsSoFar = bucketEnd;
+    tier1SoFar = tier1End;
+    tier2SoFar = tier2End;
   }
 
-  const usage = [...functions.values()].reduce((sum, cost) => sum.plus(cost.total), Decimal.ZERO);
+  const usage = [...functions.values(), ...resources.values()].reduce((sum, cost) => sum.plus(cost.total), Decimal.ZERO);
   const monthlyFee = feeBook?.monthlyPlanFee ?? Decimal.ZERO;
-  return { functions, usage, freeTier, volumeTiers, monthlyFee, total: usage.plus(freeTier).plus(volumeTiers).plus(monthlyFee) };
+  return { functions, resources, usage, freeTier, volumeTiers, monthlyFee, total: usage.plus(freeTier).plus(volumeTiers).plus(monthlyFee) };
+}
+
+/** The hours of a month by the UTC calendar (YYYY-MM): 672 to 744, by which GB-months divide byte-hours. */
+export function hoursIn(month: string): number {
+  const [year, number] = month.split('-').map(Number);
+  return (Date.UTC(year, number, 1) - Date.UTC(year, number - 1, 1)) / 3_600_000;
 }

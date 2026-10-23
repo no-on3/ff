@@ -30,6 +30,8 @@
     --c-idp: #7a6400;
     --c-store: #9a4a1c;
     --c-reg: #3b7a1e;
+    --c-data: #34568b;
+    --c-front: #8f3b76;
     --code-bg: #f3f4f0;
     --j-key: #2561c9;
     --j-str: #0f6f5c;
@@ -63,6 +65,8 @@
       --c-idp: #e0c341;
       --c-store: #f0a07a;
       --c-reg: #8ccf6a;
+      --c-data: #a3bdf0;
+      --c-front: #f08cd0;
       --code-bg: #151815;
       --j-key: #8ab4ff;
       --j-str: #6fd8bc;
@@ -96,6 +100,8 @@
     --c-idp: #e0c341;
     --c-store: #f0a07a;
     --c-reg: #8ccf6a;
+    --c-data: #a3bdf0;
+    --c-front: #f08cd0;
     --code-bg: #151815;
     --j-key: #8ab4ff;
     --j-str: #6fd8bc;
@@ -699,9 +705,10 @@ const LANES = {
   store:  { label: 'Log store', sub: 'VictoriaLogs', color: '--c-store', map: 'logstore' },
   hook:   { label: 'Your receiver', sub: 'webhook URL', color: '--c-user', map: 'user' },
   reg:    { label: 'Registry', sub: 'code images', color: '--c-reg', map: 'registry' },
-  yourdb: { label: 'Your database', sub: 'PostgreSQL', color: '--c-user', map: 'user' },
+  datadb: { label: 'Databases', sub: 'PostgreSQL 18', color: '--c-data', map: 'datadb' },
+  front:  { label: 'S3 front door', sub: 'backend :3002', color: '--c-front', map: 'api' },
 };
-const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'registry', 'k8sapi', 'ns', 'guard', 'service', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
+const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'registry', 'datadb', 'k8sapi', 'ns', 'guard', 'service', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
@@ -1016,21 +1023,23 @@ const SCENARIOS = [
   },
   {
     id: 'app', title: 'A small app, end to end',
-    lanes: ['user', 'api', 'db', 's3', 'reg', 'k8s', 'pod', 'worker', 'yourdb'],
-    summary: 'examples/orders-app, as the getting-started guide walks through it: ff deploys a folder with pg, the PostgreSQL driver, as orders-api; the database\'s address goes in a secret; a POST to the function\'s URL writes an order to the app\'s own database, outside FF; a second function, from the same package, makes a report each night at 02:00 UTC.',
+    lanes: ['user', 'api', 'db', 's3', 'reg', 'k8s', 'pod', 'worker', 'datadb', 'front'],
+    summary: 'examples/orders-app, as the getting-started guide walks through it: ff deploys a folder with pg, the PostgreSQL driver, and AWS\'s S3 client as orders-api, and as orders-nightly from the same package; ff db create gives both a database of FF\'s, its connection string their DATABASE_URL; a bucket keeps the receipts, its name their RECEIPTS_BUCKET; a POST to the function\'s URL writes an order to FF\'s database, then its receipt to the bucket with the function\'s own key, the account\'s internet access off; each night at 02:00 UTC, a report, and the orders older than 90 days removed with their receipts.',
     state: {
       [K]: { 'Secret': null },
-      'Your database': { 'orders': null },
+      'PostgreSQL': { 'databases': null, 'buckets': null },
+      'Customers\' server': { 'orders': null },
+      'S3 (customers\' buckets)': { 'bucket': null, 'object': null },
     },
     initial: {
       [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits',
-      [K + '.NetworkPolicy']: 'ff-default-deny · DNS, and the internet: the account\'s access is on',
+      [K + '.NetworkPolicy']: 'ff-default-deny · DNS · the customers\' server on 5432 · the S3 front door: the account\'s internet access is off',
     },
     steps: [
       { from: 'user', to: 'api', kind: 'req', label: 'GET /packages?codeSha256=… · POST /packages', title: 'ff deploy uploads the folder\'s package, once',
-        text: 'ff deploy . --name orders-api --handler index.http: ff copied the folder to a temporary one, ran npm ci there, which installed pg and its 12 dependencies, then npm prune --omit=dev, and zipped what is left as AWS Lambda takes it, the same bytes each time for the same files. It asked for the package by its SHA-256 first: the account hadn\'t it, so the zip goes up, as application/zip.',
+        text: 'ff deploy . --name orders-api --handler index.http: ff copied the folder to a temporary one, ran npm ci there, which installed pg and AWS\'s S3 client, 40 packages in all, then npm prune --omit=dev, and zipped what is left as AWS Lambda takes it, the same bytes each time for the same files. It asked for the package by its SHA-256 first: the account hadn\'t it, so the zip goes up, as application/zip.',
         code: 'cli/src/package/mod.rs build() · cli/src/commands/deploy.rs provide() · BE/src/packages/packages.controller.ts upload()',
-        msg: { kind: 'http', first: 'POST /packages HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/zip', 'content-length': '24917', 'user-agent': 'ff-cli/0.1.0' }, body: '<the zip: index.js, package.json, package-lock.json, node_modules/pg/…>' } },
+        msg: { kind: 'http', first: 'POST /packages HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/zip', 'content-length': '3066104', 'user-agent': 'ff-cli/0.1.0' }, body: '<the zip: index.js, package.json, package-lock.json, node_modules/pg/…, node_modules/@aws-sdk/client-s3/…>' } },
       { from: 'api', to: 'api', kind: 'int', label: 'every entry checked', title: 'The zip, checked before it is kept',
         text: 'Streamed to a file and hashed as it comes, 50 MB at most. Then each entry: a name that leaves the package, a link, encryption, a size or a CRC-32 that lies, more than 250 MB or 20,000 files unpacked are refused, naming the entry.',
         code: 'BE/src/packages/packages.service.ts upload() · package-archive.ts readPackage()' },
@@ -1041,31 +1050,40 @@ const SCENARIOS = [
       { from: 'api', to: 'db', kind: 'req', label: 'INSERT packages · audit_log', title: 'Its record, and the answer',
         text: 'One row per account and package, its files\' paths kept for the handler\'s check; package.upload in the audit log. The answer names it by its SHA-256 in base64, as AWS Lambda\'s CodeSha256.',
         code: 'packages.service.ts upload()',
-        msg: { kind: 'sql', text: "INSERT INTO \"packages\" (\"account_id\", \"code_sha256\", \"code_size\", \"unpacked_size\", \"file_count\", \"files\")\nVALUES ('000000000001', 'G35+…aQ=', 24917, 88203, 61, '[\"index.js\", \"node_modules/pg/lib/index.js\", …]');" },
-        set: { 'PostgreSQL.packages': 'G35+…aQ= · 24,917 bytes · 61 files' } },
+        msg: { kind: 'sql', text: "INSERT INTO \"packages\" (\"account_id\", \"code_sha256\", \"code_size\", \"unpacked_size\", \"file_count\", \"files\")\nVALUES ('000000000001', 'A8oi…ExM=', 3066104, 8780253, 3458, '[\"index.js\", \"node_modules/pg/lib/index.js\", …]');" },
+        set: { 'PostgreSQL.packages': 'A8oi…ExM= · 3,066,104 bytes · 3,458 files' } },
       { from: 'user', to: 'api', kind: 'req', label: 'POST /functions · codeSha256 · handler index.http', title: 'The function names the package',
         text: 'In place of code: the package\'s SHA-256, and the handler, whose file the backend looks for in the package\'s files (index.js for index.http). The function is zip, its code size the package\'s.',
         code: 'BE/src/functions/functions.service.ts codeOf() · code-package.ts packageHandlerProblem()',
-        msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'orders-api', runtime: 'nodejs', codeSha256: 'G35+…aQ=', handler: 'index.http', memory: 128, timeout: 5 } },
+        msg: { kind: 'http', first: 'POST /functions HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { name: 'orders-api', runtime: 'nodejs', codeSha256: 'A8oi…ExM=', handler: 'index.http', memory: 128, timeout: 5 } },
         set: { 'PostgreSQL.functions': 'orders-api · zip · index.http · CREATING' } },
       { from: 'api', to: 'reg', kind: 'req', label: 'push ff-code/000000000001:<hex>', title: 'The package becomes a code image',
         text: 'The first time a function names it: the zip read again from object storage and made one tar layer, owned by root, read-only, dated at the epoch, so the same package makes the same digest; pushed with a minimal configuration, each blob skipped when the registry has it, then the manifest, tagged with the package\'s hash. The digest is kept with the package. A registry that doesn\'t answer gives 503 before anything changes.',
         code: 'BE/src/functions/functions.service.ts codeImageOf() · BE/src/packages/code-images.service.ts imageFor() · code-layer.ts buildLayer() · registry.ts pushBlob(), pushManifest()',
-        set: { 'Registry.code image': 'ff-code/000000000001@sha256:5c0a…e9', 'PostgreSQL.packages': 'G35+…aQ= · its image sha256:5c0a…e9' } },
+        set: { 'Registry.code image': 'ff-code/000000000001@sha256:5c0a…e9', 'PostgreSQL.packages': 'A8oi…ExM= · its image sha256:5c0a…e9' } },
       { from: 'api', to: 'k8s', kind: 'req', label: 'apply Service, Deployment · code as an image volume', title: 'The pods mount the image at /var/task',
-        text: 'As for inline code, whose code is an image too: the code volume is the package\'s image, by digest, which the node pulls from the registry and mounts read-only at /var/task. The tenant\'s NetworkPolicy is written again with the account\'s internet access: on, it lets the pods reach any address but FF\'s own network and the private ranges.',
+        text: 'As for inline code, whose code is an image too: the code volume is the package\'s image, by digest, which the node pulls from the registry and mounts read-only at /var/task. The tenant\'s NetworkPolicy is written again; the account\'s internet access is off, so it lets the pods reach DNS, the server of customers\' databases and the S3 front door, each on its port, and nothing else outside. This first deploy made the function a key of its own to the account\'s buckets, in its pods\' environment with the region and the front door\'s address, as AWS Lambda gives a function its role\'s.',
         code: 'BE/src/orchestrator/kubernetes/manifests.ts deploymentManifest(), networkPolicyManifest()',
         msg: { kind: 'ipc', title: 'the Deployment\'s code volume', body: { volumes: [{ name: 'code', image: { reference: 'ff-dev-registry:5000/ff-code/000000000001@sha256:5c0a…e9', pullPolicy: 'IfNotPresent' } }, { name: 'tmp', emptyDir: { sizeLimit: '512Mi' } }] } },
         set: { [K + '.Service']: 'fn-a71c… (ClusterIP :8080)', [K + '.Deployment']: 'replicas 1 · ready 0/1', [K + '.Pod']: 'pulling the code image' } },
       { from: 'k8s', to: 'pod', kind: 'req', label: 'pull the image · start · load index.js', title: 'The runtime loads index.js',
-        text: 'FF_HANDLER=index.http: the runtime finds index.js at /var/task, and require(\'pg\') resolves in /var/task/node_modules, as on AWS Lambda. The pod is ready, the function ACTIVE, and ff deploy says created.',
+        text: 'FF_HANDLER=index.http: the runtime finds index.js at /var/task, and require(\'pg\') and require(\'@aws-sdk/client-s3\') resolve in /var/task/node_modules, as on AWS Lambda. The pod is ready, the function ACTIVE, and ff deploy says created.',
         code: 'runtimes/nodejs/src/worker.ts · functions.service.ts create()',
         set: { [K + '.Deployment']: 'replicas 1 · ready 1/1', [K + '.Pod']: 'Running · Ready', 'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'index.js loaded · idle', 'PostgreSQL.functions': 'orders-api · zip · index.http · ACTIVE' } },
-      { from: 'user', to: 'api', kind: 'req', label: 'PATCH /functions/:id/secrets · DATABASE_URL', title: 'The database\'s address, a secret',
-        text: 'ff secrets set orders-api DATABASE_URL reads it from a prompt or stdin, never the command line. The backend seals it in PostgreSQL with the function\'s variables, writes a Kubernetes Secret, which it never reads back, and rolls the function out to read it as an environment variable.',
-        code: 'BE/src/functions/functions.controller.ts · functions.service.ts change() · manifests.ts environmentSecretManifest()',
-        msg: { kind: 'http', first: 'PATCH /functions/a71c…/secrets HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { secrets: { DATABASE_URL: 'postgres://app:…@db.atelier.tn:5432/app' } } },
-        set: { 'PostgreSQL.functions': 'orders-api · ACTIVE · secrets: DATABASE_URL (sealed)', [K + '.Secret']: 'fn-a71c…-env-1 · DATABASE_URL' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions orders-nightly · the same codeSha256', title: 'A second function, from the same package',
+        text: 'ff deploy . --name orders-nightly --handler index.nightly: the same folder makes the same zip, which the account has, so nothing goes up; the image is the same too, already in the registry. It gets a key of its own to the account\'s buckets, as orders-api did.',
+        code: 'cli/src/commands/deploy.rs provide() · code-images.service.ts imageFor() · BE/src/storage/function-keys.service.ts credentialsFor()',
+        set: { 'PostgreSQL.functions': 'orders-api, orders-nightly · zip · ACTIVE' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /databases · then PATCH each function\'s secrets', title: 'ff db create: FF\'s database, both functions\' DATABASE_URL',
+        text: 'ff db create orders --secret-for orders-api --secret-for orders-nightly: a PostgreSQL 18 database and its user on the server of customers\' databases, as "A database, as AWS RDS gives one" shows. The connection string comes back once, and ff sets it as each function\'s DATABASE_URL: sealed in PostgreSQL, written to a Kubernetes Secret, the function rolled out to read it from its environment.',
+        code: 'cli/src/commands/db.rs create() · BE/src/databases/databases.service.ts create() · functions.service.ts change() · manifests.ts networkPolicyManifest()',
+        msg: { kind: 'http', first: 'POST /databases HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { name: 'orders' } },
+        set: { 'PostgreSQL.databases': 'orders · ff_3f9c2a1e8b7d4c6a9e5f1a2b · active', 'PostgreSQL.functions': 'orders-api, orders-nightly · ACTIVE · secrets: DATABASE_URL (sealed)', [K + '.Secret']: 'fn-a71c…-env-2 · DATABASE_URL, and the function\'s key' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /buckets · PATCH each function\'s environment', title: 'A bucket for the receipts, its name a variable',
+        text: 'ff buckets create shop-receipts makes the bucket, under a name of FF\'s in the store, as "Files in a bucket, as AWS S3 keeps them" shows. ff env set orders-api RECEIPTS_BUCKET=shop-receipts, and the same for orders-nightly, roll each out with it. No key goes in: each function has its own already.',
+        code: 'cli/src/commands/buckets.rs create() · BE/src/storage/buckets.service.ts create() · cli/src/commands/env.rs',
+        msg: { kind: 'http', first: 'POST /buckets HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { name: 'shop-receipts' } },
+        set: { 'PostgreSQL.buckets': 'shop-receipts · ff-3b8e5d0c71a24f96e8d1c2b4 · active', 'S3 (customers\' buckets).bucket': 'ff-3b8e5d0c71a24f96e8d1c2b4 · empty', 'PostgreSQL.functions': 'orders-api, orders-nightly · ACTIVE · RECEIPTS_BUCKET=shop-receipts' } },
       { from: 'user', to: 'api', kind: 'req', label: 'POST /orders · host <id>.fn.localhost', title: 'A POST to the function\'s URL',
         text: 'ff url enable orders-api --auth none gave it an address. A request there goes to the backend\'s gateway, which builds AWS Lambda\'s event for function URLs and calls the function as any invoke, as in "A request to a function\'s URL".',
         code: 'BE/src/function-urls/function-url.gateway.ts serve() · url-event.ts urlEvent()',
@@ -1077,30 +1095,184 @@ const SCENARIOS = [
       { from: 'pod', to: 'worker', kind: 'req', label: 'http(event, context)', title: 'index.http reads the request',
         text: 'requestContext.http says POST /orders; the body is the order.',
         code: 'examples/orders-app/index.js http()' },
-      { from: 'worker', to: 'yourdb', kind: 'req', label: 'connect · CREATE TABLE IF NOT EXISTS · INSERT', title: 'Your database, over the internet',
-        text: 'The instance\'s first call connects with DATABASE_URL, from its environment, and keeps the connection for the calls after. The NetworkPolicy lets it out, the account\'s internet access being on; FF\'s own network stays out of reach. FF has no database of its own for customers yet: this one is the app\'s.',
+      { from: 'worker', to: 'datadb', kind: 'req', label: 'connect over TLS · CREATE TABLE IF NOT EXISTS · INSERT', title: 'The order, in FF\'s database',
+        text: 'The instance\'s first call connects with DATABASE_URL, from its environment, over TLS, and keeps the connection for the calls after. The account\'s internet access is off: its NetworkPolicy lets the function reach this server, and nothing else outside but the front door.',
         code: 'examples/orders-app/index.js database()',
         msg: { kind: 'sql', text: "CREATE TABLE IF NOT EXISTS orders (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, item text NOT NULL, …);\nINSERT INTO orders (item, quantity) VALUES ('harissa', 2) RETURNING id, item, quantity, created_at;" },
-        set: { 'Your database.orders': '1 row: harissa × 2' } },
-      { from: 'worker', to: 'user', kind: 'res', label: '201 {"id":1,"item":"harissa",…}', title: 'The order, as the response',
+        set: { 'Customers\' server.orders': '1 row: harissa × 2' } },
+      { from: 'worker', to: 'front', kind: 'req', label: 'PUT /shop-receipts/receipts/1.txt · its own key', title: 'Its receipt, to the bucket',
+        text: 'The order kept, its receipt goes to RECEIPTS_BUCKET. new S3Client({}) found the function\'s own key, the region and the front door\'s address in its environment, as an SDK finds a Lambda role\'s: an IP address inside the cluster, so the SDK goes path-style by itself. The front door checks it as any key: the bucket its account\'s, the account active and its storage on, the plan\'s rate, credit for an upload, room in the plan\'s storage. A receipt that can\'t be written leaves the order: the answer says "receipt": null, and the log why.',
+        code: 'examples/orders-app/index.js http() · BE/src/storage/front-door.ts answer()',
+        msg: { kind: 'http', first: 'PUT /shop-receipts/receipts/1.txt HTTP/1.1', headers: { host: '172.18.0.1:3002', 'content-type': 'text/plain; charset=utf-8', 'content-length': '46', 'x-amz-checksum-crc32': '…', 'x-amz-content-sha256': '<its SHA-256>', authorization: 'AWS4-HMAC-SHA256 Credential=AKFF…/20261021/tn-tunis-1/s3/aws4_request, SignedHeaders=…, Signature=…' }, body: 'Order 1\n2 × harissa\n2026-10-21T14:39:04.964Z\n' } },
+      { from: 'front', to: 's3', kind: 'req', label: 'PUT /ff-3b8e…/receipts/1.txt', title: 'Into the store, under FF\'s name',
+        text: 'As every upload: its body checked as it streams, signed again with FF\'s own key to the store, and counted in its minute, by S3\'s first class.',
+        code: 'front-door.ts forward() · storage-request-counts.service.ts',
+        set: { 'S3 (customers\' buckets).bucket': 'ff-3b8e5d0c71a24f96e8d1c2b4 · 1 object', 'S3 (customers\' buckets).object': 'receipts/1.txt · 46 bytes' } },
+      { from: 'worker', to: 'user', kind: 'res', label: '201 {"id":1,…,"receipt":"s3://shop-receipts/receipts/1.txt"}', title: 'The order, as the response',
         text: 'The handler answers with a response object; the gateway sends it as the HTTP response, by AWS Lambda\'s rules. The call is COMPLETED, and billed as any.',
         code: 'url-response.ts urlAnswer() · functions.service.ts finish()',
-        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json', 'x-amzn-RequestId': INV }, body: { id: 1, item: 'harissa', quantity: 2, created_at: '2026-10-21T14:39:04.964Z' } },
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json', 'x-amzn-RequestId': INV }, body: { id: 1, item: 'harissa', quantity: 2, created_at: '2026-10-21T14:39:04.964Z', receipt: 's3://shop-receipts/receipts/1.txt' } },
         set: { 'PostgreSQL.function_invocations': 'COMPLETED · url', 'PostgreSQL.usage_records': 'success · 128 MB' } },
-      { from: 'user', to: 'api', kind: 'req', label: 'POST /functions orders-nightly · the same codeSha256', title: 'A second function, from the same package',
-        text: 'ff deploy . --name orders-nightly --handler index.nightly: the same folder makes the same zip, which the account has, so nothing goes up; the image is the same too, already in the registry. Its secret is set as orders-api\'s, then ff schedule set orders-nightly "cron(0 2 * * ? *)".',
-        code: 'cli/src/commands/deploy.rs provide() · code-images.service.ts imageFor() · BE/src/schedules/schedules.controller.ts',
-        set: { 'PostgreSQL.schedules': 'orders-nightly · cron(0 2 * * ? *) · next 02:00' } },
       { from: 'api', to: 'worker', kind: 'req', label: '02:00 UTC · the Scheduled Event · nightly()', title: 'The nightly run',
-        text: 'The scheduler takes the schedule when it comes due, as in "A function on a schedule", and calls orders-nightly with EventBridge\'s Scheduled Event.',
+        text: 'ff schedule set orders-nightly "cron(0 2 * * ? *)" made its schedule. The scheduler takes it when it comes due, as in "A function on a schedule", and calls orders-nightly with EventBridge\'s Scheduled Event.',
         code: 'scheduler.service.ts tick() · examples/orders-app/index.js nightly()',
         msg: { kind: 'ipc', title: 'the Scheduled Event', body: { 'detail-type': 'Scheduled Event', source: 'aws.events', time: '2026-10-22T02:00:00Z', '…': '…' } },
-        set: { 'PostgreSQL.function_invocations': 'RUNNING · schedule' } },
-      { from: 'worker', to: 'yourdb', kind: 'req', label: 'SELECT count(*) · DELETE older than 90 days', title: 'The report, from your database',
-        text: 'The day before the event\'s time, counted; what is older than 90 days, removed. The report goes to the log, where ff logs orders-nightly reads it, and is the call\'s output.',
+        set: { 'PostgreSQL.schedules': 'orders-nightly · cron(0 2 * * ? *) · next 02:00', 'PostgreSQL.function_invocations': 'RUNNING · schedule' } },
+      { from: 'worker', to: 'datadb', kind: 'req', label: 'SELECT count(*) · DELETE older than 90 days', title: 'The report, from FF\'s database',
+        text: 'The day before the event\'s time, counted; what is older than 90 days, removed, and the receipts of the orders removed with them, a DeleteObjects for each thousand: none tonight. The report goes to the log, where ff logs orders-nightly reads it, and is the call\'s output.',
         code: 'examples/orders-app/index.js nightly()',
-        msg: { kind: 'log', lines: ['report {"day":"2026-10-21","orders":1,"items":2,"removed":0}'] },
+        msg: { kind: 'log', lines: ['report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}'] },
         set: { 'PostgreSQL.function_invocations': 'COMPLETED · schedule', 'PostgreSQL.schedules': 'orders-nightly · next 2026-10-23 02:00 · success' } },
+    ],
+  },
+  {
+    id: 'database', title: 'A database, as AWS RDS gives one',
+    lanes: ['user', 'api', 'db', 'datadb', 'k8s', 'pod', 'worker'],
+    summary: 'ff db create orders --secret-for orders-api: the backend makes a PostgreSQL 18 database and its user on the server of customers\' databases, with its own role there, never a superuser; the connection string comes back once, and becomes the function\'s DATABASE_URL; the small app writes its orders there over TLS, its account\'s internet access off; every hour the backend measures the database, and its storage is billed by the GB-month, as RDS bills gp3.',
+    state: {
+      'PostgreSQL': { 'databases': null, 'database_samples': null, 'resource_usage_hourly': null },
+      'Customers\' server': { 'user': null, 'database': null, 'orders': null },
+      [K]: { 'Secret': null },
+    },
+    initial: {
+      'PostgreSQL.functions': 'orders-api · zip · index.http · ACTIVE',
+      [K + '.Namespace']: NS, [K + '.ResourceQuota']: 'ff-tenant-quota', [K + '.LimitRange']: 'ff-tenant-limits',
+      [K + '.NetworkPolicy']: 'ff-default-deny · DNS only: the account\'s internet access is off',
+      [K + '.Service']: 'fn-a71c… (ClusterIP :8080)', [K + '.Deployment']: 'replicas 1 · ready 1/1', [K + '.Pod']: 'Running · Ready',
+      'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'index.js loaded · idle',
+    },
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /databases · {"name":"orders"}', title: 'ff db create asks for a database',
+        text: 'The name is the account\'s, held to AWS RDS\'s rule by ff before it calls, and by the backend: 1 to 63 lower-case letters, digits and hyphens, a letter first. ff looked orders-api up first, so that a function that isn\'t there stops it before anything is made. The console\'s Databases page sends the same.',
+        code: 'cli/src/commands/db.rs create() · BE/src/databases/databases.controller.ts · database-names.ts databaseNameProblem()',
+        msg: { kind: 'http', first: 'POST /databases HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { name: 'orders' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'lock the account · count · INSERT databases', title: 'Within the plan, counted under a lock',
+        text: 'The account\'s row locked, its databases counted against the plan\'s: one on beta, of 1,024 MB and 10 sessions, so that two at once can\'t both pass. The row keeps the account\'s name for it and the server\'s, ff_ and 24 random hexadecimal characters, which say nothing of whose it is.',
+        code: 'BE/src/databases/databases.service.ts create() · database-names.ts newServerName()',
+        msg: { kind: 'sql', text: "SELECT \"id\" FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;\nSELECT count(*) FROM \"databases\" WHERE \"account_id\" = '000000000001';\nINSERT INTO \"databases\" (\"account_id\", \"name\", \"db_name\", \"status\") VALUES ('000000000001', 'orders', 'ff_3f9c2a1e8b7d4c6a9e5f1a2b', 'creating');" },
+        set: { 'PostgreSQL.databases': 'orders · ff_3f9c2a1e8b7d4c6a9e5f1a2b · creating' } },
+      { from: 'api', to: 'datadb', kind: 'req', label: 'CREATE ROLE · CREATE DATABASE … OWNER · REVOKE', title: 'Its user and the database, on a server of their own',
+        text: 'With the backend\'s role there, ff_admin, which makes roles and databases but is no superuser. The password, 32 random bytes, reaches the server only as its SCRAM verifier, which the backend computes: it is in no statement and no log. The user owns its database, and as its owner takes PUBLIC\'s rights on it away: no other customer\'s user may connect there, and pg_hba.conf lets each user into its namesake database only, over TLS.',
+        code: 'BE/src/databases/data-server.ts create() · scram.ts scramVerifier() · deploy/data-db/pg_hba.conf',
+        msg: { kind: 'sql', text: "CREATE ROLE \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS\n  CONNECTION LIMIT 10 PASSWORD 'SCRAM-SHA-256$4096:…';\nGRANT \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\" TO \"ff_admin\" WITH INHERIT FALSE, SET TRUE;\nCREATE DATABASE \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\" OWNER \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\";\nSET ROLE \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\"; REVOKE ALL ON DATABASE \"ff_3f9c2a1e8b7d4c6a9e5f1a2b\" FROM PUBLIC; RESET ROLE;" },
+        set: { 'Customers\' server.user': 'ff_3f9c2a1e8b7d4c6a9e5f1a2b · 10 sessions at most · SCRAM', 'Customers\' server.database': 'ff_3f9c2a1e8b7d4c6a9e5f1a2b · its user\'s' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply NetworkPolicy · the server on 5432', title: 'Its functions reach it at once',
+        text: 'The account\'s NetworkPolicy, written again: besides DNS, the server\'s addresses on port 5432 only, whatever the account\'s internet access. The server sees the functions\' connections come from the cluster\'s node, which masquerades what leaves the cluster.',
+        code: 'BE/src/orchestrator/kubernetes/manifests.ts networkPolicyManifest() · kubernetes.orchestrator.ts applyTenantLimits()',
+        set: { [K + '.NetworkPolicy']: 'ff-default-deny · DNS · the customers\' server on 5432' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · the connection string, this once', title: 'Its password, shown once',
+        text: 'In this answer only: FF keeps no copy. ff db password orders makes a new one, shown once too, after which the old one opens no session. The string says sslmode=require: every driver encrypts, and node-postgres checks the server\'s certificate too.',
+        code: 'databases.service.ts create() · cli/src/commands/db.rs shown_once()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json' }, body: { name: 'orders', status: 'active', host: 'db.ffunc.tn', port: 5432, database: 'ff_3f9c2a1e8b7d4c6a9e5f1a2b', user: 'ff_3f9c2a1e8b7d4c6a9e5f1a2b', password: 'Xq3v…', connectionString: 'postgresql://ff_3f9c2a1e8b7d4c6a9e5f1a2b:Xq3v…@db.ffunc.tn:5432/ff_3f9c2a1e8b7d4c6a9e5f1a2b?sslmode=require' } },
+        set: { 'PostgreSQL.databases': 'orders · ff_3f9c2a1e8b7d4c6a9e5f1a2b · active' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'PATCH /functions/:id/secrets · DATABASE_URL', title: '--secret-for: the string, the function\'s secret',
+        text: 'ff sets it as orders-api\'s DATABASE_URL, through ff secrets\' route: sealed in PostgreSQL, written to a Kubernetes Secret, and the function rolled out to read it from its environment, as an app written for Lambda and RDS reads its own.',
+        code: 'cli/src/commands/db.rs set_secrets() · BE/src/functions/functions.service.ts change() · manifests.ts environmentSecretManifest()',
+        set: { 'PostgreSQL.functions': 'orders-api · ACTIVE · secrets: DATABASE_URL (sealed)', [K + '.Secret']: 'fn-a71c…-env-2 · DATABASE_URL' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /orders · host <id>.fn.localhost', title: 'An order comes in',
+        text: 'At the function\'s URL, as in "A small app, end to end": the gateway builds AWS Lambda\'s event for function URLs and calls the function as any invoke.',
+        code: 'BE/src/function-urls/function-url.gateway.ts serve() · url-event.ts urlEvent()',
+        msg: { kind: 'http', first: 'POST /orders HTTP/1.1', headers: { host: 'k7x2…d5.fn.localhost:3001', 'content-type': 'application/json' }, body: { item: 'makroudh', quantity: 3 } } },
+      { from: 'api', to: 'pod', kind: 'req', label: 'POST /invoke · the URL event', title: 'The event goes to the function',
+        text: 'Through the function\'s Service, as every call.',
+        code: 'functions.service.ts call() · kubernetes.orchestrator.ts invoke()',
+        set: { 'PostgreSQL.function_invocations': 'RUNNING · url' } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'http(event, context)', title: 'index.http reads the order',
+        text: 'requestContext.http says POST /orders; the body is the order. The code is the small app\'s, unchanged: only its DATABASE_URL names another server.',
+        code: 'examples/orders-app/index.js http()' },
+      { from: 'worker', to: 'datadb', kind: 'req', label: 'connect over TLS · CREATE TABLE IF NOT EXISTS · INSERT', title: 'The order, in its database on FF',
+        text: 'The instance\'s first call connects with DATABASE_URL, over TLS, the server\'s certificate checked: a public CA\'s in production; in development, the server\'s own CA, which the pods get at /etc/ff/data-db/ and Node.js reads through NODE_EXTRA_CA_CERTS. The account\'s internet access is off: the policy lets the function reach this server, and nothing else outside.',
+        code: 'examples/orders-app/index.js database() · manifests.ts dataDbCaSecretManifest()',
+        msg: { kind: 'sql', text: "CREATE TABLE IF NOT EXISTS orders (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, item text NOT NULL, …);\nINSERT INTO orders (item, quantity) VALUES ('makroudh', 3) RETURNING id, item, quantity, created_at;" },
+        set: { 'Customers\' server.orders': '1 row: makroudh × 3' } },
+      { from: 'worker', to: 'user', kind: 'res', label: '201 {"id":1,"item":"makroudh",…}', title: 'The order, as the response',
+        text: 'As in the small app: the handler\'s response object is the HTTP response, and the call is billed as any.',
+        code: 'url-response.ts urlAnswer() · functions.service.ts finish()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json', 'x-amzn-RequestId': INV }, body: { id: 1, item: 'makroudh', quantity: 3, created_at: '2026-10-23T06:36:12.481Z' } },
+        set: { 'PostgreSQL.function_invocations': 'COMPLETED · url', 'PostgreSQL.usage_records': 'success · 128 MB' } },
+      { from: 'api', to: 'datadb', kind: 'req', label: 'pg_database_size · numbackends', title: 'Measured every hour',
+        text: 'Each minute, the backend measures every database not measured yet in the hour, all in one query, as ff_admin, which reads every database\'s statistics. At 80% and 100% of the plan\'s storage, the owners get an e-mail; past 100%, the database\'s new sessions start read-only, a signal rather than a wall, which a session may lift for itself to clean up: the storage past the plan is billed.',
+        code: 'BE/src/databases/database-samples.service.ts · data-server.ts use() · storage-notice.ts storageStep()',
+        msg: { kind: 'sql', text: "SELECT d.\"datname\" AS \"name\", pg_database_size(d.\"oid\")::text AS \"size\", coalesce(s.\"numbackends\", 0)::int AS \"connections\"\n  FROM \"pg_database\" d LEFT JOIN \"pg_stat_database\" s ON s.\"datid\" = d.\"oid\"\n WHERE d.\"datname\" = ANY($1);" } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT database_samples · resource_usage_hourly', title: 'Billed by the GB-month',
+        text: 'The hour\'s sample, written once, in a partition per month; the hourly rating adds it to resource_usage_hourly. The month\'s statement prices the byte-hours over 2^30 bytes and the month\'s hours, at RDS\'s gp3 price per GB-month in dinars, the first GB-month of each month free. GET /usage, the console\'s Usage page and ff usage show the month so far; GET /databases/:id/metrics gives DatabaseConnections and VolumeBytesUsed, an hour a point, which alarms watch.',
+        code: 'database-samples.service.ts · BE/src/billing/hourly-rating.service.ts · rating.ts gbMonths()',
+        set: { 'PostgreSQL.database_samples': 'orders · 06:00 · 7.3 MB · 1 session', 'PostgreSQL.resource_usage_hourly': 'orders · 06:00 · 7,634,423 byte-hours' } },
+    ],
+  },
+  {
+    id: 'bucket', title: 'Files in a bucket, as AWS S3 keeps them',
+    lanes: ['user', 'api', 'db', 'front', 's3'],
+    summary: 'ff buckets create photos, then a key whose secret ff prints once as the variables AWS\'s tools read, then aws s3 cp with nothing else changed: the backend\'s S3 front door, a port of its own, checks the signature with the key, the key\'s account and plan, and the bucket, then streams the file to the store under a name of FF\'s, checking it on the way; it counts each request by S3\'s two classes, and every hour the backend measures the bucket, which is billed by the GB-month and the request, as S3 Standard is.',
+    state: {
+      'PostgreSQL': { 'buckets': null, 'storage_keys': null, 'storage_request_counts': null, 'bucket_samples': null, 'resource_usage_hourly': null },
+      'S3 (customers\' buckets)': { 'bucket': null, 'object': null },
+    },
+    initial: {},
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /buckets · {"name":"photos"}', title: 'ff buckets create asks for a bucket',
+        text: 'The name is held to AWS\'s rule by ff before it calls, and by the backend: 3 to 63 lower-case letters, digits and hyphens, a letter or a digit first and last, and none of the prefixes and suffixes AWS keeps for itself. Without dots on FF, so that the bucket\'s own address, photos.s3.<domain>, keeps the wildcard certificate; any name FF takes, S3 takes too. The console\'s Buckets page sends the same.',
+        code: 'cli/src/commands/buckets.rs create() · BE/src/storage/buckets.controller.ts · storage-names.ts bucketNameProblem()',
+        msg: { kind: 'http', first: 'POST /buckets HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { name: 'photos' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'lock the account · count · INSERT buckets', title: 'Within the plan, its name unique across FF',
+        text: 'The account\'s row locked and its buckets counted against the plan\'s, five on beta, so that two at once can\'t both pass. The name is unique across FF, as on AWS: a unique index refuses one that another account has, with 409, until that one is deleted. The row keeps a name of FF\'s for the store, ff- and 24 random hexadecimal characters, which says nothing of whose it is.',
+        code: 'BE/src/storage/buckets.service.ts create() · storage-names.ts newStoreName() · bucket.entity.ts',
+        msg: { kind: 'sql', text: "SELECT \"id\" FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;\nSELECT count(*) FROM \"buckets\" WHERE \"account_id\" = '000000000001';\nINSERT INTO \"buckets\" (\"account_id\", \"name\", \"store_name\") VALUES ('000000000001', 'photos', 'ff-7927db049ca09e024ab4426c');   -- active" },
+        set: { 'PostgreSQL.buckets': 'photos · ff-7927db049ca09e024ab4426c · active' } },
+      { from: 'api', to: 's3', kind: 'req', label: 'PUT /ff-7927… (CreateBucket)', title: 'The bucket in the store, under FF\'s name',
+        text: 'With FF\'s own key to the store, which no customer has. If the store can\'t make it, the row is taken back and the answer is 503: no row names a bucket the store hasn\'t. The audit log names bucket.create.',
+        code: 'buckets.service.ts create() · store-buckets.ts create() · store-client.ts',
+        msg: { kind: 'http', first: 'PUT /ff-7927db049ca09e024ab4426c HTTP/1.1', headers: { host: 'localhost:9003', 'x-amz-content-sha256': '<SHA-256 of the empty body>', authorization: S3_SIGNED } },
+        set: { 'S3 (customers\' buckets).bucket': 'ff-7927db049ca09e024ab4426c · empty' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · its endpoint and addresses', title: 'Where AWS\'s tools reach it',
+        text: 'ff prints the endpoint, the bucket\'s own address (virtual-hosted, as the SDK for JavaScript addresses a host name), the path-style one (as boto3 and the AWS CLI address it, and every SDK at an IP address), and the region. Not measured yet: the first measure comes within a minute.',
+        code: 'buckets.service.ts view() · cli/src/commands/buckets.rs reach()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'photos', status: 'active', region: 'tn-tunis-1', endpoint: 'http://s3.localhost:3002', url: 'http://photos.s3.localhost:3002', sizeBytes: null, objects: null, measuredAt: null, createdAt: '2026-10-23T06:30:02.114Z' } } },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /storage-keys · {"buckets":["photos"]}', title: 'An access key, for this bucket alone',
+        text: 'ff buckets keys create --bucket photos. Without buckets, a key reaches all the account\'s; with readOnly, it reads and lists only. Only owners see, make and revoke keys.',
+        code: 'cli/src/commands/buckets.rs keys_create() · BE/src/storage/storage-keys.controller.ts',
+        msg: { kind: 'http', first: 'POST /storage-keys HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { buckets: ['photos'] } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'lock · count · INSERT storage_keys', title: 'Two keys at most, the secret sealed',
+        text: 'An ID like AWS\'s, AKFF and 16 characters of base32, and a secret of 40. An account has two keys at most, as IAM gives a user, so that one can replace the other; a function\'s own key isn\'t counted. The front door needs the secret itself to check signatures, so FF can\'t keep only a hash of it, as it does of API keys: it is sealed, a data key of its own encrypting it with AES-256-GCM, for that key ID alone.',
+        code: 'BE/src/storage/storage-keys.service.ts create() · storage-directory.service.ts sealSecret() · BE/src/encryption/envelope.ts',
+        msg: { kind: 'sql', text: "SELECT \"id\" FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;\nSELECT count(*) FROM \"storage_keys\" WHERE \"account_id\" = '000000000001' AND \"function_id\" IS NULL AND \"revoked_at\" IS NULL;\nINSERT INTO \"storage_keys\" (\"id\", \"account_id\", \"secret\", \"buckets\", \"read_only\")\nVALUES ('AKFF7Q2MXRWN4D6KJ3TA', '000000000001', '{\"v\":1,\"kid\":…,\"key\":…,\"iv\":…,\"data\":…}', '{photos}', false);" },
+        set: { 'PostgreSQL.storage_keys': 'AKFF7Q2MXRWN4D6KJ3TA · photos · read-write · sealed' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · the secret, this once', title: 'The four variables AWS\'s tools read',
+        text: 'The secret is in this answer only. ff prints it as export lines, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and AWS_ENDPOINT_URL_S3, for eval "$(ff buckets keys create … | grep \'^export \')" or a function\'s secrets. AWS\'s SDKs and CLI read the endpoint from the last, so no code needs to name FF. The audit log names storage_key.create.',
+        code: 'storage-keys.service.ts create() · cli/src/commands/buckets.rs keys_create()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { id: 'AKFF7Q2MXRWN4D6KJ3TA', buckets: ['photos'], readOnly: false, createdAt: '2026-10-23T06:30:09.502Z', lastUsedAt: null, secretAccessKey: 'wJal…', endpoint: 'http://s3.localhost:3002', region: 'tn-tunis-1' } } },
+      { from: 'user', to: 'front', kind: 'req', label: 'PUT /photos/2026/cat.jpg · SigV4', title: 'aws s3 cp, its endpoint the only change',
+        text: 'The AWS CLI as it is, with those variables: AWS_ENDPOINT_URL_S3 sends it to FF\'s front door, which the backend serves on a port of its own (FF_STORAGE_PORT, 3002), path-style at that address. It signs with AWS Signature Version 4, the body\'s SHA-256 among what it signs, adds the CRC-64/NVME checksum AWS\'s tools now send, and waits for 100 Continue before it sends the body.',
+        code: 'BE/src/storage/front-door.ts serve() · s3-requests.ts operationOf()',
+        msg: { kind: 'http', first: 'PUT /photos/2026/cat.jpg HTTP/1.1', headers: { host: 's3.localhost:3002', 'content-type': 'image/jpeg', 'content-length': '2481337', expect: '100-continue', 'x-amz-date': '20261023T063015Z', 'x-amz-content-sha256': '71680691…09af44', 'x-amz-checksum-crc64nvme': 'V9WiTp/A9Yc=', 'x-amz-sdk-checksum-algorithm': 'CRC64NVME', authorization: 'AWS4-HMAC-SHA256 Credential=AKFF7Q2MXRWN4D6KJ3TA/20261023/tn-tunis-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-checksum-crc64nvme;x-amz-content-sha256;x-amz-date;x-amz-sdk-checksum-algorithm, Signature=…' }, body: '<2,481,337 bytes, once the front door answers 100 Continue>' } },
+      { from: 'front', to: 'db', kind: 'req', label: 'the key · its account · the bucket', title: 'Every request checked the same way',
+        text: 'The key of that ID, unless it is revoked (InvalidAccessKeyId otherwise); its secret opened, and the signature checked, its time within 15 minutes of the front door\'s (SignatureDoesNotMatch, RequestTimeTooSkewed). Its account must be active and its storage on (AccountProblem, saying why), within the plan\'s requests a second (SlowDown, 100 on beta). The bucket must be the key\'s account\'s, and one the key names (AccessDenied; NoSuchBucket for none). An upload needs a read-write key, room in the plan\'s storage at the last measure, and credit, as an invocation does; reading and deleting go on without. Only then does the front door answer 100 Continue. Nothing is anonymous: a request without a signature is refused.',
+        code: 'front-door.ts answer() admitAccount() bucketFor() · storage-directory.service.ts key() · sigv4.ts checkSignature()',
+        msg: { kind: 'sql', text: "SELECT … FROM \"storage_keys\" WHERE \"id\" = 'AKFF7Q2MXRWN4D6KJ3TA' AND \"revoked_at\" IS NULL LIMIT 1;\nSELECT \"id\", \"status\", \"plan_id\", \"storage_disabled_at\", \"storage_disabled_reason\", \"bucket_storage_notice\" FROM \"accounts\" WHERE \"id\" = '000000000001';\nSELECT … FROM \"buckets\" WHERE \"name\" = 'photos' AND \"status\" = 'active' LIMIT 1;" },
+        set: { 'PostgreSQL.storage_keys': 'AKFF7Q2MXRWN4D6KJ3TA · photos · read-write · last used 06:30' } },
+      { from: 'front', to: 's3', kind: 'req', label: 'PUT /ff-7927…/2026/cat.jpg', title: 'To the store, checked as it streams',
+        text: 'Under the store\'s name for the bucket, signed again with FF\'s own key. The body streams through, its SHA-256 and its CRC-64/NVME computed on the way and compared at its end: a body that doesn\'t match is cut off before its last byte, so the store never completes it, and the client gets XAmzContentSHA256Mismatch or BadDigest. The store gets neither the client\'s checksum nor the customer\'s name for the bucket.',
+        code: 'front-door.ts forward() body() · aws-chunked.ts PlainBodyChecker · checksums.ts · sigv4.ts signedForStore()',
+        msg: { kind: 'http', first: 'PUT /ff-7927db049ca09e024ab4426c/2026/cat.jpg HTTP/1.1', headers: { host: 'localhost:9003', 'content-type': 'image/jpeg', 'content-length': '2481337', 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD', authorization: S3_SIGNED }, body: '<the same 2,481,337 bytes, as they arrive>' },
+        set: { 'S3 (customers\' buckets).bucket': 'ff-7927db049ca09e024ab4426c · 1 object', 'S3 (customers\' buckets).object': '2026/cat.jpg · 2,481,337 bytes' } },
+      { from: 'front', to: 'user', kind: 'res', label: '200 · ETag', title: 'The store\'s answer, in the customer\'s names',
+        text: 'The store\'s status and the headers S3 gives, ETag among them, with the front door\'s own request ID; in an XML answer, the store\'s name for the bucket becomes the customer\'s. The AWS CLI prints upload: ./cat.jpg to s3://photos/2026/cat.jpg.',
+        code: 'front-door.ts relay()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { etag: '"5f2b…"', 'x-amz-request-id': '4F1A9C2E7B3D8E60', 'content-length': '0' } } },
+      { from: 'front', to: 'db', kind: 'req', label: 'INSERT storage_request_counts', title: 'Counted, by S3\'s two classes',
+        text: 'Each request let into a bucket is counted in memory, in its minute and its class: the first (PUT, COPY, POST, LIST), the second (GET, HEAD and the others), or free (DELETE), with its status and its bytes in and out. Once a minute the minutes that are over are written, a row each per bucket and class, and whatever is left when the backend stops; a row that can\'t be written goes back for the next turn. GET /buckets/photos/metrics reads them: AllRequests, GetRequests, PutRequests, 4xxErrors, 5xxErrors, BytesDownloaded and BytesUploaded, as CloudWatch names S3\'s.',
+        code: 'front-door.ts serve() · BE/src/storage/storage-request-counts.service.ts flush() · s3-requests.ts',
+        msg: { kind: 'sql', text: "INSERT INTO \"storage_request_counts\" (\"bucket_id\", \"minute\", \"class\", \"writer\", \"account_id\", \"name\", \"requests\", \"gets\", \"puts\", \"errors4xx\", \"errors5xx\", \"bytes_in\", \"bytes_out\")\nVALUES ('9d3e…', '2026-10-23 06:30:00+00', 'tier1', '<this backend>', '000000000001', 'photos', 1, 0, 1, 0, 0, 2481337, 0);" },
+        set: { 'PostgreSQL.storage_request_counts': 'photos · 06:30 · tier1 · 1 PUT · 2,481,337 bytes in' } },
+      { from: 'api', to: 's3', kind: 'req', label: 'ListObjectsV2 ff-7927… · each hour', title: 'Measured every hour',
+        text: 'Each minute, the backend measures the buckets of every account that has one not measured yet in the hour, all of that account\'s together: the store\'s listing, page by page, its objects\' sizes summed and counted. One backend at a time, the one that holds PostgreSQL\'s advisory lock. A closed account\'s buckets aren\'t measured, a suspended one\'s are, and billed; an account whose buckets hold the plan\'s storage is measured every minute, so that uploads go in again soon after files are deleted.',
+        code: 'BE/src/storage/bucket-samples.service.ts sampleDue() · store-buckets.ts measure()',
+        msg: { kind: 'http', first: 'GET /ff-7927db049ca09e024ab4426c?list-type=2 HTTP/1.1', headers: { host: 'localhost:9003', authorization: S3_SIGNED } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT bucket_samples · resource_usage_hourly', title: 'Billed as S3 Standard is',
+        text: 'The hour\'s sample, written once, in a partition per month. Together, the account\'s buckets set its storage notice: its owners get an e-mail at 80% and at 100% of the plan\'s storage, 5 GB on beta, and from 100% uploads answer AccountProblem until the buckets hold less. The hourly rating adds each bucket\'s hour to resource_usage_hourly, its byte-hours from the sample and each class\'s requests from the counts. The month\'s statement prices the GB-months in S3 Standard\'s tiers and the requests by the thousand, at S3\'s prices in dinars, the first 5 GB-months, 2,000 requests of the first class and 20,000 of the second free each month. GET /usage, the console\'s Usage page and ff usage show the month so far, with the bytes each bucket\'s requests sent out, counted and not billed. FF keeps no copy of a bucket at the second site: the store\'s own redundancy keeps it, as S3\'s does.',
+        code: 'bucket-samples.service.ts measureAccount() · bucket-storage.ts · BE/src/billing/hourly-rating.service.ts · rating.ts gbMonths() · price-book.ts',
+        msg: { kind: 'sql', text: "INSERT INTO \"bucket_samples\" (\"bucket_id\", \"hour\", \"account_id\", \"name\", \"size_bytes\", \"objects\")\nVALUES ('9d3e…', '2026-10-23 06:00:00+00', '000000000001', 'photos', 2481337, 1) ON CONFLICT DO NOTHING;" },
+        set: { 'PostgreSQL.bucket_samples': 'photos · 06:00 · 2.5 MB · 1 object', 'PostgreSQL.resource_usage_hourly': 'bucket photos · 06:00 · 2,481,337 byte-hours · 1 + 0 requests' } },
     ],
   },
   {
@@ -1494,11 +1666,11 @@ const SCENARIOS = [
       { from: 'api', to: 'user', kind: 'res', label: '200 · functions, totals, estimate', title: 'The month, as JSON',
         text: 'Requests billed are successes, errors and timeouts (D7); throttled, failed and lost calls come apart, unbilled. gbSeconds is a string, as AWS\'s Cost Explorer gives its amounts, so no float rounds it. Each function\'s cost is before the free tier; the estimate takes the free tier off the total. Nothing is charged yet: prepaid credit comes with P-31.',
         code: 'usage/usage.controller.ts get()',
-        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { month: '2026-10', functions: [{ functionId: FN, functionName: 'hello', deleted: false, requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1, cost: '0.000' }], totals: { requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1 }, estimate: { currency: 'TND', usage: '0.000', freeTier: '0.000', volumeTiers: '0.000', monthlyFee: '0.000', total: '0.000', pricedFrom: '2026-10-01T00:00:00.000Z', priceBooks: ['0c9e…'] } } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { month: '2026-10', functions: [{ functionId: FN, functionName: 'hello', deleted: false, requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1, cost: '0.000' }], databases: [], totals: { requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1 }, estimate: { currency: 'TND', usage: '0.000', freeTier: '0.000', volumeTiers: '0.000', monthlyFee: '0.000', total: '0.000', pricedFrom: '2026-10-01T00:00:00.000Z', priceBooks: ['0c9e…'] } } } },
       { from: 'user', to: 'api', kind: 'req', label: 'Accept: text/csv', title: 'Or as CSV, for a spreadsheet',
-        text: 'The same query, written as a download: a line per function, no total line for a spreadsheet to count twice. A function name a spreadsheet would run as a formula (=, +, -, @) gets a leading apostrophe.',
+        text: 'The same query, written as a download: a line per function, then one per database, each its kind\'s columns, no total line for a spreadsheet to count twice. A name a spreadsheet would run as a formula (=, +, -, @) gets a leading apostrophe.',
         code: 'usage/usage-csv.ts usageCsv()',
-        msg: [{ kind: 'http', first: 'GET /usage?month=2026-10 HTTP/1.1', headers: { accept: 'text/csv' } }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="ff-usage-000000000001-2026-10.csv"' }, body: 'function_id,function_name,deleted,requests,billed_ms,gb_seconds,throttled,platform_errors,lost,cost\r\n' + FN + ',hello,false,4,3016,0.752,0,0,1,0.000' }] },
+        msg: [{ kind: 'http', first: 'GET /usage?month=2026-10 HTTP/1.1', headers: { accept: 'text/csv' } }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="ff-usage-000000000001-2026-10.csv"' }, body: 'kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,throttled,platform_errors,lost,cost\r\nfunction,' + FN + ',hello,false,4,3016,0.752,,0,0,1,0.000' }] },
     ],
   },
   {
@@ -2029,12 +2201,12 @@ const SCENARIOS = [
 const ARCH_INFO = {
   user: ['You', 'The console (React, on :5199), Swagger UI on /api, or curl; as FF\'s operator, the admin dashboard (admin/, on :5198), whose /admin routes take only an operator\'s token issued to ff-admin. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · admin/src · docs/getting-started.md'],
   idp: ['Keycloak', 'Logs users in and signs them up, for the realm ff (development: localhost:8180). Users with the realm role ff-operator also give a one-time password (P-70). The console gets its tokens from it with the authorization code flow and PKCE; the backend checks each access token against the realm\'s public keys, which it fetches once and caches.', 'deploy/keycloak/ff-realm.json · FE/src/auth/oidc.ts · BE/src/auth/token-verifier.ts'],
-  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL and the packages\' zips in S3, makes each package\'s code image and pushes it to the code registry, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, its CapacityService samples every function\'s ready instances 5 s into every minute; its NotificationWorker sends the e-mails and webhooks due every 10 s; and its AlarmEvaluator judges every alarm every minute.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator'],
+  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL and the packages\' zips in S3, makes each package\'s code image and pushes it to the code registry, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, its CapacityService samples every function\'s ready instances 5 s into every minute; its NotificationWorker sends the e-mails and webhooks due every 10 s; and its AlarmEvaluator judges every alarm every minute. On a port of its own, :3002, it is the S3 front door (ADR 0009): AWS\'s SDKs and CLI reach customers\' buckets there, each request\'s signature checked with one of the account\'s access keys, its account and plan, before it streams to the store; its BucketSamplesService measures every bucket each hour.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator · BE/src/storage'],
   db: ['PostgreSQL', 'The records: accounts, their plans, users and memberships, invitations and API keys; functions, with their invocations and metrics; and tables written once and never changed: the audit log, the usage records and the capacity samples, the last two with a partition per month; the price books; and the money: the ledger, the hourly charges, the payments and the invoices. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
-  s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds each package\'s zip, uploaded or made of inline code, from which its code image is made; a copy of each inline function\'s code; the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client'],
+  s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds each package\'s zip, uploaded or made of inline code, from which its code image is made; a copy of each inline function\'s code; the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Customers\' buckets are there too, each under a name of FF\'s, ff- and 24 hexadecimal characters, reached only through the backend\'s S3 front door, never directly; the store\'s own redundancy keeps them, and no copy goes to the second site. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/minio-client · BE/src/storage/store-buckets.ts'],
   k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
   ns: ['Tenant namespace', 'One per tenant: ff-t- plus 12 hex characters of sha256(tenant ID). It enforces Pod Security "restricted" and holds the guardrails and every function of the tenant.', 'manifests.ts namespaceManifest()'],
-  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend\'s pods in ff-system, and lets pods reach only DNS, and public addresses once the account\'s internet egress is on.', 'manifests.ts'],
+  guard: ['Guardrails', 'A ResourceQuota, sized by the account\'s plan, caps all its functions together (beta: 20 pods, 8 CPU, 8 Gi; and 60 ConfigMaps, 30 Services). A LimitRange sets defaults and maximums per container. The NetworkPolicy ff-default-deny admits traffic only from the backend\'s pods in ff-system, and lets pods reach only DNS, the server of customers\' databases and the S3 front door, each on its port, and public addresses once the account\'s internet egress is on.', 'manifests.ts'],
   registry: ['Code registry', 'Every function\'s code as an image (ADR 0003): one per package, uploaded or made of inline code, in the repository ff-code/<account>, tagged with the package\'s SHA-256 in hex. The backend alone pushes and deletes; the nodes pull by digest over their own network, so no tenant policy opens for it. In development, the container ff-dev-registry next to the cluster: the backend pushes on 127.0.0.1:5056, the nodes pull ff-dev-registry:5000. In production, Zot in ff-system.', 'BE/src/packages/code-images.service.ts · registry.ts · hack/k8s/registry-up.sh · deploy/k8s/platform/70-code-registry.yaml'],
   service: ['Service', 'fn-<id>: ClusterIP, port http (8080). Invocations reach the ready pods through it.', 'manifests.ts serviceManifest()'],
   deployment: ['Deployment', 'fn-<id>: the runtime image, the code image by digest, environment, resources, probes, security context, and volumes. Its replica count changes with autoscaling, the idle sweep, and cold starts.', 'manifests.ts deploymentManifest()'],
@@ -2042,6 +2214,7 @@ const ARCH_INFO = {
   pod: ['Runtime: the main process', 'Serves /healthz, /readyz, and /invoke on :8080. It queues invocations, enforces the timeout, writes the START, END, and REPORT lines, and supervises the worker.', 'runtimes/nodejs/src/main.ts · runtimes/python/ff_runtime/main.py'],
   worker: ['Worker: your handler', 'Loads your code once and runs handler(event, context) for each invocation. It is replaced after a timeout, an out-of-memory error, or a crash.', 'runtimes/nodejs/src/worker.ts · runtimes/python/ff_runtime/worker.py'],
   node: ['Node: scheduler, kubelet, containerd', 'Places pods, starts containers from the runtime images, pulls each function\'s code image from the code registry, once per node, mounts it read-only at /var/task, and probes /readyz and /healthz.', 'manifests.ts deploymentManifest() (the code volume, the probes)'],
+  datadb: ['Customers\' databases', 'A PostgreSQL 18 server of its own, apart from FF\'s (ADR 0008): per database, a user that owns it, both named ff_ and 24 hexadecimal characters. The backend makes them with its own role there, ff_admin, never a superuser, measures each every hour, and turns one read-only past its plan\'s storage. Functions reach it on port 5432 with their account\'s internet access off; developers from their machines; TLS only, SCRAM passwords. It archives its WAL to the second site with WAL-G, 7 days of point-in-time recovery. In development, docker compose\'s data-db, at 10.199.0.10 on a network of its own.', 'deploy/data-db · BE/src/databases'],
   logstore: ['Log store: VictoriaLogs', 'In ff-system, it keeps every function\'s log lines for 31 days, after their instance is gone; each account reads its plan\'s window (14 days on beta). Fluent Bit, on every node, reads the function containers\' logs and adds each line\'s account, function, pod, stream and call, within 2,000 lines and 1 MiB a second per account. Only the collector and the backend reach it; in development the backend queries it through the API server\'s Service proxy.', 'deploy/k8s/logging · BE/src/orchestrator/kubernetes/log-store.ts'],
 };
 
@@ -2197,21 +2370,22 @@ const svgLink = (d, label, lx, ly, anchor) => '<g class="arch-link"><path d="' +
 
 /* ---------- architecture maps ---------- */
 function archBig() {
-  return '<svg class="diagram" viewBox="0 0 1000 626" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL, S3 and the code registry, and the Kubernetes cluster with the tenant namespace and the log store">' +
+  return '<svg class="diagram" viewBox="0 0 1000 626" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL, S3, the code registry and the server of customers\' databases, and the Kubernetes cluster with the tenant namespace and the log store">' +
     '<defs>' + arrowDefs('arch-arrow', '--muted') + '</defs>' +
-    svgGroup(208, 20, 300, 512, 'Your machine or server') +
+    svgGroup(208, 20, 300, 590, 'Your machine or server') +
     svgGroup(560, 20, 428, 590, 'Kubernetes cluster (k3s)') +
     svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-27d6fbbe5c7d (dev account)', 'end') +
     svgBox('user', 16, 136, 150, 76, 'You', 'console · curl') +
     svgBox('idp', 16, 252, 150, 64, 'Keycloak', 'login · realm ff') +
-    svgBox('api', 226, 52, 264, 244, 'Backend API', 'NestJS · :3000', { top: true }) +
+    svgBox('api', 226, 52, 264, 244, 'Backend API', 'NestJS · :3000 · S3 front door :3002', { top: true }) +
     svgComp(242, 108, 232, 36, 'Functions: controller · service') +
     svgComp(242, 152, 232, 36, 'Metrics · autoscaler · idle sweep') +
     svgComp(242, 196, 232, 36, 'Kubernetes driver · KubeClient') +
     svgComp(242, 240, 232, 36, 'S3 client · registry client') +
     svgBox('db', 226, 344, 118, 72, 'PostgreSQL', 'records') +
-    svgBox('s3', 372, 344, 118, 72, 'S3 storage', 'zips · code copies') +
+    svgBox('s3', 372, 344, 118, 72, 'S3 storage', 'zips · buckets') +
     svgBox('registry', 226, 456, 264, 60, 'Code registry', 'ff-code/<account> · an image per package') +
+    svgBox('datadb', 226, 536, 264, 58, 'Customers\' databases', 'PostgreSQL 18 · a server of its own · TLS') +
     svgBox('k8sapi', 578, 52, 392, 56, 'Kubernetes API server', 'RBAC · admission policy ff-controller-scope') +
     svgBox('guard', 668, 168, 286, 44, 'Guardrails', 'ResourceQuota · LimitRange · NetworkPolicy') +
     svgBox('service', 594, 224, 178, 46, 'Service', 'fn-<id> · ClusterIP :8080') +
@@ -2227,6 +2401,8 @@ function archBig() {
     svgLink('M288,296 L288,342', 'SQL', 296, 324, 'start') +
     svgLink('M428,296 L428,342', 'S3 API', 436, 324, 'start') +
     svgLink('M358,296 L358,454', 'push', 362, 440, 'start') +
+    svgLink('M226,291 L216,291 L216,565 L224,565', '', 0, 0) +
+    svgLink('M578,506 L540,506 L540,580 L492,580', '5432', 516, 572) +
     svgLink('M578,486 L492,486', 'pull', 535, 478) +
     svgLink('M490,80 L576,80', 'HTTPS', 534, 72) +
     svgLink('M640,108 L640,222', 'service proxy', 648, 128, 'start') +
@@ -2240,7 +2416,7 @@ function archBig() {
 }
 function archMini() {
   const o = { inert: true };
-  return '<svg class="diagram" viewBox="0 0 420 430" role="img" aria-label="Where this step happens">' +
+  return '<svg class="diagram" viewBox="0 0 420 474" role="img" aria-label="Where this step happens">' +
     svgBox('user', 10, 10, 100, 40, 'You', '', o) +
     svgBox('idp', 10, 60, 100, 36, 'Keycloak', '', o) +
     svgBox('api', 120, 10, 290, 40, 'Backend API', '', o) +
@@ -2257,6 +2433,7 @@ function archMini() {
     svgBox('worker', 214, 273, 178, 36, 'Your handler', '', o) +
     svgBox('node', 10, 336, 400, 38, 'Node: scheduler · kubelet', '', o) +
     svgBox('logstore', 10, 382, 400, 38, 'Log store (VictoriaLogs)', '', o) +
+    svgBox('datadb', 10, 428, 400, 38, 'Customers\' databases (PostgreSQL 18)', '', o) +
     '</svg>';
 }
 function mountArchBig() {

@@ -7,7 +7,20 @@ import ReasonDialog from '../components/ReasonDialog';
 import { Fact, Table } from '../components/Facts';
 import { EmptyState, ErrorState, Loading } from '../components/States';
 import StatusBadge from '../components/StatusBadge';
-import { AccountView, PlanOption, STATUS_CHANGES, StatusChange, changedNotice, changesFor, dataDeletion, isAccountId, ownersSee } from '../lib/accounts';
+import {
+  AccountView,
+  PlanOption,
+  STATUS_CHANGES,
+  StatusChange,
+  changedNotice,
+  changesFor,
+  dataDeletion,
+  bucketStorageLabel,
+  formatMegabytes,
+  isAccountId,
+  ownersSee,
+  storageLabel,
+} from '../lib/accounts';
 import { actionLabel, describeAction } from '../lib/audit';
 import { GrantRequest, chargesLabel, creditStateLabel, grantNotice } from '../lib/credits';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
@@ -18,7 +31,7 @@ import { currentCursor, firstPage, nextPage, pageNumber, previousPage } from '..
 import { whenUtc } from '../lib/time';
 
 /** The change waiting for its reason, in the dialog. */
-type Pending = { kind: 'status'; change: StatusChange } | { kind: 'plan'; planId: string } | { kind: 'egress'; on: boolean };
+type Pending = { kind: 'status'; change: StatusChange } | { kind: 'plan'; planId: string } | { kind: 'egress'; on: boolean } | { kind: 'storage'; on: boolean };
 
 const AUDIT_COLUMNS: Array<Column<AccountAuditEntry>> = [
   { label: 'When', cell: (entry) => whenUtc(entry.at), className: 'whitespace-nowrap' },
@@ -171,7 +184,9 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
           ? await accountsApi.change(account.id, pending.change, reason)
           : pending.kind === 'plan'
             ? await accountsApi.plan(account.id, pending.planId, reason)
-            : await accountsApi.egress(account.id, pending.on, reason);
+            : pending.kind === 'storage'
+              ? await accountsApi.storage(account.id, pending.on, reason)
+              : await accountsApi.egress(account.id, pending.on, reason);
       setView(data);
       setPlanChoice(data.account.planId);
       setNotice(pending.kind === 'status' ? changedNotice(pending.change) : 'Saved.');
@@ -202,6 +217,20 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
         title: `Move ${account.name} to another plan?`,
         body: <p>Plan: {account.planId} → {pending.planId}. Its quota changes at once.</p>,
         confirmLabel: 'Change plan',
+      };
+    }
+    if (pending.kind === 'storage') {
+      return {
+        title: `Turn ${account.name}'s databases and buckets ${pending.on ? 'on' : 'off'}?`,
+        body: (
+          <p>
+            {pending.on
+              ? "Its databases' users log in again, unless the account is suspended or closed."
+              : "Its databases' users can't log in, their sessions end, and it can make no database. Their data stay, and are billed; its functions go on."}{' '}
+            Its owners get an e-mail that gives your reason, and its members read it in their audit log.
+          </p>
+        ),
+        confirmLabel: pending.on ? 'Turn on' : 'Turn off',
       };
     }
     return {
@@ -313,6 +342,21 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
               </button>
             </span>
           </Fact>
+          <Fact label="Databases and buckets">
+            <span className="flex flex-wrap items-center gap-3">
+              {storageLabel(account, whenUtc)}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setNotice(null);
+                  setPending({ kind: 'storage', on: account.storageDisabledAt !== null });
+                }}
+              >
+                {account.storageDisabledAt ? 'Turn on' : 'Turn off'}
+              </button>
+            </span>
+          </Fact>
         </dl>
       </section>
 
@@ -333,6 +377,47 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
           <Table
             head={['Name', 'Runtime', 'Memory', 'Status', 'Warm instances', 'Last call']}
             rows={view.functions.map((f) => [<Link to={`/functions/${f.id}`} className="text-blue-700 hover:underline">{f.name}</Link>, f.runtime, `${f.memory} MB`, f.status, f.minInstances, f.lastInvokedAt ? whenUtc(f.lastInvokedAt) : 'never'])}
+          />
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Databases</h2>
+        {view.databases.length === 0 ? (
+          <EmptyState>No database.</EmptyState>
+        ) : (
+          <Table
+            head={['Name', 'On the server', 'Status', 'Size', 'Sessions', 'Plan storage', 'Created']}
+            rows={view.databases.map((d) => [
+              d.name,
+              <span className="font-mono text-xs">{d.database}</span>,
+              d.status.replace('_', '-'),
+              formatMegabytes(d.sizeBytes),
+              d.connections ?? '–',
+              `${d.storageLimitMb.toLocaleString('en-US')} MB`,
+              whenUtc(d.createdAt),
+            ])}
+          />
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Buckets</h2>
+        <p className="text-sm text-slate-600">Together: {bucketStorageLabel(account)}.</p>
+        {view.buckets.length === 0 ? (
+          <EmptyState>No bucket.</EmptyState>
+        ) : (
+          <Table
+            head={['Name', 'In the store', 'Status', 'Size', 'Objects', 'Measured', 'Created']}
+            rows={view.buckets.map((b) => [
+              b.name,
+              <span className="font-mono text-xs">{b.storeName}</span>,
+              b.status,
+              formatMegabytes(b.sizeBytes),
+              b.objects === null ? '–' : b.objects.toLocaleString('en-US'),
+              b.measuredAt ? whenUtc(b.measuredAt) : 'not yet',
+              whenUtc(b.createdAt),
+            ])}
           />
         )}
       </section>

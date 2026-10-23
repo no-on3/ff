@@ -9,10 +9,13 @@ import {
   PriceBookPreview,
   PriceDocument,
   STATUS_LABELS,
+  StorageForm,
   draftDocument,
   earliestStart,
   formFrom,
+  pricesStorage,
   sourceLabel,
+  storageTierLabel,
   tierLabel,
 } from '../lib/prices';
 import { whenUtc } from '../lib/time';
@@ -37,6 +40,21 @@ const BookPrices: React.FC<{ document: PriceDocument }> = ({ document }) => {
     ['Idle instance time, per GB-s', prices.idleInstanceGbSecond, ''],
     ['Monthly fee', prices.monthlyPlanFee, ''],
   ];
+  // Customers' databases and buckets, as AWS RDS and S3 price them, in a book that has them.
+  if (prices.databaseStorageGbMonth !== undefined) rows.push(['Database storage, per GB-month', prices.databaseStorageGbMonth, usd?.databaseStorageGbMonth ?? '']);
+  if (prices.databaseMonthlyFee !== undefined) rows.push(['Monthly fee per database', prices.databaseMonthlyFee, '']);
+  for (const [index, tier] of (prices.bucketStorageGbMonth ?? []).entries()) {
+    rows.push([`Bucket storage, ${storageTierLabel(prices.bucketStorageGbMonth ?? [], index)}, per GB-month`, tier.price, usd?.bucketStorageGbMonth?.[index]?.price ?? '']);
+  }
+  if (prices.requestsTier1PerThousand !== undefined) rows.push(['PUT, COPY, POST and LIST requests, per 1,000', prices.requestsTier1PerThousand, usd?.requestsTier1PerThousand ?? '']);
+  if (prices.requestsTier2PerThousand !== undefined) rows.push(['GET and other requests, per 1,000', prices.requestsTier2PerThousand, usd?.requestsTier2PerThousand ?? '']);
+  if (freeTier.databaseStorageGbMonths !== undefined) {
+    rows.push([
+      'Free tier of databases and buckets, a month',
+      `${freeTier.databaseStorageGbMonths} GB-month of databases, ${freeTier.bucketStorageGbMonths ?? 0} of buckets, ${(freeTier.requestsTier1 ?? 0).toLocaleString('en-US')} PUT and ${(freeTier.requestsTier2 ?? 0).toLocaleString('en-US')} GET requests`,
+      '',
+    ]);
+  }
   return (
     <div className="card overflow-x-auto p-0">
       <table className="w-full text-left text-sm">
@@ -72,10 +90,11 @@ const Field: React.FC<{ id: string; label: string; value: string; onChange: (val
 );
 
 /**
- * FF's price books (P-73, D8): AWS Lambda's prices in TND, each from a whole
- * hour until the next book's. A new one starts from the active one, at AWS's
- * US$ prices times a rate or at TND prices as given, and can be tried on last
- * month first.
+ * FF's price books (P-73, D8): AWS Lambda's prices in TND, and from the book
+ * that brought them, customers' databases' and buckets' as AWS RDS and S3
+ * price them; each from a whole hour until the next book's. A new one starts
+ * from the latest one, scheduled or active, at AWS's US$ prices times a rate
+ * or at TND prices as given, and can be tried on last month first.
  */
 const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
   const [books, setBooks] = useState<PriceBook[] | null>(null);
@@ -104,9 +123,11 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
   if (failure) return <ErrorState message={failure} />;
   if (!books) return <Loading />;
 
-  const active = books.find((book) => book.status === 'active');
+  // A new book starts from the latest: after it, a book without its SKUs would price what they price at nothing.
+  const latest: PriceBook | undefined = books[books.length - 1];
   const book = books.find((candidate) => candidate.id === shown);
-  const draft = form && active ? draftDocument(form, active.document, new Date()) : null;
+  const draft = form && latest ? draftDocument(form, latest.document, new Date()) : null;
+  const setStorage = (change: Partial<StorageForm>) => setForm((current) => (current ? { ...current, storage: { ...current.storage, ...change } } : current));
   const set = (change: Partial<DraftForm>) => {
     setForm((current) => (current ? { ...current, ...change } : current));
     setPreview(null);
@@ -156,17 +177,18 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
         <div>
           <h1 className="text-2xl font-bold">Prices</h1>
           <p className="text-gray-600">
-            FF's price books: AWS Lambda's prices in TND, with its free tier (D8). Each starts at a whole hour, UTC, and prices what happens until
-            the next one starts. One that has started never changes: usage keeps the prices it had.
+            FF's price books: AWS Lambda's prices in TND, with its free tier (D8), and in the books that have them, customers' databases' and
+            buckets' as AWS RDS and S3 price them. Each starts at a whole hour, UTC, and prices what happens until the next one starts. One that
+            has started never changes: usage keeps the prices it had.
           </p>
         </div>
-        {active && !form && (
+        {latest && !form && (
           <button
             type="button"
             className="btn btn-primary"
             onClick={() => {
               setNotice(null);
-              setForm(formFrom(active.document, new Date()));
+              setForm(formFrom(latest.document, new Date()));
             }}
           >
             New price book
@@ -231,9 +253,9 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
         </section>
       )}
 
-      {form && active && (
+      {form && latest && (
         <section className="space-y-4">
-          <h2 className="text-lg font-semibold">A new price book, from the active one</h2>
+          <h2 className="text-lg font-semibold">A new price book, from the latest one ({STATUS_LABELS[latest.status].toLowerCase()}, from {whenUtc(latest.validFrom)})</h2>
           <div className="card space-y-5">
             <div className="flex flex-wrap items-end gap-4">
               <Field id="startDay" label="Starts on (UTC)" type="date" value={form.day} onChange={(day) => set({ day })} />
@@ -277,7 +299,7 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
                 if (key === 'tiers') {
                   // The duration tiers, in the table's order: after the requests.
                   const tiers = form.mode === 'aws' ? form.usd.tiers : form.tnd.tiers;
-                  return active.document.prices.gbSecond.map((_tier, index) => {
+                  return latest.document.prices.gbSecond.map((_tier, index) => {
                     const update = (value: string) => {
                       const next = tiers.map((price, at) => (at === index ? value : price));
                       if (form.mode === 'aws') set({ usd: { ...form.usd, tiers: next } });
@@ -287,7 +309,7 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
                       <Field
                         key={`tier-${index}`}
                         id={`tier-${index}`}
-                        label={`Duration, ${tierLabel(active.document.prices.gbSecond, index)}, per GB-s, ${currency}`}
+                        label={`Duration, ${tierLabel(latest.document.prices.gbSecond, index)}, per GB-s, ${currency}`}
                         value={tiers[index] ?? ''}
                         onChange={update}
                       />
@@ -306,6 +328,40 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
               <Field id="idleInstanceGbSecond" label="Idle instance time, per GB-s, TND" value={form.idleInstanceGbSecond} onChange={(idleInstanceGbSecond) => set({ idleInstanceGbSecond })} />
               <Field id="monthlyPlanFee" label="Monthly fee, TND" value={form.monthlyPlanFee} onChange={(monthlyPlanFee) => set({ monthlyPlanFee })} />
             </div>
+            {pricesStorage(latest.document) && (
+              <fieldset className="space-y-3">
+                <legend className="text-sm font-medium text-gray-700">Customers' databases and buckets, as AWS RDS and S3 price them</legend>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {(() => {
+                    const currency = form.mode === 'aws' ? 'US$' : 'TND';
+                    const given = form.mode === 'aws' ? form.storage.usd : form.storage.tnd;
+                    const change = (next: Partial<StorageForm['usd']>) => setStorage(form.mode === 'aws' ? { usd: { ...given, ...next } } : { tnd: { ...given, ...next } });
+                    const tiers = latest.document.prices.bucketStorageGbMonth ?? [];
+                    return (
+                      <>
+                        <Field id="databaseStorageGbMonth" label={`Database storage, per GB-month, ${currency}`} value={given.databaseStorageGbMonth} onChange={(databaseStorageGbMonth) => change({ databaseStorageGbMonth })} />
+                        {tiers.map((_tier, index) => (
+                          <Field
+                            key={`bucket-tier-${index}`}
+                            id={`bucket-tier-${index}`}
+                            label={`Bucket storage, ${storageTierLabel(tiers, index)}, per GB-month, ${currency}`}
+                            value={given.bucketTiers[index] ?? ''}
+                            onChange={(value) => change({ bucketTiers: given.bucketTiers.map((price, at) => (at === index ? value : price)) })}
+                          />
+                        ))}
+                        <Field id="requestsTier1" label={`PUT, COPY, POST and LIST requests, per 1,000, ${currency}`} value={given.requestsTier1PerThousand} onChange={(requestsTier1PerThousand) => change({ requestsTier1PerThousand })} />
+                        <Field id="requestsTier2" label={`GET and other requests, per 1,000, ${currency}`} value={given.requestsTier2PerThousand} onChange={(requestsTier2PerThousand) => change({ requestsTier2PerThousand })} />
+                      </>
+                    );
+                  })()}
+                  <Field id="databaseMonthlyFee" label="Monthly fee per database, TND" value={form.storage.databaseMonthlyFee} onChange={(databaseMonthlyFee) => setStorage({ databaseMonthlyFee })} />
+                  <Field id="freeDatabaseGbMonths" label="Free database GB-months, a month" value={form.storage.freeDatabaseGbMonths} onChange={(freeDatabaseGbMonths) => setStorage({ freeDatabaseGbMonths })} />
+                  <Field id="freeBucketGbMonths" label="Free bucket GB-months, a month" value={form.storage.freeBucketGbMonths} onChange={(freeBucketGbMonths) => setStorage({ freeBucketGbMonths })} />
+                  <Field id="freeRequestsTier1" label="Free PUT, COPY, POST and LIST requests, a month" value={form.storage.freeRequestsTier1} onChange={(freeRequestsTier1) => setStorage({ freeRequestsTier1 })} />
+                  <Field id="freeRequestsTier2" label="Free GET and other requests, a month" value={form.storage.freeRequestsTier2} onChange={(freeRequestsTier2) => setStorage({ freeRequestsTier2 })} />
+                </div>
+              </fieldset>
+            )}
             {draft && 'document' in draft && form.mode === 'aws' && (
               <div className="space-y-2">
                 <p className="text-sm text-gray-600">In TND, each US$ price times {form.rate}, exactly:</p>

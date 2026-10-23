@@ -22,6 +22,16 @@ describe('Decimal (L1, P-30)', () => {
     expect(() => Decimal.ratio(1n, 0n)).toThrow('Cannot divide by 0');
   });
 
+  it('divides by anything to a number of places, half away from zero, for a quantity with no finite decimal form', () => {
+    expect(Decimal.quotient(200n, 744n, 12).toString()).toBe('0.268817204301');
+    expect(Decimal.quotient(1n, 3n, 2).toString()).toBe('0.33');
+    expect(Decimal.quotient(2n, 3n, 2).toString()).toBe('0.67');
+    expect(Decimal.quotient(1n, 8n, 2).toFixed(2)).toBe('0.13'); // 0.125, the half away from zero
+    expect(Decimal.quotient(-1n, 8n, 2).toFixed(2)).toBe('-0.13');
+    expect(Decimal.quotient(1_440n, 720n, 12).toString()).toBe('2');
+    expect(() => Decimal.quotient(1n, 0n, 2)).toThrow('Cannot divide by 0');
+  });
+
   it('rounds once, half away from zero, and writes every place', () => {
     expect(d('8.221880704').toFixed(3)).toBe('8.222');
     expect(d('0.0005').toFixed(3)).toBe('0.001');

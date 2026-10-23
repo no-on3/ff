@@ -127,6 +127,15 @@ hack/k8s/gvisor-up.sh                                       # about 80 s the fir
 sed -i 's/^K8S_RUNTIME_CLASS=.*/K8S_RUNTIME_CLASS=gvisor/' BE/.env
 ```
 
+**10. Customers' databases (optional).** Customers' PostgreSQL databases live on a server of their own, apart from FF's ([ADR 0008](adr/0008-customer-databases.md)). In development it is `docker-compose.yml`'s `data-db`, PostgreSQL 18 with TLS only, on a Docker network of its own (10.199.0.0/24) that the cluster's node joins, so that functions reach it at its address there, as the backend and `psql` on this machine do. The script builds and starts it, joins the node, copies the CA of its certificate to `hack/.data-db/ca.crt`, and prints four lines for `BE/.env`; restart the backend after adding them. Without them, FF has no databases.
+
+```bash
+hack/k8s/data-db-up.sh            # about 2 minutes the first time: it builds its image
+```
+
+- Functions reach it whatever their account's internet access: their NetworkPolicy opens its address on port 5432, and nothing else of that network. Node.js functions trust its certificate through `NODE_EXTRA_CA_CERTS`, which FF sets to the CA it mounts in their pods; a Python driver finds the CA at `/etc/ff/data-db/ca.crt`.
+- `hack/k8s/data-db-up.sh psql` opens `psql` in it as its superuser; `hack/k8s/data-db-up.sh down` stops it, and `down --volumes` deletes its data too, as `docker compose down -v` does.
+
 **Check the whole setup** with the end-to-end test. It uses its own compose project, ports, and backend, so it can run next to your dev stack. It takes about 3 minutes and needs 3.5 GB of free memory.
 
 ```bash
@@ -210,6 +219,8 @@ curl -s "$FF/functions/$ID/invocations?limit=1" | jq -c '.invocations[0] | {stat
 
 `GET /metrics` gives the same for the whole account, deleted functions included. Both are worked out from the usage records the bill is made of, so they agree with it, and with the history. `period` is 60 (the default), 300 or 3600 seconds. `start` and `end` are RFC 3339 times, rounded out to whole periods of UTC time; by default the window starts 60 periods before now. An answer has at most 1,440 points: a longer window answers 400 and says so. An API key needs the `metrics:read` scope.
 
+`GET /databases/<id>/metrics` gives a customer's database's, a point an hour from its hourly measures (below), under the names CloudWatch gives RDS's and Aurora's: `DatabaseConnections`, its sessions, and `VolumeBytesUsed`, the bytes it uses, each with its `Maximum` and `Average` over the hour, `null` for an hour it wasn't measured in. Its period is an hour; by default the window starts 60 hours before now.
+
 ```bash
 curl -s "$FF/functions/$PY/metrics?period=300" \
   | jq -c '{period, points: (.timestamps | length), calls: (.metrics.Invocations | add), errors: (.metrics.Errors | add), slowest: ([.metrics.Duration.Maximum[] | values] | max)}'
@@ -231,7 +242,7 @@ sleep 11; curl -s "$FF/notifications/deliveries?limit=1" | jq -c '.[0] | {status
 
 The body is `{"id", "type", "account", "createdAt", "data"}`; `id` is also the `FF-Event-Id`, the same for each try. `"email": true` sends the test to the owners' e-mail too; development mode's account has no owner, so it answers 400 there. `POST /notifications/webhook-secret/rotate` makes a new secret: for 24 hours after, each webhook carries a `v1` by the old one too, while your receivers change over. Owners read and rotate the secret; owners and developers send tests; every member reads the deliveries, kept 30 days. API keys can't call these routes. The console's Notifications page does all of it: the secret, a test, and how each delivery went, read again while one is still to be sent.
 
-**Alarms**, as CloudWatch's: a metric of a function, or of the whole account without one, its statistic over a period, compared with a threshold, and "M out of N" periods breaching. Every minute FF judges the last N whole periods, each once it has been over a minute, so that a call ending then still counts. M or more breaching is `ALARM`, fewer is `OK`. A period without a datapoint (a duration with no call) is left out by default, and all N missing is `INSUFFICIENT_DATA`; `treatMissingData` makes it `notBreaching`, `breaching`, or `ignore`. Going into `ALARM`, and out of it, the alarm tells its actions: the owners' e-mail and up to 5 webhooks, signed as above, with `"kind": "alarm"` and the alarm, the states it left and entered, why, and the datapoints. Two alarms watch the account's money as it is: `Balance` and `MonthToDateCharges`, with the statistic `Latest` and one datapoint.
+**Alarms**, as CloudWatch's: a metric of a function, or of the whole account without one, its statistic over a period, compared with a threshold, and "M out of N" periods breaching. Every minute FF judges the last N whole periods, each once it has been over a minute, so that a call ending then still counts. M or more breaching is `ALARM`, fewer is `OK`. A period without a datapoint (a duration with no call) is left out by default, and all N missing is `INSUFFICIENT_DATA`; `treatMissingData` makes it `notBreaching`, `breaching`, or `ignore`. Going into `ALARM`, and out of it, the alarm tells its actions: the owners' e-mail and up to 5 webhooks, signed as above, with `"kind": "alarm"` and the alarm, the states it left and entered, why, and the datapoints. Two alarms watch the account's money as it is: `Balance` and `MonthToDateCharges`, with the statistic `Latest` and one datapoint. An alarm with a `databaseId` watches a customer's database's `DatabaseConnections` or `VolumeBytesUsed`, hours at a time (`period` 3600), each hour judged once it is over; it goes with its database, as a function's alarm goes with its function.
 
 ```bash
 curl -s -X POST "$FF/alarms" -H 'content-type: application/json' -d "{\"name\": \"py errors\", \"functionId\": \"$PY\",
@@ -422,56 +433,145 @@ ff metrics hello --since 6h                       # its invocations, errors, dur
 
 On an FF with logins, an owner of the account makes an API key in the console's API keys page, with the scopes the commands need (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `usage:read` for `ff usage` and `ff balance`, `metrics:read` for `ff metrics`), and `ff config set-token` saves it without showing it; `ff config set endpoint https://api.<domain>` names the API. A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh` makes the static Linux binary, with its SHA-256.
 
+### A database
+
+An account's functions keep their data in PostgreSQL databases that FF gives, as AWS RDS gives instances ([ADR 0008](adr/0008-customer-databases.md)): PostgreSQL 18, on a server of customers' databases apart from FF's own, a database and its user each, both named `ff_` and 24 random hexadecimal characters, which say nothing of whose it is; your name for it is the account's. TLS only. The plan sets how many, their storage and their sessions: one database on beta, 1,024 MB, 10 sessions at once. In development, setup's step 10 starts the server.
+
+```bash
+ff db create orders --secret-for orders-api              # the console's Databases page does the same
+# orders made: its connection string, shown this once (FF keeps no copy; `ff db password orders` makes a new one):
+# postgresql://ff_3f9c2a1e8b7d4c6a9e5f1a2b:Xq3v…@10.199.0.10:5432/ff_3f9c2a1e8b7d4c6a9e5f1a2b?sslmode=require
+# DATABASE_URL set on orders-api
+curl -s -X POST "$FF/databases" -H 'content-type: application/json' -d '{"name": "shop"}' | jq -r .connectionString
+```
+
+**Its password** is 32 random bytes, in that answer only: FF keeps no copy, and the server got only its SCRAM verifier, so the password is in no log. `ff db password orders` (`POST /databases/<id>/password`) makes a new one, shown once too; the old one opens no new session, those under way keep theirs. `--secret-for` sets the string as a secret of the functions named, `DATABASE_URL` unless `--secret-name` says otherwise, as an app written for Lambda and RDS reads its own.
+
+**Functions reach it whatever their account's internet access:** each account's network policy opens the server, on its port only. node-postgres reads `sslmode=require` as a full check of the certificate: in production the server's comes from a public CA; in development FF gives functions' pods the server's own CA, in `NODE_EXTRA_CA_CERTS`. From your machine, `psql "<the string>"` encrypts and doesn't check the certificate, as libpq reads `require`; add `&sslmode=verify-full&sslrootcert=hack/.data-db/ca.crt` to check it in development.
+
+**What it is now:** `ff db list` and `ff db get orders` (`GET /databases`, `GET /databases/<id>`): its status (`active`; `read_only` past the plan's storage, below; `suspended` with its account), its size and sessions as the server counts them, the plan's limits. Every hour the backend measures it, and its storage is billed by the GB-month, as RDS bills it, 1 GB-month free each month: section 5, "Customers' databases, measured every hour" and "Prices". `GET /databases/<id>/metrics` gives its `DatabaseConnections` and `VolumeBytesUsed` an hour a point, which alarms watch.
+
+**Deleting it** (`ff db delete orders`, `DELETE /databases/<id>`) ends its sessions and drops it and its user, with its data. A suspended account's users can't log in until it is active again; a closed account's databases go at its data deletion date, with the rest of its data. Every member reads the account's databases; owners and developers make, change and delete them; an API key needs `databases:read` and `databases:write`. The audit log names each `database.create`, `database.password` and `database.delete`.
+
+**Backups and the way out:** the server is backed up as FF's own is, to a second site, 7 days of point-in-time recovery. An owner asks FF for a database as it was at a moment of those 7 days, from the e-mail address FF knows them by; it comes back as a new database of the account's, as RDS restores to a new instance, by the runbook in [`deploy/backup`](../deploy/backup/README.md), which the monthly drill runs. To move a database to AWS RDS, `pg_dump` and `pg_restore`, the writes stopped for the copy: [`cli/templates/export/data/postgres.md`](../cli/templates/export/data/postgres.md), which `ff export` will put in its kit. Logical replication, which moves one without stopping them, needs what the server doesn't give customers today: a user with `REPLICATION`, and `wal_level` at `logical`. In French: [Bases de données](fr/bases-de-donnees.md).
+
+### Files in buckets
+
+Buckets for files come as AWS S3 gives them ([ADR 0009](adr/0009-buckets.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers their requests on a port of its own, `FF_STORAGE_PORT` (3002), at `FF_STORAGE_BASE` (`http://s3.localhost:3002`): path-style there (`http://s3.localhost:3002/photos/a.jpg`, as boto3 and the CLI address it, and every SDK an IP address), and virtual-hosted under it (`http://photos.s3.localhost:3002/a.jpg`, as the SDK for JavaScript addresses a host name). In front of the store, SeaweedFS in development (`MINIO_*`), it:
+- checks each request's AWS Signature Version 4, in its `Authorization` header or as a presigned URL (up to 7 days), with one of the account's access keys; nothing anonymous;
+- lets a key into its own account's buckets only, those it names if it names some, and writes only with a read-write key: AWS's errors otherwise (`SignatureDoesNotMatch`, `InvalidAccessKeyId`, `AccessDenied`, `NoSuchBucket`), in S3's XML;
+- serves `PutObject`, `GetObject` with ranges, `HeadObject`, `DeleteObject`, `DeleteObjects`, `CopyObject`, `ListObjectsV2` and `ListObjects`, the multipart upload's steps, `HeadBucket`, `GetBucketLocation` (`tn-tunis-1`) and `ListBuckets`; anything else answers `NotImplemented`;
+- checks a body as it streams to the store: its signed SHA-256, each chunk of the SDKs' `aws-chunked` uploads and its trailer, the checksum it carries (CRC-32, CRC-32C, CRC-64/NVME, SHA-1, SHA-256); a body that fails never completes in the store, which gets FF's own signature, the bucket's name there (`ff-` and 24 characters), and no checksum;
+- counts each request let into a bucket in its minute, by AWS's two classes of request (deletes free), with its bytes in and out, written once a minute to `storage_request_counts`.
+
+Buckets and the account's access keys to them are made on the console's Buckets page, which lists each bucket with what it held at its last measure and warns when the account's buckets near or reach the plan's storage; a bucket's own page has its addresses, the AWS CLI's command for it, its last hours (what it held, its requests and those that failed) and its alarms; the Usage page has each bucket's month. Or through FF's API:
+
+```bash
+curl -s -X POST "$FF/buckets" -H 'content-type: application/json' -d '{"name": "photos"}'   # 201, its endpoint and address
+curl -s -X POST "$FF/storage-keys" -H 'content-type: application/json' -d '{}' | jq -r '"export AWS_ACCESS_KEY_ID=\(.id) AWS_SECRET_ACCESS_KEY=\(.secretAccessKey) AWS_REGION=\(.region)"'
+# then, with those three, any of AWS's tools, only the endpoint given:
+aws --endpoint-url http://s3.localhost:3002 s3 cp ./cat.jpg s3://photos/2026/cat.jpg
+aws --endpoint-url http://s3.localhost:3002 s3 ls s3://photos --recursive
+```
+
+Or with `ff`, whose key's secret comes as the four variables AWS's tools read, `AWS_ENDPOINT_URL_S3` among them, so that the CLI needs no `--endpoint-url`:
+
+```bash
+ff buckets create photos
+eval "$(ff buckets keys create --bucket photos | grep '^export ')"
+aws s3 cp ./cat.jpg s3://photos/2026/cat.jpg
+ff buckets get photos          # what it held at its last hourly measure
+ff usage                       # its month: GB-months, its requests by S3's two classes, what it sent out
+```
+
+`GET /buckets` and `GET /buckets/<name>` give each bucket's last measure too (`sizeBytes`, `objects`, `measuredAt`), and `GET /me` how full the account's buckets are together (`bucketStorageNotice`: 80, 100, or null under 80%).
+
+**A bucket's name** is AWS's, without dots (3 to 63 lower-case letters, digits and hyphens), and unique across FF, as on AWS: whoever has `photos`, nobody else may, until it is deleted. In the store it is a name of FF's, `ff-` and 24 characters, which says nothing of whose it is. The plan sets how many an account has (five on beta), what they hold together (5 GB), the requests a second (100) and the largest file in one `PutObject` (5 GB; a multipart upload sends more). `GET /buckets` and `GET /buckets/<name>` show them; `DELETE /buckets/<name>` deletes an empty one, as S3 does, and `?force=true` deletes its files first, and the uploads under way.
+
+**An access key** (`POST /storage-keys`) is an ID like AWS's, `AKFF` and 16 characters, and a secret of 40, in that answer only: FF keeps it sealed, as the front door needs it to check signatures. It reaches all the account's buckets, or those `buckets` names, read-write or, with `readOnly`, reading and listing only. An account has two at most, as IAM gives a user, so that one can replace the other; `DELETE /storage-keys/<id>` revokes one, at once. Only owners see, make and revoke them; owners and developers make and delete buckets; every member lists them. An API key needs `storage:read` and `storage:write`. The audit log names each `bucket.create`, `bucket.delete`, `storage_key.create` and `storage_key.delete`.
+
+**Every request is checked the same way:** the key's account must be active and its storage on, or the front door answers `AccountProblem`, saying why; past the plan's requests a second, `SlowDown`; out of credit, uploads wait for credit, while reading and deleting go on. A closed account's buckets are emptied and deleted with the rest of its data, at its data deletion date, and its keys revoked.
+
+**Measured every hour, billed as S3 Standard bills them:** each bucket's listing is measured once an hour, its objects' sizes summed and counted (`bucket_samples`), and each hour of it is rated from that and from its requests by S3's two classes, PUT, COPY, POST and LIST, then GET and the others, deletes free. The price book has S3 Standard's prices in TND, and each month's free tier, as AWS gives it the first year: 5 GB-months, 2,000 requests of the first class and 20,000 of the second. `GET /usage` lists each bucket's month (its GB-months, what it held last, each class's requests, its estimated cost, and the bytes its requests sent out and brought in, `bytesDownloaded` and `bytesUploaded`, counted, not billed, as [decision 12](decisions.md) has it), its CSV a line each, and the month's statement a table of them; the console's Usage page and `ff usage` show what each sent out. The plan's storage, 5 GB on beta, counts the account's buckets together: its owners are told at 80% and at 100%, and from 100% uploads answer `AccountProblem`, saying why, until the buckets hold less; reading and deleting go on, and once files are deleted, uploads go in again within a minute.
+
+**Metrics and alarms, as CloudWatch has S3's:** `GET /buckets/<name>/metrics?period=60|300|3600` gives `BucketSizeBytes` and `NumberOfObjects` (their `Average`: each period of an hour carries that hour's measure, `null` in an hour not measured) and the requests, each period's `Sum`: `AllRequests`, `GetRequests`, `PutRequests`, `4xxErrors`, `5xxErrors`, `BytesDownloaded` and `BytesUploaded`, from the front door's counts by the minute. An alarm watches any of them with `bucketName` (`POST /alarms`), as CloudWatch's alarms on S3 name a `BucketName`, and goes with its bucket. The admin app's account page lists the account's buckets, their names in the store, what each held at its last measure, and how full they are together.
+
+**A function reaches its account's buckets with no setting at all,** as on AWS Lambda with a role: `new S3Client({})` and `boto3.client("s3")` work as they are. Its pods get a key of its own in their environment, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, with `AWS_REGION`, `AWS_DEFAULT_REGION` and `AWS_ENDPOINT_URL_S3`, the front door's address inside the cluster: an IP address, where AWS's SDKs go path-style by themselves. The key is made at the function's first deploy (an older function gets its own the next time an update rolls it out), reaches every bucket of the account, read-write, is checked as any key is, and is revoked when the function is deleted; it is neither listed with the account's two keys nor counted against them. FF sets these names, so a function's variables can't, `AWS_ENDPOINT_URL_S3` included. The SDK isn't in the runtimes' images: name `@aws-sdk/client-s3`, or `boto3`, in the function's package ([Node.js](../runtimes/nodejs/README.md#buckets-with-awss-sdk), [Python](../runtimes/python/README.md#buckets-with-boto3)). The backend gives functions keys only when it knows where they reach the front door: `FF_STORAGE_FUNCTION_ENDPOINT`, and `FF_STORAGE_FUNCTION_CIDRS`, the addresses their NetworkPolicy opens on its port. With the development cluster, this machine as its pods see it, the gateway of its Docker network (`BE/.env.example` says how to find it):
+
+```bash
+FF_STORAGE_FUNCTION_ENDPOINT=http://172.18.0.1:3002
+FF_STORAGE_FUNCTION_CIDRS=172.18.0.1/32
+```
+
+In production the backend runs in the cluster, and functions reach its pods through the Service `ff-storage`, at a fixed address, `10.43.0.251` ([deploy/k8s/README.md](../deploy/k8s/README.md), "Buckets from functions").
+
+**Backups and the way out:** no bucket is copied to the second site ([decision 11](decisions.md)). The store's own redundancy keeps the files through a failed disk, as S3's does, but not through a file deleted or replaced by mistake, since FF keeps no versions of them, nor through the loss of the store. Keep your own copy of the files that matter: `aws s3 sync s3://photos ./photos`, with one of the account's keys in the environment, which is what the first half of [`cli/templates/export/data/s3-sync.sh`](../cli/templates/export/data/s3-sync.sh) does. To move a bucket to AWS S3, the same script then copies that folder to a bucket on S3 with the AWS CLI's own settings, FF's variables dropped first; run again, it copies only what changed, and `--delete-gone` deletes what FF no longer has. `ff export` will put it in its kit. Then point the code at S3 (on AWS Lambda, a role and no endpoint) and delete the bucket on FF. In French: [Fichiers dans des compartiments](fr/compartiments.md).
+
+```bash
+eval "$(ff buckets keys create --read-only | grep '^export ')"
+cli/templates/export/data/s3-sync.sh photos my-photos-on-s3     # my-photos-on-s3 made on S3 first
+```
+
 ### A small app, end to end
 
-[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and written to PostgreSQL, through a secret that holds the database's address, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, makes its two functions. FF has no database for customers yet (step 2 of [What to build next](what-to-build-next.md)): the app uses one of its own, which its functions reach over the internet, once the account's internet access is on.
+[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and kept in PostgreSQL, each order's receipt kept in a bucket, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, and `@aws-sdk/client-s3`, AWS's S3 client, makes its two functions. On FF it keeps its orders in one of FF's databases and its receipts in one of FF's buckets, as it would in RDS and S3 on AWS: its functions reach both with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL` and `RECEIPTS_BUCKET`. In development, functions get their own keys to buckets once the backend knows where they reach the front door (`FF_STORAGE_FUNCTION_ENDPOINT`, in "Files in buckets" above), and the customers' databases' server runs (setup's step 10).
 
-**The database.** A function never reaches a private address, FF's own network included. In development, `hack/k8s/app-database.sh up` runs a PostgreSQL that the cluster's functions reach as they would one on the internet: on a Docker network of its own in 198.18.0.0/15, the range set aside for tests, which the cluster's node joins (Docker 28 or later). It prints the database's address, which the functions get as a secret.
-
-```bash
-DATABASE_URL=$(hack/k8s/app-database.sh up)       # postgres://app:…@198.18.0.10:5432/app
-```
-
-**Its internet access.** The beta plan's accounts have none. FF's operator turns it on in the admin dashboard, on the account's page (`PUT /admin/accounts/<id>/egress`). In development mode, with no operator, the database stands in, and the next deploy applies it to the account's namespace:
-
-```bash
-docker compose exec -T postgres psql -U postgres -d serverless_platform \
-  -c "UPDATE accounts SET internet_egress = true WHERE id = '$(curl -s "$FF/me" | jq -r '.accounts[0].id')'"
-```
-
-**The web address.** From the app's folder:
+**The two functions.** From the app's folder; the second has the same package, so nothing goes up again:
 
 ```bash
 cd examples/orders-app
-ff deploy . --name orders-api --handler index.http     # npm installs pg in a copy of the folder; the package goes up
-printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
-ff url enable orders-api --auth none                    # its address: http://<id>.fn.localhost:3001/
-ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}'
-# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…"}
-ff invoke orders-api --http GET /orders                 # or curl http://<id>.fn.localhost:3001/orders
-../../hack/k8s/app-database.sh psql -c 'SELECT * FROM orders'
+ff deploy . --name orders-api --handler index.http          # npm installs pg and the S3 client in a copy of the folder; the package goes up
+ff deploy . --name orders-nightly --handler index.nightly   # "package: …, which the account had"
 ```
 
-Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the address the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after.
-
-**The nightly report.** The same folder makes the second function, with the other handler. Its package is the same, so nothing goes up again:
+**Its database and its bucket.** `ff db create` makes the database and sets its connection string as both functions' `DATABASE_URL`, rolling each out; the bucket keeps the receipts, its name in a variable. Each function has a key of its own to the account's buckets, with the region and the front door's address, in its environment, so `new S3Client({})` needs nothing more, as on AWS Lambda with a role:
 
 ```bash
-ff deploy . --name orders-nightly --handler index.nightly   # "package: …, which the account had"
-printf '%s\n' "$DATABASE_URL" | ff secrets set orders-nightly DATABASE_URL
-ff schedule set orders-nightly "cron(0 2 * * ? *)"          # every night at 02:00 UTC; it says the next runs
-ff invoke orders-nightly --data @events/scheduled.json      # a night's run, now, with EventBridge's Scheduled Event
-ff logs orders-nightly                                      # report {"day":"2026-10-21","orders":1,"items":2,"removed":0}
+ff db create orders --secret-for orders-api --secret-for orders-nightly
+ff buckets create shop-receipts                             # a name of yours: bucket names are unique across FF
+ff env set orders-api RECEIPTS_BUCKET=shop-receipts
+ff env set orders-nightly RECEIPTS_BUCKET=shop-receipts
 ```
 
-The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. At 02:00 UTC the scheduler calls the function with that event itself; the run is in `ff history orders-nightly`, and `ff schedule list orders-nightly` says how it went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
+**The web address.**
+
+```bash
+ff url enable orders-api --auth none                        # its address: http://<id>.fn.localhost:3001/
+ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}'
+# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…","receipt":"s3://shop-receipts/receipts/1.txt"}
+ff invoke orders-api --http GET /orders                     # or curl http://<id>.fn.localhost:3001/orders
+ff invoke orders-api --http GET /orders/1/receipt           # Order 1, 2 × harissa, and its time
+```
+
+Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the string the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after. The order is written first, then its receipt, `receipts/<id>.txt`: a receipt that can't be written leaves the order, with `"receipt": null` in the answer and a line in the log. With one of the account's keys, the AWS CLI reads it as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
+
+**The nightly report.**
+
+```bash
+ff schedule set orders-nightly "cron(0 2 * * ? *)"          # every night at 02:00 UTC; it says the next runs
+ff invoke orders-nightly --data @events/scheduled.json      # a night's run, now, with EventBridge's Scheduled Event
+ff logs orders-nightly                                      # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
+```
+
+The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself; the run is in `ff history orders-nightly`, and `ff schedule list orders-nightly` says how it went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
 
 ```bash
 ff delete orders-nightly --yes && ff delete orders-api --yes
-../../hack/k8s/app-database.sh down                     # the database, with its data
+ff db delete orders --yes                                   # the database, with its data
+ff buckets delete shop-receipts --force --yes               # the bucket, with its receipts
 ```
 
-**In production** the database is yours, at an address on the internet, with TLS (`sslmode=require` in its address) and its password in the secret; FF's operator turns the account's internet access on. The same folder runs on AWS Lambda with an RDS database: `ff package` writes its zip.
+**A database of your own, elsewhere,** works as well, through the same secret, once the account's internet access is on. A function never reaches a private address, FF's own network included, so in development `hack/k8s/app-database.sh up` runs a PostgreSQL that the cluster's functions reach as they would one on the internet: on a Docker network of its own in 198.18.0.0/15, the range set aside for tests, which the cluster's node joins (Docker 28 or later). It prints the database's address. FF's operator turns the account's internet access on in the admin dashboard, on the account's page (`PUT /admin/accounts/<id>/egress`); in development mode, with no operator, the database stands in, and the next deploy applies it to the account's namespace:
+
+```bash
+DATABASE_URL=$(hack/k8s/app-database.sh up)                 # postgres://app:…@198.18.0.10:5432/app
+docker compose exec -T postgres psql -U postgres -d serverless_platform \
+  -c "UPDATE accounts SET internet_egress = true WHERE id = '$(curl -s "$FF/me" | jq -r '.accounts[0].id')'"
+printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
+hack/k8s/app-database.sh down                               # afterwards: the database, with its data
+```
+
+**In production** the database and the bucket are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on. The same folder runs on AWS Lambda with an RDS database and an S3 bucket: `ff package` writes its zip, and the function's role gives the S3 client its credentials.
 
 ## 4. Look inside the cluster
 
@@ -646,7 +746,7 @@ curl -s "$FF/audit-log?limit=20&before=<next>" -H "$AUTH"   # the next page, old
 
 The cold start, when the call had to start an instance, is recorded in `init_ms` and never billed.
 
-**The month's usage.** `GET /usage` adds the records up for a month by the UTC calendar: per function and in total, the requests billed, the billed duration, the GB-seconds, and the calls not billed. Every member of the account may read it, viewers included, and an API key with `usage:read`. The console's "Usage" page shows this month and last month, and downloads the CSV:
+**The month's usage.** `GET /usage` adds the records up for a month by the UTC calendar: per function and in total, the requests billed, the billed duration, the GB-seconds, and the calls not billed; and, under `databases`, each of the account's databases measured in the month: the hours it was measured in, its GB-months, and its size at its last measure. Every member of the account may read it, viewers included, and an API key with `usage:read`. The console's "Usage" page shows this month and last month, and downloads the CSV, a line per function and then per database, its `kind` first:
 
 ```bash
 curl -s "$FF/usage" | jq '{month, totals}'                                # this month
@@ -655,16 +755,23 @@ curl -s "$FF/usage?month=2026-09" -H 'Accept: text/csv'                  # the s
 # {"month": "2026-10", "totals": {"requests": 4, "billedMs": 3016, "gbSeconds": "0.752", "throttled": 0, "platformErrors": 0, "lost": 1}}
 ```
 
-`gbSeconds` is billed duration × memory, counting 1,024 MB as 1 GB, as an exact decimal string, as AWS's Cost Explorer gives its amounts. The totals are the records' own sums, never the functions' rounded figures added up. A function deleted since keeps its usage, marked `"deleted": true`. To read the raw records:
+`gbSeconds` is billed duration × memory, counting 1,024 MB as 1 GB, as an exact decimal string, as AWS's Cost Explorer gives its amounts. The totals are the records' own sums, never the functions' rounded figures added up. A function deleted since keeps its usage, marked `"deleted": true`, and so does a database. A database's `gbMonths` is its size each hour over the month's hours, 1 GB being 2^30 bytes, as RDS bills storage, to six decimals. To read the raw records:
 
 ```bash
 docker compose exec -T postgres psql -U postgres -d serverless_platform \
   -c "SELECT started_at, function_name, status, memory_mb, duration_ms, billed_ms, init_ms FROM usage_records ORDER BY started_at DESC LIMIT 10"
 ```
 
-The table has a partition per month, by the UTC calendar (`usage_records_2026_10`, …). The backend creates this month's and the next two at startup and then daily, so a month is never missing.
+The table has a partition per month, by the UTC calendar (`usage_records_2026_10`, …). The backend creates this month's and the next two at startup and then daily, so a month is never missing; `capacity_samples` and `database_samples` likewise.
 
-**Prices** (P-30, D8 of the client-readiness plan). FF charges what AWS Lambda charges, in TND, with the same free tier: 1 million requests and 400,000 GB-s per account and month. Prices live in price books, as data: the first is AWS's US East list at the BCT's rate of 14 October 2026, 3.0080 TND per US$, valid from 1 October 2026. A new book starts in the future, and a book that has started never changes, so past usage keeps its prices. `GET /usage` estimates the month's cost with the books valid during it: each function's cost before the free tier, then the free tier, the duration tiers past 6 billion GB-s, any monthly fee, and the total, each rounded to the millime. A function with `minInstances` above zero pays for those instances while they are ready, and for its calls at the provisioned price, without the free tier. Every hour, the backend rates the hour's usage with the same prices (P-32, below); for the first two weeks it only shows the charges.
+**Customers' databases, measured every hour** ([ADR 0008](adr/0008-customer-databases.md)). Each minute, the backend measures every database not measured yet in the hour: all of them at the hour's start, a new one within a minute. Each measure is a row of `database_samples`, written once, with the database's size (`pg_database_size`), its sessions and its name; a closed account's databases aren't measured, their data waiting for their deletion date. At 80% and at 100% of the plan's storage per database, the account's owners get an e-mail, in their language, once each time it reaches the share, listed with the account's other notifications. Past 100%, its new sessions start read-only, and the sessions under way are ended so that a pool's start so again: an app reads, and a write is refused with SQLSTATE 25006. It is a signal rather than a wall: a session may turn it off for itself (`SET default_transaction_read_only = off`) and delete what it no longer needs, or even take the setting away, which the next hour's measure sets again, leaving the sessions under way be; the storage above the plan's is billed. Once the database is back under, at the next measure, its sessions start read-write again. To read the samples:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d serverless_platform \
+  -c "SELECT hour, name, pg_size_pretty(size_bytes) AS size, connections FROM database_samples ORDER BY hour DESC LIMIT 10"
+```
+
+**Prices** (P-30, D8 of the client-readiness plan). FF charges what AWS Lambda charges, in TND, with the same free tier: 1 million requests and 400,000 GB-s per account and month. Prices live in price books, as data: the first is AWS's US East list at the BCT's rate of 14 October 2026, 3.0080 TND per US$, valid from 1 October 2026. A new book starts in the future, and a book that has started never changes, so past usage keeps its prices. `GET /usage` estimates the month's cost with the books valid during it: each function's cost before the free tier, then the free tier, the duration tiers past 6 billion GB-s, any monthly fee, and the total, each rounded to the millime. A function with `minInstances` above zero pays for those instances while they are ready, and for its calls at the provisioned price, without the free tier. A database costs what RDS for PostgreSQL's gp3 storage costs in US East, by the GB-month: 0.115 US$, 0.34592 TND at the book's rate, with 1 GB-month free per account and month; FF charges no monthly fee per database. Those prices are in the second book, which the migration `DatabaseBilling` adds from the first hour of the month after it runs, the first book's prices with RDS's and S3's (S3 Standard's storage in its three tiers, its two classes of request, and their free tier: 5 GB-months, 2,000 `PUT` and 20,000 `GET`, for buckets); the books before price databases at nothing. Every hour, the backend rates the hour's usage with the same prices (P-32, below); for the first two weeks it only shows the charges.
 
 ```bash
 curl -s "$FF/usage" | jq '.estimate'
@@ -686,7 +793,7 @@ curl -s $FF/admin/accounts/$ACCOUNT -H "Authorization: Bearer $OP" | jq -c .bala
 
 Amounts are `bigint` from the database to the API, never a JavaScript number, and the API writes them as strings with every decimal of the currency.
 
-**The hourly rating** (P-32, D9). An hour is rated once its last usage can have arrived: 33 minutes after it ends, at the platform's limits (two 900 s timeouts, the cold start, 30 s, and a minute). The backend then sums the hour's billed calls and minute samples into `usage_hourly`, and charges each account that used something in it: its month so far, rated with the price books and rounded once to the millime, less what the month's earlier hours were charged. So the free tier and the tiers count from the month's start, and a month's charges add up to its total rounded once. Each charge is in `usage_charges`, and `rating_runs` lists the hours rated; a stopped backend catches up when it starts, hour by hour, and only one backend rates at a time.
+**The hourly rating** (P-32, D9). An hour is rated once its last usage can have arrived: 33 minutes after it ends, at the platform's limits (two 900 s timeouts, the cold start, 30 s, and a minute). The backend then sums the hour's billed calls and minute samples into `usage_hourly`, and its databases' hourly samples into `resource_usage_hourly`, each with its name then, and charges each account that used something in it: its month so far, rated with the price books and rounded once to the millime, less what the month's earlier hours were charged. So the free tier and the tiers count from the month's start, and a month's charges add up to its total rounded once. Each charge is in `usage_charges`, and `rating_runs` lists the hours rated; a stopped backend catches up when it starts, hour by hour, and only one backend rates at a time.
 
 **Shadow mode** is on at first (D9: the platform setting `billingShadowMode`, in the admin dashboard's Settings): charges are recorded and shown, and nothing is debited. Once `npm run billing:reconcile` has agreed for two weeks, turn it off, with a reason: from the next hour rated, each charge is debited, one ledger transaction per account and hour (`usage:<account>:<hour>`), and usage rated in shadow mode is never debited later. The console shows the balance on every page, with "Billing trial" while shadow mode is on; its title gives the month's charges so far. Every member reads it, and an API key with `usage:read`:
 
@@ -696,12 +803,12 @@ curl -s $FF/billing/balance | jq -c .
 curl -s "$FF/billing/transactions?limit=20" | jq -c '.transactions[] | {kind, occurredAt, amount}'   # newest first; pass next as before
 cd BE && npm run billing:reconcile -- --month 2026-10      # the month's charges against its usage records, priced afresh
 # 2026-10 until 2026-10-17T13:00:00.000Z (the end of the last hour rated):
-# Account         Charged  From usage  Requests rated  Requests used
-# 000000000001  0.000 TND   0.000 TND               4              4  ok
+# Account         Charged  From usage  Requests rated  Requests used  GB-h rated  GB-h sampled
+# 000000000001  0.000 TND   0.000 TND               4              4       0.007         0.007  ok
 # The account agrees.
 ```
 
-The reconciliation compares, per account, what the hourly rating charged in the month with the same hours priced again from the usage records and samples, and the billed calls counted both ways: the parent plan's criterion, rated usage equals raw usage. It only reads, and exits 1 when an account differs. A difference means usage reached the database after its hour was rated, which the 33 minutes are there to prevent: that usage is not charged.
+The reconciliation compares, per account, what the hourly rating charged in the month with the same hours priced again from the usage records and samples, and the billed calls and the databases' storage counted both ways: the parent plan's criterion, rated usage equals raw usage. It only reads, and exits 1 when an account differs. A difference means usage reached the database after its hour was rated, which the 33 minutes are there to prevent: that usage is not charged.
 
 **The balance check** (P-33, D9). Before each invoke, the backend looks at the account's balance: calls go on down to the negative buffer (`negativeBuffer`, 1.000 TND), so that the hour and a half the rating lags never blocks a paying customer; below it, for the grace period (`gracePeriodHours`, 24); then `POST /functions/:id/invoke` answers `402 InsufficientCreditException`, saying since when and what to do, and records nothing of the call. Reads, logs and deploys go on, and nothing is deleted. Credit lets invokes in again at once. In shadow mode nothing is refused. The balance is cached per account: a trigger on the ledger NOTIFYs every backend of each write to a wallet when it commits, whoever wrote it, and each drops that account's balance; a lost notification is covered within a minute. The console shows a banner on every page once the balance is below the buffer, with the time invokes stop, or a red one once they stopped; both link to the Billing page.
 
@@ -728,7 +835,7 @@ Each pro-forma names FF and its bank from `FF_SELLER_NAME`, `FF_SELLER_TAX_ID`, 
 
 When the transfer shows on FF's bank statement, you record it on the admin dashboard's Payments page (below). The wallet gets the credit at once, less any share the buyer withheld at source, and invokes go on again at once (P-33). The withheld share is credited when you add the buyer's withholding certificate. The owners get an e-mail each time.
 
-**Invoices and usage statements** (P-36, D9). Each month an account buys credit in gets an invoice, issued early the next month by FF's operator (below). It lists a line per transfer received up to the month's end and not invoiced before: the credit before tax and its VAT, at the rate of the day the pro-forma was asked for. It adds the stamp duty, 1 TND, which is taken from the account's credit when the invoice is issued. The invoice is a French PDF, numbered `FAC-<year>-000001` without gaps in each fiscal year, with the month's usage statement attached: each function's requests, GB-seconds and cost, the free tier, the total, and what was debited. Usage itself isn't invoiced again, since its credit was. Every month has a usage statement, with or without an invoice. An issued invoice never changes: a correction is a credit note (*facture d'avoir*), `AV-<year>-000001`. The console's Billing page lists the invoices and credit notes, and downloads them and any month's statement. Every member does, and an API key with `usage:read`:
+**Invoices and usage statements** (P-36, D9). Each month an account buys credit in gets an invoice, issued early the next month by FF's operator (below). It lists a line per transfer received up to the month's end and not invoiced before: the credit before tax and its VAT, at the rate of the day the pro-forma was asked for. It adds the stamp duty, 1 TND, which is taken from the account's credit when the invoice is issued. The invoice is a French PDF, numbered `FAC-<year>-000001` without gaps in each fiscal year, with the month's usage statement attached: each function's requests, GB-seconds and cost, each database's GB-months and cost, by the name it had, the free tier, the total, and what was debited. Usage itself isn't invoiced again, since its credit was. Every month has a usage statement, with or without an invoice. An issued invoice never changes: a correction is a credit note (*facture d'avoir*), `AV-<year>-000001`. The console's Billing page lists the invoices and credit notes, and downloads them and any month's statement. Every member does, and an API key with `usage:read`:
 
 ```bash
 curl -s $FF/billing/invoices | jq -c '.invoices[] | {number, kind, month, issuedOn, total, corrects}'
@@ -845,6 +952,8 @@ The e-mail of a rejection, a suspension or a closure gives your reason. A change
 
 Once a minute, the backend scales back to zero any function of a suspended or closed account that started anyway, such as with a call already under way. Moving an account to another plan applies the plan's quota to its namespace at once. Internet egress is off for every new account (its plan's default: beta has it off) until you turn it on: the change writes the account's NetworkPolicy at once, and if the cluster refuses it, nothing changes and you get the error, so try again. Private addresses, FF's own network and the cloud's metadata addresses stay out of reach either way. `K8S_EGRESS_INTERNET=false` cuts every account off, whatever its setting.
 
+**Turning an account's databases and buckets off** (`PUT /admin/accounts/<id>/storage`, the account page's "Databases and buckets"). With a reason, as for abuse, its functions going on: its databases' users can't log in and their sessions end, and it makes no database; their data stay, and are billed. Turned on again, they log in, unless the account is suspended or closed; reactivating a suspended account doesn't let them in while its storage is off. Its owners get an e-mail of each change, in their language, the reason in it, and its members read the reason in their audit log and in `GET /me` (`storageDisabledAt`, `storageDisabledReason`). The account page lists its databases, with their names on the server, which a restore of one names (`deploy/backup/README.md`), and their size and sessions as the server counts them.
+
 **Closing an account deletes its data, after a notice.** Closing sets the date: now plus the notice period in the settings, `closedAccountDeletionDays`, 30 days by default. The owners' e-mail gives it, to the minute in UTC, and so do the account page, `GET /me` and the console's banner; until then, the members still read the account's functions, history and logs. Once the date has passed, a job deletes each function, with its code in object storage and its invocation history, then the account's namespace, then its lines in the log store, and checks that none is left. The account's audit log then shows each deletion as FF's. Its usage records, payments, invoices and audit log stay: the law requires keeping them. The job runs at the backend's start and every hour (`FF_RETENTION_INTERVAL_SECONDS`), with the purge of old invocation history; a step that fails is logged, and the next run does it again. Changing the notice period doesn't move the date of an account closed already.
 
 ```bash
@@ -892,7 +1001,7 @@ curl -s -X POST $FF/admin/accounts/$ACCOUNT/credits -H "Authorization: Bearer $O
   -d "{\"kind\": \"adjustment\", \"amount\": \"-150\", \"confirmAmount\": \"-150\", \"reason\": \"Transfer recorded twice\", \"idempotencyKey\": \"$(cat /proc/sys/kernel/random/uuid)\"}"
 ```
 
-**Prices** (P-73). The dashboard's Prices page lists the price books: past, active and scheduled. A new book starts from the active one, at AWS's US$ prices times a rate, or at TND prices as you set them, with the free tier and D8's knobs (a minimum billed duration, a price for idle instance time, a monthly fee). It starts at a whole hour, UTC, from the next one on, and prices what happens until a later one starts. "Try it on last month" prices last month with the draft, per account, next to the books valid then and what the hourly rating charged (in shadow mode, only rated), and saves nothing. A book that says it is AWS's prices times a rate must be exactly that: the API names each price that isn't. A scheduled book can be removed; one that has started never changes.
+**Prices** (P-73). The dashboard's Prices page lists the price books: past, active and scheduled. A new book starts from the latest one, scheduled or active, at AWS's US$ prices times a rate, or at TND prices as you set them, with the free tier and D8's knobs (a minimum billed duration, a price for idle instance time, a monthly fee); and, from a book that has them, customers' databases' and buckets' prices as AWS RDS and S3 set them, their free tier and a monthly fee per database. A book after one with those must have them too: the API names each one missing, since without them databases and buckets would cost nothing from it on. It starts at a whole hour, UTC, from the next one on, and prices what happens until a later one starts. "Try it on last month" prices last month with the draft, per account, next to the books valid then and what the hourly rating charged (in shadow mode, only rated), and saves nothing. A book that says it is AWS's prices times a rate must be exactly that: the API names each price that isn't. A scheduled book can be removed; one that has started never changes.
 
 ```bash
 curl -s $FF/admin/price-books -H "Authorization: Bearer $OP" | jq -c '.[] | {status, validFrom, kind: .document.source.kind, rate: .document.source.usdRate}'

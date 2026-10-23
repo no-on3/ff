@@ -26,6 +26,7 @@ cd "$repo"
 TRIVY_IMAGE=aquasec/trivy:0.75.0
 GITLEAKS_IMAGE=zricethezav/gitleaks:v8.30.1
 POSTGRES_IMAGE=postgres:15.19-alpine3.24
+SEAWEEDFS_IMAGE=chrislusf/seaweedfs:4.48
 ACTIONLINT_IMAGE=rhysd/actionlint:1.7.12
 ci_dir="$repo/hack/.ci"
 mkdir -p "$ci_dir"
@@ -107,22 +108,43 @@ stage_unit() {
 
 stage_db() {
   "$repo/hack/check-resources.sh"
-  local name="ff-ci-postgres-$$" password port
+  local name="ff-ci-postgres-$$" data="ff-ci-data-db-$$" s3="ff-ci-s3-$$" password port admin data_port s3_key s3_port
   password="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
-  # shellcheck disable=SC2064 # the name is fixed now
-  trap "docker rm -f $name >/dev/null 2>&1 || true" EXIT
+  admin="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
+  s3_key="ci$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # shellcheck disable=SC2064 # the names are fixed now
+  trap "docker rm -f -v $name $data $s3 >/dev/null 2>&1 || true" EXIT
   docker run -d --name "$name" -e POSTGRES_PASSWORD="$password" -p 127.0.0.1::5432 "$POSTGRES_IMAGE" >/dev/null
   port="$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')"
+  # Customers' database server (ADR 0008), its certificate from a CA of its own, for the suites that make databases.
+  docker build -q -t ff-data-db:ci "$repo/deploy/data-db" >/dev/null
+  docker run -d --name "$data" -e POSTGRES_PASSWORD="$password" -e FF_DATA_DB_ADMIN_PASSWORD="$admin" \
+    -e FF_DATA_DB_TLS_NAMES=DNS:localhost,IP:127.0.0.1 -p 127.0.0.1::5432 ff-data-db:ci >/dev/null
+  data_port="$(docker port "$data" 5432/tcp | head -1 | sed 's/.*://')"
+  # The store behind buckets' S3 front door, as development's, with keys of its own, for the suites that send it requests.
+  mkdir -p "$ci_dir"
+  printf '{"identities": [{"name": "ci", "credentials": [{"accessKey": "%s", "secretKey": "%s"}], "actions": ["Admin", "Read", "List", "Tagging", "Write"]}]}\n' \
+    "$s3_key" "$password" >"$ci_dir/s3.json"
+  chmod 644 "$ci_dir/s3.json"
+  docker run -d --name "$s3" -p 127.0.0.1::8333 -v "$ci_dir/s3.json:/etc/seaweedfs/s3.json:ro" "$SEAWEEDFS_IMAGE" \
+    server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=64 >/dev/null
+  s3_port="$(docker port "$s3" 8333/tcp | head -1 | sed 's/.*://')"
   for _ in $(seq 1 60); do docker exec "$name" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+  for _ in $(seq 1 60); do docker exec "$data" pg_isready -q -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
+  # SeaweedFS answers S3 once its volume server has joined: an anonymous request is refused then, with a status.
+  for _ in $(seq 1 60); do [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$s3_port/")" != 000 ] && break; sleep 1; done
+  docker cp -q "$data:/var/lib/postgresql/tls/ca.crt" "$ci_dir/data-db-ca.crt"
   # The variables win over BE/.env, which dotenv never overrides.
   export DB_HOST=127.0.0.1 DB_PORT="$port" DB_USERNAME=postgres DB_PASSWORD="$password" DB_NAME=postgres DB_SSL=false
-  step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}" in_dir BE npm run test:db
+  export FF_DATA_DB_HOST=127.0.0.1 FF_DATA_DB_PORT="$data_port" FF_DATA_DB_ADMIN_PASSWORD="$admin" FF_DATA_DB_CA_FILE="$ci_dir/data-db-ca.crt"
+  export MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$s3_port" MINIO_USE_SSL=false MINIO_ACCESS_KEY="$s3_key" MINIO_SECRET_KEY="$password"
+  step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" in_dir BE npm run test:db
   step "migrations: exactly the entities' schema" in_dir BE npm run migration:check
-  docker rm -f "$name" >/dev/null
+  docker rm -f -v "$name" "$data" "$s3" >/dev/null
   trap - EXIT
 }
 
-# Every image FF builds: the platform's, the runtimes', the edge's and the backup's, each with its build
+# Every image FF builds: the platform's, the runtimes', the edge's, the backup's and customers' database server's, each with its build
 # arguments. The apps bake their addresses in: any will do for a scan.
 apps=(--build-arg VITE_API_URL=https://api.ff.test --build-arg VITE_OIDC_AUTHORITY=https://login.ff.test/realms/ff)
 IMAGES=(
@@ -133,6 +155,7 @@ IMAGES=(
   "ff-runtime-nodejs:ci runtimes/nodejs"
   "ff-runtime-python:ci runtimes/python"
   "ff-postgres-walg:ci deploy/backup/postgres-walg"
+  "ff-data-db:ci deploy/data-db"
 )
 
 # The scanners run as this user: what they write here stays this user's.

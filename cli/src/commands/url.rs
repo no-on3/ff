@@ -157,6 +157,7 @@ pub fn disable(name: &str, yes: bool, context: &Context) -> Result<(), Error> {
     let function = function_named(&client, name)?;
     let url = url_of(&client, &function.id)?.ok_or_else(|| no_url(name))?;
     if !super::functions::confirmed(
+        "ff url disable",
         &format!("Delete {}? It stops answering at once, and a new URL would have another address", url.function_url),
         yes,
     )? {
@@ -232,7 +233,11 @@ pub fn domains_verify(name: &str, domain: &str, context: &Context) -> Result<(),
 pub fn domains_remove(name: &str, domain: &str, yes: bool, context: &Context) -> Result<(), Error> {
     let client = Client::new(&context.settings()?)?;
     let function = function_named(&client, name)?;
-    if !super::functions::confirmed(&format!("Remove {domain} from {name}'s URL? It stops answering there"), yes)? {
+    if !super::functions::confirmed(
+        "ff domains remove",
+        &format!("Remove {domain} from {name}'s URL? It stops answering there"),
+        yes,
+    )? {
         return context.out.result(&json!({ "removed": false }), || "Nothing removed".to_owned());
     }
     client.done(&Call::delete(format!("/functions/{}/url/domains/{}", function.id, encode(domain))))?;

@@ -1,10 +1,12 @@
 # Local development dependencies.
 #   docker compose up -d --wait                  → PostgreSQL + S3 storage (what the backend needs)
 #   docker compose --profile auth up -d --wait   → also Keycloak (login, realm "ff") and Mailpit (its e-mails)
+#   docker compose --profile data up -d --wait   → also the server of customers' databases (hack/k8s/data-db-up.sh)
 # The backend and the dashboard run on the host (see docs/getting-started.md).
 # Functions run on the Kubernetes dev cluster (hack/k8s/cluster-up.sh), not here.
 # Host ports bind to 127.0.0.1 only and can be moved: FF_PG_PORT, FF_S3_PORT,
-# FF_KEYCLOAK_PORT, FF_MAIL_SMTP_PORT, FF_MAIL_UI_PORT.
+# FF_KEYCLOAK_PORT, FF_MAIL_SMTP_PORT, FF_MAIL_UI_PORT. The data server has no host port: on Linux its own address,
+# FF_DATA_DB_ADDRESS on FF_DATA_DB_SUBNET, is reachable from this machine too.
 
 services:
   postgres:
@@ -73,6 +75,30 @@ services:
       timeout: 3s
       retries: 60
 
+  # The server of customers' databases (ADR 0008): PostgreSQL 18, apart from FF's own, TLS and SCRAM only, on a
+  # network of its own that the cluster's node joins, so that functions reach it at its address there, as the backend
+  # and psql on this machine do. Its certificate comes from a CA it makes at its first start. hack/k8s/data-db-up.sh
+  # starts it, joins the node to its network and prints the backend's settings. Development only: its passwords are
+  # these, which production refuses.
+  data-db:
+    build: deploy/data-db
+    image: ff-data-db:dev
+    profiles: [data]
+    environment:
+      POSTGRES_PASSWORD: postgres
+      FF_DATA_DB_ADMIN_PASSWORD: ff-data-admin-dev
+      FF_DATA_DB_TLS_NAMES: "DNS:localhost,IP:127.0.0.1,IP:${FF_DATA_DB_ADDRESS:-10.199.0.10}"
+    networks:
+      data:
+        ipv4_address: ${FF_DATA_DB_ADDRESS:-10.199.0.10}
+    volumes:
+      - data_db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U ff_admin -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
   # Catches every e-mail Keycloak (and later the backend) sends: http://localhost:58025.
   mailpit:
     image: axllent/mailpit:v1.31.4
@@ -86,7 +112,15 @@ services:
       timeout: 3s
       retries: 20
 
+networks:
+  # Customers' database server's own (FF_DATA_DB_SUBNET), a private range as production's would be.
+  data:
+    ipam:
+      config:
+        - subnet: ${FF_DATA_DB_SUBNET:-10.199.0.0/24}
+
 volumes:
   postgres_data:
   s3_data:
   keycloak_data:
+  data_db:

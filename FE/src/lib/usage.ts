@@ -31,6 +31,14 @@ export function formatGbSeconds(exact: string): string {
   return decimals(value, 6);
 }
 
+/** A database's GB-months to read: at most 6 decimals, and never rounded down to 0. */
+export function formatGbMonths(exact: string): string {
+  const value = Number(exact);
+  if (value === 0) return '0';
+  if (value < 0.000001) return '< 0.000001';
+  return decimals(value, 6);
+}
+
 /** The calls that weren't billed, by why (D7): "2 throttled", "1 lost". */
 export function notBilled(amounts: UsageAmounts): string[] {
   const reasons: Array<[number, string]> = [

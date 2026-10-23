@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PriceDocument, draftDocument, earliestStart, formFrom, multiplyDecimals, sourceLabel, tierLabel } from './prices';
+import { PriceDocument, draftDocument, earliestStart, formFrom, multiplyDecimals, pricesStorage, sourceLabel, storageTierLabel, tierLabel } from './prices';
 
 /** The first price book, as the backend's migration loads it (P-30). */
 const FIRST: PriceDocument = {
@@ -37,6 +37,32 @@ const FIRST: PriceDocument = {
   },
 };
 const NOW = new Date('2026-10-17T10:15:00Z');
+/** The book after it, as the backend's migration adds it: RDS's and S3's prices too, at the same rate, and their free tier. */
+const STORAGE_TIERS = [
+  { upToGbMonths: 51_200, price: '0.023' },
+  { upToGbMonths: 512_000, price: '0.022' },
+  { upToGbMonths: null, price: '0.021' },
+];
+const WITH_STORAGE: PriceDocument = {
+  ...FIRST,
+  source: {
+    ...FIRST.source,
+    usdPrices: { ...FIRST.source.usdPrices!, databaseStorageGbMonth: '0.115', bucketStorageGbMonth: STORAGE_TIERS, requestsTier1PerThousand: '0.005', requestsTier2PerThousand: '0.0004' },
+  },
+  freeTier: { ...FIRST.freeTier, databaseStorageGbMonths: 1, bucketStorageGbMonths: 5, requestsTier1: 2_000, requestsTier2: 20_000 },
+  prices: {
+    ...FIRST.prices,
+    databaseStorageGbMonth: '0.34592',
+    databaseMonthlyFee: '0',
+    bucketStorageGbMonth: [
+      { upToGbMonths: 51_200, price: '0.069184' },
+      { upToGbMonths: 512_000, price: '0.066176' },
+      { upToGbMonths: null, price: '0.063168' },
+    ],
+    requestsTier1PerThousand: '0.01504',
+    requestsTier2PerThousand: '0.0012032',
+  },
+};
 
 describe('prices, multiplied exactly (P-73)', () => {
   it("gives AWS's US$ prices times the rate as the backend checks them: no float, no rounding", () => {
@@ -106,6 +132,52 @@ describe('a new price book, from the active one (P-73)', () => {
       problems: ['Start: choose a day and an hour', 'Rate: must be a decimal number, such as 0.0000166667'],
     });
     expect(draftDocument({ ...form, freeRequests: '1e6' }, FIRST, NOW)).toEqual({ problems: ['Free requests: must be a whole number'] });
+  });
+});
+
+describe("a new price book from one with customers' databases' and buckets' prices", () => {
+  it('gives them back unchanged, their free tier and the fee per database with them', () => {
+    expect(draftDocument(formFrom(WITH_STORAGE, NOW), WITH_STORAGE, NOW)).toEqual({
+      validFrom: '2026-10-17T11:00:00Z',
+      document: { ...WITH_STORAGE, source: { ...WITH_STORAGE.source, readOn: '2026-10-17' } },
+    });
+  });
+
+  it("prices them at a new rate too, AWS's US$ price times it, and takes a fee per database and a free tier as set", () => {
+    const form = formFrom(WITH_STORAGE, NOW);
+    const changed = { ...form, rate: '3.1', storage: { ...form.storage, databaseMonthlyFee: '1.500', freeDatabaseGbMonths: '2' } };
+
+    expect(draftDocument(changed, WITH_STORAGE, NOW)).toMatchObject({
+      document: {
+        prices: {
+          databaseStorageGbMonth: '0.3565',
+          databaseMonthlyFee: '1.500',
+          bucketStorageGbMonth: [
+            { upToGbMonths: 51_200, price: '0.0713' },
+            { upToGbMonths: 512_000, price: '0.0682' },
+            { upToGbMonths: null, price: '0.0651' },
+          ],
+          requestsTier1PerThousand: '0.0155',
+          requestsTier2PerThousand: '0.00124',
+        },
+        freeTier: { databaseStorageGbMonths: 2, bucketStorageGbMonths: 5, requestsTier1: 2_000, requestsTier2: 20_000 },
+        source: { usdPrices: { databaseStorageGbMonth: '0.115', bucketStorageGbMonth: STORAGE_TIERS } },
+      },
+    });
+  });
+
+  it('names one left empty, and adds none to a book from one without them', () => {
+    const form = formFrom(WITH_STORAGE, NOW);
+
+    expect(draftDocument({ ...form, storage: { ...form.storage, usd: { ...form.storage.usd, requestsTier2PerThousand: '' } } }, WITH_STORAGE, NOW)).toEqual({
+      problems: ['GET and other requests, per 1,000 (US$): must be a decimal number, such as 0.0000166667'],
+    });
+    const draft = draftDocument(formFrom(FIRST, NOW), FIRST, NOW);
+    expect([pricesStorage(FIRST), pricesStorage(WITH_STORAGE), 'document' in draft && pricesStorage(draft.document)]).toEqual([false, true, false]);
+  });
+
+  it("names S3's storage tiers by where they end", () => {
+    expect(STORAGE_TIERS.map((_tier, index) => storageTierLabel(STORAGE_TIERS, index))).toEqual(['first 51,200 GB-months', 'up to 512,000 GB-months', 'past 512,000 GB-months']);
   });
 });
 

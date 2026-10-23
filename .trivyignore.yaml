@@ -16,70 +16,75 @@ vulnerabilities:
     statement: >-
       Caddy 2.11.7, the latest release, in the console's, the admin app's and the edge's images, was built with Go 1.26.8 and golang.org/x/net v0.59.0: denial of service through HTTP/2 and TLS. Go 1.26.9 (2026-10-10) and x/net v0.60.0 (2026-10-08) fix them, and are two weeks old on 2026-10-24: Caddy is rebuilt with them then, or replaced by a newer release that has them. Nothing is in production before then.
     expired_at: 2026-10-24
+  - id: CVE-2026-111943
+    paths: [usr/local/bin/wal-g]
+    statement: >-
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11: crypto/x509 may accept a chain through untrusted intermediates, a man in the middle of its TLS to the second site's S3. What it sends there is encrypted and authenticated with libsodium before it leaves the server (WALG_LIBSODIUM_KEY), so such a man reads nothing, and a backup changed on the way fails at its restore, which the monthly drill runs: accepted, not shown harmless, until a release built with Go 1.26.10 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
+    expired_at: 2026-11-20
   - id: CVE-2026-84304
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-84445
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-33818
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-39821
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-39822
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-56853
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-56858
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-56859
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-56860
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-56862
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-78667
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-78669
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2026-97031
     paths: [usr/local/bin/wal-g]
     statement: >-
-      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference server of deploy/backup runs it.
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with Go 1.25.11 and gRPC 1.83.0. Here it only talks to the second site's S3, over TLS, and serves nothing, which narrows what these reach: accepted, not shown harmless, until a release built with Go 1.26.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
     expired_at: 2026-11-20
   - id: CVE-2021-38599
     paths: [usr/local/bin/wal-g]

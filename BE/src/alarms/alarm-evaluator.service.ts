@@ -8,7 +8,20 @@ import { CustomerMetricsService } from '../metrics/customer-metrics.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Alarm } from './alarm.entity';
 import { alarmMail } from './alarm-mail';
-import { AlarmState, BILLING_METRICS, Evaluation, datapointsOf, evaluate, evaluationWindow, notifies, stateReason } from './alarm-rules';
+import {
+  AlarmState,
+  BILLING_METRICS,
+  BUCKET_METRICS,
+  DATABASE_METRICS,
+  Evaluation,
+  bucketDatapointsOf,
+  databaseDatapointsOf,
+  datapointsOf,
+  evaluate,
+  evaluationWindow,
+  notifies,
+  stateReason,
+} from './alarm-rules';
 import { alarmChanges, alarmEvaluations } from '../monitoring/operator-metrics';
 
 /** The most alarms one backend takes at once. */
@@ -88,10 +101,10 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
       [now, Math.max(intervalSeconds - 5, 0), CLAIM_BATCH],
     );
     if (rows.length === 0) return [];
-    return this.dataSource.getRepository(Alarm).find({ where: { id: In(rows.map((row) => row.id)) }, relations: { account: true, function: true } });
+    return this.dataSource.getRepository(Alarm).find({ where: { id: In(rows.map((row) => row.id)) }, relations: { account: true, function: true, database: true, bucket: true } });
   }
 
-  /** The alarm's datapoints, oldest first: its periods' values, or the account's money as it is. */
+  /** The alarm's datapoints, oldest first: its periods' values, a database's hours, a bucket's periods, or the account's money as it is. */
   private async datapoints(alarm: Alarm, now: Date): Promise<Array<number | null>> {
     if (BILLING_METRICS.includes(alarm.metric)) {
       const view = await this.billing.balance(alarm.accountId, now);
@@ -99,6 +112,12 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
     }
     const { settleSeconds } = this.config.getOrThrow<{ settleSeconds: number }>('alarms');
     const window = { ...evaluationWindow(alarm, now, settleSeconds), period: alarm.period as Period };
+    if (DATABASE_METRICS.includes(alarm.metric)) {
+      return databaseDatapointsOf(await this.metrics.forDatabase(alarm.accountId, alarm.databaseId as string, window), alarm.metric, alarm.statistic);
+    }
+    if (BUCKET_METRICS.includes(alarm.metric)) {
+      return bucketDatapointsOf(await this.metrics.bucketMetrics(alarm.accountId, alarm.bucketId as string, window), alarm.metric, alarm.statistic);
+    }
     const view = alarm.functionId ? await this.metrics.forFunction(alarm.accountId, alarm.functionId, window) : await this.metrics.forAccount(alarm.accountId, window);
     return datapointsOf(view, alarm.metric, alarm.statistic);
   }
@@ -129,7 +148,18 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
     if (!actions.email && actions.webhookUrls.length === 0) return;
     const { consoleUrl } = this.config.getOrThrow<{ consoleUrl: string }>('mail');
     const account = { id: alarm.accountId, name: alarm.account?.name ?? alarm.accountId };
-    const change = { account, alarm, functionName: alarm.function?.name ?? null, from, to: evaluation.state, evaluation, at: now, consoleUrl };
+    const change = {
+      account,
+      alarm,
+      functionName: alarm.function?.name ?? null,
+      databaseName: alarm.database?.name ?? null,
+      bucketName: alarm.bucket?.name ?? null,
+      from,
+      to: evaluation.state,
+      evaluation,
+      at: now,
+      consoleUrl,
+    };
     await this.notifications.notify(
       {
         accountId: alarm.accountId,
@@ -139,6 +169,8 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
             id: alarm.id,
             name: alarm.name,
             functionId: alarm.functionId,
+            databaseId: alarm.databaseId,
+            bucketName: alarm.bucket?.name ?? null,
             metric: alarm.metric,
             statistic: alarm.statistic,
             period: alarm.period,

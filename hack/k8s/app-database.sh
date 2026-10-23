@@ -39,7 +39,8 @@ case "${1:-}" in
     # The node joins it as the lowest gateway priority: its default route stays its cluster's
     # network, where Docker would otherwise move it, by the networks' names (Docker 28 and later).
     joined || docker network connect --gw-priority -1 "$name" "$node"
-    for _ in $(seq 1 60); do
+    # Up to 90 s: a first start runs initdb, slow on a machine short of memory with a cluster and a test run on it.
+    for _ in $(seq 1 180); do
       docker exec "$name" pg_isready -q -U app -d app && break
       sleep 0.5
     done

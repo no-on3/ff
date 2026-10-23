@@ -1,8 +1,8 @@
 /**
- * L1: GET /functions/:id/metrics and GET /metrics through HTTP, with the
- * validation main.ts sets up: who may read them, the account and the window
- * they pass on, and what they refuse before asking the database. Their SQL
- * runs against PostgreSQL in customer-metrics.db.spec.ts.
+ * L1: GET /functions/:id/metrics, GET /metrics, GET /databases/:id/metrics and GET /buckets/:name/metrics
+ * through HTTP, with the validation main.ts sets up: who may read them, the
+ * account and the window they pass on, and what they refuse before asking the
+ * database. Their SQL runs against PostgreSQL in customer-metrics.db.spec.ts.
  */
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -16,12 +16,15 @@ import { MetricsController } from './metrics.controller';
 
 const ACCOUNT = '000000000001';
 const FN = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
+const DB = '7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f';
 
 describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   let app: INestApplication;
   let baseUrl: string;
   const forFunction = jest.fn(async (_accountId: string, _id: string, _window: MetricsWindow) => ({ metrics: {} }));
   const forAccount = jest.fn(async (_accountId: string, _window: MetricsWindow) => ({ metrics: {} }));
+  const forDatabase = jest.fn(async (_accountId: string, _id: string, _window: MetricsWindow) => ({ metrics: {} }));
+  const forBucket = jest.fn(async (_accountId: string, _name: string, _window: MetricsWindow) => ({ metrics: {} }));
 
   const get = (path: string) => fetch(`${baseUrl}${path}`);
   const refusal = async (path: string) => {
@@ -32,7 +35,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [MetricsController],
-      providers: [{ provide: CustomerMetricsService, useValue: { forFunction, forAccount } }],
+      providers: [{ provide: CustomerMetricsService, useValue: { forFunction, forAccount, forDatabase, forBucket } }],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
@@ -49,7 +52,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
 
   it('lets every member read them, viewers included, even in an account that is not active, and a key with metrics:read', () => {
     const reflector = new Reflector();
-    for (const handler of [MetricsController.prototype.forFunction, MetricsController.prototype.forAccount]) {
+    for (const handler of [MetricsController.prototype.forFunction, MetricsController.prototype.forAccount, MetricsController.prototype.forDatabase, MetricsController.prototype.forBucket]) {
       expect([reflector.get(ROLES, handler), reflector.get(ACTIVE_ACCOUNT, handler), reflector.get(SCOPE, handler)]).toEqual([undefined, undefined, 'metrics:read']);
     }
   });
@@ -90,6 +93,30 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
     expect(await refusal('/metrics?start=2026-10-12T09:00:00Z&end=2026-10-19T09:00:00Z&period=300')).toEqual([400, expect.stringContaining('2016 periods of 300 s')]);
     expect(await refusal('/metrics?stat=p99')).toEqual([400, ['property stat should not exist']]);
     expect(forAccount).not.toHaveBeenCalled();
+  });
+
+  it("asks for the caller's account's database a point an hour, over the last 60 hours by default, and refuses another period", async () => {
+    expect((await get(`/databases/${DB}/metrics?start=2026-10-19T09:30:00Z&end=2026-10-19T12:10:00Z`)).status).toBe(200);
+    expect(forDatabase).toHaveBeenCalledWith(ACCOUNT, DB, { start: new Date('2026-10-19T09:00:00Z'), end: new Date('2026-10-19T13:00:00Z'), period: 3600 });
+
+    expect((await get(`/databases/${DB}/metrics?period=3600`)).status).toBe(200);
+    const [, , window] = forDatabase.mock.calls[1];
+    expect(window.period).toBe(3600);
+    // 61 hours: the 60 before now's, and now's; 60 when now is a whole hour.
+    expect([60, 61]).toContain((window.end.getTime() - window.start.getTime()) / 3_600_000);
+    expect(await refusal(`/databases/${DB}/metrics?period=60`)).toEqual([400, "A database's metrics have a point an hour: period must be 3600"]);
+    expect(await refusal('/databases/orders/metrics')).toEqual([400, 'Validation failed (uuid is expected)']);
+    expect(forDatabase).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks for the caller's account's bucket by its name, in any of the periods, over the window named", async () => {
+    expect((await get('/buckets/photos/metrics?start=2026-10-19T09:30:00Z&end=2026-10-19T12:10:00Z&period=300')).status).toBe(200);
+    expect(forBucket).toHaveBeenCalledWith(ACCOUNT, 'photos', { start: new Date('2026-10-19T09:30:00Z'), end: new Date('2026-10-19T12:10:00Z'), period: 300 });
+
+    expect((await get('/buckets/photos/metrics')).status).toBe(200);
+    expect(forBucket.mock.calls[1][2].period).toBe(60);
+    expect(await refusal('/buckets/photos/metrics?period=86400')).toEqual([400, ['period must be one of 60, 300, 3600 seconds']]);
+    expect(forBucket).toHaveBeenCalledTimes(2);
   });
 
   it("refuses a function's ID that isn't one", async () => {

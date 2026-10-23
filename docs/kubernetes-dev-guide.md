@@ -53,6 +53,7 @@ hack/k8s/cluster-down.sh           # delete the cluster, its registry's containe
 - the log pipeline (below), unless `--no-logging`;
 - the operator's monitoring (below), with `--monitoring` only;
 - the registry of functions' code images ([ADR 0003](adr/0003-code-delivery.md)), `ff-dev-registry` (`registry:3.1.2`), on the cluster's Docker network: the backend pushes to `127.0.0.1:5056`, and the node pulls from `ff-dev-registry:5000` over HTTP. `registry-up.sh` tells the node's containerd so in a `hosts.toml`, which containerd reads at each pull, and in `/etc/rancher/k3s/registries.yaml`, which has k3s write it again when it starts: a cluster made before the registry gets it without a restart. Its images are in the volume `ff-dev-registry`, which `cluster-down.sh` keeps; the backend makes an image again when the registry has lost it, at a deploy, and for every function's every hour and at its start. It takes deletes (`REGISTRY_STORAGE_DELETE_ENABLED=true`), as production's registry does, so that the purge of unused packages deletes their images too: `registry-up.sh` makes a container from before without them again, its volume kept.
+- outside it, when `hack/k8s/data-db-up.sh` runs, the server of customers' databases ([ADR 0008](adr/0008-customer-databases.md)): `docker-compose.yml`'s `data-db` at 10.199.0.10, on a Docker network of its own that the node joins with `--gw-priority -1`, so that its default route stays the cluster's network. Docker picks a container's default gateway by the networks' names at equal priority, and `ff_data` sorts before `k3d-ff-dev`: without it, the node's traffic would leave through the data network. The script checks the route after joining, and `down` takes the node off the network first.
 
 It is safe to re-run.
 
@@ -79,6 +80,7 @@ hack/k8s/test-it.sh functions.lifecycle    # only the suites whose path matches
 - a Node.js function in `/var/task` that reads a file next to its code through a relative path;
 - a Python and a Node.js memory hog: each gets `Runtime.OutOfMemory`, the next invocation works, and the container is never restarted;
 - functions of both runtimes inside gVisor, with the network policy still enforced (only where the `gvisor` RuntimeClass exists; see [Sandboxing with gVisor](#sandboxing-with-gvisor));
+- customers' database server (only where `hack/k8s/data-db-up.sh` runs it): a function reaches it on its port with its account's internet access off, and trusts its certificate through `NODE_EXTRA_CA_CERTS` and the CA FF mounts; once the platform's rule leaves the account's policy, it reaches it no more;
 - scaling on concurrency (`functions.scaling.it.spec.ts`): a burst of slow calls takes a function to two instances without a failed call, later calls are spread over both, and a quiet minute steps it back to one;
 - the function lifecycle, through `FunctionsService` (`functions.lifecycle.it.spec.ts`): a broken create is released and then repaired by an update; a broken update of a working function is rolled back, so the next cold start runs the old code; an update of a function scaled to zero is checked on a real pod; a call that a hung runtime never answers is recorded as `TIMEOUT` through the API server proxy, as in direct mode;
 - clean-up.
@@ -118,13 +120,14 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 4. update (new code live);
 5. delete (Deployment gone, record gone);
 6. the same create, invoke, and delete for a Python function;
-7. plans and rate limits (P-15): an account on a small plan, its limits, its namespace's quota, and its rates;
-8. usage records (P-20): one per invocation, with the invocation's ID as the runtime's request ID, for a success, an error, a timeout and a cold start; then the backend is killed during a call, restarted, and marks the call `LOST`, unbilled, within about a minute;
-9. capacity samples (P-21): the warm function sampled each minute, and `npm run capacity:report` showing the account's day;
-10. the usage API (P-22): `GET /usage` against the raw records, the deleted function's usage, CSV, an empty month, a malformed one;
-11. usage priced (P-30): the month in TND with the first price book, a function's cost from the book's prices in SQL, the free tier covering the month, the CSV's costs, and no estimate before the first book;
-12. the hourly rating (P-32): every hour from the first book rated as the backend started, once and in order, in shadow mode; the balance and the transactions, nothing debited; `npm run billing:reconcile` against the stack's database;
-13. the balance check (P-33): shadow mode off, no buffer and no grace period; a wallet run below zero, an invoke refused with 402 and nothing recorded; a top-up, and invokes accepted again at once.
+7. customers' buckets (ADR 0009): made through the API, a name once across FF, the plan's five, access keys two at most; then AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door, only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in parts, presigned URLs, a wrong signature, an expired URL, another account's bucket); a read-only key, a revoked one, a suspended account and one whose storage is off refused; two functions, the SDK in a Node.js one and boto3 in a Python one, with no setting at all, writing to the account's bucket with keys of their own, through this machine at the gateway of the cluster's Docker network, and refused another's, a function's key revoked with it; the bucket measured within a minute; another account on a plan of 1 MB, its buckets past it together, its uploads refused with `AccountProblem` while it reads and deletes, then let in again within a minute of a delete; the requests counted by the minute; the bucket's metrics against its counts and its hour's measure, and an alarm on its 4xx errors firing, then going with the bucket. The first run fetches the SDK (3.1156.0, with its presigner and `lib-storage`) and boto3 (1.43.118, for this machine and for the Python function's package) into `hack/.cache/s3-clients`, with npm and pip; it takes the AWS CLI from this machine, or its image `amazon/aws-cli:2.34.32`;
+8. plans and rate limits (P-15): an account on a small plan, its limits, its namespace's quota, and its rates;
+9. usage records (P-20): one per invocation, with the invocation's ID as the runtime's request ID, for a success, an error, a timeout and a cold start; then the backend is killed during a call, restarted, and marks the call `LOST`, unbilled, within about a minute;
+10. capacity samples (P-21): the warm function sampled each minute, and `npm run capacity:report` showing the account's day;
+11. the usage API (P-22): `GET /usage` against the raw records, the deleted function's usage, the deleted database's month from its hourly sample and the deleted bucket's from its samples and its request counts, CSV with them all, an empty month, a malformed one;
+12. usage priced (P-30): the month in TND with the first price book, a function's cost from the book's prices in SQL, the free tier covering the month, the CSV's costs, and no estimate before the first book;
+13. the hourly rating (P-32): every hour from the first book rated as the backend started, once and in order, in shadow mode; the balance and the transactions, nothing debited; `npm run billing:reconcile` against the stack's database;
+14. the balance check (P-33): shadow mode off, no buffer and no grace period; a wallet run below zero, an invoke refused with 402 and nothing recorded; a top-up, and invokes accepted again at once.
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
 
@@ -305,9 +308,10 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
    - the backend's token for the cluster's API, read in its pod, lasting an hour;
    - a function deployed and invoked in direct mode, its inline code an image from the platform's registry, answering from gVisor's kernel, and its logs;
    - a function made from a package, its code image pushed to the platform's registry and pulled by the node under the name it maps, answering from its package; a second from the same package, whose own code can't reach the registry;
+   - a bucket made at the S3 endpoint behind the edge, and a function from a package with AWS's SDK for JavaScript v3 and no setting writing to it and reading it back with its own key, at the Service `ff-storage`'s fixed address, as production's functions do; a bucket nobody has, `NoSuchBucket`;
    - the audit log naming the caller's address, not the edge's;
    - a function URL over HTTPS through the edge, its certificate made on demand once the backend said yes, the function told the caller's address; no certificate for a host that is no URL;
-   - an ordinary pod reaching the edge, and not the backend, its port for function URLs, Keycloak, the console, the code registry or a function;
+   - an ordinary pod reaching the edge, and not the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' address for functions or a function;
    - `deploy.sh` run again changing nothing.
 
 ```bash

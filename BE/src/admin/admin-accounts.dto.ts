@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+import { DatabaseStatus } from '../databases/database.entity';
+import { BucketStatus } from '../storage/bucket.entity';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import type { Role } from '../auth/principal';
@@ -73,6 +75,13 @@ export class AdminEgressDto extends AdminChange {
   internetEgress: boolean;
 }
 
+/** PUT /admin/accounts/:id/storage. */
+export class AdminStorageDto extends AdminChange {
+  @ApiProperty({ example: false, description: "Whether the account's databases and buckets are on: off, its databases' users can't log in and their sessions end; its functions go on" })
+  @IsBoolean()
+  enabled: boolean;
+}
+
 export class AccountPersonView {
   @ApiProperty({ example: 'amira@ff.test' }) email: string;
   @ApiProperty({ nullable: true, type: String, example: 'Amira' }) name: string | null;
@@ -92,6 +101,14 @@ export class AdminAccountSummaryView {
   @ApiProperty({ nullable: true, type: Date, description: "When a closed account's functions, their invocation history and logs are deleted: its closure plus the notice period set then. Null unless the account is closed" })
   dataDeletionDueAt: Date | null;
   @ApiProperty({ nullable: true, type: Date, description: 'When they were deleted; null until then' }) dataDeletedAt: Date | null;
+  @ApiProperty({ nullable: true, type: Date, description: "When an operator turned its databases and buckets off; null while they are on" }) storageDisabledAt: Date | null;
+  @ApiProperty({ nullable: true, type: String, description: 'Why, as the operator wrote it, which its members read too' }) storageDisabledReason: string | null;
+  @ApiProperty({
+    nullable: true,
+    enum: [80, 100],
+    description: "The share of its plan's storage its buckets reached together at their last measure, which its owners were told of; at 100, uploads wait for room. Null under 80%",
+  })
+  bucketStorageNotice: 80 | 100 | null;
   @ApiProperty({ type: [AccountPersonView] }) owners: AccountPersonView[];
 }
 
@@ -117,6 +134,29 @@ export class AdminFunctionView {
   @ApiProperty({ example: 'ACTIVE' }) status: string;
   @ApiProperty({ example: 0, description: 'Instances kept warm' }) minInstances: number;
   @ApiProperty({ nullable: true, type: Date, description: 'Its newest call, from its usage records, which outlive the invocation history (P-45); null if none' }) lastInvokedAt: Date | null;
+}
+
+/** One of the account's databases (ADR 0008): its size and sessions now, as the server counts them. */
+export class AdminDatabaseView {
+  @ApiProperty() id: string;
+  @ApiProperty({ example: 'orders' }) name: string;
+  @ApiProperty({ example: 'ff_3f9c2a1e8b7d4c6a9e5f1a2b', description: "Its name on the server of customers' databases, and its user's: what a restore of it names" }) database: string;
+  @ApiProperty({ enum: DatabaseStatus }) status: DatabaseStatus;
+  @ApiProperty({ nullable: true, type: Number, example: 7_634_423, description: 'Bytes; null when the server could not be asked' }) sizeBytes: number | null;
+  @ApiProperty({ nullable: true, type: Number, example: 2, description: 'Sessions now; null when the server could not be asked' }) connections: number | null;
+  @ApiProperty({ example: 1024, description: "The plan's storage for it, in MB" }) storageLimitMb: number;
+  @ApiProperty() createdAt: Date;
+}
+
+/** One of the account's buckets (ADR 0009): what it held at its last hourly measure, and its name in the store. */
+export class AdminBucketView {
+  @ApiProperty({ example: 'photos' }) name: string;
+  @ApiProperty({ example: 'ff-0123456789abcdef01234567', description: "Its bucket in the store, which says nothing of whose it is: what FF's own tools name" }) storeName: string;
+  @ApiProperty({ enum: BucketStatus }) status: BucketStatus;
+  @ApiProperty({ nullable: true, type: Number, example: 161_480_253, description: 'Bytes at its last hourly measure; null before its first' }) sizeBytes: number | null;
+  @ApiProperty({ nullable: true, type: Number, example: 1_204, description: 'Its objects then' }) objects: number | null;
+  @ApiProperty({ nullable: true, type: Date, description: 'The hour of its last measure' }) measuredAt: Date | null;
+  @ApiProperty() createdAt: Date;
 }
 
 /** One status the account went through: its creation, or an operator's change. */
@@ -158,6 +198,8 @@ export class AdminAccountView {
   @ApiProperty({ type: AdminAccountSummaryView }) account: AdminAccountSummaryView;
   @ApiProperty({ type: [AdminMemberView] }) members: AdminMemberView[];
   @ApiProperty({ type: [AdminFunctionView] }) functions: AdminFunctionView[];
+  @ApiProperty({ type: [AdminDatabaseView], description: 'Its databases, by name' }) databases: AdminDatabaseView[];
+  @ApiProperty({ type: [AdminBucketView], description: 'Its buckets, by name' }) buckets: AdminBucketView[];
   @ApiProperty({ type: AdminAccountUsageView }) usage: AdminAccountUsageView;
   @ApiProperty({ type: [AdminBalanceView], description: "Each wallet's balance (P-31); none before the account's first credit or debit" })
   balances: AdminBalanceView[];

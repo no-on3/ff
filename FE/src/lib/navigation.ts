@@ -2,7 +2,7 @@ import type { Role } from '../services/api';
 import { can } from './session';
 
 /** The icons the sidebar draws (components/Icon.tsx). */
-export type NavIcon = 'functions' | 'alarms' | 'usage' | 'billing' | 'settings' | 'notifications' | 'members' | 'keys';
+export type NavIcon = 'functions' | 'databases' | 'buckets' | 'alarms' | 'usage' | 'billing' | 'settings' | 'notifications' | 'members' | 'keys';
 
 export interface NavItem {
   to: string;
@@ -34,6 +34,8 @@ export function consoleNav(role: Role): NavGroup[] {
       label: null,
       items: [
         { to: '/functions', label: 'Functions', icon: 'functions', home: true },
+        { to: '/databases', label: 'Databases', icon: 'databases' },
+        { to: '/buckets', label: 'Buckets', icon: 'buckets' },
         { to: '/alarms', label: 'Alarms', icon: 'alarms' },
         { to: '/usage', label: 'Usage', icon: 'usage' },
         { to: '/billing', label: 'Billing', icon: 'billing' },

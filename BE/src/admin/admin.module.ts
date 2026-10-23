@@ -6,6 +6,7 @@ import { Currency } from '../billing/currency.entity';
 import { PriceBook } from '../billing/price-book.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { AuditModule } from '../audit/audit.module';
+import { DatabasesModule } from '../databases/databases.module';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
 import { Schedule } from '../schedules/schedule.entity';
@@ -30,12 +31,14 @@ import { AdminStatsService } from './admin-stats.service';
 import { AdminSupportController } from './admin-support.controller';
 import { AdminSupportService } from './admin-support.service';
 import { PlatformSettingsModule } from './platform-settings.module';
+import { StorageModule } from '../storage/storage.module';
 
 /** The admin dashboard's routes, under /admin, for FF's operators only (P-70, D12). */
 @Module({
   imports: [
     TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, PriceBook, Currency, Schedule]),
     AuditModule,
+    DatabasesModule,
     BillingModule,
     FunctionsModule,
     FunctionUrlsModule,
@@ -44,6 +47,8 @@ import { PlatformSettingsModule } from './platform-settings.module';
     OrchestratorModule,
     PlansModule,
     UsageModule,
+    // An account's buckets, and what each holds.
+    StorageModule,
   ],
   controllers: [
     AdminSettingsController,

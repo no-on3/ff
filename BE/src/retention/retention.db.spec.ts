@@ -28,7 +28,7 @@ import { BETA_LIMITS } from '../plans/test-fixtures';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
 import { RetentionService } from './retention.service';
-import { memoryEnvironments, noPackages } from '../functions/test-fixtures';
+import { memoryEnvironments, noFunctionKeys, noPackages } from '../functions/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const MINUTE = 60;
@@ -103,9 +103,11 @@ run('what FF keeps only for a while (L2)', () => {
       { admit: async () => undefined } as never,
       memoryEnvironments(),
       ...noPackages(),
+      noFunctionKeys(),
     );
     const packages = new PackagesService(db.dataSource.getRepository(Package), minio as never, audit, { deleteImage: async () => undefined } as never);
-    retention = new RetentionService(db.dataSource, functions, packages, orchestrator as unknown as Orchestrator, audit, config);
+    // An account without databases or buckets: deleting them asks no server, nor the store.
+    retention = new RetentionService(db.dataSource, functions, packages, { deleteAll: async () => 0 } as never, { deleteAll: async () => 0 } as never, orchestrator as unknown as Orchestrator, audit, config);
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
 

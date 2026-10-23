@@ -16,6 +16,13 @@ export interface PlanLimits {
   internetEgress: boolean;
   customDomains: number;
   schedules: number;
+  databases: number;
+  databaseStorageMb: number;
+  databaseConnections: number;
+  buckets: number;
+  bucketStorageMb: number;
+  storageRequestsPerSecond: number;
+  maxObjectMb: number;
 }
 
 export interface Plan {
@@ -43,6 +50,13 @@ export const LIMIT_FIELDS: Array<{ path: [keyof PlanLimits] | ['quota', keyof Pl
   { path: ['internetEgress'], label: 'Internet egress, by default', kind: 'boolean' },
   { path: ['customDomains'], label: "Customers' own domains", unit: "for their functions' URLs, all together", kind: 'whole' },
   { path: ['schedules'], label: 'Schedules', unit: 'all functions together', kind: 'whole' },
+  { path: ['databases'], label: 'Databases', unit: 'PostgreSQL, all together', kind: 'whole' },
+  { path: ['databaseStorageMb'], label: 'Storage per database', unit: 'MB: past it, new sessions read-only', kind: 'whole' },
+  { path: ['databaseConnections'], label: 'Sessions per database', unit: 'at once', kind: 'whole' },
+  { path: ['buckets'], label: 'Buckets', unit: 'all together', kind: 'whole' },
+  { path: ['bucketStorageMb'], label: 'Storage of the buckets', unit: 'MB, all together', kind: 'whole' },
+  { path: ['storageRequestsPerSecond'], label: 'Requests to the buckets', unit: 'per second, all keys together', kind: 'whole' },
+  { path: ['maxObjectMb'], label: 'Largest file in one upload', unit: 'MB, in one PutObject', kind: 'whole' },
 ];
 
 const QUANTITY = /^\d+(\.\d+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$/;

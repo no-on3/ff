@@ -112,6 +112,12 @@ A function made from a package, a zip as AWS Lambda takes one (`ff deploy <folde
 | `PORT` | `8080` | HTTP port |
 | `FF_EVENT_FORMAT` | `lambda` | `lambda`: the payload is the event; `wrapped`: FF's original wrapper around it. Anything else stops the runtime at start, with `unknown FF_EVENT_FORMAT` |
 
+### Buckets, with AWS's SDK
+
+A function's pods get a key to its account's buckets in their environment, as AWS Lambda gives a function its role's credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `AWS_DEFAULT_REGION`, and `AWS_ENDPOINT_URL_S3`, FF's S3 endpoint inside the cluster, an IP address. AWS's SDK for JavaScript v3 reads all of them, so `new S3Client({})` reaches the account's buckets as it is, path-style, as the SDK addresses an IP address by itself ([ADR 0009](../../docs/adr/0009-buckets.md)). The key is the function's own, made at its first deploy (an older function gets its own the next time an update rolls it out) and revoked when it is deleted; it reaches every bucket of the account, read-write, and its requests are checked as any key's. FF sets these names: a function's own variables can't.
+
+The SDK isn't in the image, as it is in Lambda's Node.js runtimes: name `@aws-sdk/client-s3` in the package's `dependencies`, which `ff deploy <folder>` installs, as AWS recommends for Lambda too.
+
 ## Memory
 
 On Kubernetes the container's memory limit equals the function's memory, as on Lambda. A container that reaches it is killed by the kernel, and repeated kills put the pod into CrashLoopBackOff. A full V8 heap only ends the worker. So the worker's heap limit is the function's memory (or the container limit, if lower), minus 35 MB for the main thread (or more, if the container already uses more at start), 12 MB for a worker's baseline, and 16 MB of margin. A 128 MB function gets about 65 MB of heap; the startup log line shows it (`heapLimitMb`). The first version allowed 80% of the function's memory, and on the cluster the container was OOM-killed first.

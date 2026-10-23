@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # L4 end-to-end test of the whole stack, driven through the public REST API:
-#   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003)
+#   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003), customers' database server (10.199.1.10)
 #   + the k3d dev cluster + the backend (built, started on a free port).
 # The backend first refuses the new database, then the migrations run from the
 # build, as a deploy step would. Scenario: create → invoke → history → update →
@@ -21,15 +21,32 @@
 # and the usage records; the URL's own domains, proved through a DNS server of
 # the test's, a subdomain by its CNAME and an apex by its TXT record. Then a
 # function on schedules: rate(1 minute) within about 70 s, with EventBridge's
-# Scheduled Event or the schedule's input, a disabled one never. Then plans:
+# Scheduled Event or the schedule's input, a disabled one never. Then a
+# customer's database on the run's own server of customers' databases: made, its
+# connection string over TLS as its own user, the plan's one database, a new
+# password, a function reaching it with its account's internet access off and
+# trusting its certificate, its hourly sample within a minute, then deleted
+# from the server. Then customers' buckets: made through the API, a name once
+# across FF, the plan's five; access keys, two at most, the secret once; then
+# AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door,
+# only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in
+# parts, presigned URLs, a wrong signature, an expired URL, another account's
+# bucket); a read-only key, a revoked one, a suspended account and one whose
+# storage is off refused; two functions, AWS's SDK for JavaScript v3 and boto3
+# with no setting at all, writing to the account's bucket with keys of their own
+# and refused another's, a function's key revoked with it; the bucket measured
+# within a minute; an account past its plan's storage, its uploads waiting for
+# room and let in again once it has some; the requests counted by the minute; its
+# metrics, and an alarm on its errors firing; a bucket deleted empty, or emptied
+# first when asked, its alarm with it. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
-# Then GET /usage (P-22) against the raw records, as JSON and as CSV, priced with
-# the first price book (P-30). Then the hourly rating (P-32): every hour settled
+# Then GET /usage (P-22) against the raw records, as JSON and as CSV, the deleted
+# database's and bucket's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
 # since the first book rated as the backend started, in shadow mode, the balance,
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
 # invokes refused with 402, a top-up, and invokes accepted again at once. Then an
@@ -67,6 +84,12 @@ code_configmaps() { kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-i
 
 e2e_dependencies
 e2e_cluster
+# This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front
+# door there with their own keys, at an IP address, where AWS's SDKs address buckets path-style by themselves.
+cluster_gateway="$(docker network inspect "k3d-$FF_CLUSTER_NAME" --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | awk '{print $1}')"
+# Customers' databases (ADR 0008): the run's own server, on 10.199.1.0/24, which no other run uses.
+data_db_address=10.199.1.10
+e2e_data_db 10.199.1.0/24 "$data_db_address"
 
 echo "== backend"
 e2e_build
@@ -76,12 +99,16 @@ metrics_host="${FF_E2E_METRICS_HOST:-127.0.0.1}"
 metrics_port="${FF_E2E_METRICS_PORT:-$(free_port)}"
 # Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which curl takes to this machine.
 url_port="$(free_port)"
+# Buckets' S3 front door on another, at http://s3.localhost:<port>, each bucket at http://<bucket>.s3.localhost:<port> too.
+storage_port="$(free_port)"
 # Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
 dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
   FF_METRICS_HOST="$metrics_host" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
-  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1)
+  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
+  FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -616,6 +643,282 @@ check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM us
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
 
+echo "== customers' databases (ADR 0008)"
+made="$(http POST /databases '{"name": "e2e-orders"}')"
+check "a database is made: active, the password and the connection string in the answer, TLS asked" "201 active true true" \
+  "$(status) $(jq -r '. as $d | "\($d.status) \($d.connectionString | startswith("postgresql://\($d.user):\($d.password)@")) \($d.connectionString | endswith("?sslmode=require"))"' <<<"$made")"
+db_id="$(jq -r .id <<<"$made")"
+db_name="$(jq -r .database <<<"$made")"
+db_conn="$(jq -r .connectionString <<<"$made")"
+check "the string reaches it over TLS, as its own user, the database's owner" "$db_name|$db_name|t" \
+  "$(data_db_psql "$db_conn" "select current_user, (select pg_get_userbyid(datdba) from pg_database where datname = current_database()), (select ssl from pg_stat_ssl where pid = pg_backend_pid())")"
+data_db_psql "$db_conn" 'create table orders (id int primary key); insert into orders values (1)' >/dev/null
+shown="$(http GET "/databases/$db_id")"
+check "GET shows its size, its sessions and the plan's limits, never its password" "200 true 10 1024 false false" \
+  "$(status) $(jq -r '"\(.sizeBytes > 1000000) \(.connectionLimit) \(.storageLimitMb) \(has("password")) \(has("connectionString"))"' <<<"$shown")"
+http POST /databases '{"name": "e2e-second"}' >/dev/null
+check "a second database, past the beta plan's one, is refused" "400 The Beta plan allows 1 database, and the account has 1: delete one first" "$(status) $(jq -r .message "$work/body")"
+http POST /databases '{"name": "Not_A_Name"}' >/dev/null
+check "a name RDS wouldn't take is refused, saying what a name is" "400 name must be 1 to 63 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last, as AWS RDS names its databases" \
+  "$(status) $(jq -r '.message | if type == "array" then join("; ") else . end' "$work/body")"
+reset="$(http POST "/databases/$db_id/password")"
+new_conn="$(jq -r .connectionString <<<"$reset")"
+check "a new password: the old one opens no session, the new one does, the data kept" "200 true 1" \
+  "$(status) $( (data_db_psql "$db_conn" 'select 1' || true) | grep -q 'password authentication failed' && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
+probe='import * as net from "node:net";
+import * as tls from "node:tls";
+// The server of customers'"'"' databases, as a function reaches it: its port, then TLS after PostgreSQL'"'"'s SSLRequest, its certificate checked.
+export async function handler(event: { host: string }) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: event.host, port: 5432 });
+    socket.setTimeout(3000, () => { socket.destroy(); resolve("timeout"); });
+    socket.once("error", (error) => resolve(error.message));
+    socket.once("connect", () => socket.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47])));
+    socket.once("data", (answer) => {
+      if (answer.toString() !== "S") return resolve("no TLS");
+      const secure = tls.connect({ socket, host: event.host });
+      secure.once("secureConnect", () => { resolve(secure.authorized ? "trusted" : String(secure.authorizationError)); secure.destroy(); });
+      secure.once("error", (error) => resolve(error.message));
+    });
+  });
+}'
+probe_fn="$(http POST /functions "$(jq -n --arg code "$probe" '{name: "e2e-data-db-probe", runtime: "nodejs", code: $code, memory: 128, timeout: 10}')" | jq -r .id)"
+check "a function reaches it, the account's internet access off, and trusts its certificate" '"trusted"' \
+  "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg host "$data_db_address" '{input: {host: $host}}')" | jq -c .output)"
+http DELETE "/functions/$probe_fn" >/dev/null
+# Every minute, each database not measured yet in the hour is: a new one within a minute.
+for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM database_samples WHERE database_id = '$db_id'")" = 1 ] && break; sleep 1; done
+check "its hourly sample, within a minute: once in the hour, by its name, its size as the server counts it" "1|e2e-orders|t" \
+  "$(env_q "SELECT count(*), max(name), bool_and(size_bytes > 1000000) FROM database_samples WHERE database_id = '$db_id'")"
+http DELETE "/databases/$db_id" >/dev/null
+check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
+  "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
+
+echo "== customers' buckets (ADR 0009): the API, then AWS's own clients through the S3 front door"
+s3_endpoint="http://s3.localhost:$storage_port"
+made="$(http POST /buckets '{"name": "e2e-photos"}')"
+check "a bucket is made: its endpoint, its own address, FF's region" "201 e2e-photos active $s3_endpoint http://e2e-photos.s3.localhost:$storage_port tn-tunis-1" \
+  "$(status) $(jq -r '"\(.name) \(.status) \(.endpoint) \(.url) \(.region)"' <<<"$made")"
+store_name="$(env_q "SELECT store_name FROM buckets WHERE name = 'e2e-photos'")"
+photos_id="$(env_q "SELECT id FROM buckets WHERE name = 'e2e-photos'")"
+# The store itself, with FF's own credentials: what it really keeps.
+store_s3() { AWS_ACCESS_KEY_ID=ffdevaccesskey AWS_SECRET_ACCESS_KEY=ffdevsecretkey-local-only AWS_DEFAULT_REGION=us-east-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+  "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$FF_S3_PORT" "$@"; }
+if command -v aws >/dev/null; then aws_cli=(aws); else
+  aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
+    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE amazon/aws-cli:2.34.32)
+fi
+# held <command…>: whether the store has the bucket, as head-bucket answers.
+held() { "$@" >/dev/null 2>&1 && echo held || echo gone; }
+check "the store has it, under a name of FF's that says nothing of whose it is" "true held" \
+  "$([[ "$store_name" =~ ^ff-[0-9a-f]{24}$ ]] && echo true || echo false) $(held store_s3 s3api head-bucket --bucket "$store_name")"
+other="$(random_account)"
+as_other() {
+  local method=$1 path=$2 body=${3:-}
+  shift $(($# < 3 ? $# : 3))
+  http_at "$api" "$method" "$path" "$body" -H "X-FF-Dev-Account: $other" "$@"
+}
+as_other POST /buckets '{"name": "e2e-theirs"}' >/dev/null
+http POST /buckets '{"name": "e2e-theirs"}' >/dev/null
+check "a name is FF's once, whoever asks, as on AWS" "409 The bucket name \"e2e-theirs\" is taken: bucket names are unique across FF, as on AWS" "$(status) $(jq -r .message "$work/body")"
+http POST /buckets '{"name": "My.Photos"}' >/dev/null
+check "a name AWS wouldn't take, or that has a dot, is refused, saying why" "400 true" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body" | grep -q 'is not a bucket name: 3 to 63 lower-case letters' && echo true || echo false)"
+for n in 2 3 4 5; do http POST /buckets "{\"name\": \"e2e-more-$n\"}" >/dev/null; done
+http POST /buckets '{"name": "e2e-sixth"}' >/dev/null
+check "past the beta plan's five buckets, refused" "400 The Beta plan allows 5 buckets, and the account has 5: delete one first" "$(status) $(jq -r .message "$work/body")"
+for n in 2 3 4 5; do http DELETE "/buckets/e2e-more-$n" >/dev/null; done
+check "an empty bucket deleted, 204, then 404; the list the account's own" "204 404 e2e-photos" \
+  "$(status) $(http GET /buckets/e2e-more-5 >/dev/null; status) $(http GET /buckets | jq -r 'map(.name) | join(",")')"
+key="$(http POST /storage-keys '{}')"
+check "an access key: its ID, its secret this once, the endpoint and the region" "201 true true $s3_endpoint tn-tunis-1" \
+  "$(status) $(jq -r '"\(.id | test("^AKFF[A-Z2-7]{16}$")) \(.secretAccessKey | test("^[A-Za-z0-9+/]{40}$")) \(.endpoint) \(.region)"' <<<"$key")"
+key_id="$(jq -r .id <<<"$key")"
+key_secret="$(jq -r .secretAccessKey <<<"$key")"
+read_only="$(http POST /storage-keys '{"readOnly": true, "buckets": ["e2e-photos"]}')"
+ro_id="$(jq -r .id <<<"$read_only")"
+ro_secret="$(jq -r .secretAccessKey <<<"$read_only")"
+http POST /storage-keys '{}' >/dev/null
+check "two keys at most, as IAM gives a user; listed without their secrets" "409 2 false" \
+  "$(status) $(http GET /storage-keys | jq -r 'length, (map(has("secretAccessKey")) | any)' | xargs)"
+check "the secret is sealed in FF's database, never in clear" "0" \
+  "$(env_q "SELECT count(*) FROM storage_keys WHERE secret::text LIKE '%' || '$key_secret' || '%'")"
+
+# The clients, pinned to the versions ADR 0009 measured: npm and pip fetch them once, into hack/.cache.
+clients="$FF_REPO_ROOT/hack/.cache/s3-clients"
+if [ ! -d "$clients/node_modules/@aws-sdk/lib-storage" ]; then
+  npm install --prefix "$clients" --no-audit --no-fund --silent @aws-sdk/client-s3@3.1156.0 @aws-sdk/s3-request-presigner@3.1156.0 @aws-sdk/lib-storage@3.1156.0 >/dev/null
+fi
+if [ ! -x "$clients/venv/bin/python" ]; then
+  python3 -m venv "$clients/venv"
+  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.118
+fi
+head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
+# client_checks <file> <how many>: each JSON line a check, its detail shown when it fails; then that none is missing.
+client_checks() {
+  local line
+  while IFS= read -r line; do
+    if [ "$(jq -r .want <<<"$line")" = "$(jq -r .got <<<"$line")" ]; then
+      check "$(jq -r '"\(.client): \(.what)"' <<<"$line")" "$(jq -r .want <<<"$line")" "$(jq -r .got <<<"$line")"
+    else
+      fail "$(jq -r '"\(.client): \(.what): wanted \(.want), got \(.got): \(.detail)"' <<<"$line")"
+    fi
+  done <"$1"
+  check "  ... all $2 of them, the client to its end" "$2" "$(wc -l <"$1" | tr -d ' ')"
+}
+MODULES="$clients/node_modules" ENDPOINT="$s3_endpoint" IP_ENDPOINT="http://127.0.0.1:$storage_port" KEY="$key_id" SECRET="$key_secret" \
+  BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" node "$FF_REPO_ROOT/hack/lib/s3-clients/sdk.mjs" >"$work/sdk.jsonl" 2>"$work/sdk.log" || true
+client_checks "$work/sdk.jsonl" 14
+ENDPOINT="$s3_endpoint" KEY="$key_id" SECRET="$key_secret" BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" \
+  "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/s3-clients/boto3_checks.py" >"$work/boto3.jsonl" 2>"$work/boto3.log" || true
+client_checks "$work/boto3.jsonl" 11
+# The AWS CLI, path-style as it addresses any endpoint, with the key in its environment and none of this machine's settings.
+aws_ff() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
+  AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "$s3_endpoint" "$@"; }
+aws_ff s3 cp "$work/big.bin" s3://e2e-photos/cli/big.bin --only-show-errors
+aws_ff s3 cp s3://e2e-photos/cli/big.bin "$work/big.out" --only-show-errors
+check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \
+  "$(aws_ff s3api head-object --bucket e2e-photos --key cli/big.bin --query ContentLength --output text) $(cmp -s "$work/big.bin" "$work/big.out"; echo $?)"
+aws_ff s3api get-object --bucket e2e-photos --key cli/big.bin --range bytes=0-9 "$work/range.out" >/dev/null
+check "aws: a range" "$(head -c 10 "$work/big.bin" | od -An -tx1 | tr -d ' \n')" "$(od -An -tx1 "$work/range.out" | tr -d ' \n')"
+mkdir -p "$work/site/css" "$work/site-back"
+printf '<h1>Ahlan</h1>' >"$work/site/index.html"
+printf 'body {}' >"$work/site/css/main.css"
+aws_ff s3 sync "$work/site" s3://e2e-photos/site --only-show-errors
+aws_ff s3 sync s3://e2e-photos/site "$work/site-back" --only-show-errors
+check "aws: a folder synced up, listed, and down again, the same" "2 0" \
+  "$(aws_ff s3 ls s3://e2e-photos/site/ --recursive | wc -l | tr -d ' ') $(diff -r "$work/site" "$work/site-back" >/dev/null; echo $?)"
+presigned="$(aws_ff s3 presign s3://e2e-photos/site/index.html --expires-in 300)"
+expiring="$(aws_ff s3 presign s3://e2e-photos/site/index.html --expires-in 1)"
+sleep 2
+check "aws: a presigned URL, fetched; one past its expiry, AccessDenied" "<h1>Ahlan</h1> 403 AccessDenied" \
+  "$(curl -s "$presigned") $(curl -s -o "$work/expired" -w '%{http_code}' "$expiring") $(grep -o '<Code>[^<]*' "$work/expired" | cut -c7-)"
+# outcome <command…>: accepted, or refused with the S3 error's code in its message, as the CLI prints it.
+outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
+check "aws: a wrong secret, SignatureDoesNotMatch" "refused SignatureDoesNotMatch" "$(AWS_SECRET=wrong-secret outcome aws_ff s3 ls s3://e2e-photos)"
+check "aws: another account's bucket, AccessDenied" "refused AccessDenied" "$(outcome aws_ff s3 ls s3://e2e-theirs)"
+check "a read-only key lists, and writes nothing: AccessDenied" "accepted refused AccessDenied" \
+  "$(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos/site/) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 cp "$work/site/index.html" s3://e2e-photos/site/new.html)"
+http DELETE "/storage-keys/$ro_id" >/dev/null
+check "a revoked key opens nothing at once: InvalidAccessKeyId" "204 refused InvalidAccessKeyId" "$(status) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos)"
+# Functions as on AWS Lambda with a role: AWS's SDK for JavaScript v3 and boto3 with no setting at all, in packages as
+# npm and pip install them. FF gives the pods a key of the function's own, the region and the front door's address.
+if [ ! -d "$clients/python/boto3" ]; then
+  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check --target "$clients/python" boto3==1.43.118
+fi
+# package_with <zip> <libraries> <their folder in it> <name=file>...: a function's files and its libraries, deflated.
+package_with() {
+  python3 - "$@" <<'PY'
+import os, sys, zipfile
+target, libraries, folder, *files = sys.argv[1:]
+with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
+    for entry in files:
+        name, path = entry.split('=', 1)
+        archive.write(path, name)
+    for root, dirs, names in os.walk(libraries):
+        dirs[:] = sorted(d for d in dirs if d not in ('__pycache__', '.bin', 'bin'))
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            archive.write(path, os.path.join(folder, os.path.relpath(path, libraries)))
+PY
+}
+package_with "$work/s3-node.zip" "$clients/node_modules" node_modules "index.mjs=$FF_REPO_ROOT/hack/lib/s3-clients/functions/index.mjs"
+package_with "$work/s3-python.zip" "$clients/python" '' "function.py=$FF_REPO_ROOT/hack/lib/s3-clients/functions/function.py"
+upload "$work/s3-node.zip" >/dev/null
+upload "$work/s3-python.zip" >/dev/null
+node_s3="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$work/s3-node.zip")" '{name: "e2e-s3-node", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 256, timeout: 20}')" | jq -r .id)"
+python_s3="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$work/s3-python.zip")" '{name: "e2e-s3-python", runtime: "python", codeSha256: $sha, handler: "function.handler", memory: 256, timeout: 20}')" | jq -r .id)"
+s3_input='{"input": {"bucket": "e2e-photos", "other": "e2e-theirs"}}'
+check "a Node.js function, new S3Client({}) as on Lambda: writes to its account's bucket and reads it back; another account's, AccessDenied" \
+  '{"read":"written by a Node.js function","other":"AccessDenied"}' "$(http POST "/functions/$node_s3/invoke" "$s3_input" | jq -c .output)"
+check "a Python function, boto3.client(\"s3\") as on Lambda: the same" \
+  '{"read":"written by a Python function","other":"AccessDenied"}' "$(http POST "/functions/$python_s3/invoke" "$s3_input" | jq -c .output)"
+check "what they wrote is in the bucket, as the account's own key reads it" "written by a Node.js function|written by a Python function" \
+  "$(aws_ff s3 cp s3://e2e-photos/from-node.txt - 2>/dev/null)|$(aws_ff s3 cp s3://e2e-photos/from-python.txt - 2>/dev/null)"
+# function_secret <function> <name>: a value of the environment Secret the function's Deployment reads, as an operator would.
+function_secret() {
+  kubectl -n "$tenant_ns" get secret "$(kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')" \
+    -o jsonpath="{.data.$2}" | base64 -d
+}
+fn_key="$(function_secret "$node_s3" AWS_ACCESS_KEY_ID)"
+fn_secret="$(function_secret "$node_s3" AWS_SECRET_ACCESS_KEY)"
+check "its pods get a key of its own, the region and the front door's address inside the cluster, through the Secret; the Deployment holds none" \
+  "true tn-tunis-1 tn-tunis-1 http://$cluster_gateway:$storage_port $fn_key 0" \
+  "$([[ "$fn_key" =~ ^AKFF[A-Z2-7]{16}$ ]] && echo true || echo false) $(function_secret "$node_s3" AWS_REGION) $(function_secret "$node_s3" AWS_DEFAULT_REGION) $(function_secret "$node_s3" AWS_ENDPOINT_URL_S3) \
+$(env_q "SELECT id FROM storage_keys WHERE function_id = '$node_s3' AND revoked_at IS NULL") $(kubectl -n "$tenant_ns" get deployment "fn-$node_s3" -o json | grep -c -- "$fn_secret")"
+check "a function's key is its own: not among the account's, which has one left, and sealed" "1 0" \
+  "$(http GET /storage-keys | jq length) $(env_q "SELECT count(*) FROM storage_keys WHERE secret::text LIKE '%' || '$fn_secret' || '%'")"
+http PUT "/functions/$node_s3" '{"timeout": 25}' >/dev/null
+check "a new version keeps it: one key a function, and the new pods have it" "200 1 $fn_key" \
+  "$(status) $(env_q "SELECT count(*) FROM storage_keys WHERE function_id = '$node_s3'") $(function_secret "$node_s3" AWS_ACCESS_KEY_ID)"
+http PUT "/functions/$python_s3" '{"environment": {"AWS_ENDPOINT_URL_S3": "https://s3.amazonaws.com"}}' >/dev/null
+check "a function can't point it elsewhere: AWS_ENDPOINT_URL_S3 is FF's" "400 AWS_ENDPOINT_URL_S3 is reserved: FF sets it, with the function's own key to its account's buckets" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+http DELETE "/functions/$node_s3" >/dev/null
+check "a function deleted: its key revoked with it, and refused at once, InvalidAccessKeyId" "200 t refused InvalidAccessKeyId" \
+  "$(status) $(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE function_id = '$node_s3'") $(AWS_KEY="$fn_key" AWS_SECRET="$fn_secret" outcome aws_ff s3 ls s3://e2e-photos)"
+http DELETE "/functions/$python_s3" >/dev/null
+sql_e2e() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
+sql_e2e "UPDATE accounts SET status = 'suspended' WHERE id = '$tenant'"
+suspended="$(aws_ff s3 ls s3://e2e-photos 2>&1 >/dev/null || true)"
+sql_e2e "UPDATE accounts SET status = 'active', storage_disabled_at = now(), storage_disabled_reason = 'E2E check' WHERE id = '$tenant'"
+storage_off="$(aws_ff s3 ls s3://e2e-photos 2>&1 >/dev/null || true)"
+sql_e2e "UPDATE accounts SET storage_disabled_at = NULL, storage_disabled_reason = NULL WHERE id = '$tenant'"
+check "a suspended account's keys, and those of an account whose storage FF turned off, AccountProblem, saying why" "true true true" \
+  "$(grep -q AccountProblem <<<"$suspended" && echo true || echo false) $(grep -q AccountProblem <<<"$storage_off" && echo true || echo false) $(grep -q 'E2E check' <<<"$storage_off" && echo true || echo false)"
+# Each minute, the buckets not measured yet in the hour are: this one within a minute, whatever its files.
+for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")" = 1 ] && break; sleep 1; done
+check "its hourly measure, within a minute: once in the hour, by its name" "1|e2e-photos" \
+  "$(env_q "SELECT count(*), max(name) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")"
+# The plan's storage, an account's buckets together: the other account on a plan of 1 MB, its bucket holding 1.2 MB once
+# a new bucket of its own has it measured, within a minute. Uploads wait for room; reads and deletes go on.
+other_key="$(as_other POST /storage-keys '{}')"
+as_other_s3() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
+head -c 600000 /dev/urandom >"$work/part.bin"
+as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/one.bin --only-show-errors
+as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/two.bin --only-show-errors
+sql_e2e "INSERT INTO plans (id, name, limits) SELECT 'e2e-files', 'E2E files', limits || '{\"bucketStorageMb\": 1}' FROM plans WHERE id = 'beta'"
+sql_e2e "UPDATE accounts SET plan_id = 'e2e-files' WHERE id = '$other'"
+storage_notice() { env_q "SELECT coalesce(bucket_storage_notice, 0) FROM accounts WHERE id = '$other'"; }
+as_other POST /buckets '{"name": "e2e-theirs-more"}' >/dev/null
+for _ in $(seq 75); do [ "$(storage_notice)" = 100 ] && break; sleep 1; done
+full="$(as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin 2>&1 >/dev/null || true)"
+check "its buckets past the plan's storage together: an upload waits for room, AccountProblem saying why" "100 true true" \
+  "$(storage_notice) $(grep -q AccountProblem <<<"$full" && echo true || echo false) $(grep -q 'its buckets hold the 1 MB its E2E files plan gives them' <<<"$full" && echo true || echo false)"
+check "  ... a read and a delete go on" "accepted accepted" \
+  "$(as_other_s3 outcome aws_ff s3 cp s3://e2e-theirs/one.bin "$work/one.out") $(as_other_s3 outcome aws_ff s3 rm s3://e2e-theirs/two.bin)"
+# A full account is measured every minute: room made, its uploads go in again within one.
+for _ in $(seq 75); do [ "$(storage_notice)" != 100 ] && break; sleep 1; done
+check "  ... and once there is room, within a minute, the upload goes in" "0 accepted" \
+  "$(storage_notice) $(as_other_s3 outcome aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin)"
+sql_e2e "UPDATE accounts SET plan_id = 'beta' WHERE id = '$other'"
+# Each minute, the front door writes the minutes that are over: these within two.
+for _ in $(seq 150); do
+  [ "$(env_q "SELECT count(DISTINCT class) FROM storage_request_counts WHERE name = 'e2e-photos'")" = 3 ] && break
+  sleep 1
+done
+check "the requests counted by the minute, in AWS's three classes, with their bytes, the 300 MB up and down among them" "3 true true true" \
+  "$(env_q "SELECT count(DISTINCT class) || ' ' || (sum(bytes_in) > 314572800) || ' ' || (sum(bytes_out) > 314572800) || ' ' || (sum(errors4xx) > 0) FROM storage_request_counts WHERE name = 'e2e-photos'" | tr -d '\r')"
+# Its metrics, as CloudWatch names S3's: this hour and the one before, a point an hour.
+since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
+photos_metrics="$(http GET "/buckets/e2e-photos/metrics?period=3600&start=$since")"
+check "its metrics, as CloudWatch names S3's: its requests and their bytes as counted, what it holds as its hour's measure" \
+  "200 $(env_q "SELECT sum(requests) || ' ' || sum(errors4xx) || ' ' || sum(bytes_in) FROM storage_request_counts WHERE bucket_id = '$photos_id' AND minute >= '$since'" | tr -d '\r') $(env_q "SELECT size_bytes FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")" \
+  "$(status) $(jq -r '"\([.metrics.AllRequests.Sum[]] | add) \([.metrics."4xxErrors".Sum[]] | add) \([.metrics.BytesUploaded.Sum[]] | add) \(.metrics.BucketSizeBytes.Average[-1])"' <<<"$photos_metrics")"
+# An alarm on its 4xx errors, as CloudWatch's on S3's metrics, judging its last three minutes: a file it hasn't, asked for.
+bucket_alarm="$(http POST /alarms '{"name": "e2e-photos 4xx", "bucketName": "e2e-photos", "metric": "4xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 3, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' | jq -r .id)"
+aws_ff s3 cp s3://e2e-photos/no-such-file.txt "$work/none" --only-show-errors 2>/dev/null || true
+for _ in $(seq 150); do [ "$(http GET "/alarms/$bucket_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
+check "an alarm on its 4xx errors fires once the minute is counted, naming the bucket" "ALARM e2e-photos true" \
+  "$(http GET "/alarms/$bucket_alarm" | jq -r '"\(.state) \(.bucketName) \(.stateReason | test("breaching 4xxErrors Sum > 0"))"')"
+http DELETE /buckets/e2e-photos >/dev/null
+check "a bucket with files isn't deleted unless asked to empty it" "409 The bucket e2e-photos isn't empty: delete its objects first, or delete it with ?force=true, which deletes them all" \
+  "$(status) $(jq -r .message "$work/body")"
+http DELETE "/buckets/e2e-photos?force=true" >/dev/null
+check "  ... which deletes its files, then the bucket, gone from the store too, and its alarm with it" "204 404 gone 404" \
+  "$(status) $(http GET /buckets/e2e-photos >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$store_name") $(http GET "/alarms/$bucket_alarm" >/dev/null; status)"
+http DELETE "/storage-keys/$key_id" >/dev/null
+
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account
 # that development mode creates on its first call.
@@ -760,10 +1063,23 @@ check "the account's totals are its records' own sums" \
 # Its two calls: handler's, then lambda_handler's.
 check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 2" \
   "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
+check "the database, deleted earlier, keeps its month: its hours sampled and GB-months, at nothing before the book that prices databases" "true e2e-orders true true 0.000" \
+  "$(jq -r --arg id "$db_id" '.databases[] | select(.databaseId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \((.gbMonths | tonumber) > 0) \(.cost)"' <<<"$usage")"
+photos_requests="$(env_q "SELECT coalesce(sum(requests) FILTER (WHERE class = 'tier1'), 0) || ' ' || coalesce(sum(requests) FILTER (WHERE class = 'tier2'), 0)
+                           FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
+# The bytes its requests sent out and brought in, every request's: its files were uploaded and read, so neither is 0.
+photos_bytes="$(env_q "SELECT coalesce(sum(bytes_out), 0) || ' ' || coalesce(sum(bytes_in), 0) FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
+# Its GB-months as its samples give them: what it held each hour, over the month's hours, 1 GB being 2^30 bytes, to six decimals.
+photos_gb="$(env_q "SELECT trim_scale(round(coalesce(sum(size_bytes), 0)::numeric / 1073741824
+                      / (extract(epoch FROM date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month' - date_trunc('month', now() AT TIME ZONE 'UTC')) / 3600), 6))
+                      FROM bucket_samples WHERE bucket_id = '$photos_id'")"
+check "the bucket, deleted earlier, keeps its month: its hours measured, GB-months, its requests by S3's two classes and its bytes as counted, at nothing before the book that prices buckets" \
+  "true e2e-photos true $photos_gb $photos_requests $photos_bytes true 0.000" \
+  "$(jq -r --arg id "$photos_id" '.buckets[] | select(.bucketId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \(.gbMonths) \(.tier1Requests) \(.tier2Requests) \(.bytesDownloaded) \(.bytesUploaded) \(.bytesDownloaded > 0 and .bytesUploaded > 0) \(.cost)"' <<<"$usage")"
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
-check "as CSV: a download, its header, and the meter function's line" \
-  "text/csv; charset=utf-8|function_id,function_name,deleted,requests,billed_ms,gb_seconds,throttled,platform_errors,lost,cost|true" \
-  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)"
+check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
+  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,throttled,platform_errors,lost,cost|true|true|true" \
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,0\.000$" && echo true || echo false)"
 empty="$(http GET '/usage?month=2001-01')"
 check "a month without calls is empty, and before the first price book, unpriced" "200 0 0 null" \
   "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"
@@ -781,7 +1097,7 @@ check "the meter function's cost: its billed requests and GB-s at the book's pri
 check "the free tier covers the month: usage, the free tier taking it all off, and nothing to pay" "true 0.000" \
   "$(jq -r '.estimate | "\((.usage | tonumber) + (.freeTier | tonumber) == 0) \(.total)"' <<<"$usage")"
 check "and the CSV has each function's cost" true \
-  "$(tr -d '\r' <<<"$csv" | grep -q "^$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" && echo true || echo false)"
+  "$(tr -d '\r' <<<"$csv" | grep -q "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" && echo true || echo false)"
 
 echo "== the hourly rating (P-32)"
 # As it started, the backend rated every hour since the first book that had settled: ended 33 minutes ago at least.

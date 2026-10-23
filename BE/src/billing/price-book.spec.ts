@@ -4,7 +4,8 @@
  * come first, named.
  */
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
-import { PriceDocument, priceDocumentProblems } from './price-book';
+import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
+import { PriceDocument, priceDocumentProblems, priceDocumentSchema, storageKeysMissing } from './price-book';
 
 const withPrices = (prices: Partial<PriceDocument['prices']>, source: Record<string, unknown> = FIRST_PRICE_BOOK.source) => ({
   ...FIRST_PRICE_BOOK,
@@ -42,6 +43,26 @@ describe("a price book's problems (L1, P-73)", () => {
   it('leaves the prices of a book of another kind to the operator, and D8\'s knobs to FF in any book', () => {
     expect(priceDocumentProblems(withPrices({ requestsPerMillion: '0.5' }, { kind: 'manual' }))).toEqual([]);
     expect(priceDocumentProblems(withPrices({ minimumBilledMs: 100, monthlyPlanFee: '5.000' }))).toEqual([]);
+  });
+
+  it("has none for the book of databases' and buckets' SKUs, and names bucket tiers that don't go up or whose last has an end", () => {
+    const priced = withStoragePrices(FIRST_PRICE_BOOK);
+    const tiers = (bucketStorageGbMonth: unknown) => priceDocumentProblems({ ...priced, prices: { ...priced.prices, bucketStorageGbMonth } });
+    const problem = 'prices.bucketStorageGbMonth: must go up, tier by tier, and the last tier has no end (upToGbMonths null)';
+
+    expect(priceDocumentProblems(priced)).toEqual([]);
+    expect(tiers([{ upToGbMonths: 10, price: '1' }])).toEqual([problem]);
+    expect(tiers([{ upToGbMonths: 10, price: '1' }, { upToGbMonths: 5, price: '1' }, { upToGbMonths: null, price: '1' }])).toEqual([problem]);
+  });
+
+  it("names the storage prices and free tier a book lacks that the book before it has, and nothing between books without them", () => {
+    const priced = priceDocumentSchema.parse(withStoragePrices(FIRST_PRICE_BOOK));
+    const first = priceDocumentSchema.parse(FIRST_PRICE_BOOK);
+    const noFee = { ...priced, prices: { ...priced.prices, databaseMonthlyFee: undefined }, freeTier: { ...priced.freeTier, requestsTier2: undefined } };
+
+    expect([storageKeysMissing(priced, priced), storageKeysMissing(first, first), storageKeysMissing(first, priced)]).toEqual([[], [], []]);
+    expect(storageKeysMissing(priced, noFee)).toEqual(['prices.databaseMonthlyFee', 'freeTier.requestsTier2']);
+    expect(storageKeysMissing(priced, first)).toHaveLength(9);
   });
 
   it("names the schema's problems before any of AWS's", () => {

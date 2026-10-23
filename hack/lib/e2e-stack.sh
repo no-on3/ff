@@ -12,8 +12,8 @@
 # compose project with its volumes; the cluster too if e2e_teardown is true.
 
 work="$FF_REPO_ROOT/hack/.$E2E_NAME"
-# With the "auth" profile, so that cleaning up also removes Keycloak and Mailpit when they ran.
-compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth)
+# With the "auth" and "data" profiles, so that cleaning up also removes Keycloak, Mailpit and the data server when they ran.
+compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth --profile data)
 e2e_pids=()
 e2e_namespaces=()
 # Containers a test starts beside the compose project, such as a DNS server: removed on exit.
@@ -40,9 +40,36 @@ e2e_base_env=(
   FF_METRICS_PORT=0
   # Nor a function URL gateway, for the same reason: a test that calls URLs gives it a free port, and the base to match.
   FF_FUNCTION_URL_PORT=0
+  # Nor buckets' S3 front door: a test that sends S3 requests gives it a free port.
+  FF_STORAGE_PORT=0
   # Every function's code runs as a code image (ADR 0003), pushed to the cluster's registry (hack/k8s/registry-up.sh), pulled by its node.
   FF_CODE_REGISTRY="http://127.0.0.1:$FF_REGISTRY_PORT" FF_CODE_REGISTRY_PULL="$FF_REGISTRY_NAME:5000"
 )
+
+# e2e_data_db <subnet> <address>: the server of customers' databases (ADR 0008), the compose project's own, on a Docker
+# network of its own (a /24 no other run uses), which the cluster's node joins at the lowest gateway priority, so that
+# functions reach it; its CA copied to the work directory. Sets e2e_data_db_env, the backend's FF_DATA_DB_* settings,
+# and e2e_data_db_container. The node leaves the network on exit.
+e2e_data_db() {
+  local subnet=$1 address=$2 node="k3d-$FF_CLUSTER_NAME-server-0" network
+  FF_DATA_DB_SUBNET="$subnet" FF_DATA_DB_ADDRESS="$address" "${compose[@]}" up -d --wait data-db >/dev/null 2>&1 ||
+    fail "the data server did not become healthy"
+  e2e_data_db_container="$("${compose[@]}" ps -q data-db)"
+  network="${E2E_PROJECT}_data"
+  docker network connect --gw-priority -1 "$network" "$node"
+  e2e_cleanups+=("docker network disconnect $network $node")
+  docker cp -q "$e2e_data_db_container:/var/lib/postgresql/tls/ca.crt" "$work/data-db-ca.crt"
+  e2e_data_db_env=(FF_DATA_DB_HOST="$address" FF_DATA_DB_ADMIN_PASSWORD=ff-data-admin-dev FF_DATA_DB_CIDRS="$address/32"
+    FF_DATA_DB_CA_FILE="$work/data-db-ca.crt")
+  echo "  customers' database server at $address"
+}
+
+# data_db_psql <connection string> <sql>: psql as a customer's app connects, with the string FF gave, the server's CA
+# named; inside the server's own container, which reaches its own address. Prints the rows, or fails with the error:
+# under pipefail, a check that greps the error runs it as (data_db_psql … || true) | grep.
+data_db_psql() {
+  docker exec "$e2e_data_db_container" psql "$1&sslrootcert=/var/lib/postgresql/tls/ca.crt" -XAtc "$2" 2>&1
+}
 
 # e2e_dns <port> <directory>: a DNS server on 127.0.0.1:<port>, CoreDNS, for customers' domains: each zone file
 # <zone>.db in the directory is served, read again within a second of a change (its serial must grow).

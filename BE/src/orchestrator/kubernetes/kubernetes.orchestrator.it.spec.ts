@@ -5,6 +5,7 @@
  *   npm run test:it
  */
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Runtime } from '../../functions/entities/function.entity';
 import { FunctionLoadError, OrchestratorError } from '../orchestrator.errors';
@@ -22,6 +23,10 @@ const sandboxClass = process.env.K8S_IT_RUNTIME_CLASS;
 const itSandboxed = sandboxClass ? it : it.skip;
 // Set by hack/k8s/test-it.sh when the host reaches the internet, through which the cluster's pods do.
 const itOnline = process.env.K8S_IT_INTERNET === '1' ? it : it.skip;
+// Set by hack/k8s/test-it.sh when the development server of customers' databases runs (hack/k8s/data-db-up.sh): its
+// address, and the CA of its certificate.
+const dataDbAddress = process.env.K8S_IT_DATA_DB;
+const runDataDb = process.env.K8S_IT === '1' && dataDbAddress ? describe : describe.skip;
 const kubeDir = path.resolve(__dirname, '../../../../hack/.kube');
 
 const greeter = (version: number) => `
@@ -110,6 +115,38 @@ const egressProbe = `${reachable}
 
 export async function handler() {
   return { internet: await reachable('1.1.1.1', 443), apiServer: await reachable('10.43.0.1', 443) };
+}`;
+
+// Customers' database server, from inside a function pod: its port, and its certificate as Node.js checks it once
+// PostgreSQL's SSLRequest has opened TLS, against Node.js's CAs and those NODE_EXTRA_CA_CERTS names.
+const dataDbProbe = (host: string) => `
+import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as tls from 'node:tls';
+${reachable}
+
+function certificate(host: string, port: number): Promise<string> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    socket.setTimeout(3000, () => { socket.destroy(); resolve('timeout'); });
+    socket.once('error', (error) => resolve(error.message));
+    socket.once('connect', () => socket.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47])));
+    socket.once('data', (answer) => {
+      if (answer.toString() !== 'S') return resolve('no TLS');
+      const secure = tls.connect({ socket, host });
+      secure.once('secureConnect', () => { resolve(secure.authorized ? 'trusted' : String(secure.authorizationError)); secure.destroy(); });
+      secure.once('error', (error) => resolve(error.message));
+    });
+  });
+}
+
+export async function handler() {
+  const ca = process.env.NODE_EXTRA_CA_CERTS;
+  return {
+    server: await reachable('${host}', 5432),
+    certificate: await certificate('${host}', 5432),
+    caFile: ca !== undefined && fs.existsSync(ca) && fs.readFileSync(ca, 'utf8').includes('BEGIN CERTIFICATE'),
+  };
 }`;
 
 async function eventually(check: () => Promise<boolean>, timeoutMs: number): Promise<void> {
@@ -372,5 +409,50 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     expect(await client.get(deploymentPath)).toBeNull();
     expect(await client.get(paths.core(ns, 'services', functionResourceName(fn.id)))).toBeNull();
     expect(await client.list(paths.core(ns, 'configmaps'), `${LABELS.functionId}=${fn.id}`)).toHaveLength(0);
+  });
+});
+
+runDataDb("functions and customers' database server (ADR 0008, L3)", () => {
+  jest.setTimeout(180_000);
+
+  const address = dataDbAddress as string;
+  const s = settings({
+    apiUrl: process.env.K8S_API_URL ?? 'https://127.0.0.1:6550',
+    tokenFile: process.env.K8S_TOKEN_FILE ?? path.join(kubeDir, 'ff-controller.token'),
+    caFile: process.env.K8S_CA_FILE ?? path.join(kubeDir, 'ca.crt'),
+    invokeMode: 'proxy',
+    readyTimeoutSeconds: 90,
+    ingressAllowCidrs: (process.env.K8S_INGRESS_ALLOW_CIDRS ?? '').split(',').filter(Boolean),
+    platformEgress: [{ cidrs: [`${address}/32`], port: 5432 }],
+    dataDbCa: fs.readFileSync(process.env.K8S_IT_DATA_DB_CA ?? path.resolve(kubeDir, '../.data-db/ca.crt'), 'utf8'),
+  });
+  const client = new KubeClient({ server: s.apiUrl, tokenFile: s.tokenFile, caFile: s.caFile });
+  const orchestrator = new KubernetesOrchestrator(s, client);
+  const tenant = `it-${randomUUID()}`;
+  const fn = workload({ id: randomUUID(), accountId: tenant, name: 'it-data-db', code: dataDbProbe(address), memory: 128, timeout: 10 });
+  const probe = async () => (await orchestrator.invoke(fn, {})).output as { server: boolean; certificate: string; caFile: boolean };
+
+  beforeAll(async () => {
+    fn.codeImage = await inlineCodeImage(fn.code, fn.runtime, fn.accountId);
+  });
+
+  afterAll(async () => {
+    await orchestrator.remove(fn).catch(() => undefined);
+    await client.delete(paths.namespace(accountNamespace(s.namespacePrefix, tenant))).catch(() => undefined);
+  });
+
+  it("reaches the server on its port, the account's internet access off, and trusts its certificate through NODE_EXTRA_CA_CERTS", async () => {
+    await orchestrator.deploy(fn, limits());
+    await orchestrator.waitUntilReady(fn, 90_000);
+
+    expect(await probe()).toEqual({ server: true, certificate: 'trusted', caFile: true });
+  });
+
+  it("reaches it no more once the platform's rule is gone from the account's policy, the rest unchanged", async () => {
+    await new KubernetesOrchestrator({ ...s, platformEgress: [] }, client).applyTenantLimits(tenant, limits());
+    let found = await probe();
+    await eventually(async () => !(found = await probe()).server, 30_000);
+
+    expect(found).toMatchObject({ server: false, caFile: true });
   });
 });

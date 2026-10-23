@@ -1,13 +1,13 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, QueryFailedError, Repository } from 'typeorm';
+import { In, LessThan, QueryFailedError, Repository } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { Currency } from '../billing/currency.entity';
 import { Decimal } from '../billing/decimal';
 import { formatMinor } from '../billing/money';
 import { PriceBook } from '../billing/price-book.entity';
-import { PriceDocument, priceDocumentProblems } from '../billing/price-book';
+import { PriceDocument, priceDocumentProblems, storageKeysMissing } from '../billing/price-book';
 import { PricingService, monthBounds } from '../billing/pricing.service';
 import { BookStatus, PriceBookPreviewView, PriceBookView } from './admin-prices.dto';
 import { Operator } from './operator';
@@ -58,6 +58,9 @@ export class AdminPricesService {
     if (validFrom.getTime() % HOUR_MS !== 0 || validFrom < earliest) {
       throw new BadRequestException(`validFrom must be a whole hour, UTC, from ${earliest.toISOString()} on`);
     }
+    const before = await this.books.findOne({ where: { validFrom: LessThan(validFrom) }, order: { validFrom: 'DESC' } });
+    const missing = before ? storageKeysMissing(before.prices, checked) : [];
+    if (missing.length) throw new BadRequestException(missing.map((path) => `${path}: the book before this one has it, so this one must too`));
     const taken = `A price book already starts at ${validFrom.toISOString()}`;
     try {
       const book = await this.books.manager.transaction(async (manager) => {

@@ -23,6 +23,8 @@ export type AuditAction =
   | 'support.view_invocation'
   | 'support.view_logs'
   | 'account.egress'
+  // An operator turned the account's databases and buckets off, or on again.
+  | 'account.storage'
   | 'function.create'
   | 'function.update'
   | 'function.delete'
@@ -42,6 +44,15 @@ export type AuditAction =
   | 'schedule.create'
   | 'schedule.update'
   | 'schedule.delete'
+  // A customer's database: made, its password changed, deleted (ADR 0008).
+  | 'database.create'
+  | 'database.password'
+  | 'database.delete'
+  // A customer's bucket, made and deleted, and an access key to the account's buckets, made and revoked (ADR 0009).
+  | 'bucket.create'
+  | 'bucket.delete'
+  | 'storage_key.create'
+  | 'storage_key.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

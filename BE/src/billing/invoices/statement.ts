@@ -1,7 +1,7 @@
 import { Decimal } from '../decimal';
 import { toMinor } from '../money';
 import { BookPrices } from '../price-book';
-import { FunctionUsage, rateMonth } from '../rating';
+import { FunctionUsage, ResourceUsage, hoursIn, rateMonth } from '../rating';
 
 /** MB-ms per GB-second (D7). */
 const MB_MS_PER_GB_SECOND = 1_024_000n;
@@ -14,6 +14,21 @@ export interface StatementFunction {
   requests: bigint;
   /** Their GB-seconds, to six decimals at most: "0.000125". */
   gbSeconds: string;
+  /** Before the free tier, at the books' prices, rounded to the minor unit for display. */
+  amountMinor: bigint;
+}
+
+/** One customer's database's or bucket's month, as the statement lists it. */
+export interface StatementResource {
+  resourceId: string;
+  kind: 'database' | 'bucket';
+  /** Its name when it was last sampled in the month. */
+  name: string;
+  /** Its storage, in GB-months, to six decimals at most: "0.007118". */
+  gbMonths: string;
+  /** A bucket's requests by S3's two classes; 0 for a database. */
+  tier1Requests: bigint;
+  tier2Requests: bigint;
   /** Before the free tier, at the books' prices, rounded to the minor unit for display. */
   amountMinor: bigint;
 }
@@ -31,6 +46,8 @@ export interface Statement {
   currency: string;
   exponent: number;
   functions: StatementFunction[];
+  /** Its databases, then its buckets, each by name. */
+  resources: StatementResource[];
   usageMinor: bigint;
   freeTierMinor: bigint;
   volumeTiersMinor: bigint;
@@ -56,6 +73,8 @@ export interface StatementInput {
   rows: Array<FunctionUsage & { priceBookId: string }>;
   /** Each function's name, as last invoked. */
   names: Map<string, string>;
+  /** The month's resource_usage_hourly, summed per database or bucket and book, with its name when last sampled. */
+  resources: Array<ResourceUsage & { priceBookId: string; name: string }>;
   charges: { debitedMinor: bigint; shadowMinor: bigint; ratedUntil: Date | null };
   /** The month's end, to say whether it is rated to it. */
   monthEnd: Date;
@@ -65,8 +84,9 @@ export interface StatementInput {
 export function buildStatement(input: StatementInput): Statement {
   const { books, rows, exponent } = input;
   const estimate = rateMonth(
-    books.map((book) => ({ book, functions: rows.filter((row) => row.priceBookId === book.id) })),
+    books.map((book) => ({ book, functions: rows.filter((row) => row.priceBookId === book.id), resources: input.resources.filter((row) => row.priceBookId === book.id) })),
     books[0] ?? null,
+    hoursIn(input.month),
   );
   const sums = new Map<string, { requests: bigint; mbMs: bigint }>();
   for (const row of rows) {
@@ -85,12 +105,32 @@ export function buildStatement(input: StatementInput): Statement {
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name) || a.functionId.localeCompare(b.functionId));
+  const usage = new Map<string, { name: string; tier1: bigint; tier2: bigint }>();
+  for (const row of input.resources) {
+    const sum = usage.get(row.resourceId) ?? { name: row.name, tier1: 0n, tier2: 0n };
+    usage.set(row.resourceId, { name: sum.name, tier1: sum.tier1 + row.tier1Requests, tier2: sum.tier2 + row.tier2Requests });
+  }
+  const resources = [...estimate.resources.entries()]
+    .map(([resourceId, cost]) => {
+      const sum = usage.get(resourceId) ?? { name: resourceId, tier1: 0n, tier2: 0n };
+      return {
+        resourceId,
+        kind: cost.kind,
+        name: sum.name,
+        gbMonths: cost.gbMonths.round(6).toString(),
+        tier1Requests: sum.tier1,
+        tier2Requests: sum.tier2,
+        amountMinor: toMinor(cost.total, exponent),
+      };
+    })
+    .sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name) || a.resourceId.localeCompare(b.resourceId));
   const { ratedUntil } = input.charges;
   return {
     month: input.month,
     currency: input.currency,
     exponent,
     functions,
+    resources,
     usageMinor: toMinor(estimate.usage, exponent),
     freeTierMinor: toMinor(estimate.freeTier, exponent),
     volumeTiersMinor: toMinor(estimate.volumeTiers, exponent),

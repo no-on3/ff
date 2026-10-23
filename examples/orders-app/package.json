@@ -1,8 +1,9 @@
 {
   "name": "orders-app",
   "private": true,
-  "description": "A small app on FF: orders taken at a function's URL into PostgreSQL, and a nightly report",
+  "description": "A small app on FF: orders taken at a function's URL into PostgreSQL, each order's receipt in a bucket, and a nightly report",
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1156.0",
     "pg": "8.23.1"
   }
 }

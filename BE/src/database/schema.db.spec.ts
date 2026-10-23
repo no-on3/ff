@@ -16,6 +16,8 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { MIGRATIONS } from '../migrations';
+import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
+import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
@@ -53,6 +55,10 @@ const ALARMS = migrationNames.find((name) => name.startsWith('Alarms')) as strin
 const FUNCTION_ENVIRONMENTS = migrationNames.find((name) => name.startsWith('FunctionEnvironments')) as string;
 const SCHEDULES = migrationNames.find((name) => name.startsWith('Schedules')) as string;
 const CODE_IMAGES = migrationNames.find((name) => name.startsWith('CodeImages')) as string;
+const DATABASES = migrationNames.find((name) => name.startsWith('Databases1')) as string;
+const DATABASE_BILLING = migrationNames.find((name) => name.startsWith('DatabaseBilling')) as string;
+const DATABASE_OPERATIONS = migrationNames.find((name) => name.startsWith('DatabaseOperations')) as string;
+const FUNCTION_KEYS = migrationNames.find((name) => name.startsWith('FunctionKeys')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -666,6 +672,137 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the database-billing migration gives books not started yet databases' and buckets' SKUs, adds its own from next month's first hour, keeps samples append-only, and reverts with them present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: database }] = await dataSource.query(
+        `INSERT INTO databases (account_id, name, db_name, status, storage_notice) VALUES ($1, 'orders', 'ff_0123456789abcdef01234567', 'read_only', 100) RETURNING id`,
+        [ACCOUNT],
+      );
+      const hour = `date_trunc('hour', now())`;
+      await dataSource.query(`INSERT INTO database_samples (database_id, hour, account_id, name, size_bytes, connections) VALUES ($1, ${hour}, $2, 'orders', 7634423, 2)`, [database, ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO resource_usage_hourly (account_id, hour, resource_id, kind, name, price_book_id, byte_hours, hours, tier1_requests, tier2_requests)
+         VALUES ($1, ${hour}, $2, 'database', 'orders', (SELECT id FROM price_books LIMIT 1), 7634423, 1, 0, 0)`,
+        [ACCOUNT, database],
+      );
+      await expect(dataSource.query(`UPDATE database_samples SET size_bytes = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM resource_usage_hourly`)).rejects.toThrow('resource_usage_hourly is append-only: DELETE refused');
+      await expect(dataSource.query(`UPDATE databases SET storage_notice = 90`)).rejects.toThrow(/violates check constraint/);
+
+      await migrateDownTo(dataSource, DATABASES);
+
+      const left = await dataSource.query(
+        `SELECT to_regclass('database_samples') AS s, to_regclass('resource_usage_hourly') AS r,
+                (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'databases' AND column_name = 'storage_notice') AS c,
+                (SELECT count(*)::int FROM price_books WHERE prices -> 'source' ? 'storagePriceLists') AS b`,
+      );
+      expect(left).toEqual([{ s: null, r: null, c: 0, b: 0 }]);
+      // A book that hasn't started, without the SKUs, as an operator may have added one: applied again, it gains them.
+      const [{ id: future }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T00:00:00Z', $1, 'test') RETURNING id`, [
+        JSON.stringify(FIRST_PRICE_BOOK),
+      ]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
+      expect(books).toEqual([
+        { id: expect.any(String), valid_from: next, prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'test' },
+      ]);
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the database-operations migration lets an alarm watch a database and go with it, and an account's storage be off with its reason only; it reverts with both present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id, storage_disabled_at, storage_disabled_reason) VALUES ($1, 'A', 'active', 'beta', now(), 'Abuse')`, [ACCOUNT]);
+      await expect(dataSource.query(`UPDATE accounts SET storage_disabled_reason = NULL`)).rejects.toThrow(/violates check constraint/);
+      const database = async (name: string, dbName: string) =>
+        (await dataSource.query(`INSERT INTO databases (account_id, name, db_name, status) VALUES ($1, $2, $3, 'active') RETURNING id`, [ACCOUNT, name, dbName]))[0].id as string;
+      const alarm = (databaseId: string | null, metric: string, period: number) =>
+        dataSource.query(
+          `INSERT INTO alarms (account_id, database_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+           VALUES ($1, $2, $3, $3, 'Maximum', $4, 'GreaterThanThreshold', 8, 1, 1, '{"email": true, "webhookUrls": []}')`,
+          [ACCOUNT, databaseId, metric, period],
+        );
+      const gone = await database('gone', 'ff_0123456789abcdef01234567');
+      await alarm(gone, 'DatabaseConnections', 3600);
+      await dataSource.query(`DELETE FROM databases WHERE id = $1`, [gone]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM alarms`)).toEqual([{ n: 0 }]); // it went with its database
+      await alarm(await database('kept', 'ff_0123456789abcdef01234568'), 'VolumeBytesUsed', 3600);
+      await alarm(null, 'Instances', 60);
+
+      await migrateDownTo(dataSource, DATABASE_BILLING);
+
+      expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Instances' }]); // the account's alarm stays
+      const columns = await dataSource.query(
+        `SELECT table_name, column_name FROM information_schema.columns
+          WHERE table_name IN ('alarms', 'accounts') AND column_name IN ('database_id', 'storage_disabled_at', 'storage_disabled_reason') ORDER BY 1, 2`,
+      );
+      expect(columns).toEqual([]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the buckets migration keeps a bucket's name once across FF, a key's secret sealed, and buckets' requests counted by month, append-only; it reverts with all three present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const bucket = (account: string, name: string, storeName: string) =>
+        dataSource.query(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, $2, $3) RETURNING id, status`, [account, name, storeName]);
+      const [photos] = await bucket(ACCOUNT, 'photos', 'ff-0123456789abcdef01234567');
+      expect(photos.status).toBe('active');
+      await expect(bucket('000000000002', 'photos', 'ff-0123456789abcdef01234568')).rejects.toThrow(/duplicate key value violates unique constraint/);
+      await expect(bucket(ACCOUNT, 'other', 'ff-0123456789abcdef01234567')).rejects.toThrow(/duplicate key value violates unique constraint/);
+      await expect(dataSource.query(`UPDATE buckets SET status = 'gone'`)).rejects.toThrow(/violates check constraint/);
+      await dataSource.query(`INSERT INTO storage_keys (id, account_id, secret, buckets, read_only) VALUES ('AKFFAAAAAAAAAAAAAAAA', $1, '{"v": 1}', '{photos}', true)`, [ACCOUNT]);
+      const minute = `date_trunc('minute', now())`;
+      await dataSource.query(
+        `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
+         VALUES ($1, ${minute}, 'tier1', gen_random_uuid(), $2, 'photos', 3, 0, 3, 0, 0, 3000, 0)`,
+        [photos.id, ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE storage_request_counts SET requests = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM storage_request_counts`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'storage_request_counts')).toEqual([{ relname: monthPartition('storage_request_counts', 0) }, { relname: monthPartition('storage_request_counts', 1) }]);
+
+      await migrateDownTo(dataSource, DATABASE_OPERATIONS);
+
+      expect(await dataSource.query(`SELECT to_regclass('buckets') AS b, to_regclass('storage_keys') AS k, to_regclass('storage_request_counts') AS c`)).toEqual([{ b: null, k: null, c: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the bucket samples migration keeps each bucket's hours by month, append-only, and an account's buckets' storage notice at 80 or 100; it reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.getRepository(Account).save({ id: ACCOUNT, name: 'Samples', planId: 'beta', status: AccountStatus.ACTIVE });
+      const hour = `date_trunc('hour', now())`;
+      await dataSource.query(
+        `INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES (gen_random_uuid(), ${hour}, $1, 'photos', 161480253, 1204)`,
+        [ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE bucket_samples SET size_bytes = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM bucket_samples`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'bucket_samples')).toEqual([{ relname: monthPartition('bucket_samples', 0) }, { relname: monthPartition('bucket_samples', 1) }]);
+      await dataSource.query(`UPDATE accounts SET bucket_storage_notice = 100 WHERE id = $1`, [ACCOUNT]);
+      await expect(dataSource.query(`UPDATE accounts SET bucket_storage_notice = 90 WHERE id = $1`, [ACCOUNT])).rejects.toThrow(/violates check constraint/);
+
+      await migrateDownTo(dataSource, FUNCTION_KEYS);
+
+      expect(await dataSource.query(`SELECT to_regclass('bucket_samples') AS s`)).toEqual([{ s: null }]);
+      expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'accounts' AND column_name = 'bucket_storage_notice'`)).toEqual([]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   describe('after the migrations', () => {
     let db: ScratchDatabase;
 
@@ -694,16 +831,20 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples)_\d{4}_\d{2}$/; // their partitions, one per month (P-20, P-21)
+      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
         'alarms',
         'api_keys',
         'audit_log',
+        'bucket_samples',
+        'buckets',
         'capacity_samples',
         'currencies',
         'custom_domains',
+        'database_samples',
+        'databases',
         'function_environments',
         'function_invocations',
         'function_metrics',
@@ -728,7 +869,10 @@ run('database schema (L2, real PostgreSQL)', () => {
         'price_books',
         'rate_limited_invocations',
         'rating_runs',
+        'resource_usage_hourly',
         'schedules',
+        'storage_keys',
+        'storage_request_counts',
         'tax_rates',
         'usage_charges',
         'usage_hourly',
@@ -737,13 +881,19 @@ run('database schema (L2, real PostgreSQL)', () => {
         'webhook_secrets',
       ]);
       expect(tables.filter((table) => monthly.test(table))).toEqual([
+        monthPartition('bucket_samples', 0),
+        monthPartition('bucket_samples', 1),
         monthPartition('capacity_samples', 0),
         monthPartition('capacity_samples', 1),
+        monthPartition('database_samples', 0),
+        monthPartition('database_samples', 1),
+        monthPartition('storage_request_counts', 0),
+        monthPartition('storage_request_counts', 1),
         usagePartition(0),
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

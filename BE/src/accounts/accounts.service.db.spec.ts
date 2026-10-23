@@ -195,7 +195,7 @@ run('accounts, users and memberships (L2, P-12)', () => {
       expect(await service.me(user)).toEqual({
         user: { id: user.id, email: 'user12@example.tn', name: 'User 12', locale: 'fr-TN' },
         key: null,
-        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: false, dataDeletionDueAt: null, dataDeletedAt: null }],
+        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: false, dataDeletionDueAt: null, dataDeletedAt: null, storageDisabledAt: null, storageDisabledReason: null, bucketStorageNotice: null }],
       });
     });
 
@@ -209,7 +209,7 @@ run('accounts, users and memberships (L2, P-12)', () => {
       expect(await service.keyMe(principal)).toEqual({
         user: null,
         key: { id: '0123456789ab', name: 'laptop', scopes: ['functions:read', 'logs:read'] },
-        accounts: [{ id, name: 'Keyed', status: 'active', role: 'developer', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: true, dataDeletionDueAt: null, dataDeletedAt: null }],
+        accounts: [{ id, name: 'Keyed', status: 'active', role: 'developer', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: true, dataDeletionDueAt: null, dataDeletedAt: null, storageDisabledAt: null, storageDisabledReason: null, bucketStorageNotice: null }],
       });
     });
 

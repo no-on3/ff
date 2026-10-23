@@ -7,7 +7,8 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { PLATFORM_LIMITS } from '../plans/plan-limits';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
-import { UsageAmountsView, UsageMonth } from './usage.dto';
+import { BucketMonth, DatabaseMonth, UsageAmountsView, UsageMonth } from './usage.dto';
+import { gbMonths, hoursIn } from '../billing/rating';
 import { coldStartSeconds, invocationSeconds, invocations } from '../monitoring/operator-metrics';
 
 /** The outcomes of a call that ran, measured by the runtime. */
@@ -43,8 +44,8 @@ const amounts = (row: UsageRow): UsageAmountsView => ({
   lost: Number(row.lost),
 });
 
-/** The tables partitioned by month, written once and never changed: usage records (P-20) and capacity samples (P-21). */
-const MONTHLY_TABLES = ['usage_records', 'capacity_samples'];
+/** The tables partitioned by month, written once and never changed: usage records, capacity samples, customers' databases' and buckets' samples, and buckets' request counts. */
+const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts'];
 
 /**
  * Usage records (client-readiness plan, P-20, D6): written once per
@@ -185,6 +186,91 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
       .map((row) => ({ functionId: row.function_id as string, functionName: row.function_name as string, deleted: row.deleted, ...amounts(row) }));
     const total = rows.find((row) => row.total);
     return { month, functions, totals: amounts(total as UsageRow) };
+  }
+
+  /**
+   * An account's databases in a month by the UTC calendar (ADR 0008), from
+   * their hourly samples: each one's hours measured, GB-months, and size at
+   * its latest sample, the most GB-months first.
+   */
+  async monthlyDatabases(accountId: string, month: string): Promise<DatabaseMonth[]> {
+    const [year, number] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(year, number - 1, 1));
+    const to = new Date(Date.UTC(year, number, 1));
+    const rows = await this.records.manager.query<Array<{ id: string; name: string; deleted: boolean; hours: number; byte_hours: string; size_bytes: string }>>(
+      `SELECT s."database_id" AS "id", (array_agg(s."name" ORDER BY s."hour" DESC))[1] AS "name", bool_and(d."id" IS NULL) AS "deleted",
+              count(*)::int AS "hours", sum(s."size_bytes")::text AS "byte_hours", (array_agg(s."size_bytes" ORDER BY s."hour" DESC))[1]::text AS "size_bytes"
+         FROM "database_samples" s
+         LEFT JOIN "databases" d ON d."id" = s."database_id"
+        WHERE s."account_id" = $1 AND s."hour" >= $2 AND s."hour" < $3
+        GROUP BY s."database_id"
+        ORDER BY sum(s."size_bytes") DESC, 2, 1`,
+      [accountId, from, to],
+    );
+    return rows.map((row) => ({
+      databaseId: row.id,
+      name: row.name,
+      deleted: row.deleted,
+      hours: row.hours,
+      gbMonths: gbMonths(BigInt(row.byte_hours), hoursIn(month)).round(6).toString(),
+      sizeBytes: Number(row.size_bytes),
+    }));
+  }
+
+  /**
+   * An account's buckets in a month by the UTC calendar (ADR 0009): from
+   * their hourly samples, each one's hours measured, GB-months, and what it
+   * held at its latest sample; from the front door's counts, its requests of
+   * S3's two classes, deletes free. The most GB-months first.
+   */
+  async monthlyBuckets(accountId: string, month: string): Promise<BucketMonth[]> {
+    const [year, number] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(year, number - 1, 1));
+    const to = new Date(Date.UTC(year, number, 1));
+    const rows = await this.records.manager.query<
+      Array<{
+        id: string;
+        name: string;
+        deleted: boolean;
+        hours: number;
+        byte_hours: string;
+        size_bytes: string;
+        objects: string;
+        tier1: string;
+        tier2: string;
+        bytes_out: string;
+        bytes_in: string;
+      }>
+    >(
+      // The bytes of every request, deletes' too; the requests of the two classes billed.
+      `WITH s AS (SELECT "bucket_id", (array_agg("name" ORDER BY "hour" DESC))[1] AS "name", count(*)::int AS "hours", sum("size_bytes") AS "byte_hours",
+                         (array_agg("size_bytes" ORDER BY "hour" DESC))[1] AS "size_bytes", (array_agg("objects" ORDER BY "hour" DESC))[1] AS "objects"
+                    FROM "bucket_samples" WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3 GROUP BY "bucket_id"),
+            r AS (SELECT "bucket_id", max("name") AS "name", coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0) AS "tier1",
+                         coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0) AS "tier2", sum("bytes_out") AS "bytes_out", sum("bytes_in") AS "bytes_in"
+                    FROM "storage_request_counts" WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3 GROUP BY "bucket_id")
+       SELECT coalesce(s."bucket_id", r."bucket_id") AS "id", coalesce(s."name", r."name") AS "name", b."id" IS NULL AS "deleted",
+              coalesce(s."hours", 0) AS "hours", coalesce(s."byte_hours", 0)::text AS "byte_hours", coalesce(s."size_bytes", 0)::text AS "size_bytes",
+              coalesce(s."objects", 0)::text AS "objects", coalesce(r."tier1", 0)::text AS "tier1", coalesce(r."tier2", 0)::text AS "tier2",
+              coalesce(r."bytes_out", 0)::text AS "bytes_out", coalesce(r."bytes_in", 0)::text AS "bytes_in"
+         FROM s FULL JOIN r ON r."bucket_id" = s."bucket_id"
+         LEFT JOIN "buckets" b ON b."id" = coalesce(s."bucket_id", r."bucket_id")
+        ORDER BY coalesce(s."byte_hours", 0) DESC, 2, 1`,
+      [accountId, from, to],
+    );
+    return rows.map((row) => ({
+      bucketId: row.id,
+      name: row.name,
+      deleted: row.deleted,
+      hours: row.hours,
+      gbMonths: gbMonths(BigInt(row.byte_hours), hoursIn(month)).round(6).toString(),
+      sizeBytes: Number(row.size_bytes),
+      objects: Number(row.objects),
+      tier1Requests: Number(row.tier1),
+      tier2Requests: Number(row.tier2),
+      bytesDownloaded: Number(row.bytes_out),
+      bytesUploaded: Number(row.bytes_in),
+    }));
   }
 
   /**

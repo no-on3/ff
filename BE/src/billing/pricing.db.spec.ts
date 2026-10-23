@@ -48,6 +48,8 @@ run('price books and pricing (L2, P-30)', () => {
       minInstances,
       memoryMb,
     ]);
+  /** The migrations' last book: from next month's first hour, the one with customers' databases' and buckets' SKUs. */
+  const lastSystemBook = () => db.dataSource.getRepository(PriceBook).findOneOrFail({ where: { createdBy: 'system' }, order: { validFrom: 'DESC' } });
   const addBook = (validFrom: string, prices: Partial<PriceDocument['prices']>) =>
     db.dataSource.getRepository(PriceBook).save({
       currency: 'TND',
@@ -140,7 +142,7 @@ run('price books and pricing (L2, P-30)', () => {
     expect(month?.functions.get(warm)?.total.toString()).toBe(warmCost.toString());
     expect([month?.total.toString(), month?.total.toFixed(3), month?.currency, month?.exponent]).toEqual([warmCost.toString(), '0.005', 'TND', 3]);
     expect(month?.monthlyFee.isZero()).toBe(true);
-    expect(month?.books.map((book) => book.validFrom.toISOString())).toEqual(['2026-10-01T00:00:00.000Z', later.validFrom.toISOString()]);
+    expect(month?.books.map((book) => book.validFrom.toISOString())).toEqual([(await lastSystemBook()).validFrom.toISOString(), later.validFrom.toISOString()]);
     expect(month?.pricedFrom.toISOString()).toBe(`${Y}-01-01T00:00:00.000Z`);
   });
 
@@ -171,6 +173,6 @@ run('price books and pricing (L2, P-30)', () => {
   it('lists the books valid in a month: the one at its start, and those that start in it', async () => {
     const books = await pricing.booksFor(new Date(`${Y}-01-01T00:00:00Z`), new Date(`${Y}-02-01T00:00:00Z`));
 
-    expect(books.map((book) => book.validFrom.toISOString())).toEqual(['2026-10-01T00:00:00.000Z', `${Y}-01-16T00:00:00.000Z`]);
+    expect(books.map((book) => book.validFrom.toISOString())).toEqual([(await lastSystemBook()).validFrom.toISOString(), `${Y}-01-16T00:00:00.000Z`]);
   });
 });

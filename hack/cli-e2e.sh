@@ -11,9 +11,18 @@
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
-# ff package --compile, whose zip runs on FF as it is; the getting-started guide's small app
-# (examples/orders-app), its functions writing to a database as one on the internet would be
-# (hack/k8s/app-database.sh), in an account whose internet access is on; and ff local, in
+# ff package --compile, whose zip runs on FF as it is; the small app (examples/orders-app), its
+# functions writing to a database of its own as one on the internet would be
+# (hack/k8s/app-database.sh), in an account whose internet access is on; ff db, with the run's own
+# server of customers' databases: one made, its string a function's secret, the app writing its
+# order there with its account's internet access off, read with psql, a new password, its month
+# in ff usage, then deleted; ff buckets: one made, a key whose secret ff prints once as the
+# variables AWS's tools read, the AWS CLI uploading with them alone, what the bucket held at its
+# measure and its month in ff usage, the export kit's s3-sync.sh copying it out to a folder and on
+# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; the getting-started
+# guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
+# each one's receipt written to a bucket with the function's own key, read back by a GET and by the
+# AWS CLI, both gone after the night 90 days on; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -34,6 +43,12 @@ e2e_namespaces+=("$(tenant_namespace "$account_a")" "$(tenant_namespace "$accoun
 
 e2e_dependencies
 e2e_cluster
+# This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front
+# door there with their own keys, at an IP address, where AWS's SDKs address buckets path-style by themselves.
+cluster_gateway="$(docker network inspect "k3d-$FF_CLUSTER_NAME" --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | awk '{print $1}')"
+# Customers' databases (ADR 0008): the run's own server, on 10.199.3.0/24, which no other run uses.
+data_db_address=10.199.3.10
+e2e_data_db 10.199.3.0/24 "$data_db_address"
 
 echo "== ff and the backend"
 (cd "$FF_REPO_ROOT/cli" && cargo build --release --locked -q)
@@ -41,8 +56,12 @@ ff_bin="$FF_REPO_ROOT/cli/target/release/ff"
 e2e_build
 # Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which ff reaches on 127.0.0.1.
 url_port="$(free_port)"
+# Buckets' S3 front door on another, at http://s3.localhost:<port>.
+storage_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
-  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port")
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
+  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
+  FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32" "${e2e_data_db_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -414,8 +433,9 @@ ff invoke cli-pkg-ts --data '{"ms": 60000}'
 check "and run on FF as they would on Lambda" "0 1m" "$(code) $(out | sed '$d' | jq -r .took)"
 ff delete cli-pkg-ts --yes
 
-echo "== a small app, as the guide walks through it: a package with a driver, a secret, a URL that writes to a database, a nightly schedule"
-# The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own.
+echo "== the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
+# The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own. No
+# bucket is named, so its orders go without receipts.
 export FF_APP_DB_NAME="$E2E_PROJECT-app-db" FF_APP_DB_SUBNET=198.18.1.0/24 FF_APP_DB_ADDRESS=198.18.1.10
 e2e_cleanups+=("$FF_REPO_ROOT/hack/k8s/app-database.sh down")
 database_url="$("$FF_REPO_ROOT/hack/k8s/app-database.sh" up)"
@@ -460,6 +480,145 @@ ff invoke orders-nightly --data "@$work/scheduled.json" --profile c
 check "which reports the day's order from the database" "0 $order_day 1 2 0" "$(code) $(out | sed '$d' | jq -r '"\(.day) \(.orders) \(.items) \(.removed)"')"
 ff delete orders-nightly --yes --profile c
 ff delete orders-api --yes --profile c
+
+echo "== a customer's database, with ff db: a function's secret, written by the app with its account's internet access off"
+ff deploy "$app" --name cli-db-orders --handler index.http
+check "the same app in account A, whose functions don't reach the internet" "0 created cli-db-orders (nodejs, 128 MB, 5 s): ACTIVE" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff db create Orders
+check "ff db create refuses a name RDS wouldn't take, before calling" "2 true" "$(code) $(err | grep -q "can't be a database's name" && echo true || echo false)"
+ff db create cli-orders --secret-for cli-db-orders --output json
+db_conn="$(out | jq -r .connectionString)"
+check "ff db create makes it, its connection string once, and sets it as the function's DATABASE_URL" "0 active cli-db-orders:DATABASE_URL true" \
+  "$(code) $(out | jq -r '"\(.status) \(.secretsSet[0].function):\(.secretsSet[0].secret)"') $([[ "$db_conn" == postgresql://*"@$data_db_address:5432/"*"?sslmode=require" ]] && echo true || echo false)"
+ff url enable cli-db-orders --auth none
+ff invoke cli-db-orders --http POST /orders --data '{"item": "makroudh", "quantity": 3}'
+check "a POST writes its order to FF's database, over TLS, its certificate trusted" "0 HTTP 201 makroudh 3" \
+  "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity)"')"
+check "which psql reads with the string ff gave" "makroudh|3" "$(data_db_psql "$db_conn" 'select item, quantity from orders')"
+ff db list
+check "ff db list shows it available, its storage and sessions" "0 cli-orders available" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
+ff db get cli-orders --output json
+check "ff db get gives how to reach it, without its password" "0 $data_db_address false" \
+  "$(code) $(out | jq -r .host) $(out | grep -q "$(jq -rn --arg s "$db_conn" '$s | capture(":(?<p>[^:@]+)@").p')" && echo true || echo false)"
+ff db password cli-orders --secret-for cli-db-orders --output json
+new_conn="$(out | jq -r .connectionString)"
+check "ff db password: the old string opens no session, the new one does, and the function has it" "0 true 1" \
+  "$(code) $( (data_db_psql "$db_conn" 'select 1' || true) | grep -q 'password authentication failed' && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
+ff invoke cli-db-orders --http POST /orders --data '{"item": "bambalouni", "quantity": 1}'
+check "  ... which writes again through its new secret" "0 HTTP 201 2" "$(code) $(out | head -1) $(data_db_psql "$new_conn" 'select count(*) from orders')"
+# Each minute, the backend measures every database not measured yet in the hour: this one within a minute.
+for _ in $(seq 75); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.databases | map(.name) | index("cli-orders")' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists its month after the functions" "0 true" "$(code) $(out | grep -qE '^cli-orders +[0-9]+ +[0-9.]+ +[0-9.]+$' && echo true || echo false)"
+ff db delete cli-orders
+check "ff db delete asks first, a script saying --yes" "2 true" "$(code) $(err | grep -q 'ff db delete asks first' && echo true || echo false)"
+ff db delete cli-orders --yes
+check "ff db delete drops it, with its data, its user gone" "0 deleted the database cli-orders, with its data 0" \
+  "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
+ff delete cli-db-orders --yes
+
+echo "== buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
+ff buckets create My.Photos
+check "ff buckets create refuses a name AWS wouldn't take, before calling" "2 true" "$(code) $(err | grep -q "can't be a bucket's name" && echo true || echo false)"
+ff buckets create cli-photos
+check "ff buckets create makes it, and says where AWS's tools reach it" "0 cli-photos made http://cli-photos.s3.localhost:$storage_port" \
+  "$(code) $(out | head -1) $(out | sed -n 3p | awk '{ print $2 }')"
+ff buckets list
+check "ff buckets list shows it" "0 cli-photos active" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
+ff buckets keys create --bucket cli-photos
+check "ff buckets keys create prints its secret once, as the four variables AWS's tools read" "0 4" "$(code) $(out | grep -c '^export AWS_')"
+out | grep '^export AWS_' >"$work/s3.env"
+key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
+printf 'Ahlan from the CLI' >"$work/hello.txt"
+# The AWS CLI with those variables alone, none of this machine's settings: AWS_ENDPOINT_URL_S3 names FF's endpoint.
+# Without one here, AWS's image: as this user, so that the files it writes are this user's, s3.localhost this machine.
+if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
+  aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
+    -e AWS_PROFILE amazon/aws-cli:2.34.32)
+fi
+aws_with_key() { (set -a; . "$work/s3.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+uploaded="$(aws_with_key s3 cp "$work/hello.txt" s3://cli-photos/hello.txt --only-show-errors >/dev/null 2>&1; echo $?)"
+check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its only change" "0 Ahlan from the CLI" \
+  "$uploaded $(aws_with_key s3 cp s3://cli-photos/hello.txt - 2>/dev/null)"
+ff buckets keys list
+check "ff buckets keys list names what it reaches, never its secret" "0 $key_id cli-photos false" \
+  "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep -q "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" && echo true || echo false)"
+# Each minute, the backend measures every bucket not measured yet in the hour: this one within a minute.
+for _ in $(seq 75); do "$ff_bin" buckets get cli-photos --output json 2>/dev/null | jq -e '.measuredAt != null' >/dev/null && break; sleep 1; done
+ff buckets get cli-photos
+check "ff buckets get says what it held at its last measure" "0 true" "$(code) $(out | grep -qE '^held +[0-9.]+ MB, [01] objects?, as measured at ' && echo true || echo false)"
+# Its month: the requests the front door counted, by S3's classes, and the bytes they sent out, once their minute is written.
+for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.buckets[] | select(.name == "cli-photos" and .tier1Requests > 0 and .tier2Requests > 0)' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists its month after the databases: GB-months, each class's requests, what it sent out" "0 true true" \
+  "$(code) $(out | grep -qE '^cli-photos +[0-9.]+ +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+ [MG]B +[0-9.]+$' && echo true || echo false) $("$ff_bin" usage --output json | jq '.buckets[] | select(.name == "cli-photos") | .bytesDownloaded > 0')"
+# The export kit's way out to AWS S3, both halves: the bucket to a folder with the key's variables, then the folder to
+# "S3", here another bucket behind an AWS CLI profile whose key reaches that one alone, so that a second half still
+# holding FF's variables would be refused there. The script calls the AWS CLI by name: the one above.
+ff buckets create cli-photos-out
+ff buckets keys create --bucket cli-photos-out
+printf '[profile as-s3]\nregion = %s\nendpoint_url = %s\n' "$(sed -n 's/^export AWS_REGION=//p' "$work/s3.env")" \
+  "$(sed -n 's/^export AWS_ENDPOINT_URL_S3=//p' "$work/s3.env")" >"$work/aws-config"
+printf '[as-s3]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$(out | sed -n 's/^export AWS_ACCESS_KEY_ID=//p')" \
+  "$(out | sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p')" >"$work/aws-credentials"
+as_s3() { AWS_CONFIG_FILE="$work/aws-config" AWS_SHARED_CREDENTIALS_FILE="$work/aws-credentials" AWS_PROFILE=as-s3 "$@"; }
+mkdir -p "$work/bin"
+{ echo '#!/usr/bin/env bash'; printf 'exec'; printf ' %q' "${aws_cli[@]}"; echo ' "$@"'; } >"$work/bin/aws"
+chmod +x "$work/bin/aws"
+synced="$(set -a; . "$work/s3.env"; set +a; PATH="$work/bin:$PATH" as_s3 "$FF_REPO_ROOT/cli/templates/export/data/s3-sync.sh" \
+  cli-photos cli-photos-out "$work/backup" >"$work/s3-sync.out" 2>&1 && echo 0 || echo $?)"
+check "the export kit's s3-sync.sh copies the bucket to a folder, then to S3 with the AWS CLI's own settings" \
+  "0 Ahlan from the CLI Ahlan from the CLI" \
+  "$synced $(cat "$work/backup/hello.txt" 2>/dev/null) $(as_s3 "${aws_cli[@]}" s3 cp s3://cli-photos-out/hello.txt - 2>/dev/null)"
+ff buckets delete cli-photos-out --force --yes
+ff buckets delete cli-photos --yes
+check "ff buckets delete leaves a bucket with files, in the API's words, exit 3" "3 true" "$(code) $(err | grep -q "isn't empty" && echo true || echo false)"
+ff buckets delete cli-photos --force --yes
+check "  ... and --force deletes them first" "0 deleted the bucket cli-photos, with its files" "$(code) $(out)"
+ff buckets keys revoke "$key_id" --yes
+# The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
+refused="$(aws_with_key s3 ls 2>&1 || true)"
+check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
+
+echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt in a bucket"
+# In account A, whose functions don't reach the internet: FF's database and the S3 front door, they do.
+ff deploy "$app" --name shop-api --handler index.http
+check "examples/orders-app, the S3 client among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff deploy "$app" --name shop-nightly --handler index.nightly
+ff db create shop --secret-for shop-api --secret-for shop-nightly --output json
+check "ff db create: FF's database, its connection string both functions' DATABASE_URL" "0 active shop-api,shop-nightly" \
+  "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
+ff buckets create cli-receipts
+ff env set shop-api RECEIPTS_BUCKET=cli-receipts
+ff env set shop-nightly RECEIPTS_BUCKET=cli-receipts
+ff env list shop-nightly
+check "a bucket for the receipts, its name each function's RECEIPTS_BUCKET" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
+ff url enable shop-api --auth none
+ff invoke shop-api --http POST /orders --data '{"item": "bsissa", "quantity": 4}'
+check "a POST writes the order to FF's database, then its receipt to the bucket with the function's own key" \
+  "0 HTTP 201 bsissa 4 s3://cli-receipts/receipts/1.txt" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
+order_day="$(out | tail -1 | jq -r '.created_at[0:10]')"
+ff invoke shop-api --http GET /orders/1/receipt
+check "  ... and a GET reads the receipt back from the bucket" "0 HTTP 200 Order 1|4 × bsissa" "$(code) $(out | head -1) $(out | sed -n '3,4p' | paste -sd'|')"
+# The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
+ff buckets keys create --bucket cli-receipts --read-only
+out | grep '^export AWS_' >"$work/receipts.env"
+receipts_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/receipts.env")"
+aws_receipts() { (set -a; . "$work/receipts.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+check "the AWS CLI reads that receipt in the account's bucket, as the function wrote it" "Order 1" "$(aws_receipts s3 cp s3://cli-receipts/receipts/1.txt - 2>/dev/null | head -1)"
+# The night 91 days after the order's day: the order is older than 90 days, so it goes, its receipt with it.
+jq --arg time "$(date -u -d "$order_day + 91 days" +%Y-%m-%dT02:00:00Z)" '.time = $time' "$app/events/scheduled.json" >"$work/night.json"
+ff invoke shop-nightly --data "@$work/night.json"
+check "the night 91 days on removes the order and its receipt, which the bucket no longer has" "0 1 1 0" \
+  "$(code) $(out | sed '$d' | jq -r '"\(.removed) \(.receipts)"') $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
+ff buckets keys revoke "$receipts_key" --yes
+ff buckets delete cli-receipts --force --yes
+ff db delete shop --yes
+ff delete shop-nightly --yes
+ff delete shop-api --yes
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts

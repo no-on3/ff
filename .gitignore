@@ -159,6 +159,8 @@ sketch
 # Kubernetes migration (K-00): local tool binaries and cluster credentials
 hack/bin/
 hack/.kube/
+# hack/k8s/data-db-up.sh: the development data server's CA, for the backend and functions' pods
+hack/.data-db/
 # hack/install-tools.sh: Rust, where the machine has none recent enough
 hack/.rust/
 *.kubeconfig
@@ -168,6 +170,7 @@ hack/.e2e/
 hack/.e2e-tenancy/
 hack/.cli-e2e/
 hack/.code-delivery-spike/
+hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/
 # hack/ci.sh: its work files, the scanner's database and the SBOMs

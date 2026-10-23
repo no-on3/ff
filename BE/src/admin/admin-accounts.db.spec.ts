@@ -36,6 +36,9 @@ import { AdminAccountsService, utcMinute } from './admin-accounts.service';
 import { AdminCreditsService } from './admin-credits.service';
 import { PlatformSetting } from './platform-setting.entity';
 import { PlatformSettingsService } from './platform-settings.service';
+import { BucketsService } from '../storage/buckets.service';
+import { Bucket } from '../storage/bucket.entity';
+import { StoreBuckets } from '../storage/store-buckets';
 
 const DAY_MS = 86_400_000;
 
@@ -52,6 +55,8 @@ run('accounts, for operators (L2, P-71)', () => {
   const sent: Mail[] = [];
   /** [function ID, replicas] of each scale call. */
   const scaled: Array<[string, number]> = [];
+  // What the account's databases were told: their users suspended, or let in again.
+  const databaseChanges: string[] = [];
   const applied: Array<{ accountId: string; tenant: TenantLimits }> = [];
   let failScaleOf: string | null = null;
   let failLimitsOf: string | null = null;
@@ -66,6 +71,8 @@ run('accounts, for operators (L2, P-71)', () => {
     },
   } as unknown as Orchestrator;
   let n = 0;
+  /** The account whose databases the stand-in for the server of customers' databases lists. */
+  const WITH_DATABASE = '300000009999';
 
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
   /** A user; in English unless said otherwise, as most of the e-mails these tests read. */
@@ -138,6 +145,17 @@ run('accounts, for operators (L2, P-71)', () => {
       config,
       credits,
       settings,
+      {
+        suspendAccount: async (accountId: string) => void databaseChanges.push(`suspend ${accountId}`),
+        reactivateAccount: async (accountId: string) => void databaseChanges.push(`reactivate ${accountId}`),
+        applyAccess: async (accountId: string) => void databaseChanges.push(`apply ${accountId}`),
+        list: async (accountId: string) =>
+          accountId === WITH_DATABASE
+            ? [{ id: 'db-1', name: 'orders', database: 'ff_0123456789abcdef01234567', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z'), host: 'db.example.tn' }]
+            : [],
+      } as never,
+      // Its buckets' rows and samples are read from the database itself; nothing here makes or empties a bucket in the store.
+      new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } })),
     );
   });
 
@@ -148,6 +166,7 @@ run('accounts, for operators (L2, P-71)', () => {
   beforeEach(() => {
     sent.length = 0;
     scaled.length = 0;
+    databaseChanges.length = 0;
     applied.length = 0;
     failScaleOf = null;
     failLimitsOf = null;
@@ -238,6 +257,7 @@ run('accounts, for operators (L2, P-71)', () => {
       ['active', 'operator@ff.test', 'Use case checked'],
     ]);
     expect(page.balances).toEqual([]);
+    expect([page.databases, page.account.storageDisabledAt, page.account.storageDisabledReason]).toEqual([[], null, null]);
     expect(page.credit).toEqual({
       currency: 'TND',
       balance: '0.000',
@@ -320,7 +340,7 @@ run('accounts, for operators (L2, P-71)', () => {
       await expect(service.changePlan(missing, 'beta', 'x')).rejects.toThrow(new NotFoundException(message));
     });
 
-    it('suspend: working functions scaled to zero; reactivate: warm instances back, the others left to their next call', async () => {
+    it("suspend: working functions scaled to zero, the databases' users kept out; reactivate: warm instances back, the others left to their next call, the users let in", async () => {
       const id = await account({ status: AccountStatus.ACTIVE }, [[await user('suspended@ff.test'), 'owner']]);
       const cold = await fn(id);
       const warm = await fn(id, { minInstances: 2 });
@@ -334,6 +354,7 @@ run('accounts, for operators (L2, P-71)', () => {
       scaled.length = 0;
       await service.changeStatus(id, 'reactivate', 'Owner removed the miner');
       expect([await statusOf(id), scaled]).toEqual(['active', [[warm.id, 2]]]);
+      expect(databaseChanges).toEqual([`suspend ${id}`, `reactivate ${id}`]);
     });
 
     it("keep the change when a function can't be scaled: the others are, and the minute's hold catches up", async () => {
@@ -369,7 +390,7 @@ run('accounts, for operators (L2, P-71)', () => {
 
       const page = await service.changeStatus(id, 'close', 'Owner asked');
 
-      expect([await statusOf(id), scaled]).toEqual(['closed', [[left.id, 0]]]);
+      expect([await statusOf(id), scaled, databaseChanges]).toEqual(['closed', [[left.id, 0]], [`suspend ${id}`]]);
       const due = page.account.dataDeletionDueAt as Date;
       expect(due.getTime() - before).toBeGreaterThanOrEqual(30 * DAY_MS);
       expect(due.getTime() - before).toBeLessThan(30 * DAY_MS + 60_000);
@@ -459,6 +480,59 @@ run('accounts, for operators (L2, P-71)', () => {
       { accountId: id, tenant: { quota: BETA_LIMITS.quota, internetEgress: true } },
       { accountId: id, tenant: { quota: BETA_LIMITS.quota, internetEgress: false } },
     ]);
+  });
+
+  it("turns the account's databases and buckets off and on, its reason on the page and in the log, the databases following each time, a retry too, the owners told of each change", async () => {
+    const id = await account({ status: AccountStatus.ACTIVE }, [[await user(`storage-owner-${++n}@ff.test`), 'owner'], [await user(`storage-dev-${++n}@ff.test`), 'developer']]);
+
+    const off = await service.setStorage(id, false, 'Files shared against our terms');
+    await service.setStorage(id, false, 'Again, as a retry');
+    const on = await service.setStorage(id, true, 'Cleared with the owner');
+
+    expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([
+      [expect.stringMatching(/^storage-owner-/), `The databases and buckets of your FF account are off: ${off.account.name}`],
+      [expect.stringMatching(/^storage-owner-/), `The databases and buckets of your FF account are on again: ${off.account.name}`],
+    ]);
+
+    expect([off.account.storageDisabledAt instanceof Date, off.account.storageDisabledReason]).toEqual([true, 'Files shared against our terms']);
+    expect([on.account.storageDisabledAt, on.account.storageDisabledReason]).toEqual([null, null]);
+    expect((await entriesOf(id)).map((entry) => [entry.action, entry.details])).toEqual([
+      ['account.storage', { reason: 'Files shared against our terms', changes: { storageEnabled: { from: true, to: false } } }],
+      ['account.storage', { reason: 'Cleared with the owner', changes: { storageEnabled: { from: false, to: true } } }],
+    ]);
+    expect(databaseChanges).toEqual([`apply ${id}`, `apply ${id}`, `apply ${id}`]);
+    await expect(query(`UPDATE accounts SET storage_disabled_at = now() WHERE id = $1`, [id])).rejects.toThrow(/violates check constraint/); // no reason
+    await expect(service.setStorage('999999999999', false, 'Nobody')).rejects.toThrow('Account 999999999999 not found');
+  });
+
+  it("shows the account's databases on its page, their names on the server, their size and sessions as the server counts them", async () => {
+    const page = await service.detail(await account({ status: AccountStatus.ACTIVE, id: WITH_DATABASE }));
+
+    expect(page.databases).toEqual([
+      { id: 'db-1', name: 'orders', database: 'ff_0123456789abcdef01234567', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z') },
+    ]);
+  });
+
+  it("shows the account's buckets on its page, their names in the store, what each held at its last measure, and how full they are together", async () => {
+    const id = await account({ status: AccountStatus.ACTIVE });
+    const [{ id: photos }] = await query<Array<{ id: string }>>(
+      `INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456a', '2026-10-20T10:00:00Z') RETURNING id`,
+      [id, `photos-${id}`],
+    );
+    await query(`INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456b', '2026-10-21T10:00:00Z')`, [id, `zz-new-${id}`]);
+    await query(`SELECT ff_ensure_month_partition('bucket_samples', '2026-10-01')`);
+    for (const [hour, size] of [['2026-10-22T08:00:00Z', 1_000], ['2026-10-22T09:00:00Z', 161_480_253]] as const) {
+      await query(`INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES ($1, $2, $3, 'photos', $4, 1204)`, [photos, hour, id, size]);
+    }
+    await query(`UPDATE accounts SET bucket_storage_notice = 80 WHERE id = $1`, [id]);
+
+    const page = await service.detail(id);
+
+    expect(page.buckets).toEqual([
+      { name: `photos-${id}`, storeName: 'ff-0123456789abcdef0123456a', status: 'active', sizeBytes: 161_480_253, objects: 1_204, measuredAt: new Date('2026-10-22T09:00:00Z'), createdAt: new Date('2026-10-20T10:00:00Z') },
+      { name: `zz-new-${id}`, storeName: 'ff-0123456789abcdef0123456b', status: 'active', sizeBytes: null, objects: null, measuredAt: null, createdAt: new Date('2026-10-21T10:00:00Z') },
+    ]);
+    expect(page.account.bucketStorageNotice).toBe(80);
   });
 
   it('changes nothing when the cluster refuses the NetworkPolicy; the value the account has writes nothing, but applies it again', async () => {

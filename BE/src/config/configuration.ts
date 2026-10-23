@@ -38,6 +38,8 @@ export const DEVELOPMENT_CREDENTIALS = {
   DB_PASSWORD: ['postgres'],
   MINIO_ACCESS_KEY: ['minioadmin', 'ffdevaccesskey'],
   MINIO_SECRET_KEY: ['minioadmin', 'ffdevsecretkey-local-only'],
+  // The development server of customers' databases (docker-compose.yml's data-db).
+  FF_DATA_DB_ADMIN_PASSWORD: ['ff-data-admin-dev'],
 } as const;
 
 const DEV_CORS_ORIGIN = 'http://localhost:5199';
@@ -46,6 +48,8 @@ const DEV_CORS_ORIGIN = 'http://localhost:5199';
  * machine, as any name under .localhost.
  */
 export const DEV_FUNCTION_URL_BASE = 'http://fn.localhost:3001';
+/** Buckets' S3 endpoint in development: path-style there, and virtual-hosted under its host, which resolves to this machine. */
+export const DEV_STORAGE_BASE = 'http://s3.localhost:3002';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
@@ -268,6 +272,34 @@ const functionUrlBase = {
   },
   expected: 'an origin whose host has a dot, such as https://fn.example.tn, under which each function URL is https://<id>.fn.example.tn/',
 };
+/** Buckets' S3 endpoint: a scheme, a host under which each bucket is <bucket>.<host>, and a port if any; no path. */
+const storageBase = {
+  test: functionUrlBase.test,
+  expected: 'an origin whose host has a dot, such as https://s3.example.tn, at which a bucket is https://s3.example.tn/<bucket> and https://<bucket>.s3.example.tn',
+};
+/**
+ * Where functions reach buckets' S3 front door inside the cluster: a scheme, an IP address, and a port if any; no path.
+ * An address rather than a name: AWS's SDKs address buckets path-style at an IP address by themselves, where a name
+ * would have them ask DNS for <bucket>.<name>.
+ */
+const functionStorageEndpoint = {
+  test: (v: string) => {
+    try {
+      const url = new URL(v);
+      return ['http:', 'https:'].includes(url.protocol) && url.origin === v.replace(/\/$/, '') && isIP(url.hostname.replace(/^\[|\]$/g, '')) !== 0;
+    } catch {
+      return false;
+    }
+  },
+  expected: "an origin whose host is an IP address, such as http://10.43.0.251:3002: AWS's SDKs address buckets path-style there by themselves",
+};
+/** A server's address as clients name it: a host name or an IP address, without a port. */
+const serverHost = {
+  test: (v: string) => isIP(v) !== 0 || (v.length <= 253 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(v)),
+  expected: 'a host name or an IP address, such as db.example.tn or 10.199.0.10',
+};
+/** A PostgreSQL role's name, as the backend's role is named. */
+const roleName = { test: (v: string) => /^[a-z_][a-z0-9_]{0,62}$/.test(v), expected: 'a PostgreSQL role name: lower-case letters, digits and underscores' };
 const emailAddress = { test: (v: string) => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(v), expected: 'an e-mail address' };
 const mailbox = {
   test: (v: string) => emailAddress.test(v) || /^[^<>]*<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>$/.test(v),
@@ -377,6 +409,15 @@ const appShape = {
   // Function URLs: the port of the server that answers them, apart from the API's (0: none), and where they live.
   FF_FUNCTION_URL_PORT: integer(3001, 0, 65535),
   FF_FUNCTION_URL_BASE: text(DEV_FUNCTION_URL_BASE, functionUrlBase),
+  // Buckets' S3 front door (ADR 0009): the port of its server, apart from the API's (0: none), and the endpoint
+  // customers give AWS's SDKs and CLI.
+  FF_STORAGE_PORT: integer(3002, 0, 65535),
+  FF_STORAGE_BASE: text(DEV_STORAGE_BASE, storageBase),
+  // Functions' own keys to their account's buckets come with the endpoint they reach the front door at, inside the
+  // cluster (unset: functions get no key), and the addresses their NetworkPolicy opens on its port (none: the
+  // backend's own pods in ff-system, on FF_STORAGE_PORT, as when the backend runs in the cluster).
+  FF_STORAGE_FUNCTION_ENDPOINT: optionalText(functionStorageEndpoint),
+  FF_STORAGE_FUNCTION_CIDRS: list(cidr),
   // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
   // servers that check domains' records (none: the system's).
   FF_EDGE_ADDRESSES: list(ipAddress),
@@ -392,6 +433,18 @@ const appShape = {
   FF_CODE_REGISTRY_PULL: optionalText(registryHost),
   FF_CODE_REGISTRY_USERNAME: optionalText(),
   FF_CODE_REGISTRY_PASSWORD: optionalSecret(),
+
+  // Customers' databases (ADR 0008): their server as customers and functions reach it (unset: no databases, the API
+  // answers 503), its port, where the backend reaches it if elsewhere, and the backend's role there; the addresses
+  // functions reach it at, for their NetworkPolicy; and the CA of its certificate when it isn't a public one, which
+  // functions' pods get too.
+  FF_DATA_DB_HOST: optionalText(serverHost),
+  FF_DATA_DB_PORT: port(5432),
+  FF_DATA_DB_ADMIN_HOST: optionalText(serverHost),
+  FF_DATA_DB_ADMIN_USER: text('ff_admin', roleName),
+  FF_DATA_DB_ADMIN_PASSWORD: optionalSecret(),
+  FF_DATA_DB_CIDRS: list(cidr),
+  FF_DATA_DB_CA_FILE: optionalText(),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -430,6 +483,25 @@ function appRules(env: AppEnv): string[] {
   }
   if (!!env.FF_CODE_REGISTRY_USERNAME !== !!env.FF_CODE_REGISTRY_PASSWORD) {
     problems.push('FF_CODE_REGISTRY_USERNAME and FF_CODE_REGISTRY_PASSWORD go together: set both, or neither for a registry without a login');
+  }
+
+  if (env.FF_DATA_DB_HOST) {
+    if (!env.FF_DATA_DB_ADMIN_PASSWORD) problems.push("FF_DATA_DB_ADMIN_PASSWORD is required when FF_DATA_DB_HOST is set: it is the backend's role's on customers' database server");
+    if (env.FF_DATA_DB_CIDRS.length === 0) {
+      problems.push("FF_DATA_DB_CIDRS is required when FF_DATA_DB_HOST is set: functions reach customers' database server only at these addresses, through their NetworkPolicy");
+    }
+  } else {
+    const without = (['FF_DATA_DB_ADMIN_HOST', 'FF_DATA_DB_ADMIN_PASSWORD', 'FF_DATA_DB_CA_FILE'] as const).filter((name) => env[name] !== undefined);
+    if (env.FF_DATA_DB_CIDRS.length > 0) without.push('FF_DATA_DB_CIDRS' as (typeof without)[number]);
+    for (const name of without) problems.push(`${name} is set, but FF_DATA_DB_HOST is not: it names customers' database server`);
+  }
+
+  if (env.FF_STORAGE_FUNCTION_ENDPOINT) {
+    if (env.FF_STORAGE_PORT === 0) {
+      problems.push("FF_STORAGE_FUNCTION_ENDPOINT is set, but FF_STORAGE_PORT is 0: functions' keys reach buckets through the S3 front door, which isn't running");
+    }
+  } else if (env.FF_STORAGE_FUNCTION_CIDRS.length > 0) {
+    problems.push("FF_STORAGE_FUNCTION_CIDRS is set, but FF_STORAGE_FUNCTION_ENDPOINT is not: it names where functions reach buckets' S3 front door");
   }
 
   if (env.FF_DEV_USER_ID !== undefined) {
@@ -492,6 +564,9 @@ function appRules(env: AppEnv): string[] {
     if (!env.FF_FUNCTION_URL_BASE.startsWith('https://')) {
       problems.push('FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production, such as https://fn.example.tn: function URLs are served over TLS');
     }
+    if (!env.FF_STORAGE_BASE.startsWith('https://')) {
+      problems.push("FF_STORAGE_BASE must be an https:// origin when NODE_ENV=production, such as https://s3.example.tn: buckets' requests carry customers' files");
+    }
     if (!env.FF_ENCRYPTION_KEYS_FILE) {
       problems.push("FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production: its keys encrypt functions' environment variables and secrets");
     }
@@ -501,6 +576,9 @@ function appRules(env: AppEnv): string[] {
     }
     if (env.FF_WEBHOOK_ALLOW_PRIVATE) {
       problems.push("FF_WEBHOOK_ALLOW_PRIVATE is for development only: in production a customer's webhook must never reach FF's own network");
+    }
+    if (env.FF_DATA_DB_ADMIN_PASSWORD && (DEVELOPMENT_CREDENTIALS.FF_DATA_DB_ADMIN_PASSWORD as readonly string[]).includes(env.FF_DATA_DB_ADMIN_PASSWORD)) {
+      problems.push('FF_DATA_DB_ADMIN_PASSWORD must not be the development default when NODE_ENV=production');
     }
     for (const name of Object.keys(DEV_SELLER) as Array<keyof typeof DEV_SELLER>) {
       if (env[name] === DEV_SELLER[name]) problems.push(`${name} must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)`);
@@ -555,6 +633,46 @@ function readCertificate(name: string, path: string): string {
   return content;
 }
 
+/**
+ * How functions reach buckets' S3 front door with their own keys: at the addresses named, on the endpoint's port; with
+ * none named, at the backend's own pods, on the front door's port, which the endpoint's Service forwards to. Nothing
+ * when functions get no key.
+ */
+function storageEgress(env: AppEnv): Array<{ cidrs: string[]; port: number }> {
+  if (!env.FF_STORAGE_FUNCTION_ENDPOINT) return [];
+  if (env.FF_STORAGE_FUNCTION_CIDRS.length === 0) return [{ cidrs: [], port: env.FF_STORAGE_PORT }];
+  const endpoint = new URL(env.FF_STORAGE_FUNCTION_ENDPOINT);
+  return [{ cidrs: env.FF_STORAGE_FUNCTION_CIDRS, port: Number(endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80)) }];
+}
+
+/** Customers' database server (ADR 0008), as the backend reaches it, and as connection strings and functions name it. */
+export interface DataDbSettings {
+  /** In connection strings: as customers and functions reach the server. */
+  host: string;
+  port: number;
+  /** Where the backend reaches it: its host unless told otherwise. */
+  adminHost: string;
+  adminUser: string;
+  adminPassword: string;
+  /** The addresses functions reach it at: their NetworkPolicy's rule. */
+  cidrs: string[];
+  /** The CA of its certificate (PEM), when it isn't a public one: the backend checks the server against it, and functions get it. */
+  ca?: string;
+}
+
+function dataDbSettings(env: AppEnv): DataDbSettings | null {
+  if (!env.FF_DATA_DB_HOST) return null;
+  return {
+    host: env.FF_DATA_DB_HOST,
+    port: env.FF_DATA_DB_PORT,
+    adminHost: env.FF_DATA_DB_ADMIN_HOST ?? env.FF_DATA_DB_HOST,
+    adminUser: env.FF_DATA_DB_ADMIN_USER,
+    adminPassword: env.FF_DATA_DB_ADMIN_PASSWORD as string,
+    cidrs: env.FF_DATA_DB_CIDRS,
+    ...(env.FF_DATA_DB_CA_FILE ? { ca: readCertificate('FF_DATA_DB_CA_FILE', env.FF_DATA_DB_CA_FILE) } : {}),
+  };
+}
+
 /** The `database` block: the same for the backend, the TypeORM CLI and the drift check. */
 export interface DatabaseSettings {
   host: string;
@@ -593,6 +711,7 @@ export default function configuration(env: Env = process.env) {
   const problems = appRules(parsed);
   if (problems.length > 0) throw new ConfigurationError(problems);
   const production = parsed.NODE_ENV === 'production';
+  const dataDb = dataDbSettings(parsed);
   return {
     nodeEnv: parsed.NODE_ENV,
     port: parsed.PORT,
@@ -676,6 +795,14 @@ export default function configuration(env: Env = process.env) {
       edgeAddresses: parsed.FF_EDGE_ADDRESSES,
       domainResolvers: parsed.FF_DOMAIN_RESOLVERS,
     },
+    // Buckets' S3 front door (ADR 0009): its server, the endpoint customers use, and the region its answers name.
+    storage: {
+      port: parsed.FF_STORAGE_PORT,
+      base: parsed.FF_STORAGE_BASE.replace(/\/$/, ''),
+      region: parsed.FF_REGION,
+      // Where functions reach it with their own keys, inside the cluster; '': functions get no key.
+      functionEndpoint: parsed.FF_STORAGE_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
+    },
     // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
     codeImages: {
       registry: parsed.FF_CODE_REGISTRY?.replace(/\/$/, '') ?? '',
@@ -683,6 +810,8 @@ export default function configuration(env: Env = process.env) {
       username: parsed.FF_CODE_REGISTRY_USERNAME ?? '',
       password: parsed.FF_CODE_REGISTRY_PASSWORD ?? '',
     },
+    // Customers' databases (ADR 0008): their server, the backend's role there, and how functions reach it; null without one.
+    dataDb,
     // What FF keeps encrypted at rest (functions' environments) is sealed with these keys, the first sealing.
     encryption: {
       keys: encryptionKeys(parsed.FF_ENCRYPTION_KEYS_FILE, production),
@@ -716,6 +845,11 @@ export default function configuration(env: Env = process.env) {
       egressInternet: parsed.K8S_EGRESS_INTERNET,
       ingressAllowCidrs: parsed.K8S_INGRESS_ALLOW_CIDRS,
       logStoreDeleteKeyFile: parsed.K8S_LOG_STORE_DELETE_KEY_FILE,
+      // What functions reach of the platform whatever their account's internet access: customers' database server, and
+      // buckets' S3 front door.
+      platformEgress: [...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []), ...storageEgress(parsed)],
+      // The CA of that server's certificate when it isn't a public one: functions' pods get it (none: '').
+      dataDbCa: dataDb?.ca ?? '',
     },
   };
 }

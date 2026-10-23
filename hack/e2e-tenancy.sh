@@ -20,6 +20,12 @@
 #     in the reader's language.
 #   - API keys (P-13): account 1's key reads and invokes (L4), within its scopes,
 #     and stops when revoked; account 2's key gets 404 on account 1's function.
+#   - Customers' databases (ADR 0008), on the suite's own server: each account's
+#     own; another account gets 404 on every route, and the owner's password
+#     still works; a key needs databases:read and databases:write; the
+#     operator turns an account's databases off, its user kept out and its
+#     members told why, and on again; a closed account's user is kept out,
+#     then its database dropped with its data.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -62,6 +68,9 @@ api_oidc="http://127.0.0.1:$(free_port)"
 # Each backend answers function URLs on a port of its own, at http://<id>.fn.localhost:<port>/.
 url_port="$(free_port)"
 url_port_oidc="$(free_port)"
+# And buckets' S3 front door on another, reached path-style at http://127.0.0.1:<port>.
+storage_port="$(free_port)"
+storage_port_oidc="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
@@ -183,6 +192,8 @@ approve() {
 
 e2e_dependencies keycloak mailpit
 e2e_cluster
+# Customers' databases (ADR 0008): the suite's own server, on 10.199.2.0/24, which no other run uses.
+e2e_data_db 10.199.2.0/24 10.199.2.10
 
 echo "== a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
 receiver_port="$(free_port)"
@@ -213,15 +224,17 @@ e2e_migrate "${e2e_base_env[@]}"
 # Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
 # Both send notifications every second, and may reach the receiver on this machine.
 notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
-e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" PORT="${api##*:}" \
+e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api##*:}" \
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
-  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
+  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
-e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
+e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
   FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
-  FF_FUNCTION_URL_PORT="$url_port_oidc" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port_oidc"
+  FF_FUNCTION_URL_PORT="$url_port_oidc" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port_oidc" \
+  FF_STORAGE_PORT="$storage_port_oidc" FF_STORAGE_BASE="http://s3.localhost:$storage_port_oidc"
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 # call_url <function URL> [curl option...]: a GET of the URL; prints the status, and the body goes to $work/url-body.
 # --resolve takes the URL's host to this machine, whatever the system's resolver does with *.localhost.
@@ -259,6 +272,18 @@ url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .function
 check "A gives its function a URL" "201 true" "$(status) $([[ $url_a =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
 check "which anyone may call: its host reaches A's function" '200 {"message":"Hello world"}' "$(call_url "$url_a") $(cat "$work/url-body")"
 before="$(snapshot as_a "$id")"
+database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
+check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"
+db_a="$(jq -r .id <<<"$database_a")"
+conn_a="$(jq -r .connectionString <<<"$database_a")"
+check "  ... which its connection string reaches, over TLS, as its own user" "$(jq -r .user <<<"$database_a")|t" \
+  "$(data_db_psql "$conn_a" 'select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()')"
+as_a POST /buckets '{"name": "l5-photos-a"}' >/dev/null
+check "A makes a bucket" 201 "$(status)"
+key_a="$(as_a POST /storage-keys '{}')"
+check "  ... and an access key to it, its secret in the answer" "201 true" "$(status) $(jq -r '.secretAccessKey | test("^[A-Za-z0-9+/]{40}$")' <<<"$key_a")"
+key_a_id="$(jq -r .id <<<"$key_a")"
+key_a_secret="$(jq -r .secretAccessKey <<<"$key_a")"
 missing="$(node -e "console.log(require('crypto').randomUUID())")"
 as_a GET "/functions/$missing" >/dev/null
 check "a function that doesn't exist answers 404" "404 Function with ID $missing not found" "$(status) $(message)"
@@ -286,6 +311,7 @@ path_for() {
   path="${path//\{domain\}/l5.example.tn}"
   path="${path//\{scheduleId\}/$missing}"
   path="${path//\{month\}/$(date -u +%Y-%m)}"
+  path="${path//\{name\}/l5-photos-a}" # a bucket's
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
     case $name in
@@ -326,6 +352,7 @@ body_for() {
     "PUT /admin/settings") echo '{"settings": {"gracePeriodHours": 1}, "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/plan") echo '{"planId": "beta", "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/egress") echo '{"internetEgress": true, "reason": "l5 tries"}' ;;
+    "PUT /admin/accounts/{id}/storage") echo '{"enabled": false, "reason": "l5 tries"}' ;;
     "POST /admin/accounts/{id}/credits") echo '{"kind": "promo", "amount": "1", "reason": "l5 tries", "idempotencyKey": "00000000-0000-4000-8000-000000000000"}' ;;
     "POST /admin/accounts/"*) echo '{"reason": "l5 tries"}' ;;
     "POST /admin/plans") echo '{"id": "l5-tries", "name": "L5 tries", "limits": {}, "reason": "l5 tries"}' ;;
@@ -477,6 +504,55 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: development mode has no operator" "$no_operator" "$(status) $(message)"
       ;;
+    "GET /buckets")
+      listed="$(as_b GET /buckets | jq 'map(select(.name == "l5-photos-a")) | length')"
+      check "$route: B's list doesn't show A's bucket" "200 0" "$(status) $listed"
+      ;;
+    "POST /buckets")
+      as_b POST /buckets '{"name": "l5-photos-a"}' >/dev/null
+      check "$route: B can't take the name of A's bucket: names are FF's once, as on AWS" '409 The bucket name "l5-photos-a" is taken: bucket names are unique across FF, as on AWS' "$(status) $(message)"
+      as_b POST /buckets '{"name": "l5-photos-b"}' >/dev/null
+      check "  ... and makes one of its own, which A's list doesn't show" "201 0" "$(status) $(as_a GET /buckets | jq 'map(select(.name == "l5-photos-b")) | length')"
+      ;;
+    "GET /buckets/{name}" | "DELETE /buckets/{name}")
+      as_b "$method" /buckets/l5-photos-a >/dev/null
+      check "$route: B gets 404 for A's bucket" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
+      check "  ... which A still has" "l5-photos-a 200" "$(as_a GET /buckets/l5-photos-a | jq -r .name) $(status)"
+      ;;
+    "GET /buckets/{name}/metrics")
+      as_b GET /buckets/l5-photos-a/metrics >/dev/null
+      check "$route: B gets 404 for A's bucket's metrics" '404 The account has no bucket l5-photos-a' "$(status) $(message)"
+      check "  ... which A reads" "true 200" "$(as_a GET /buckets/l5-photos-a/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
+      ;;
+    "GET /storage-keys")
+      listed="$(as_b GET /storage-keys | jq --arg id "$key_a_id" 'map(select(.id == $id)) | length')"
+      check "$route: B's list doesn't show A's key" "200 0" "$(status) $listed"
+      ;;
+    "POST /storage-keys")
+      key_b="$(as_b POST /storage-keys '{}')"
+      check "$route: B makes a key of its own, which A's list doesn't show" "201 0" \
+        "$(status) $(as_a GET /storage-keys | jq --arg id "$(jq -r .id <<<"$key_b")" 'map(select(.id == $id)) | length')"
+      ;;
+    "DELETE /storage-keys/{id}")
+      as_b DELETE "/storage-keys/$key_a_id" >/dev/null
+      check "$route: B can't revoke A's key: 404" "404 The account has no access key $key_a_id" "$(status) $(message)"
+      check "  ... which A still has" 1 "$(as_a GET /storage-keys | jq --arg id "$key_a_id" 'map(select(.id == $id)) | length')"
+      ;;
+    "GET /databases")
+      listed="$(as_b GET /databases | jq --arg id "$db_a" 'map(select(.id == $id)) | length')"
+      check "$route: B's list doesn't show A's database" "200 0" "$(status) $listed"
+      ;;
+    "POST /databases")
+      db_b="$(as_b POST /databases '{"name": "l5-orders"}' | jq -r .id)"
+      check "$route: B makes a database of its own, of the name A's has: names are each account's" 201 "$(status)"
+      check "  ... which A's list doesn't show" 0 "$(as_a GET /databases | jq --arg id "$db_b" 'map(select(.id == $id)) | length')"
+      ;;
+    "GET /databases/{id}" | "DELETE /databases/{id}" | "POST /databases/{id}/password" | "GET /databases/{id}/metrics")
+      as_b "$method" "${template//\{id\}/$db_a}" >/dev/null
+      check "$route: B gets 404 for A's database" "404 Database $db_a not found" "$(status) $(message)"
+      database_now="$(as_a GET "/databases/$db_a")"
+      check "  ... which A still has, its password unchanged" "200 active 1" "$(status) $(jq -r .status <<<"$database_now") $(data_db_psql "$conn_a" 'select 1')"
+      ;;
     "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
       as_b "$method" "/alarms/$alarm_a" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
       check "$route: B gets 404 for A's alarm" "404 Alarm $alarm_a not found" "$(status) $(message)"
@@ -515,6 +591,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "POST /alarms")
       as_b POST /alarms "$(alarm_body "$id")" >/dev/null
       check "$route: B can't watch A's function" "404 Function with ID $id not found" "$(status) $(message)"
+      as_b POST /alarms '{"name": "l5", "bucketName": "l5-photos-a", "metric": "5xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor A's bucket" "404 The account has no bucket l5-photos-a" "$(status) $(message)"
       as_b POST /alarms "$(alarm_body)" >/dev/null
       check "  ... but makes its own account's alarm" 201 "$(status)"
       ;;
@@ -537,6 +615,33 @@ done
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
 as_b DELETE "/functions/$own" >/dev/null
 check "B deletes its own function" 200 "$(status)"
+as_b DELETE "/databases/$db_b" >/dev/null
+check "B deletes its own database" 204 "$(status)"
+
+echo "== buckets through the S3 front door: each account's key reaches its own account's buckets alone"
+if command -v aws >/dev/null; then aws_cli=(aws); else
+  aws_cli=(docker run --rm --network host -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE amazon/aws-cli:2.34.32)
+fi
+# s3_with <key ID> <secret> <port> <aws s3 arguments…>: accepted, or refused with the S3 error's code, as the CLI prints it.
+s3_with() {
+  local id=$1 secret=$2 port=$3
+  shift 3
+  AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+    "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$port" "$@" >/dev/null 2>"$work/s3.err" && echo accepted ||
+    echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|NoSuchBucket)\)' "$work/s3.err" | head -1 | tr -d '()')"
+}
+key_b_id="$(jq -r .id <<<"$key_b")"
+key_b_secret="$(jq -r .secretAccessKey <<<"$key_b")"
+check "A's key lists A's bucket, and B's key B's" "accepted accepted" \
+  "$(s3_with "$key_a_id" "$key_a_secret" "$storage_port" s3 ls s3://l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 ls s3://l5-photos-b)"
+check "A's key on B's bucket, and B's on A's, AccessDenied, both ways" "refused AccessDenied refused AccessDenied" \
+  "$(s3_with "$key_a_id" "$key_a_secret" "$storage_port" s3 ls s3://l5-photos-b) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 ls s3://l5-photos-a)"
+check "  ... and a copy from the other's bucket too" "refused AccessDenied" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api copy-object --bucket l5-photos-b --key stolen.txt --copy-source l5-photos-a/anything.txt)"
+check "ListBuckets lists each key's own account's buckets alone" "l5-photos-a" \
+  "$(AWS_ACCESS_KEY_ID="$key_a_id" AWS_SECRET_ACCESS_KEY="$key_a_secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$storage_port" s3api list-buckets --query 'Buckets[].Name' --output text)"
+as_b DELETE /buckets/l5-photos-b >/dev/null
+check "B deletes its own bucket" 204 "$(status)"
 
 echo "== nobody authenticated, through the guard, on every route (${#routes[@]})"
 for route in "${routes[@]}"; do
@@ -629,6 +734,16 @@ alarm_1="$(as_user_1 POST /alarms "$(alarm_body "$fn_1")" | jq -r .id)"
 check "account 1's owner makes an alarm on its function's errors" 201 "$(status)"
 package_1="$(upload_package "$api_oidc" "$work/package-a.zip" -H "Authorization: Bearer $token_1" | jq -r .codeSha256)"
 check "account 1's owner uploads a package" "201 $package_a" "$(status) $package_1"
+database_1="$(as_user_1 POST /databases '{"name": "l5-one"}')"
+check "account 1's owner makes a database" "201 active" "$(status) $(jq -r .status <<<"$database_1")"
+db_1="$(jq -r .id <<<"$database_1")"
+conn_1="$(jq -r .connectionString <<<"$database_1")"
+as_user_1 POST /buckets '{"name": "l5-photos-1"}' >/dev/null
+check "account 1's owner makes a bucket" 201 "$(status)"
+key_1_s3="$(as_user_1 POST /storage-keys '{}')"
+check "  ... and an access key to it" 201 "$(status)"
+key_1_s3_id="$(jq -r .id <<<"$key_1_s3")"
+key_1_s3_secret="$(jq -r .secretAccessKey <<<"$key_1_s3")"
 for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
   method="${route%% *}"
   template="${route#* }"
@@ -765,6 +880,55 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 DELETE "/members/invitations/$invitation_1" >/dev/null
       check "$route: account 2 can't cancel account 1's invitation" "404 Invitation $invitation_1 not found" "$(status) $(message)"
       ;;
+    "GET /buckets")
+      listed="$(as_user_2 GET /buckets | jq 'map(select(.name == "l5-photos-1")) | length')"
+      check "$route: account 2's list doesn't show account 1's bucket" "200 0" "$(status) $listed"
+      ;;
+    "POST /buckets")
+      as_user_2 POST /buckets '{"name": "l5-photos-1"}' >/dev/null
+      check "$route: account 2 can't take the name of account 1's bucket" '409 The bucket name "l5-photos-1" is taken: bucket names are unique across FF, as on AWS' "$(status) $(message)"
+      as_user_2 POST /buckets '{"name": "l5-photos-2"}' >/dev/null
+      check "  ... and makes one of its own, which account 1's list doesn't show" "201 0" "$(status) $(as_user_1 GET /buckets | jq 'map(select(.name == "l5-photos-2")) | length')"
+      ;;
+    "GET /buckets/{name}" | "DELETE /buckets/{name}")
+      as_user_2 "$method" /buckets/l5-photos-1 >/dev/null
+      check "$route: account 2 gets 404 for account 1's bucket" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
+      check "  ... which account 1 still has" "l5-photos-1 200" "$(as_user_1 GET /buckets/l5-photos-1 | jq -r .name) $(status)"
+      ;;
+    "GET /buckets/{name}/metrics")
+      as_user_2 GET /buckets/l5-photos-1/metrics >/dev/null
+      check "$route: account 2 gets 404 for account 1's bucket's metrics" '404 The account has no bucket l5-photos-1' "$(status) $(message)"
+      check "  ... which account 1 reads" "true 200" "$(as_user_1 GET /buckets/l5-photos-1/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
+      ;;
+    "GET /storage-keys")
+      listed="$(as_user_2 GET /storage-keys | jq --arg id "$key_1_s3_id" 'map(select(.id == $id)) | length')"
+      check "$route: account 2's list doesn't show account 1's key" "200 0" "$(status) $listed"
+      ;;
+    "POST /storage-keys")
+      key_2_s3="$(as_user_2 POST /storage-keys '{}')"
+      check "$route: user 2 makes account 2's own key, which account 1's list doesn't show" "201 0" \
+        "$(status) $(as_user_1 GET /storage-keys | jq --arg id "$(jq -r .id <<<"$key_2_s3")" 'map(select(.id == $id)) | length')"
+      ;;
+    "DELETE /storage-keys/{id}")
+      as_user_2 DELETE "/storage-keys/$key_1_s3_id" >/dev/null
+      check "$route: account 2 can't revoke account 1's key: 404" "404 The account has no access key $key_1_s3_id" "$(status) $(message)"
+      check "  ... which still opens account 1's bucket" accepted "$(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1)"
+      ;;
+    "GET /databases")
+      listed="$(as_user_2 GET /databases | jq --arg id "$db_1" 'map(select(.id == $id)) | length')"
+      check "$route: account 2's list doesn't show account 1's database" "200 0" "$(status) $listed"
+      ;;
+    "POST /databases")
+      db_2="$(as_user_2 POST /databases '{"name": "l5-one"}' | jq -r .id)"
+      check "$route: user 2 makes account 2's own database" 201 "$(status)"
+      check "  ... which account 1's list doesn't show" 0 "$(as_user_1 GET /databases | jq --arg id "$db_2" 'map(select(.id == $id)) | length')"
+      ;;
+    "GET /databases/{id}" | "DELETE /databases/{id}" | "POST /databases/{id}/password" | "GET /databases/{id}/metrics")
+      as_user_2 "$method" "${template//\{id\}/$db_1}" >/dev/null
+      check "$route: account 2 gets 404 for account 1's database" "404 Database $db_1 not found" "$(status) $(message)"
+      database_now="$(as_user_1 GET "/databases/$db_1")"
+      check "  ... which account 1 still has, its password unchanged" "200 active 1" "$(status) $(jq -r .status <<<"$database_now") $(data_db_psql "$conn_1" 'select 1')"
+      ;;
     "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
       as_user_2 "$method" "/alarms/$alarm_1" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
       check "$route: account 2 gets 404 for account 1's alarm" "404 Alarm $alarm_1 not found" "$(status) $(message)"
@@ -805,6 +969,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "POST /alarms")
       as_user_2 POST /alarms "$(alarm_body "$fn_1")" >/dev/null
       check "$route: account 2 can't watch account 1's function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
+      as_user_2 POST /alarms '{"name": "l5", "bucketName": "l5-photos-1", "metric": "5xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor account 1's bucket" "404 The account has no bucket l5-photos-1" "$(status) $(message)"
       ;;
     "POST /packages")
       upload_package "$api_oidc" "$work/package-b.zip" -H "Authorization: Bearer $token_2" -H "X-FF-Account: ${account_2:-}" >/dev/null
@@ -866,6 +1032,14 @@ with_token "$key_1" GET "/functions/$fn_1/logs" >/dev/null
 check "a key without logs:read can't read a function's logs (P-40)" "403 This API key lacks the scope logs:read" "$(status) $(message)"
 with_token "$key_1" GET /billing/pro-formas >/dev/null
 check "a key without usage:read can't list them" "403 This API key lacks the scope usage:read" "$(status) $(message)"
+with_token "$key_1" GET /databases >/dev/null
+check "a key without databases:read can't list the account's databases" "403 This API key lacks the scope databases:read" "$(status) $(message)"
+with_token "$key_1" POST /databases '{"name": "by-key"}' >/dev/null
+check "nor make one without databases:write" "403 This API key lacks the scope databases:write" "$(status) $(message)"
+with_token "$key_1" GET /buckets >/dev/null
+check "a key without storage:read can't list the account's buckets" "403 This API key lacks the scope storage:read" "$(status) $(message)"
+with_token "$key_1" POST /buckets '{"name": "l5-by-key"}' >/dev/null
+check "nor make one without storage:write" "403 This API key lacks the scope storage:write" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 me_key="$(with_token "$key_1" GET /me)"
@@ -960,7 +1134,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
@@ -1095,17 +1269,34 @@ check "the operator moves account 1 to a larger plan, and its quota follows at o
   "$(status) $(jq -r .account.planId <<<"$moved") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
 with_token "$operator_token" PUT "/admin/accounts/$account_1/plan" '{"planId": "imaginary", "reason": "l5 tries"}' >/dev/null
 check "a plan that doesn't exist is refused" "404 Plan imaginary not found" "$(status) $(message)"
-# Where an account's NetworkPolicy lets its functions go beyond DNS: an address range, and how many ranges it keeps
-# out (FF's own network, the cloud's metadata addresses); "none" when only DNS.
+# Where an account's NetworkPolicy lets its functions go beyond DNS and FF's services, on any port: an address range,
+# and how many ranges it keeps out (FF's own network, the cloud's metadata addresses); "none" when nowhere.
 internet_rule() { # <account>
   kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
-    jq -r '[.spec.egress[].to[]?.ipBlock | select(.) | "\(.cidr) except \(.except | length)"] | if length == 0 then "none" else join(",") end'
+    jq -r '[.spec.egress[] | select(.ports == null) | .to[]?.ipBlock | select(.) | "\(.cidr) except \(.except | length)"] | if length == 0 then "none" else join(",") end'
 }
-check "account 1's functions reach nothing beyond DNS, as every account starts" none "$(internet_rule "$account_1")"
+# FF's services the account's functions reach whatever its internet access, each address and its one port.
+service_rules() { # <account>
+  kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
+    jq -r '[.spec.egress[] | select(.ports != null and (.to | any(.ipBlock != null))) | "\(.to[].ipBlock.cidr):\(.ports[0].port)"] | join(",")'
+}
+check "account 1's functions reach nothing beyond DNS on any port, as every account starts" none "$(internet_rule "$account_1")"
+check "but customers' database server, on its port only, whatever the account's internet access (ADR 0008)" "10.199.2.10/32:5432" "$(service_rules "$account_1")"
 egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '{"internetEgress": true, "reason": "l5: calls a payment API"}')"
 check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out" "200 true 0.0.0.0/0 except 6" \
   "$(status) $(jq -r .account.internetEgress <<<"$egress") $(internet_rule "$account_1")"
 check "and account 2's functions still reach nothing beyond DNS" none "$(internet_rule "$account_2")"
+storage="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": false, "reason": "l5: files shared against the terms"}')"
+check "the operator turns account 1's databases and buckets off: its database's user can't log in, and its members read why in GET /me" \
+  "200 suspended true l5: files shared against the terms" \
+  "$(status) $(jq -r --arg id "$db_1" '.databases[] | select(.id == $id) | .status' <<<"$storage") $( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false) $(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .storageDisabledReason')"
+as_user_1 POST /databases '{"name": "l5-while-off"}' >/dev/null
+check "  ... and no database is made meanwhile" "403 FF turned this account's databases and buckets off: l5: files shared against the terms" "$(status) $(message)"
+check "  ... nor a bucket, and its keys answer AccountProblem, saying why" "403 refused AccountProblem true" \
+  "$(as_user_1 POST /buckets '{"name": "l5-while-off"}' >/dev/null; status) $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1) $(grep -q 'files shared against the terms' "$work/s3.err" && echo true || echo false)"
+with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": true, "reason": "l5: cleared with the owner"}' >/dev/null
+check "  ... on again: the user logs in, the key opens its bucket, and account 1's log names both, as FF's" "200 1 accepted account.storage,account.storage" \
+  "$(status) $(data_db_psql "$conn_1" 'select 1') $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1) $(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action == "account.storage") | .action] | join(",")')"
 plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
   "$(jq -cn --argjson limits "$beta_limits" '{limits: ($limits | .quota = {pods: 32, cpu: "16", memory: "16Gi"}), reason: "l5: pilots need more"}')")"
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
@@ -1191,22 +1382,27 @@ check "its owner reads each look in the account's audit log, as FF's, with the r
 
 echo "== the operator's price books (P-73)"
 books="$(with_token "$operator_token" GET /admin/price-books)"
-check "the first price book is active: AWS's prices at the BCT's rate" "200 1 active aws-lambda 3.0080" \
-  "$(status) $(jq -r '"\(length) \(.[0].status) \(.[0].document.source.kind) \(.[0].document.source.usdRate)"' <<<"$books")"
+check "the first price book is active: AWS's prices at the BCT's rate; the migrations' second, with databases' and buckets' prices, starts next month" \
+  "200 2 active aws-lambda 3.0080 scheduled 0.34592" \
+  "$(status) $(jq -r '"\(length) \(.[0].status) \(.[0].document.source.kind) \(.[0].document.source.usdRate) \(.[1].status) \(.[1].document.prices.databaseStorageGbMonth)"' <<<"$books")"
 first_book="$(jq -c '.[0].document' <<<"$books")"
+latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
-created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
-check "the operator adds a book for next year: scheduled, made by the operator" "201 scheduled true" \
+with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
+check "a book after one with databases' and buckets' prices is refused without them, each named" \
+  "400 9 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
+check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"
-with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: ($doc | .prices.requestsPerMillion = "1"), reason: "l5 tries"}')" >/dev/null
+with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: ($doc | .prices.requestsPerMillion = "1"), reason: "l5 tries"}')" >/dev/null
 check "a book that says AWS's prices, but isn't them, is refused" "400 prices.requestsPerMillion: must be 0.20 × 3.0080 = 0.6016" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
-preview="$(with_token "$operator_token" POST /admin/price-books/preview "$(jq -cn --argjson doc "$first_book" '{document: $doc}')")"
+preview="$(with_token "$operator_token" POST /admin/price-books/preview "$(jq -cn --argjson doc "$latest_book" '{document: $doc}')")"
 check "the operator previews it on last month, with no reason asked, as it changes nothing" "200 $(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m) TND" \
   "$(status) $(jq -r '"\(.month) \(.currency)"' <<<"$preview")"
 with_token "$operator_token" DELETE "/admin/price-books/$(jq -r '.[0].id' <<<"$books")" '{"reason": "l5 tries"}' >/dev/null
 check "the active book is never removed" 409 "$(status)"
 with_token "$operator_token" DELETE "/admin/price-books/$(jq -r .id <<<"$created")" '{"reason": "l5: not yet"}' >/dev/null
-check "a scheduled one is" "200 1" "$(status) $(with_token "$operator_token" GET /admin/price-books | jq length)"
+check "a scheduled one is" "200 2" "$(status) $(with_token "$operator_token" GET /admin/price-books | jq length)"
 echo "== bank transfers (P-35)"
 typed="$(tr 'A-Z' 'a-z' <<<"${ref_1//-/}")"
 found="$(with_token "$operator_token" GET "/admin/payments?reference=$typed")"
@@ -1380,7 +1576,7 @@ check "and the grants, as FF's, with their reasons (P-74)" "credit.promo:FF:l5: 
   "$(jq -r '[.entries[] | select(.action | startswith("credit.")) | "\(.action):\(.actorLabel):\(.details.reason)"] | reverse | join("|")' <<<"$log_invoices")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress account.storage account.storage support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -1388,7 +1584,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 24 account.approve,account.egress,account.plan,account.reactivate,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
+  "200 26 account.approve,account.egress,account.plan,account.reactivate,account.storage,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \
@@ -1446,6 +1642,8 @@ check "the owner's e-mail says when, and what is kept" "Your FF account is close
 check "and so does GET /me, for the console's banner" "$due_1" "$(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .dataDeletionDueAt')"
 as_user_1 GET "/functions/$fn_1" >/dev/null
 check "until then, its members still read its functions" 200 "$(status)"
+check "but its database's user can't log in any more (ADR 0008)" true \
+  "$( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false)"
 # The notice period passes.
 sql "UPDATE accounts SET data_deletion_due_at = now() WHERE id = '$account_1'" >/dev/null
 deleted=""
@@ -1462,6 +1660,10 @@ check "its functions are gone, with their history; the account itself stays, rea
   "$listed_status $listed_1 $(status) $(sql "SELECT count(*) FROM function_invocations WHERE function_id = '$fn_1'")"
 check "its namespace is gone from the cluster, its code from object storage, and its lines from the log store" "false empty 0" \
   "$(kubectl get namespace "$ns_1" >/dev/null 2>&1 && echo true || echo false) $([ -z "$(archived "$fn_1/code.ts")" ] && echo empty || echo kept) $(store_lines "$ns_1")"
+check "its database is gone from the server, with its user" "0 0" \
+  "$(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$(jq -r .database <<<"$database_1")') || ' ' || (select count(*) from pg_roles where rolname = '$(jq -r .user <<<"$database_1")')")"
+check "its bucket is gone, with its files, from FF's records and the store, and its key opens nothing" "0 0 refused InvalidAccessKeyId" \
+  "$(sql "SELECT count(*) FROM buckets WHERE account_id = '$account_1'") $(sql "SELECT count(*) FROM storage_keys WHERE account_id = '$account_1' AND revoked_at IS NULL") $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1)"
 check "its usage records, payments and invoices are kept, as the law requires" "$kept_1" \
   "$(sql "SELECT (SELECT count(*) FROM usage_records WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM payments WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM invoices WHERE account_id = '$account_1')")"
 check "its owner reads in its audit log what FF deleted, as FF" "function.delete:function:$fn_1:FF account.data_delete:account:$account_1:FF" \

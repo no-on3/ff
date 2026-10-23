@@ -7,6 +7,10 @@ import BalanceProvider from '../components/BalanceProvider';
 import Billing from '../components/Billing';
 import CreateFunction from '../components/CreateFunction';
 import CreditBanner from '../components/CreditBanner';
+import DatabaseDetail from '../components/DatabaseDetail';
+import BucketDetail from '../components/BucketDetail';
+import Buckets from '../components/Buckets';
+import Databases from '../components/Databases';
 import FunctionDetail from '../components/FunctionDetail';
 import FunctionList from '../components/FunctionList';
 import Members from '../components/Members';
@@ -50,6 +54,10 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
               <Route path="/functions" element={<FunctionList />} />
               <Route path="/functions/new" element={<CreateFunction />} />
               <Route path="/functions/:id" element={<FunctionDetail />} />
+              <Route path="/databases" element={<Databases />} />
+              <Route path="/databases/:id" element={<DatabaseDetail />} />
+              <Route path="/buckets" element={<Buckets />} />
+              <Route path="/buckets/:name" element={<BucketDetail />} />
               <Route path="/usage" element={<Usage />} />
               <Route path="/billing" element={<Billing />} />
               <Route path="/billing/pro-formas/:id" element={<ProFormaPage />} />

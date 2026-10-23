@@ -1,5 +1,5 @@
 import { AccountEstimate } from '../billing/pricing.service';
-import { MonthlyUsageView, UsageMonth } from './usage.dto';
+import { BucketMonth, DatabaseMonth, MonthlyUsageView, UsageMonth } from './usage.dto';
 
 const NO_CALLS = { requests: 0, billedMs: 0, gbSeconds: '0', throttled: 0, platformErrors: 0, lost: 0 };
 
@@ -11,15 +11,30 @@ export function unlisted(month: UsageMonth, estimate: AccountEstimate | null): s
 }
 
 /**
- * The month's usage with its estimated cost (P-30): each function's, before
- * the free tier, and the account's estimate, each amount rounded once to the
- * currency's minor unit. `names` names the unlisted functions that still
- * exist; the others were deleted.
+ * The month's usage with its estimated cost (P-30): each function's, each
+ * database's and each bucket's, before the free tier, and the account's
+ * estimate, each amount rounded once to the currency's minor unit. `names`
+ * names the unlisted functions that still exist; the others were deleted.
  */
-export function withEstimate(month: UsageMonth, estimate: AccountEstimate | null, names: Map<string, string>): MonthlyUsageView {
-  if (!estimate) return { ...month, functions: month.functions.map((fn) => ({ ...fn, cost: null })), estimate: null };
+export function withEstimate(
+  month: UsageMonth,
+  estimate: AccountEstimate | null,
+  names: Map<string, string>,
+  databases: DatabaseMonth[] = [],
+  buckets: BucketMonth[] = [],
+): MonthlyUsageView {
+  if (!estimate) {
+    return {
+      ...month,
+      functions: month.functions.map((fn) => ({ ...fn, cost: null })),
+      databases: databases.map((database) => ({ ...database, cost: null })),
+      buckets: buckets.map((bucket) => ({ ...bucket, cost: null })),
+      estimate: null,
+    };
+  }
   const places = estimate.exponent;
   const cost = (functionId: string) => estimate.functions.get(functionId)?.total.toFixed(places) ?? (0).toFixed(places);
+  const stored = (resourceId: string) => estimate.resources.get(resourceId)?.total.toFixed(places) ?? (0).toFixed(places);
   return {
     ...month,
     functions: [
@@ -32,6 +47,8 @@ export function withEstimate(month: UsageMonth, estimate: AccountEstimate | null
         cost: cost(functionId),
       })),
     ],
+    databases: databases.map((database) => ({ ...database, cost: stored(database.databaseId) })),
+    buckets: buckets.map((bucket) => ({ ...bucket, cost: stored(bucket.bucketId) })),
     estimate: {
       currency: estimate.currency,
       usage: estimate.usage.toFixed(places),

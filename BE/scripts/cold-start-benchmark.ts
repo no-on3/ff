@@ -143,6 +143,9 @@ async function main(): Promise<void> {
     egressInternet: false,
     ingressAllowCidrs: [],
     logStoreDeleteKeyFile: '/nonexistent',
+    // The benchmark's functions reach no service of the platform.
+    platformEgress: [],
+    dataDbCa: '',
   };
   const client = new KubeClient({ server: settings.apiUrl, tokenFile: settings.tokenFile, caFile: settings.caFile });
   const orchestrator = new KubernetesOrchestrator(settings, client);

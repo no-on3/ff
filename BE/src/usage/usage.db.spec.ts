@@ -18,7 +18,7 @@ import { InvokeResult, Orchestrator } from '../orchestrator/orchestrator.types';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
 import { LOST_MESSAGE, UsageService } from './usage.service';
-import { memoryEnvironments, noPackages } from '../functions/test-fixtures';
+import { memoryEnvironments, noFunctionKeys, noPackages } from '../functions/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '300000000001';
@@ -122,6 +122,7 @@ run('usage records (L2, P-20)', () => {
       { admit: async () => undefined } as never, // D9's balance check (P-33): every call admitted
       memoryEnvironments(),
       ...noPackages(),
+      noFunctionKeys(),
     );
   });
 
@@ -374,8 +375,17 @@ run('usage records (L2, P-20)', () => {
       'capacity_samples_2031_02',
       'capacity_samples_2031_03',
       'capacity_samples_2031_04',
+      'database_samples_2031_02',
+      'database_samples_2031_03',
+      'database_samples_2031_04',
+      'bucket_samples_2031_02',
+      'bucket_samples_2031_03',
+      'bucket_samples_2031_04',
+      'storage_request_counts_2031_02',
+      'storage_request_counts_2031_03',
+      'storage_request_counts_2031_04',
     ]);
-    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(6); // again: nothing to do
+    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(15); // again: nothing to do
 
     const fn = await newFunction();
     const at = async (startedAt: string, requestId: string) => {

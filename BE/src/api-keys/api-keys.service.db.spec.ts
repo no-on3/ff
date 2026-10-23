@@ -142,16 +142,23 @@ run('API keys (L2, P-13)', () => {
   it('records when a key was last used, at most once a minute', async () => {
     const accountId = await account();
     const { key, id } = await service.create(accountId, owner.id, { name: 'k', scopes: ['functions:read'] });
-    const lastUsed = async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50)); // the write doesn't hold up the request
-      return (await db.dataSource.getRepository(ApiKey).findOneByOrFail({ id })).lastUsedAt?.toISOString();
+    // The write doesn't hold up the request: the value, once it is the one expected, 2 s at most.
+    const lastUsed = async (expected: string) => {
+      let value: string | undefined;
+      for (let tries = 0; tries < 40; tries++) {
+        value = (await db.dataSource.getRepository(ApiKey).findOneByOrFail({ id })).lastUsedAt?.toISOString();
+        if (value === expected) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return value;
     };
 
     await service.authenticate(key, new Date('2026-10-17T10:00:00Z'));
-    expect(await lastUsed()).toBe('2026-10-17T10:00:00.000Z');
+    expect(await lastUsed('2026-10-17T10:00:00.000Z')).toBe('2026-10-17T10:00:00.000Z');
     await service.authenticate(key, new Date('2026-10-17T10:00:30Z'));
-    expect(await lastUsed()).toBe('2026-10-17T10:00:00.000Z');
+    await new Promise((resolve) => setTimeout(resolve, 200)); // a write within the minute would have come by now
+    expect(await lastUsed('2026-10-17T10:00:00.000Z')).toBe('2026-10-17T10:00:00.000Z');
     await service.authenticate(key, new Date('2026-10-17T10:01:00Z'));
-    expect(await lastUsed()).toBe('2026-10-17T10:01:00.000Z');
+    expect(await lastUsed('2026-10-17T10:01:00.000Z')).toBe('2026-10-17T10:01:00.000Z');
   });
 });

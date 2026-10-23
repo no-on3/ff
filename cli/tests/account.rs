@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 fn me(egress: bool) -> Value {
     json!({ "user": null, "key": { "id": "0123456789ab", "name": "ci", "scopes": ["usage:read"] },
             "accounts": [{ "id": "123456789012", "name": "Acme", "status": "active", "role": "developer",
-                           "plan": { "id": "beta", "name": "Beta", "limits": { "functions": 25, "memoryMb": 1024, "invokesPerSecond": 100 } },
+                           "plan": { "id": "beta", "name": "Beta", "limits": { "functions": 25, "memoryMb": 1024, "invokesPerSecond": 100,
+                                                                             "databases": 1, "databaseStorageMb": 1024, "databaseConnections": 10,
+                                                                             "buckets": 5, "bucketStorageMb": 5120, "storageRequestsPerSecond": 100, "maxObjectMb": 5120 } },
                            "internetEgress": egress, "dataDeletionDueAt": null, "dataDeletedAt": null }] })
 }
 
@@ -32,7 +34,8 @@ fn account_says_its_plan_and_whether_its_functions_reach_the_internet() {
 
     ff(&dir).arg("account").assert().success().stdout(
         "account      123456789012 \"Acme\"\nstatus       active\nrole         developer\n\
-         plan         Beta: 25 functions, 1024 MB of memory a function at most, 100 invocations a second\n\
+         plan         Beta: 25 functions, 1024 MB of memory a function at most, 100 invocations a second, 1 database, 1024 MB a database, \
+         10 sessions a database, 5 buckets, 5120 MB in the buckets, 100 requests to the buckets a second, 5120 MB a file in one upload\n\
          internet     off: its functions reach FF's services only, and a call out fails; FF's operator turns it on\n",
     );
     ff(&dir)
@@ -72,6 +75,45 @@ fn usage_shows_each_function_the_total_and_the_estimate() {
          estimated cost: 0.000 TND (0.852 TND of usage, -0.852 of free tier)\n",
     );
     assert_eq!(api.requests()[0].path, "/usage?month=2026-10");
+}
+
+#[test]
+fn usage_shows_each_database_after_the_functions() {
+    let mut month = usage();
+    month["databases"] = json!([{ "databaseId": "d1", "name": "orders", "deleted": false, "hours": 312, "gbMonths": "0.003182", "sizeBytes": 7_634_423, "cost": "0.001" },
+                                { "databaseId": "d2", "name": "audit", "deleted": true, "hours": 2, "gbMonths": "0.000021", "sizeBytes": 8_000_000, "cost": "0.000" }]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("total          15        3.14375     1           0.852\nDATABASE         HOURS  GB-MONTHS  COST\norders           312    0.003182   0.001\naudit (deleted)  2      0.000021   0.000\nestimated cost:"),
+        "{text}"
+    );
+}
+
+#[test]
+fn usage_shows_each_bucket_after_the_databases_its_requests_by_s3s_classes_and_what_it_sent_out() {
+    let mut month = usage();
+    month["buckets"] = json!([
+        { "bucketId": "b1", "name": "photos", "deleted": false, "hours": 312, "gbMonths": "0.215231", "sizeBytes": 161_480_253, "objects": 1204,
+          "tier1Requests": 2310, "tier2Requests": 48920, "bytesDownloaded": 2_831_155_200u64, "bytesUploaded": 734_003_200, "cost": "0.108" },
+        // As an API before what buckets sent out was shown answers: nothing sent out.
+        { "bucketId": "b2", "name": "tmp", "deleted": true, "hours": 0, "gbMonths": "0", "sizeBytes": 0, "objects": 0, "tier1Requests": 0, "tier2Requests": 5, "cost": "0.000" }
+    ]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "total          15        3.14375     1           0.852\nBUCKET         GB-MONTHS  PUT, LIST…  GET…   SENT OUT  COST\n\
+             photos         0.215231   2310        48920  2.6 GB    0.108\ntmp (deleted)  0          0           5      0 MB      0.000\nestimated cost:"
+        ),
+        "{text}"
+    );
 }
 
 #[test]

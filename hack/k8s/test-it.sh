@@ -24,6 +24,14 @@ if curl -s -m 5 -o /dev/null https://1.1.1.1; then
 else
   echo "no internet: the egress case is skipped"
 fi
+# Customers' database server's case runs where the development one runs (hack/k8s/data-db-up.sh), the node joined.
+data_db="$(docker compose --project-directory "$FF_REPO_ROOT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile data ps -q data-db 2>/dev/null || true)"
+if [ -n "$data_db" ] && [ -f "$FF_REPO_ROOT/hack/.data-db/ca.crt" ]; then
+  export K8S_IT_DATA_DB="${FF_DATA_DB_ADDRESS:-10.199.0.10}" K8S_IT_DATA_DB_CA="$FF_REPO_ROOT/hack/.data-db/ca.crt"
+  echo "customers' database server found: its case runs"
+else
+  echo "no customers' database server: its case is skipped (hack/k8s/data-db-up.sh starts it)"
+fi
 # The log pipeline's suite runs where the pipeline is installed (hack/k8s/logging-up.sh).
 if kubectl -n ff-system get statefulset victoria-logs >/dev/null 2>&1; then
   export K8S_IT_LOGGING=1

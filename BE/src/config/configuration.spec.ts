@@ -37,6 +37,7 @@ const production: Env = {
   K8S_RUNTIME_CLASS: 'gvisor',
   FF_ENCRYPTION_KEYS_FILE: keysFile,
   FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
+  FF_STORAGE_BASE: 'https://s3.ff.example',
   FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
 
@@ -174,6 +175,78 @@ describe('configuration', () => {
 
     it('never repeats the password in a refusal', () => {
       expect(problems({ ...dev, FF_CODE_REGISTRY: 'http://127.0.0.1:5056', FF_CODE_REGISTRY_PASSWORD: 'hunter2' }).join(' ')).not.toContain('hunter2');
+    });
+  });
+
+  describe("customers' database server (ADR 0008)", () => {
+    const server: Env = { ...dev, FF_DATA_DB_HOST: '10.199.0.10', FF_DATA_DB_ADMIN_PASSWORD: 'ff-data-admin-dev', FF_DATA_DB_CIDRS: '10.199.0.10/32' };
+    let dir: string;
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-data-db-'));
+      fs.writeFileSync(path.join(dir, 'ca.crt'), '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n');
+    });
+
+    afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    it('has none unless FF_DATA_DB_HOST names it: functions then reach nothing more', () => {
+      const config = configuration(dev);
+
+      expect(config.dataDb).toBeNull();
+      expect(config.kubernetes).toMatchObject({ platformEgress: [], dataDbCa: '' });
+    });
+
+    it("reaches it as named, on 5432, as ff_admin; functions at its addresses, on its port; no CA for a public certificate", () => {
+      const config = configuration(server);
+
+      expect(config.dataDb).toEqual({
+        host: '10.199.0.10',
+        port: 5432,
+        adminHost: '10.199.0.10',
+        adminUser: 'ff_admin',
+        adminPassword: 'ff-data-admin-dev',
+        cidrs: ['10.199.0.10/32'],
+      });
+      expect(config.kubernetes).toMatchObject({ platformEgress: [{ cidrs: ['10.199.0.10/32'], port: 5432 }], dataDbCa: '' });
+    });
+
+    it('takes another port, another address for the backend, and the CA of its certificate, which functions get too', () => {
+      const config = configuration({
+        ...server,
+        FF_DATA_DB_HOST: 'db.ff.example',
+        FF_DATA_DB_PORT: '6432',
+        FF_DATA_DB_ADMIN_HOST: '10.0.5.4',
+        FF_DATA_DB_CIDRS: '203.0.113.7/32,10.0.5.4/32',
+        FF_DATA_DB_CA_FILE: path.join(dir, 'ca.crt'),
+      });
+
+      expect(config.dataDb).toMatchObject({ host: 'db.ff.example', port: 6432, adminHost: '10.0.5.4', ca: expect.stringContaining('BEGIN CERTIFICATE') });
+      expect(config.kubernetes.platformEgress).toEqual([{ cidrs: ['203.0.113.7/32', '10.0.5.4/32'], port: 6432 }]);
+      expect(config.kubernetes.dataDbCa).toContain('BEGIN CERTIFICATE');
+    });
+
+    it("needs the backend role's password and the addresses functions reach it at", () => {
+      expect(problems({ ...dev, FF_DATA_DB_HOST: '10.199.0.10' })).toEqual([
+        "FF_DATA_DB_ADMIN_PASSWORD is required when FF_DATA_DB_HOST is set: it is the backend's role's on customers' database server",
+        "FF_DATA_DB_CIDRS is required when FF_DATA_DB_HOST is set: functions reach customers' database server only at these addresses, through their NetworkPolicy",
+      ]);
+    });
+
+    it('refuses its other settings without it, a CA it cannot read, and what is no host or role', () => {
+      expect(problems({ ...dev, FF_DATA_DB_ADMIN_PASSWORD: 'x', FF_DATA_DB_CIDRS: '10.199.0.10/32' })).toEqual([
+        "FF_DATA_DB_ADMIN_PASSWORD is set, but FF_DATA_DB_HOST is not: it names customers' database server",
+        "FF_DATA_DB_CIDRS is set, but FF_DATA_DB_HOST is not: it names customers' database server",
+      ]);
+      expect(problems({ ...server, FF_DATA_DB_CA_FILE: '/nonexistent/ca.crt' })).toEqual([expect.stringContaining('FF_DATA_DB_CA_FILE cannot be read: /nonexistent/ca.crt')]);
+      expect(problems({ ...server, FF_DATA_DB_HOST: 'db.ff.example:5432' })).toEqual([expect.stringContaining('FF_DATA_DB_HOST must be a host name or an IP address')]);
+      expect(problems({ ...server, FF_DATA_DB_ADMIN_USER: 'FF-Admin' })).toEqual([expect.stringContaining('FF_DATA_DB_ADMIN_USER must be a PostgreSQL role name')]);
+    });
+
+    it('refuses the development password in production, and never repeats a password', () => {
+      const found = problems({ ...production, ...server, NODE_ENV: 'production', FF_AUTH_MODE: 'oidc', FF_DEV_ACCOUNT_ID: undefined });
+
+      expect(found).toEqual(['FF_DATA_DB_ADMIN_PASSWORD must not be the development default when NODE_ENV=production']);
+      expect(problems({ ...dev, FF_DATA_DB_ADMIN_PASSWORD: 'hunter2' }).join(' ')).not.toContain('hunter2');
     });
   });
 
@@ -319,6 +392,68 @@ describe('configuration', () => {
 
     it.each(['https://fn.example.tn/path', 'ftp://fn.example.tn', 'https://localhost', 'fn.example.tn'])('refuse %s as where they live', (base) => {
       expect(problems({ ...dev, FF_FUNCTION_URL_BASE: base })).toEqual([expect.stringMatching(/^FF_FUNCTION_URL_BASE must be an origin whose host has a dot/)]);
+    });
+  });
+
+  describe("buckets' S3 front door", () => {
+    it('is served on port 3002, apart from the API, at s3.localhost in development, naming FF\'s region', () => {
+      expect(configuration(dev).storage).toEqual({ port: 3002, base: 'http://s3.localhost:3002', region: 'tn-tunis-1', functionEndpoint: '' });
+    });
+
+    it("gives functions no key of their own unless it has an address for them, and they reach nothing more", () => {
+      expect(configuration(dev).storage.functionEndpoint).toBe('');
+      expect(configuration(dev).kubernetes.platformEgress).toEqual([]);
+    });
+
+    it("is reached by functions at an IP address: of a backend outside the cluster at its addresses, on the endpoint's port", () => {
+      const config = configuration({ ...dev, FF_STORAGE_FUNCTION_ENDPOINT: 'http://172.18.0.1:3002/', FF_STORAGE_FUNCTION_CIDRS: '172.18.0.1/32' });
+
+      expect(config.storage.functionEndpoint).toBe('http://172.18.0.1:3002');
+      expect(config.kubernetes.platformEgress).toEqual([{ cidrs: ['172.18.0.1/32'], port: 3002 }]);
+      expect(configuration({ ...dev, FF_STORAGE_FUNCTION_ENDPOINT: 'https://[fd00::5]', FF_STORAGE_FUNCTION_CIDRS: 'fd00::5/128' }).kubernetes.platformEgress).toEqual([
+        { cidrs: ['fd00::5/128'], port: 443 },
+      ]);
+    });
+
+    it("is reached by functions at a Service's fixed address: of the backend's own pods, on the front door's port, beside the database server", () => {
+      const config = configuration({
+        ...dev,
+        FF_STORAGE_PORT: '3102',
+        FF_STORAGE_FUNCTION_ENDPOINT: 'http://10.43.0.251:3002',
+        FF_DATA_DB_HOST: '10.199.0.10',
+        FF_DATA_DB_ADMIN_PASSWORD: 'ff-data-admin-dev',
+        FF_DATA_DB_CIDRS: '10.199.0.10/32',
+      });
+
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: ['10.199.0.10/32'], port: 5432 },
+        { cidrs: [], port: 3102 },
+      ]);
+    });
+
+    it.each(['http://s3.ff.internal:3002', 'http://10.43.0.251:3002/s3', 'ftp://10.43.0.251'])("refuses %s as functions' endpoint: an origin at an IP address", (endpoint) => {
+      expect(problems({ ...dev, FF_STORAGE_FUNCTION_ENDPOINT: endpoint })).toEqual([expect.stringMatching(/^FF_STORAGE_FUNCTION_ENDPOINT must be an origin whose host is an IP address/)]);
+    });
+
+    it("refuses functions' endpoint without the front door, and their addresses without the endpoint", () => {
+      expect(problems({ ...dev, FF_STORAGE_PORT: '0', FF_STORAGE_FUNCTION_ENDPOINT: 'http://10.43.0.251:3002' })).toEqual([
+        "FF_STORAGE_FUNCTION_ENDPOINT is set, but FF_STORAGE_PORT is 0: functions' keys reach buckets through the S3 front door, which isn't running",
+      ]);
+      expect(problems({ ...dev, FF_STORAGE_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
+        "FF_STORAGE_FUNCTION_CIDRS is set, but FF_STORAGE_FUNCTION_ENDPOINT is not: it names where functions reach buckets' S3 front door",
+      ]);
+    });
+
+    it('takes an origin with a dot in its host, a trailing slash dropped, and port 0 for none', () => {
+      expect(configuration({ ...production, FF_STORAGE_BASE: 'https://s3.example.tn/', FF_STORAGE_PORT: '0' }).storage).toMatchObject({ port: 0, base: 'https://s3.example.tn' });
+    });
+
+    it.each(['https://s3.example.tn/path', 'ftp://s3.example.tn', 'https://localhost', 's3.example.tn'])('refuses %s as its endpoint', (base) => {
+      expect(problems({ ...dev, FF_STORAGE_BASE: base })).toEqual([expect.stringMatching(/^FF_STORAGE_BASE must be an origin whose host has a dot/)]);
+    });
+
+    it('is reached over TLS in production', () => {
+      expect(problems({ ...production, FF_STORAGE_BASE: 'http://s3.example.tn' })).toEqual([expect.stringMatching(/^FF_STORAGE_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
     });
   });
 

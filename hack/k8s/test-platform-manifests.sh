@@ -13,8 +13,10 @@
 #     mounted from their Secret where its settings look;
 #   - the production realm up to date with the development realm;
 #   - function URLs: the edge's function domain the backend's, the backend's port for them reached by the edge alone;
-#   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image, both ways to function URLs'
-#     certificates;
+#   - buckets' S3 front door: the edge's storage host the backend's, the backend's port for it reached by the edge
+#     alone, both of its hosts sent there;
+#   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image, both ways to function URLs' and
+#     buckets' certificates;
 #   - the code registry: Zot's settings valid for its pinned image, where its volume and its users' Secret are
 #     mounted, its fixed address and port the backend's settings name, and the backend alone reaching it;
 #   - all of it valid for the dev cluster's API, no field unknown (a server dry run, which writes nothing).
@@ -209,19 +211,59 @@ check "the edge sends them there, function URLs' hosts and customers' own domain
   "ask http://ff-backend.ff-system.svc.cluster.local:$url_port/tls/allowed 2" \
   "$(grep -oE 'ask http://[^ ]+' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$url_port$" "$platform/edge/Caddyfile")"
 
+echo "== buckets' S3 front door"
+# The edge serves the backend's S3 endpoint and each bucket's host under it, on the backend's port for them, which
+# nothing else reaches; certificates on demand are asked at function URLs' port, the edge's one address for them all.
+check "the edge's storage host is the host of the backend's FF_STORAGE_BASE" "s3.example.tn s3.example.tn" \
+  "$(sed -n 's/^FF_STORAGE_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_STORAGE_BASE=https://##p' "$platform/backend.env")"
+storage_port="$(sed -n 's/^FF_STORAGE_PORT=//p' "$platform/backend.env")"
+# Functions reach it too, with their own keys, at the fixed address of a Service of its own: the tenants' function
+# pods on that port alone, which their NetworkPolicy opens on the backend's pods, as no FF_STORAGE_FUNCTION_CIDRS says.
+check "the backend's port for buckets in its Service, reached by the edge and tenants' functions alone" "$storage_port storage edge,functions" \
+  "$(python3 - "$work/platform.yaml" "$storage_port" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+port = int(sys.argv[2])
+named = lambda kind, name: next(d for d in docs if d['kind'] == kind and d['metadata']['name'] == name)
+container = next(p for p in named('Deployment', 'ff-backend')['spec']['template']['spec']['containers'][0]['ports'] if p['containerPort'] == port)
+service = next(p for p in named('Service', 'ff-backend')['spec']['ports'] if p['targetPort'] == container['name'])
+def who(peers):
+    if all(peer.get('podSelector', {}).get('matchLabels', {}).get('app.kubernetes.io/name') == 'ff-edge' for peer in peers):
+        return 'edge'
+    tenants = {'app.kubernetes.io/managed-by': 'ff-controller'}
+    functions = {'app.kubernetes.io/name': 'ff-function'}
+    if all(peer.get('namespaceSelector', {}).get('matchLabels') == tenants and peer.get('podSelector', {}).get('matchLabels') == functions for peer in peers):
+        return 'functions'
+    return 'open'
+reaching = [who(rule['from']) for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if port in [p['port'] for p in rule['ports']]]
+others = [rule for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if who(rule['from']) == 'functions' and [p['port'] for p in rule['ports']] != [port]]
+print(service['port'], container['name'], ','.join(reaching) if not others else 'functions reach more')
+PY
+)"
+check "functions' address for it: the Service ff-storage's fixed one, on that port, which the backend names to their pods" \
+  "10.43.0.251:$storage_port storage http://10.43.0.251:$storage_port none" \
+  "$(python3 - "$work/platform.yaml" <<'PY'
+import sys, yaml
+service = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d['kind'] == 'Service' and d['metadata']['name'] == 'ff-storage')
+print(f"{service['spec']['clusterIP']}:{service['spec']['ports'][0]['port']} {service['spec']['ports'][0]['targetPort']}")
+PY
+) $(sed -n 's/^FF_STORAGE_FUNCTION_ENDPOINT=//p' "$platform/backend.env") $(grep -q '^FF_STORAGE_FUNCTION_CIDRS=.' "$platform/backend.env" && echo some || echo none)"
+check "the edge sends both of its hosts there" "1 1" \
+  "$(grep -c '^{\$FF_STORAGE_HOST}, \*\.{\$FF_STORAGE_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$storage_port$" "$platform/edge/Caddyfile")"
+
 echo "== the edge"
 docker build -q -t ff-edge:test "$FF_REPO_ROOT/deploy/edge" >/dev/null
 check "its image: Caddy 2.11.7 with the RFC 2136 DNS module, as the numeric user 65532" "v2.11.7 1 65532:65532" \
   "$(docker run --rm ff-edge:test caddy version | cut -d' ' -f1) $(docker run --rm ff-edge:test caddy list-modules | grep -c '^dns.providers.rfc2136$') $(docker image inspect ff-edge:test --format '{{.Config.User}}')"
-# Both ways to function URLs' certificates: one for the function domain by DNS, with a TSIG key as its Secret gives
-# it, or one per host on demand.
+# Both ways to function URLs' and buckets' certificates: one for the domain by DNS, with a TSIG key as its Secret
+# gives it, or one per host on demand.
 validated=""
 for mode in wildcard on-demand; do
   validated+="$(docker run --rm --read-only --tmpfs /tmp --tmpfs /data --cap-drop ALL --security-opt no-new-privileges --env-file "$platform/edge.env" \
-      -e FF_FUNCTION_URL_TLS="$mode" -e FF_DNS_TSIG_KEY="$(head -c 32 /dev/urandom | base64)" -v "$platform/edge/Caddyfile:/etc/caddy/Caddyfile:ro" \
+      -e FF_FUNCTION_URL_TLS="$mode" -e FF_STORAGE_TLS="$mode" -e FF_DNS_TSIG_KEY="$(head -c 32 /dev/urandom | base64)" -v "$platform/edge/Caddyfile:/etc/caddy/Caddyfile:ro" \
       ff-edge:test caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$work/validate-$mode.log" 2>&1; echo $?) "
 done
-check "its Caddyfile, with its settings, valid for Caddy, function URLs' certificates by DNS or on demand" "0 0 " "$validated"
+check "its Caddyfile, with its settings, valid for Caddy, function URLs' and buckets' certificates by DNS or on demand" "0 0 " "$validated"
 
 echo "== the code registry"
 # Zot's own check of its settings, in the image the Deployment pins, its storage and its users' file where the

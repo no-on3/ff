@@ -95,7 +95,63 @@ export interface AccountSummary {
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */
   dataDeletedAt: string | null;
+  /** When an operator turned its databases and buckets off; null while they are on. */
+  storageDisabledAt: string | null;
+  /** Why, which its members read too. */
+  storageDisabledReason: string | null;
+  /** The share of its plan's storage its buckets reached together at their last measure: at 100, uploads wait for room; null under 80%. */
+  bucketStorageNotice: 80 | 100 | null;
   owners: AccountPerson[];
+}
+
+/** One of the account's databases: its size and sessions now, as the server counts them; null when it couldn't be asked. */
+export interface AccountDatabase {
+  id: string;
+  name: string;
+  /** Its name on the server, and its user's (ff_ and 24 hexadecimal characters): what a restore of it names. */
+  database: string;
+  status: 'creating' | 'active' | 'read_only' | 'suspended' | 'deleting';
+  sizeBytes: number | null;
+  connections: number | null;
+  storageLimitMb: number;
+  createdAt: string;
+}
+
+/** The fields the API gives for each of them. */
+export const DATABASE_FIELDS = ['id', 'name', 'database', 'status', 'sizeBytes', 'connections', 'storageLimitMb', 'createdAt'] as const;
+
+/** One of the account's buckets: what it held at its last hourly measure, null before the first, and its name in the store. */
+export interface AccountBucket {
+  name: string;
+  /** Its bucket in the store (ff- and 24 hexadecimal characters), which says nothing of whose it is. */
+  storeName: string;
+  status: 'active' | 'deleting';
+  sizeBytes: number | null;
+  objects: number | null;
+  /** The hour of its last measure. */
+  measuredAt: string | null;
+  createdAt: string;
+}
+
+/** The fields the API gives for each of them. */
+export const BUCKET_FIELDS = ['name', 'storeName', 'status', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const;
+
+/** What the page says of the account's buckets together against its plan's storage. */
+export function bucketStorageLabel(account: Pick<AccountSummary, 'bucketStorageNotice'>): string {
+  if (account.bucketStorageNotice === 100) return "Full: they hold all of the plan's storage, and uploads wait for room";
+  if (account.bucketStorageNotice === 80) return "80% or more of the plan's storage";
+  return "Under 80% of the plan's storage";
+}
+
+/** A size in MB of 1,048,576 bytes, to a tenth: "7.3 MB"; "–" when unknown. */
+export function formatMegabytes(bytes: number | null): string {
+  if (bytes === null) return '–';
+  return `${(Math.round((bytes / 1_048_576) * 10) / 10).toLocaleString('en-US', { maximumFractionDigits: 1 })} MB`;
+}
+
+/** What the page says of the account's databases and buckets: on, or off since when and why. */
+export function storageLabel(account: Pick<AccountSummary, 'storageDisabledAt' | 'storageDisabledReason'>, when: (at: string) => string): string {
+  return account.storageDisabledAt ? `Off since ${when(account.storageDisabledAt)}: ${account.storageDisabledReason ?? ''}` : 'On';
 }
 
 /** What the account page says of a closed account's data: when it goes, or when it went. Nothing for an account not closed. */
@@ -119,6 +175,10 @@ export interface AccountView {
   account: AccountSummary;
   members: Array<AccountPerson & { userId: string; role: 'owner' | 'developer' | 'viewer'; joinedAt: string }>;
   functions: Array<{ id: string; name: string; runtime: string; memory: number; status: string; minInstances: number; lastInvokedAt: string | null }>;
+  /** Its databases, by name. */
+  databases: AccountDatabase[];
+  /** Its buckets, by name. */
+  buckets: AccountBucket[];
   usage: { month: string; totals: UsageTotals };
   /** Each wallet's balance (P-31), with its currency's decimals; none before the account's first credit or debit. */
   balances: Array<{ currency: string; balance: string }>;

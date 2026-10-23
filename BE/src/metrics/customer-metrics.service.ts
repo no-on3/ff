@@ -1,6 +1,16 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import { InstancesRow, MetricsView, MetricsWindow, PeriodRow, metricsView } from './customer-metrics';
+import {
+  BucketMetricsView,
+  DatabaseMetricsView,
+  InstancesRow,
+  MetricsView,
+  MetricsWindow,
+  PeriodRow,
+  bucketMetricsView,
+  databaseMetricsView,
+  metricsView,
+} from './customer-metrics';
 
 /** A call that ran: measured by the runtime, and so in the duration's statistics. */
 const RAN = "('success', 'error', 'timeout')";
@@ -15,7 +25,9 @@ interface Scope {
 
 /**
  * The metrics of a function, or of a whole account, from its usage records,
- * its rate-limited invocations and its capacity samples (customer-metrics.ts).
+ * its rate-limited invocations and its capacity samples; of a customer's
+ * database, from its hourly samples; and of a customer's bucket, from its
+ * hourly samples and the front door's request counts (customer-metrics.ts).
  */
 @Injectable()
 export class CustomerMetricsService {
@@ -31,6 +43,74 @@ export class CustomerMetricsService {
   /** The account's, all its functions together, those deleted since included. */
   forAccount(accountId: string, window: MetricsWindow): Promise<MetricsView> {
     return this.metrics(window, { where: 't."account_id" = $4', parameters: [accountId] });
+  }
+
+  /** A database's, for its own account only: another account's database, or one deleted, is not found. */
+  async forDatabase(accountId: string, databaseId: string, window: MetricsWindow): Promise<DatabaseMetricsView> {
+    const found = await this.dataSource.query<unknown[]>('SELECT 1 FROM "databases" WHERE "id" = $1 AND "account_id" = $2', [databaseId, accountId]);
+    if (found.length === 0) throw new NotFoundException(`Database ${databaseId} not found`);
+    const rows = await this.dataSource.query<Array<{ bucket: string; connections_max: number; connections_avg: string; bytes_max: string; bytes_avg: string }>>(
+      `SELECT floor(extract(epoch FROM t."hour") / $3)::bigint * $3 AS "bucket",
+              max(t."connections") AS "connections_max", avg(t."connections") AS "connections_avg",
+              max(t."size_bytes") AS "bytes_max", avg(t."size_bytes") AS "bytes_avg"
+         FROM "database_samples" t
+        WHERE t."hour" >= $1 AND t."hour" < $2 AND t."account_id" = $4 AND t."database_id" = $5
+        GROUP BY 1`,
+      [window.start, window.end, window.period, accountId, databaseId],
+    );
+    return databaseMetricsView(
+      window,
+      rows.map((row) => ({
+        bucket: Number(row.bucket),
+        connectionsMaximum: Number(row.connections_max),
+        connectionsAverage: Number(row.connections_avg),
+        bytesMaximum: Number(row.bytes_max),
+        bytesAverage: Number(row.bytes_avg),
+      })),
+    );
+  }
+
+  /** A bucket's, by its name, for its own account only: another account's bucket, or one deleted, is not found. */
+  async forBucket(accountId: string, name: string, window: MetricsWindow): Promise<BucketMetricsView> {
+    const [found] = await this.dataSource.query<Array<{ id: string }>>('SELECT "id" FROM "buckets" WHERE "name" = $1 AND "account_id" = $2', [name, accountId]);
+    if (!found) throw new NotFoundException(`The account has no bucket ${name}`);
+    return this.bucketMetrics(accountId, found.id, window);
+  }
+
+  /** A bucket's, by its ID, as an alarm names it: none found answers no datapoint. */
+  async bucketMetrics(accountId: string, bucketId: string, window: MetricsWindow): Promise<BucketMetricsView> {
+    // Every hour a period of the window falls in: a period's storage is its hour's measure.
+    const firstHour = new Date(Math.floor(window.start.getTime() / 3_600_000) * 3_600_000);
+    const [hours, periods] = await Promise.all([
+      this.dataSource.query<Array<{ hour: string; size_bytes: string; objects: string }>>(
+        `SELECT extract(epoch FROM "hour")::bigint AS "hour", "size_bytes"::text, "objects"::text FROM "bucket_samples"
+          WHERE "hour" >= $1 AND "hour" < $2 AND "account_id" = $3 AND "bucket_id" = $4`,
+        [firstHour, window.end, accountId, bucketId],
+      ),
+      this.dataSource.query<Array<Record<string, string>>>(
+        `SELECT floor(extract(epoch FROM "minute") / $3)::bigint * $3 AS "bucket", sum("requests")::text AS "AllRequests", sum("gets")::text AS "GetRequests",
+                sum("puts")::text AS "PutRequests", sum("errors4xx")::text AS "4xxErrors", sum("errors5xx")::text AS "5xxErrors",
+                sum("bytes_out")::text AS "BytesDownloaded", sum("bytes_in")::text AS "BytesUploaded"
+           FROM "storage_request_counts"
+          WHERE "minute" >= $1 AND "minute" < $2 AND "account_id" = $4 AND "bucket_id" = $5
+          GROUP BY 1`,
+        [window.start, window.end, window.period, accountId, bucketId],
+      ),
+    ]);
+    return bucketMetricsView(
+      window,
+      hours.map((row) => ({ hour: Number(row.hour), sizeBytes: Number(row.size_bytes), objects: Number(row.objects) })),
+      periods.map((row) => ({
+        bucket: Number(row.bucket),
+        AllRequests: Number(row.AllRequests),
+        GetRequests: Number(row.GetRequests),
+        PutRequests: Number(row.PutRequests),
+        '4xxErrors': Number(row['4xxErrors']),
+        '5xxErrors': Number(row['5xxErrors']),
+        BytesDownloaded: Number(row.BytesDownloaded),
+        BytesUploaded: Number(row.BytesUploaded),
+      })),
+    );
   }
 
   private async metrics(window: MetricsWindow, scope: Scope): Promise<MetricsView> {

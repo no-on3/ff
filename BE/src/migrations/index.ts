@@ -30,6 +30,14 @@ import { FunctionPackages1792581123640 } from './1792581123640-FunctionPackages'
 import { Packages1792584171843 } from './1792584171843-Packages';
 import { CodeImages1792586195192 } from './1792586195192-CodeImages';
 import { InlineCodePackages1792596918071 } from './1792596918071-InlineCodePackages';
+import { Databases1792724178089 } from './1792724178089-Databases';
+import { DatabaseBilling1792727200566 } from './1792727200566-DatabaseBilling';
+import { DatabaseOperations1792731046155 } from './1792731046155-DatabaseOperations';
+import { Buckets1792737696352 } from './1792737696352-Buckets';
+import { BucketLimits1792739264070 } from './1792739264070-BucketLimits';
+import { FunctionKeys1792743758847 } from './1792743758847-FunctionKeys';
+import { BucketSamples1792746521862 } from './1792746521862-BucketSamples';
+import { BucketAlarms1792748816752 } from './1792748816752-BucketAlarms';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -69,4 +77,12 @@ export const MIGRATIONS: Array<new () => object> = [
   Packages1792584171843,
   CodeImages1792586195192,
   InlineCodePackages1792596918071,
+  Databases1792724178089,
+  DatabaseBilling1792727200566,
+  DatabaseOperations1792731046155,
+  Buckets1792737696352,
+  BucketLimits1792739264070,
+  FunctionKeys1792743758847,
+  BucketSamples1792746521862,
+  BucketAlarms1792748816752,
 ];

@@ -10,6 +10,10 @@ export const SCOPE_INFO: Record<Scope, string> = {
   'alarms:read': 'List and read alarms, with their state',
   'alarms:write': 'Create, change and delete alarms',
   'usage:read': 'Read usage, the balance, pro-formas and invoices',
+  'databases:read': "List and read databases, with their size and sessions",
+  'databases:write': 'Create and delete databases, and give them new passwords',
+  'storage:read': "List and read buckets, and the account's access keys to them",
+  'storage:write': "Create and delete buckets, and make and revoke the account's access keys to them",
 };
 
 export type KeyState = 'active' | 'revoked' | 'expired';

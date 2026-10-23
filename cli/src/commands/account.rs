@@ -85,6 +85,13 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("idleSeconds", &|n| format!("scaled to zero after {} min idle", n / 60));
     add("customDomains", &|n| format!("{n} custom domains"));
     add("schedules", &|n| format!("{n} schedules"));
+    add("databases", &|n| if n == 1 { "1 database".to_string() } else { format!("{n} databases") });
+    add("databaseStorageMb", &|n| format!("{n} MB a database"));
+    add("databaseConnections", &|n| format!("{n} sessions a database"));
+    add("buckets", &|n| if n == 1 { "1 bucket".to_string() } else { format!("{n} buckets") });
+    add("bucketStorageMb", &|n| format!("{n} MB in the buckets"));
+    add("storageRequestsPerSecond", &|n| format!("{n} requests to the buckets a second"));
+    add("maxObjectMb", &|n| format!("{n} MB a file in one upload"));
     lines
 }
 
@@ -134,8 +141,40 @@ pub fn month(text: &str) -> Result<String, Error> {
 struct Usage {
     month: String,
     functions: Vec<FunctionUsage>,
+    /// Absent from an API before customers' databases.
+    #[serde(default)]
+    databases: Vec<DatabaseUsage>,
+    /// Absent from an API before customers' buckets.
+    #[serde(default)]
+    buckets: Vec<BucketUsage>,
     totals: Amounts,
     estimate: Option<Estimate>,
+}
+
+/// A database's month, as its hourly measures counted it.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseUsage {
+    name: String,
+    deleted: bool,
+    hours: u32,
+    gb_months: String,
+    cost: Option<String>,
+}
+
+/// A bucket's month, as its hourly measures and the front door's counts counted it.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BucketUsage {
+    name: String,
+    deleted: bool,
+    gb_months: String,
+    tier1_requests: u64,
+    tier2_requests: u64,
+    /// What its requests sent out, counted and not billed. Absent from an API before it was shown.
+    #[serde(default)]
+    bytes_downloaded: u64,
+    cost: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -214,8 +253,46 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
             ),
             None => "no estimate: no price book prices the month".to_owned(),
         };
+        let databases = if usage.databases.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .databases
+                .iter()
+                .map(|database| {
+                    vec![
+                        if database.deleted { format!("{} (deleted)", database.name) } else { database.name.clone() },
+                        database.hours.to_string(),
+                        database.gb_months.clone(),
+                        database.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["DATABASE", "HOURS", "GB-MONTHS", "COST"], &rows))
+        };
+        // As S3 bills them: storage by the GB-month, PUT, COPY, POST and LIST in its first class, GET and the others in its second;
+        // what each sent out, counted and not billed.
+        let buckets = if usage.buckets.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .buckets
+                .iter()
+                .map(|bucket| {
+                    vec![
+                        if bucket.deleted { format!("{} (deleted)", bucket.name) } else { bucket.name.clone() },
+                        bucket.gb_months.clone(),
+                        bucket.tier1_requests.to_string(),
+                        bucket.tier2_requests.to_string(),
+                        super::db::size(Some(bucket.bytes_downloaded)),
+                        bucket.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["BUCKET", "GB-MONTHS", "PUT, LIST…", "GET…", "SENT OUT", "COST"], &rows))
+        };
         format!(
-            "{}\n{}\n{estimate}",
+            "{}\n{}{databases}{buckets}\n{estimate}",
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )

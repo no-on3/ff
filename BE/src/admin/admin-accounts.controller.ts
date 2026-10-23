@@ -2,7 +2,7 @@ import { Body, Controller, Get, HttpCode, Param, Post, Put, Query } from '@nestj
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AuditPageView, AuditQuery } from '../audit/audit.dto';
 import { StatusChange } from './account-status-changes';
-import { AccountIdParam, AdminAccountPageView, AdminAccountView, AdminAccountsQuery, AdminEgressDto, AdminPlanDto } from './admin-accounts.dto';
+import { AccountIdParam, AdminAccountPageView, AdminAccountView, AdminAccountsQuery, AdminEgressDto, AdminPlanDto, AdminStorageDto } from './admin-accounts.dto';
 import { AdminAccountsService } from './admin-accounts.service';
 import { AdminGrantDto, AdminGrantResultView } from './admin-credits.dto';
 import { AdminCreditsService } from './admin-credits.service';
@@ -98,6 +98,16 @@ export class AdminAccountsController {
   @ApiResponse({ status: 200, type: AdminAccountView })
   egress(@Param() { id }: AccountIdParam, @Body() body: AdminEgressDto): Promise<AdminAccountView> {
     return this.accounts.setEgress(id, body.internetEgress, body.reason);
+  }
+
+  @Put(':id/storage')
+  @ApiOperation({
+    summary: "Turn the account's databases and buckets off, with a reason, or on again; its functions go on (operators only)",
+    description: "Off, its databases' users can't log in and their sessions end, and no database can be made; their data stay, and are billed. On, they log in again, unless the account is suspended or closed. The account's members read the reason in their audit log and in GET /me.",
+  })
+  @ApiResponse({ status: 200, type: AdminAccountView })
+  storage(@Param() { id }: AccountIdParam, @Body() body: AdminStorageDto): Promise<AdminAccountView> {
+    return this.accounts.setStorage(id, body.enabled, body.reason);
   }
 
   @Post(':id/credits')

@@ -359,12 +359,73 @@ export interface UsageEstimate {
   priceBooks: string[];
 }
 
+/** A database's fields in GET /usage, as the API's DatabaseUsageView names them: contract.test.ts checks them. */
+export const DATABASE_USAGE_FIELDS = ['databaseId', 'name', 'deleted', 'hours', 'gbMonths', 'sizeBytes', 'cost'] as const satisfies ReadonlyArray<keyof DatabaseUsage>;
+/** A customer's database in the month, as its hourly measures counted it. */
+export interface DatabaseUsage {
+  databaseId: string;
+  /** Its name at its latest measure of the month. */
+  name: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+  /** The hours it was measured in. */
+  hours: number;
+  /** Its storage in GB-months, to six decimals, as a string. */
+  gbMonths: string;
+  /** Its size at its latest measure, in bytes. */
+  sizeBytes: number;
+  /** Before the free tier; null without a price book. */
+  cost: string | null;
+}
+
+/** A bucket's fields in GET /usage, as the API's BucketUsageView names them: contract.test.ts checks them. */
+export const BUCKET_USAGE_FIELDS = [
+  'bucketId',
+  'name',
+  'deleted',
+  'hours',
+  'gbMonths',
+  'sizeBytes',
+  'objects',
+  'tier1Requests',
+  'tier2Requests',
+  'bytesDownloaded',
+  'bytesUploaded',
+  'cost',
+] as const satisfies ReadonlyArray<keyof BucketUsage>;
+/** A customer's bucket in the month, as its hourly measures and the front door's counts counted it. */
+export interface BucketUsage {
+  bucketId: string;
+  name: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+  /** The hours it was measured in. */
+  hours: number;
+  /** Its storage in GB-months, to six decimals, as a string. */
+  gbMonths: string;
+  /** What it held at its latest measure, in bytes, and its objects then. */
+  sizeBytes: number;
+  objects: number;
+  /** S3's first class of request (PUT, COPY, POST, LIST) and its second (GET and the others); deletes are free. */
+  tier1Requests: number;
+  tier2Requests: number;
+  /** The bytes its requests sent out, counted and not billed, and those they brought in, free as on S3. */
+  bytesDownloaded: number;
+  bytesUploaded: number;
+  /** Before the free tier; null without a price book. */
+  cost: string | null;
+}
+
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
   month: string;
   /** Each function with calls in the month, the most GB-seconds first, then any that cost something without a call. */
   functions: FunctionUsage[];
+  /** Each of the account's databases measured in the month, the most GB-months first. */
+  databases: DatabaseUsage[];
+  /** Each of its buckets measured, or asked anything, in the month, the most GB-months first. */
+  buckets: BucketUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */
   estimate: UsageEstimate | null;
@@ -581,6 +642,20 @@ export interface PlanLimits {
   customDomains: number;
   /** Functions' schedules, all together. */
   schedules: number;
+  /** Customers' PostgreSQL databases, all together. */
+  databases: number;
+  /** What one database may hold, in MB, before its new sessions start read-only. */
+  databaseStorageMb: number;
+  /** The sessions one database may have at once. */
+  databaseConnections: number;
+  /** Customers' buckets, all together. */
+  buckets: number;
+  /** What the account's buckets may hold together, in MB. */
+  bucketStorageMb: number;
+  /** S3 requests per second, all the keys together. */
+  storageRequestsPerSecond: number;
+  /** The largest object one PutObject may send, in MB. */
+  maxObjectMb: number;
 }
 
 export interface Plan {
@@ -591,7 +666,19 @@ export interface Plan {
 
 /** One of the user's accounts, in GET /me. */
 /** An account's fields in GET /me, as the API's DTO names them: contract.test.ts checks them against it. */
-export const ME_ACCOUNT_FIELDS = ['id', 'name', 'status', 'role', 'plan', 'internetEgress', 'dataDeletionDueAt', 'dataDeletedAt'] as const satisfies ReadonlyArray<keyof MeAccount>;
+export const ME_ACCOUNT_FIELDS = [
+  'id',
+  'name',
+  'status',
+  'role',
+  'plan',
+  'internetEgress',
+  'dataDeletionDueAt',
+  'dataDeletedAt',
+  'storageDisabledAt',
+  'storageDisabledReason',
+  'bucketStorageNotice',
+] as const satisfies ReadonlyArray<keyof MeAccount>;
 
 export interface MeAccount {
   /** 12 digits. */
@@ -608,6 +695,12 @@ export interface MeAccount {
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */
   dataDeletedAt: string | null;
+  /** When FF turned the account's databases and buckets off: their users can't log in. null while they are on. */
+  storageDisabledAt: string | null;
+  /** FF's reason for it. */
+  storageDisabledReason: string | null;
+  /** The share of its plan's storage its buckets reached together at their last measure: at 100, uploads wait for room; null under 80%. */
+  bucketStorageNotice: 80 | 100 | null;
 }
 // A field missing from ME_ACCOUNT_FIELDS stops the build.
 type UnlistedMeAccountField = Exclude<keyof MeAccount, (typeof ME_ACCOUNT_FIELDS)[number]>;
@@ -655,7 +748,20 @@ export interface AccountUpdate {
   taxId?: string | null;
 }
 
-export const SCOPES = ['functions:read', 'functions:write', 'functions:invoke', 'logs:read', 'metrics:read', 'alarms:read', 'alarms:write', 'usage:read'] as const;
+export const SCOPES = [
+  'functions:read',
+  'functions:write',
+  'functions:invoke',
+  'logs:read',
+  'metrics:read',
+  'alarms:read',
+  'alarms:write',
+  'usage:read',
+  'databases:read',
+  'databases:write',
+  'storage:read',
+  'storage:write',
+] as const;
 export type Scope = (typeof SCOPES)[number];
 
 /** An API key, as GET /api-keys lists it: never its secret. */
@@ -812,6 +918,10 @@ export interface AlarmBody {
   name: string;
   /** null: the account's, all its functions together, or its money. */
   functionId: string | null;
+  /** The database watched, for DatabaseConnections and VolumeBytesUsed, an hour at a time; null otherwise. */
+  databaseId?: string | null;
+  /** The bucket watched, by its name, for its storage and its requests; null otherwise. */
+  bucketName?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -830,6 +940,8 @@ export const ALARM_FIELDS = [
   'id',
   'name',
   'functionId',
+  'databaseId',
+  'bucketName',
   'metric',
   'statistic',
   'period',
@@ -862,6 +974,161 @@ export interface Alarm extends AlarmBody {
 type UnlistedAlarmField = Exclude<keyof Alarm, (typeof ALARM_FIELDS)[number]>;
 const everyAlarmFieldListed: [UnlistedAlarmField] extends [never] ? true : never = true;
 void everyAlarmFieldListed;
+
+/** A customer's database's status, as the API's DatabaseStatus names them: contract.test.ts checks them. */
+export const DATABASE_STATUSES = ['creating', 'active', 'read_only', 'suspended', 'deleting'] as const;
+export type DatabaseStatus = (typeof DATABASE_STATUSES)[number];
+
+/** A database's fields, as the API's DatabaseView names them: contract.test.ts checks them. */
+export const DATABASE_FIELDS = [
+  'id',
+  'name',
+  'status',
+  'host',
+  'port',
+  'database',
+  'user',
+  'connectionUrl',
+  'sizeBytes',
+  'connections',
+  'connectionLimit',
+  'storageLimitMb',
+  'passwordSetAt',
+  'createdAt',
+] as const satisfies ReadonlyArray<keyof Database>;
+
+/** A customer's PostgreSQL database, as AWS RDS gives one: never its password, which FF doesn't keep. */
+export interface Database {
+  id: string;
+  /** Its name in the account. */
+  name: string;
+  status: DatabaseStatus;
+  /** The server, as functions and developers reach it. */
+  host: string;
+  port: number;
+  /** Its name on the server, and its user's: the same, opaque. */
+  database: string;
+  user: string;
+  /** How to connect, without the password. */
+  connectionUrl: string;
+  /** Its size now, in bytes; null when the server could not be asked. */
+  sizeBytes: number | null;
+  /** Its sessions now; null when the server could not be asked. */
+  connections: number | null;
+  /** The plan's sessions at most. */
+  connectionLimit: number;
+  /** The plan's storage for it, in MB: past it, its new sessions start read-only. */
+  storageLimitMb: number;
+  passwordSetAt: string | null;
+  createdAt: string;
+}
+// A field missing from DATABASE_FIELDS stops the build.
+type UnlistedDatabaseField = Exclude<keyof Database, (typeof DATABASE_FIELDS)[number]>;
+const everyDatabaseFieldListed: [UnlistedDatabaseField] extends [never] ? true : never = true;
+void everyDatabaseFieldListed;
+
+/** A database just made, or given a new password: the password and the connection string, in this answer only. */
+export interface DatabaseWithPassword extends Database {
+  password: string;
+  connectionString: string;
+}
+
+/** GET /databases/:id/metrics: a point an hour, oldest first, null for an hour without a measure. */
+export interface DatabaseMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: {
+    DatabaseConnections: { Maximum: Array<number | null>; Average: Array<number | null> };
+    VolumeBytesUsed: { Maximum: Array<number | null>; Average: Array<number | null> };
+  };
+}
+
+/** The account's PostgreSQL databases: every member reads them; owners and developers make, change and delete them. */
+export const databasesApi = {
+  list: () => api.get<Database[]>('/databases'),
+  get: (id: string) => api.get<Database>(`/databases/${id}`),
+  create: (name: string) => api.post<DatabaseWithPassword>('/databases', { name }),
+  /** A new password: the old one opens no new session. */
+  resetPassword: (id: string) => api.post<DatabaseWithPassword>(`/databases/${id}/password`),
+  remove: (id: string) => api.delete(`/databases/${id}`),
+  /** Its sessions and size, a point an hour; the last 60 hours by default. */
+  metrics: (id: string, params: { start?: string; end?: string } = {}) => api.get<DatabaseMetrics>(`/databases/${id}/metrics`, { params }),
+};
+
+/** A bucket's fields, as the API's BucketView names them: contract.test.ts checks them. */
+export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
+
+/** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
+export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
+
+/** A bucket, as AWS S3 gives one, behind FF's S3 front door (ADR 0009). */
+export interface Bucket {
+  name: string;
+  status: 'active' | 'deleting';
+  /** FF's region, as GetBucketLocation answers it. */
+  region: string;
+  /** The S3 endpoint to give AWS's SDKs and CLI. */
+  endpoint: string;
+  /** Its own address, virtual-hosted. */
+  url: string;
+  /** What it held at its last hourly measure, in bytes, and its objects then; null before its first. */
+  sizeBytes: number | null;
+  objects: number | null;
+  /** The hour of that measure. */
+  measuredAt: string | null;
+  createdAt: string;
+}
+
+/** The request metrics a bucket has, as CloudWatch names S3's: each period's Sum. */
+export const BUCKET_REQUEST_METRICS = ['AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'] as const;
+export type BucketRequestMetric = (typeof BUCKET_REQUEST_METRICS)[number];
+
+/** GET /buckets/:name/metrics: what it holds, its hour's measure in each period; its requests, each period's Sum. */
+export interface BucketMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: { BucketSizeBytes: { Average: Array<number | null> }; NumberOfObjects: { Average: Array<number | null> } } & Record<BucketRequestMetric, { Sum: number[] }>;
+}
+
+/** An access key to the account's buckets: never its secret. */
+export interface StorageKey {
+  /** AWS_ACCESS_KEY_ID: AKFF and 16 characters. */
+  id: string;
+  /** The buckets it reaches; null for all the account's. */
+  buckets: string[] | null;
+  readOnly: boolean;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** A key just made: its secret this once, with the endpoint and the region. */
+export interface CreatedStorageKey extends StorageKey {
+  secretAccessKey: string;
+  endpoint: string;
+  region: string;
+}
+
+/** The account's buckets: every member lists them; owners and developers make and delete them. */
+export const bucketsApi = {
+  list: () => api.get<Bucket[]>('/buckets'),
+  get: (name: string) => api.get<Bucket>(`/buckets/${name}`),
+  create: (name: string) => api.post<Bucket>('/buckets', { name }),
+  /** An empty one; with force, its files first. */
+  remove: (name: string, force = false) => api.delete(`/buckets/${name}`, { params: force ? { force: 'true' } : {} }),
+  /** What it holds and its requests, a point per period: a minute, five or an hour. */
+  metrics: (name: string, params: { start?: string; end?: string; period?: 60 | 300 | 3600 } = {}) => api.get<BucketMetrics>(`/buckets/${name}/metrics`, { params }),
+};
+
+/** The account's access keys to its buckets: its owners alone see, make and revoke them. */
+export const storageKeysApi = {
+  list: () => api.get<StorageKey[]>('/storage-keys'),
+  create: (body: { buckets?: string[]; readOnly?: boolean }) => api.post<CreatedStorageKey>('/storage-keys', body),
+  revoke: (id: string) => api.delete(`/storage-keys/${id}`),
+};
 
 /** The account's alarms: every member reads them; owners and developers change them. */
 export const alarmsApi = {
