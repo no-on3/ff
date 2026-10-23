@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed on 2026-10-21. It is a view with an order and reasons, not a plan with tasks. When you pick a step, it gets its own plan, in the format of the [client-readiness plan](client-readiness-plan.md). **Step 1 done on 2026-10-21,** in development: its plan is the [step-1 plan](step-1-plan.md), tasks U-00 to U-09, whose progress log says what was built. You confirmed [ADR 0003](adr/0003-code-delivery.md) the same day: production's code registry is in the platform's manifests, and inline code has moved onto it. **Step 2's plan** is the [step-2 plan](step-2-plan.md), which you confirmed on 2026-10-22 with the step-1 plan's choices; it starts after the CLI plan's C-29. Every decision you made is in the [decision log](decisions.md). |
+| **Status** | Proposed on 2026-10-21. It is a view with an order and reasons, not a plan with tasks. When you pick a step, it gets its own plan, in the format of the [client-readiness plan](client-readiness-plan.md). **Step 1 done on 2026-10-21,** in development: its plan is the [step-1 plan](step-1-plan.md), tasks U-00 to U-09, whose progress log says what was built. You confirmed [ADR 0003](adr/0003-code-delivery.md) the same day: production's code registry is in the platform's manifests, and inline code has moved onto it. **Step 2's plan** is the [step-2 plan](step-2-plan.md), which you confirmed on 2026-10-22 with the step-1 plan's choices; **started on 2026-10-23,** after the CLI plan's C-29: its progress log says what is built. Every decision you made is in the [decision log](decisions.md). |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): its Phase 3 (E-01 to E-10), its Phase 4 (S-01 to S-10), §4.6 event sources, §4.7 storage and queues, §6.7 AWS-compatible services, §10 go-to-market |
 | **Builds on** | The [client-readiness plan](client-readiness-plan.md), done up to its pilot-launch tasks, and the [CLI plan](cli-plan.md), its phases 0 to 2 done with step 1 |
 | **What it is for** | To answer "what do we add after functions?", and to look further ahead |
@@ -64,7 +64,7 @@ Four gaps stop a customer from running anything real. They come before any new s
 
 These two are the heart of the "local cloud" idea. Almost every app needs both, and both need a foreign card today.
 
-**Confirmed on 2026-10-22:** the [step-2 plan](step-2-plan.md), with its choices (its §9); it starts after the CLI plan's C-29. It takes the decisions below further: where the customers' database server runs and how functions reach it, how its size is limited, the S3 front door that the parent plan's E-04 describes, and what each service is billed.
+**Confirmed on 2026-10-22, started on 2026-10-23:** the [step-2 plan](step-2-plan.md), with its choices (its §9), after the CLI plan's C-29. It takes the decisions below further: where the customers' database server runs and how functions reach it, how its size is limited, the S3 front door that the parent plan's E-04 describes, and what each service is billed.
 
 ### 5.1 Managed PostgreSQL
 
@@ -243,7 +243,7 @@ From the parent plan's non-goals (§1.3, §3.3), with the reason in plain words:
 | Order | What | Needs | Size |
 |---|---|---|---|
 | 1 | Step 1: function URLs, secrets, packages and the CLI, schedules. **Done** in development: the [step-1 plan](step-1-plan.md) | nothing | the CLI plan, plus about 4 weeks; the step-1 plan says 22 to 32 days besides the CLI (its §10) |
-| 2 | Step 2: managed PostgreSQL, file storage. **Confirmed on 2026-10-22:** the [step-2 plan](step-2-plan.md), after the CLI plan's C-29 | secrets | medium, plus 2.5 weeks; the step-2 plan says 35 to 45 days (its §10), counting all that every service needs |
+| 2 | Step 2: managed PostgreSQL, file storage. **Started on 2026-10-23:** the [step-2 plan](step-2-plan.md), confirmed on 2026-10-22 | secrets | medium, plus 2.5 weeks; the step-2 plan says 35 to 45 days (its §10), counting all that every service needs |
 | 3 | Step 3: the queue, as async invoke, SQS queues and bucket notifications | storage | about 6.5 weeks |
 | 4 | Step 4: static sites, e-mail, a cache | storage | medium |
 | 5 | Step 5: the Lambda API, versions, Terraform, the export kit | steps 1 to 3 | about 15 weeks |
