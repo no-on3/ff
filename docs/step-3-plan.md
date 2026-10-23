@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Proposed on 2026-10-23, for you to confirm,** with step 2's close (the [step-2 plan](step-2-plan.md), V-10). Checked against the code the same day by a read-only survey (§1). Nothing in it is built. Its choices are in §9: each has a recommendation, and none is decided until you confirm it. |
+| **Status** | Proposed on 2026-10-23 with step 2's close (the [step-2 plan](step-2-plan.md), V-10), checked against the code the same day by a read-only survey (§1), and **confirmed by you the same day** with every choice of §9 as it recommended (the [decision log](decisions.md), 24 to 33). **Started on 2026-10-23,** on the branch `feat/step-3`, made from `master` (`f772e7f`, step 2's merge); its first commit renamed the object store's settings, which still carried MinIO's name (the decision log, 23). What is done is in the progress log (§11). |
 | **Goal** | Step 3 of [What to build next](what-to-build-next.md) (§6): one queue that keeps its messages until they are handled, shown to customers three ways, each in AWS's shape: a function called without waiting, as AWS Lambda's asynchronous invoke; queues that AWS's SDKs and CLI reach as Amazon SQS, read by functions in batches; and a function run when a file lands in a bucket, with S3's event |
 | **Parent plans** | [What to build next](what-to-build-next.md) §6 and §10; the [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): E-03 (asynchronous invoke), E-05 (FF Queues, the SQS JSON protocol, event source mappings), E-04's notifications, §4.6 (event sources), §4.7 and ADR-003 (the queue's storage), §6.7 (SQS), §8.1 (queue requests by the million, in 64 KB chunks) |
 | **Builds on** | The [step-2 plan](step-2-plan.md): the S3 front door, its keys and functions' own keys, the hourly rating beyond functions, buckets' metrics and alarms; the [step-1 plan](step-1-plan.md): schedules, the event shapes, function URLs; the [client-readiness plan](client-readiness-plan.md): plans, usage records, the price book, notifications |
@@ -195,7 +195,7 @@ The step-2 plan's (§6 there), on a branch of this step's own: `type(scope): sum
 
 ## 9. Choices made for you to confirm
 
-**None is decided yet.** Each row says what this plan chooses and why, and what the other way would be; your answers go to the decision log.
+**You confirmed them all on 2026-10-23,** as recommended (the [decision log](decisions.md), 24 to 33). Each row says what this plan chose and why, and what the other way would have been.
 
 | Question | This plan's choice | Affects |
 |---|---|---|
@@ -231,7 +231,7 @@ The step-2 plan's (§6 there), on a branch of this step's own: `type(scope): sum
 
 | Task | Status | Commit | Evidence |
 |---|---|---|---|
-| Q-00 The plan and the baseline | ⏳ Waits for your answers to §9 | | |
+| Q-00 The plan and the baseline | ✅ Done | this commit | • **The plan,** proposed with step 2's close (`5196b28`), confirmed by you on 2026-10-23 with every choice of §9 as it recommended (the [decision log](decisions.md), 24 to 33), and started the same day on `feat/step-3`, made from `master` at step 2's merge (`f772e7f`).<br>• **Before it, on the branch:** the object store's settings named for what it is, any S3-compatible store, MinIO's names refused at boot naming the new ones (`da318c7`, the decision log's 23); and a race in FF's direct calls fixed, a function's Service refusing a call for a moment after its pod becomes ready (`2dc03ad`).<br>• **The baseline,** this branch at `2dc03ad`: L1 121 suites / 1,771 tests; L2 40 suites / 402 tests, `migration:check` over 40 migrations; L3 158 checks; L4 277; L5 741; the platform's manifests 19 checks, its images 27, its end-to-end suite 41; `hack/ci.sh static` (lint, types and builds of the backend, the console and the admin app, the runtime's build, `ff`'s formatting and clippy, the docs, every shell script); the console 24 files / 327 tests; the admin app 17 files / 134 tests; the CLI 211 tests in 14 binaries.<br>• **Found on the way,** in `da318c7`'s runs: the suites' shared settings let a developer's `BE/.env` reach their backends for functions' keys and customers' databases, now set empty there; `hack/test-images.sh` had fallen behind production's settings since 2026-10-21, and took ports a development backend holds; and two runs of L4 lost their backend to a kill from outside FF, its log simply stopping, with neither a crash nor a memory kill in the journal.<br>• **Docs:** the decision log (23 to 33; 19; the step-3 question gone from the open ones), the roadmap, the docs' index, the README, this plan (its status, §9) |
 | Q-01 Spike and ADR 0010 | ⏳ Planned | | |
 | Q-02 The queue and asynchronous invoke | ⏳ Planned | | |
 | Q-03 Destinations, and schedules through the queue | ⏳ Planned | | |
