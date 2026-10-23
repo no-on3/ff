@@ -13,7 +13,10 @@
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
 # ff package --compile, whose zip runs on FF as it is; the getting-started guide's small app
 # (examples/orders-app), its functions writing to a database as one on the internet would be
-# (hack/k8s/app-database.sh), in an account whose internet access is on; and ff local, in
+# (hack/k8s/app-database.sh), in an account whose internet access is on; ff db, with the run's own
+# server of customers' databases: one made, its string a function's secret, the app writing its
+# order there with its account's internet access off, read with psql, a new password, its month
+# in ff usage, then deleted; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -34,6 +37,9 @@ e2e_namespaces+=("$(tenant_namespace "$account_a")" "$(tenant_namespace "$accoun
 
 e2e_dependencies
 e2e_cluster
+# Customers' databases (ADR 0008): the run's own server, on 10.199.3.0/24, which no other run uses.
+data_db_address=10.199.3.10
+e2e_data_db 10.199.3.0/24 "$data_db_address"
 
 echo "== ff and the backend"
 (cd "$FF_REPO_ROOT/cli" && cargo build --release --locked -q)
@@ -42,7 +48,7 @@ e2e_build
 # Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which ff reaches on 127.0.0.1.
 url_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
-  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port")
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" "${e2e_data_db_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -460,6 +466,43 @@ ff invoke orders-nightly --data "@$work/scheduled.json" --profile c
 check "which reports the day's order from the database" "0 $order_day 1 2 0" "$(code) $(out | sed '$d' | jq -r '"\(.day) \(.orders) \(.items) \(.removed)"')"
 ff delete orders-nightly --yes --profile c
 ff delete orders-api --yes --profile c
+
+echo "== a customer's database, with ff db: a function's secret, written by the app with its account's internet access off"
+ff deploy "$app" --name cli-db-orders --handler index.http
+check "the same app in account A, whose functions don't reach the internet" "0 created cli-db-orders (nodejs, 128 MB, 5 s): ACTIVE" \
+  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff db create Orders
+check "ff db create refuses a name RDS wouldn't take, before calling" "2 true" "$(code) $(err | grep -q "can't be a database's name" && echo true || echo false)"
+ff db create cli-orders --secret-for cli-db-orders --output json
+db_conn="$(out | jq -r .connectionString)"
+check "ff db create makes it, its connection string once, and sets it as the function's DATABASE_URL" "0 active cli-db-orders:DATABASE_URL true" \
+  "$(code) $(out | jq -r '"\(.status) \(.secretsSet[0].function):\(.secretsSet[0].secret)"') $([[ "$db_conn" == postgresql://*"@$data_db_address:5432/"*"?sslmode=require" ]] && echo true || echo false)"
+ff url enable cli-db-orders --auth none
+ff invoke cli-db-orders --http POST /orders --data '{"item": "makroudh", "quantity": 3}'
+check "a POST writes its order to FF's database, over TLS, its certificate trusted" "0 HTTP 201 makroudh 3" \
+  "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity)"')"
+check "which psql reads with the string ff gave" "makroudh|3" "$(data_db_psql "$db_conn" 'select item, quantity from orders')"
+ff db list
+check "ff db list shows it available, its storage and sessions" "0 cli-orders available" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
+ff db get cli-orders --output json
+check "ff db get gives how to reach it, without its password" "0 $data_db_address false" \
+  "$(code) $(out | jq -r .host) $(out | grep -q "$(jq -rn --arg s "$db_conn" '$s | capture(":(?<p>[^:@]+)@").p')" && echo true || echo false)"
+ff db password cli-orders --secret-for cli-db-orders --output json
+new_conn="$(out | jq -r .connectionString)"
+check "ff db password: the old string opens no session, the new one does, and the function has it" "0 true 1" \
+  "$(code) $( (data_db_psql "$db_conn" 'select 1' || true) | grep -q 'password authentication failed' && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
+ff invoke cli-db-orders --http POST /orders --data '{"item": "bambalouni", "quantity": 1}'
+check "  ... which writes again through its new secret" "0 HTTP 201 2" "$(code) $(out | head -1) $(data_db_psql "$new_conn" 'select count(*) from orders')"
+# Each minute, the backend measures every database not measured yet in the hour: this one within a minute.
+for _ in $(seq 75); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.databases | map(.name) | index("cli-orders")' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists its month after the functions" "0 true" "$(code) $(out | grep -qE '^cli-orders +[0-9]+ +[0-9.]+ +[0-9.]+$' && echo true || echo false)"
+ff db delete cli-orders
+check "ff db delete asks first, a script saying --yes" "2 true" "$(code) $(err | grep -q 'ff db delete asks first' && echo true || echo false)"
+ff db delete cli-orders --yes
+check "ff db delete drops it, with its data, its user gone" "0 deleted the database cli-orders, with its data 0" \
+  "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
+ff delete cli-db-orders --yes
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts

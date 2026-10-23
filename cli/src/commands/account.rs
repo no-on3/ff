@@ -137,8 +137,22 @@ pub fn month(text: &str) -> Result<String, Error> {
 struct Usage {
     month: String,
     functions: Vec<FunctionUsage>,
+    /// Absent from an API before customers' databases.
+    #[serde(default)]
+    databases: Vec<DatabaseUsage>,
     totals: Amounts,
     estimate: Option<Estimate>,
+}
+
+/// A database's month, as its hourly measures counted it.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseUsage {
+    name: String,
+    deleted: bool,
+    hours: u32,
+    gb_months: String,
+    cost: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -217,8 +231,25 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
             ),
             None => "no estimate: no price book prices the month".to_owned(),
         };
+        let databases = if usage.databases.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .databases
+                .iter()
+                .map(|database| {
+                    vec![
+                        if database.deleted { format!("{} (deleted)", database.name) } else { database.name.clone() },
+                        database.hours.to_string(),
+                        database.gb_months.clone(),
+                        database.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["DATABASE", "HOURS", "GB-MONTHS", "COST"], &rows))
+        };
         format!(
-            "{}\n{}\n{estimate}",
+            "{}\n{}{databases}\n{estimate}",
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )

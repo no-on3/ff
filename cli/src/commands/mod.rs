@@ -3,6 +3,7 @@
 mod account;
 mod completion;
 mod config;
+mod db;
 mod deploy;
 mod env;
 mod functions;
@@ -18,7 +19,8 @@ mod version;
 mod whoami;
 
 use crate::cli::{
-    Command, ConnectionArgs, DomainsCommand, EnvCommand, LocalCommand, ScheduleCommand, SecretsCommand, UrlCommand,
+    Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand, LocalCommand, ScheduleCommand, SecretsCommand,
+    UrlCommand,
 };
 use crate::config::Settings;
 use crate::error::Error;
@@ -97,6 +99,15 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             schedule::enable(&name, &schedule, false, context)
         }
         Command::Schedule(ScheduleCommand::Remove { name, schedule }) => schedule::remove(&name, &schedule, context),
+        Command::Db(DbCommand::Create { name, secret }) => {
+            db::create(&name, &secret.functions, &secret.secret_name, context)
+        }
+        Command::Db(DbCommand::List) => db::list(context),
+        Command::Db(DbCommand::Get { name }) => db::get(&name, context),
+        Command::Db(DbCommand::Password { name, secret }) => {
+            db::password(&name, &secret.functions, &secret.secret_name, context)
+        }
+        Command::Db(DbCommand::Delete { name, yes }) => db::delete(&name, yes, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),

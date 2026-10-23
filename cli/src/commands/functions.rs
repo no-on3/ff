@@ -146,13 +146,16 @@ pub fn scale(name: &str, min: Option<u32>, max: Option<u32>, context: &Context) 
     })
 }
 
-/// Whether to go on: asked in a terminal; a script says `--yes`.
-pub fn confirmed(question: &str, yes: bool) -> Result<bool, Error> {
+/// Whether to go on: asked in a terminal; a script says `--yes`. `command` names it when there is no terminal.
+pub fn confirmed(command: &str, question: &str, yes: bool) -> Result<bool, Error> {
     if yes {
         return Ok(true);
     }
     if !io::stdin().is_terminal() {
-        return Err(Error::new(Kind::Usage, "ff delete asks first, and there is no terminal to ask in: say --yes"));
+        return Err(Error::new(
+            Kind::Usage,
+            format!("{command} asks first, and there is no terminal to ask in: say --yes"),
+        ));
     }
     eprint!("{question} [y/N] ");
     let _ = io::stderr().flush();
@@ -167,7 +170,7 @@ pub fn confirmed(question: &str, yes: bool) -> Result<bool, Error> {
 pub fn delete(name: &str, yes: bool, context: &Context) -> Result<(), Error> {
     let client = client(context)?;
     let function = function_named(&client, name)?;
-    if !confirmed(&format!("Delete {name}, with its history and its logs?"), yes)? {
+    if !confirmed("ff delete", &format!("Delete {name}, with its history and its logs?"), yes)? {
         return context.out.result(&json!({ "deleted": false, "name": name }), || "Nothing deleted".to_owned());
     }
     client.done(&Call::delete(format!("/functions/{}", function.id)))?;

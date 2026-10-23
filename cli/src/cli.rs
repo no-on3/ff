@@ -181,6 +181,10 @@ pub enum Command {
     #[command(subcommand)]
     Schedule(ScheduleCommand),
 
+    /// The account's PostgreSQL databases, as AWS RDS gives them
+    #[command(subcommand)]
+    Db(DbCommand),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -482,6 +486,58 @@ pub enum EnvCommand {
         #[arg(required = true)]
         keys: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum DbCommand {
+    /// Make a database and its user: its connection string, with its password, printed this once
+    Create {
+        /// Its name: lower-case letters, digits and hyphens, as AWS RDS names its databases
+        name: String,
+
+        #[command(flatten)]
+        secret: SecretFor,
+    },
+
+    /// List the account's databases: their status, storage and sessions now
+    List,
+
+    /// Show a database: how to reach it, its storage and sessions now
+    Get {
+        /// The database's name
+        name: String,
+    },
+
+    /// Give a database a new password: its connection string printed this once; the old one opens no new session
+    Password {
+        /// The database's name
+        name: String,
+
+        #[command(flatten)]
+        secret: SecretFor,
+    },
+
+    /// Delete a database and its user, with its data
+    Delete {
+        /// The database's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// Where the connection string goes besides the terminal: functions' secrets.
+#[derive(Args)]
+pub struct SecretFor {
+    /// Set the connection string as a secret of this function too, which rolls it out; again for each function
+    #[arg(long = "secret-for", value_name = "FUNCTION")]
+    pub functions: Vec<String>,
+
+    /// The secret's name, which the function reads from its environment
+    #[arg(long, default_value = "DATABASE_URL", value_name = "NAME")]
+    pub secret_name: String,
 }
 
 #[derive(Subcommand)]

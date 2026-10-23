@@ -77,6 +77,22 @@ fn usage_shows_each_function_the_total_and_the_estimate() {
 }
 
 #[test]
+fn usage_shows_each_database_after_the_functions() {
+    let mut month = usage();
+    month["databases"] = json!([{ "databaseId": "d1", "name": "orders", "deleted": false, "hours": 312, "gbMonths": "0.003182", "sizeBytes": 7_634_423, "cost": "0.001" },
+                                { "databaseId": "d2", "name": "audit", "deleted": true, "hours": 2, "gbMonths": "0.000021", "sizeBytes": 8_000_000, "cost": "0.000" }]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("total          15        3.14375     1           0.852\nDATABASE         HOURS  GB-MONTHS  COST\norders           312    0.003182   0.001\naudit (deleted)  2      0.000021   0.000\nestimated cost:"),
+        "{text}"
+    );
+}
+
+#[test]
 fn usage_as_csv_is_the_apis_own_and_a_wrong_month_is_refused_before_calling() {
     let csv = "functionId,functionName,requests\r\nf1,hello,12\r\n";
     let api = Server::start(vec![Reply::text(200, "text/csv; charset=utf-8", csv)]);
