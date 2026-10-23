@@ -11,7 +11,8 @@ fn me(egress: bool) -> Value {
     json!({ "user": null, "key": { "id": "0123456789ab", "name": "ci", "scopes": ["usage:read"] },
             "accounts": [{ "id": "123456789012", "name": "Acme", "status": "active", "role": "developer",
                            "plan": { "id": "beta", "name": "Beta", "limits": { "functions": 25, "memoryMb": 1024, "invokesPerSecond": 100,
-                                                                             "databases": 1, "databaseStorageMb": 1024, "databaseConnections": 10 } },
+                                                                             "databases": 1, "databaseStorageMb": 1024, "databaseConnections": 10,
+                                                                             "buckets": 5, "bucketStorageMb": 5120, "storageRequestsPerSecond": 100, "maxObjectMb": 5120 } },
                            "internetEgress": egress, "dataDeletionDueAt": null, "dataDeletedAt": null }] })
 }
 
@@ -34,7 +35,7 @@ fn account_says_its_plan_and_whether_its_functions_reach_the_internet() {
     ff(&dir).arg("account").assert().success().stdout(
         "account      123456789012 \"Acme\"\nstatus       active\nrole         developer\n\
          plan         Beta: 25 functions, 1024 MB of memory a function at most, 100 invocations a second, 1 database, 1024 MB a database, \
-         10 sessions a database\n\
+         10 sessions a database, 5 buckets, 5120 MB in the buckets, 100 requests to the buckets a second, 5120 MB a file in one upload\n\
          internet     off: its functions reach FF's services only, and a call out fails; FF's operator turns it on\n",
     );
     ff(&dir)

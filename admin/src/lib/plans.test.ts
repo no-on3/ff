@@ -18,6 +18,10 @@ const BETA: PlanLimits = {
   databases: 1,
   databaseStorageMb: 1024,
   databaseConnections: 10,
+  buckets: 5,
+  bucketStorageMb: 5120,
+  storageRequestsPerSecond: 100,
+  maxObjectMb: 5120,
 };
 
 describe("a plan's limits, in a form (P-73)", () => {

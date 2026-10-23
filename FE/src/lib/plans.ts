@@ -18,6 +18,10 @@ export const PLAN_LIMIT_KEYS = [
   'databases',
   'databaseStorageMb',
   'databaseConnections',
+  'buckets',
+  'bucketStorageMb',
+  'storageRequestsPerSecond',
+  'maxObjectMb',
 ] as const satisfies ReadonlyArray<keyof PlanLimits>;
 
 // A limit missing from the list above stops the build.
@@ -59,5 +63,9 @@ export function planLimitRows({ limits }: Pick<Plan, 'limits'>): Array<[label: s
     ['Databases', String(limits.databases)],
     ['Storage per database', `${formatMegabytes(limits.databaseStorageMb)}, then its new sessions are read-only`],
     ['Sessions per database', `up to ${limits.databaseConnections} at once`],
+    ['Buckets', String(limits.buckets)],
+    ['Storage of the buckets', `${formatMegabytes(limits.bucketStorageMb)} together`],
+    ['Requests to the buckets', `${limits.storageRequestsPerSecond} per second`],
+    ['Largest file in one upload', `${formatMegabytes(limits.maxObjectMb)}; more in parts`],
   ];
 }

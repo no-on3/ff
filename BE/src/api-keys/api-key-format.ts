@@ -15,6 +15,8 @@ export const SCOPES = [
   'usage:read',
   'databases:read',
   'databases:write',
+  'storage:read',
+  'storage:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 

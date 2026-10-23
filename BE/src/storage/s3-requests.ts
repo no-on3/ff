@@ -38,7 +38,7 @@ export interface S3Operation {
 }
 
 /** Query parameters every request may carry: the signature's, the checksum's a presigned URL signs, and the "x-id" AWS's SDKs add. */
-const ALWAYS = /^(X-Amz-[A-Za-z-]+|x-amz-checksum-[a-z0-9]+|x-amz-sdk-checksum-algorithm|x-id)$/;
+const ALWAYS = /^(X-Amz-[A-Za-z0-9-]+|x-amz-checksum-[a-z0-9]+|x-amz-sdk-checksum-algorithm|x-id)$/;
 const LISTING = new Set(['list-type', 'prefix', 'delimiter', 'max-keys', 'marker', 'continuation-token', 'start-after', 'encoding-type', 'fetch-owner']);
 const UPLOADS_LISTING = new Set(['uploads', 'prefix', 'delimiter', 'max-uploads', 'key-marker', 'upload-id-marker', 'encoding-type']);
 const PARTS_LISTING = new Set(['uploadId', 'max-parts', 'part-number-marker', 'encoding-type']);

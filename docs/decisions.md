@@ -109,7 +109,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **11. Customers' files are not copied to the second site, at first.** ✅ Confirmed, said plainly in the docs; to decide again before customers keep important files on FF.
 - **Changed already:** the step-2 plan's V-09 now has the guide say so.
-- **Still to change:** V-09.
+- **Changed already, too:** V-07: the guide's "Buckets" says it, beside the API that makes them.
+- **Still to change:** V-09, the console and `ff` saying it too; the decision itself, again, before customers keep important files on FF.
 
 **12. Data downloaded from FF is counted, not billed.** ✅ Confirmed. If FF's hosting bills FF for its traffic, FF bills it too.
 - **Changed already:** V-06, the S3 front door, counts each bucket's bytes in and out by the minute, with its requests.
@@ -117,7 +118,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **13. Out of credit: file uploads are refused; reading files and the databases go on.** ✅ Confirmed. FF never deletes data for non-payment, and functions are already refused without credit.
 - **Changed already:** V-04: a database's storage is rated and debited whatever the balance, which goes below zero, as a function's `minInstances` do; nothing stops a database for its balance.
-- **Still to change:** V-07, the uploads refused.
+- **Changed already, too:** V-07: out of credit, an upload to a bucket answers `AccountProblem`, saying why; reading files goes on, and so does deleting them, which lowers the bill.
+- **Still to change:** nothing.
 
 **14. Documentation in French, a page per service, under `docs/fr/`.** ✅ Confirmed.
 - **Changed already:** V-05, the first page: [`docs/fr/bases-de-donnees.md`](fr/bases-de-donnees.md), databases "comme AWS RDS", and the folder's index.

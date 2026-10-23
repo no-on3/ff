@@ -21,6 +21,10 @@ describe('planLimitRows', () => {
       ['Databases', '1'],
       ['Storage per database', '1 GB, then its new sessions are read-only'],
       ['Sessions per database', 'up to 10 at once'],
+      ['Buckets', '5'],
+      ['Storage of the buckets', '5 GB together'],
+      ['Requests to the buckets', '100 per second'],
+      ['Largest file in one upload', '5 GB; more in parts'],
     ]);
   });
 

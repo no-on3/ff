@@ -17,6 +17,9 @@ import {
   UploadPartCommand,
 } from '@aws-sdk/client-s3';
 import { ConfigService } from '@nestjs/config';
+import { Account, AccountStatus } from '../accounts/entities/account.entity';
+import { CreditService } from '../billing/credit.service';
+import { onePlan } from '../plans/test-fixtures';
 import { createHash, randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { databaseConfiguration } from '../config/configuration';
@@ -70,6 +73,10 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
+    await db.dataSource.getRepository(Account).save([
+      { id: ACCOUNT, name: 'Photos', planId: 'beta', status: AccountStatus.ACTIVE },
+      { id: OTHER, name: 'Other', planId: 'beta', status: AccountStatus.ACTIVE },
+    ]);
     // A store just started answers before it can keep anything: the first bucket waits for it, 30 s at most.
     for (let tries = 0; ; tries++) {
       try {
@@ -89,7 +96,17 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
     const directory = new StorageDirectory(buckets, db.dataSource.getRepository(StorageKey), encryption);
     await db.dataSource.getRepository(StorageKey).save({ id: key.id, accountId: ACCOUNT, secret: directory.sealSecret(key.id, key.secret) });
     counts = new StorageRequestCountsService(db.dataSource.getRepository(StorageRequestCount));
-    frontDoor = new S3FrontDoor(new ConfigService({ storage: { base: 'http://s3.localhost:3002', region: 'tn-tunis-1' }, minio }), directory, counts);
+    // Every account on the beta plan, with credit, and as many requests a second as it sends: the API's checks have their own tests.
+    const credit = { admit: async () => undefined } as unknown as CreditService;
+    const throttler = { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) };
+    frontDoor = new S3FrontDoor(
+      new ConfigService({ storage: { base: 'http://s3.localhost:3002', region: 'tn-tunis-1' }, minio }),
+      directory,
+      counts,
+      onePlan(),
+      credit,
+      throttler,
+    );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 

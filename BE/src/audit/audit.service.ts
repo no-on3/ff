@@ -48,6 +48,11 @@ export type AuditAction =
   | 'database.create'
   | 'database.password'
   | 'database.delete'
+  // A customer's bucket, made and deleted, and an access key to the account's buckets, made and revoked (ADR 0009).
+  | 'bucket.create'
+  | 'bucket.delete'
+  | 'storage_key.create'
+  | 'storage_key.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

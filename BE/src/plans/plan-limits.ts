@@ -53,6 +53,14 @@ export const planLimitsSchema = z.strictObject({
   databaseStorageMb: positive,
   /** The sessions one database may have at once: its user's CONNECTION LIMIT on the server. */
   databaseConnections: positive,
+  /** Customers' buckets, the account's together (ADR 0009). */
+  buckets: z.number().int().min(0),
+  /** What the account's buckets may hold together, in MB: S3's free tier, 5 GB, on beta. */
+  bucketStorageMb: positive,
+  /** S3 requests per second, the account's keys together: past it, the front door answers SlowDown, as S3 does. */
+  storageRequestsPerSecond: positive,
+  /** The largest object one PutObject may send, in MB: S3's own limit is 5 GB. */
+  maxObjectMb: positive,
 });
 
 export type PlanLimits = z.infer<typeof planLimitsSchema>;

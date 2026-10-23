@@ -120,13 +120,14 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 4. update (new code live);
 5. delete (Deployment gone, record gone);
 6. the same create, invoke, and delete for a Python function;
-7. plans and rate limits (P-15): an account on a small plan, its limits, its namespace's quota, and its rates;
-8. usage records (P-20): one per invocation, with the invocation's ID as the runtime's request ID, for a success, an error, a timeout and a cold start; then the backend is killed during a call, restarted, and marks the call `LOST`, unbilled, within about a minute;
-9. capacity samples (P-21): the warm function sampled each minute, and `npm run capacity:report` showing the account's day;
-10. the usage API (P-22): `GET /usage` against the raw records, the deleted function's usage and the deleted database's month from its hourly sample, CSV with both, an empty month, a malformed one;
-11. usage priced (P-30): the month in TND with the first price book, a function's cost from the book's prices in SQL, the free tier covering the month, the CSV's costs, and no estimate before the first book;
-12. the hourly rating (P-32): every hour from the first book rated as the backend started, once and in order, in shadow mode; the balance and the transactions, nothing debited; `npm run billing:reconcile` against the stack's database;
-13. the balance check (P-33): shadow mode off, no buffer and no grace period; a wallet run below zero, an invoke refused with 402 and nothing recorded; a top-up, and invokes accepted again at once.
+7. customers' buckets (ADR 0009): made through the API, a name once across FF, the plan's five, access keys two at most; then AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door, only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in parts, presigned URLs, a wrong signature, an expired URL, another account's bucket); a read-only key, a revoked one, a suspended account and one whose storage is off refused; the requests counted by the minute. The first run fetches the SDK (3.1156.0, with its presigner and `lib-storage`) and boto3 (1.43.118) into `hack/.cache/s3-clients`, with npm and pip; it takes the AWS CLI from this machine, or its image `amazon/aws-cli:2.34.32`;
+8. plans and rate limits (P-15): an account on a small plan, its limits, its namespace's quota, and its rates;
+9. usage records (P-20): one per invocation, with the invocation's ID as the runtime's request ID, for a success, an error, a timeout and a cold start; then the backend is killed during a call, restarted, and marks the call `LOST`, unbilled, within about a minute;
+10. capacity samples (P-21): the warm function sampled each minute, and `npm run capacity:report` showing the account's day;
+11. the usage API (P-22): `GET /usage` against the raw records, the deleted function's usage and the deleted database's month from its hourly sample, CSV with both, an empty month, a malformed one;
+12. usage priced (P-30): the month in TND with the first price book, a function's cost from the book's prices in SQL, the free tier covering the month, the CSV's costs, and no estimate before the first book;
+13. the hourly rating (P-32): every hour from the first book rated as the backend started, once and in order, in shadow mode; the balance and the transactions, nothing debited; `npm run billing:reconcile` against the stack's database;
+14. the balance check (P-33): shadow mode off, no buffer and no grace period; a wallet run below zero, an invoke refused with 402 and nothing recorded; a top-up, and invokes accepted again at once.
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
 

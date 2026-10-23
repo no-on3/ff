@@ -1,15 +1,22 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
 import { createHash, randomBytes } from 'node:crypto';
 import { IncomingMessage, Server, ServerResponse, createServer } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { AccountStatus } from '../accounts/entities/account.entity';
+import { InsufficientCreditException } from '../billing/credit-policy';
+import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
+import { PlanView } from '../plans/plan-limits';
+import { PlansService } from '../plans/plans.service';
+import { countStorageRequest } from '../plans/rate-limits';
 import { ChunkedBodyReader, ExpectedChecksum, PlainBodyChecker, STREAMING_SIGNED, STREAMING_SIGNED_TRAILER, STREAMING_UNSIGNED_TRAILER, isStreaming } from './aws-chunked';
 import { Bucket } from './bucket.entity';
 import { CHECKSUM_ALGORITHMS, isChecksumAlgorithm } from './checksums';
-import { S3Error, accessDenied, errorDocument, internalError, invalidAccessKeyId, invalidRequest, noSuchBucket, notImplemented } from './s3-error';
+import { S3Error, accessDenied, accountProblem, errorDocument, internalError, invalidAccessKeyId, invalidRequest, noSuchBucket, notImplemented } from './s3-error';
 import { S3Address, S3Operation, addressOf, operationOf } from './s3-requests';
 import { RequestSignature, SigningChain, UNSIGNED_PAYLOAD, checkSignature, decodeEscapes, readSignature } from './sigv4';
 import { StoreClient } from './store-client';
@@ -19,6 +26,8 @@ import { listBucketsDocument, locationDocument, replacing } from './xml';
 
 /** S3's limit on an object sent in one PUT, and on a part of a multipart upload: 5 GiB. */
 export const MAX_UPLOAD_BYTES = 5 * 1024 ** 3;
+
+const MB = 1024 * 1024;
 
 /** The XML bodies read whole before they go to the store: a batch of deletes, a multipart upload's completion. */
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
@@ -33,7 +42,7 @@ const ANSWERED = /^(content-type|content-length|content-range|content-encoding|c
 /** Operations whose small XML body is read whole, then sent with its MD5, which some stores require of a batch of deletes. */
 const DOCUMENT_BODIES = new Set(['DeleteObjects', 'CompleteMultipartUpload']);
 
-/** Operations whose object or part is limited to 5 GiB. */
+/** Operations whose object or part is limited to 5 GiB; PutObject's object, to the plan's maxObjectMb too. */
 const UPLOADS = new Set(['PutObject', 'UploadPart']);
 
 const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
@@ -138,7 +147,10 @@ function expectedChecksum(request: IncomingMessage): { checksum?: ExpectedChecks
  * and cut before its end when it fails, so the store never keeps it. The store
  * gets FF's own signature, the bucket's name there, and no checksum header;
  * its answers come back as they come, naming the customer's bucket. Each
- * request let into a bucket counts in its minute, by AWS's classes.
+ * request let into a bucket counts in its minute, by AWS's classes. Every key
+ * is checked the same way: its account active, its storage on, the plan's
+ * requests per second; an upload, the account's credit and the plan's largest
+ * object; deletes and reads go on without credit.
  */
 @Injectable()
 export class S3FrontDoor implements OnModuleDestroy {
@@ -154,6 +166,9 @@ export class S3FrontDoor implements OnModuleDestroy {
     config: ConfigService,
     private readonly directory: StorageDirectory,
     private readonly counts: StorageRequestCountsService,
+    private readonly plans: PlansService,
+    private readonly credit: CreditService,
+    @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
   ) {
     const base = new URL(config.getOrThrow<string>('storage.base'));
     this.host = base.hostname;
@@ -266,6 +281,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     if (!key) throw invalidAccessKeyId();
     const chain = checkSignature({ method, rawPath, rawQuery, rawHeaders: request.rawHeaders }, signature, key.secret, new Date());
     this.directory.touch(key.id);
+    const plan = await this.admitAccount(key.accountId);
 
     const operation = operationOf(method, address, query, request.headers);
     if (operation.name === 'NotImplemented') throw notImplemented();
@@ -277,13 +293,36 @@ export class S3FrontDoor implements OnModuleDestroy {
     exchange.bucket = bucket;
     exchange.operation = operation;
     if (operation.writes && key.readOnly) throw accessDenied();
+    // Out of credit, uploads wait for it; reads, and deletes that lower the bill, go on.
+    if (operation.writes && operation.class === 'tier1') await this.admitUpload(key.accountId);
     if (operation.name === 'GetBucketLocation') return this.document(exchange, 200, locationDocument(this.region));
     if (operation.name === 'HeadBucket') {
       exchange.response.writeHead(200, { 'x-amz-request-id': exchange.id, 'x-amz-bucket-region': this.region, 'content-length': 0 });
       exchange.response.end();
       return 200;
     }
-    return this.forward(exchange, signature, chain, key, bucket, operation);
+    return this.forward(exchange, signature, chain, key, bucket, operation, plan);
+  }
+
+  /** The key's account, as every key is checked: active, its storage on, within the plan's requests per second. Answers its plan. */
+  private async admitAccount(accountId: string): Promise<PlanView> {
+    const account = await this.directory.account(accountId);
+    if (!account || account.status !== AccountStatus.ACTIVE) throw accountProblem(`it is ${account?.status ?? 'gone'}`);
+    if (account.storageDisabledAt) throw accountProblem(`FF turned its databases and buckets off: ${account.storageDisabledReason}`);
+    const plan = await this.plans.get(account.planId);
+    if ((await countStorageRequest(this.throttler, account.id, plan.limits.storageRequestsPerSecond)) !== undefined) {
+      throw new S3Error(503, 'SlowDown', `Please reduce your request rate: the ${plan.name} plan allows ${plan.limits.storageRequestsPerSecond} requests a second.`);
+    }
+    return plan;
+  }
+
+  private async admitUpload(accountId: string): Promise<void> {
+    try {
+      await this.credit.admit(accountId);
+    } catch (error) {
+      if (error instanceof InsufficientCreditException) throw accountProblem('it is out of credit: its files are read and deleted, and uploads wait for credit');
+      throw error;
+    }
   }
 
   /** The bucket of that name, if the key reaches it: none answers NoSuchBucket; another account's, or one the key doesn't name, AccessDenied, as S3 answers. */
@@ -306,7 +345,7 @@ export class S3FrontDoor implements OnModuleDestroy {
   }
 
   /** The request to the store, its body checked on the way, and the store's answer back. */
-  private async forward(exchange: Exchange, signature: RequestSignature, chain: SigningChain, key: ActiveKey, bucket: Bucket, operation: S3Operation): Promise<number> {
+  private async forward(exchange: Exchange, signature: RequestSignature, chain: SigningChain, key: ActiveKey, bucket: Bucket, operation: S3Operation, plan: PlanView): Promise<number> {
     const { request, response, method } = exchange;
     const headers: Record<string, string> = {};
     for (let i = 0; i < request.rawHeaders.length; i += 2) {
@@ -322,7 +361,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     const copySource = single(request.headers['x-amz-copy-source']);
     if (copySource !== undefined) headers['x-amz-copy-source'] = await this.copySource(copySource, key);
 
-    const body = method === 'PUT' || method === 'POST' ? this.body(exchange, signature, chain, operation, headers) : null;
+    const body = method === 'PUT' || method === 'POST' ? this.body(exchange, signature, chain, operation, headers, plan) : null;
     // Let in: now the client may send its body.
     if (exchange.expectsContinue) response.writeContinue();
     let whole: Buffer | undefined;
@@ -353,7 +392,7 @@ export class S3FrontDoor implements OnModuleDestroy {
    * plain body's SHA-256 and checksum. A presigned URL signs no body, and its
    * checksum parameters are signed, then ignored, as S3 does.
    */
-  private body(exchange: Exchange, signature: RequestSignature, chain: SigningChain, operation: S3Operation, headers: Record<string, string>): Stage[] {
+  private body(exchange: Exchange, signature: RequestSignature, chain: SigningChain, operation: S3Operation, headers: Record<string, string>, plan: PlanView): Stage[] {
     const { request } = exchange;
     // The bytes uploaded are the body's own, as CloudWatch counts them: after aws-chunked's framing.
     const counted = counter((bytes) => (exchange.bytesIn += bytes));
@@ -363,7 +402,7 @@ export class S3FrontDoor implements OnModuleDestroy {
       if (![STREAMING_SIGNED, STREAMING_SIGNED_TRAILER, STREAMING_UNSIGNED_TRAILER].includes(payload)) throw notImplemented();
       const decodedLength = Number(single(request.headers['x-amz-decoded-content-length']));
       if (!Number.isSafeInteger(decodedLength) || decodedLength < 0) throw new S3Error(411, 'MissingContentLength', 'You must provide the x-amz-decoded-content-length HTTP header.');
-      this.limit(operation, decodedLength);
+      this.limit(operation, decodedLength, plan);
       headers['content-length'] = String(decodedLength);
       const { checksum, trailerName } = expectedChecksum(request);
       stages.push(
@@ -383,7 +422,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     if (request.headers['content-length'] === undefined || !Number.isSafeInteger(length)) {
       throw new S3Error(411, 'MissingContentLength', 'You must provide the Content-Length HTTP header.');
     }
-    this.limit(operation, length);
+    this.limit(operation, length, plan);
     headers['content-length'] = String(length);
     if (signature.kind === 'presigned') return [...stages, counted];
     const { checksum } = expectedChecksum(request);
@@ -393,8 +432,11 @@ export class S3FrontDoor implements OnModuleDestroy {
     return [...stages, counted];
   }
 
-  private limit(operation: S3Operation, bytes: number): void {
+  private limit(operation: S3Operation, bytes: number, plan: PlanView): void {
     if (UPLOADS.has(operation.name) && bytes > MAX_UPLOAD_BYTES) throw new S3Error(400, 'EntityTooLarge', 'Your proposed upload exceeds the maximum allowed size');
+    if (operation.name === 'PutObject' && bytes > plan.limits.maxObjectMb * MB) {
+      throw new S3Error(400, 'EntityTooLarge', `Your proposed upload exceeds the maximum allowed size: the ${plan.name} plan takes ${plan.limits.maxObjectMb} MB in one PutObject; a multipart upload sends more`);
+    }
   }
 
   /** The store's answer to the client, as it comes: an XML one naming the customer's bucket rather than the store's. */

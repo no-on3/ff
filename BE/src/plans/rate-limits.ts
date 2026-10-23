@@ -61,6 +61,16 @@ export async function countInvocation(storage: ThrottlerStorage, accountId: stri
   return record.isBlocked ? record.timeToBlockExpire : undefined;
 }
 
+/**
+ * Counts an S3 request against the account's storageRequestsPerSecond, in the
+ * throttler's own storage, its keys' requests together. Answers the seconds to
+ * wait when it is over the limit, and undefined when it may go on.
+ */
+export async function countStorageRequest(storage: ThrottlerStorage, accountId: string, limit: number): Promise<number | undefined> {
+  const record = await storage.increment(`storage:account:${accountId}`, 1_000, limit, 1_000, 'storage');
+  return record.isBlocked ? record.timeToBlockExpire : undefined;
+}
+
 /** The plan whose limits apply: the account's, else the plan a new account gets. */
 const planOf = (plans: PlansService, request: RateLimitedRequest): Promise<PlanView> =>
   plans.get(request.principal?.planId ?? DEFAULT_PLAN);

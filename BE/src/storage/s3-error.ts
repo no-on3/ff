@@ -39,6 +39,10 @@ export const badDigest = (algorithm: string) => new S3Error(400, 'BadDigest', `T
 
 export const internalError = () => new S3Error(500, 'InternalError', 'We encountered an internal error. Please try again.');
 
+/** The account can't do it, in AWS's words for a suspended account's requests, and why. */
+export const accountProblem = (why: string) =>
+  new S3Error(403, 'AccountProblem', `There is a problem with your FF account that prevents the action from completing successfully: ${why}.`);
+
 /** S3's error document: its code and message, the resource asked for, and the request's ID. */
 export function errorDocument(error: S3Error, requestId: string, resource?: string): string {
   return (

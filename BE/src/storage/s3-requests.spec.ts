@@ -53,10 +53,11 @@ describe('the operation a request is', () => {
     expect(of('DELETE', object, 'uploadId=u1')).toBe('AbortMultipartUpload free writes');
   });
 
-  it("a presigned URL's parameters, and the checksum the SDK signs into it, are no operation's", () => {
-    const presigned = 'X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=c&X-Amz-Date=d&X-Amz-Expires=60&X-Amz-SignedHeaders=host&X-Amz-Signature=s';
-    expect(of('PUT', object, `${presigned}&x-amz-checksum-crc32=AAAAAA%3D%3D&x-amz-sdk-checksum-algorithm=CRC32`)).toBe('PutObject tier1 writes');
-    expect(of('GET', object, presigned)).toBe('GetObject tier2');
+  it("a presigned URL's parameters, as the SDK for JavaScript's presigner writes them, are no operation's", () => {
+    // Its GET asks for the object's checksum, its PUT signs the CRC-32 of nothing, and both name their payload.
+    const presigned = 'X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=c&X-Amz-Date=d&X-Amz-Expires=60&X-Amz-SignedHeaders=host&X-Amz-Signature=s';
+    expect(of('PUT', object, `${presigned}&x-amz-checksum-crc32=AAAAAA%3D%3D&x-amz-sdk-checksum-algorithm=CRC32&x-id=PutObject`)).toBe('PutObject tier1 writes');
+    expect(of('GET', object, `${presigned}&x-amz-checksum-mode=ENABLED&x-id=GetObject`)).toBe('GetObject tier2');
   });
 
   it("anything else answers NotImplemented: a bucket's policy or creation, an object's tags, versions", () => {

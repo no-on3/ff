@@ -88,6 +88,10 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("databases", &|n| if n == 1 { "1 database".to_string() } else { format!("{n} databases") });
     add("databaseStorageMb", &|n| format!("{n} MB a database"));
     add("databaseConnections", &|n| format!("{n} sessions a database"));
+    add("buckets", &|n| if n == 1 { "1 bucket".to_string() } else { format!("{n} buckets") });
+    add("bucketStorageMb", &|n| format!("{n} MB in the buckets"));
+    add("storageRequestsPerSecond", &|n| format!("{n} requests to the buckets a second"));
+    add("maxObjectMb", &|n| format!("{n} MB a file in one upload"));
     lines
 }
 

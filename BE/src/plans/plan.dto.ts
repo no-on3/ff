@@ -25,6 +25,10 @@ export class PlanLimitsView implements PlanLimits {
   @ApiProperty({ example: 1, description: "Customers' PostgreSQL databases, all together" }) databases: number;
   @ApiProperty({ example: 1024, description: 'What one database may hold, in MB, before its new sessions start read-only' }) databaseStorageMb: number;
   @ApiProperty({ example: 10, description: 'The sessions one database may have at once' }) databaseConnections: number;
+  @ApiProperty({ example: 5, description: "Customers' buckets, all together" }) buckets: number;
+  @ApiProperty({ example: 5120, description: "What the account's buckets may hold together, in MB" }) bucketStorageMb: number;
+  @ApiProperty({ example: 100, description: 'S3 requests per second, all the keys together' }) storageRequestsPerSecond: number;
+  @ApiProperty({ example: 5120, description: 'The largest object one PutObject may send, in MB' }) maxObjectMb: number;
 }
 
 /** An account's plan. */

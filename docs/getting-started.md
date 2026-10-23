@@ -455,7 +455,7 @@ curl -s -X POST "$FF/databases" -H 'content-type: application/json' -d '{"name":
 
 **Backups and the way out:** the server is backed up as FF's own is, to a second site, 7 days of point-in-time recovery. An owner asks FF for a database as it was at a moment of those 7 days, from the e-mail address FF knows them by; it comes back as a new database of the account's, as RDS restores to a new instance, by the runbook in [`deploy/backup`](../deploy/backup/README.md), which the monthly drill runs. To move a database to AWS RDS, `pg_dump` and `pg_restore`, the writes stopped for the copy: [`cli/templates/export/data/postgres.md`](../cli/templates/export/data/postgres.md), which `ff export` will put in its kit. Logical replication, which moves one without stopping them, needs what the server doesn't give customers today: a user with `REPLICATION`, and `wal_level` at `logical`. In French: [Bases de données](fr/bases-de-donnees.md).
 
-### Buckets' S3 front door
+### Buckets
 
 Buckets for files come as AWS S3 gives them ([ADR 0009](adr/0009-buckets.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers their requests on a port of its own, `FF_STORAGE_PORT` (3002), at `FF_STORAGE_BASE` (`http://s3.localhost:3002`): path-style there (`http://s3.localhost:3002/photos/a.jpg`, as boto3 and the CLI address it, and every SDK an IP address), and virtual-hosted under it (`http://photos.s3.localhost:3002/a.jpg`, as the SDK for JavaScript addresses a host name). In front of the store, SeaweedFS in development (`MINIO_*`), it:
 - checks each request's AWS Signature Version 4, in its `Authorization` header or as a presigned URL (up to 7 days), with one of the account's access keys; nothing anonymous;
@@ -464,7 +464,21 @@ Buckets for files come as AWS S3 gives them ([ADR 0009](adr/0009-buckets.md)): A
 - checks a body as it streams to the store: its signed SHA-256, each chunk of the SDKs' `aws-chunked` uploads and its trailer, the checksum it carries (CRC-32, CRC-32C, CRC-64/NVME, SHA-1, SHA-256); a body that fails never completes in the store, which gets FF's own signature, the bucket's name there (`ff-` and 24 characters), and no checksum;
 - counts each request let into a bucket in its minute, by AWS's two classes of request (deletes free), with its bytes in and out, written once a minute to `storage_request_counts`.
 
-Buckets and their access keys are made through FF's API, which comes with the buckets themselves; until then the front door answers the keys and buckets the backend's tables hold, as its tests make them (`src/storage/front-door.db.spec.ts`, against the development SeaweedFS).
+Buckets and the account's access keys to them are made through FF's API:
+
+```bash
+curl -s -X POST "$FF/buckets" -H 'content-type: application/json' -d '{"name": "photos"}'   # 201, its endpoint and address
+curl -s -X POST "$FF/storage-keys" -H 'content-type: application/json' -d '{}' | jq -r '"export AWS_ACCESS_KEY_ID=\(.id) AWS_SECRET_ACCESS_KEY=\(.secretAccessKey) AWS_REGION=\(.region)"'
+# then, with those three, any of AWS's tools, only the endpoint given:
+aws --endpoint-url http://s3.localhost:3002 s3 cp ./cat.jpg s3://photos/2026/cat.jpg
+aws --endpoint-url http://s3.localhost:3002 s3 ls s3://photos --recursive
+```
+
+**A bucket's name** is AWS's, without dots (3 to 63 lower-case letters, digits and hyphens), and unique across FF, as on AWS: whoever has `photos`, nobody else may, until it is deleted. In the store it is a name of FF's, `ff-` and 24 characters, which says nothing of whose it is. The plan sets how many an account has (five on beta), what they hold together (5 GB), the requests a second (100) and the largest file in one `PutObject` (5 GB; a multipart upload sends more). `GET /buckets` and `GET /buckets/<name>` show them; `DELETE /buckets/<name>` deletes an empty one, as S3 does, and `?force=true` deletes its files first, and the uploads under way.
+
+**An access key** (`POST /storage-keys`) is an ID like AWS's, `AKFF` and 16 characters, and a secret of 40, in that answer only: FF keeps it sealed, as the front door needs it to check signatures. It reaches all the account's buckets, or those `buckets` names, read-write or, with `readOnly`, reading and listing only. An account has two at most, as IAM gives a user, so that one can replace the other; `DELETE /storage-keys/<id>` revokes one, at once. Only owners see, make and revoke them; owners and developers make and delete buckets; every member lists them. An API key needs `storage:read` and `storage:write`. The audit log names each `bucket.create`, `bucket.delete`, `storage_key.create` and `storage_key.delete`.
+
+**Every request is checked the same way:** the key's account must be active and its storage on, or the front door answers `AccountProblem`, saying why; past the plan's requests a second, `SlowDown`; out of credit, uploads wait for credit, while reading and deleting go on. A closed account's buckets are emptied and deleted with the rest of its data, at its data deletion date, and its keys revoked. No bucket is copied to the second site: the store's own redundancy keeps them, as S3's does (decision 11).
 
 ### A small app, end to end
 

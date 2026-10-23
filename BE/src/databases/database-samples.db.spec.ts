@@ -74,7 +74,8 @@ run("customers' databases measured every hour (L2, ADR 0008)", () => {
       config,
     );
   const samples = () => new DatabaseSamplesService(db.dataSource, server, plans, new NotificationsService(db.dataSource, {} as AuditService, config), config);
-  const t0 = new Date();
+  // The start of this hour: "10 minutes later" stays in it, whenever the suite runs.
+  const t0 = new Date(Math.floor(Date.now() / HOUR_MS) * HOUR_MS);
   const hour = (n: number) => new Date(t0.getTime() + n * HOUR_MS);
 
   const connect = async (made: { connectionString: string }): Promise<Client> => {

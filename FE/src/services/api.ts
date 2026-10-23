@@ -608,6 +608,14 @@ export interface PlanLimits {
   databaseStorageMb: number;
   /** The sessions one database may have at once. */
   databaseConnections: number;
+  /** Customers' buckets, all together. */
+  buckets: number;
+  /** What the account's buckets may hold together, in MB. */
+  bucketStorageMb: number;
+  /** S3 requests per second, all the keys together. */
+  storageRequestsPerSecond: number;
+  /** The largest object one PutObject may send, in MB. */
+  maxObjectMb: number;
 }
 
 export interface Plan {
@@ -708,6 +716,8 @@ export const SCOPES = [
   'usage:read',
   'databases:read',
   'databases:write',
+  'storage:read',
+  'storage:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 

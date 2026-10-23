@@ -15,6 +15,12 @@ import { IncomingMessage, Server, ServerResponse, createServer, request as httpR
 import { AddressInfo } from 'node:net';
 import { Readable } from 'node:stream';
 import { text } from 'node:stream/consumers';
+import { AccountStatus } from '../accounts/entities/account.entity';
+import { InsufficientCreditException } from '../billing/credit-policy';
+import { CreditService } from '../billing/credit.service';
+import { PlanView } from '../plans/plan-limits';
+import { PlansService } from '../plans/plans.service';
+import { plan } from '../plans/test-fixtures';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
@@ -115,6 +121,27 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     touch: () => undefined,
   } as unknown as StorageDirectory;
   const counts = { count: (request: CountedRequest) => counted.push(request) } as unknown as StorageRequestCountsService;
+  const accounts = new Map(
+    [KEY.accountId, OTHERS.accountId].map((id) => [id, { id, status: AccountStatus.ACTIVE, planId: 'beta', storageDisabledAt: null as Date | null, storageDisabledReason: null as string | null }]),
+  );
+  Object.assign(directory, { account: async (id: string) => accounts.get(id) ?? null });
+  let currentPlan: PlanView = plan();
+  const plans = { get: async () => currentPlan } as unknown as PlansService;
+  const outOfCredit = new Set<string>();
+  const credit = {
+    admit: async (accountId: string) => {
+      if (outOfCredit.has(accountId)) throw Object.create(InsufficientCreditException.prototype) as InsufficientCreditException;
+    },
+  } as unknown as CreditService;
+  /** The throttler's storage, as its in-memory one counts: hits per key in the window. */
+  const hits = new Map<string, number>();
+  const throttler = {
+    increment: async (key: string, _ttl: number, limit: number) => {
+      const total = (hits.get(key) ?? 0) + 1;
+      hits.set(key, total);
+      return { totalHits: total, timeToExpire: 1, isBlocked: total > limit, timeToBlockExpire: 1 };
+    },
+  };
   const client = (key: ActiveKey = KEY, secret = key.secret) =>
     new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: secret }, maxAttempts: 1 });
   /** The SDK's error for a refused call: its name and status. */
@@ -135,7 +162,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
       minio: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
-    frontDoor = new S3FrontDoor(config, directory, counts);
+    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler);
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 
@@ -147,6 +174,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   beforeEach(() => {
     seen.length = 0;
     counted.length = 0;
+    hits.clear();
   });
 
   it("puts a string, its SHA-256 and CRC-32 checked, and the store gets the object under its own name, FF's signature, no checksum", async () => {
@@ -245,6 +273,57 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'shared.txt', Body: 'shared' }));
 
     expect(await (await client(READ_ONLY).send(new GetObjectCommand({ Bucket: 'photos', Key: 'shared.txt' }))).Body?.transformToString()).toBe('shared');
+  });
+
+  it("refuses every key of an account that isn't active, or whose storage FF turned off, in AWS's words for it, saying why", async () => {
+    const account = accounts.get(KEY.accountId)!;
+    const get = () => client().send(new ListBucketsCommand({}));
+    try {
+      account.status = AccountStatus.SUSPENDED;
+      expect(await refused(get())).toBe('403 AccountProblem');
+      account.status = AccountStatus.ACTIVE;
+      account.storageDisabledAt = new Date();
+      account.storageDisabledReason = 'Abuse';
+      expect(await refused(get())).toBe('403 AccountProblem');
+    } finally {
+      Object.assign(account, { status: AccountStatus.ACTIVE, storageDisabledAt: null, storageDisabledReason: null });
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('out of credit, an upload waits for it; a read and a delete go on', async () => {
+    await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'kept.txt', Body: 'kept' }));
+    outOfCredit.add(KEY.accountId);
+    try {
+      expect(await refused(client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'more.txt', Body: 'more' })))).toBe('403 AccountProblem');
+      expect(await (await client().send(new GetObjectCommand({ Bucket: 'photos', Key: 'kept.txt' }))).Body?.transformToString()).toBe('kept');
+      expect(await refused(client().send(new DeleteObjectsCommand({ Bucket: 'photos', Delete: { Objects: [{ Key: 'kept.txt' }] } })))).toBe('accepted');
+    } finally {
+      outOfCredit.delete(KEY.accountId);
+    }
+  });
+
+  it("answers SlowDown past the plan's requests a second, the account's keys together", async () => {
+    currentPlan = plan({ storageRequestsPerSecond: 3 });
+    try {
+      const answers = [];
+      for (const key of [KEY, READ_ONLY, KEY, READ_ONLY, KEY]) answers.push(await refused(client(key).send(new ListBucketsCommand({}))));
+
+      expect(answers).toEqual(['accepted', 'accepted', 'accepted', '503 SlowDown', '503 SlowDown']);
+    } finally {
+      currentPlan = plan();
+    }
+  });
+
+  it("refuses a PutObject larger than the plan's largest object, before the store hears of it; a part may be larger", async () => {
+    currentPlan = plan({ maxObjectMb: 1 });
+    try {
+      expect(await refused(client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'big.bin', Body: Buffer.alloc(1024 * 1024 + 1) })))).toBe('400 EntityTooLarge');
+      expect(seen).toEqual([]);
+      expect(await refused(client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'fits.bin', Body: Buffer.alloc(1024 * 1024) })))).toBe('accepted');
+    } finally {
+      currentPlan = plan();
+    }
   });
 
   /** A request signed with the key, an unsigned body declared, as any client may send one. */

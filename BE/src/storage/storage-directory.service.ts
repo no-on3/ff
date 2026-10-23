@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { describeError } from '../common/describe-error';
+import { Account } from '../accounts/entities/account.entity';
 import { Sealed } from '../encryption/envelope';
 import { EncryptionService } from '../encryption/encryption.service';
 import { Bucket, BucketStatus } from './bucket.entity';
@@ -53,6 +54,11 @@ export class StorageDirectory {
       readOnly: key.readOnly,
       secret: this.encryption.openJson<string>(key.secret, sealedFor(key.id)),
     };
+  }
+
+  /** The account a key belongs to: its status, and whether FF turned its storage off; null for none. */
+  account(accountId: string): Promise<Pick<Account, 'id' | 'status' | 'planId' | 'storageDisabledAt' | 'storageDisabledReason'> | null> {
+    return this.buckets.manager.findOne(Account, { where: { id: accountId }, select: { id: true, status: true, planId: true, storageDisabledAt: true, storageDisabledReason: true } });
   }
 
   /** The active bucket of that name, whoever's it is. */
