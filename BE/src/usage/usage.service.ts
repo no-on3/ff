@@ -45,7 +45,7 @@ const amounts = (row: UsageRow): UsageAmountsView => ({
 });
 
 /** The tables partitioned by month, written once and never changed: usage records, capacity samples and customers' databases' samples. */
-const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples'];
+const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples', 'storage_request_counts'];
 
 /**
  * Usage records (client-readiness plan, P-20, D6): written once per

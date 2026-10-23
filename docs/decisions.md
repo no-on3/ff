@@ -112,7 +112,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Still to change:** V-09.
 
 **12. Data downloaded from FF is counted, not billed.** ✅ Confirmed. If FF's hosting bills FF for its traffic, FF bills it too.
-- **Still to change:** V-09, the counts.
+- **Changed already:** V-06, the S3 front door, counts each bucket's bytes in and out by the minute, with its requests.
+- **Still to change:** V-09, the counts shown, on the console's Usage page and in `GET /usage`.
 
 **13. Out of credit: file uploads are refused; reading files and the databases go on.** ✅ Confirmed. FF never deletes data for non-payment, and functions are already refused without credit.
 - **Changed already:** V-04: a database's storage is rated and debited whatever the balance, which goes below zero, as a function's `minInstances` do; nothing stops a database for its balance.

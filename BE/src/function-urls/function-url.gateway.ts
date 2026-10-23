@@ -20,6 +20,7 @@ import { FunctionUrl, UrlAuthType, UrlCors } from '../functions/entities/functio
 import { EventFormat, Function, FunctionStatus } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
+import { S3FrontDoor } from '../storage/front-door';
 import { refusals, statusClass, urlResponses } from '../monitoring/operator-metrics';
 import { FunctionThrottledError } from '../orchestrator/orchestrator.errors';
 import { PlansService } from '../plans/plans.service';
@@ -145,6 +146,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     private readonly refused: RefusedInvocationsService,
     @InjectRepository(Account) private readonly accounts: Repository<Account>,
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
+    private readonly frontDoor: S3FrontDoor,
   ) {
     this.domain = functionDomain(config.getOrThrow<string>('functionUrls.base'));
     // Behind the edge, the caller is in X-Forwarded-For, which only the proxies the API trusts may set.
@@ -226,14 +228,15 @@ export class FunctionUrlGateway implements OnModuleDestroy {
 
   /**
    * The edge's question before it gets a certificate on demand, for a host it
-   * hasn't one for (Caddy's on_demand_tls ask): 200 for a function URL's host
-   * or a customer's verified domain, 404 for any other, so that nobody makes it
-   * ask a certificate authority for names of their choosing. Only the edge
-   * reaches this port in a cluster.
+   * hasn't one for (Caddy's on_demand_tls ask, one address for all its hosts):
+   * 200 for a function URL's host, a customer's verified domain, or buckets'
+   * S3 endpoint and a bucket's host under it; 404 for any other, so that nobody
+   * makes it ask a certificate authority for names of their choosing. Only the
+   * edge reaches this port in a cluster.
    */
   private async tlsAllowed(target: string): Promise<UrlAnswer> {
     const domain = new URL(target, 'http://edge').searchParams.get('domain') ?? undefined;
-    const known = (await this.urlFor(domain)) !== null;
+    const known = (await this.urlFor(domain)) !== null || (domain !== undefined && (await this.frontDoor.allowsCertificate(domain)));
     return known ? { status: HttpStatus.OK, headers: [['content-type', 'text/plain']], body: Buffer.from('allowed') } : jsonAnswer(HttpStatus.NOT_FOUND, 'Not Found');
   }
 

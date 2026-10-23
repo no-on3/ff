@@ -28,6 +28,7 @@ import { PlansService } from './plans/plans.service';
 import { RateLimitGuard, rateLimitOptions } from './plans/rate-limits';
 import { RetentionModule } from './retention/retention.module';
 import { SchedulesModule } from './schedules/schedules.module';
+import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
@@ -63,6 +64,7 @@ import { SchedulesModule } from './schedules/schedules.module';
     PlansModule,
     RetentionModule,
     SchedulesModule,
+    StorageModule,
   ],
   controllers: [HealthController],
   providers: [

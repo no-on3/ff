@@ -57,6 +57,7 @@ const SCHEDULES = migrationNames.find((name) => name.startsWith('Schedules')) as
 const CODE_IMAGES = migrationNames.find((name) => name.startsWith('CodeImages')) as string;
 const DATABASES = migrationNames.find((name) => name.startsWith('Databases1')) as string;
 const DATABASE_BILLING = migrationNames.find((name) => name.startsWith('DatabaseBilling')) as string;
+const DATABASE_OPERATIONS = migrationNames.find((name) => name.startsWith('DatabaseOperations')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -748,6 +749,35 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the buckets migration keeps a bucket's name once across FF, a key's secret sealed, and buckets' requests counted by month, append-only; it reverts with all three present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const bucket = (account: string, name: string, storeName: string) =>
+        dataSource.query(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, $2, $3) RETURNING id, status`, [account, name, storeName]);
+      const [photos] = await bucket(ACCOUNT, 'photos', 'ff-0123456789abcdef01234567');
+      expect(photos.status).toBe('active');
+      await expect(bucket('000000000002', 'photos', 'ff-0123456789abcdef01234568')).rejects.toThrow(/duplicate key value violates unique constraint/);
+      await expect(bucket(ACCOUNT, 'other', 'ff-0123456789abcdef01234567')).rejects.toThrow(/duplicate key value violates unique constraint/);
+      await expect(dataSource.query(`UPDATE buckets SET status = 'gone'`)).rejects.toThrow(/violates check constraint/);
+      await dataSource.query(`INSERT INTO storage_keys (id, account_id, secret, buckets, read_only) VALUES ('AKFFAAAAAAAAAAAAAAAA', $1, '{"v": 1}', '{photos}', true)`, [ACCOUNT]);
+      const minute = `date_trunc('minute', now())`;
+      await dataSource.query(
+        `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
+         VALUES ($1, ${minute}, 'tier1', gen_random_uuid(), $2, 'photos', 3, 0, 3, 0, 0, 3000, 0)`,
+        [photos.id, ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE storage_request_counts SET requests = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM storage_request_counts`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'storage_request_counts')).toEqual([{ relname: monthPartition('storage_request_counts', 0) }, { relname: monthPartition('storage_request_counts', 1) }]);
+
+      await migrateDownTo(dataSource, DATABASE_OPERATIONS);
+
+      expect(await dataSource.query(`SELECT to_regclass('buckets') AS b, to_regclass('storage_keys') AS k, to_regclass('storage_request_counts') AS c`)).toEqual([{ b: null, k: null, c: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   describe('after the migrations', () => {
     let db: ScratchDatabase;
 
@@ -776,13 +806,14 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples|database_samples)_\d{4}_\d{2}$/; // their partitions, one per month
+      const monthly = /^(usage_records|capacity_samples|database_samples|storage_request_counts)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
         'alarms',
         'api_keys',
         'audit_log',
+        'buckets',
         'capacity_samples',
         'currencies',
         'custom_domains',
@@ -814,6 +845,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         'rating_runs',
         'resource_usage_hourly',
         'schedules',
+        'storage_keys',
+        'storage_request_counts',
         'tax_rates',
         'usage_charges',
         'usage_hourly',
@@ -826,11 +859,13 @@ run('database schema (L2, real PostgreSQL)', () => {
         monthPartition('capacity_samples', 1),
         monthPartition('database_samples', 0),
         monthPartition('database_samples', 1),
+        monthPartition('storage_request_counts', 0),
+        monthPartition('storage_request_counts', 1),
         usagePartition(0),
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

@@ -39,6 +39,8 @@ spec:
           protocol: TCP
         - port: 3001
           protocol: TCP
+        - port: 3002
+          protocol: TCP
     - from:
         - namespaceSelector:
             matchLabels:

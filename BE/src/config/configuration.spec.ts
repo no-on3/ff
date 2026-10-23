@@ -37,6 +37,7 @@ const production: Env = {
   K8S_RUNTIME_CLASS: 'gvisor',
   FF_ENCRYPTION_KEYS_FILE: keysFile,
   FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
+  FF_STORAGE_BASE: 'https://s3.ff.example',
   FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
 
@@ -391,6 +392,24 @@ describe('configuration', () => {
 
     it.each(['https://fn.example.tn/path', 'ftp://fn.example.tn', 'https://localhost', 'fn.example.tn'])('refuse %s as where they live', (base) => {
       expect(problems({ ...dev, FF_FUNCTION_URL_BASE: base })).toEqual([expect.stringMatching(/^FF_FUNCTION_URL_BASE must be an origin whose host has a dot/)]);
+    });
+  });
+
+  describe("buckets' S3 front door", () => {
+    it('is served on port 3002, apart from the API, at s3.localhost in development, naming FF\'s region', () => {
+      expect(configuration(dev).storage).toEqual({ port: 3002, base: 'http://s3.localhost:3002', region: 'tn-tunis-1' });
+    });
+
+    it('takes an origin with a dot in its host, a trailing slash dropped, and port 0 for none', () => {
+      expect(configuration({ ...production, FF_STORAGE_BASE: 'https://s3.example.tn/', FF_STORAGE_PORT: '0' }).storage).toMatchObject({ port: 0, base: 'https://s3.example.tn' });
+    });
+
+    it.each(['https://s3.example.tn/path', 'ftp://s3.example.tn', 'https://localhost', 's3.example.tn'])('refuses %s as its endpoint', (base) => {
+      expect(problems({ ...dev, FF_STORAGE_BASE: base })).toEqual([expect.stringMatching(/^FF_STORAGE_BASE must be an origin whose host has a dot/)]);
+    });
+
+    it('is reached over TLS in production', () => {
+      expect(problems({ ...production, FF_STORAGE_BASE: 'http://s3.example.tn' })).toEqual([expect.stringMatching(/^FF_STORAGE_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
     });
   });
 

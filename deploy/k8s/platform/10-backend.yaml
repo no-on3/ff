@@ -5,7 +5,8 @@
 # which the deployment writes (deploy/k8s/README.md): DB_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
 # FF_SMTP_URL; and the keys that encrypt functions' variables and secrets, the Secret ff-encryption-keys, as a
 # file. It refuses to start on a schema with pending migrations: deploy.sh runs the migrations Job first. Functions'
-# URLs are answered on a port of their own, 3001, which only the edge reaches.
+# URLs are answered on a port of their own, 3001, and buckets' S3 requests on another, 3002, which only the edge
+# reaches.
 apiVersion: v1
 kind: Service
 metadata:
@@ -24,6 +25,9 @@ spec:
     - name: function-urls
       port: 3001
       targetPort: function-urls
+    - name: storage
+      port: 3002
+      targetPort: storage
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -74,6 +78,9 @@ spec:
             # FF_FUNCTION_URL_PORT
             - name: function-urls
               containerPort: 3001
+            # FF_STORAGE_PORT
+            - name: storage
+              containerPort: 3002
             - name: metrics
               containerPort: 9464
           startupProbe:

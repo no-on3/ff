@@ -48,6 +48,8 @@ const DEV_CORS_ORIGIN = 'http://localhost:5199';
  * machine, as any name under .localhost.
  */
 export const DEV_FUNCTION_URL_BASE = 'http://fn.localhost:3001';
+/** Buckets' S3 endpoint in development: path-style there, and virtual-hosted under its host, which resolves to this machine. */
+export const DEV_STORAGE_BASE = 'http://s3.localhost:3002';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
@@ -270,6 +272,11 @@ const functionUrlBase = {
   },
   expected: 'an origin whose host has a dot, such as https://fn.example.tn, under which each function URL is https://<id>.fn.example.tn/',
 };
+/** Buckets' S3 endpoint: a scheme, a host under which each bucket is <bucket>.<host>, and a port if any; no path. */
+const storageBase = {
+  test: functionUrlBase.test,
+  expected: 'an origin whose host has a dot, such as https://s3.example.tn, at which a bucket is https://s3.example.tn/<bucket> and https://<bucket>.s3.example.tn',
+};
 /** A server's address as clients name it: a host name or an IP address, without a port. */
 const serverHost = {
   test: (v: string) => isIP(v) !== 0 || (v.length <= 253 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(v)),
@@ -386,6 +393,10 @@ const appShape = {
   // Function URLs: the port of the server that answers them, apart from the API's (0: none), and where they live.
   FF_FUNCTION_URL_PORT: integer(3001, 0, 65535),
   FF_FUNCTION_URL_BASE: text(DEV_FUNCTION_URL_BASE, functionUrlBase),
+  // Buckets' S3 front door (ADR 0009): the port of its server, apart from the API's (0: none), and the endpoint
+  // customers give AWS's SDKs and CLI.
+  FF_STORAGE_PORT: integer(3002, 0, 65535),
+  FF_STORAGE_BASE: text(DEV_STORAGE_BASE, storageBase),
   // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
   // servers that check domains' records (none: the system's).
   FF_EDGE_ADDRESSES: list(ipAddress),
@@ -523,6 +534,9 @@ function appRules(env: AppEnv): string[] {
     }
     if (!env.FF_FUNCTION_URL_BASE.startsWith('https://')) {
       problems.push('FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production, such as https://fn.example.tn: function URLs are served over TLS');
+    }
+    if (!env.FF_STORAGE_BASE.startsWith('https://')) {
+      problems.push("FF_STORAGE_BASE must be an https:// origin when NODE_ENV=production, such as https://s3.example.tn: buckets' requests carry customers' files");
     }
     if (!env.FF_ENCRYPTION_KEYS_FILE) {
       problems.push("FF_ENCRYPTION_KEYS_FILE is required when NODE_ENV=production: its keys encrypt functions' environment variables and secrets");
@@ -739,6 +753,12 @@ export default function configuration(env: Env = process.env) {
       base: parsed.FF_FUNCTION_URL_BASE.replace(/\/$/, ''),
       edgeAddresses: parsed.FF_EDGE_ADDRESSES,
       domainResolvers: parsed.FF_DOMAIN_RESOLVERS,
+    },
+    // Buckets' S3 front door (ADR 0009): its server, the endpoint customers use, and the region its answers name.
+    storage: {
+      port: parsed.FF_STORAGE_PORT,
+      base: parsed.FF_STORAGE_BASE.replace(/\/$/, ''),
+      region: parsed.FF_REGION,
     },
     // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
     codeImages: {

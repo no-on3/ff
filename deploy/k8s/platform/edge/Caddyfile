@@ -1,5 +1,6 @@
-# FF's edge: TLS for the API, the console, the admin app and the login, each on its hostname, and for functions'
-# URLs, every host under the function domain; certificates from Let's Encrypt (ACME), kept on the edge's volume.
+# FF's edge: TLS for the API, the console, the admin app and the login, each on its hostname, for functions' URLs,
+# every host under the function domain, and for buckets' S3 endpoint and every bucket's host under it; certificates
+# from Let's Encrypt (ACME), kept on the edge's volume.
 # Every value is the edge's environment (edge.env, and the Secret ff-edge-dns), read when Caddy starts. The admin
 # app, and Keycloak's own admin console, answer only the addresses FF_ADMIN_ALLOW names; everyone else gets 403.
 # The caller's address is the connection's: the Service keeps it (externalTrafficPolicy: Local), and each app
@@ -15,9 +16,9 @@
 	skip_install_trust
 	# Caddy's own redirects would name its port, 8443: the one below names none, so 443.
 	auto_https disable_redirects
-	# A certificate on demand (a function URL's host with FF_FUNCTION_URL_TLS=on-demand, a customer's own domain
-	# always) only for a host the backend says is one, verified: nobody makes the edge ask a certificate authority for
-	# names of their choosing.
+	# A certificate on demand (a function URL's host with FF_FUNCTION_URL_TLS=on-demand, a bucket's with
+	# FF_STORAGE_TLS=on-demand, a customer's own domain always) only for a host the backend says is one, verified:
+	# nobody makes the edge ask a certificate authority for names of their choosing.
 	on_demand_tls {
 		ask http://ff-backend.ff-system.svc.cluster.local:3001/tls/allowed
 	}
@@ -47,9 +48,10 @@ http:// {
 	reverse_proxy ff-backend.ff-system.svc.cluster.local:80
 }
 
-# Function URLs' certificates, as FF_FUNCTION_URL_TLS chooses: one for *.<function domain>, which Let's Encrypt
-# issues only through DNS (DNS-01), here by RFC 2136 updates signed with a TSIG key; or one per host, at the host's
-# first request, once the backend says yes (50 a week per registered domain, Let's Encrypt's limit: a small beta's).
+# Function URLs' certificates, as FF_FUNCTION_URL_TLS chooses, and buckets' as FF_STORAGE_TLS does: one for
+# *.<domain>, which Let's Encrypt issues only through DNS (DNS-01), here by RFC 2136 updates signed with a TSIG key; or
+# one per host, at the host's first request, once the backend says yes (50 a week per registered domain, Let's
+# Encrypt's limit, for function URLs and buckets together: a small beta's).
 (function-url-tls-wildcard) {
 	tls {
 		dns rfc2136 {
@@ -77,6 +79,20 @@ http:// {
 	}
 	log
 	reverse_proxy ff-backend.ff-system.svc.cluster.local:3001
+}
+
+# Buckets' S3 endpoint and each bucket's host under it, virtual-hosted, to the backend's S3 front door, as the
+# clients sent them: their signatures cover the host, the path and the headers, so nothing is rewritten, added or
+# compressed, and bodies stream both ways. Their certificate as FF_STORAGE_TLS chooses: one for both names through
+# DNS, or one per host on demand, once the backend says the bucket is one.
+{$FF_STORAGE_HOST}, *.{$FF_STORAGE_HOST} {
+	import function-url-tls-{$FF_STORAGE_TLS}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	log
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:3002
 }
 
 # Customers' own domains for their functions' URLs, each proved by DNS: every other host, its certificate made on

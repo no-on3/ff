@@ -56,6 +56,33 @@ case "$tls" in
     ;;
 esac
 
+echo "== buckets' S3 front door"
+# The edge's storage host must be the host of the backend's FF_STORAGE_BASE, which customers give AWS's SDKs and CLI,
+# or their requests would reach nothing; a wildcard certificate needs the same TSIG key as function URLs'.
+storage_base="$(setting FF_STORAGE_BASE)"
+storage_host="$(setting FF_STORAGE_HOST)"
+storage_tls="$(setting FF_STORAGE_TLS)"
+storage_base_host="${storage_base#*://}"
+storage_base_host="${storage_base_host%%[:/]*}"
+if [ "$storage_base_host" != "$storage_host" ]; then
+  echo "the edge's FF_STORAGE_HOST ($storage_host) must be the host of the backend's FF_STORAGE_BASE ($storage_base)" >&2
+  exit 1
+fi
+case "$storage_tls" in
+  wildcard)
+    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep -q . || {
+      echo "FF_STORAGE_TLS=wildcard needs the Secret ff-edge-dns with FF_DNS_TSIG_KEY, as FF_FUNCTION_URL_TLS=wildcard does; or choose on-demand" >&2
+      exit 1
+    }
+    echo "buckets at $storage_host and under it, with one certificate for both, through DNS"
+    ;;
+  on-demand) echo "buckets at $storage_host and under it, with a certificate per host, on demand, out of the same 50 a week" ;;
+  *)
+    echo "the edge's FF_STORAGE_TLS must be wildcard or on-demand, not '$storage_tls'" >&2
+    exit 1
+    ;;
+esac
+
 echo "== the code registry"
 # Packages' code images: the registry's two users, from the Secret ff-code-registry, and the backend's password for
 # its own (deploy/k8s/README.md, "The code registry").

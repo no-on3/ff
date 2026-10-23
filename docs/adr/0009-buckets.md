@@ -75,7 +75,7 @@ The hourly sample sums the sizes in the bucket's listing, through the store's ow
 
 ## Consequences
 
-- **V-06 builds the front door in the backend,** in TypeScript, from the spike's: tested against AWS's SigV4 test vectors, the four `aws-chunked` forms, each checksum, and the requests the three clients sent here; then end to end with the three clients themselves, through the backend.
+- **V-06 builds the front door in the backend,** in TypeScript, from the spike's: tested against AWS's SigV4 test vectors, the four `aws-chunked` forms, each checksum, and the requests the three clients sent here; then end to end with the three clients themselves, through the backend. As built: AWS's documented examples, the SDK for JavaScript against it with a store in memory, then in front of SeaweedFS; the three clients end to end with V-07, which makes their keys. One change from the spike's: a body's last piece waits for its checks, as checking at the end let the store complete a failed body, which had every byte its length announced.
 - **CRC-64/NVME and CRC-32C** come from AWS's own package, `@aws-sdk/checksums`, which the backend's SDK already brings, made a direct dependency; CRC-32 and the SHA ones from Node.js.
 - **The edge** gains `s3.<domain>` and `*.s3.<domain>`, sent to the backend's storage port, with their certificates as function URLs get theirs (decision 17).
 - **Functions reach it inside the cluster,** with their account's internet access off: a NetworkPolicy rule to the backend's storage port, as databases have theirs (ADR 0008).

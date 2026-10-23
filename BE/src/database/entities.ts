@@ -38,9 +38,12 @@ import { Package } from '../packages/package.entity';
 import { Database } from '../databases/database.entity';
 import { DatabaseSample } from '../databases/database-sample.entity';
 import { ResourceUsageHourly } from '../billing/resource-usage-hourly.entity';
+import { Bucket } from '../storage/bucket.entity';
+import { StorageKey } from '../storage/storage-key.entity';
+import { StorageRequestCount } from '../storage/storage-request-count.entity';
 
 /**
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount];

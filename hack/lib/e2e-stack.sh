@@ -40,6 +40,8 @@ e2e_base_env=(
   FF_METRICS_PORT=0
   # Nor a function URL gateway, for the same reason: a test that calls URLs gives it a free port, and the base to match.
   FF_FUNCTION_URL_PORT=0
+  # Nor buckets' S3 front door: a test that sends S3 requests gives it a free port.
+  FF_STORAGE_PORT=0
   # Every function's code runs as a code image (ADR 0003), pushed to the cluster's registry (hack/k8s/registry-up.sh), pulled by its node.
   FF_CODE_REGISTRY="http://127.0.0.1:$FF_REGISTRY_PORT" FF_CODE_REGISTRY_PULL="$FF_REGISTRY_NAME:5000"
 )

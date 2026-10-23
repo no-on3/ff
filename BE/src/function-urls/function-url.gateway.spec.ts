@@ -136,6 +136,7 @@ describe('the function URL gateway (L1)', () => {
       refused as never,
       accounts as never,
       throttler,
+      { allowsCertificate: async (domain: string) => ['s3.localhost', 'photos.s3.localhost'].includes(domain.toLowerCase()) } as never,
     );
     port = (await gateway.listen(0, '127.0.0.1')).port;
   });
@@ -449,6 +450,10 @@ describe('the function URL gateway (L1)', () => {
   describe("the edge's question before a certificate on demand", () => {
     const ask = (domain: string | undefined, host = 'ff-backend.ff-system.svc.cluster.local:3001') =>
       send('', `/tls/allowed${domain === undefined ? '' : `?domain=${encodeURIComponent(domain)}`}`, { headers: { host } });
+
+    it("says yes for buckets' S3 endpoint and a bucket's host, as the front door says, behind the same address", async () => {
+      expect([(await ask('s3.localhost')).status, (await ask('photos.s3.localhost')).status, (await ask('nowhere.s3.localhost')).status]).toEqual([200, 200, 404]);
+    });
 
     it("says yes for a function URL's host, whatever its case", async () => {
       const answers = [await ask(`${PUBLIC}.fn.localhost`), await ask(`${PRIVATE.toUpperCase()}.FN.localhost`)];

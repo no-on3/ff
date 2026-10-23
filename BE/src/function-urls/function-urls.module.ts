@@ -9,6 +9,7 @@ import { FunctionUrl } from '../functions/entities/function-url.entity';
 import { FunctionsModule } from '../functions/functions.module';
 import { MetricsModule } from '../metrics/metrics.module';
 import { PlansModule } from '../plans/plans.module';
+import { StorageModule } from '../storage/storage.module';
 import { CustomDomain } from './custom-domain.entity';
 import { CustomDomainsController } from './custom-domains.controller';
 import { CustomDomainsService, DOMAIN_RESOLVER } from './custom-domains.service';
@@ -30,6 +31,7 @@ import { FunctionUrlsService } from './function-urls.service';
     BillingModule,
     MetricsModule,
     PlansModule,
+    StorageModule,
   ],
   controllers: [FunctionUrlsController, CustomDomainsController],
   providers: [
