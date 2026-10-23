@@ -42,18 +42,16 @@ export class StorageDirectory {
     return this.encryption.sealJson(secret, sealedFor(accessKeyId));
   }
 
+  /** A key's secret, opened. */
+  secretOf(key: Pick<StorageKey, 'id' | 'secret'>): string {
+    return this.encryption.openJson<string>(key.secret, sealedFor(key.id));
+  }
+
   /** The key of that ID, unless it is revoked; null for any other. */
   async key(accessKeyId: string): Promise<ActiveKey | null> {
     const key = await this.keys.findOneBy({ id: accessKeyId, revokedAt: IsNull() });
     if (!key) return null;
-    return {
-      id: key.id,
-      accountId: key.accountId,
-      functionId: key.functionId,
-      buckets: key.buckets,
-      readOnly: key.readOnly,
-      secret: this.encryption.openJson<string>(key.secret, sealedFor(key.id)),
-    };
+    return { id: key.id, accountId: key.accountId, functionId: key.functionId, buckets: key.buckets, readOnly: key.readOnly, secret: this.secretOf(key) };
   }
 
   /** The account a key belongs to: its status, and whether FF turned its storage off; null for none. */

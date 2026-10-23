@@ -16,7 +16,8 @@
 # yes, and none for a host that is no URL; a customer's own domain, proved through a DNS server beside the
 # cluster, reaching the function the same way; a function made from a package, its code image pushed to the
 # platform's own registry (Zot) and pulled by the node as the node is told to, which no tenant's code reaches;
-# who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
+# a function with AWS's SDK and no setting writing to its account's bucket with its own key, at the fixed address
+# of the Service ff-storage; who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
@@ -305,6 +306,28 @@ check "a second function from the same package, the image the registry has" "201
 check "whose own code doesn't reach the registry: a tenant reaches no private address" "201 refused" \
   "$(as "$token" "/functions/$reach_fn/invoke" -d '{"input": {}}' >/dev/null; status) $(jq -r .output.registry "$work/body")"
 
+echo "== a function's own key to its account's buckets, at ff-storage's fixed address"
+as "$token" /buckets -d '{"name": "e2e-platform-files"}' >/dev/null
+check "the customer makes a bucket, at the S3 endpoint behind the edge" "201 https://s3.ff.test:$https_port" "$(status) $(jq -r .endpoint "$work/body")"
+# AWS's SDK for JavaScript v3 in the package, as npm installs it: hack/e2e.sh's clients, fetched once into hack/.cache.
+clients="$FF_REPO_ROOT/hack/.cache/s3-clients"
+if [ ! -d "$clients/node_modules/@aws-sdk/lib-storage" ]; then
+  npm install --prefix "$clients" --no-audit --no-fund --silent @aws-sdk/client-s3@3.1156.0 @aws-sdk/s3-request-presigner@3.1156.0 @aws-sdk/lib-storage@3.1156.0 >/dev/null
+fi
+mkdir -p "$work/s3-package"
+cp "$FF_REPO_ROOT/hack/lib/s3-clients/functions/index.mjs" "$work/s3-package/"
+cp -r "$clients/node_modules" "$work/s3-package/"
+rm -rf "$work/s3-package/node_modules/.bin"
+(cd "$work/s3-package" && python3 -c 'import shutil; shutil.make_archive("../s3-package", "zip", ".")')
+s3_sha="$(https api /packages -H "authorization: Bearer $token" -H 'content-type: application/zip' --data-binary "@$work/s3-package.zip" | jq -r .codeSha256)"
+s3_fn="$(as "$token" /functions -d "$(jq -cn --arg sha "$s3_sha" '{name: "e2e-s3", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 256, timeout: 20}')" | jq -r .id)"
+check "a function with AWS's SDK, new S3Client({}) and no setting, writes to its account's bucket and reads it back, inside gVisor; a bucket nobody has, NoSuchBucket" \
+  '201 {"read":"written by a Node.js function","other":"NoSuchBucket"}' \
+  "$(as "$token" "/functions/$s3_fn/invoke" -d '{"input": {"bucket": "e2e-platform-files", "other": "e2e-platform-nobody"}}' >/dev/null; status) $(jq -c .output "$work/body")"
+s3_secret_name="$(kubectl -n "$tenant" get deployment "fn-$s3_fn" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')"
+check "it reached the front door at the Service's fixed address, inside the cluster, which the backend names to its pods" "http://10.43.0.251:3002" \
+  "$(kubectl -n "$tenant" get secret "$s3_secret_name" -o jsonpath='{.data.AWS_ENDPOINT_URL_S3}' | base64 -d)"
+
 echo "== a function's URL, through the edge"
 url="$(as "$token" "/functions/$fn/url" -d '{"authType": "NONE"}' | jq -r .functionUrl)"
 check "the customer gives the function a URL, under the function domain" "201 true" \
@@ -364,7 +387,7 @@ kubectl create namespace e2e-probe >/dev/null
 kubectl -n e2e-probe run probe --image=ff-runtime-nodejs:24-v3 --image-pull-policy=Never --restart=Never --command -- node -e '
 const net = require("node:net");
 const targets = { edge: ["ff-edge.ff-edge.svc", 443], backend: ["ff-backend.ff-system.svc", 80], urls: ["ff-backend.ff-system.svc", 3001], keycloak: ["keycloak.ff-system.svc", 8080],
-  console: ["ff-console.ff-system.svc", 80], registry: ["ff-code-registry.ff-system.svc", 5000], function: [process.argv[1], 8080] };
+  console: ["ff-console.ff-system.svc", 80], registry: ["ff-code-registry.ff-system.svc", 5000], buckets: ["10.43.0.251", 3002], function: [process.argv[1], 8080] };
 Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((resolve) => {
   const socket = net.connect({ host, port });
   const done = (state) => { socket.destroy(); resolve(name + "=" + state); };
@@ -373,8 +396,8 @@ Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((r
   socket.once("error", () => done("refused"));
 }))).then((states) => console.log(states.join(" ")));' "fn-$fn.ff-t-$(printf %s "$account" | sha256sum | cut -c1-12).svc" >/dev/null
 kubectl -n e2e-probe wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe --timeout=120s >/dev/null || true
-check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry nor a function" \
-  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
+check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' address for functions nor a function" \
+  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused buckets=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
 
 echo "== deploy.sh again"
 "$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >"$work/redeploy.log" 2>&1 || { tail -20 "$work/redeploy.log" >&2; fail "deploy.sh failed the second time"; }

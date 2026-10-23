@@ -35,6 +35,7 @@ import { DatabaseBilling1792727200566 } from './1792727200566-DatabaseBilling';
 import { DatabaseOperations1792731046155 } from './1792731046155-DatabaseOperations';
 import { Buckets1792737696352 } from './1792737696352-Buckets';
 import { BucketLimits1792739264070 } from './1792739264070-BucketLimits';
+import { FunctionKeys1792743758847 } from './1792743758847-FunctionKeys';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -79,4 +80,5 @@ export const MIGRATIONS: Array<new () => object> = [
   DatabaseOperations1792731046155,
   Buckets1792737696352,
   BucketLimits1792739264070,
+  FunctionKeys1792743758847,
 ];

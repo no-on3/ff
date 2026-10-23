@@ -105,7 +105,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **10. Each function gets its own key to its account's buckets.** ✅ Confirmed. `new S3Client({})` works with no setup, as on AWS. The keys don't expire; short-lived ones, as AWS gives, come with step 5.
 - **Changed already:** V-01 found how: the endpoint functions get is an IP address inside the cluster, which every SDK addresses path-style by itself, so that no DNS name of FF's is needed there ([ADR 0009](adr/0009-buckets.md), §4).
-- **Still to change:** V-08.
+- **Changed already, too:** V-08: each function's key, made at its first deploy and revoked when it is deleted, in its pods' environment with the region and the endpoint, the Service `ff-storage`'s fixed address in production; `new S3Client({})` and `boto3.client("s3")` write to the account's bucket as they are, and are refused another's.
+- **Still to change:** nothing, until short-lived keys (step 5).
 
 **11. Customers' files are not copied to the second site, at first.** ✅ Confirmed, said plainly in the docs; to decide again before customers keep important files on FF.
 - **Changed already:** the step-2 plan's V-09 now has the guide say so.
@@ -142,7 +143,8 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **18. The region is `tn-tunis-1`.** ✅ Confirmed, if FF's servers are in Tunis. FF's first server is in Canada (21), and is for development only (answered on 2026-10-23): production's servers are in Tunisia, so the region stays.
 - **Changed already:** `57101f7` (U-07): `FF_REGION`, `tn-tunis-1` by default, in each scheduled event's `region` and in its rule's name (`arn:aws:events:tn-tunis-1:…`).
-- **Still to change:** from step 2 (V-08), functions also get it as `AWS_REGION`. Before launch: the legal check of names like AWS's, and the `aws` in those names (the [parent plan](local-markets-and-aws-portability-plan.md)'s ADR-006).
+- **Changed already, too:** V-08: functions get it as `AWS_REGION` and `AWS_DEFAULT_REGION`, with their key to their account's buckets.
+- **Still to change:** before launch, the legal check of names like AWS's, and the `aws` in those names (the [parent plan](local-markets-and-aws-portability-plan.md)'s ADR-006).
 
 **19. A failed scheduled run is not retried, until step 3.** ✅ Confirmed.
 - **Changed already:** `57101f7` and `b66e09e` (U-07): each run happens at most once; a failure is kept in the history, the metrics and the schedule's last outcome.

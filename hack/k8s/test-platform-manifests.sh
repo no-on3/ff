@@ -217,7 +217,9 @@ echo "== buckets' S3 front door"
 check "the edge's storage host is the host of the backend's FF_STORAGE_BASE" "s3.example.tn s3.example.tn" \
   "$(sed -n 's/^FF_STORAGE_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_STORAGE_BASE=https://##p' "$platform/backend.env")"
 storage_port="$(sed -n 's/^FF_STORAGE_PORT=//p' "$platform/backend.env")"
-check "the backend's port for buckets in its Service, reached by the edge alone" "$storage_port storage edge-only" \
+# Functions reach it too, with their own keys, at the fixed address of a Service of its own: the tenants' function
+# pods on that port alone, which their NetworkPolicy opens on the backend's pods, as no FF_STORAGE_FUNCTION_CIDRS says.
+check "the backend's port for buckets in its Service, reached by the edge and tenants' functions alone" "$storage_port storage edge,functions" \
   "$(python3 - "$work/platform.yaml" "$storage_port" <<'PY'
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
@@ -225,11 +227,27 @@ port = int(sys.argv[2])
 named = lambda kind, name: next(d for d in docs if d['kind'] == kind and d['metadata']['name'] == name)
 container = next(p for p in named('Deployment', 'ff-backend')['spec']['template']['spec']['containers'][0]['ports'] if p['containerPort'] == port)
 service = next(p for p in named('Service', 'ff-backend')['spec']['ports'] if p['targetPort'] == container['name'])
-reaching = [rule['from'] for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if port in [p['port'] for p in rule['ports']]]
-edge = len(reaching) == 1 and all(peer.get('podSelector', {}).get('matchLabels', {}).get('app.kubernetes.io/name') == 'ff-edge' for peer in reaching[0])
-print(service['port'], container['name'], 'edge-only' if edge else 'open')
+def who(peers):
+    if all(peer.get('podSelector', {}).get('matchLabels', {}).get('app.kubernetes.io/name') == 'ff-edge' for peer in peers):
+        return 'edge'
+    tenants = {'app.kubernetes.io/managed-by': 'ff-controller'}
+    functions = {'app.kubernetes.io/name': 'ff-function'}
+    if all(peer.get('namespaceSelector', {}).get('matchLabels') == tenants and peer.get('podSelector', {}).get('matchLabels') == functions for peer in peers):
+        return 'functions'
+    return 'open'
+reaching = [who(rule['from']) for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if port in [p['port'] for p in rule['ports']]]
+others = [rule for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if who(rule['from']) == 'functions' and [p['port'] for p in rule['ports']] != [port]]
+print(service['port'], container['name'], ','.join(reaching) if not others else 'functions reach more')
 PY
 )"
+check "functions' address for it: the Service ff-storage's fixed one, on that port, which the backend names to their pods" \
+  "10.43.0.251:$storage_port storage http://10.43.0.251:$storage_port none" \
+  "$(python3 - "$work/platform.yaml" <<'PY'
+import sys, yaml
+service = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d['kind'] == 'Service' and d['metadata']['name'] == 'ff-storage')
+print(f"{service['spec']['clusterIP']}:{service['spec']['ports'][0]['port']} {service['spec']['ports'][0]['targetPort']}")
+PY
+) $(sed -n 's/^FF_STORAGE_FUNCTION_ENDPOINT=//p' "$platform/backend.env") $(grep -q '^FF_STORAGE_FUNCTION_CIDRS=.' "$platform/backend.env" && echo some || echo none)"
 check "the edge sends both of its hosts there" "1 1" \
   "$(grep -c '^{\$FF_STORAGE_HOST}, \*\.{\$FF_STORAGE_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$storage_port$" "$platform/edge/Caddyfile")"
 

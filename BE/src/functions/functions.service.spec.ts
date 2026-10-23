@@ -33,7 +33,8 @@ import { EnvironmentStore } from './environment.store';
 import { CodeImagesService } from '../packages/code-images.service';
 import { PackagesService } from '../packages/packages.service';
 import { RegistryError } from '../packages/registry';
-import { FunctionsService } from './functions.service';
+import { FunctionKeys } from '../storage/function-keys.service';
+import { FunctionsService, workloadOf } from './functions.service';
 import { memoryEnvironments } from './test-fixtures';
 import { TAIL_ENDED, TAIL_UNAVAILABLE } from './live-tail';
 import { Observable } from 'rxjs';
@@ -79,6 +80,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const ending = { findOne: jest.fn(), save: jest.fn() };
   /** Each function's variables and secrets, as the service saved them. */
   let environments: ReturnType<typeof memoryEnvironments>;
+  /** Functions' own keys to their account's buckets: none, unless a test gives them (FF without the front door's address for functions). */
+  const functionKeys = { credentialsFor: jest.fn(), revoke: jest.fn() };
 
   const activeFunction = (): Function =>
     ({
@@ -177,6 +180,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         { provide: EnvironmentStore, useValue: environments },
         { provide: PackagesService, useValue: packages },
         { provide: CodeImagesService, useValue: codeImages },
+        { provide: FunctionKeys, useValue: functionKeys },
       ],
     }).compile();
     service = moduleRef.get(FunctionsService);
@@ -864,6 +868,23 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     expect(orchestrator.remove).toHaveBeenCalledWith(fn);
     expect(storage.deleteCode).toHaveBeenCalledWith('fn-1/code.ts');
     expect(functionsRepo.remove).toHaveBeenCalledWith(fn);
+  });
+
+  it("remove revokes the function's key to its account's buckets before its record goes; a failed removal keeps it", async () => {
+    functionsRepo.findOne.mockResolvedValue(activeFunction());
+    const order: string[] = [];
+    functionKeys.revoke.mockImplementation(async () => order.push('revoke'));
+    functionsRepo.remove.mockImplementation(async () => order.push('record'));
+
+    await service.remove('user-1', 'fn-1');
+
+    expect(functionKeys.revoke).toHaveBeenCalledWith('fn-1');
+    expect(order).toEqual(['revoke', 'record']);
+
+    functionKeys.revoke.mockClear();
+    orchestrator.remove.mockRejectedValue(new Error('the API server is down'));
+    await expect(service.remove('user-1', 'fn-1')).rejects.toThrow(internal('Deleting the function'));
+    expect(functionKeys.revoke).not.toHaveBeenCalled();
   });
 
   describe('invoke', () => {
@@ -1652,6 +1673,92 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect(functionsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ status: FunctionStatus.ACTIVE, error: null }));
       expect(environments.saved.get('fn-1')!.secrets.DB_PASSWORD.value).toBe('hunter2');
+    });
+  });
+
+  describe("a function's key to its account's buckets", () => {
+    const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
+    const KEY = 'AKFF7Q2MLKX4RTZB3W5N';
+    const credentials = {
+      keyId: KEY,
+      variables: {
+        AWS_ACCESS_KEY_ID: KEY,
+        AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        AWS_REGION: 'tn-tunis-1',
+        AWS_DEFAULT_REGION: 'tn-tunis-1',
+        AWS_ENDPOINT_URL_S3: 'http://10.43.0.251:3002',
+      },
+    };
+    const given = () => [...orchestrator.deploy.mock.calls, ...orchestrator.update.mock.calls].map(([fn]) => fn.environment);
+
+    it('reaches its pods with their variables and secrets, under the names AWS\'s SDKs read, and never its answer', async () => {
+      functionKeys.credentialsFor.mockResolvedValue(credentials);
+
+      const result = await service.create('user-1', { ...dto, environment: { TABLE: 'orders' }, secrets: { DB_PASSWORD: 'hunter2' } });
+
+      expect(functionKeys.credentialsFor).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1', accountId: 'user-1' }));
+      const [environment] = given();
+      expect(environment).toEqual({ revision: expect.stringMatching(new RegExp(`^[0-9a-f]{16}\\.${KEY}$`)), values: { TABLE: 'orders', DB_PASSWORD: 'hunter2', ...credentials.variables } });
+      expect(JSON.stringify(result)).not.toContain(credentials.variables.AWS_SECRET_ACCESS_KEY);
+      expect(environments.saved.get('fn-1')!.variables).toEqual({ TABLE: 'orders' });
+    });
+
+    it('is given to a function without variables too, which then has an environment of its key alone', async () => {
+      functionKeys.credentialsFor.mockResolvedValue(credentials);
+
+      await service.create('user-1', dto);
+
+      expect(given()).toEqual([{ revision: KEY, values: credentials.variables }]);
+      expect(environments.saved.has('fn-1')).toBe(false);
+    });
+
+    it('goes with every rollout: an update, and the rollback of a failed one', async () => {
+      functionKeys.credentialsFor.mockResolvedValue(credentials);
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Error', 'boom at init'));
+
+      await service.update('user-1', 'fn-1', { code: 'v2' }).catch(() => undefined);
+
+      expect(orchestrator.update).toHaveBeenCalledTimes(2);
+      expect(given()).toEqual([
+        { revision: KEY, values: credentials.variables },
+        { revision: KEY, values: credentials.variables },
+      ]);
+    });
+
+    it('fails a create as a platform failure when it can\'t be made: the function is kept, ERROR, with nothing deployed', async () => {
+      functionKeys.credentialsFor.mockRejectedValue(new Error('connection terminated'));
+
+      await expect(service.create('user-1', dto)).rejects.toThrow(internal('Deploying the function'));
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining('connection terminated'), expect.anything());
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+      expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ERROR]);
+    });
+
+    describe('workloadOf', () => {
+      const fn = activeFunction();
+      const environment = { revision: '0123456789abcdef', variables: { TABLE: 'orders' }, secrets: {} };
+
+      it('gives nothing where FF gives functions no key, as before', () => {
+        expect(workloadOf(fn, { revision: '', variables: {}, secrets: {} }, 'image').environment).toBeUndefined();
+        expect(workloadOf(fn, environment, 'image').environment).toEqual({ revision: '0123456789abcdef', values: { TABLE: 'orders' } });
+      });
+
+      it('makes a new key a new version, as a new environment is, and the same key and environment the same one', () => {
+        const first = workloadOf(fn, environment, 'image', credentials).environment;
+        const again = workloadOf(fn, environment, 'image', credentials).environment;
+        const newKey = workloadOf(fn, environment, 'image', { ...credentials, keyId: 'AKFFBBBBBBBBBBBBBBBB' }).environment;
+
+        expect(first?.revision).toBe(`0123456789abcdef.${KEY}`);
+        expect(again?.revision).toBe(first?.revision);
+        expect(newKey?.revision).not.toBe(first?.revision);
+      });
+
+      it("keeps FF's names FF's, over a variable a function was given before they were reserved", () => {
+        const before = { ...environment, variables: { AWS_ENDPOINT_URL_S3: 'https://s3.amazonaws.com' } };
+
+        expect(workloadOf(fn, before, 'image', credentials).environment?.values.AWS_ENDPOINT_URL_S3).toBe('http://10.43.0.251:3002');
+      });
     });
   });
 

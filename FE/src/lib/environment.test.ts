@@ -25,6 +25,7 @@ describe("a function's environment variables in the console", () => {
     expect(nameProblem('MY-VAR')).toMatch(/is not a variable name/);
     expect(nameProblem('AWS_REGION')).toBe("AWS_REGION is reserved: AWS Lambda or FF's runtime sets it");
     expect(nameProblem('PATH')).toBe("PATH is reserved: AWS Lambda or FF's runtime sets it");
+    expect(nameProblem('AWS_ENDPOINT_URL_S3')).toBe("AWS_ENDPOINT_URL_S3 is reserved: FF sets it, with the function's own key to its account's buckets");
     expect(nameProblem('FF_ANYTHING')).toBe("FF_ANYTHING is reserved: names starting with FF_ are FF's own");
   });
 

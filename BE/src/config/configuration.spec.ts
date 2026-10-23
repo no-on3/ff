@@ -397,7 +397,51 @@ describe('configuration', () => {
 
   describe("buckets' S3 front door", () => {
     it('is served on port 3002, apart from the API, at s3.localhost in development, naming FF\'s region', () => {
-      expect(configuration(dev).storage).toEqual({ port: 3002, base: 'http://s3.localhost:3002', region: 'tn-tunis-1' });
+      expect(configuration(dev).storage).toEqual({ port: 3002, base: 'http://s3.localhost:3002', region: 'tn-tunis-1', functionEndpoint: '' });
+    });
+
+    it("gives functions no key of their own unless it has an address for them, and they reach nothing more", () => {
+      expect(configuration(dev).storage.functionEndpoint).toBe('');
+      expect(configuration(dev).kubernetes.platformEgress).toEqual([]);
+    });
+
+    it("is reached by functions at an IP address: of a backend outside the cluster at its addresses, on the endpoint's port", () => {
+      const config = configuration({ ...dev, FF_STORAGE_FUNCTION_ENDPOINT: 'http://172.18.0.1:3002/', FF_STORAGE_FUNCTION_CIDRS: '172.18.0.1/32' });
+
+      expect(config.storage.functionEndpoint).toBe('http://172.18.0.1:3002');
+      expect(config.kubernetes.platformEgress).toEqual([{ cidrs: ['172.18.0.1/32'], port: 3002 }]);
+      expect(configuration({ ...dev, FF_STORAGE_FUNCTION_ENDPOINT: 'https://[fd00::5]', FF_STORAGE_FUNCTION_CIDRS: 'fd00::5/128' }).kubernetes.platformEgress).toEqual([
+        { cidrs: ['fd00::5/128'], port: 443 },
+      ]);
+    });
+
+    it("is reached by functions at a Service's fixed address: of the backend's own pods, on the front door's port, beside the database server", () => {
+      const config = configuration({
+        ...dev,
+        FF_STORAGE_PORT: '3102',
+        FF_STORAGE_FUNCTION_ENDPOINT: 'http://10.43.0.251:3002',
+        FF_DATA_DB_HOST: '10.199.0.10',
+        FF_DATA_DB_ADMIN_PASSWORD: 'ff-data-admin-dev',
+        FF_DATA_DB_CIDRS: '10.199.0.10/32',
+      });
+
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: ['10.199.0.10/32'], port: 5432 },
+        { cidrs: [], port: 3102 },
+      ]);
+    });
+
+    it.each(['http://s3.ff.internal:3002', 'http://10.43.0.251:3002/s3', 'ftp://10.43.0.251'])("refuses %s as functions' endpoint: an origin at an IP address", (endpoint) => {
+      expect(problems({ ...dev, FF_STORAGE_FUNCTION_ENDPOINT: endpoint })).toEqual([expect.stringMatching(/^FF_STORAGE_FUNCTION_ENDPOINT must be an origin whose host is an IP address/)]);
+    });
+
+    it("refuses functions' endpoint without the front door, and their addresses without the endpoint", () => {
+      expect(problems({ ...dev, FF_STORAGE_PORT: '0', FF_STORAGE_FUNCTION_ENDPOINT: 'http://10.43.0.251:3002' })).toEqual([
+        "FF_STORAGE_FUNCTION_ENDPOINT is set, but FF_STORAGE_PORT is 0: functions' keys reach buckets through the S3 front door, which isn't running",
+      ]);
+      expect(problems({ ...dev, FF_STORAGE_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
+        "FF_STORAGE_FUNCTION_CIDRS is set, but FF_STORAGE_FUNCTION_ENDPOINT is not: it names where functions reach buckets' S3 front door",
+      ]);
     });
 
     it('takes an origin with a dot in its host, a trailing slash dropped, and port 0 for none', () => {

@@ -6,11 +6,13 @@ import { Sealed } from '../encryption/envelope';
  * ID, AKFF and 16 characters, and its secret, which the front door needs to
  * check signatures, so it is sealed rather than hashed, for this key alone. It
  * reaches all the account's buckets, or those it names, read-write or
- * read-only. A function's own key names its function. A revoked key keeps its
- * row, so that its ID is never another's.
+ * read-only. A function's own key names its function, which has one that
+ * works at most. A revoked key keeps its row, so that its ID is never
+ * another's.
  */
 @Entity('storage_keys')
 @Index(['accountId'])
+@Index('UQ_storage_keys_function', ['functionId'], { unique: true, where: '"function_id" IS NOT NULL AND "revoked_at" IS NULL' })
 export class StorageKey {
   /** The access key ID. */
   @PrimaryColumn({ type: 'varchar', length: 20 })

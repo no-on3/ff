@@ -277,6 +277,22 @@ const storageBase = {
   test: functionUrlBase.test,
   expected: 'an origin whose host has a dot, such as https://s3.example.tn, at which a bucket is https://s3.example.tn/<bucket> and https://<bucket>.s3.example.tn',
 };
+/**
+ * Where functions reach buckets' S3 front door inside the cluster: a scheme, an IP address, and a port if any; no path.
+ * An address rather than a name: AWS's SDKs address buckets path-style at an IP address by themselves, where a name
+ * would have them ask DNS for <bucket>.<name>.
+ */
+const functionStorageEndpoint = {
+  test: (v: string) => {
+    try {
+      const url = new URL(v);
+      return ['http:', 'https:'].includes(url.protocol) && url.origin === v.replace(/\/$/, '') && isIP(url.hostname.replace(/^\[|\]$/g, '')) !== 0;
+    } catch {
+      return false;
+    }
+  },
+  expected: "an origin whose host is an IP address, such as http://10.43.0.251:3002: AWS's SDKs address buckets path-style there by themselves",
+};
 /** A server's address as clients name it: a host name or an IP address, without a port. */
 const serverHost = {
   test: (v: string) => isIP(v) !== 0 || (v.length <= 253 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(v)),
@@ -397,6 +413,11 @@ const appShape = {
   // customers give AWS's SDKs and CLI.
   FF_STORAGE_PORT: integer(3002, 0, 65535),
   FF_STORAGE_BASE: text(DEV_STORAGE_BASE, storageBase),
+  // Functions' own keys to their account's buckets come with the endpoint they reach the front door at, inside the
+  // cluster (unset: functions get no key), and the addresses their NetworkPolicy opens on its port (none: the
+  // backend's own pods in ff-system, on FF_STORAGE_PORT, as when the backend runs in the cluster).
+  FF_STORAGE_FUNCTION_ENDPOINT: optionalText(functionStorageEndpoint),
+  FF_STORAGE_FUNCTION_CIDRS: list(cidr),
   // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
   // servers that check domains' records (none: the system's).
   FF_EDGE_ADDRESSES: list(ipAddress),
@@ -473,6 +494,14 @@ function appRules(env: AppEnv): string[] {
     const without = (['FF_DATA_DB_ADMIN_HOST', 'FF_DATA_DB_ADMIN_PASSWORD', 'FF_DATA_DB_CA_FILE'] as const).filter((name) => env[name] !== undefined);
     if (env.FF_DATA_DB_CIDRS.length > 0) without.push('FF_DATA_DB_CIDRS' as (typeof without)[number]);
     for (const name of without) problems.push(`${name} is set, but FF_DATA_DB_HOST is not: it names customers' database server`);
+  }
+
+  if (env.FF_STORAGE_FUNCTION_ENDPOINT) {
+    if (env.FF_STORAGE_PORT === 0) {
+      problems.push("FF_STORAGE_FUNCTION_ENDPOINT is set, but FF_STORAGE_PORT is 0: functions' keys reach buckets through the S3 front door, which isn't running");
+    }
+  } else if (env.FF_STORAGE_FUNCTION_CIDRS.length > 0) {
+    problems.push("FF_STORAGE_FUNCTION_CIDRS is set, but FF_STORAGE_FUNCTION_ENDPOINT is not: it names where functions reach buckets' S3 front door");
   }
 
   if (env.FF_DEV_USER_ID !== undefined) {
@@ -602,6 +631,18 @@ function readCertificate(name: string, path: string): string {
     throw new ConfigurationError([`${name} must be a PEM file with at least one certificate: ${path}`]);
   }
   return content;
+}
+
+/**
+ * How functions reach buckets' S3 front door with their own keys: at the addresses named, on the endpoint's port; with
+ * none named, at the backend's own pods, on the front door's port, which the endpoint's Service forwards to. Nothing
+ * when functions get no key.
+ */
+function storageEgress(env: AppEnv): Array<{ cidrs: string[]; port: number }> {
+  if (!env.FF_STORAGE_FUNCTION_ENDPOINT) return [];
+  if (env.FF_STORAGE_FUNCTION_CIDRS.length === 0) return [{ cidrs: [], port: env.FF_STORAGE_PORT }];
+  const endpoint = new URL(env.FF_STORAGE_FUNCTION_ENDPOINT);
+  return [{ cidrs: env.FF_STORAGE_FUNCTION_CIDRS, port: Number(endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80)) }];
 }
 
 /** Customers' database server (ADR 0008), as the backend reaches it, and as connection strings and functions name it. */
@@ -759,6 +800,8 @@ export default function configuration(env: Env = process.env) {
       port: parsed.FF_STORAGE_PORT,
       base: parsed.FF_STORAGE_BASE.replace(/\/$/, ''),
       region: parsed.FF_REGION,
+      // Where functions reach it with their own keys, inside the cluster; '': functions get no key.
+      functionEndpoint: parsed.FF_STORAGE_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
     },
     // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
     codeImages: {
@@ -802,8 +845,9 @@ export default function configuration(env: Env = process.env) {
       egressInternet: parsed.K8S_EGRESS_INTERNET,
       ingressAllowCidrs: parsed.K8S_INGRESS_ALLOW_CIDRS,
       logStoreDeleteKeyFile: parsed.K8S_LOG_STORE_DELETE_KEY_FILE,
-      // What functions reach of the platform whatever their account's internet access: customers' database server.
-      platformEgress: dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : [],
+      // What functions reach of the platform whatever their account's internet access: customers' database server, and
+      // buckets' S3 front door.
+      platformEgress: [...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []), ...storageEgress(parsed)],
       // The CA of that server's certificate when it isn't a public one: functions' pods get it (none: '').
       dataDbCa: dataDb?.ca ?? '',
     },

@@ -5,8 +5,8 @@
 # which the deployment writes (deploy/k8s/README.md): DB_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
 # FF_SMTP_URL; and the keys that encrypt functions' variables and secrets, the Secret ff-encryption-keys, as a
 # file. It refuses to start on a schema with pending migrations: deploy.sh runs the migrations Job first. Functions'
-# URLs are answered on a port of their own, 3001, and buckets' S3 requests on another, 3002, which only the edge
-# reaches.
+# URLs are answered on a port of their own, 3001, and buckets' S3 requests on another, 3002, which the edge reaches,
+# and functions too, with their own keys, through the Service ff-storage.
 apiVersion: v1
 kind: Service
 metadata:
@@ -25,6 +25,27 @@ spec:
     - name: function-urls
       port: 3001
       targetPort: function-urls
+    - name: storage
+      port: 3002
+      targetPort: storage
+---
+# Buckets' S3 front door as functions reach it with their own keys (ADR 0009), at the address that the backend's
+# FF_STORAGE_FUNCTION_ENDPOINT names: an IP address, where AWS's SDKs address buckets path-style by themselves, so that
+# no name of FF's is needed inside the cluster. A fixed one, in the band of the cluster's Service range that Kubernetes
+# keeps for fixed addresses, beside the code registry's: k3s's range is 10.43.0.0/16; an overlay gives one of another.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ff-storage
+  namespace: ff-system
+  labels:
+    app.kubernetes.io/name: ff-backend
+    app.kubernetes.io/part-of: ff
+spec:
+  clusterIP: 10.43.0.251
+  selector:
+    app.kubernetes.io/name: ff-backend
+  ports:
     - name: storage
       port: 3002
       targetPort: storage

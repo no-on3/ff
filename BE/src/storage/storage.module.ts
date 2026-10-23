@@ -8,6 +8,7 @@ import { PlansModule } from '../plans/plans.module';
 import { Bucket } from './bucket.entity';
 import { BucketsController } from './buckets.controller';
 import { BucketsService } from './buckets.service';
+import { FunctionKeys } from './function-keys.service';
 import { S3FrontDoor } from './front-door';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
@@ -19,13 +20,14 @@ import { StoreBuckets } from './store-buckets';
 
 /**
  * Customers' buckets (ADR 0009): their records and the API that makes them,
- * the keys that reach them, and the S3 front door that answers AWS's SDKs and
- * CLI on a port of its own, counting their requests.
+ * the keys that reach them, the account's and each function's own, and the S3
+ * front door that answers AWS's SDKs and CLI on a port of its own, counting
+ * their requests.
  */
 @Module({
   imports: [TypeOrmModule.forFeature([Bucket, StorageKey, StorageRequestCount, Account]), EncryptionModule, AuditModule, PlansModule, BillingModule],
   controllers: [BucketsController, StorageKeysController],
-  providers: [StorageDirectory, StorageRequestCountsService, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService],
-  exports: [StorageDirectory, S3FrontDoor, BucketsService],
+  providers: [StorageDirectory, StorageRequestCountsService, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys],
+  exports: [StorageDirectory, S3FrontDoor, BucketsService, FunctionKeys],
 })
 export class StorageModule {}

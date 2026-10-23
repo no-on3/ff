@@ -18,7 +18,7 @@ import { FunctionsService } from './functions.service';
 import { recordingAudit } from '../audit/test-fixtures';
 import { recordingUsage } from '../usage/test-fixtures';
 import { onePlan } from '../plans/test-fixtures';
-import { FUNCTION_DEFAULTS, MemoryRepository, eventually, memoryEnvironments, clusterImages } from './test-fixtures';
+import { clusterImages, eventually, FUNCTION_DEFAULTS, memoryEnvironments, MemoryRepository, noFunctionKeys } from './test-fixtures';
 
 const run = process.env.K8S_IT === '1' ? describe : describe.skip;
 const kubeDir = path.resolve(__dirname, '../../../hack/.kube');
@@ -66,6 +66,7 @@ run('function lifecycle against the dev cluster (L3, P-03)', () => {
     { admit: async () => undefined } as never, // D9's balance check (P-33): every call admitted
     memoryEnvironments(),
     ...clusterImages(),
+    noFunctionKeys(),
   );
   const spec = (name: string, code: string) => ({ name, runtime: Runtime.NODEJS, code, memory: 128, timeout: 3 });
 

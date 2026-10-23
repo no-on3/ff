@@ -88,6 +88,12 @@ A function made from a package, a zip as AWS Lambda takes one (`ff deploy <folde
 - **Compiled extensions** load when built for CPython 3.13 on Linux x86_64, glibc 2.41 or older (`*.cpython-313-x86_64-linux-gnu.so`): manylinux wheels, as Lambda's are; numpy's `manylinux_2_28` wheels import and compute (`hack/cli-e2e.sh` checks it).
 - **Read-only:** a function writes to `/tmp`, 512 MiB, as on Lambda.
 
+### Buckets, with boto3
+
+A function's pods get a key to its account's buckets in their environment, as AWS Lambda gives a function its role's credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `AWS_DEFAULT_REGION`, and `AWS_ENDPOINT_URL_S3`, FF's S3 endpoint inside the cluster, an IP address. boto3 reads all of them, so `boto3.client("s3")` reaches the account's buckets as it is, path-style, as boto3 addresses an IP address by itself ([ADR 0009](../../docs/adr/0009-buckets.md)). The key is the function's own, made at its first deploy (an older function gets its own the next time an update rolls it out) and revoked when it is deleted; it reaches every bucket of the account, read-write, and its requests are checked as any key's. FF sets these names: a function's own variables can't.
+
+boto3 isn't in the image, as it is in Lambda's Python runtimes: name it in the package's `requirements.txt`, which `ff deploy <folder>` installs.
+
 ## Memory
 
 On Kubernetes the container's memory limit equals the function's memory, as on Lambda. A container that reaches it is killed by the kernel, all processes together (`memory.oom.group = 1`, verified on k3s v1.37.1), and repeated kills put the pod into CrashLoopBackOff. So the runtime stops the worker first:

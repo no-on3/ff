@@ -18,7 +18,7 @@ import { InvokeResult, Orchestrator } from '../orchestrator/orchestrator.types';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
 import { LOST_MESSAGE, UsageService } from './usage.service';
-import { memoryEnvironments, noPackages } from '../functions/test-fixtures';
+import { memoryEnvironments, noFunctionKeys, noPackages } from '../functions/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '300000000001';
@@ -122,6 +122,7 @@ run('usage records (L2, P-20)', () => {
       { admit: async () => undefined } as never, // D9's balance check (P-33): every call admitted
       memoryEnvironments(),
       ...noPackages(),
+      noFunctionKeys(),
     );
   });
 

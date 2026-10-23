@@ -16,13 +16,13 @@ export interface KubernetesSettings {
   ingressAllowCidrs: string[];
   /** The file holding the log store's delete key (P-45): the Secret victoria-logs-delete-key, mounted. */
   logStoreDeleteKeyFile: string;
-  /** What functions reach of the platform whatever their account's internet access: addresses, and the one port there. */
+  /** What functions reach of the platform whatever their account's internet access: customers' database server, buckets' S3 front door. */
   platformEgress: PlatformEgress[];
   /** The CA of customers' database server's certificate (PEM) when it isn't a public one, which functions' pods get; '' for none. */
   dataDbCa: string;
 }
 
-/** A platform service functions reach: its addresses, on one TCP port. */
+/** A platform service functions reach, on one TCP port: at its addresses, or, with none, at the backend's own pods in ff-system. */
 export interface PlatformEgress {
   cidrs: string[];
   port: number;

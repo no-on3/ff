@@ -32,8 +32,10 @@
 # only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in
 # parts, presigned URLs, a wrong signature, an expired URL, another account's
 # bucket); a read-only key, a revoked one, a suspended account and one whose
-# storage is off refused; the requests counted by the minute; a bucket deleted
-# empty, or emptied first when asked. Then plans:
+# storage is off refused; two functions, AWS's SDK for JavaScript v3 and boto3
+# with no setting at all, writing to the account's bucket with keys of their own
+# and refused another's, a function's key revoked with it; the requests counted
+# by the minute; a bucket deleted empty, or emptied first when asked. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -79,6 +81,9 @@ code_configmaps() { kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-i
 
 e2e_dependencies
 e2e_cluster
+# This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front
+# door there with their own keys, at an IP address, where AWS's SDKs address buckets path-style by themselves.
+cluster_gateway="$(docker network inspect "k3d-$FF_CLUSTER_NAME" --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | awk '{print $1}')"
 # Customers' databases (ADR 0008): the run's own server, on 10.199.1.0/24, which no other run uses.
 data_db_address=10.199.1.10
 e2e_data_db 10.199.1.0/24 "$data_db_address"
@@ -99,6 +104,7 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_METRICS_HOST="$metrics_host" FF_METRICS_PORT="$metrics_port" FF_LOG_FORMAT=json
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
+  FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
@@ -791,6 +797,63 @@ check "a read-only key lists, and writes nothing: AccessDenied" "accepted refuse
   "$(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos/site/) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 cp "$work/site/index.html" s3://e2e-photos/site/new.html)"
 http DELETE "/storage-keys/$ro_id" >/dev/null
 check "a revoked key opens nothing at once: InvalidAccessKeyId" "204 refused InvalidAccessKeyId" "$(status) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos)"
+# Functions as on AWS Lambda with a role: AWS's SDK for JavaScript v3 and boto3 with no setting at all, in packages as
+# npm and pip install them. FF gives the pods a key of the function's own, the region and the front door's address.
+if [ ! -d "$clients/python/boto3" ]; then
+  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check --target "$clients/python" boto3==1.43.118
+fi
+# package_with <zip> <libraries> <their folder in it> <name=file>...: a function's files and its libraries, deflated.
+package_with() {
+  python3 - "$@" <<'PY'
+import os, sys, zipfile
+target, libraries, folder, *files = sys.argv[1:]
+with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
+    for entry in files:
+        name, path = entry.split('=', 1)
+        archive.write(path, name)
+    for root, dirs, names in os.walk(libraries):
+        dirs[:] = sorted(d for d in dirs if d not in ('__pycache__', '.bin', 'bin'))
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            archive.write(path, os.path.join(folder, os.path.relpath(path, libraries)))
+PY
+}
+package_with "$work/s3-node.zip" "$clients/node_modules" node_modules "index.mjs=$FF_REPO_ROOT/hack/lib/s3-clients/functions/index.mjs"
+package_with "$work/s3-python.zip" "$clients/python" '' "function.py=$FF_REPO_ROOT/hack/lib/s3-clients/functions/function.py"
+upload "$work/s3-node.zip" >/dev/null
+upload "$work/s3-python.zip" >/dev/null
+node_s3="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$work/s3-node.zip")" '{name: "e2e-s3-node", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 256, timeout: 20}')" | jq -r .id)"
+python_s3="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$work/s3-python.zip")" '{name: "e2e-s3-python", runtime: "python", codeSha256: $sha, handler: "function.handler", memory: 256, timeout: 20}')" | jq -r .id)"
+s3_input='{"input": {"bucket": "e2e-photos", "other": "e2e-theirs"}}'
+check "a Node.js function, new S3Client({}) as on Lambda: writes to its account's bucket and reads it back; another account's, AccessDenied" \
+  '{"read":"written by a Node.js function","other":"AccessDenied"}' "$(http POST "/functions/$node_s3/invoke" "$s3_input" | jq -c .output)"
+check "a Python function, boto3.client(\"s3\") as on Lambda: the same" \
+  '{"read":"written by a Python function","other":"AccessDenied"}' "$(http POST "/functions/$python_s3/invoke" "$s3_input" | jq -c .output)"
+check "what they wrote is in the bucket, as the account's own key reads it" "written by a Node.js function|written by a Python function" \
+  "$(aws_ff s3 cp s3://e2e-photos/from-node.txt - 2>/dev/null)|$(aws_ff s3 cp s3://e2e-photos/from-python.txt - 2>/dev/null)"
+# function_secret <function> <name>: a value of the environment Secret the function's Deployment reads, as an operator would.
+function_secret() {
+  kubectl -n "$tenant_ns" get secret "$(kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')" \
+    -o jsonpath="{.data.$2}" | base64 -d
+}
+fn_key="$(function_secret "$node_s3" AWS_ACCESS_KEY_ID)"
+fn_secret="$(function_secret "$node_s3" AWS_SECRET_ACCESS_KEY)"
+check "its pods get a key of its own, the region and the front door's address inside the cluster, through the Secret; the Deployment holds none" \
+  "true tn-tunis-1 tn-tunis-1 http://$cluster_gateway:$storage_port $fn_key 0" \
+  "$([[ "$fn_key" =~ ^AKFF[A-Z2-7]{16}$ ]] && echo true || echo false) $(function_secret "$node_s3" AWS_REGION) $(function_secret "$node_s3" AWS_DEFAULT_REGION) $(function_secret "$node_s3" AWS_ENDPOINT_URL_S3) \
+$(env_q "SELECT id FROM storage_keys WHERE function_id = '$node_s3' AND revoked_at IS NULL") $(kubectl -n "$tenant_ns" get deployment "fn-$node_s3" -o json | grep -c -- "$fn_secret")"
+check "a function's key is its own: not among the account's, which has one left, and sealed" "1 0" \
+  "$(http GET /storage-keys | jq length) $(env_q "SELECT count(*) FROM storage_keys WHERE secret::text LIKE '%' || '$fn_secret' || '%'")"
+http PUT "/functions/$node_s3" '{"timeout": 25}' >/dev/null
+check "a new version keeps it: one key a function, and the new pods have it" "200 1 $fn_key" \
+  "$(status) $(env_q "SELECT count(*) FROM storage_keys WHERE function_id = '$node_s3'") $(function_secret "$node_s3" AWS_ACCESS_KEY_ID)"
+http PUT "/functions/$python_s3" '{"environment": {"AWS_ENDPOINT_URL_S3": "https://s3.amazonaws.com"}}' >/dev/null
+check "a function can't point it elsewhere: AWS_ENDPOINT_URL_S3 is FF's" "400 AWS_ENDPOINT_URL_S3 is reserved: FF sets it, with the function's own key to its account's buckets" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+http DELETE "/functions/$node_s3" >/dev/null
+check "a function deleted: its key revoked with it, and refused at once, InvalidAccessKeyId" "200 t refused InvalidAccessKeyId" \
+  "$(status) $(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE function_id = '$node_s3'") $(AWS_KEY="$fn_key" AWS_SECRET="$fn_secret" outcome aws_ff s3 ls s3://e2e-photos)"
+http DELETE "/functions/$python_s3" >/dev/null
 sql_e2e() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
 sql_e2e "UPDATE accounts SET status = 'suspended' WHERE id = '$tenant'"
 suspended="$(aws_ff s3 ls s3://e2e-photos 2>&1 >/dev/null || true)"

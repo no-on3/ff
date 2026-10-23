@@ -120,7 +120,7 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 4. update (new code live);
 5. delete (Deployment gone, record gone);
 6. the same create, invoke, and delete for a Python function;
-7. customers' buckets (ADR 0009): made through the API, a name once across FF, the plan's five, access keys two at most; then AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door, only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in parts, presigned URLs, a wrong signature, an expired URL, another account's bucket); a read-only key, a revoked one, a suspended account and one whose storage is off refused; the requests counted by the minute. The first run fetches the SDK (3.1156.0, with its presigner and `lib-storage`) and boto3 (1.43.118) into `hack/.cache/s3-clients`, with npm and pip; it takes the AWS CLI from this machine, or its image `amazon/aws-cli:2.34.32`;
+7. customers' buckets (ADR 0009): made through the API, a name once across FF, the plan's five, access keys two at most; then AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door, only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in parts, presigned URLs, a wrong signature, an expired URL, another account's bucket); a read-only key, a revoked one, a suspended account and one whose storage is off refused; two functions, the SDK in a Node.js one and boto3 in a Python one, with no setting at all, writing to the account's bucket with keys of their own, through this machine at the gateway of the cluster's Docker network, and refused another's, a function's key revoked with it; the requests counted by the minute. The first run fetches the SDK (3.1156.0, with its presigner and `lib-storage`) and boto3 (1.43.118, for this machine and for the Python function's package) into `hack/.cache/s3-clients`, with npm and pip; it takes the AWS CLI from this machine, or its image `amazon/aws-cli:2.34.32`;
 8. plans and rate limits (P-15): an account on a small plan, its limits, its namespace's quota, and its rates;
 9. usage records (P-20): one per invocation, with the invocation's ID as the runtime's request ID, for a success, an error, a timeout and a cold start; then the backend is killed during a call, restarted, and marks the call `LOST`, unbilled, within about a minute;
 10. capacity samples (P-21): the warm function sampled each minute, and `npm run capacity:report` showing the account's day;
@@ -308,9 +308,10 @@ kubectl -n ff-monitoring port-forward svc/victoria-metrics 8428:8428 & # http://
    - the backend's token for the cluster's API, read in its pod, lasting an hour;
    - a function deployed and invoked in direct mode, its inline code an image from the platform's registry, answering from gVisor's kernel, and its logs;
    - a function made from a package, its code image pushed to the platform's registry and pulled by the node under the name it maps, answering from its package; a second from the same package, whose own code can't reach the registry;
+   - a bucket made at the S3 endpoint behind the edge, and a function from a package with AWS's SDK for JavaScript v3 and no setting writing to it and reading it back with its own key, at the Service `ff-storage`'s fixed address, as production's functions do; a bucket nobody has, `NoSuchBucket`;
    - the audit log naming the caller's address, not the edge's;
    - a function URL over HTTPS through the edge, its certificate made on demand once the backend said yes, the function told the caller's address; no certificate for a host that is no URL;
-   - an ordinary pod reaching the edge, and not the backend, its port for function URLs, Keycloak, the console, the code registry or a function;
+   - an ordinary pod reaching the edge, and not the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' address for functions or a function;
    - `deploy.sh` run again changing nothing.
 
 ```bash

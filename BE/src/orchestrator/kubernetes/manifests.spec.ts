@@ -239,6 +239,23 @@ describe('Kubernetes manifests', () => {
       ]);
     });
 
+    it("lets functions reach buckets' S3 front door at the backend's own pods, on its port, when no address is named", () => {
+      const np: any = networkPolicyManifest('ff-t-abc', settings({ platformEgress: [{ cidrs: ['10.199.0.10/32'], port: 5432 }, { cidrs: [], port: 3002 }] }), false);
+
+      expect(np.spec.egress.slice(1)).toEqual([
+        { to: [{ ipBlock: { cidr: '10.199.0.10/32' } }], ports: [{ protocol: 'TCP', port: 5432 }] },
+        {
+          to: [
+            {
+              namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'ff-backend' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 3002 }],
+        },
+      ]);
+    });
+
     it('adds configured ingress CIDRs', () => {
       const np: any = networkPolicyManifest('ff-t-abc', settings({ ingressAllowCidrs: ['10.42.0.1/32'] }), false);
 

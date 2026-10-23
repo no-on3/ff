@@ -9,6 +9,7 @@ import { BillingModule } from '../billing/billing.module';
 import { EncryptionModule } from '../encryption/encryption.module';
 import { UsageModule } from '../usage/usage.module';
 import { PackagesModule } from '../packages/packages.module';
+import { StorageModule } from '../storage/storage.module';
 import { FunctionEnvironment } from './entities/function-environment.entity';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
@@ -29,6 +30,8 @@ import { FunctionsService } from './functions.service';
     EncryptionModule,
     // A function names a package, and runs its code image.
     PackagesModule,
+    // A function's pods get a key of its own to its account's buckets.
+    StorageModule,
   ],
   controllers: [FunctionsController],
   providers: [FunctionsService, EnvironmentStore],

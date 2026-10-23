@@ -11,6 +11,7 @@ import type { EnvironmentStore } from './environment.store';
 import { InlinePackage, inlinePackage } from './inline-package';
 import { codeRepository, pushCodeImage } from '../packages/code-images.service';
 import type { CodeImagesService } from '../packages/code-images.service';
+import { FunctionKeys } from '../storage/function-keys.service';
 import type { PackagesService } from '../packages/packages.service';
 import { Registry } from '../packages/registry';
 
@@ -131,6 +132,11 @@ const noUpload = () => {
  * fake, which never pulls an image: inline code's image is a name, made up of
  * its package's SHA-256, and no function names an uploaded package.
  */
+/** FF without functions' keys to buckets, as where the front door has no address for functions: none made, none to revoke. */
+export function noFunctionKeys(): FunctionKeys {
+  return { credentialsFor: async () => undefined, revoke: async () => undefined } as unknown as FunctionKeys;
+}
+
 export function noPackages(): [PackagesService, CodeImagesService] {
   const images = {
     assertAvailable: () => undefined,

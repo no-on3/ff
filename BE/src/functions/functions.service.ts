@@ -35,6 +35,7 @@ import { UsageStatus } from '../usage/usage-record.entity';
 import { failureStatus, usageRecord } from '../usage/usage';
 import { UsageService } from '../usage/usage.service';
 import { CreditService } from '../billing/credit.service';
+import { FunctionCredentials, FunctionKeys } from '../storage/function-keys.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
@@ -103,13 +104,17 @@ function viewOf(function_: Function, environment: FunctionEnvironmentValues): Fu
   return { ...function_, environment: { ...environment.variables } };
 }
 
-/** The function as the orchestrator runs it: its record, the variables and secrets its process gets, and its code's image. */
-function workloadOf(function_: Function, environment: FunctionEnvironmentValues, codeImage: string): FunctionWorkload {
-  return {
-    ...function_,
-    environment: isEmpty(environment) ? undefined : { revision: environment.revision, values: processEnvironment(environment) },
-    codeImage,
-  };
+/**
+ * The function as the orchestrator runs it: its record, its code's image, and
+ * what its process gets: its variables and secrets, and its key to its
+ * account's buckets with the region and the endpoint, under names FF reserves.
+ * A new key is a new version, as a new environment is: its ID joins the
+ * environment's revision, so that the pods roll out with it.
+ */
+export function workloadOf(function_: Function, environment: FunctionEnvironmentValues, codeImage: string, credentials?: FunctionCredentials): FunctionWorkload {
+  const values = { ...processEnvironment(environment), ...credentials?.variables };
+  const revision = [environment.revision, credentials?.keyId].filter(Boolean).join('.');
+  return { ...function_, environment: Object.keys(values).length > 0 ? { revision, values } : undefined, codeImage };
 }
 
 /** A function's code, as its record keeps it. */
@@ -246,7 +251,13 @@ export class FunctionsService {
     private environments: EnvironmentStore,
     private packages: PackagesService,
     private codeImages: CodeImagesService,
+    private functionKeys: FunctionKeys,
   ) {}
+
+  /** The function as its pods run it, with its key to its account's buckets, made at its first deploy. */
+  private async workload(function_: Function, environment: FunctionEnvironmentValues, codeImage: string): Promise<FunctionWorkload> {
+    return workloadOf(function_, environment, codeImage, await this.functionKeys.credentialsFor(function_));
+  }
 
   private readyTimeoutMs(): number {
     return this.configService.get<number>('orchestrator.readyTimeoutSeconds', 90) * 1000;
@@ -276,7 +287,8 @@ export class FunctionsService {
       // A copy of inline code's text in object storage, beside the package its pods run; a package is there already.
       if (savedFunction.packageType === PackageType.INLINE) await this.minioClientService.uploadCode(this.codePath(savedFunction), savedFunction.code);
 
-      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workloadOf(savedFunction, environment, codeImage), tenant));
+      const workload = await this.workload(savedFunction, environment, codeImage);
+      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workload, tenant));
       // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
       await this.orchestrator.waitUntilReady(savedFunction, this.readyTimeoutMs());
 
@@ -547,7 +559,7 @@ export class FunctionsService {
 
     // The code image first: without it, nothing has changed, and nothing needs rolling back.
     const { codeImage, packageSha256 } = await this.codeImageOf(updated);
-    const workload = workloadOf(updated, environment.after, codeImage);
+    const workload = await this.workload(updated, environment.after, codeImage);
     try {
       await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       // The old version keeps serving during the rollout; record the change only once it's live.
@@ -605,7 +617,7 @@ export class FunctionsService {
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
-      const workload = workloadOf(previous, previousEnvironment, (await this.codeImageOf(previous)).codeImage);
+      const workload = await this.workload(previous, previousEnvironment, (await this.codeImageOf(previous)).codeImage);
       await this.plans.withTenant(previous.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {
@@ -780,7 +792,7 @@ export class FunctionsService {
         // As its record is now, if it still runs that package: a change saved meanwhile rolled out its own image.
         const function_ = await this.functionsRepository.findOne({ where: { id, accountId, status: FunctionStatus.ACTIVE, packageSha256: packageSha256 as string } });
         if (!function_) continue;
-        const workload = workloadOf(function_, await this.environments.load(id), image);
+        const workload = await this.workload(function_, await this.environments.load(id), image);
         await this.plans.withTenant(accountId, (tenant) => this.orchestrator.update(workload, tenant));
         await this.orchestrator.waitUntilReady(function_, this.readyTimeoutMs());
         report.rolledOut++;
@@ -801,7 +813,8 @@ export class FunctionsService {
       // Remove the code's copy from object storage
       await this.minioClientService.deleteCode(this.codePath(function_));
       
-      // Delete from database
+      // Its key to its account's buckets stops working, then its record goes
+      await this.functionKeys.revoke(function_.id);
       await this.functionsRepository.remove(function_);
     } catch (error) {
       throw new InternalServerErrorException(platformFailure(this.logger, 'Deleting the function', error));

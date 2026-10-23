@@ -132,15 +132,18 @@ export function limitRangeManifest(namespace: string): K8sObject {
  * access: customers' database server. NetworkPolicy rules add up, so the ranges the internet rule leaves out don't
  * cancel them.
  */
+/** The backend's pods, in ff-system, as a NetworkPolicy's peer. */
+const BACKEND_PODS = {
+  namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } },
+  podSelector: { matchLabels: { 'app.kubernetes.io/name': 'ff-backend' } },
+};
+
 export function networkPolicyManifest(namespace: string, settings: KubernetesSettings, internetEgress: boolean): K8sObject {
   // Only the backend calls a function: never the other platform pods in ff-system (Keycloak, the console, the
   // admin app, the log store). A backend outside the cluster calls through the API server's proxy, which comes
   // from the node, as k3s lets through.
   const ingressFrom: unknown[] = [
-    {
-      namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ff-system' } },
-      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'ff-backend' } },
-    },
+    BACKEND_PODS,
     ...settings.ingressAllowCidrs.map((cidr) => ({ ipBlock: { cidr } })),
   ];
   const egress: unknown[] = [
@@ -157,8 +160,11 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
       ],
     },
   ];
+  // Customers' database server and buckets' S3 front door: at their addresses, or the backend's own pods for the front
+  // door of a backend in the cluster, which its NetworkPolicy lets functions reach on that port.
   for (const service of settings.platformEgress) {
-    egress.push({ to: service.cidrs.map((cidr) => ({ ipBlock: { cidr } })), ports: [{ protocol: 'TCP', port: service.port }] });
+    const to = service.cidrs.length > 0 ? service.cidrs.map((cidr) => ({ ipBlock: { cidr } })) : [BACKEND_PODS];
+    egress.push({ to, ports: [{ protocol: 'TCP', port: service.port }] });
   }
   if (settings.egressInternet && internetEgress) {
     egress.push({ to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }] });

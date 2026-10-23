@@ -57,10 +57,16 @@ pub const RESERVED: [&str; 27] = [
     "PATH",
 ];
 
+/// The names FF sets with a function's own key to its account's buckets, which the API refuses too.
+/// A test holds this list to the API's.
+pub const BUCKETS_RESERVED: [&str; 1] = ["AWS_ENDPOINT_URL_S3"];
+
 /// Why a name can't be a variable's, in the API's words, or none.
 pub fn reserved(name: &str) -> Option<String> {
     if RESERVED.contains(&name) {
         Some(format!("{name} is reserved: AWS Lambda or FF's runtime sets it"))
+    } else if BUCKETS_RESERVED.contains(&name) {
+        Some(format!("{name} is reserved: FF sets it, with the function's own key to its account's buckets"))
     } else if name.starts_with("FF_") {
         Some(format!("{name} is reserved: names starting with FF_ are FF's own"))
     } else {
@@ -263,6 +269,11 @@ mod tests {
         let api: Vec<String> = [list("LAMBDA_RESERVED"), list("FF_RESERVED")].concat();
 
         assert_eq!(api, RESERVED.map(str::to_owned));
+        assert_eq!(list("BUCKETS_RESERVED"), BUCKETS_RESERVED.map(str::to_owned));
+        assert_eq!(
+            reserved("AWS_ENDPOINT_URL_S3").unwrap(),
+            "AWS_ENDPOINT_URL_S3 is reserved: FF sets it, with the function's own key to its account's buckets"
+        );
         assert_eq!(reserved("FF_DEBUG").unwrap(), "FF_DEBUG is reserved: names starting with FF_ are FF's own");
         assert_eq!(reserved("TZ"), None);
     }

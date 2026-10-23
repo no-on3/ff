@@ -480,6 +480,15 @@ aws --endpoint-url http://s3.localhost:3002 s3 ls s3://photos --recursive
 
 **Every request is checked the same way:** the key's account must be active and its storage on, or the front door answers `AccountProblem`, saying why; past the plan's requests a second, `SlowDown`; out of credit, uploads wait for credit, while reading and deleting go on. A closed account's buckets are emptied and deleted with the rest of its data, at its data deletion date, and its keys revoked. No bucket is copied to the second site: the store's own redundancy keeps them, as S3's does (decision 11).
 
+**A function reaches its account's buckets with no setting at all,** as on AWS Lambda with a role: `new S3Client({})` and `boto3.client("s3")` work as they are. Its pods get a key of its own in their environment, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, with `AWS_REGION`, `AWS_DEFAULT_REGION` and `AWS_ENDPOINT_URL_S3`, the front door's address inside the cluster: an IP address, where AWS's SDKs go path-style by themselves. The key is made at the function's first deploy (an older function gets its own the next time an update rolls it out), reaches every bucket of the account, read-write, is checked as any key is, and is revoked when the function is deleted; it is neither listed with the account's two keys nor counted against them. FF sets these names, so a function's variables can't, `AWS_ENDPOINT_URL_S3` included. The SDK isn't in the runtimes' images: name `@aws-sdk/client-s3`, or `boto3`, in the function's package ([Node.js](../runtimes/nodejs/README.md#buckets-with-awss-sdk), [Python](../runtimes/python/README.md#buckets-with-boto3)). The backend gives functions keys only when it knows where they reach the front door: `FF_STORAGE_FUNCTION_ENDPOINT`, and `FF_STORAGE_FUNCTION_CIDRS`, the addresses their NetworkPolicy opens on its port. With the development cluster, this machine as its pods see it, the gateway of its Docker network (`BE/.env.example` says how to find it):
+
+```bash
+FF_STORAGE_FUNCTION_ENDPOINT=http://172.18.0.1:3002
+FF_STORAGE_FUNCTION_CIDRS=172.18.0.1/32
+```
+
+In production the backend runs in the cluster, and functions reach its pods through the Service `ff-storage`, at a fixed address, `10.43.0.251` ([deploy/k8s/README.md](../deploy/k8s/README.md), "Buckets from functions").
+
 ### A small app, end to end
 
 [`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and written to PostgreSQL, through a secret that holds the database's address, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, makes its two functions. Here the app uses a database of its own, which its functions reach over the internet, once the account's internet access is on; on one of FF's, as the section before shows, they reach it with that access off, the app unchanged but for its `DATABASE_URL`.
