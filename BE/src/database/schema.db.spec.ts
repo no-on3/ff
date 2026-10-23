@@ -60,6 +60,7 @@ const DATABASE_BILLING = migrationNames.find((name) => name.startsWith('Database
 const DATABASE_OPERATIONS = migrationNames.find((name) => name.startsWith('DatabaseOperations')) as string;
 const FUNCTION_KEYS = migrationNames.find((name) => name.startsWith('FunctionKeys')) as string;
 const QUEUE_LIMITS = migrationNames.find((name) => name.startsWith('QueueLimits')) as string;
+const EVENT_INVOKE_CONFIGS = migrationNames.find((name) => name.startsWith('EventInvokeConfigs')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -237,8 +238,8 @@ run('database schema (L2, real PostgreSQL)', () => {
   it("the capacity-samples migration replaces P-20's partition function, and reverts with samples present (P-21)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      // P-30's price book guard, P-31's ledger check, P-33's NOTIFY, inline code's hash and the queues' sizes too, which reverting their migrations removes.
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_own_request', 'ff_queue_size', 'ff_refuse_change']);
+      // The price book's guard, the ledger's check and its NOTIFY, inline code's hash, and the queues' sizes and NOTIFY too, which reverting their migrations removes.
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_own_request', 'ff_queue_notify', 'ff_queue_size', 'ff_refuse_change']);
       expect(await partitionsOf(dataSource, 'capacity_samples')).toEqual([
         { relname: monthPartition('capacity_samples', 0) },
         { relname: monthPartition('capacity_samples', 1) },
@@ -257,7 +258,7 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_own_request', 'ff_queue_size', 'ff_refuse_change']);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_own_request', 'ff_queue_notify', 'ff_queue_size', 'ff_refuse_change']);
     });
   });
 
@@ -384,6 +385,58 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(await dataSource.query(`SELECT to_regclass('queues') AS q, to_regclass('queue_messages') AS m`)).toEqual([{ q: null, m: null }]);
       expect(await ffFunctions(dataSource)).not.toEqual(expect.arrayContaining(['ff_own_request']));
       expect(await ffFunctions(dataSource)).not.toEqual(expect.arrayContaining(['ff_queue_size']));
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the customer-queues migration gives each queue SQS's defaults, moves a message's size with it, tells the queue's consumers, and reverts with customers' queues present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, EVENT_INVOKE_CONFIGS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: orders }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [ACCOUNT]);
+      const [{ id: dead }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders-dlq', 'customer') RETURNING id`, [ACCOUNT]);
+      const message = `INSERT INTO queue_messages (queue_id, message_id, body, size_bytes, expires_at) VALUES ($1, gen_random_uuid(), 'harissa', 7, now() + interval '1 day') RETURNING id`;
+      const [{ id: kept }] = await dataSource.query(message, [orders]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(
+        await dataSource.query(
+          `SELECT visibility_timeout, message_retention_seconds, delay_seconds, maximum_message_size, receive_wait_seconds, redrive_policy, size_bytes FROM queues WHERE id = $1`,
+          [orders],
+        ),
+      ).toEqual([{ visibility_timeout: 30, message_retention_seconds: 345600, delay_seconds: 0, maximum_message_size: 1048576, receive_wait_seconds: 0, redrive_policy: null, size_bytes: '7' }]);
+      await dataSource.query(`UPDATE queue_messages SET queue_id = $2 WHERE id = $1`, [kept, dead]);
+      expect(await dataSource.query(`SELECT name, size_bytes FROM queues ORDER BY name`)).toEqual([
+        { name: 'orders', size_bytes: '0' },
+        { name: 'orders-dlq', size_bytes: '7' },
+      ]);
+      // Each message written, or moved, NOTIFYs ff_queue with its queue's ID as its write commits.
+      const runner = dataSource.createQueryRunner();
+      const client = (await runner.connect()) as { on(event: 'notification', listener: (message: { channel: string; payload?: string }) => void): void };
+      const heard: string[] = [];
+      client.on('notification', (notification) => heard.push(`${notification.channel} ${notification.payload}`));
+      await runner.query('LISTEN ff_queue');
+      await dataSource.query(message, [orders]);
+      await dataSource.query(`UPDATE queue_messages SET queue_id = $2 WHERE id = $1`, [kept, orders]);
+      await runner.query('SELECT 1');
+      expect(heard).toEqual([`ff_queue ${orders}`, `ff_queue ${orders}`]);
+      await runner.query('UNLISTEN ff_queue');
+      await runner.release();
+      await expect(dataSource.query(`UPDATE queues SET visibility_timeout = 43201 WHERE id = $1`, [orders])).rejects.toThrow(/violates check constraint/);
+
+      await migrateDownTo(dataSource, EVENT_INVOKE_CONFIGS);
+
+      expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'queues' AND column_name IN ('visibility_timeout', 'redrive_policy', 'updated_at')`)).toEqual([]);
+      expect(await ffFunctions(dataSource)).not.toEqual(expect.arrayContaining(['ff_queue_notify']));
+      expect(await dataSource.query(`SELECT name, size_bytes FROM queues ORDER BY name`)).toEqual([
+        { name: 'orders', size_bytes: '14' },
+        { name: 'orders-dlq', size_bytes: '0' },
+      ]);
+      await dataSource.query(`DELETE FROM queue_messages WHERE id = $1`, [kept]);
+      expect(await dataSource.query(`SELECT size_bytes FROM queues WHERE id = $1`, [orders])).toEqual([{ size_bytes: '7' }]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

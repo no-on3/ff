@@ -51,7 +51,7 @@ const single = (value: string | string[] | undefined): string | undefined => (Ar
 type Stage = NodeJS.ReadableStream | NodeJS.WritableStream | NodeJS.ReadWriteStream;
 
 /** The request's path and query: an absolute target, as a proxy may send one, without its scheme and host. */
-function originForm(target: string | undefined): string {
+export function originForm(target: string | undefined): string {
   if (target?.startsWith('/')) return target;
   try {
     const url = new URL(target ?? '');

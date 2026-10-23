@@ -536,6 +536,28 @@ eval "$(ff buckets keys create --read-only | grep '^export ')"
 cli/templates/export/data/s3-sync.sh photos my-photos-on-s3     # my-photos-on-s3 made on S3 first
 ```
 
+### Queues, as Amazon SQS
+
+Queues come as Amazon SQS gives its standard queues ([ADR 0010](adr/0010-queue.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers their requests on a port of its own, `FF_SQS_PORT` (3003), at `FF_SQS_BASE` (`http://localhost:3003`). A queue's URL is `<FF_SQS_BASE>/<account>/<queue>`, and its ARN `arn:aws:sqs:tn-tunis-1:<account>:<queue>`. The endpoint:
+- speaks SQS's JSON protocol, as AWS's current SDKs and CLI do, each request signed with AWS Signature Version 4 for the service `sqs` by one of the account's access keys, the same keys as buckets' ("An access key", above): a read-write key does everything, a read-only one lists queues, reads their attributes and receives;
+- serves `CreateQueue`, `GetQueueUrl`, `ListQueues`, `GetQueueAttributes`, `SetQueueAttributes`, `DeleteQueue`, `PurgeQueue`, `SendMessage` and `SendMessageBatch`, `ReceiveMessage` with long polling, `DeleteMessage` and `DeleteMessageBatch`, `ChangeMessageVisibility` and `ChangeMessageVisibilityBatch`; anything else answers `UnsupportedOperation`, and FIFO queues, tags, access policies and KMS keys are refused, saying why;
+- takes SQS's attributes, with SQS's defaults and ranges: `VisibilityTimeout` (30 s, up to 12 hours), `MessageRetentionPeriod` (4 days, from a minute to 14 days), `DelaySeconds` (up to 15 minutes), `ReceiveMessageWaitTimeSeconds` (up to 20 s), `MaximumMessageSize` (1 MiB at most), and a `RedrivePolicy`: another queue of the account, the dead-letter queue, takes a message once it has been received `maxReceiveCount` times;
+- answers SQS's errors (`QueueDoesNotExist`, `InvalidParameterValue`, `AccessDenied`, `OverLimit`, …) by both their names, the body's `__type` and the `x-amzn-query-error` header, and gives the MD5 sums of each message's body and attributes that AWS's SDKs check.
+
+With one of the account's keys in the environment (as above), and only the endpoint given:
+
+```bash
+export AWS_ENDPOINT_URL_SQS=http://localhost:3003
+aws sqs create-queue --queue-name orders                  # its URL: http://localhost:3003/<account>/orders
+queue="$(aws sqs get-queue-url --queue-name orders --query QueueUrl --output text)"
+aws sqs send-message --queue-url "$queue" --message-body '{"item": "harissa", "quantity": 2}'
+aws sqs receive-message --queue-url "$queue" --wait-time-seconds 10   # then delete-message with its ReceiptHandle
+```
+
+**At least once, as SQS's standard queues:** a message received is hidden for the visibility timeout, then comes back for another receive unless it was deleted with the receipt handle of its last receive (an older handle deletes nothing, without an error, as SQS's documentation says); two receives never hold one message at once. A long poll answers as soon as a message comes, PostgreSQL telling every backend of each message written to a queue; a message past its retention is deleted, received or not. The messages are in FF's own database, one table for every queue's ([ADR 0010](adr/0010-queue.md)), so its backups keep them.
+
+**Every request is checked as buckets' are:** the key's account must be active and its databases, buckets and queues on, or `AccessDenied` says why; past the plan's queue requests a second (100 on beta), `RequestThrottled`; out of credit, sending waits for credit, while receiving and deleting go on. The plan sets how many queues an account has (10 on beta) and what their messages hold together (100 MB), its functions' calls that don't wait among them: past it, sending answers `OverLimit` until some are deleted.
+
 ### A small app, end to end
 
 [`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and kept in PostgreSQL, each order's receipt kept in a bucket, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, and `@aws-sdk/client-s3`, AWS's S3 client, makes its two functions. On FF it keeps its orders in one of FF's databases and its receipts in one of FF's buckets, as it would in RDS and S3 on AWS: its functions reach both with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL` and `RECEIPTS_BUCKET`. In development, functions get their own keys to buckets once the backend knows where they reach the front door (`FF_STORAGE_FUNCTION_ENDPOINT`, in "Files in buckets" above), and the customers' databases' server runs (setup's step 10).

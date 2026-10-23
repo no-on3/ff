@@ -38,6 +38,7 @@ const production: Env = {
   FF_ENCRYPTION_KEYS_FILE: keysFile,
   FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
   FF_STORAGE_BASE: 'https://s3.ff.example',
+  FF_SQS_BASE: 'https://sqs.ff.example',
   FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
 
@@ -454,6 +455,24 @@ describe('configuration', () => {
 
     it('is reached over TLS in production', () => {
       expect(problems({ ...production, FF_STORAGE_BASE: 'http://s3.example.tn' })).toEqual([expect.stringMatching(/^FF_STORAGE_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
+    });
+  });
+
+  describe("queues' SQS endpoint", () => {
+    it("is served on port 3003, apart from the API, at localhost in development, naming FF's region", () => {
+      expect(configuration(dev).sqs).toEqual({ port: 3003, base: 'http://localhost:3003', region: 'tn-tunis-1' });
+    });
+
+    it('takes an origin, a trailing slash dropped, and port 0 for none', () => {
+      expect(configuration({ ...production, FF_SQS_BASE: 'https://sqs.example.tn/', FF_SQS_PORT: '0' }).sqs).toMatchObject({ port: 0, base: 'https://sqs.example.tn' });
+    });
+
+    it.each(['https://sqs.example.tn/queues', 'ftp://sqs.example.tn', 'sqs.example.tn'])('refuses %s as its endpoint', (base) => {
+      expect(problems({ ...dev, FF_SQS_BASE: base })).toEqual([expect.stringMatching(/^FF_SQS_BASE must be an origin, such as https:\/\/sqs.example.tn/)]);
+    });
+
+    it('is reached over TLS in production', () => {
+      expect(problems({ ...production, FF_SQS_BASE: 'http://sqs.example.tn' })).toEqual([expect.stringMatching(/^FF_SQS_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
     });
   });
 

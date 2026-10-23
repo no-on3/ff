@@ -50,6 +50,8 @@ const DEV_CORS_ORIGIN = 'http://localhost:5199';
 export const DEV_FUNCTION_URL_BASE = 'http://fn.localhost:3001';
 /** Buckets' S3 endpoint in development: path-style there, and virtual-hosted under its host, which resolves to this machine. */
 export const DEV_STORAGE_BASE = 'http://s3.localhost:3002';
+/** Queues' SQS endpoint in development, which a queue's URL begins with: AWS's SDKs reach a queue at its URL. */
+export const DEV_SQS_BASE = 'http://localhost:3003';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
@@ -277,6 +279,18 @@ const storageBase = {
   test: functionUrlBase.test,
   expected: 'an origin whose host has a dot, such as https://s3.example.tn, at which a bucket is https://s3.example.tn/<bucket> and https://<bucket>.s3.example.tn',
 };
+/** Queues' SQS endpoint: a scheme, a host and a port if any; no path. A queue's URL is <endpoint>/<account>/<name>. */
+const sqsBase = {
+  test: (v: string) => {
+    try {
+      const url = new URL(v);
+      return ['http:', 'https:'].includes(url.protocol) && url.origin === v.replace(/\/$/, '');
+    } catch {
+      return false;
+    }
+  },
+  expected: 'an origin, such as https://sqs.example.tn, under which a queue is https://sqs.example.tn/<account>/<queue>',
+};
 /**
  * Where functions reach buckets' S3 front door inside the cluster: a scheme, an IP address, and a port if any; no path.
  * An address rather than a name: AWS's SDKs address buckets path-style at an IP address by themselves, where a name
@@ -428,6 +442,10 @@ const appShape = {
   // backend's own pods in ff-system, on FF_STORAGE_PORT, as when the backend runs in the cluster).
   FF_STORAGE_FUNCTION_ENDPOINT: optionalText(functionStorageEndpoint),
   FF_STORAGE_FUNCTION_CIDRS: list(cidr),
+  // Queues' SQS endpoint (ADR 0010): the port of its server, apart from the API's (0: none), and the endpoint
+  // customers give AWS's SDKs and CLI, which a queue's URL begins with.
+  FF_SQS_PORT: integer(3003, 0, 65535),
+  FF_SQS_BASE: text(DEV_SQS_BASE, sqsBase),
   // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
   // servers that check domains' records (none: the system's).
   FF_EDGE_ADDRESSES: list(ipAddress),
@@ -587,6 +605,9 @@ function appRules(env: AppEnv): string[] {
     }
     if (!env.FF_FUNCTION_URL_BASE.startsWith('https://')) {
       problems.push('FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production, such as https://fn.example.tn: function URLs are served over TLS');
+    }
+    if (!env.FF_SQS_BASE.startsWith('https://')) {
+      problems.push("FF_SQS_BASE must be an https:// origin when NODE_ENV=production, such as https://sqs.example.tn: queues' requests carry customers' messages");
     }
     if (!env.FF_STORAGE_BASE.startsWith('https://')) {
       problems.push("FF_STORAGE_BASE must be an https:// origin when NODE_ENV=production, such as https://s3.example.tn: buckets' requests carry customers' files");
@@ -831,6 +852,12 @@ export default function configuration(env: Env = process.env) {
       region: parsed.FF_REGION,
       // Where functions reach it with their own keys, inside the cluster; '': functions get no key.
       functionEndpoint: parsed.FF_STORAGE_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
+    },
+    // Queues' SQS endpoint (ADR 0010): its server, the endpoint customers use, which queues' URLs begin with, and the region their ARNs name.
+    sqs: {
+      port: parsed.FF_SQS_PORT,
+      base: parsed.FF_SQS_BASE.replace(/\/$/, ''),
+      region: parsed.FF_REGION,
     },
     // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
     codeImages: {
