@@ -16,7 +16,10 @@
 # (hack/k8s/app-database.sh), in an account whose internet access is on; ff db, with the run's own
 # server of customers' databases: one made, its string a function's secret, the app writing its
 # order there with its account's internet access off, read with psql, a new password, its month
-# in ff usage, then deleted; and ff local, in
+# in ff usage, then deleted; ff buckets: one made, a key whose secret ff prints once as the
+# variables AWS's tools read, the AWS CLI uploading with them alone, what the bucket held at its
+# measure and its month in ff usage, the export kit's s3-sync.sh copying it out to a folder and on
+# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -47,8 +50,11 @@ ff_bin="$FF_REPO_ROOT/cli/target/release/ff"
 e2e_build
 # Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which ff reaches on 127.0.0.1.
 url_port="$(free_port)"
+# Buckets' S3 front door on another, at http://s3.localhost:<port>.
+storage_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
-  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" "${e2e_data_db_env[@]}")
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
+  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" "${e2e_data_db_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -503,6 +509,70 @@ ff db delete cli-orders --yes
 check "ff db delete drops it, with its data, its user gone" "0 deleted the database cli-orders, with its data 0" \
   "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
 ff delete cli-db-orders --yes
+
+echo "== buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
+ff buckets create My.Photos
+check "ff buckets create refuses a name AWS wouldn't take, before calling" "2 true" "$(code) $(err | grep -q "can't be a bucket's name" && echo true || echo false)"
+ff buckets create cli-photos
+check "ff buckets create makes it, and says where AWS's tools reach it" "0 cli-photos made http://cli-photos.s3.localhost:$storage_port" \
+  "$(code) $(out | head -1) $(out | sed -n 3p | awk '{ print $2 }')"
+ff buckets list
+check "ff buckets list shows it" "0 cli-photos active" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
+ff buckets keys create --bucket cli-photos
+check "ff buckets keys create prints its secret once, as the four variables AWS's tools read" "0 4" "$(code) $(out | grep -c '^export AWS_')"
+out | grep '^export AWS_' >"$work/s3.env"
+key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
+printf 'Ahlan from the CLI' >"$work/hello.txt"
+# The AWS CLI with those variables alone, none of this machine's settings: AWS_ENDPOINT_URL_S3 names FF's endpoint.
+# Without one here, AWS's image: as this user, so that the files it writes are this user's, s3.localhost this machine.
+if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
+  aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
+    -e AWS_PROFILE amazon/aws-cli:2.34.32)
+fi
+aws_with_key() { (set -a; . "$work/s3.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+uploaded="$(aws_with_key s3 cp "$work/hello.txt" s3://cli-photos/hello.txt --only-show-errors >/dev/null 2>&1; echo $?)"
+check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its only change" "0 Ahlan from the CLI" \
+  "$uploaded $(aws_with_key s3 cp s3://cli-photos/hello.txt - 2>/dev/null)"
+ff buckets keys list
+check "ff buckets keys list names what it reaches, never its secret" "0 $key_id cli-photos false" \
+  "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep -q "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" && echo true || echo false)"
+# Each minute, the backend measures every bucket not measured yet in the hour: this one within a minute.
+for _ in $(seq 75); do "$ff_bin" buckets get cli-photos --output json 2>/dev/null | jq -e '.measuredAt != null' >/dev/null && break; sleep 1; done
+ff buckets get cli-photos
+check "ff buckets get says what it held at its last measure" "0 true" "$(code) $(out | grep -qE '^held +[0-9.]+ MB, [01] objects?, as measured at ' && echo true || echo false)"
+# Its month: the requests the front door counted, by S3's classes, once their minute is written.
+for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.buckets[] | select(.name == "cli-photos" and .tier1Requests > 0 and .tier2Requests > 0)' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists its month after the databases: GB-months, each class's requests" "0 true" \
+  "$(code) $(out | grep -qE '^cli-photos +[0-9.]+ +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' && echo true || echo false)"
+# The export kit's way out to AWS S3, both halves: the bucket to a folder with the key's variables, then the folder to
+# "S3", here another bucket behind an AWS CLI profile whose key reaches that one alone, so that a second half still
+# holding FF's variables would be refused there. The script calls the AWS CLI by name: the one above.
+ff buckets create cli-photos-out
+ff buckets keys create --bucket cli-photos-out
+printf '[profile as-s3]\nregion = %s\nendpoint_url = %s\n' "$(sed -n 's/^export AWS_REGION=//p' "$work/s3.env")" \
+  "$(sed -n 's/^export AWS_ENDPOINT_URL_S3=//p' "$work/s3.env")" >"$work/aws-config"
+printf '[as-s3]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$(out | sed -n 's/^export AWS_ACCESS_KEY_ID=//p')" \
+  "$(out | sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p')" >"$work/aws-credentials"
+as_s3() { AWS_CONFIG_FILE="$work/aws-config" AWS_SHARED_CREDENTIALS_FILE="$work/aws-credentials" AWS_PROFILE=as-s3 "$@"; }
+mkdir -p "$work/bin"
+{ echo '#!/usr/bin/env bash'; printf 'exec'; printf ' %q' "${aws_cli[@]}"; echo ' "$@"'; } >"$work/bin/aws"
+chmod +x "$work/bin/aws"
+synced="$(set -a; . "$work/s3.env"; set +a; PATH="$work/bin:$PATH" as_s3 "$FF_REPO_ROOT/cli/templates/export/data/s3-sync.sh" \
+  cli-photos cli-photos-out "$work/backup" >"$work/s3-sync.out" 2>&1 && echo 0 || echo $?)"
+check "the export kit's s3-sync.sh copies the bucket to a folder, then to S3 with the AWS CLI's own settings" \
+  "0 Ahlan from the CLI Ahlan from the CLI" \
+  "$synced $(cat "$work/backup/hello.txt" 2>/dev/null) $(as_s3 "${aws_cli[@]}" s3 cp s3://cli-photos-out/hello.txt - 2>/dev/null)"
+ff buckets delete cli-photos-out --force --yes
+ff buckets delete cli-photos --yes
+check "ff buckets delete leaves a bucket with files, in the API's words, exit 3" "3 true" "$(code) $(err | grep -q "isn't empty" && echo true || echo false)"
+ff buckets delete cli-photos --force --yes
+check "  ... and --force deletes them first" "0 deleted the bucket cli-photos, with its files" "$(code) $(out)"
+ff buckets keys revoke "$key_id" --yes
+# The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
+refused="$(aws_with_key s3 ls 2>&1 || true)"
+check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts

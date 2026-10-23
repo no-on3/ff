@@ -144,6 +144,9 @@ struct Usage {
     /// Absent from an API before customers' databases.
     #[serde(default)]
     databases: Vec<DatabaseUsage>,
+    /// Absent from an API before customers' buckets.
+    #[serde(default)]
+    buckets: Vec<BucketUsage>,
     totals: Amounts,
     estimate: Option<Estimate>,
 }
@@ -156,6 +159,18 @@ struct DatabaseUsage {
     deleted: bool,
     hours: u32,
     gb_months: String,
+    cost: Option<String>,
+}
+
+/// A bucket's month, as its hourly measures and the front door's counts counted it.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BucketUsage {
+    name: String,
+    deleted: bool,
+    gb_months: String,
+    tier1_requests: u64,
+    tier2_requests: u64,
     cost: Option<String>,
 }
 
@@ -252,8 +267,27 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
                 .collect();
             format!("\n{}", table(&["DATABASE", "HOURS", "GB-MONTHS", "COST"], &rows))
         };
+        // As S3 bills them: storage by the GB-month, PUT, COPY, POST and LIST in its first class, GET and the others in its second.
+        let buckets = if usage.buckets.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .buckets
+                .iter()
+                .map(|bucket| {
+                    vec![
+                        if bucket.deleted { format!("{} (deleted)", bucket.name) } else { bucket.name.clone() },
+                        bucket.gb_months.clone(),
+                        bucket.tier1_requests.to_string(),
+                        bucket.tier2_requests.to_string(),
+                        bucket.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["BUCKET", "GB-MONTHS", "PUT, LIST…", "GET…", "COST"], &rows))
+        };
         format!(
-            "{}\n{}{databases}\n{estimate}",
+            "{}\n{}{databases}{buckets}\n{estimate}",
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )

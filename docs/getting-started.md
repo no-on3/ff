@@ -474,6 +474,16 @@ aws --endpoint-url http://s3.localhost:3002 s3 cp ./cat.jpg s3://photos/2026/cat
 aws --endpoint-url http://s3.localhost:3002 s3 ls s3://photos --recursive
 ```
 
+Or with `ff`, whose key's secret comes as the four variables AWS's tools read, `AWS_ENDPOINT_URL_S3` among them, so that the CLI needs no `--endpoint-url`:
+
+```bash
+ff buckets create photos
+eval "$(ff buckets keys create --bucket photos | grep '^export ')"
+aws s3 cp ./cat.jpg s3://photos/2026/cat.jpg
+ff buckets get photos          # what it held at its last hourly measure
+ff usage                       # its month: GB-months, its requests by S3's two classes
+```
+
 `GET /buckets` and `GET /buckets/<name>` give each bucket's last measure too (`sizeBytes`, `objects`, `measuredAt`), and `GET /me` how full the account's buckets are together (`bucketStorageNotice`: 80, 100, or null under 80%).
 
 **A bucket's name** is AWS's, without dots (3 to 63 lower-case letters, digits and hyphens), and unique across FF, as on AWS: whoever has `photos`, nobody else may, until it is deleted. In the store it is a name of FF's, `ff-` and 24 characters, which says nothing of whose it is. The plan sets how many an account has (five on beta), what they hold together (5 GB), the requests a second (100) and the largest file in one `PutObject` (5 GB; a multipart upload sends more). `GET /buckets` and `GET /buckets/<name>` show them; `DELETE /buckets/<name>` deletes an empty one, as S3 does, and `?force=true` deletes its files first, and the uploads under way.

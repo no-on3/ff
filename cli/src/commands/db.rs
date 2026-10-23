@@ -95,8 +95,8 @@ fn status(status: &str) -> &str {
     }
 }
 
-/// A size in MB of 1,048,576 bytes, or GB from 1,024 MB on, to a tenth.
-fn size(bytes: Option<u64>) -> String {
+/// A size in MB of 1,048,576 bytes, or GB from 1,024 MB on, to a tenth; a dash for none.
+pub fn size(bytes: Option<u64>) -> String {
     let Some(bytes) = bytes else { return "-".to_owned() };
     let mb = bytes as f64 / 1_048_576.0;
     let (value, unit) = if mb >= 1024.0 { (mb / 1024.0, "GB") } else { (mb, "MB") };

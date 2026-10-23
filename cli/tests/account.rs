@@ -94,6 +94,28 @@ fn usage_shows_each_database_after_the_functions() {
 }
 
 #[test]
+fn usage_shows_each_bucket_after_the_databases_its_requests_by_s3s_classes() {
+    let mut month = usage();
+    month["buckets"] = json!([
+        { "bucketId": "b1", "name": "photos", "deleted": false, "hours": 312, "gbMonths": "0.215231", "sizeBytes": 161_480_253, "objects": 1204,
+          "tier1Requests": 2310, "tier2Requests": 48920, "cost": "0.108" },
+        { "bucketId": "b2", "name": "tmp", "deleted": true, "hours": 0, "gbMonths": "0", "sizeBytes": 0, "objects": 0, "tier1Requests": 0, "tier2Requests": 5, "cost": "0.000" }
+    ]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "total          15        3.14375     1           0.852\nBUCKET         GB-MONTHS  PUT, LIST…  GET…   COST\n\
+             photos         0.215231   2310        48920  0.108\ntmp (deleted)  0          0           5      0.000\nestimated cost:"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
 fn usage_as_csv_is_the_apis_own_and_a_wrong_month_is_refused_before_calling() {
     let csv = "functionId,functionName,requests\r\nf1,hello,12\r\n";
     let api = Server::start(vec![Reply::text(200, "text/csv; charset=utf-8", csv)]);

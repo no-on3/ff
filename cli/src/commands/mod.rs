@@ -1,6 +1,7 @@
 //! One file per command.
 
 mod account;
+mod buckets;
 mod completion;
 mod config;
 mod db;
@@ -19,8 +20,8 @@ mod version;
 mod whoami;
 
 use crate::cli::{
-    Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand, LocalCommand, ScheduleCommand, SecretsCommand,
-    UrlCommand,
+    BucketKeysCommand, BucketsCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand, LocalCommand,
+    ScheduleCommand, SecretsCommand, UrlCommand,
 };
 use crate::config::Settings;
 use crate::error::Error;
@@ -108,6 +109,17 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             db::password(&name, &secret.functions, &secret.secret_name, context)
         }
         Command::Db(DbCommand::Delete { name, yes }) => db::delete(&name, yes, context),
+        Command::Buckets(BucketsCommand::Create { name }) => buckets::create(&name, context),
+        Command::Buckets(BucketsCommand::List) => buckets::list(context),
+        Command::Buckets(BucketsCommand::Get { name }) => buckets::get(&name, context),
+        Command::Buckets(BucketsCommand::Delete { name, force, yes }) => buckets::delete(&name, force, yes, context),
+        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::List)) => buckets::keys_list(context),
+        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Create { buckets, read_only })) => {
+            buckets::keys_create(&buckets, read_only, context)
+        }
+        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Revoke { id, yes })) => {
+            buckets::keys_revoke(&id, yes, context)
+        }
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),

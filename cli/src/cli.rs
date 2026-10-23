@@ -185,6 +185,10 @@ pub enum Command {
     #[command(subcommand)]
     Db(DbCommand),
 
+    /// The account's buckets, as AWS S3 gives them, and its access keys to them
+    #[command(subcommand)]
+    Buckets(BucketsCommand),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -521,6 +525,69 @@ pub enum DbCommand {
     Delete {
         /// The database's name
         name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BucketsCommand {
+    /// Make a bucket: its name unique across FF, as on AWS
+    Create {
+        /// Its name: lower-case letters, digits and hyphens, as AWS names buckets, without dots
+        name: String,
+    },
+
+    /// List the account's buckets
+    List,
+
+    /// Show a bucket: its endpoint, address and region
+    Get {
+        /// The bucket's name
+        name: String,
+    },
+
+    /// Delete a bucket: an empty one, or with --force every file in it first
+    Delete {
+        /// The bucket's name
+        name: String,
+
+        /// Delete its files first, and the uploads under way
+        #[arg(long)]
+        force: bool,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// The account's access keys to its buckets, for AWS's SDKs and CLI
+    #[command(subcommand)]
+    Keys(BucketKeysCommand),
+}
+
+#[derive(Subcommand)]
+pub enum BucketKeysCommand {
+    /// List the account's access keys: what each reaches, when it was last used; never a secret
+    List,
+
+    /// Make an access key: its secret printed this once, as the variables AWS's tools read
+    Create {
+        /// A bucket it reaches, by name; again for each; all the account's without it
+        #[arg(long = "bucket", value_name = "NAME")]
+        buckets: Vec<String>,
+
+        /// Reads and lists only: no upload, copy or delete
+        #[arg(long)]
+        read_only: bool,
+    },
+
+    /// Revoke an access key: whatever uses it is refused at once
+    Revoke {
+        /// The access key ID, AKFF and 16 characters
+        id: String,
 
         /// Don't ask first: a script must say it
         #[arg(long, short)]
