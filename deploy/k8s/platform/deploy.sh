@@ -83,6 +83,19 @@ case "$storage_tls" in
     ;;
 esac
 
+echo "== queues' SQS endpoint"
+# The edge's SQS host must be the host of the backend's FF_SQS_BASE, which customers give AWS's SDKs and CLI and a
+# queue's URL begins with, or their requests would reach nothing.
+sqs_base="$(setting FF_SQS_BASE)"
+sqs_host="$(setting FF_SQS_HOST)"
+sqs_base_host="${sqs_base#*://}"
+sqs_base_host="${sqs_base_host%%[:/]*}"
+if [ "$sqs_base_host" != "$sqs_host" ]; then
+  echo "the edge's FF_SQS_HOST ($sqs_host) must be the host of the backend's FF_SQS_BASE ($sqs_base)" >&2
+  exit 1
+fi
+echo "queues at $sqs_host, with a certificate of its own"
+
 echo "== the code registry"
 # Packages' code images: the registry's two users, from the Secret ff-code-registry, and the backend's password for
 # its own (deploy/k8s/README.md, "The code registry").

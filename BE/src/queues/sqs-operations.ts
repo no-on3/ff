@@ -27,6 +27,8 @@ export interface Caller {
   plan: PlanView;
   /** Aborted when the client goes: a long poll ends. */
   signal?: AbortSignal;
+  /** The endpoint the caller reached, which the queues' URLs answered to it begin with; FF_SQS_BASE when none is given. */
+  endpoint?: string;
 }
 
 type Input = Record<string, unknown>;
@@ -91,8 +93,10 @@ const asked = (names: unknown, name: string): boolean =>
  * Amazon SQS's operations on an account's standard queues, as its JSON
  * protocol takes them: the caller's key reaches the account's queues, a
  * read-only one only reading them (ADR 0010). Queues' URLs are
- * <endpoint>/<account>/<name>; another account's queue is one that doesn't
- * exist. A long poll waits for its queue's news, from any backend.
+ * <endpoint>/<account>/<name>, under the endpoint the caller reached; a URL
+ * names its queue by its path, whatever its host; another account's queue is
+ * one that doesn't exist. A long poll waits for its queue's news, from any
+ * backend.
  */
 export class SqsOperations {
   constructor(
@@ -163,9 +167,9 @@ export class SqsOperations {
     },
   };
 
-  /** A queue's URL, as SQS's: <endpoint>/<account>/<name>. */
-  urlOf(queue: Pick<Queue, 'accountId' | 'name'>): string {
-    return `${this.base}/${queue.accountId}/${queue.name}`;
+  /** A queue's URL, as SQS's: <endpoint>/<account>/<name>, under the endpoint given, else FF_SQS_BASE. */
+  urlOf(queue: Pick<Queue, 'accountId' | 'name'>, endpoint = this.base): string {
+    return `${endpoint}/${queue.accountId}/${queue.name}`;
   }
 
   /** The caller's account's queue a URL names, whatever its host: by its path, /<account>/<name>; another account's doesn't exist for it. */
@@ -190,7 +194,7 @@ export class SqsOperations {
     if (input.tags !== undefined && Object.keys(input.tags as object).length > 0) throw invalidParameter("FF's queues have no tags yet.");
     const settings = settingsOf(input.Attributes, this.region, caller.accountId);
     const queue = await this.queues.create(caller.accountId, name, settings, { limit: caller.plan.limits.queues, name: caller.plan.name }, this.region);
-    return { QueueUrl: this.urlOf(queue) };
+    return { QueueUrl: this.urlOf(queue, caller.endpoint) };
   }
 
   private async getQueueUrl(input: Input, caller: Caller): Promise<Output> {
@@ -200,14 +204,14 @@ export class SqsOperations {
     if (owner !== undefined && owner !== caller.accountId) throw queueDoesNotExist();
     const queue = await this.queues.find(caller.accountId, name);
     if (!queue) throw queueDoesNotExist();
-    return { QueueUrl: this.urlOf(queue) };
+    return { QueueUrl: this.urlOf(queue, caller.endpoint) };
   }
 
   private async listQueues(input: Input, caller: Caller): Promise<Output> {
     const max = integer(input, 'MaxResults', 1, 1000, 1000);
     const page = await this.queues.list(caller.accountId, text(input, 'QueueNamePrefix') ?? '', max, text(input, 'NextToken'));
     return {
-      ...(page.queues.length ? { QueueUrls: page.queues.map((queue) => this.urlOf(queue)) } : {}),
+      ...(page.queues.length ? { QueueUrls: page.queues.map((queue) => this.urlOf(queue, caller.endpoint)) } : {}),
       ...(page.nextToken ? { NextToken: page.nextToken } : {}),
     };
   }

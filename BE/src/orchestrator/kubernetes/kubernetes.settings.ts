@@ -16,7 +16,7 @@ export interface KubernetesSettings {
   ingressAllowCidrs: string[];
   /** The file holding the log store's delete key (P-45): the Secret victoria-logs-delete-key, mounted. */
   logStoreDeleteKeyFile: string;
-  /** What functions reach of the platform whatever their account's internet access: customers' database server, buckets' S3 front door. */
+  /** What functions reach of the platform whatever their account's internet access: customers' database server, buckets' S3 front door, queues' SQS endpoint. */
   platformEgress: PlatformEgress[];
   /** The CA of customers' database server's certificate (PEM) when it isn't a public one, which functions' pods get; '' for none. */
   dataDbCa: string;

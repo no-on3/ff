@@ -1701,6 +1701,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         AWS_REGION: 'tn-tunis-1',
         AWS_DEFAULT_REGION: 'tn-tunis-1',
         AWS_ENDPOINT_URL_S3: 'http://10.43.0.251:3002',
+        AWS_ENDPOINT_URL_SQS: 'http://10.43.0.251:3003',
       },
     };
     const given = () => [...orchestrator.deploy.mock.calls, ...orchestrator.update.mock.calls].map(([fn]) => fn.environment);
@@ -1769,9 +1770,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       });
 
       it("keeps FF's names FF's, over a variable a function was given before they were reserved", () => {
-        const before = { ...environment, variables: { AWS_ENDPOINT_URL_S3: 'https://s3.amazonaws.com' } };
+        const before = { ...environment, variables: { AWS_ENDPOINT_URL_S3: 'https://s3.amazonaws.com', AWS_ENDPOINT_URL_SQS: 'https://sqs.us-east-1.amazonaws.com' } };
 
-        expect(workloadOf(fn, before, 'image', credentials).environment?.values.AWS_ENDPOINT_URL_S3).toBe('http://10.43.0.251:3002');
+        expect(workloadOf(fn, before, 'image', credentials).environment?.values).toMatchObject({
+          AWS_ENDPOINT_URL_S3: 'http://10.43.0.251:3002',
+          AWS_ENDPOINT_URL_SQS: 'http://10.43.0.251:3003',
+        });
       });
     });
   });

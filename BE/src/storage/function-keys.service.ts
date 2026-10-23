@@ -9,28 +9,30 @@ import { newAccessKeyId, newSecretAccessKey } from './storage-names';
 /** PostgreSQL's unique_violation: another deploy of the function made its key meanwhile. */
 const UNIQUE_VIOLATION = '23505';
 
-/** What a function's pods get to reach its account's buckets, as AWS Lambda gives a function its role's credentials. */
+/** What a function's pods get to reach its account's buckets and queues, as AWS Lambda gives a function its role's credentials. */
 export interface FunctionCredentials {
   /** The key's ID: a new key is a new version of what the function's process gets. */
   keyId: string;
-  /** AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_DEFAULT_REGION and AWS_ENDPOINT_URL_S3: AWS's SDKs read them all. */
+  /** AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_DEFAULT_REGION, AWS_ENDPOINT_URL_S3 and AWS_ENDPOINT_URL_SQS: AWS's SDKs read them all. */
   variables: Record<string, string>;
 }
 
 /**
- * Each function's own access key to its account's buckets (ADR 0009): made the
- * first time the function is deployed, reaching every bucket of the account,
- * read-write, and checked by the front door as any key is; revoked when the
- * function is deleted. It reaches the function's pods in their environment's
- * Secret, with the region and the front door's address inside the cluster,
- * where AWS's SDKs look for them, so that `new S3Client({})` and
- * `boto3.client("s3")` work unchanged. Short-lived credentials, as a Lambda
+ * Each function's own access key to its account's buckets (ADR 0009) and
+ * queues (ADR 0010): made the first time the function is deployed, reaching
+ * every bucket and queue of the account, read-write, and checked as any key
+ * is; revoked when the function is deleted. It reaches the function's pods in
+ * their environment's Secret, with the region and the endpoints' addresses
+ * inside the cluster, where AWS's SDKs look for them, so that
+ * `new S3Client({})`, `new SQSClient({})`, `boto3.client("s3")` and
+ * `boto3.client("sqs")` work unchanged. Short-lived credentials, as a Lambda
  * role's are, wait for an STS of FF's. Never listed with the account's own
  * keys, nor counted against their two.
  */
 @Injectable()
 export class FunctionKeys {
-  private readonly endpoint: string;
+  /** Where functions reach buckets' S3 front door and queues' SQS endpoint; '' for one they aren't given. */
+  private readonly endpoints: { s3: string; sqs: string };
   private readonly region: string;
 
   constructor(
@@ -38,13 +40,17 @@ export class FunctionKeys {
     private readonly directory: StorageDirectory,
     config: ConfigService,
   ) {
-    this.endpoint = config.get<string>('storage.functionEndpoint') ?? '';
+    this.endpoints = { s3: config.get<string>('storage.functionEndpoint') ?? '', sqs: config.get<string>('sqs.functionEndpoint') ?? '' };
     this.region = config.getOrThrow<string>('storage.region');
   }
 
-  /** The function's key and where it reaches, the key made if it has none; undefined where FF gives functions none. */
+  /**
+   * The function's key and the endpoints it reaches, the key made if it has
+   * none; undefined where FF gives functions neither endpoint. A function
+   * deployed before an endpoint was given gets it at its next rollout.
+   */
   async credentialsFor(fn: { id: string; accountId: string }): Promise<FunctionCredentials | undefined> {
-    if (!this.endpoint) return undefined;
+    if (!this.endpoints.s3 && !this.endpoints.sqs) return undefined;
     const key = (await this.keyOf(fn.id)) ?? (await this.make(fn));
     return {
       keyId: key.id,
@@ -53,7 +59,8 @@ export class FunctionKeys {
         AWS_SECRET_ACCESS_KEY: key.secret,
         AWS_REGION: this.region,
         AWS_DEFAULT_REGION: this.region,
-        AWS_ENDPOINT_URL_S3: this.endpoint,
+        ...(this.endpoints.s3 ? { AWS_ENDPOINT_URL_S3: this.endpoints.s3 } : {}),
+        ...(this.endpoints.sqs ? { AWS_ENDPOINT_URL_SQS: this.endpoints.sqs } : {}),
       },
     };
   }

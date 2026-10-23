@@ -291,6 +291,11 @@ const sqsBase = {
   },
   expected: 'an origin, such as https://sqs.example.tn, under which a queue is https://sqs.example.tn/<account>/<queue>',
 };
+/** Where functions reach queues' SQS endpoint inside the cluster: a scheme, a host and a port if any; no path. */
+const functionSqsEndpoint = {
+  test: sqsBase.test,
+  expected: "an origin, such as http://10.43.0.251:3003, at which functions reach queues' SQS endpoint inside the cluster",
+};
 /**
  * Where functions reach buckets' S3 front door inside the cluster: a scheme, an IP address, and a port if any; no path.
  * An address rather than a name: AWS's SDKs address buckets path-style at an IP address by themselves, where a name
@@ -446,6 +451,11 @@ const appShape = {
   // customers give AWS's SDKs and CLI, which a queue's URL begins with.
   FF_SQS_PORT: integer(3003, 0, 65535),
   FF_SQS_BASE: text(DEV_SQS_BASE, sqsBase),
+  // Functions reach queues with their own keys at this endpoint, inside the cluster (unset: their pods get no
+  // AWS_ENDPOINT_URL_SQS), and their NetworkPolicy opens these addresses on its port (none: the backend's own pods in
+  // ff-system, on FF_SQS_PORT, as when the backend runs in the cluster).
+  FF_SQS_FUNCTION_ENDPOINT: optionalText(functionSqsEndpoint),
+  FF_SQS_FUNCTION_CIDRS: list(cidr),
   // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
   // servers that check domains' records (none: the system's).
   FF_EDGE_ADDRESSES: list(ipAddress),
@@ -541,6 +551,14 @@ function appRules(env: AppEnv): string[] {
     }
   } else if (env.FF_STORAGE_FUNCTION_CIDRS.length > 0) {
     problems.push("FF_STORAGE_FUNCTION_CIDRS is set, but FF_STORAGE_FUNCTION_ENDPOINT is not: it names where functions reach buckets' S3 front door");
+  }
+
+  if (env.FF_SQS_FUNCTION_ENDPOINT) {
+    if (env.FF_SQS_PORT === 0) {
+      problems.push("FF_SQS_FUNCTION_ENDPOINT is set, but FF_SQS_PORT is 0: functions' keys reach queues through the SQS endpoint, which isn't running");
+    }
+  } else if (env.FF_SQS_FUNCTION_CIDRS.length > 0) {
+    problems.push("FF_SQS_FUNCTION_CIDRS is set, but FF_SQS_FUNCTION_ENDPOINT is not: it names where functions reach queues' SQS endpoint");
   }
 
   if (env.FF_DEV_USER_ID !== undefined) {
@@ -679,15 +697,15 @@ function readCertificate(name: string, path: string): string {
 }
 
 /**
- * How functions reach buckets' S3 front door with their own keys: at the addresses named, on the endpoint's port; with
- * none named, at the backend's own pods, on the front door's port, which the endpoint's Service forwards to. Nothing
- * when functions get no key.
+ * How functions reach one of FF's endpoints with their own keys, buckets' S3 front door or queues' SQS endpoint: at
+ * the addresses named, on the endpoint's port; with none named, at the backend's own pods, on the server's port, which
+ * the endpoint's Service forwards to. Nothing when functions aren't given the endpoint.
  */
-function storageEgress(env: AppEnv): Array<{ cidrs: string[]; port: number }> {
-  if (!env.FF_STORAGE_FUNCTION_ENDPOINT) return [];
-  if (env.FF_STORAGE_FUNCTION_CIDRS.length === 0) return [{ cidrs: [], port: env.FF_STORAGE_PORT }];
-  const endpoint = new URL(env.FF_STORAGE_FUNCTION_ENDPOINT);
-  return [{ cidrs: env.FF_STORAGE_FUNCTION_CIDRS, port: Number(endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80)) }];
+function functionEgress(endpoint: string | undefined, cidrs: string[], serverPort: number): Array<{ cidrs: string[]; port: number }> {
+  if (!endpoint) return [];
+  if (cidrs.length === 0) return [{ cidrs: [], port: serverPort }];
+  const url = new URL(endpoint);
+  return [{ cidrs, port: Number(url.port || (url.protocol === 'https:' ? 443 : 80)) }];
 }
 
 /** Customers' database server (ADR 0008), as the backend reaches it, and as connection strings and functions name it. */
@@ -858,6 +876,8 @@ export default function configuration(env: Env = process.env) {
       port: parsed.FF_SQS_PORT,
       base: parsed.FF_SQS_BASE.replace(/\/$/, ''),
       region: parsed.FF_REGION,
+      // Where functions reach it with their own keys, inside the cluster; '': their pods get no AWS_ENDPOINT_URL_SQS.
+      functionEndpoint: parsed.FF_SQS_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
     },
     // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
     codeImages: {
@@ -903,7 +923,11 @@ export default function configuration(env: Env = process.env) {
       logStoreDeleteKeyFile: parsed.K8S_LOG_STORE_DELETE_KEY_FILE,
       // What functions reach of the platform whatever their account's internet access: customers' database server, and
       // buckets' S3 front door.
-      platformEgress: [...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []), ...storageEgress(parsed)],
+      platformEgress: [
+        ...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []),
+        ...functionEgress(parsed.FF_STORAGE_FUNCTION_ENDPOINT, parsed.FF_STORAGE_FUNCTION_CIDRS, parsed.FF_STORAGE_PORT),
+        ...functionEgress(parsed.FF_SQS_FUNCTION_ENDPOINT, parsed.FF_SQS_FUNCTION_CIDRS, parsed.FF_SQS_PORT),
+      ],
       // The CA of that server's certificate when it isn't a public one: functions' pods get it (none: '').
       dataDbCa: dataDb?.ca ?? '',
     },

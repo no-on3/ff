@@ -558,6 +558,15 @@ aws sqs receive-message --queue-url "$queue" --wait-time-seconds 10   # then del
 
 **Every request is checked as buckets' are:** the key's account must be active and its databases, buckets and queues on, or `AccessDenied` says why; past the plan's queue requests a second (100 on beta), `RequestThrottled`; out of credit, sending waits for credit, while receiving and deleting go on. The plan sets how many queues an account has (10 on beta) and what their messages hold together (100 MB), its functions' calls that don't wait among them: past it, sending answers `OverLimit` until some are deleted.
 
+**A function reaches its account's queues with no setting at all,** as on AWS Lambda with a role: `new SQSClient({})` and `boto3.client("sqs")` work as they are. With the function's own key ("A function reaches its account's buckets", above), its pods get `AWS_ENDPOINT_URL_SQS`, the endpoint's address inside the cluster, which a function's variables can't set. A queue's URL is answered under the endpoint its caller reached: in a function, `GetQueueUrl` by the queue's name gives one under that address. AWS's SDK for JavaScript sends a queue's requests to the host of the URL it is given, so a URL from outside (`http://localhost:3003/…`, `https://sqs.<domain>/…`) works in a function only with `new SQSClient({ useQueueUrlAsEndpoint: false })`; boto3 and the AWS CLI keep to their endpoint whatever the URL's host, FF reading a queue's URL by its path. The backend gives functions the endpoint when it knows where they reach it: `FF_SQS_FUNCTION_ENDPOINT`, and `FF_SQS_FUNCTION_CIDRS`, the addresses their NetworkPolicy opens on its port; with the development cluster, the same gateway as buckets':
+
+```bash
+FF_SQS_FUNCTION_ENDPOINT=http://172.18.0.1:3003
+FF_SQS_FUNCTION_CIDRS=172.18.0.1/32
+```
+
+A function deployed before the endpoint was given gets it at its next update. In production, functions reach it through the Service `ff-storage` too, at `10.43.0.251:3003` ([deploy/k8s/README.md](../deploy/k8s/README.md), "Queues from functions"), and customers at `https://sqs.<domain>`, behind the edge.
+
 ### A small app, end to end
 
 [`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and kept in PostgreSQL, each order's receipt kept in a bucket, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, and `@aws-sdk/client-s3`, AWS's S3 client, makes its two functions. On FF it keeps its orders in one of FF's databases and its receipts in one of FF's buckets, as it would in RDS and S3 on AWS: its functions reach both with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL` and `RECEIPTS_BUCKET`. In development, functions get their own keys to buckets once the backend knows where they reach the front door (`FF_STORAGE_FUNCTION_ENDPOINT`, in "Files in buckets" above), and the customers' databases' server runs (setup's step 10).

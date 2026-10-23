@@ -460,7 +460,7 @@ describe('configuration', () => {
 
   describe("queues' SQS endpoint", () => {
     it("is served on port 3003, apart from the API, at localhost in development, naming FF's region", () => {
-      expect(configuration(dev).sqs).toEqual({ port: 3003, base: 'http://localhost:3003', region: 'tn-tunis-1' });
+      expect(configuration(dev).sqs).toEqual({ port: 3003, base: 'http://localhost:3003', region: 'tn-tunis-1', functionEndpoint: '' });
     });
 
     it('takes an origin, a trailing slash dropped, and port 0 for none', () => {
@@ -473,6 +473,40 @@ describe('configuration', () => {
 
     it('is reached over TLS in production', () => {
       expect(problems({ ...production, FF_SQS_BASE: 'http://sqs.example.tn' })).toEqual([expect.stringMatching(/^FF_SQS_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
+    });
+
+    it("is reached by functions where it names: a backend outside the cluster at its addresses, on the endpoint's port", () => {
+      const config = configuration({ ...dev, FF_SQS_FUNCTION_ENDPOINT: 'http://172.18.0.1:3003/', FF_SQS_FUNCTION_CIDRS: '172.18.0.1/32' });
+
+      expect(config.sqs.functionEndpoint).toBe('http://172.18.0.1:3003');
+      expect(config.kubernetes.platformEgress).toEqual([{ cidrs: ['172.18.0.1/32'], port: 3003 }]);
+    });
+
+    it("is reached by functions at a Service's fixed address, in plain HTTP inside the cluster even in production: the backend's own pods, on the endpoint's port, beside the S3 front door", () => {
+      const config = configuration({
+        ...production,
+        FF_SQS_PORT: '3103',
+        FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003',
+        FF_STORAGE_FUNCTION_ENDPOINT: 'http://10.43.0.251:3002',
+      });
+
+      expect(config.sqs.functionEndpoint).toBe('http://10.43.0.251:3003');
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: [], port: 3002 },
+        { cidrs: [], port: 3103 },
+      ]);
+    });
+
+    it("refuses functions' endpoint without the SQS endpoint, their addresses without functions' endpoint, and one with a path", () => {
+      expect(problems({ ...dev, FF_SQS_PORT: '0', FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003' })).toEqual([
+        "FF_SQS_FUNCTION_ENDPOINT is set, but FF_SQS_PORT is 0: functions' keys reach queues through the SQS endpoint, which isn't running",
+      ]);
+      expect(problems({ ...dev, FF_SQS_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
+        "FF_SQS_FUNCTION_CIDRS is set, but FF_SQS_FUNCTION_ENDPOINT is not: it names where functions reach queues' SQS endpoint",
+      ]);
+      expect(problems({ ...dev, FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003/sqs' })).toEqual([
+        expect.stringMatching(/^FF_SQS_FUNCTION_ENDPOINT must be an origin, such as http:\/\/10.43.0.251:3003, at which functions reach queues' SQS endpoint/),
+      ]);
     });
   });
 

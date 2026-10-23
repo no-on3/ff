@@ -86,6 +86,13 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 - **Dead-letter queues:** a message received as often as its queue's `maxReceiveCount` moves to the dead-letter queue as it would be received again, its receive count back to none, kept for that queue's retention from when it was first sent, as SQS keeps a message's first enqueue time; its size moves with it, the size trigger following a message's move now.
 - **Retention:** a message past it is never received, and the retention job deletes it with functions' expired calls.
 
+### As built (Q-04, part 2): the endpoint reached
+
+- **From outside,** through the edge at `sqs.<domain>`, which sends the host to the backend's port 3003 as it came, the signatures covering it; `deploy.sh` checks that the edge's host is `FF_SQS_BASE`'s.
+- **From functions,** as buckets are (ADR 0009): with the function's own key, its pods get `AWS_ENDPOINT_URL_SQS`, the endpoint inside the cluster (`FF_SQS_FUNCTION_ENDPOINT`, the Service `ff-storage`'s fixed address on 3003), which their NetworkPolicy opens; a function's variables can't set it.
+- **A queue's URL under the endpoint its caller reached.** AWS's SDK for JavaScript sends each request that names a queue's URL to that URL's host, unless its client was given an endpoint in its code or `useQueueUrlAsEndpoint: false`: an endpoint from `AWS_ENDPOINT_URL_SQS` doesn't count (its `queueUrlMiddleware`, read in `@aws-sdk/client-sqs` 3.1146.0). boto3 1.43 and the AWS CLI send every request to their endpoint, botocore having no such rule. So the endpoint answers a queue's URL under functions' endpoint to a request made to its host, and under `FF_SQS_BASE` to any other, and reads any URL by its path: a function that finds its queue by name keeps its requests inside the cluster, with every SDK.
+- **A URL from outside, in a function:** works with boto3 and the AWS CLI; with the SDK for JavaScript, only with `useQueueUrlAsEndpoint: false`, as functions don't reach the edge. Measured in L4: its default client's send failed with `ECONNREFUSED`, the URL's host being the function's own `localhost`, and the same send with `useQueueUrlAsEndpoint: false` went in. The other way, every function reaching FF's public endpoints through the edge whatever its account's internet access, would make such URLs work as they are; it is a choice of the platform's, left open.
+
 ## Consequences
 
 - One more append-and-delete table in FF's database, its size bounded by the plans' limits on messages (the decision log, 28); the operator's database alerts and backups cover it, its point-in-time recovery possibly redelivering what was handled in the last minutes.

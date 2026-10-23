@@ -26,6 +26,10 @@
 #     operator turns an account's databases off, its user kept out and its
 #     members told why, and on again; a closed account's user is kept out,
 #     then its database dropped with its data.
+#   - Buckets and queues, through the S3 front door and the SQS endpoint: each
+#     account's key reaches its own account's alone; another's bucket is
+#     AccessDenied, another's queue one that doesn't exist, by its URL or its
+#     name, and its messages stay.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -71,6 +75,9 @@ url_port_oidc="$(free_port)"
 # And buckets' S3 front door on another, reached path-style at http://127.0.0.1:<port>.
 storage_port="$(free_port)"
 storage_port_oidc="$(free_port)"
+# And queues' SQS endpoint on a third, at http://127.0.0.1:<port>.
+sqs_port="$(free_port)"
+sqs_port_oidc="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
@@ -229,14 +236,16 @@ notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
 e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api##*:}" \
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
-  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
+  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
   FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
   FF_FUNCTION_URL_PORT="$url_port_oidc" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port_oidc" \
-  FF_STORAGE_PORT="$storage_port_oidc" FF_STORAGE_BASE="http://s3.localhost:$storage_port_oidc"
+  FF_STORAGE_PORT="$storage_port_oidc" FF_STORAGE_BASE="http://s3.localhost:$storage_port_oidc" \
+  FF_SQS_PORT="$sqs_port_oidc" FF_SQS_BASE="http://127.0.0.1:$sqs_port_oidc"
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 # call_url <function URL> [curl option...]: a GET of the URL; prints the status, and the body goes to $work/url-body.
 # --resolve takes the URL's host to this machine, whatever the system's resolver does with *.localhost.
@@ -653,6 +662,34 @@ check "ListBuckets lists each key's own account's buckets alone" "l5-photos-a" \
   "$(AWS_ACCESS_KEY_ID="$key_a_id" AWS_SECRET_ACCESS_KEY="$key_a_secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$storage_port" s3api list-buckets --query 'Buckets[].Name' --output text)"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
+
+echo "== queues through the SQS endpoint: each account's key reaches its own account's queues alone"
+# sqs_with <key ID> <secret> <aws sqs arguments…>: the answer's text, or refused with the error's query code, as the CLI prints it.
+sqs_with() {
+  local id=$1 secret=$2
+  shift 2
+  AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+    "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$sqs_port" sqs "$@" --output text 2>"$work/sqs.err" ||
+    echo "refused $(grep -oE '\((AWS\.SimpleQueueService\.[A-Za-z]+|SignatureDoesNotMatch|InvalidClientTokenId|AccessDenied)\)' "$work/sqs.err" | head -1 | tr -d '()')"
+}
+queue_a="$(sqs_with "$key_a_id" "$key_a_secret" create-queue --queue-name l5-orders --query QueueUrl)"
+queue_b="$(sqs_with "$key_b_id" "$key_b_secret" create-queue --queue-name l5-orders --query QueueUrl)"
+check "each account makes a queue of the same name, its own, under its account" "http://127.0.0.1:$sqs_port/$account_a/l5-orders http://127.0.0.1:$sqs_port/$account_b/l5-orders" \
+  "$queue_a $queue_b"
+sqs_with "$key_a_id" "$key_a_secret" send-message --queue-url "$queue_a" --message-body "A's own" --query MessageId >/dev/null
+check "A's key on B's queue, and B's on A's, a queue that doesn't exist, both ways" \
+  "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$(sqs_with "$key_a_id" "$key_a_secret" send-message --queue-url "$queue_b" --message-body 'not mine' --query MessageId) $(sqs_with "$key_b_id" "$key_b_secret" receive-message --queue-url "$queue_a" --query 'Messages[].Body')"
+check "  ... nor by its name, naming its owner" "refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$(sqs_with "$key_b_id" "$key_b_secret" get-queue-url --queue-name l5-orders --queue-owner-aws-account-id "$account_a" --query QueueUrl)"
+check "  ... nor purged, nor deleted: A's message is there still" "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue A's own" \
+  "$(sqs_with "$key_b_id" "$key_b_secret" purge-queue --queue-url "$queue_a") $(sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_a") $(sqs_with "$key_a_id" "$key_a_secret" receive-message --queue-url "$queue_a" --query 'Messages[].Body')"
+check "ListQueues lists each key's own account's queues alone" "$queue_a $queue_b" \
+  "$(sqs_with "$key_a_id" "$key_a_secret" list-queues --query QueueUrls) $(sqs_with "$key_b_id" "$key_b_secret" list-queues --query QueueUrls)"
+sqs_with "$key_a_id" "$key_a_secret" delete-queue --queue-url "$queue_a" >/dev/null
+sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_b" >/dev/null
+check "each deletes its own queue" "None None" \
+  "$(sqs_with "$key_a_id" "$key_a_secret" list-queues --query QueueUrls) $(sqs_with "$key_b_id" "$key_b_secret" list-queues --query QueueUrls)"
 
 echo "== nobody authenticated, through the guard, on every route (${#routes[@]})"
 for route in "${routes[@]}"; do

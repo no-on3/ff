@@ -74,6 +74,9 @@ export class SqsFrontDoor implements OnModuleDestroy {
   private readonly polls = new Set<AbortController>();
   /** Once the server stops, each answer closes its connection: a client kept alive doesn't hold the stop up. */
   private stopping = false;
+  /** The endpoint customers give AWS's SDKs and CLI, and the one functions reach inside the cluster ('' for none), with its host. */
+  private readonly base: string;
+  private readonly functionEndpoint: { url: string; host: string };
 
   constructor(
     config: ConfigService,
@@ -85,7 +88,9 @@ export class SqsFrontDoor implements OnModuleDestroy {
     private readonly credit: CreditService,
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
   ) {
-    const sqs = config.getOrThrow<{ base: string; region: string }>('sqs');
+    const sqs = config.getOrThrow<{ base: string; region: string; functionEndpoint?: string }>('sqs');
+    this.base = sqs.base;
+    this.functionEndpoint = { url: sqs.functionEndpoint ?? '', host: sqs.functionEndpoint ? new URL(sqs.functionEndpoint).host : '' };
     this.operations = new SqsOperations(queues, store, events, sqs.base, sqs.region);
   }
 
@@ -174,7 +179,19 @@ export class SqsFrontDoor implements OnModuleDestroy {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalidParameter('The request body must be a JSON object.');
     const operation = target.slice(TARGET_PREFIX.length);
     const caller = await this.admit(key.accountId, key.id, key.readOnly, SENDING_OPERATIONS.has(operation), signal);
-    return this.operations.run(operation, input, caller);
+    return this.operations.run(operation, input, { ...caller, endpoint: this.endpointOf(request) });
+  }
+
+  /**
+   * The endpoint a request reached, which the queues' URLs answered to it
+   * begin with: functions' own, inside the cluster, for a request to its host,
+   * so that a URL a function is given keeps it there, as AWS's SDK for
+   * JavaScript sends a queue's requests to its URL's host; FF_SQS_BASE for
+   * any other.
+   */
+  private endpointOf(request: IncomingMessage): string {
+    const host = single(request.headers.host)?.toLowerCase();
+    return this.functionEndpoint.host && host === this.functionEndpoint.host ? this.functionEndpoint.url : this.base;
   }
 
   /**

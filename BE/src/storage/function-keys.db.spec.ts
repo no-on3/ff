@@ -16,9 +16,14 @@ import { StorageKeysService } from './storage-keys.service';
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '720000000001';
 const ENDPOINT = 'http://10.43.0.251:3002';
+const SQS_ENDPOINT = 'http://10.43.0.251:3003';
 
-run("functions' own keys to their account's buckets, in FF's database (L2)", () => {
-  const config = (functionEndpoint = ENDPOINT) => new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1', functionEndpoint } });
+run("functions' own keys to their account's buckets and queues, in FF's database (L2)", () => {
+  const config = (functionEndpoint = ENDPOINT, sqsEndpoint = SQS_ENDPOINT) =>
+    new ConfigService({
+      storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1', functionEndpoint },
+      sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1', functionEndpoint: sqsEndpoint },
+    });
   let db: ScratchDatabase;
   let directory: StorageDirectory;
   let keys: FunctionKeys;
@@ -52,6 +57,7 @@ run("functions' own keys to their account's buckets, in FF's database (L2)", () 
         AWS_REGION: 'tn-tunis-1',
         AWS_DEFAULT_REGION: 'tn-tunis-1',
         AWS_ENDPOINT_URL_S3: ENDPOINT,
+        AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT,
       },
     });
     expect(again).toEqual(first);
@@ -102,11 +108,20 @@ run("functions' own keys to their account's buckets, in FF's database (L2)", () 
     expect(await db.dataSource.getRepository(AuditEntry).countBy({ accountId: ACCOUNT, action: 'storage_key.create' })).toBe(2);
   });
 
-  it('makes none where FF gives functions no key: the front door has no address for them', async () => {
+  it('makes none where FF gives functions neither endpoint: neither has an address for them', async () => {
     const function_ = fn();
-    const none = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config(''));
+    const none = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', ''));
 
     expect(await none.credentialsFor(function_)).toBeUndefined();
     expect(await rowsOf(function_.id)).toEqual([]);
+  });
+
+  it('gives the endpoints there are an address for, each alone: buckets without queues, queues without buckets', async () => {
+    const buckets = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config(ENDPOINT, '')).credentialsFor(fn());
+    const queues = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', SQS_ENDPOINT)).credentialsFor(fn());
+
+    expect(Object.keys(buckets!.variables).filter((name) => name.startsWith('AWS_ENDPOINT_URL'))).toEqual(['AWS_ENDPOINT_URL_S3']);
+    expect(queues!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: queues!.keyId, AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT });
+    expect(queues!.variables).not.toHaveProperty('AWS_ENDPOINT_URL_S3');
   });
 });

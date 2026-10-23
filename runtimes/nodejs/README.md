@@ -118,6 +118,10 @@ A function's pods get a key to its account's buckets in their environment, as AW
 
 The SDK isn't in the image, as it is in Lambda's Node.js runtimes: name `@aws-sdk/client-s3` in the package's `dependencies`, which `ff deploy <folder>` installs, as AWS recommends for Lambda too.
 
+### Queues, with AWS's SDK
+
+With the same key, the pods get `AWS_ENDPOINT_URL_SQS`, FF's SQS endpoint inside the cluster, so `new SQSClient({})` reaches the account's queues as it is ([ADR 0010](../../docs/adr/0010-queue.md)). Find a queue by its name, `GetQueueUrlCommand`: its URL comes under that endpoint, where the SDK sends a queue's requests. The SDK sends them to the host of the URL it is given, so a URL from outside (`https://sqs.<domain>/…`, as clients outside the cluster get it) works in a function only with `new SQSClient({ useQueueUrlAsEndpoint: false })`, which keeps them to the endpoint; FF reads a queue's URL by its path. Name `@aws-sdk/client-sqs` in the package's `dependencies`.
+
 ## Memory
 
 On Kubernetes the container's memory limit equals the function's memory, as on Lambda. A container that reaches it is killed by the kernel, and repeated kills put the pod into CrashLoopBackOff. A full V8 heap only ends the worker. So the worker's heap limit is the function's memory (or the container limit, if lower), minus 35 MB for the main thread (or more, if the container already uses more at start), 12 MB for a worker's baseline, and 16 MB of margin. A 128 MB function gets about 65 MB of heap; the startup log line shows it (`heapLimitMb`). The first version allowed 80% of the function's memory, and on the cluster the container was OOM-killed first.

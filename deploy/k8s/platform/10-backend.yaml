@@ -5,8 +5,8 @@
 # which the deployment writes (deploy/k8s/README.md): DB_PASSWORD, FF_OBJECT_STORE_ACCESS_KEY, FF_OBJECT_STORE_SECRET_KEY,
 # FF_SMTP_URL; and the keys that encrypt functions' variables and secrets, the Secret ff-encryption-keys, as a
 # file. It refuses to start on a schema with pending migrations: deploy.sh runs the migrations Job first. Functions'
-# URLs are answered on a port of their own, 3001, and buckets' S3 requests on another, 3002, which the edge reaches,
-# and functions too, with their own keys, through the Service ff-storage.
+# URLs are answered on a port of their own, 3001, buckets' S3 requests on another, 3002, and queues' SQS requests on
+# a third, 3003, which the edge reaches, and functions too, with their own keys, through the Service ff-storage.
 apiVersion: v1
 kind: Service
 metadata:
@@ -28,11 +28,15 @@ spec:
     - name: storage
       port: 3002
       targetPort: storage
+    - name: sqs
+      port: 3003
+      targetPort: sqs
 ---
 # Buckets' S3 front door as functions reach it with their own keys (ADR 0009), at the address that the backend's
 # FF_STORAGE_FUNCTION_ENDPOINT names: an IP address, where AWS's SDKs address buckets path-style by themselves, so that
-# no name of FF's is needed inside the cluster. A fixed one, in the band of the cluster's Service range that Kubernetes
-# keeps for fixed addresses, beside the code registry's: k3s's range is 10.43.0.0/16; an overlay gives one of another.
+# no name of FF's is needed inside the cluster; and queues' SQS endpoint at the same address (ADR 0010), as
+# FF_SQS_FUNCTION_ENDPOINT names it. A fixed one, in the band of the cluster's Service range that Kubernetes keeps for
+# fixed addresses, beside the code registry's: k3s's range is 10.43.0.0/16; an overlay gives one of another.
 apiVersion: v1
 kind: Service
 metadata:
@@ -49,6 +53,9 @@ spec:
     - name: storage
       port: 3002
       targetPort: storage
+    - name: sqs
+      port: 3003
+      targetPort: sqs
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -102,6 +109,9 @@ spec:
             # FF_STORAGE_PORT
             - name: storage
               containerPort: 3002
+            # FF_SQS_PORT
+            - name: sqs
+              containerPort: 3003
             - name: metrics
               containerPort: 9464
           startupProbe:

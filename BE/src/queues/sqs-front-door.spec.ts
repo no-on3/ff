@@ -2,7 +2,8 @@ import { GetQueueUrlCommand, ReceiveMessageCommand, SQSClient, SQSServiceExcepti
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorage } from '@nestjs/throttler';
-import { request as httpRequest } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
@@ -46,27 +47,28 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
   /** A long poll's wait: until the client goes, as each test's wait is cut. */
   const events = { wait: jest.fn((_queueId: string, _ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve()))) };
 
-  beforeAll(async () => {
-    const directory = {
-      key: async (id: string) => [KEY, OTHERS].find((key) => key.id === id) ?? null,
-      account: async (id: string) => accounts.get(id) ?? null,
-      touch: (id: string) => void touched.push(id),
-    } as unknown as StorageDirectory;
-    const credit = {
-      admit: async () => {
-        if (!creditless) return;
-        throw new InsufficientCreditException(
-          { currency: 'TND', exponent: 3, balanceMinor: -40_000n, belowBufferSince: new Date('2026-10-17T10:33:00Z') },
-          { bufferMinor: 1000n, graceMs: 24 * 3_600_000, shadow: false },
-          { state: 'stopped', invokesStopAt: new Date('2026-10-18T10:33:00Z') },
-        );
-      },
-    } as unknown as CreditService;
-    const throttler = {
-      increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: throttled, timeToBlockExpire: throttled ? 1 : 0 }),
-    } as unknown as ThrottlerStorage;
-    frontDoor = new SqsFrontDoor(
-      new ConfigService({ sqs: { base: BASE, region: 'tn-tunis-1' } }),
+  const directory = {
+    key: async (id: string) => [KEY, OTHERS].find((key) => key.id === id) ?? null,
+    account: async (id: string) => accounts.get(id) ?? null,
+    touch: (id: string) => void touched.push(id),
+  } as unknown as StorageDirectory;
+  const credit = {
+    admit: async () => {
+      if (!creditless) return;
+      throw new InsufficientCreditException(
+        { currency: 'TND', exponent: 3, balanceMinor: -40_000n, belowBufferSince: new Date('2026-10-17T10:33:00Z') },
+        { bufferMinor: 1000n, graceMs: 24 * 3_600_000, shadow: false },
+        { state: 'stopped', invokesStopAt: new Date('2026-10-18T10:33:00Z') },
+      );
+    },
+  } as unknown as CreditService;
+  const throttler = {
+    increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: throttled, timeToBlockExpire: throttled ? 1 : 0 }),
+  } as unknown as ThrottlerStorage;
+  /** A front door with these settings of the endpoint's, its database's side the tests' stand-ins. */
+  const frontDoorWith = (sqs: { base: string; region: string; functionEndpoint?: string }) =>
+    new SqsFrontDoor(
+      new ConfigService({ sqs }),
       directory,
       queues as unknown as CustomerQueues,
       { accountBytes: async () => 0 } as unknown as QueueStore,
@@ -75,6 +77,9 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
       credit,
       throttler,
     );
+
+  beforeAll(async () => {
+    frontDoor = frontDoorWith({ base: BASE, region: 'tn-tunis-1' });
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
     endpoint = `http://127.0.0.1:${port}`;
   });
@@ -121,6 +126,29 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     expect(answer.QueueUrl).toBe(URL_);
     expect(answer.$metadata.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(touched).toContain(KEY.id);
+  });
+
+  it("answers a queue's URL under functions' own endpoint for a request to its host, inside the cluster, and under FF_SQS_BASE for any other", async () => {
+    // The port first, so that functions' endpoint can name it: the same server, called by two names.
+    const probe = createServer();
+    const free = await new Promise<number>((resolve) => probe.listen(0, '127.0.0.1', () => resolve((probe.address() as AddressInfo).port)));
+    await new Promise((resolve) => probe.close(resolve));
+    const inCluster = frontDoorWith({ base: BASE, region: 'tn-tunis-1', functionEndpoint: `http://127.0.0.1:${free}` });
+    await inCluster.listen(free, '127.0.0.1');
+    const urlAt = async (at: string) => {
+      const sqs = new SQSClient({ endpoint: at, region: 'tn-tunis-1', credentials: { accessKeyId: KEY.id, secretAccessKey: KEY.secret }, maxAttempts: 1 });
+      try {
+        return (await sqs.send(new GetQueueUrlCommand({ QueueName: 'orders' }))).QueueUrl;
+      } finally {
+        sqs.destroy();
+      }
+    };
+    try {
+      expect(await urlAt(`http://127.0.0.1:${free}`)).toBe(`http://127.0.0.1:${free}/${KEY.accountId}/orders`);
+      expect(await urlAt(`http://localhost:${free}`)).toBe(URL_);
+    } finally {
+      await inCluster.onModuleDestroy();
+    }
   });
 
   it("refuses an unknown key, and another secret, as SQS names them", async () => {

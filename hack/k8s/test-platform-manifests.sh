@@ -13,8 +13,8 @@
 #     mounted from their Secret where its settings look;
 #   - the production realm up to date with the development realm;
 #   - function URLs: the edge's function domain the backend's, the backend's port for them reached by the edge alone;
-#   - buckets' S3 front door: the edge's storage host the backend's, the backend's port for it reached by the edge
-#     alone, both of its hosts sent there;
+#   - buckets' S3 front door and queues' SQS endpoint: the edge's host for each the backend's, the backend's port for
+#     each reached by the edge and tenants' functions alone, functions' fixed address for it, each host sent there;
 #   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image, both ways to function URLs' and
 #     buckets' certificates;
 #   - the code registry: Zot's settings valid for its pinned image, where its volume and its users' Secret are
@@ -217,13 +217,16 @@ echo "== buckets' S3 front door"
 check "the edge's storage host is the host of the backend's FF_STORAGE_BASE" "s3.example.tn s3.example.tn" \
   "$(sed -n 's/^FF_STORAGE_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_STORAGE_BASE=https://##p' "$platform/backend.env")"
 storage_port="$(sed -n 's/^FF_STORAGE_PORT=//p' "$platform/backend.env")"
-# Functions reach it too, with their own keys, at the fixed address of a Service of its own: the tenants' function
-# pods on that port alone, which their NetworkPolicy opens on the backend's pods, as no FF_STORAGE_FUNCTION_CIDRS says.
-check "the backend's port for buckets in its Service, reached by the edge and tenants' functions alone" "$storage_port storage edge,functions" \
-  "$(python3 - "$work/platform.yaml" "$storage_port" <<'PY'
+sqs_port="$(sed -n 's/^FF_SQS_PORT=//p' "$platform/backend.env")"
+# reached_by <port>: the backend's Service port and container port for it, and who its NetworkPolicy lets in there,
+# the edge's pods or tenants' functions; "functions reach more" when functions reach a port other than buckets' and
+# queues'.
+reached_by() {
+  python3 - "$work/platform.yaml" "$1" "$storage_port" "$sqs_port" <<'PY'
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
 port = int(sys.argv[2])
+theirs = {int(sys.argv[3]), int(sys.argv[4])}
 named = lambda kind, name: next(d for d in docs if d['kind'] == kind and d['metadata']['name'] == name)
 container = next(p for p in named('Deployment', 'ff-backend')['spec']['template']['spec']['containers'][0]['ports'] if p['containerPort'] == port)
 service = next(p for p in named('Service', 'ff-backend')['spec']['ports'] if p['targetPort'] == container['name'])
@@ -236,20 +239,41 @@ def who(peers):
         return 'functions'
     return 'open'
 reaching = [who(rule['from']) for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if port in [p['port'] for p in rule['ports']]]
-others = [rule for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if who(rule['from']) == 'functions' and [p['port'] for p in rule['ports']] != [port]]
+others = [rule for rule in named('NetworkPolicy', 'ff-backend')['spec']['ingress'] if who(rule['from']) == 'functions' and not {p['port'] for p in rule['ports']} <= theirs]
 print(service['port'], container['name'], ','.join(reaching) if not others else 'functions reach more')
 PY
-)"
-check "functions' address for it: the Service ff-storage's fixed one, on that port, which the backend names to their pods" \
-  "10.43.0.251:$storage_port storage http://10.43.0.251:$storage_port none" \
-  "$(python3 - "$work/platform.yaml" <<'PY'
+}
+# ff_storage <port>: the Service ff-storage's fixed address on that port, and the container port it reaches.
+ff_storage() {
+  python3 - "$work/platform.yaml" "$1" <<'PY'
 import sys, yaml
 service = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d['kind'] == 'Service' and d['metadata']['name'] == 'ff-storage')
-print(f"{service['spec']['clusterIP']}:{service['spec']['ports'][0]['port']} {service['spec']['ports'][0]['targetPort']}")
+port = next(p for p in service['spec']['ports'] if p['port'] == int(sys.argv[2]))
+print(f"{service['spec']['clusterIP']}:{port['port']} {port['targetPort']}")
 PY
-) $(sed -n 's/^FF_STORAGE_FUNCTION_ENDPOINT=//p' "$platform/backend.env") $(grep -q '^FF_STORAGE_FUNCTION_CIDRS=.' "$platform/backend.env" && echo some || echo none)"
+}
+# Functions reach it too, with their own keys, at the fixed address of a Service of its own: the tenants' function
+# pods on that port alone, which their NetworkPolicy opens on the backend's pods, as no FF_STORAGE_FUNCTION_CIDRS says.
+check "the backend's port for buckets in its Service, reached by the edge and tenants' functions alone" "$storage_port storage edge,functions" \
+  "$(reached_by "$storage_port")"
+check "functions' address for it: the Service ff-storage's fixed one, on that port, which the backend names to their pods" \
+  "10.43.0.251:$storage_port storage http://10.43.0.251:$storage_port none" \
+  "$(ff_storage "$storage_port") $(sed -n 's/^FF_STORAGE_FUNCTION_ENDPOINT=//p' "$platform/backend.env") $(grep -q '^FF_STORAGE_FUNCTION_CIDRS=.' "$platform/backend.env" && echo some || echo none)"
 check "the edge sends both of its hosts there" "1 1" \
   "$(grep -c '^{\$FF_STORAGE_HOST}, \*\.{\$FF_STORAGE_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$storage_port$" "$platform/edge/Caddyfile")"
+
+echo "== queues' SQS endpoint"
+# The edge serves the backend's SQS endpoint, one host, on the backend's port for it; functions reach that port at
+# ff-storage's address too, where the queues' URLs they are answered begin.
+check "the edge's SQS host is the host of the backend's FF_SQS_BASE" "sqs.example.tn sqs.example.tn" \
+  "$(sed -n 's/^FF_SQS_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_SQS_BASE=https://##p' "$platform/backend.env")"
+check "the backend's port for queues in its Service, reached by the edge and tenants' functions alone" "$sqs_port sqs edge,functions" \
+  "$(reached_by "$sqs_port")"
+check "functions' address for it: the Service ff-storage's fixed one, on that port, which the backend names to their pods" \
+  "10.43.0.251:$sqs_port sqs http://10.43.0.251:$sqs_port none" \
+  "$(ff_storage "$sqs_port") $(sed -n 's/^FF_SQS_FUNCTION_ENDPOINT=//p' "$platform/backend.env") $(grep -q '^FF_SQS_FUNCTION_CIDRS=.' "$platform/backend.env" && echo some || echo none)"
+check "the edge sends its host there" "1 1" \
+  "$(grep -c '^{\$FF_SQS_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$sqs_port$" "$platform/edge/Caddyfile")"
 
 echo "== the edge"
 docker build -q -t ff-edge:test "$FF_REPO_ROOT/deploy/edge" >/dev/null

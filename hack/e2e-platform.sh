@@ -17,7 +17,8 @@
 # cluster, reaching the function the same way; a function made from a package, its code image pushed to the
 # platform's own registry (Zot) and pulled by the node as the node is told to, which no tenant's code reaches;
 # a function with AWS's SDK and no setting writing to its account's bucket with its own key, at the fixed address
-# of the Service ff-storage; who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
+# of the Service ff-storage; a queue made and read through the edge with AWS's SDK, and a function sending to it with
+# its own key at the same address; who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
@@ -328,6 +329,36 @@ s3_secret_name="$(kubectl -n "$tenant" get deployment "fn-$s3_fn" -o jsonpath='{
 check "it reached the front door at the Service's fixed address, inside the cluster, which the backend names to its pods" "http://10.43.0.251:3002" \
   "$(kubectl -n "$tenant" get secret "$s3_secret_name" -o jsonpath='{.data.AWS_ENDPOINT_URL_S3}' | base64 -d)"
 
+echo "== queues through the edge, and a function's own key to them at ff-storage's fixed address"
+queue_key="$(as "$token" /storage-keys -d '{}')"
+sqs_clients="$FF_REPO_ROOT/hack/.cache/sqs-clients"
+if [ ! -d "$sqs_clients/node_modules/@aws-sdk/client-sqs" ]; then
+  npm install --prefix "$sqs_clients" --no-audit --no-fund --silent @aws-sdk/client-sqs@3.1156.0 >/dev/null
+fi
+# through_edge create|receive: AWS's SDK for JavaScript v3 at the SQS endpoint behind the edge, as a customer from outside.
+through_edge() {
+  MODULES="$sqs_clients/node_modules" ENDPOINT="https://sqs.ff.test:$https_port" CA="$work/root.crt" KEY="$(jq -r .id <<<"$queue_key")" \
+    SECRET="$(jq -r .secretAccessKey <<<"$queue_key")" QUEUE=e2e-platform-orders node "$FF_REPO_ROOT/hack/lib/sqs-clients/through-edge.mjs" "$1"
+}
+check "the customer makes a queue and sends a message through the edge, over TLS, its URL under the SQS endpoint" \
+  "https://sqs.ff.test:$https_port/$account/e2e-platform-orders" "$(through_edge create | jq -r .url)"
+mkdir -p "$work/sqs-package"
+cp "$FF_REPO_ROOT/hack/lib/sqs-clients/functions/index.mjs" "$work/sqs-package/"
+cp -r "$sqs_clients/node_modules" "$work/sqs-package/"
+rm -rf "$work/sqs-package/node_modules/.bin"
+(cd "$work/sqs-package" && python3 -c 'import shutil; shutil.make_archive("../sqs-package", "zip", ".")')
+sqs_sha="$(https api /packages -H "authorization: Bearer $token" -H 'content-type: application/zip' --data-binary "@$work/sqs-package.zip" | jq -r .codeSha256)"
+sqs_fn="$(as "$token" /functions -d "$(jq -cn --arg sha "$sqs_sha" '{name: "e2e-sqs", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 256, timeout: 30}')" | jq -r .id)"
+sqs_input="$(jq -cn --arg url "https://sqs.ff.test:$https_port/$account/e2e-platform-orders" '{input: {queue: "e2e-platform-orders", publicUrl: $url, otherAccount: "000000000000"}}')"
+check "a function with AWS's SDK, new SQSClient({}) and no setting, finds the queue by its name inside the cluster, under ff-storage's address, and sends to it, in gVisor; another account's, QueueDoesNotExist" \
+  "201 {\"url\":\"http://10.43.0.251:3003/$account/e2e-platform-orders\",\"byName\":\"sent\",\"keptToEndpoint\":\"sent\",\"other\":\"QueueDoesNotExist\"}" \
+  "$(as "$token" "/functions/$sqs_fn/invoke" -d "$sqs_input" >/dev/null; status) $(jq -c '.output | {url, byName, keptToEndpoint, other}' "$work/body")"
+sqs_secret_name="$(kubectl -n "$tenant" get deployment "fn-$sqs_fn" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')"
+check "it reached the SQS endpoint at the Service's fixed address, inside the cluster, which the backend names to its pods" "http://10.43.0.251:3003" \
+  "$(kubectl -n "$tenant" get secret "$sqs_secret_name" -o jsonpath='{.data.AWS_ENDPOINT_URL_SQS}' | base64 -d)"
+check "the customer receives its messages through the edge, then deletes the queue" \
+  '["sent by a Node.js function","sent by a Node.js function, to the URL from outside","sent through the edge"]' "$(through_edge receive | jq -c .bodies)"
+
 echo "== a function's URL, through the edge"
 url="$(as "$token" "/functions/$fn/url" -d '{"authType": "NONE"}' | jq -r .functionUrl)"
 check "the customer gives the function a URL, under the function domain" "201 true" \
@@ -387,7 +418,8 @@ kubectl create namespace e2e-probe >/dev/null
 kubectl -n e2e-probe run probe --image=ff-runtime-nodejs:24-v3 --image-pull-policy=Never --restart=Never --command -- node -e '
 const net = require("node:net");
 const targets = { edge: ["ff-edge.ff-edge.svc", 443], backend: ["ff-backend.ff-system.svc", 80], urls: ["ff-backend.ff-system.svc", 3001], keycloak: ["keycloak.ff-system.svc", 8080],
-  console: ["ff-console.ff-system.svc", 80], registry: ["ff-code-registry.ff-system.svc", 5000], buckets: ["10.43.0.251", 3002], function: [process.argv[1], 8080] };
+  console: ["ff-console.ff-system.svc", 80], registry: ["ff-code-registry.ff-system.svc", 5000], buckets: ["10.43.0.251", 3002], queues: ["10.43.0.251", 3003],
+  function: [process.argv[1], 8080] };
 Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((resolve) => {
   const socket = net.connect({ host, port });
   const done = (state) => { socket.destroy(); resolve(name + "=" + state); };
@@ -396,8 +428,8 @@ Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((r
   socket.once("error", () => done("refused"));
 }))).then((states) => console.log(states.join(" ")));' "fn-$fn.ff-t-$(printf %s "$account" | sha256sum | cut -c1-12).svc" >/dev/null
 kubectl -n e2e-probe wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe --timeout=120s >/dev/null || true
-check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' address for functions nor a function" \
-  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused buckets=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
+check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' and queues' address for functions nor a function" \
+  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused buckets=refused queues=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
 
 echo "== deploy.sh again"
 "$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >"$work/redeploy.log" 2>&1 || { tail -20 "$work/redeploy.log" >&2; fail "deploy.sh failed the second time"; }

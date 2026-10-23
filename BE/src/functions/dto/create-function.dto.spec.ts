@@ -88,6 +88,12 @@ describe("a function's environment variables, as the API takes them: AWS Lambda'
     }
   });
 
+  it("refuses AWS_ENDPOINT_URL_SQS: FF sets it, with the function's own key to its account's queues", async () => {
+    for (const result of await both({ AWS_ENDPOINT_URL_SQS: 'https://sqs.us-east-1.amazonaws.com' })) {
+      expect(result).toEqual(["AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues"]);
+    }
+  });
+
   it("refuses every name starting with FF_, FF's own", async () => {
     for (const result of await both({ FF_HANDLER: 'x.handler' })) expect(result).toEqual(['FF_HANDLER is reserved: names starting with FF_ are FF\'s own']);
   });

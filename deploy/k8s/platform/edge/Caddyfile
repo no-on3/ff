@@ -1,6 +1,6 @@
 # FF's edge: TLS for the API, the console, the admin app and the login, each on its hostname, for functions' URLs,
-# every host under the function domain, and for buckets' S3 endpoint and every bucket's host under it; certificates
-# from Let's Encrypt (ACME), kept on the edge's volume.
+# every host under the function domain, for buckets' S3 endpoint and every bucket's host under it, and for queues'
+# SQS endpoint; certificates from Let's Encrypt (ACME), kept on the edge's volume.
 # Every value is the edge's environment (edge.env, and the Secret ff-edge-dns), read when Caddy starts. The admin
 # app, and Keycloak's own admin console, answer only the addresses FF_ADMIN_ALLOW names; everyone else gets 403.
 # The caller's address is the connection's: the Service keeps it (externalTrafficPolicy: Local), and each app
@@ -93,6 +93,17 @@ http:// {
 	}
 	log
 	reverse_proxy ff-backend.ff-system.svc.cluster.local:3002
+}
+
+# Queues' SQS endpoint, to the backend's, as the clients sent it: their signatures cover the host and the body, so
+# nothing is rewritten, added or compressed. One name, and its own certificate.
+{$FF_SQS_HOST} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	log
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:3003
 }
 
 # Customers' own domains for their functions' URLs, each proved by DNS: every other host, its certificate made on

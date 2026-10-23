@@ -47,7 +47,13 @@
 # within a minute; an account past its plan's storage, its uploads waiting for
 # room and let in again once it has some; the requests counted by the minute; its
 # metrics, and an alarm on its errors firing; a bucket deleted empty, or emptied
-# first when asked, its alarm with it. Then plans:
+# first when asked, its alarm with it. Then customers' queues: the AWS CLI, AWS's
+# SDK for JavaScript v3 and boto3 through the SQS endpoint, only their endpoint
+# changed (queues made and listed, messages with attributes sent and received,
+# long polls, batches, visibility, a dead-letter queue, a queue that isn't there,
+# another account's, a wrong secret, an unknown key); two functions with no
+# setting at all, the SDK's own queue URL inside the cluster and boto3 with one
+# from outside, which the SDK for JavaScript sends to its host. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -110,6 +116,8 @@ metrics_port="${FF_E2E_METRICS_PORT:-$(free_port)}"
 url_port="$(free_port)"
 # Buckets' S3 front door on another, at http://s3.localhost:<port>, each bucket at http://<bucket>.s3.localhost:<port> too.
 storage_port="$(free_port)"
+# Queues' SQS endpoint on a third, at http://localhost:<port>; functions reach it at the cluster's gateway.
+sqs_port="$(free_port)"
 # Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
 dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
@@ -117,6 +125,8 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
   FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
+  FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
@@ -825,7 +835,7 @@ store_s3() { AWS_ACCESS_KEY_ID=ffdevaccesskey AWS_SECRET_ACCESS_KEY=ffdevsecretk
   "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$FF_S3_PORT" "$@"; }
 if command -v aws >/dev/null; then aws_cli=(aws); else
   aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
-    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE amazon/aws-cli:2.34.32)
+    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS amazon/aws-cli:2.34.32)
 fi
 # held <command…>: whether the store has the bucket, as head-bucket answers.
 held() { "$@" >/dev/null 2>&1 && echo held || echo gone; }
@@ -1037,6 +1047,78 @@ http DELETE "/buckets/e2e-photos?force=true" >/dev/null
 check "  ... which deletes its files, then the bucket, gone from the store too, and its alarm with it" "204 404 gone 404" \
   "$(status) $(http GET /buckets/e2e-photos >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$store_name") $(http GET "/alarms/$bucket_alarm" >/dev/null; status)"
 http DELETE "/storage-keys/$key_id" >/dev/null
+
+echo "== customers' queues (ADR 0010): AWS's own clients through the SQS endpoint, then functions with no setting"
+sqs_endpoint="http://localhost:$sqs_port"
+queue_key="$(http POST /storage-keys '{}')"
+queue_key_id="$(jq -r .id <<<"$queue_key")"
+queue_key_secret="$(jq -r .secretAccessKey <<<"$queue_key")"
+# The AWS CLI, its endpoint from AWS_ENDPOINT_URL_SQS alone, as a function's environment gives it, and no setting of
+# this machine's; as the other account with AWS_KEY and AWS_SECRET.
+aws_sqs() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$queue_key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$queue_key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 \
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_SQS="$sqs_endpoint" "${aws_cli[@]}" sqs "$@"; }
+as_other_sqs() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
+check "the AWS CLI makes a queue, its URL under the endpoint and the account" "$sqs_endpoint/$tenant/e2e-cli-orders" \
+  "$(aws_sqs create-queue --queue-name e2e-cli-orders --query QueueUrl --output text)"
+cli_url="$sqs_endpoint/$tenant/e2e-cli-orders"
+aws_sqs send-message --queue-url "$cli_url" --message-body 'Ahlan from the CLI' \
+  --message-attributes '{"source": {"DataType": "String", "StringValue": "aws-cli"}}' >/dev/null
+aws_sqs receive-message --queue-url "$cli_url" --wait-time-seconds 2 --message-attribute-names All >"$work/received.json"
+check "  ... sends a message with an attribute, receives it back, and deletes it" "Ahlan from the CLI aws-cli 0" \
+  "$(jq -r '.Messages[0] | "\(.Body) \(.MessageAttributes.source.StringValue)"' "$work/received.json") \
+$(aws_sqs delete-message --queue-url "$cli_url" --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' "$work/received.json")" >/dev/null; \
+aws_sqs get-queue-attributes --queue-url "$cli_url" --attribute-names ApproximateNumberOfMessages --query Attributes.ApproximateNumberOfMessages --output text)"
+# outcome_sqs <command…>: accepted, or refused with the error's query code, as the CLI prints it.
+outcome_sqs() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((AWS\.SimpleQueueService\.[A-Za-z]+|SignatureDoesNotMatch|InvalidClientTokenId|AccessDenied|OverLimit|RequestThrottled)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
+check "  ... a queue that isn't there, by its query code" "refused AWS.SimpleQueueService.NonExistentQueue" "$(outcome_sqs aws_sqs get-queue-url --queue-name nowhere)"
+other_url="$(as_other_sqs aws_sqs create-queue --queue-name e2e-cli-orders --query QueueUrl --output text)"
+check "another account's queue of the same name is its own: its URL under its account, which this account's key doesn't find" \
+  "$sqs_endpoint/$other/e2e-cli-orders refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$other_url $(outcome_sqs aws_sqs send-message --queue-url "$other_url" --message-body 'not mine')"
+check "  ... nor lists" "$cli_url" "$(aws_sqs list-queues --query 'QueueUrls' --output text)"
+# AWS's SDK for JavaScript v3, pinned to the version ADR 0010 measured, fetched once into hack/.cache; boto3 from the
+# buckets' clients.
+sqs_clients="$FF_REPO_ROOT/hack/.cache/sqs-clients"
+if [ ! -d "$sqs_clients/node_modules/@aws-sdk/client-sqs" ]; then
+  npm install --prefix "$sqs_clients" --no-audit --no-fund --silent @aws-sdk/client-sqs@3.1156.0 >/dev/null
+fi
+MODULES="$sqs_clients/node_modules" ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
+  node "$FF_REPO_ROOT/hack/lib/sqs-clients/sdk.mjs" >"$work/sqs-sdk.jsonl" 2>"$work/sqs-sdk.log" || true
+client_checks "$work/sqs-sdk.jsonl" 13
+ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
+  "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/sqs-clients/boto3_checks.py" >"$work/sqs-boto3.jsonl" 2>"$work/sqs-boto3.log" || true
+client_checks "$work/sqs-boto3.jsonl" 8
+# Functions as on AWS Lambda with a role: AWS's SDK for JavaScript v3 and boto3 with no setting at all, in packages
+# as npm and pip install them; FF gives their pods the function's own key, the region and the endpoint.
+aws_sqs create-queue --queue-name e2e-fn-orders >/dev/null
+package_with "$work/sqs-node.zip" "$sqs_clients/node_modules" node_modules "index.mjs=$FF_REPO_ROOT/hack/lib/sqs-clients/functions/index.mjs"
+package_with "$work/sqs-python.zip" "$clients/python" '' "function.py=$FF_REPO_ROOT/hack/lib/sqs-clients/functions/function.py"
+upload "$work/sqs-node.zip" >/dev/null
+upload "$work/sqs-python.zip" >/dev/null
+node_sqs="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$work/sqs-node.zip")" '{name: "e2e-sqs-node", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 256, timeout: 30}')" | jq -r .id)"
+python_sqs="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$work/sqs-python.zip")" '{name: "e2e-sqs-python", runtime: "python", codeSha256: $sha, handler: "function.handler", memory: 256, timeout: 30}')" | jq -r .id)"
+sqs_input="$(jq -cn --arg url "$sqs_endpoint/$tenant/e2e-fn-orders" --arg other "$other" '{input: {queue: "e2e-fn-orders", publicUrl: $url, otherAccount: $other}}')"
+check "a Node.js function, new SQSClient({}) as on Lambda: the queue's URL by its name under FF's endpoint inside the cluster, and a send to it; another account's, QueueDoesNotExist" \
+  "{\"url\":\"http://$cluster_gateway:$sqs_port/$tenant/e2e-fn-orders\",\"byName\":\"sent\",\"other\":\"QueueDoesNotExist\"}" \
+  "$(http POST "/functions/$node_sqs/invoke" "$sqs_input" | jq -c '.output | {url, byName, other}')"
+check "  ... a URL from outside: the SDK sends to its host, which a function doesn't reach, unless its client keeps to its endpoint (useQueueUrlAsEndpoint: false)" \
+  "ECONNREFUSED sent" "$(jq -r '.output | "\(.fromOutside) \(.keptToEndpoint)"' "$work/body")"
+check "a Python function, boto3.client(\"sqs\") as on Lambda: the URL from outside works as it is, boto3 sending to its endpoint; it receives both functions' messages" \
+  '{"bodies":["sent by a Node.js function","sent by a Node.js function, to the URL from outside","sent by a Python function"],"other":"AWS.SimpleQueueService.NonExistentQueue"}' \
+  "$(http POST "/functions/$python_sqs/invoke" "$sqs_input" | jq -c .output)"
+check "their pods get the SQS endpoint inside the cluster with their own key, through the Secret" \
+  "http://$cluster_gateway:$sqs_port $(function_secret "$node_sqs" AWS_ACCESS_KEY_ID)" \
+  "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SQS) $(env_q "SELECT id FROM storage_keys WHERE function_id = '$node_sqs' AND revoked_at IS NULL")"
+http PUT "/functions/$python_sqs" '{"environment": {"AWS_ENDPOINT_URL_SQS": "https://sqs.us-east-1.amazonaws.com"}}' >/dev/null
+check "a function can't point it elsewhere: AWS_ENDPOINT_URL_SQS is FF's" "400 AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+http DELETE "/functions/$node_sqs" >/dev/null
+http DELETE "/functions/$python_sqs" >/dev/null
+for queue in e2e-cli-orders e2e-fn-orders; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
+as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
+check "the queues deleted, their messages with them" "0 0" \
+  "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"
+http DELETE "/storage-keys/$queue_key_id" >/dev/null
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account
