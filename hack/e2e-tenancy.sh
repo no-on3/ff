@@ -632,6 +632,15 @@ check "  ... and nothing of B's waits in A's function's queue" 0 "$(waiting_for 
 as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
 check "B can't name A's function as the destination of its own function's calls" \
   "400 destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_b:function:l5-a" "$(status) $(message)"
+# A's queue, as the SQS endpoint makes one: a row of FF's database.
+"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "INSERT INTO queues (account_id, name, kind) VALUES ('$account_a', 'l5-records', 'customer')" >/dev/null
+as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
+check "  ... nor A's queue" \
+  "400 destinationConfig.onFailure.destination must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_b:l5-records" "$(status) $(message)"
+as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
+check "  ... which, under its own account's ARN, is no queue of B's" \
+  '400 destinationConfig.onFailure.destination: the account has no queue named "l5-records"' "$(status) $(message)"
+"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "DELETE FROM queues WHERE account_id = '$account_a' AND name = 'l5-records'" >/dev/null
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
 as_b DELETE "/functions/$own" >/dev/null
 check "B deletes its own function" 200 "$(status)"

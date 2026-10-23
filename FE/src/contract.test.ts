@@ -49,7 +49,7 @@ import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
 import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
-import { BUCKETS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
+import { ENDPOINTS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
   BUCKET_FIELDS,
@@ -375,7 +375,9 @@ describe("a function's environment variables", () => {
     expect(Number(/export const MAX_ENVIRONMENT_BYTES = (\d+);/.exec(environmentSource)![1])).toBe(MAX_ENVIRONMENT_BYTES);
     expect(LAMBDA_RESERVED).toEqual(listed('LAMBDA_RESERVED'));
     expect(FF_RESERVED).toEqual(listed('FF_RESERVED'));
-    expect(BUCKETS_RESERVED).toEqual(listed('BUCKETS_RESERVED'));
+    // The endpoints FF sets, a map of each name to why, ['NAME', "why"] pairs in the API's source.
+    const endpoints = /const ENDPOINTS_RESERVED = new Map\(\[([\s\S]*?)\]\);/.exec(environmentSource)![1];
+    expect([...ENDPOINTS_RESERVED]).toEqual([...endpoints.matchAll(/\['([^']+)', "([^"]+)"\]/g)].map((m) => [m[1], m[2]]));
     expect(environmentSource).toContain("name.startsWith('FF_')");
   });
 });

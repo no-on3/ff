@@ -525,8 +525,8 @@ describe('configuration', () => {
   });
 
   describe('asynchronous calls', () => {
-    it('are claimed every second, ten at once on each backend, by default', () => {
-      expect(configuration(dev).asyncInvoke).toEqual({ intervalSeconds: 1, concurrency: 10 });
+    it('are looked for every 5 s without being told, a call kept being told at once, ten at once on each backend, by default', () => {
+      expect(configuration(dev).asyncInvoke).toEqual({ intervalSeconds: 5, concurrency: 10 });
     });
 
     it('take 0 for a backend that runs none, and more at once', () => {

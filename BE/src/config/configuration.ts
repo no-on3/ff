@@ -394,8 +394,9 @@ const appShape = {
   // events name, as AWS's do theirs.
   FF_SCHEDULER_INTERVAL_SECONDS: integer(5, 0, 60),
   FF_REGION: text('tn-tunis-1', region),
-  // How often the backend claims the asynchronous calls due (0: never, a backend that runs none), and how many it runs at once.
-  FF_ASYNC_INTERVAL_SECONDS: integer(1, 0, 60),
+  // How often the backend looks for the asynchronous calls due without being told, its retries' and its lost claims'
+  // (0: never, a backend that runs none): a call kept is told at once. And how many it runs at once.
+  FF_ASYNC_INTERVAL_SECONDS: integer(5, 0, 60),
   FF_ASYNC_CONCURRENCY: integer(10, 1, 1000),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 

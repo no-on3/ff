@@ -149,8 +149,8 @@ export class CustomerQueues {
     return { visible: Number(row.visible), notVisible: Number(row.not_visible), delayed: Number(row.delayed) };
   }
 
-  /** Keeps the messages, in one statement: each visible after its delay, kept for the queue's retention from now. */
-  async send(queue: Queue, messages: Outgoing[], now: Date): Promise<void> {
+  /** Keeps the messages, in one statement, in the transaction given: each visible after its delay, kept for the queue's retention from now. */
+  async send(queue: Queue, messages: Outgoing[], now: Date, manager: EntityManager = this.dataSource.manager): Promise<void> {
     if (messages.length === 0) return;
     const values: unknown[] = [];
     const rows = messages.map((message, n) => {
@@ -158,7 +158,7 @@ export class CustomerQueues {
       values.push(message.messageId, message.body, message.meta, message.sizeBytes, new Date(now.getTime() + message.delaySeconds * 1000), new Date(now.getTime() + queue.messageRetentionSeconds * 1000));
       return `($${at + 2}::uuid, $${at + 3}, $${at + 4}::jsonb, $${at + 5}::integer, $${at + 6}::timestamptz, $${at + 7}::timestamptz)`;
     });
-    await this.dataSource.query(
+    await manager.query(
       `INSERT INTO "queue_messages" ("queue_id", "message_id", "body", "attributes", "size_bytes", "visible_at", "expires_at", "sent_at")
        SELECT $1::uuid, v.*, $${values.length + 2}::timestamptz FROM (VALUES ${rows.join(', ')}) AS v`,
       [queue.id, ...values, now],

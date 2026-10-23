@@ -57,16 +57,19 @@ pub const RESERVED: [&str; 27] = [
     "PATH",
 ];
 
-/// The names FF sets with a function's own key to its account's buckets, which the API refuses too.
+/// The names FF sets with a function's own key to its account's buckets and queues, and why, which the API refuses too.
 /// A test holds this list to the API's.
-pub const BUCKETS_RESERVED: [&str; 1] = ["AWS_ENDPOINT_URL_S3"];
+pub const ENDPOINTS_RESERVED: [(&str, &str); 2] = [
+    ("AWS_ENDPOINT_URL_S3", "FF sets it, with the function's own key to its account's buckets"),
+    ("AWS_ENDPOINT_URL_SQS", "FF sets it, with the function's own key to its account's queues"),
+];
 
 /// Why a name can't be a variable's, in the API's words, or none.
 pub fn reserved(name: &str) -> Option<String> {
     if RESERVED.contains(&name) {
         Some(format!("{name} is reserved: AWS Lambda or FF's runtime sets it"))
-    } else if BUCKETS_RESERVED.contains(&name) {
-        Some(format!("{name} is reserved: FF sets it, with the function's own key to its account's buckets"))
+    } else if let Some((_, why)) = ENDPOINTS_RESERVED.iter().find(|(reserved, _)| *reserved == name) {
+        Some(format!("{name} is reserved: {why}"))
     } else if name.starts_with("FF_") {
         Some(format!("{name} is reserved: names starting with FF_ are FF's own"))
     } else {
@@ -269,10 +272,24 @@ mod tests {
         let api: Vec<String> = [list("LAMBDA_RESERVED"), list("FF_RESERVED")].concat();
 
         assert_eq!(api, RESERVED.map(str::to_owned));
-        assert_eq!(list("BUCKETS_RESERVED"), BUCKETS_RESERVED.map(str::to_owned));
+        // The API's endpoints, a map of each name to why: ['NAME', "why"] pairs.
+        let start = source.find("const ENDPOINTS_RESERVED = new Map([").expect("the API's endpoints");
+        let end = start + source[start..].find("]);").expect("their end");
+        let endpoints: Vec<(String, String)> = source[start..end]
+            .lines()
+            .filter_map(|line| {
+                let (name, why) = line.trim().strip_prefix("['")?.split_once("', \"")?;
+                Some((name.to_owned(), why.strip_suffix("\"],")?.to_owned()))
+            })
+            .collect();
+        assert_eq!(endpoints, ENDPOINTS_RESERVED.map(|(name, why)| (name.to_owned(), why.to_owned())));
         assert_eq!(
             reserved("AWS_ENDPOINT_URL_S3").unwrap(),
             "AWS_ENDPOINT_URL_S3 is reserved: FF sets it, with the function's own key to its account's buckets"
+        );
+        assert_eq!(
+            reserved("AWS_ENDPOINT_URL_SQS").unwrap(),
+            "AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues"
         );
         assert_eq!(reserved("FF_DEBUG").unwrap(), "FF_DEBUG is reserved: names starting with FF_ are FF's own");
         assert_eq!(reserved("TZ"), None);

@@ -9,9 +9,10 @@
  * messages gone with their function, or past their expiry; a lost attempt
  * marked under its request; a function's own settings, and the record of a
  * call that ended handed to its destination function in the transaction that
- * deletes it, which then runs it; a schedule's run, the schedule's call. Each
- * run works in a scratch database, dropped
- * afterwards.
+ * deletes it, which then runs it, or to a queue of the account, its body
+ * Lambda's record; a call kept, which PostgreSQL's NOTIFY has the worker claim
+ * at once; a schedule's run, the schedule's call. Each run works in a scratch
+ * database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -22,7 +23,12 @@ import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { FunctionRuntimeError } from '../orchestrator/orchestrator.errors';
 import { InvokeResult, Orchestrator } from '../orchestrator/orchestrator.types';
+import { onePlan } from '../plans/test-fixtures';
+import { CustomerQueues } from '../queues/customer-queues';
+import { QueueEvents } from '../queues/queue-events';
 import { QueueStore } from '../queues/queue-store';
+import { Queue } from '../queues/queue.entity';
+import { DEFAULT_SETTINGS, queueArn } from '../queues/sqs-attributes';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
 import { AsyncInvokeWorker } from './async-invoke.worker';
@@ -44,23 +50,30 @@ run('asynchronous calls, in the database (L2)', () => {
   let functions: FunctionsService;
   let usage: UsageService;
   let configs: EventInvokeConfigService;
+  let customerQueues: CustomerQueues;
+  let events: QueueEvents;
   const invoke = jest.fn<Promise<InvokeResult>, Parameters<Orchestrator['invoke']>>();
-  const config = {
-    getOrThrow: () => ({ intervalSeconds: 0, concurrency: 10 }),
-    get: (_key: string, fallback?: unknown) => fallback,
-  } as unknown as ConfigService;
+  const settings = (intervalSeconds: number) =>
+    ({
+      getOrThrow: () => ({ intervalSeconds, concurrency: 10 }),
+      get: (_key: string, fallback?: unknown) => fallback,
+    }) as unknown as ConfigService;
+  const config = settings(0);
   let n = 0;
 
   /** A worker of its own, as each backend runs one; `calls` stands in for the real call path when given. */
-  const worker = (calls?: Pick<FunctionsService, 'call'>) =>
+  const worker = (calls?: Pick<FunctionsService, 'call'>, intervalSeconds = 0) =>
     new AsyncInvokeWorker(
-      config,
+      settings(intervalSeconds),
       queues,
       calls ? ({ findOne: (accountId: string, id: string) => functions.findOne(accountId, id), call: calls.call } as unknown as FunctionsService) : functions,
       { admit: async () => undefined } as never,
       db.dataSource.getRepository(Account),
       configs,
       db.dataSource.getRepository(Schedule),
+      events,
+      customerQueues,
+      onePlan(),
     );
   const send = (fn: Function, requestId: string, body = '{"order":1}', expiresAt = new Date(Date.now() + 7 * HOUR)) => queues.sendEvent(fn, requestId, body, expiresAt);
   const message = async (requestId: string) =>
@@ -106,15 +119,19 @@ run('asynchronous calls, in the database (L2)', () => {
       ...noPackages(),
       noFunctionKeys(),
     );
-    configs = new EventInvokeConfigService(db.dataSource.getRepository(FunctionEventInvokeConfig), functions, { record: async () => undefined } as never, {
+    customerQueues = new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue));
+    configs = new EventInvokeConfigService(db.dataSource.getRepository(FunctionEventInvokeConfig), functions, customerQueues, { record: async () => undefined } as never, {
       getOrThrow: () => 'tn-tunis-1',
     } as unknown as ConfigService);
+    events = new QueueEvents(db.dataSource);
+    await events.onModuleInit();
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
 
   afterAll(async () => {
     jest.restoreAllMocks();
+    await events?.onModuleDestroy();
     await db?.drop();
   });
 
@@ -333,6 +350,55 @@ run('asynchronous calls, in the database (L2)', () => {
       requestId,
     ]);
     invoke.mockReset();
+  });
+
+  it("hands the record of a call that failed for good to a queue of the account, its body Lambda's record, in the transaction that deletes it", async () => {
+    const orders = await newFunction();
+    const failed = await customerQueues.create(ACCOUNT, `failed-${++n}`, {}, { limit: 10, name: 'Beta' }, 'tn-tunis-1');
+    await configs.put(ACCOUNT, orders.id, { maximumRetryAttempts: 0, destinationConfig: { onFailure: { destination: queueArn('tn-tunis-1', ACCOUNT, failed.name) } } });
+    const requestId = uuid(850);
+    await send(orders, requestId, '{"order":85}');
+    invoke.mockRejectedValue(new FunctionRuntimeError('TypeError', 'x is undefined', { durationMs: 2 }));
+    const w = worker();
+
+    await w.tick(new Date(Date.now() + 1000));
+    await w.settled();
+
+    expect(await message(requestId)).toBeUndefined();
+    // Received on the clock of the claim, a second ahead, as the worker sent it.
+    const [received] = await customerQueues.receive(failed, 10, 30, new Date(Date.now() + 2000));
+    expect(JSON.parse(received.body)).toMatchObject({
+      requestContext: { requestId, functionArn: `${configs.arnOf(orders)}:$LATEST`, condition: 'RetriesExhausted', approximateInvokeCount: 1 },
+      requestPayload: { order: 85 },
+      responsePayload: { errorType: 'TypeError', errorMessage: 'x is undefined' },
+    });
+    expect(received.meta).toEqual({ senderId: configs.arnOf(orders) });
+    expect(await db.dataSource.query(`SELECT size_bytes::int AS size FROM queues WHERE id = $1`, [failed.id])).toEqual([{ size: Buffer.byteLength(received.body) }]);
+    // Its retention is the queue's, from when the record was sent.
+    const [{ kept }] = await db.dataSource.query<Array<{ kept: number }>>(`SELECT extract(epoch FROM expires_at - sent_at)::int AS kept FROM queue_messages WHERE queue_id = $1`, [failed.id]);
+    expect(kept).toBe(DEFAULT_SETTINGS.messageRetentionSeconds);
+    invoke.mockReset();
+  });
+
+  it("claims a call as soon as it is kept, PostgreSQL telling the worker, not at its next look a minute later", async () => {
+    const fn = await newFunction();
+    invoke.mockResolvedValue({ output: 'woken', durationMs: 1 });
+    const w = worker(undefined, 60);
+    w.onModuleInit();
+    try {
+      const requestId = uuid(860);
+      const sentAt = Date.now();
+      await send(fn, requestId);
+      for (let tries = 0; tries < 100 && (await message(requestId)); tries++) await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(await message(requestId)).toBeUndefined();
+      expect(Date.now() - sentAt).toBeLessThan(2_000);
+      expect(invoke).toHaveBeenCalledTimes(1);
+    } finally {
+      w.onModuleDestroy();
+      await w.settled();
+      invoke.mockReset();
+    }
   });
 
   it('hands nothing over for a claim another has taken since, and deletes a function\'s settings with it', async () => {

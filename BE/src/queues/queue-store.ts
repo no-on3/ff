@@ -83,26 +83,35 @@ export class QueueStore {
   }
 
   /**
-   * Ends a claimed event and hands its record to another function as an
-   * asynchronous call, in one transaction: the record is kept exactly when the
-   * event goes. False, and nothing sent, when another claim has the event since.
+   * Ends a claimed event and makes `then`'s writes, in one transaction: they
+   * are kept exactly when the event goes. False, and nothing written, when
+   * another claim has the event since.
    */
-  async deleteEventAndSend(
-    event: Pick<ClaimedEvent, 'id' | 'receiveCount'>,
-    target: { id: string; accountId: string },
-    requestId: string,
-    body: string,
-    expiresAt: Date,
-  ): Promise<boolean> {
+  async deleteEventAnd(event: Pick<ClaimedEvent, 'id' | 'receiveCount'>, then: (manager: EntityManager) => Promise<void>): Promise<boolean> {
     return this.dataSource.transaction(async (manager) => {
       const [, count] = await manager.query<[unknown[], number]>(`DELETE FROM "queue_messages" WHERE "id" = $1 AND "receive_count" = $2`, [
         event.id,
         event.receiveCount,
       ]);
       if (count !== 1) return false;
-      await this.sendEvent(target, requestId, body, expiresAt, { manager });
+      await then(manager);
       return true;
     });
+  }
+
+  /**
+   * Ends a claimed event and hands its record to another function as an
+   * asynchronous call, in one transaction: the record is kept exactly when the
+   * event goes. False, and nothing sent, when another claim has the event since.
+   */
+  deleteEventAndSend(
+    event: Pick<ClaimedEvent, 'id' | 'receiveCount'>,
+    target: { id: string; accountId: string },
+    requestId: string,
+    body: string,
+    expiresAt: Date,
+  ): Promise<boolean> {
+    return this.deleteEventAnd(event, (manager) => this.sendEvent(target, requestId, body, expiresAt, { manager }));
   }
 
   /**

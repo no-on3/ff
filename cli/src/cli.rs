@@ -382,7 +382,7 @@ pub struct AsyncConfigArgs {
     #[arg(long)]
     pub max_age: Option<String>,
 
-    /// Another function of the account, by name or ARN, which gets the record of each call that succeeds
+    /// Another function of the account, by name or ARN, or a queue of it, by ARN, which gets the record of each call that succeeds
     #[arg(long, conflicts_with = "no_on_success")]
     pub on_success: Option<String>,
 
@@ -390,7 +390,7 @@ pub struct AsyncConfigArgs {
     #[arg(long)]
     pub no_on_success: bool,
 
-    /// Another function of the account, by name or ARN, which gets the record of each call that fails for good
+    /// Another function of the account, by name or ARN, or a queue of it, by ARN, which gets the record of each call that fails for good
     #[arg(long, conflicts_with = "no_on_failure")]
     pub on_failure: Option<String>,
 

@@ -36,8 +36,11 @@ export const LAMBDA_RESERVED = [
 /** The names FF's runtimes read or start with, which the API refuses too; and every name starting with FF_. */
 export const FF_RESERVED = ['FUNCTION_NAME', 'FUNCTION_VERSION', 'FUNCTION_MEMORY_LIMIT', 'FUNCTION_TIMEOUT', 'PORT', 'PATH'];
 
-/** The names FF sets with a function's own key to its account's buckets, which the API refuses too. */
-export const BUCKETS_RESERVED = ['AWS_ENDPOINT_URL_S3'];
+/** The names FF sets with a function's own key to its account's buckets and queues, and why, which the API refuses too. */
+export const ENDPOINTS_RESERVED = new Map([
+  ['AWS_ENDPOINT_URL_S3', "FF sets it, with the function's own key to its account's buckets"],
+  ['AWS_ENDPOINT_URL_SQS', "FF sets it, with the function's own key to its account's queues"],
+]);
 
 const RESERVED = new Set([...LAMBDA_RESERVED, ...FF_RESERVED]);
 
@@ -68,7 +71,8 @@ export function environmentBytes(environment: Record<string, string>): number {
 export function nameProblem(name: string): string | undefined {
   if (!VARIABLE_NAME.test(name)) return `"${name}" is not a variable name: a letter first, then letters, digits or underscores, two characters at least`;
   if (RESERVED.has(name)) return `${name} is reserved: AWS Lambda or FF's runtime sets it`;
-  if (BUCKETS_RESERVED.includes(name)) return `${name} is reserved: FF sets it, with the function's own key to its account's buckets`;
+  const endpoint = ENDPOINTS_RESERVED.get(name);
+  if (endpoint) return `${name} is reserved: ${endpoint}`;
   if (name.startsWith('FF_')) return `${name} is reserved: names starting with FF_ are FF's own`;
   return undefined;
 }

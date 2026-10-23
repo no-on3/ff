@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, OrchestratorError } from '../orchestrator/orchestrator.errors';
+import { plan } from '../plans/test-fixtures';
 import { ClaimedEvent } from '../queues/queue-store';
 import { LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES } from './async-invoke';
 import { AsyncInvokeWorker } from './async-invoke.worker';
@@ -17,8 +18,22 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
   const fn = { id: 'fn-1', name: 'orders', accountId: ACCOUNT, status: FunctionStatus.ACTIVE };
   const records = { id: 'fn-2', name: 'records', accountId: ACCOUNT, status: FunctionStatus.ACTIVE };
   const RECORDS_ARN = `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:records`;
-  let queues: { claimEvents: jest.Mock; retryEvent: jest.Mock; deleteEvent: jest.Mock; deleteEventAndSend: jest.Mock };
-  let configs: { settingsFor: jest.Mock; arnOf: (f: { accountId: string; name: string }) => string; destinationFunction: jest.Mock };
+  const QUEUE_ARN = `arn:aws:sqs:tn-tunis-1:${ACCOUNT}:failed-orders`;
+  const failedOrders = { id: 'queue-1', accountId: ACCOUNT, name: 'failed-orders', maximumMessageSize: 1_048_576, delaySeconds: 0 };
+  let queues: {
+    claimEvents: jest.Mock;
+    retryEvent: jest.Mock;
+    deleteEvent: jest.Mock;
+    deleteEventAndSend: jest.Mock;
+    deleteEventAnd: jest.Mock;
+    accountBytes: jest.Mock;
+  };
+  let configs: { settingsFor: jest.Mock; arnOf: (f: { accountId: string; name: string }) => string; destinationFunction: jest.Mock; destinationQueue: jest.Mock };
+  /** PostgreSQL's word that a call was kept, as the worker listens for it. */
+  let told: (() => void) | undefined;
+  let events: { onAsyncCall: jest.Mock };
+  let customerQueues: { send: jest.Mock };
+  let plans: { forAccount: jest.Mock };
   let functions: { findOne: jest.Mock; call: jest.Mock };
   let credit: { admit: jest.Mock };
   let accounts: { findOne: jest.Mock };
@@ -44,10 +59,10 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await worker.settled();
     return claimed;
   };
-  const make = (concurrency = 10) =>
+  const make = (concurrency = 10, intervalSeconds = 0) =>
     new AsyncInvokeWorker(
       {
-        getOrThrow: () => ({ intervalSeconds: 0, concurrency }),
+        getOrThrow: () => ({ intervalSeconds, concurrency }),
         get: (_key: string, fallback?: unknown) => fallback,
       } as unknown as ConfigService,
       queues as never,
@@ -56,6 +71,9 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       accounts as never,
       configs as never,
       schedules as never,
+      events as never,
+      customerQueues as never,
+      plans as never,
     );
   /** The record the worker handed its destination, as the destination's event. */
   const handed = () => JSON.parse(queues.deleteEventAndSend.mock.calls[0][3] as string) as Record<string, unknown>;
@@ -66,12 +84,28 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       retryEvent: jest.fn(async () => true),
       deleteEvent: jest.fn(async () => true),
       deleteEventAndSend: jest.fn(async () => true),
+      // The event deleted, then the writes of the transaction, here with its manager's stand-in.
+      deleteEventAnd: jest.fn(async (_event: unknown, then: (manager: unknown) => Promise<void>) => {
+        await then('the transaction');
+        return true;
+      }),
+      accountBytes: jest.fn(async () => 0),
     };
     configs = {
       settingsFor: jest.fn(async () => ({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: null })),
       arnOf: (f) => `arn:aws:lambda:tn-tunis-1:${f.accountId}:function:${f.name}`,
       destinationFunction: jest.fn(async () => records),
+      destinationQueue: jest.fn(async () => failedOrders),
     };
+    told = undefined;
+    events = {
+      onAsyncCall: jest.fn((subscriber: () => void) => {
+        told = subscriber;
+        return () => (told = undefined);
+      }),
+    };
+    customerQueues = { send: jest.fn(async () => undefined) };
+    plans = { forAccount: jest.fn(async () => plan()) };
     functions = { findOne: jest.fn(async () => fn), call: jest.fn(async () => ({ ok: true, output: 1, invocation: {} })) };
     credit = { admit: jest.fn(async () => undefined) };
     accounts = { findOne: jest.fn(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE })) };
@@ -326,20 +360,81 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     expect(warnings).toHaveBeenCalledWith(expect.stringMatching(/^The record of asynchronous call req-2 of function fn-1 was not delivered: its record is \d+ bytes, over an asynchronous call's 1048576$/));
   });
 
-  it('claims only what it has room for, and nothing while full', async () => {
+  it('claims only what it has room for, nothing while full, and again as an attempt ends after a claim that took all the room', async () => {
     worker = make(2);
-    let finish!: () => void;
-    functions.call.mockImplementationOnce(() => new Promise((resolve) => (finish = () => resolve({ ok: true, invocation: {} }))));
-    queues.claimEvents.mockResolvedValueOnce([event()]);
+    const finishes: Array<() => void> = [];
+    functions.call.mockImplementation(() => new Promise((resolve) => finishes.push(() => resolve({ ok: true, invocation: {} }))));
+    queues.claimEvents.mockResolvedValueOnce([event(), event({ id: '8' })]);
 
     await worker.tick(NOW);
     await new Promise((resolve) => setImmediate(resolve));
-    queues.claimEvents.mockResolvedValueOnce([event({ id: '8' })]);
     await worker.tick(NOW);
-    await worker.tick(NOW);
-    finish();
+    finishes[0]();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    finishes[1]();
     await worker.settled();
 
+    // Full: no claim; the first attempt over, one with its room, which found none due; the second over, none.
     expect(queues.claimEvents.mock.calls.map(([limit]) => limit)).toEqual([2, 1]);
+  });
+
+  it('claims as soon as PostgreSQL tells it a call was kept, and once more after a claim a call came during', async () => {
+    worker = make(10, 60);
+    worker.onModuleInit();
+    let claimed!: (events: ClaimedEvent[]) => void;
+    queues.claimEvents.mockImplementationOnce(() => new Promise((resolve) => (claimed = resolve)));
+
+    told?.();
+    told?.();
+    expect(queues.claimEvents).toHaveBeenCalledTimes(1);
+    claimed([]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(queues.claimEvents).toHaveBeenCalledTimes(2);
+    worker.onModuleDestroy();
+    expect(told).toBeUndefined();
+  });
+
+  it("hands a call's record to a queue of the account as a message, its body Lambda's record, in the transaction that deletes the event", async () => {
+    configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: QUEUE_ARN });
+    functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('TypeError', 'x is undefined'), invocation: {} });
+
+    await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 } }));
+
+    expect(configs.destinationQueue).toHaveBeenCalledWith(ACCOUNT, QUEUE_ARN);
+    expect([queues.deleteEventAnd.mock.calls[0][0].id, queues.deleteEvent.mock.calls.length, queues.deleteEventAndSend.mock.calls.length]).toEqual(['7', 0, 0]);
+    const [[queue, [message], at, manager]] = customerQueues.send.mock.calls;
+    expect([queue, manager, (at as Date).getTime() >= NOW.getTime()]).toEqual([failedOrders, 'the transaction', true]);
+    expect(message).toEqual({
+      messageId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      body: expect.any(String),
+      meta: { senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders` },
+      sizeBytes: Buffer.byteLength(message.body as string),
+      delaySeconds: 0,
+    });
+    expect(JSON.parse(message.body as string)).toMatchObject({
+      version: '1.0',
+      requestContext: { requestId: 'req-1', condition: 'RetriesExhausted', approximateInvokeCount: 3 },
+      requestPayload: { order: 42 },
+      responsePayload: { errorType: 'TypeError', errorMessage: 'x is undefined' },
+    });
+  });
+
+  it("deletes the event of a call whose queue is gone, whose record is over the queue's largest message, or whose account's messages hold the plan's room, saying the record wasn't delivered", async () => {
+    configs.settingsFor.mockResolvedValue({ policy: LAMBDA_RETRY_POLICY, onSuccess: QUEUE_ARN, onFailure: null });
+    configs.destinationQueue.mockResolvedValueOnce(undefined).mockResolvedValueOnce({ ...failedOrders, maximumMessageSize: 1024 });
+    functions.call.mockResolvedValue({ ok: true, output: 'x'.repeat(2000), invocation: {} });
+
+    await tick(event());
+    await tick(event({ id: '8', requestId: 'req-2' }));
+    queues.accountBytes.mockResolvedValueOnce(plan().limits.queueStorageMb * 1024 * 1024);
+    await tick(event({ id: '9', requestId: 'req-3' }));
+
+    expect([customerQueues.send.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 3]);
+    expect(warnings).toHaveBeenCalledWith(`The record of asynchronous call req-1 of function fn-1 was not delivered: its destination ${QUEUE_ARN} is no queue of the account any more`);
+    expect(warnings).toHaveBeenCalledWith(expect.stringMatching(/^The record of asynchronous call req-2 of function fn-1 was not delivered: its record is \d+ bytes, over the queue's maximum message size of 1024$/));
+    expect(warnings).toHaveBeenCalledWith(
+      `The record of asynchronous call req-3 of function fn-1 was not delivered: the account's messages hold ${plan().limits.queueStorageMb} MB together, the Beta plan's limit`,
+    );
   });
 });

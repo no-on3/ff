@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { AsyncSettingsForm, KEPT_MINUTES, asyncSettingsBody, asyncSettingsForm, asyncSettingsText } from '../lib/async-settings';
+import { AsyncSettingsForm, KEPT_MINUTES, asyncSettingsBody, asyncSettingsForm, asyncSettingsText, destinationText } from '../lib/async-settings';
 import { apiErrorMessage } from '../lib/functions';
 import { EventInvokeConfig, Function, eventInvokeConfigApi, functionsApi } from '../services/api';
 import { Callout, Panel } from './Panel';
@@ -89,7 +89,7 @@ export const FunctionAsyncSettings: React.FC<{ func: Function; mayChange: boolea
         <option value="">Nowhere</option>
         {[...new Set([...others, form[field]].filter(Boolean))].map((name) => (
           <option key={name} value={name}>
-            {name}
+            {destinationText(name)}
           </option>
         ))}
       </select>

@@ -25,9 +25,13 @@ pub fn max_age_seconds(text: &str) -> Result<u64, Error> {
     Ok(seconds)
 }
 
-/// The function name a Lambda ARN ends with, `$LATEST` or not.
-fn name_of(arn: &str) -> &str {
-    arn.split_once(":function:").map(|(_, rest)| rest.split(':').next().unwrap_or(rest)).unwrap_or(arn)
+/// A destination as people read it: a function by the name its Lambda ARN ends with, `$LATEST` or not; a queue's ARN,
+/// `arn:aws:sqs:<region>:<account>:<name>`, as "the queue <name>".
+fn name_of(arn: &str) -> String {
+    if let Some(rest) = arn.strip_prefix("arn:aws:sqs:") {
+        return format!("the queue {}", rest.rsplit(':').next().unwrap_or(rest));
+    }
+    arn.split_once(":function:").map(|(_, rest)| rest.split(':').next().unwrap_or(rest)).unwrap_or(arn).to_string()
 }
 
 /// How long a call is kept, in words: hours when it is whole hours, else minutes, else seconds.
@@ -199,6 +203,11 @@ mod tests {
         assert_eq!(
             text("orders", Some(&config)),
             "orders: a call that fails is retried once, and kept 30 minutes at most; one that fails for good to failed-orders"
+        );
+        let queued = json!({ "destinationConfig": { "onSuccess": {}, "onFailure": { "destination": "arn:aws:sqs:tn-tunis-1:000000000001:failed-orders" } } });
+        assert_eq!(
+            text("orders", Some(&queued)),
+            "orders: a call that fails is retried twice, and kept 6 hours at most; one that fails for good to the queue failed-orders"
         );
     }
 }

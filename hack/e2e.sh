@@ -53,7 +53,8 @@
 # long polls, batches, visibility, a dead-letter queue, a queue that isn't there,
 # another account's, a wrong secret, an unknown key); two functions with no
 # setting at all, the SDK's own queue URL inside the cluster and boto3 with one
-# from outside, which the SDK for JavaScript sends to its host. Then plans:
+# from outside, which the SDK for JavaScript sends to its host; a queue as a
+# function's destination, receiving Lambda's record of a call that failed. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -1114,7 +1115,23 @@ check "a function can't point it elsewhere: AWS_ENDPOINT_URL_SQS is FF's" "400 A
   "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 http DELETE "/functions/$node_sqs" >/dev/null
 http DELETE "/functions/$python_sqs" >/dev/null
-for queue in e2e-cli-orders e2e-fn-orders; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
+# A queue as the destination of a function's calls that don't wait: the record, Lambda's, as the message's body.
+aws_sqs create-queue --queue-name e2e-fn-records >/dev/null
+records_queue_arn="arn:aws:sqs:tn-tunis-1:$tenant:e2e-fn-records"
+failing_code='export const handler = async () => { throw new Error("asked to fail"); };'
+failing_fn="$(http POST /functions "$(jq -n --arg code "$failing_code" '{name: "e2e-async-to-queue", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+http PUT "/functions/$failing_fn/event-invoke-config" "$(jq -cn --arg arn "$records_queue_arn" '{maximumRetryAttempts: 0, destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
+check "a queue of the account as a function's destination, by its ARN" "200 $records_queue_arn" "$(status) $(jq -r .destinationConfig.onFailure.destination "$work/body")"
+to_queue="$(http POST "/functions/$failing_fn/invoke" '{"input": {"order": 11}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+aws_sqs receive-message --queue-url "$sqs_endpoint/$tenant/e2e-fn-records" --wait-time-seconds 20 --attribute-names SenderId >"$work/record.json"
+check "  ... a call that fails for good sends it Lambda's record, the message's body, its sender the function" \
+  "RetriesExhausted $to_queue 11 asked to fail arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async-to-queue" \
+  "$(jq -r '.Messages[0].Body | fromjson | "\(.requestContext.condition) \(.requestContext.requestId) \(.requestPayload.order) \(.responsePayload.errorMessage)"' "$work/record.json") $(jq -r '.Messages[0].Attributes.SenderId' "$work/record.json")"
+http PUT "/functions/$failing_fn/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$other:e2e-cli-orders" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
+check "  ... never another account's queue" "400 destinationConfig.onFailure.destination must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$tenant:e2e-cli-orders" \
+  "$(status) $(jq -r .message "$work/body")"
+http DELETE "/functions/$failing_fn" >/dev/null
+for queue in e2e-cli-orders e2e-fn-orders e2e-fn-records; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
 as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
 check "the queues deleted, their messages with them" "0 0" \
   "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"

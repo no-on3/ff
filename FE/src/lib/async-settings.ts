@@ -14,8 +14,14 @@ export interface AsyncSettingsForm {
   onFailure: string;
 }
 
-/** The function name a Lambda ARN ends with: arn:aws:lambda:<region>:<account>:function:<name>, $LATEST or not. */
+/** The function name a Lambda ARN ends with: arn:aws:lambda:<region>:<account>:function:<name>, $LATEST or not; any other ARN, a queue's, as it is. */
 export const nameOfArn = (arn: string | undefined): string => (arn ? (/:function:([^:]+)/.exec(arn)?.[1] ?? arn) : '');
+
+/** A destination as people read it: a function by its name, a queue's ARN (arn:aws:sqs:<region>:<account>:<name>) as "the queue <name>". */
+export function destinationText(destination: string): string {
+  const queue = /^arn:aws:sqs:[^:]+:\d{12}:(.+)$/.exec(destination);
+  return queue ? `the queue ${queue[1]}` : nameOfArn(destination);
+}
 
 /** The form for the settings there are, or for Lambda's defaults when there are none. */
 export function asyncSettingsForm(config: EventInvokeConfig | null): AsyncSettingsForm {
@@ -27,7 +33,7 @@ export function asyncSettingsForm(config: EventInvokeConfig | null): AsyncSettin
   };
 }
 
-/** The body of PUT /functions/:id/event-invoke-config, the destinations by their functions' names, which the API takes as their ARNs; or what is wrong in the form. */
+/** The body of PUT /functions/:id/event-invoke-config, the destinations by their functions' names, which the API takes as their ARNs, a queue by its ARN; or what is wrong in the form. */
 export function asyncSettingsBody(form: AsyncSettingsForm): { body: Record<string, unknown> } | { problem: string } {
   const minutes = Number(form.keptMinutes);
   if (!Number.isInteger(minutes) || minutes < KEPT_MINUTES.min || minutes > KEPT_MINUTES.max) {
@@ -59,8 +65,8 @@ export function asyncSettingsText(config: EventInvokeConfig | null): string {
   const retries = config?.maximumRetryAttempts ?? DEFAULT_RETRIES;
   const kept = keptText(config?.maximumEventAgeInSeconds ?? DEFAULT_KEPT_MINUTES * 60);
   const destinations = [
-    config?.destinationConfig.onSuccess.destination && `a call that succeeds goes on to ${nameOfArn(config.destinationConfig.onSuccess.destination)}`,
-    config?.destinationConfig.onFailure.destination && `one that fails for good to ${nameOfArn(config.destinationConfig.onFailure.destination)}`,
+    config?.destinationConfig.onSuccess.destination && `a call that succeeds goes on to ${destinationText(config.destinationConfig.onSuccess.destination)}`,
+    config?.destinationConfig.onFailure.destination && `one that fails for good to ${destinationText(config.destinationConfig.onFailure.destination)}`,
   ].filter(Boolean);
   const sentence = `A call that fails is ${retriesText(retries)}, and kept ${kept} at most`;
   const ending = destinations.length ? `; ${destinations.join(', ')}.` : ', going nowhere once it ends.';

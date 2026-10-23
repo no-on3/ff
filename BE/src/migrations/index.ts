@@ -42,6 +42,7 @@ import { QueueLimits1792770408267 } from './1792770408267-QueueLimits';
 import { AsyncInvoke1792771678484 } from './1792771678484-AsyncInvoke';
 import { EventInvokeConfigs1792777408931 } from './1792777408931-EventInvokeConfigs';
 import { CustomerQueues1792783890375 } from './1792783890375-CustomerQueues';
+import { AsyncNotify1792790149607 } from './1792790149607-AsyncNotify';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -93,4 +94,5 @@ export const MIGRATIONS: Array<new () => object> = [
   AsyncInvoke1792771678484,
   EventInvokeConfigs1792777408931,
   CustomerQueues1792783890375,
+  AsyncNotify1792790149607,
 ];

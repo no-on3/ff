@@ -9,6 +9,9 @@ import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
 import { withRequestContext } from '../common/request-context';
 import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/orchestrator.errors';
+import { PlansService } from '../plans/plans.service';
+import { CustomerQueues } from '../queues/customer-queues';
+import { QueueEvents } from '../queues/queue-events';
 import { ClaimedEvent, QueueStore } from '../queues/queue-store';
 import {
   AttemptOutcome,
@@ -49,18 +52,25 @@ interface Attempted {
 const scheduleOf = (attributes: Record<string, unknown> | null): string | undefined =>
   attributes?.origin === 'schedule' && typeof attributes.scheduleId === 'string' ? attributes.scheduleId : undefined;
 
+/** A megabyte, as the plans count what messages hold. */
+const MB = 1024 * 1024;
+
 /**
- * Runs functions' asynchronous calls (ADR 0010). Every
- * FF_ASYNC_INTERVAL_SECONDS, it claims the events due, as many as it has room
- * for (FF_ASYNC_CONCURRENCY at once), each hidden from other backends for its
- * lease, and makes each attempt as the API's invoke makes a call: the
+ * Runs functions' asynchronous calls (ADR 0010). As each call is kept,
+ * PostgreSQL tells it (ff_async), whichever backend kept it, and it claims
+ * the events due, as many as it has room for (FF_ASYNC_CONCURRENCY at once),
+ * claiming again as attempts end while there were more than room; every
+ * FF_ASYNC_INTERVAL_SECONDS too, for retries come due and a backend's lost
+ * claims. Each event is hidden from other backends for its lease, and each
+ * attempt made as the API's invoke makes a call: the
  * function ACTIVE, the account active with credit, the record and the bill,
  * the history's source `async` and its attempt, under the event's request ID.
  * The plan's rate was counted when the call came. Then the event is deleted,
  * or put back for its next attempt as Lambda retries, by the function's own
  * settings, else Lambda's defaults (async-invoke.ts, EventInvokeConfigService).
  * An event that ends hands its record, Lambda's, to the destination its
- * function names for how it ended, in the transaction that deletes it. A
+ * function names for how it ended, a function or a queue, in the transaction
+ * that deletes it. A
  * schedule's run is the schedule's call, its source `schedule`, and each
  * attempt's outcome goes on the schedule, unless a later run has replaced it.
  * A backend that stops during an attempt leaves its event to come back when
@@ -74,6 +84,12 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
   private readonly coldStartSeconds: number;
   private timer?: NodeJS.Timeout;
   private ticking = false;
+  /** A call came during a claim: claim again once it is done. */
+  private again = false;
+  /** The last claim took all the room there was: more calls may be due, claimed as attempts end. */
+  private more = false;
+  private stopped = false;
+  private stopListening?: () => void;
   /** The attempts under way, which a test may wait for. */
   private readonly running = new Set<Promise<void>>();
 
@@ -85,6 +101,9 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Account) private readonly accounts: Repository<Account>,
     private readonly configs: EventInvokeConfigService,
     @InjectRepository(Schedule) private readonly schedules: Repository<Schedule>,
+    private readonly events: QueueEvents,
+    private readonly customerQueues: CustomerQueues,
+    private readonly plans: PlansService,
   ) {
     const settings = config.getOrThrow<{ intervalSeconds: number; concurrency: number }>('asyncInvoke');
     this.intervalSeconds = settings.intervalSeconds;
@@ -96,10 +115,20 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     if (this.intervalSeconds <= 0) return;
     this.timer = setInterval(() => void this.tick(), this.intervalSeconds * 1000);
     this.timer.unref();
+    this.stopListening = this.events.onAsyncCall(() => this.wake());
   }
 
   onModuleDestroy(): void {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
+    this.stopListening?.();
+  }
+
+  /** A call was kept, or room was made while more were due: a claim now, or once the one under way is done. */
+  wake(): void {
+    if (this.stopped) return;
+    if (this.ticking) this.again = true;
+    else void this.tick();
   }
 
   /** One tick: the events due claimed and their attempts started, within the room left. A tick still claiming makes the next one wait its turn. */
@@ -109,8 +138,12 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     this.ticking = true;
     try {
       const events = await this.queues.claimEvents(room, now, this.coldStartSeconds);
+      this.more = events.length === room;
       for (const event of events) {
-        const started = this.attempt(event, now).finally(() => this.running.delete(started));
+        const started = this.attempt(event, now).finally(() => {
+          this.running.delete(started);
+          if (this.more) this.wake();
+        });
         this.running.add(started);
       }
       return events.length;
@@ -119,6 +152,10 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       return 0;
     } finally {
       this.ticking = false;
+      if (this.again) {
+        this.again = false;
+        setImmediate(() => this.wake());
+      }
     }
   }
 
@@ -245,16 +282,23 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** The event deleted and its record handed to the destination as an asynchronous call of its own; a record that can't be delivered is said, and the event deleted all the same. */
+  /**
+   * The event deleted and its record handed to the destination: as an
+   * asynchronous call of a function's, or as a message of a queue's, its body,
+   * as Lambda sends one to SQS. A record that can't be delivered (its
+   * destination gone, over what the destination takes, or the account's
+   * messages at the plan's limit) is said, and the event deleted all the same.
+   */
   private async deliver(
     event: ClaimedEvent,
     end: Exclude<EventEnd, EventEnd.FUNCTION_GONE>,
     destination: string,
     context: { fn: Function; response?: AttemptResponse; at: Date },
   ): Promise<boolean> {
+    const functionArn = this.configs.arnOf(context.fn);
     const record = invocationRecord({
       requestId: event.requestId,
-      functionArn: this.configs.arnOf(context.fn),
+      functionArn,
       end,
       approximateInvokeCount: event.receiveCount,
       requestPayload: JSON.parse(event.body) as unknown,
@@ -262,17 +306,31 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       timestamp: context.at,
     });
     const body = JSON.stringify(record);
-    const target = await this.configs.destinationFunction(event.accountId, destination);
-    const undelivered = !target
-      ? `its destination ${destination} is no function of the account any more`
-      : Buffer.byteLength(body) > MAX_ASYNC_INPUT_BYTES
-        ? `its record is ${Buffer.byteLength(body)} bytes, over an asynchronous call's ${MAX_ASYNC_INPUT_BYTES}`
-        : undefined;
-    if (!target || undelivered) {
-      this.logger.warn(`The record of asynchronous call ${event.requestId} of function ${event.functionId} was not delivered: ${undelivered}`);
+    const size = Buffer.byteLength(body);
+    const undelivered = (reason: string) => {
+      this.logger.warn(`The record of asynchronous call ${event.requestId} of function ${event.functionId} was not delivered: ${reason}`);
       return this.queues.deleteEvent(event);
+    };
+    const room = await this.roomFor(event.accountId, size);
+    if (room) return undelivered(room);
+    if (destination.startsWith('arn:aws:sqs:')) {
+      const queue = await this.configs.destinationQueue(event.accountId, destination);
+      if (!queue) return undelivered(`its destination ${destination} is no queue of the account any more`);
+      if (size > queue.maximumMessageSize) return undelivered(`its record is ${size} bytes, over the queue's maximum message size of ${queue.maximumMessageSize}`);
+      const message = { messageId: randomUUID(), body, meta: { senderId: functionArn }, sizeBytes: size, delaySeconds: queue.delaySeconds };
+      return this.queues.deleteEventAnd(event, (manager) => this.customerQueues.send(queue, [message], context.at, manager));
     }
+    const target = await this.configs.destinationFunction(event.accountId, destination);
+    if (!target) return undelivered(`its destination ${destination} is no function of the account any more`);
+    if (size > MAX_ASYNC_INPUT_BYTES) return undelivered(`its record is ${size} bytes, over an asynchronous call's ${MAX_ASYNC_INPUT_BYTES}`);
     const expiresAt = new Date(context.at.getTime() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
     return this.queues.deleteEventAndSend(event, target, randomUUID(), body, expiresAt);
+  }
+
+  /** Why the account's messages have no room for a record of this size, as the plan limits what they hold together; undefined when they have. */
+  private async roomFor(accountId: string, size: number): Promise<string | undefined> {
+    const plan = await this.plans.forAccount(accountId);
+    if ((await this.queues.accountBytes(accountId)) + size <= plan.limits.queueStorageMb * MB) return undefined;
+    return `the account's messages hold ${plan.limits.queueStorageMb} MB together, the ${plan.name} plan's limit`;
   }
 }

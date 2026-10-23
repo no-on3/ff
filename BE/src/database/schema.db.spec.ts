@@ -61,6 +61,7 @@ const DATABASE_OPERATIONS = migrationNames.find((name) => name.startsWith('Datab
 const FUNCTION_KEYS = migrationNames.find((name) => name.startsWith('FunctionKeys')) as string;
 const QUEUE_LIMITS = migrationNames.find((name) => name.startsWith('QueueLimits')) as string;
 const EVENT_INVOKE_CONFIGS = migrationNames.find((name) => name.startsWith('EventInvokeConfigs')) as string;
+const CUSTOMER_QUEUES = migrationNames.find((name) => name.startsWith('CustomerQueues')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -437,6 +438,47 @@ run('database schema (L2, real PostgreSQL)', () => {
       ]);
       await dataSource.query(`DELETE FROM queue_messages WHERE id = $1`, [kept]);
       expect(await dataSource.query(`SELECT size_bytes FROM queues WHERE id = $1`, [orders])).toEqual([{ size_bytes: '7' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the async-notify migration tells a function's asynchronous calls on a channel of their own, ff_async, and customers' messages on ff_queue, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: fn }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('f', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      const [{ id: own }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind, function_id) VALUES ($1, $2::text, 'function', $2::uuid) RETURNING id`, [ACCOUNT, fn]);
+      const [{ id: orders }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [ACCOUNT]);
+      const write = async () => {
+        await dataSource.query(`INSERT INTO queue_messages (queue_id, message_id, body, size_bytes, expires_at) VALUES ($1, gen_random_uuid(), 'm', 1, now() + interval '1 day')`, [orders]);
+        await dataSource.query(`INSERT INTO queue_messages (queue_id, function_id, message_id, body, size_bytes, expires_at) VALUES ($1, $2, gen_random_uuid(), '{}', 2, now() + interval '1 day')`, [
+          own,
+          fn,
+        ]);
+      };
+      const heard = async (): Promise<string[]> => {
+        const runner = dataSource.createQueryRunner();
+        const client = (await runner.connect()) as { on(event: 'notification', listener: (message: { channel: string; payload?: string }) => void): void };
+        const notes: string[] = [];
+        client.on('notification', (note) => notes.push(`${note.channel} ${note.payload}`));
+        await runner.query('LISTEN ff_queue');
+        await runner.query('LISTEN ff_async');
+        await write();
+        await runner.query('SELECT 1');
+        await runner.query('UNLISTEN *');
+        await runner.release();
+        return notes;
+      };
+
+      expect(await heard()).toEqual([`ff_queue ${orders}`, `ff_async ${own}`]);
+
+      await migrateDownTo(dataSource, CUSTOMER_QUEUES);
+      expect(await heard()).toEqual([`ff_queue ${orders}`, `ff_queue ${own}`]);
+
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

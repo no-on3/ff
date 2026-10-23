@@ -3,6 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { CustomerQueues } from '../queues/customer-queues';
+import { Queue } from '../queues/queue.entity';
+import { parseQueueArn, queueArn } from '../queues/sqs-attributes';
 import { functionArn, parseFunctionArn } from './arns';
 import { LAMBDA_RETRY_POLICY, RetryPolicy } from './async-invoke';
 import { EventInvokeConfigView, PutEventInvokeConfigDto } from './dto/event-invoke-config.dto';
@@ -25,8 +28,9 @@ export interface AsyncSettings {
  * EventInvokeConfig (ADR 0010): put whole, read, deleted, each change in the
  * audit log. A destination is another function of the account, in FF's
  * region, named by its ARN as on Lambda, or by its name, and kept as its ARN;
- * it must exist when it is set. A function gone since is a record not
- * delivered, as Lambda's DestinationDeliveryFailures.
+ * or a queue of the account, by its ARN, as SQS names it. It must exist when
+ * it is set. One gone since is a record not delivered, as Lambda's
+ * DestinationDeliveryFailures.
  */
 @Injectable()
 export class EventInvokeConfigService {
@@ -35,6 +39,7 @@ export class EventInvokeConfigService {
   constructor(
     @InjectRepository(FunctionEventInvokeConfig) private readonly configs: Repository<FunctionEventInvokeConfig>,
     private readonly functions: FunctionsService,
+    private readonly queues: CustomerQueues,
     private readonly audit: AuditService,
     config: ConfigService,
   ) {
@@ -102,18 +107,24 @@ export class EventInvokeConfigService {
     return fn;
   }
 
-  /** A destination's ARN, as kept: another function of the account, in FF's region, there now; null for none. */
+  /** The account's queue a destination's ARN names, if it is there still. */
+  async destinationQueue(accountId: string, arn: string): Promise<Queue | undefined> {
+    const named = parseQueueArn(arn);
+    if (!named || named.accountId !== accountId || named.region !== this.region) return undefined;
+    return (await this.queues.find(accountId, named.name)) ?? undefined;
+  }
+
+  /** A destination's ARN, as kept: another function of the account, or a queue of it, in FF's region, there now; null for none. */
   private async destination(fn: Function, which: 'onSuccess' | 'onFailure', given: string | undefined): Promise<string | null> {
     if (given === undefined) return null;
     const field = `destinationConfig.${which}.destination`;
+    if (given.startsWith('arn:aws:sqs:')) return this.queueDestination(fn, field, given);
     const arn = FUNCTION_NAME.test(given) ? this.arnOf({ accountId: fn.accountId, name: given }) : given;
     const named = parseFunctionArn(arn);
     if (!named) {
-      if (arn.startsWith('arn:aws:sqs:')) {
-        throw new BadRequestException(`${field}: a queue becomes a destination with FF's queues; for now, name another function of the account`);
-      }
       throw new BadRequestException(
-        `${field} must be another function of the account: its name, or its ARN, as Lambda's: ${this.arnOf({ accountId: fn.accountId, name: '<name>' })}`,
+        `${field} must be another function of the account, by its name or its ARN, as Lambda's (${this.arnOf({ accountId: fn.accountId, name: '<name>' })}), ` +
+          `or a queue of the account, by its ARN (${queueArn(this.region, fn.accountId, '<name>')})`,
       );
     }
     if (named.region !== this.region || named.accountId !== fn.accountId) {
@@ -124,6 +135,17 @@ export class EventInvokeConfigService {
     }
     if (!(await this.destinationFunction(fn.accountId, arn))) throw new BadRequestException(`${field}: the account has no function named "${named.name}"`);
     return this.arnOf({ accountId: fn.accountId, name: named.name });
+  }
+
+  /** A queue's ARN as a destination: the account's, in FF's region, there now. */
+  private async queueDestination(fn: Function, field: string, arn: string): Promise<string> {
+    const named = parseQueueArn(arn);
+    if (!named) throw new BadRequestException(`${field} is no queue's ARN, which SQS writes ${queueArn(this.region, fn.accountId, '<name>')}`);
+    if (named.region !== this.region || named.accountId !== fn.accountId) {
+      throw new BadRequestException(`${field} must be a queue of this account, in ${this.region}: ${queueArn(this.region, fn.accountId, named.name)}`);
+    }
+    if (!(await this.destinationQueue(fn.accountId, arn))) throw new BadRequestException(`${field}: the account has no queue named "${named.name}"`);
+    return arn;
   }
 
   private none(fn: Function): NotFoundException {
