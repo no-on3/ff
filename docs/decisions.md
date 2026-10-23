@@ -5,12 +5,28 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-10-23: the console merged, the domain registered, the server for development
+
+You answered the readiness check of that day: merge the console's new look, remove a test container left running, the domain is registered, and the server in Canada is for development. Then, step 2, to its end.
+
+**22, done: the console's new look is in `master`.** Merged on 2026-10-23 (`7d26ca4`), without a checkout: `master` had not moved since the branch began, so no file changed. The same day, the test DNS server that an earlier session had left running on the cluster's network (the container `dns-repro`, made on 2026-10-21 for the custom domains' checks) was removed.
+
+**20, answered: `ffunc.tn` is registered.** ✅ Your answer: registered, while the registry confirms its owner's identity; FF acts on it as registered.
+- **What it means:** FF's own addresses are under it: `api.ffunc.tn`, `console.ffunc.tn`, `admin.ffunc.tn` and `login.ffunc.tn`, `*.fn.ffunc.tn` for function URLs, and from step 2 `s3.ffunc.tn` and `*.s3.ffunc.tn` for buckets. The platform's manifests keep `example.tn`, an example that any operator replaces: FF's own values go in the overlay of FF's own install.
+- **Still to change:** its DNS records and its certificates, once you choose who hosts its DNS (17, still waiting for you); the overlay with FF's addresses, with FF's install.
+
+**21, answered: the server in Canada is FF's development server.** ✅ Your answer.
+- **What it means:** FF runs there for development and tests, never with a customer's personal data. Production goes to a server in Tunisia, as the plans promise: the region stays `tn-tunis-1` (18), and no data of customers leaves the country, so INPDP's authorization for it isn't needed.
+- **Still to change:** FF's install there, when you ask for it ([`deploy/k8s`](../deploy/k8s/README.md)). It isn't part of step 2, which is built and tested on this machine, as step 1 was.
+
+**3, under way: step 2 started on 2026-10-23,** on the branch `feat/step-2`, made from `master` after the merge. Its tasks, V-00 to V-10, record their commits in the [step-2 plan](step-2-plan.md)'s progress log, and the decisions below (4 to 14) their changes as each is built.
+
 ## 2026-10-22, last: the console's look
 
 **22. The console's look: direction A, "navy and paper".** ✅ Your choice, from two previews of the functions page.
 - **What it means:** the console takes Column's calm palette (navy ink, a blue scale, a teal for what is healthy, an orange only for what needs you), the Geist fonts, soft navy shadows and 8 px corners. A sidebar replaces the row of links across the top, and lists become tables. The other direction, B, a dark one, stays written down in case a dark mode is wanted later.
 - **Changed already:** the [console design plan](console-design-plan.md) (W-00 `8fff4cc`), with the direction as the build's contract and where each color comes from; built the same day: the tokens and the theme (W-01 `0be984e`), the sidebar (W-02 `0cf9efc`), the functions page (W-03 `3f3fc4f`), a function's page (W-04 `4a5587b`), the other pages (W-05 `eff29e9`), phones, focus and contrast (W-06 `e525e05`). Two of Column's colors were darkened for WCAG's contrast: the labels' grey and the orange under an alarm's count. No API change.
-- **Still to change:** nothing, but merging `feat/console-redesign` into `master`, when you say.
+- **Still to change:** nothing: merged into `master` on 2026-10-23 (`7d26ca4`).
 
 ## 2026-10-22, later: FF's domain and its first server
 
@@ -20,7 +36,8 @@ You named both, and asked to record them and to merge step 1 into `master`. Two 
 - **What it means:** FF's addresses go under it. Following the example in production's settings, they would be `api.ffunc.tn`, `console.ffunc.tn`, `admin.ffunc.tn` and `login.ffunc.tn`, and each function URL `https://<32 letters and digits>.fn.ffunc.tn/`.
 - **Found on 2026-10-22:** the domain isn't registered yet. The .tn registry (ATI) has no record of it, and DNS answers "no such domain". Register it soon, through a registrar ATI accredits, before someone else does. Choosing its name servers then answers the rest of decision 17: who hosts its DNS.
 - **Changed already:** this log; the step-1 plan's §9 and the roadmap name it.
-- **Still to change, once it is registered:** production's settings, where they say `example.tn` (`deploy/k8s/platform/*.env`, through an overlay); its DNS records, the four hosts and `*.fn` pointing to the server; decision 17's way to certificates.
+- **Registered since,** as you said on 2026-10-23 (above).
+- **Still to change:** production's settings, where they say `example.tn` (`deploy/k8s/platform/*.env`, through an overlay); its DNS records, the four hosts and `*.fn` pointing to the server; decision 17's way to certificates.
 
 **21. FF's first server is the one you reach with `ssh next`.** ✅ Your answer.
 - **What it is,** read over SSH on 2026-10-22, nothing changed on it: a virtual server at OVH with 8 vCPUs, 22 GB of memory and two 200 GB disks (the second mounted at `/data`), running Ubuntu 26.04 LTS. Nothing is installed on it yet beyond Ubuntu itself. Its address belongs to OVH's data center in Beauharnois, near Montreal, **in Canada**. Its address and login stay in your SSH config, out of this repository.
@@ -28,7 +45,8 @@ You named both, and asked to record them and to merge step 1 into `master`. Two 
   - the promise "hosted in Tunisia" (the [parent plan](local-markets-and-aws-portability-plan.md), A1). Customers' personal data sent abroad needs INPDP's authorization (Law 2004-63, art. 52; the parent plan's §8.6), which may be hard to get while INPDP's council isn't renewed (R17);
   - the region, `tn-tunis-1` (18).
 - **Changed already:** this log; the step-1 plan's §9 and the parent plan's §15 (question 3, ADR-006) point to it.
-- **Still to change:** what it is for (the question at the end). Then FF's install there ([`deploy/k8s`](../deploy/k8s/README.md)), with its backups' second site at another provider or in another region ([`deploy/backup`](../deploy/backup/README.md)).
+- **Answered on 2026-10-23:** FF's development server (above).
+- **Still to change:** FF's install there ([`deploy/k8s`](../deploy/k8s/README.md)), with its backups' second site at another provider or in another region ([`deploy/backup`](../deploy/backup/README.md)).
 
 ## 2026-10-22: the step-1 and step-2 plans' choices, and C-29
 
@@ -102,7 +120,7 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Changed already:** `d13581b` (U-05): the edge built with the standard module for DNS updates (RFC 2136), both ways (`wildcard`, `on-demand`), and `deploy.sh`'s checks; `d0f5604` (U-06): customers' own domains, always one certificate each.
 - **Still to change, once you answer:** DNS servers FF runs itself: settings only (`edge.env` and the Secret `ff-edge-dns`); a DNS company: its module in `deploy/edge/Dockerfile`, one line; neither: `on-demand`, about 50 new URLs a week for all customers, while the beta stays small.
 
-**18. The region is `tn-tunis-1`.** ✅ Confirmed, if FF's servers are in Tunis. ⚠️ FF's first server is in Canada (21): to decide again if production runs there.
+**18. The region is `tn-tunis-1`.** ✅ Confirmed, if FF's servers are in Tunis. FF's first server is in Canada (21), and is for development only (answered on 2026-10-23): production's servers are in Tunisia, so the region stays.
 - **Changed already:** `57101f7` (U-07): `FF_REGION`, `tn-tunis-1` by default, in each scheduled event's `region` and in its rule's name (`arn:aws:events:tn-tunis-1:…`).
 - **Still to change:** from step 2 (V-08), functions also get it as `AWS_REGION`. Before launch: the legal check of names like AWS's, and the `aws` in those names (the [parent plan](local-markets-and-aws-portability-plan.md)'s ADR-006).
 
@@ -134,11 +152,10 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
-| Register `ffunc.tn`, and choose who hosts its DNS: DNS servers FF runs, a DNS company, or neither (decisions 17 and 20) | This log, 17 and 20 | Keeping the domain; how function URLs get their certificates in production |
-| What the server in Canada is for: a test server for FF until one in Tunisia, with no customer's personal data on it (recommended), or production, with INPDP's authorization and a region named for where it is (decisions 18 and 21) | This log, 21; the [parent plan](local-markets-and-aws-portability-plan.md) §8.6 | Where customers' data may go; the region's name; the promise "hosted in Tunisia" |
+| Who hosts `ffunc.tn`'s DNS: DNS servers FF runs, a DNS company, or neither (decision 17; the domain is registered, 20) | This log, 17 and 20 | How function URLs and, from step 2, buckets get their certificates in production: one for all of them, or one each |
 | Where `ff`'s downloads and the public runtime images are published, if customers can't rely on GitHub | [CLI plan](cli-plan.md) §10, question 3 | The first public release of `ff` |
 | Windows for `ff`: in its phase 4, or when a customer asks | CLI plan §10, question 5 | The CLI's phase 4 |
 | `ff login` sooner, so that the first customers never paste a key | CLI plan §10, question 7 | The order of the CLI's next tasks |
-| Your company and the Startup Act label; FF Cloud or on-premises first; the data center and the hardware budget (a first server named: 21); a bank or payment provider; the team and the launch date; the product's name | [Parent plan](local-markets-and-aws-portability-plan.md) §15, questions 1 to 5 and 7 | Priorities, not the direction |
+| Your company and the Startup Act label; FF Cloud or on-premises first; the data center and the hardware budget (a first server, for development: 21); a bank or payment provider; the team and the launch date; the product's name | [Parent plan](local-markets-and-aws-portability-plan.md) §15, questions 1 to 5 and 7 | Priorities, not the direction |
 | Send the accountant's five questions; book the external penetration test | [Client-readiness plan](client-readiness-plan.md) §9 | VAT, invoices and withholding; the public launch |
 | Later: take away the backend's right to create ConfigMaps, once no backend older than C-24 runs anywhere | [`deploy/k8s`](../deploy/k8s/README.md) | Nothing until then |
