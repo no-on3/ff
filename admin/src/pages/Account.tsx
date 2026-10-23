@@ -15,6 +15,7 @@ import {
   changedNotice,
   changesFor,
   dataDeletion,
+  bucketStorageLabel,
   formatMegabytes,
   isAccountId,
   ownersSee,
@@ -395,6 +396,27 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
               d.connections ?? '–',
               `${d.storageLimitMb.toLocaleString('en-US')} MB`,
               whenUtc(d.createdAt),
+            ])}
+          />
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Buckets</h2>
+        <p className="text-sm text-slate-600">Together: {bucketStorageLabel(account)}.</p>
+        {view.buckets.length === 0 ? (
+          <EmptyState>No bucket.</EmptyState>
+        ) : (
+          <Table
+            head={['Name', 'In the store', 'Status', 'Size', 'Objects', 'Measured', 'Created']}
+            rows={view.buckets.map((b) => [
+              b.name,
+              <span className="font-mono text-xs">{b.storeName}</span>,
+              b.status,
+              formatMegabytes(b.sizeBytes),
+              b.objects === null ? '–' : b.objects.toLocaleString('en-US'),
+              b.measuredAt ? whenUtc(b.measuredAt) : 'not yet',
+              whenUtc(b.createdAt),
             ])}
           />
         )}

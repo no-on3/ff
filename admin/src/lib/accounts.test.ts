@@ -4,6 +4,7 @@ import {
   AccountStatus,
   STATUS_CHANGES,
   StatusChange,
+  bucketStorageLabel,
   changedNotice,
   changesFor,
   dataDeletion,
@@ -57,6 +58,14 @@ describe("an account's databases and buckets, to read", () => {
 
   it("gives a database's size in MB to a tenth, and a dash when the server couldn't say", () => {
     expect([formatMegabytes(7_634_423), formatMegabytes(1_073_741_824), formatMegabytes(0), formatMegabytes(null)]).toEqual(['7.3 MB', '1,024 MB', '0 MB', '–']);
+  });
+
+  it("says how full the buckets are together against the plan's storage, full being when uploads wait", () => {
+    expect([null, 80, 100].map((notice) => bucketStorageLabel({ bucketStorageNotice: notice as 80 | 100 | null }))).toEqual([
+      "Under 80% of the plan's storage",
+      "80% or more of the plan's storage",
+      "Full: they hold all of the plan's storage, and uploads wait for room",
+    ]);
   });
 });
 

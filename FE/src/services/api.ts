@@ -877,6 +877,8 @@ export interface AlarmBody {
   functionId: string | null;
   /** The database watched, for DatabaseConnections and VolumeBytesUsed, an hour at a time; null otherwise. */
   databaseId?: string | null;
+  /** The bucket watched, by its name, for its storage and its requests; null otherwise. */
+  bucketName?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -896,6 +898,7 @@ export const ALARM_FIELDS = [
   'name',
   'functionId',
   'databaseId',
+  'bucketName',
   'metric',
   'statistic',
   'period',

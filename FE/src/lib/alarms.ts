@@ -11,6 +11,15 @@ export const STATISTICS = {
   Instances: ['Maximum', 'Average'],
   DatabaseConnections: ['Maximum', 'Average'],
   VolumeBytesUsed: ['Maximum', 'Average'],
+  BucketSizeBytes: ['Average'],
+  NumberOfObjects: ['Average'],
+  AllRequests: ['Sum'],
+  GetRequests: ['Sum'],
+  PutRequests: ['Sum'],
+  '4xxErrors': ['Sum'],
+  '5xxErrors': ['Sum'],
+  BytesDownloaded: ['Sum'],
+  BytesUploaded: ['Sum'],
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
 } as const;
@@ -20,6 +29,8 @@ export const METRICS = Object.keys(STATISTICS) as Metric[];
 export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharges'];
 /** A customer's database's, an hour at a time: alarms on them are made on the database's page. */
 export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
+/** A customer's bucket's, as CloudWatch names S3's: what it holds, and its requests. */
+export const BUCKET_METRICS: readonly Metric[] = ['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'];
 
 /** Each metric's unit, as the threshold is written. */
 export const UNITS: Record<Metric, string> = {
@@ -31,6 +42,15 @@ export const UNITS: Record<Metric, string> = {
   Instances: 'instances',
   DatabaseConnections: 'sessions',
   VolumeBytesUsed: 'bytes',
+  BucketSizeBytes: 'bytes',
+  NumberOfObjects: 'objects',
+  AllRequests: 'requests',
+  GetRequests: 'requests',
+  PutRequests: 'requests',
+  '4xxErrors': 'requests',
+  '5xxErrors': 'requests',
+  BytesDownloaded: 'bytes',
+  BytesUploaded: 'bytes',
   Balance: 'TND',
   MonthToDateCharges: 'TND',
 };
@@ -115,7 +135,9 @@ export const formFromAlarm = (alarm: Alarm): AlarmForm => ({
 
 /** The metrics a scope offers: a function's calls, durations and instances; the account's too, and its money; a database's its own. */
 export const metricsFor = (functionId: string, databaseId = ''): Metric[] =>
-  databaseId ? [...DATABASE_METRICS] : METRICS.filter((metric) => !DATABASE_METRICS.includes(metric) && !(functionId && BILLING_METRICS.includes(metric)));
+  databaseId
+    ? [...DATABASE_METRICS]
+    : METRICS.filter((metric) => !DATABASE_METRICS.includes(metric) && !BUCKET_METRICS.includes(metric) && !(functionId && BILLING_METRICS.includes(metric)));
 
 /** The form once the metric changes: a statistic it has; for the money the account's, one datapoint; for a database's, an hour a period. */
 export function withMetric(form: AlarmForm, metric: Metric): AlarmForm {

@@ -36,6 +36,9 @@ import { AdminAccountsService, utcMinute } from './admin-accounts.service';
 import { AdminCreditsService } from './admin-credits.service';
 import { PlatformSetting } from './platform-setting.entity';
 import { PlatformSettingsService } from './platform-settings.service';
+import { BucketsService } from '../storage/buckets.service';
+import { Bucket } from '../storage/bucket.entity';
+import { StoreBuckets } from '../storage/store-buckets';
 
 const DAY_MS = 86_400_000;
 
@@ -151,6 +154,8 @@ run('accounts, for operators (L2, P-71)', () => {
             ? [{ id: 'db-1', name: 'orders', database: 'ff_0123456789abcdef01234567', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z'), host: 'db.example.tn' }]
             : [],
       } as never,
+      // Its buckets' rows and samples are read from the database itself; nothing here makes or empties a bucket in the store.
+      new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } })),
     );
   });
 
@@ -506,6 +511,28 @@ run('accounts, for operators (L2, P-71)', () => {
     expect(page.databases).toEqual([
       { id: 'db-1', name: 'orders', database: 'ff_0123456789abcdef01234567', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z') },
     ]);
+  });
+
+  it("shows the account's buckets on its page, their names in the store, what each held at its last measure, and how full they are together", async () => {
+    const id = await account({ status: AccountStatus.ACTIVE });
+    const [{ id: photos }] = await query<Array<{ id: string }>>(
+      `INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456a', '2026-10-20T10:00:00Z') RETURNING id`,
+      [id, `photos-${id}`],
+    );
+    await query(`INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456b', '2026-10-21T10:00:00Z')`, [id, `zz-new-${id}`]);
+    await query(`SELECT ff_ensure_month_partition('bucket_samples', '2026-10-01')`);
+    for (const [hour, size] of [['2026-10-22T08:00:00Z', 1_000], ['2026-10-22T09:00:00Z', 161_480_253]] as const) {
+      await query(`INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES ($1, $2, $3, 'photos', $4, 1204)`, [photos, hour, id, size]);
+    }
+    await query(`UPDATE accounts SET bucket_storage_notice = 80 WHERE id = $1`, [id]);
+
+    const page = await service.detail(id);
+
+    expect(page.buckets).toEqual([
+      { name: `photos-${id}`, storeName: 'ff-0123456789abcdef0123456a', status: 'active', sizeBytes: 161_480_253, objects: 1_204, measuredAt: new Date('2026-10-22T09:00:00Z'), createdAt: new Date('2026-10-20T10:00:00Z') },
+      { name: `zz-new-${id}`, storeName: 'ff-0123456789abcdef0123456b', status: 'active', sizeBytes: null, objects: null, measuredAt: null, createdAt: new Date('2026-10-21T10:00:00Z') },
+    ]);
+    expect(page.account.bucketStorageNotice).toBe(80);
   });
 
   it('changes nothing when the cluster refuses the NetworkPolicy; the value the account has writes nothing, but applies it again', async () => {

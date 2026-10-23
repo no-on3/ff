@@ -309,7 +309,8 @@ describe('the alarms', () => {
 
   it("offer the API's metrics, each with its statistics", () => {
     const block = alarmRulesSource.slice(alarmRulesSource.indexOf('export const STATISTICS = {'), alarmRulesSource.indexOf('} as const;'));
-    const backend = Object.fromEntries([...block.matchAll(/^\s+(\w+): \[([^\]]*)\]/gm)].map(([, metric, list]) => [metric, list.split(',').map((s) => s.trim().replace(/'/g, ''))]));
+    // A key may be quoted, as one starting with a digit is: '4xxErrors'.
+    const backend = Object.fromEntries([...block.matchAll(/^\s+'?(\w+)'?: \[([^\]]*)\]/gm)].map(([, metric, list]) => [metric, list.split(',').map((s) => s.trim().replace(/'/g, ''))]));
     expect(backend).toEqual(Object.fromEntries(Object.entries(STATISTICS).map(([metric, list]) => [metric, [...list]])));
   });
 

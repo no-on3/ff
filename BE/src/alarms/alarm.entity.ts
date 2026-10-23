@@ -2,6 +2,7 @@ import { Check, Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, 
 import { Account } from '../accounts/entities/account.entity';
 import { Database } from '../databases/database.entity';
 import { Function } from '../functions/entities/function.entity';
+import { Bucket } from '../storage/bucket.entity';
 import type { AlarmState, Comparison, Evaluation, Metric, MissingData, Statistic } from './alarm-rules';
 
 /** Who an alarm tells when its state changes: the owners' e-mail, each in their language, and signed webhooks. */
@@ -11,10 +12,10 @@ export interface AlarmActions {
 }
 
 /**
- * An alarm on a metric, as CloudWatch's: a function's, a database's, or the
- * account's when it names neither; evaluated every minute, telling its
- * actions when it goes into ALARM and when it leaves it. It goes with its
- * function or database.
+ * An alarm on a metric, as CloudWatch's: a function's, a database's, a
+ * bucket's, or the account's when it names none; evaluated every minute,
+ * telling its actions when it goes into ALARM and when it leaves it. It goes
+ * with its function, database or bucket.
  */
 @Entity('alarms')
 @Check(`"state" IN ('OK', 'ALARM', 'INSUFFICIENT_DATA')`)
@@ -50,6 +51,15 @@ export class Alarm {
   @ManyToOne(() => Database, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({ name: 'database_id' })
   database?: Database;
+
+  /** A customer's bucket, for its storage and its requests; null otherwise. */
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  bucketId: string | null;
+
+  @ManyToOne(() => Bucket, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'bucket_id' })
+  bucket?: Bucket;
 
   @Column({ type: 'text' })
   name: string;

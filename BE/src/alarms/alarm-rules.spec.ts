@@ -5,12 +5,13 @@
  * evaluator runs against PostgreSQL in alarms.db.spec.ts.
  */
 import { alarmMail } from './alarm-mail';
-import { AlarmRule, alarmProblem, databaseDatapointsOf, datapointsOf, evaluate, evaluationWindow, notifies, stateReason } from './alarm-rules';
-import { databaseMetricsView, type MetricsView } from '../metrics/customer-metrics';
+import { AlarmRule, alarmProblem, bucketDatapointsOf, databaseDatapointsOf, datapointsOf, evaluate, evaluationWindow, notifies, stateReason } from './alarm-rules';
+import { bucketMetricsView, databaseMetricsView, type MetricsView } from '../metrics/customer-metrics';
 
 const RULE: AlarmRule = {
   functionId: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
   databaseId: null,
+  bucketId: null,
   metric: 'Errors',
   statistic: 'Sum',
   period: 60,
@@ -77,6 +78,55 @@ describe("an alarm on a customer's database", () => {
       [7_634_423, null],
     ]);
     expect(() => databaseDatapointsOf(view, 'Errors', 'Sum')).toThrow("Errors isn't a database's metric");
+  });
+});
+
+describe("an alarm on a customer's bucket", () => {
+  const bucketId = '0b6f3a1c-2d4e-4f5a-8b9c-1d2e3f4a5b6c';
+  const held = { ...RULE, functionId: null, bucketId, metric: 'BucketSizeBytes' as const, statistic: 'Average' as const, period: 3600 };
+
+  it("names the bucket, takes the Average of what it holds, and the Sum of its requests, in any period", () => {
+    expect([
+      alarmProblem(held),
+      alarmProblem({ ...held, metric: 'NumberOfObjects', period: 300 }),
+      alarmProblem({ ...held, metric: '5xxErrors', statistic: 'Sum', period: 60 }),
+      alarmProblem({ ...held, metric: 'BytesDownloaded', statistic: 'Sum', period: 3600, evaluationPeriods: 24, datapointsToAlarm: 1 }),
+    ]).toEqual([null, null, null, null]);
+    expect([
+      alarmProblem({ ...held, bucketId: null }),
+      alarmProblem({ ...held, functionId: RULE.functionId }),
+      alarmProblem({ ...held, databaseId: '7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f' }),
+      alarmProblem({ ...held, statistic: 'Maximum' }),
+      alarmProblem({ ...held, metric: 'GetRequests', statistic: 'Average' }),
+      alarmProblem({ ...RULE, bucketId }),
+    ]).toEqual([
+      "BucketSizeBytes is a bucket's: the alarm names a bucketName, and no function or database",
+      "BucketSizeBytes is a bucket's: the alarm names a bucketName, and no function or database",
+      'A databaseId goes with DatabaseConnections and VolumeBytesUsed only',
+      'BucketSizeBytes has the statistic Average, not Maximum',
+      'GetRequests has the statistic Sum, not Average',
+      "A bucketName goes with a bucket's metrics only: BucketSizeBytes, NumberOfObjects, AllRequests, GetRequests, PutRequests, 4xxErrors, 5xxErrors, BytesDownloaded, BytesUploaded",
+    ]);
+  });
+
+  it("reads its datapoints from the bucket's metrics: what it holds, its hour's measure in each period, an hour unmeasured missing; its requests every period", () => {
+    const window = { start: new Date('2026-10-20T08:55:00Z'), end: new Date('2026-10-20T09:10:00Z'), period: 300 as const };
+    const nine = Date.parse('2026-10-20T09:00:00Z') / 1000;
+    const requests = { AllRequests: 12, GetRequests: 9, PutRequests: 3, '4xxErrors': 2, '5xxErrors': 1, BytesDownloaded: 9_000, BytesUploaded: 3_000 };
+    const view = bucketMetricsView(window, [{ hour: nine, sizeBytes: 161_480_253, objects: 1_204 }], [{ bucket: nine + 300, ...requests }]);
+
+    expect([
+      bucketDatapointsOf(view, 'BucketSizeBytes', 'Average'),
+      bucketDatapointsOf(view, 'NumberOfObjects', 'Average'),
+      bucketDatapointsOf(view, '5xxErrors', 'Sum'),
+      bucketDatapointsOf(view, 'BytesDownloaded', 'Sum'),
+    ]).toEqual([
+      [null, 161_480_253, 161_480_253],
+      [null, 1_204, 1_204],
+      [0, 0, 1],
+      [0, 0, 9_000],
+    ]);
+    expect(() => bucketDatapointsOf(view, 'Errors', 'Sum')).toThrow("Errors Sum isn't a bucket's metric");
   });
 });
 
@@ -204,6 +254,15 @@ describe("an alarm's e-mail", () => {
     expect(alarmMail(sessions, 'en').text.split('\n')[0]).toBe('Your alarm "Sessions" on the database "orders" of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
     expect(alarmMail(sessions, 'fr').text.split('\n')[0]).toBe(
       'Votre alarme « Sessions » sur la base de données « orders » du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.',
+    );
+  });
+
+  it("names a bucket's alarm by the bucket, in both languages", () => {
+    const held = { ...change, alarm: { ...RULE, metric: 'BucketSizeBytes' as const, statistic: 'Average' as const, period: 3600, name: 'Photos size' }, functionName: null, bucketName: 'photos' };
+
+    expect(alarmMail(held, 'en').text.split('\n')[0]).toBe('Your alarm "Photos size" on the bucket "photos" of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
+    expect(alarmMail(held, 'fr').text.split('\n')[0]).toBe(
+      'Votre alarme « Photos size » sur le bucket « photos » du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.',
     );
   });
 

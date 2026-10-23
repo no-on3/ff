@@ -36,8 +36,9 @@
 # with no setting at all, writing to the account's bucket with keys of their own
 # and refused another's, a function's key revoked with it; the bucket measured
 # within a minute; an account past its plan's storage, its uploads waiting for
-# room and let in again once it has some; the requests counted by the minute; a
-# bucket deleted empty, or emptied first when asked. Then plans:
+# room and let in again once it has some; the requests counted by the minute; its
+# metrics, and an alarm on its errors firing; a bucket deleted empty, or emptied
+# first when asked, its alarm with it. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -898,12 +899,24 @@ for _ in $(seq 150); do
 done
 check "the requests counted by the minute, in AWS's three classes, with their bytes, the 300 MB up and down among them" "3 true true true" \
   "$(env_q "SELECT count(DISTINCT class) || ' ' || (sum(bytes_in) > 314572800) || ' ' || (sum(bytes_out) > 314572800) || ' ' || (sum(errors4xx) > 0) FROM storage_request_counts WHERE name = 'e2e-photos'" | tr -d '\r')"
+# Its metrics, as CloudWatch names S3's: this hour and the one before, a point an hour.
+since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
+photos_metrics="$(http GET "/buckets/e2e-photos/metrics?period=3600&start=$since")"
+check "its metrics, as CloudWatch names S3's: its requests and their bytes as counted, what it holds as its hour's measure" \
+  "200 $(env_q "SELECT sum(requests) || ' ' || sum(errors4xx) || ' ' || sum(bytes_in) FROM storage_request_counts WHERE bucket_id = '$photos_id' AND minute >= '$since'" | tr -d '\r') $(env_q "SELECT size_bytes FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")" \
+  "$(status) $(jq -r '"\([.metrics.AllRequests.Sum[]] | add) \([.metrics."4xxErrors".Sum[]] | add) \([.metrics.BytesUploaded.Sum[]] | add) \(.metrics.BucketSizeBytes.Average[-1])"' <<<"$photos_metrics")"
+# An alarm on its 4xx errors, as CloudWatch's on S3's metrics, judging its last three minutes: a file it hasn't, asked for.
+bucket_alarm="$(http POST /alarms '{"name": "e2e-photos 4xx", "bucketName": "e2e-photos", "metric": "4xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 3, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' | jq -r .id)"
+aws_ff s3 cp s3://e2e-photos/no-such-file.txt "$work/none" --only-show-errors 2>/dev/null || true
+for _ in $(seq 150); do [ "$(http GET "/alarms/$bucket_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
+check "an alarm on its 4xx errors fires once the minute is counted, naming the bucket" "ALARM e2e-photos true" \
+  "$(http GET "/alarms/$bucket_alarm" | jq -r '"\(.state) \(.bucketName) \(.stateReason | test("breaching 4xxErrors Sum > 0"))"')"
 http DELETE /buckets/e2e-photos >/dev/null
 check "a bucket with files isn't deleted unless asked to empty it" "409 The bucket e2e-photos isn't empty: delete its objects first, or delete it with ?force=true, which deletes them all" \
   "$(status) $(jq -r .message "$work/body")"
 http DELETE "/buckets/e2e-photos?force=true" >/dev/null
-check "  ... which deletes its files, then the bucket, gone from the store too" "204 404 gone" \
-  "$(status) $(http GET /buckets/e2e-photos >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$store_name")"
+check "  ... which deletes its files, then the bucket, gone from the store too, and its alarm with it" "204 404 gone 404" \
+  "$(status) $(http GET /buckets/e2e-photos >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$store_name") $(http GET "/alarms/$bucket_alarm" >/dev/null; status)"
 http DELETE "/storage-keys/$key_id" >/dev/null
 
 echo "== plans and rate limits (P-15)"

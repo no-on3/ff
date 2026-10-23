@@ -1,12 +1,12 @@
-import type { DatabaseMetricsView, MetricsView } from '../metrics/customer-metrics';
+import type { BucketMetricsView, BucketRequestMetric, DatabaseMetricsView, MetricsView } from '../metrics/customer-metrics';
 import { DATABASE_PERIOD } from '../metrics/customer-metrics';
 
 /**
  * An alarm's rules, as CloudWatch's: a metric and its statistic over a
  * period, compared with a threshold, "M out of N" periods breaching, and what
  * a period without a datapoint counts as. The metrics are those of the
- * metrics API, a database's among them, and two of the account's money, read
- * as they are.
+ * metrics API, a database's and a bucket's among them, and two of the
+ * account's money, read as they are.
  */
 
 /** The metrics an alarm watches, and the statistics each has. */
@@ -20,6 +20,16 @@ export const STATISTICS = {
   // A customer's database's, a point an hour, as CloudWatch names RDS's and Aurora's.
   DatabaseConnections: ['Maximum', 'Average'],
   VolumeBytesUsed: ['Maximum', 'Average'],
+  // A customer's bucket's, as CloudWatch names S3's: what it holds, its hour's measure in each period, and its requests.
+  BucketSizeBytes: ['Average'],
+  NumberOfObjects: ['Average'],
+  AllRequests: ['Sum'],
+  GetRequests: ['Sum'],
+  PutRequests: ['Sum'],
+  '4xxErrors': ['Sum'],
+  '5xxErrors': ['Sum'],
+  BytesDownloaded: ['Sum'],
+  BytesUploaded: ['Sum'],
   // The account's money, in the prices' currency, read as it is at each evaluation.
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
@@ -32,6 +42,8 @@ export const ALL_STATISTICS = [...new Set(Object.values(STATISTICS).flat())] as 
 export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharges'];
 /** A database's: the alarm names it, and judges hours. */
 export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
+/** A bucket's: the alarm names it. */
+export const BUCKET_METRICS: readonly Metric[] = ['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'];
 
 export const COMPARISONS = ['GreaterThanThreshold', 'GreaterThanOrEqualToThreshold', 'LessThanThreshold', 'LessThanOrEqualToThreshold'] as const;
 export type Comparison = (typeof COMPARISONS)[number];
@@ -53,6 +65,8 @@ export const MAX_ALARMS = 50;
 export interface AlarmRule {
   functionId: string | null;
   databaseId: string | null;
+  /** The bucket it names, if any. */
+  bucketId: string | null;
   metric: Metric;
   statistic: Statistic;
   period: number;
@@ -73,6 +87,11 @@ export function alarmProblem(rule: AlarmRule): string | null {
     if (rule.period !== DATABASE_PERIOD) return `A database's metrics have a point an hour: period must be ${DATABASE_PERIOD}`;
   } else if (rule.databaseId) {
     return `A databaseId goes with ${DATABASE_METRICS.join(' and ')} only`;
+  }
+  if (BUCKET_METRICS.includes(rule.metric)) {
+    if (!rule.bucketId || rule.functionId || rule.databaseId) return `${rule.metric} is a bucket's: the alarm names a bucketName, and no function or database`;
+  } else if (rule.bucketId) {
+    return `A bucketName goes with a bucket's metrics only: ${BUCKET_METRICS.join(', ')}`;
   }
   if (BILLING_METRICS.includes(rule.metric)) {
     if (rule.functionId) return `${rule.metric} is the account's: a billing alarm names no function`;
@@ -149,6 +168,14 @@ export function stateReason(rule: Pick<AlarmRule, 'metric' | 'statistic' | 'peri
 
 /** Whether a change of state is told: into ALARM, and out of it. */
 export const notifies = (from: AlarmState, to: AlarmState): boolean => from !== to && (to === 'ALARM' || from === 'ALARM');
+
+/** A bucket's metric's datapoints, oldest first: its storage null in an hour it wasn't measured in, its requests every period. */
+export function bucketDatapointsOf(view: BucketMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
+  if (metric === 'BucketSizeBytes' || metric === 'NumberOfObjects') return view.metrics[metric].Average;
+  const requests = BUCKET_METRICS.includes(metric) ? view.metrics[metric as BucketRequestMetric] : undefined;
+  if (!requests || statistic !== 'Sum') throw new Error(`${metric} ${statistic} isn't a bucket's metric`);
+  return requests.Sum;
+}
 
 /** A database's metric's datapoints, oldest first: null for an hour it wasn't sampled in. */
 export function databaseDatapointsOf(view: DatabaseMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {

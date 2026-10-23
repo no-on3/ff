@@ -519,6 +519,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B gets 404 for A's bucket" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
       check "  ... which A still has" "l5-photos-a 200" "$(as_a GET /buckets/l5-photos-a | jq -r .name) $(status)"
       ;;
+    "GET /buckets/{name}/metrics")
+      as_b GET /buckets/l5-photos-a/metrics >/dev/null
+      check "$route: B gets 404 for A's bucket's metrics" '404 The account has no bucket l5-photos-a' "$(status) $(message)"
+      check "  ... which A reads" "true 200" "$(as_a GET /buckets/l5-photos-a/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
+      ;;
     "GET /storage-keys")
       listed="$(as_b GET /storage-keys | jq --arg id "$key_a_id" 'map(select(.id == $id)) | length')"
       check "$route: B's list doesn't show A's key" "200 0" "$(status) $listed"
@@ -586,6 +591,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "POST /alarms")
       as_b POST /alarms "$(alarm_body "$id")" >/dev/null
       check "$route: B can't watch A's function" "404 Function with ID $id not found" "$(status) $(message)"
+      as_b POST /alarms '{"name": "l5", "bucketName": "l5-photos-a", "metric": "5xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor A's bucket" "404 The account has no bucket l5-photos-a" "$(status) $(message)"
       as_b POST /alarms "$(alarm_body)" >/dev/null
       check "  ... but makes its own account's alarm" 201 "$(status)"
       ;;
@@ -888,6 +895,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2 gets 404 for account 1's bucket" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
       check "  ... which account 1 still has" "l5-photos-1 200" "$(as_user_1 GET /buckets/l5-photos-1 | jq -r .name) $(status)"
       ;;
+    "GET /buckets/{name}/metrics")
+      as_user_2 GET /buckets/l5-photos-1/metrics >/dev/null
+      check "$route: account 2 gets 404 for account 1's bucket's metrics" '404 The account has no bucket l5-photos-1' "$(status) $(message)"
+      check "  ... which account 1 reads" "true 200" "$(as_user_1 GET /buckets/l5-photos-1/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
+      ;;
     "GET /storage-keys")
       listed="$(as_user_2 GET /storage-keys | jq --arg id "$key_1_s3_id" 'map(select(.id == $id)) | length')"
       check "$route: account 2's list doesn't show account 1's key" "200 0" "$(status) $listed"
@@ -957,6 +969,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "POST /alarms")
       as_user_2 POST /alarms "$(alarm_body "$fn_1")" >/dev/null
       check "$route: account 2 can't watch account 1's function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
+      as_user_2 POST /alarms '{"name": "l5", "bucketName": "l5-photos-1", "metric": "5xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor account 1's bucket" "404 The account has no bucket l5-photos-1" "$(status) $(message)"
       ;;
     "POST /packages")
       upload_package "$api_oidc" "$work/package-b.zip" -H "Authorization: Bearer $token_2" -H "X-FF-Account: ${account_2:-}" >/dev/null

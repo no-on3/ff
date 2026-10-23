@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 import { Logger } from '@nestjs/common';
-import { MAX_POINTS, MetricsWindow, databaseMetricsView, metricsView, metricsWindow } from './customer-metrics';
+import { MAX_POINTS, MetricsWindow, bucketMetricsView, databaseMetricsView, metricsView, metricsWindow } from './customer-metrics';
 import { MAX_HELD, RefusedInvocationsService } from './refused-invocations.service';
 
 const NOW = new Date('2026-10-19T10:07:30Z');
@@ -51,6 +51,38 @@ describe('databaseMetricsView', () => {
       metrics: {
         DatabaseConnections: { Maximum: [3, null, 4], Average: [3, null, 2.333] },
         VolumeBytesUsed: { Maximum: [7_634_423, null, 9_000_001], Average: [7_634_423, null, 8_500_001] },
+      },
+    });
+  });
+});
+
+describe('bucketMetricsView', () => {
+  it("gives a point per period, oldest first: what the bucket holds, its hour's measure in each period, null in an hour unmeasured; its requests, zeros when quiet", () => {
+    const window: MetricsWindow = { start: new Date('2026-10-19T08:50:00Z'), end: new Date('2026-10-19T09:10:00Z'), period: 300 };
+    const at = (iso: string) => new Date(iso).getTime() / 1000;
+    const quiet = { AllRequests: 0, GetRequests: 0, PutRequests: 0, '4xxErrors': 0, '5xxErrors': 0, BytesDownloaded: 0, BytesUploaded: 0 };
+
+    const view = bucketMetricsView(
+      window,
+      [{ hour: at('2026-10-19T09:00:00Z'), sizeBytes: 161_480_253, objects: 1_204 }],
+      [{ bucket: at('2026-10-19T09:05:00Z'), ...quiet, AllRequests: 12, GetRequests: 9, PutRequests: 3, '4xxErrors': 2, '5xxErrors': 1, BytesDownloaded: 9_000, BytesUploaded: 3_000 }],
+    );
+
+    expect(view).toEqual({
+      period: 300,
+      start: window.start,
+      end: window.end,
+      timestamps: ['08:50', '08:55', '09:00', '09:05'].map((time) => new Date(`2026-10-19T${time}:00Z`)),
+      metrics: {
+        BucketSizeBytes: { Average: [null, null, 161_480_253, 161_480_253] },
+        NumberOfObjects: { Average: [null, null, 1_204, 1_204] },
+        AllRequests: { Sum: [0, 0, 0, 12] },
+        GetRequests: { Sum: [0, 0, 0, 9] },
+        PutRequests: { Sum: [0, 0, 0, 3] },
+        '4xxErrors': { Sum: [0, 0, 0, 2] },
+        '5xxErrors': { Sum: [0, 0, 0, 1] },
+        BytesDownloaded: { Sum: [0, 0, 0, 9_000] },
+        BytesUploaded: { Sum: [0, 0, 0, 3_000] },
       },
     });
   });

@@ -12,6 +12,18 @@ import { StorageKey } from './storage-key.entity';
 import { newStoreName } from './storage-names';
 import { StoreBuckets } from './store-buckets';
 
+/** A bucket as FF's operators see it: its name in the store too, and its last hourly measure, null before the first. */
+export interface MeasuredBucket {
+  name: string;
+  storeName: string;
+  status: BucketStatus;
+  sizeBytes: number | null;
+  objects: number | null;
+  /** The hour of its last measure. */
+  measuredAt: Date | null;
+  createdAt: Date;
+}
+
 /** PostgreSQL's unique_violation: a bucket of that name exists, whoever's it is. */
 const UNIQUE_VIOLATION = '23505';
 
@@ -47,6 +59,29 @@ export class BucketsService {
 
   async get(accountId: string, name: string): Promise<BucketView> {
     return this.view(await this.bucketOf(accountId, name));
+  }
+
+  /** The account's buckets as FF's operators see them: their names in the store, and what each held at its last hourly measure. */
+  async measured(accountId: string): Promise<MeasuredBucket[]> {
+    const rows = await this.buckets.manager.query<
+      Array<{ name: string; store_name: string; status: BucketStatus; created_at: Date; size_bytes: string | null; objects: string | null; hour: Date | null }>
+    >(
+      `SELECT b."name", b."store_name", b."status", b."created_at", s."size_bytes"::text, s."objects"::text, s."hour"
+         FROM "buckets" b
+         LEFT JOIN LATERAL (SELECT "size_bytes", "objects", "hour" FROM "bucket_samples" WHERE "bucket_id" = b."id" ORDER BY "hour" DESC LIMIT 1) s ON true
+        WHERE b."account_id" = $1
+        ORDER BY b."name"`,
+      [accountId],
+    );
+    return rows.map((row) => ({
+      name: row.name,
+      storeName: row.store_name,
+      status: row.status,
+      sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),
+      objects: row.objects === null ? null : Number(row.objects),
+      measuredAt: row.hour,
+      createdAt: row.created_at,
+    }));
   }
 
   /**

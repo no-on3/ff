@@ -10,6 +10,7 @@ import { LedgerService } from '../billing/ledger/ledger.service';
 import { formatMinor } from '../billing/money';
 import { describeError } from '../common/describe-error';
 import { DatabasesService } from '../databases/databases.service';
+import { BucketsService } from '../storage/buckets.service';
 import { frenchTime } from '../common/french';
 import { likeLiteral } from '../common/like';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
@@ -41,8 +42,25 @@ export interface AccountsFilter {
 const person = (membership: Membership): AccountPersonView => ({ email: membership.user?.email ?? '', name: membership.user?.name ?? null });
 
 function summary(account: Account, owners: AccountPersonView[]): AdminAccountSummaryView {
-  const { id, name, status, planId, country, taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason } = account;
-  return { id, name, status, planId, country: country.trim(), taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason, owners };
+  const { id, name, status, planId, country, taxId, useCase, internetEgress, createdAt, dataDeletionDueAt, dataDeletedAt, storageDisabledAt, storageDisabledReason, bucketStorageNotice } =
+    account;
+  return {
+    id,
+    name,
+    status,
+    planId,
+    country: country.trim(),
+    taxId,
+    useCase,
+    internetEgress,
+    createdAt,
+    dataDeletionDueAt,
+    dataDeletedAt,
+    storageDisabledAt,
+    storageDisabledReason,
+    bucketStorageNotice: bucketStorageNotice ?? null,
+    owners,
+  };
 }
 
 const DAY_MS = 86_400_000;
@@ -186,6 +204,7 @@ export class AdminAccountsService {
     private readonly credits: AdminCreditsService,
     private readonly settings: PlatformSettingsService,
     private readonly databases: DatabasesService,
+    private readonly buckets: BucketsService,
   ) {}
 
   /** GET /admin/accounts: newest first, a page at a time, each with its owners. */
@@ -262,6 +281,7 @@ export class AdminAccountsService {
         storageLimitMb,
         createdAt,
       })),
+      buckets: await this.buckets.measured(id),
       usage: { month, totals },
       balances: (await this.ledger.balances(id)).map(({ currency, exponent, balanceMinor }) => ({ currency, balance: formatMinor(balanceMinor, exponent) })),
       credit: await this.credits.view(id),

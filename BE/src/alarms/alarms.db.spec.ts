@@ -86,13 +86,20 @@ run('alarms (L2)', () => {
         `ff_${String(databases).padStart(24, '0')}`,
       ])
     )[0].id;
+  let buckets = 0;
+  /** A customer's bucket of the account, as its row: the store isn't asked here. Answers its name. */
+  const bucket = async (accountId: string, name: string) => {
+    const unique = `${name}-${++buckets}`;
+    await query(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, $2, $3)`, [accountId, unique, `ff-${String(buckets).padStart(24, '0')}`]);
+    return unique;
+  };
   /** Only the deliveries of the alarm a test makes: each test clears those before it. */
   const clearDeliveries = () => query(`DELETE FROM notification_deliveries`);
 
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'database_samples']) await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
+    for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts']) await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
     for (const [id, name] of [[A, 'Alarmed'], [B, 'Other']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
     const owner = await db.dataSource.getRepository(User).save({ oidcSub: 'kc-alarm-owner', email: 'owner@ff.test', name: null, locale: 'fr-TN' }); // the e-mails in the owner's language
     await db.dataSource.getRepository(Membership).save({ accountId: A, userId: owner.id, role: 'owner' });
@@ -163,6 +170,21 @@ run('alarms (L2)', () => {
       await expect(alarms.create(A, { ...sessions, databaseId: theirs })).rejects.toThrow(new NotFoundException(`Database ${theirs} not found`));
       await expect(alarms.create(A, { ...sessions, period: 60 })).rejects.toThrow(new BadRequestException("A database's metrics have a point an hour: period must be 3600"));
       await query(`DELETE FROM databases WHERE id = $1`, [mine]);
+      await expect(alarms.get(A, watching.id)).rejects.toThrow(NotFoundException);
+    });
+
+    it("watch the account's own bucket, by its name, and go with it", async () => {
+      const mine = await bucket(A, 'photos');
+      const theirs = await bucket(B, 'photos');
+      const errors = alarm({ functionId: null, bucketName: mine, metric: '5xxErrors', statistic: 'Sum', period: 300 });
+
+      const watching = await alarms.create(A, errors);
+      expect(watching).toMatchObject({ functionId: null, databaseId: null, bucketName: mine, metric: '5xxErrors', period: 300 });
+      expect((await alarms.list(A)).map((listed) => listed.bucketName)).toEqual([mine]);
+      await expect(alarms.create(A, { ...errors, bucketName: theirs })).rejects.toThrow(new NotFoundException(`The account has no bucket ${theirs}`));
+      await expect(alarms.create(A, { ...errors, metric: 'Errors' })).rejects.toThrow(BadRequestException);
+      expect(await alarms.update(A, watching.id, { ...errors, metric: 'BucketSizeBytes', statistic: 'Average', threshold: 1e9 })).toMatchObject({ bucketName: mine, metric: 'BucketSizeBytes' });
+      await query(`DELETE FROM buckets WHERE name = $1`, [mine]);
       await expect(alarms.get(A, watching.id)).rejects.toThrow(NotFoundException);
     });
   });
@@ -289,6 +311,31 @@ run('alarms (L2)', () => {
       await query(`INSERT INTO database_samples (database_id, hour, account_id, name, size_bytes, connections) VALUES ($1, '2026-10-20T16:00:00Z', $2, 'orders', 700000000, 3)`, [orders, A]);
       await evaluator.tick(new Date('2026-10-20T17:00:05Z'));
       expect((await stateOf(big.id)).state).toBe('OK');
+    });
+
+    it("fires on a bucket's errors from the front door's counts, the e-mail naming the bucket, and recovers on a quiet period", async () => {
+      const photos = await bucket(A, 'photos');
+      const [{ id }] = await query<Array<{ id: string }>>(`SELECT id FROM buckets WHERE name = $1`, [photos]);
+      const failing = await alarms.create(
+        A,
+        alarm({ name: 'Store errors', functionId: null, bucketName: photos, metric: '5xxErrors', statistic: 'Sum', period: 60, threshold: 2, actions: { email: true, webhookUrls: [] } }),
+      );
+      await query(
+        `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
+         VALUES ($1, '2026-10-20T15:00:00Z', 'tier2', gen_random_uuid(), $2, $3, 5, 5, 0, 0, 3, 0, 0)`,
+        [id, A, photos],
+      );
+
+      await evaluator.tick(new Date('2026-10-20T15:01:05Z'));
+      expect([(await stateOf(failing.id)).state, (await stateOf(failing.id)).stateReason]).toEqual([
+        'ALARM',
+        '1 of the last 1 period(s) of 60 s breaching 5xxErrors Sum > 2 (1 needed); latest 3',
+      ]);
+      const [told] = await db.dataSource.getRepository(NotificationDelivery).find({ where: { kind: 'alarm', channel: DeliveryChannel.EMAIL } });
+      expect((told.payload as { text: string }).text).toMatch(/sur le bucket « photos-\d+ » du compte « Alarmed »/);
+
+      await evaluator.tick(new Date('2026-10-20T15:02:05Z'));
+      expect((await stateOf(failing.id)).state).toBe('OK');
     });
 
     it('evaluates each alarm once a round when two backends work at once, and an alarm replaced again at once', async () => {

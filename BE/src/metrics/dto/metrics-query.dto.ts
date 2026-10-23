@@ -74,3 +74,32 @@ export class DatabaseMetricsView {
   @ApiProperty({ type: [Date], description: "Each hour's start" }) timestamps: Date[];
   @ApiProperty({ type: DatabaseMetricSeries }) metrics: DatabaseMetricSeries;
 }
+
+class BucketStorageSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "Its hour's measure, in each period of the hour; null in an hour it wasn't measured in" }) Average: Array<number | null>;
+}
+
+class BucketRequestSeries {
+  @ApiProperty({ type: [Number], description: "The period's total; 0 for a quiet period" }) Sum: number[];
+}
+
+class BucketMetricSeries {
+  @ApiProperty({ type: BucketStorageSeries, description: "The bytes it holds: its objects' sizes, as its listing gives them" }) BucketSizeBytes: BucketStorageSeries;
+  @ApiProperty({ type: BucketStorageSeries, description: 'Its objects' }) NumberOfObjects: BucketStorageSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'The requests to it that the front door answered' }) AllRequests: BucketRequestSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'Of them, the HTTP GETs' }) GetRequests: BucketRequestSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'Of them, the HTTP PUTs' }) PutRequests: BucketRequestSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'Of them, those answered 4xx' }) '4xxErrors': BucketRequestSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'Of them, those answered 5xx' }) '5xxErrors': BucketRequestSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'The bytes of the bodies it sent' }) BytesDownloaded: BucketRequestSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'The bytes of the bodies it took' }) BytesUploaded: BucketRequestSeries;
+}
+
+/** A bucket's metrics: a point per period of the window, oldest first. */
+export class BucketMetricsView {
+  @ApiProperty({ enum: PERIODS }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each period's start" }) timestamps: Date[];
+  @ApiProperty({ type: BucketMetricSeries }) metrics: BucketMetricSeries;
+}

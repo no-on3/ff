@@ -175,3 +175,56 @@ export function databaseMetricsView(window: MetricsWindow, rows: DatabaseHourRow
   }
   return view;
 }
+
+/** The request metrics a bucket has, each period's Sum, as CloudWatch names S3's. */
+export const BUCKET_REQUEST_METRICS = ['AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'] as const;
+export type BucketRequestMetric = (typeof BUCKET_REQUEST_METRICS)[number];
+
+/**
+ * A customer's bucket's metrics, as CloudWatch names S3's (ADR 0009): what it
+ * holds (BucketSizeBytes) and its objects (NumberOfObjects), its hour's
+ * measure in each period of the hour, null in an hour it wasn't measured in;
+ * and its requests, each period's Sum, from the front door's minute counts:
+ * all of them, the GETs and the PUTs, those answered 4xx and 5xx, the bytes
+ * downloaded and uploaded. A quiet period's requests are zeros.
+ */
+export interface BucketMetricsView {
+  period: Period;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: { BucketSizeBytes: { Average: Array<number | null> }; NumberOfObjects: { Average: Array<number | null> } } & Record<BucketRequestMetric, { Sum: number[] }>;
+}
+
+/** An hour's measure of a bucket, its start in seconds since the epoch. */
+export interface BucketHourRow {
+  hour: number;
+  sizeBytes: number;
+  objects: number;
+}
+
+/** A period's requests to a bucket, as the query sums them; a quiet period has no row. */
+export type BucketPeriodRow = { bucket: number } & Record<BucketRequestMetric, number>;
+
+/** The series of the window, a point per period: the storage of its hour, null where unmeasured; the requests, zeros where quiet. */
+export function bucketMetricsView(window: MetricsWindow, hours: BucketHourRow[], periods: BucketPeriodRow[]): BucketMetricsView {
+  const byHour = new Map(hours.map((row) => [row.hour, row]));
+  const byPeriod = new Map(periods.map((row) => [row.bucket, row]));
+  const requests = Object.fromEntries(BUCKET_REQUEST_METRICS.map((metric) => [metric, { Sum: [] as number[] }])) as Record<BucketRequestMetric, { Sum: number[] }>;
+  const view: BucketMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: { BucketSizeBytes: { Average: [] }, NumberOfObjects: { Average: [] }, ...requests },
+  };
+  for (let start = window.start.getTime() / 1000; start < window.end.getTime() / 1000; start += window.period) {
+    const measure = byHour.get(Math.floor(start / 3600) * 3600);
+    const period = byPeriod.get(start);
+    view.timestamps.push(new Date(start * 1000));
+    view.metrics.BucketSizeBytes.Average.push(measure ? measure.sizeBytes : null);
+    view.metrics.NumberOfObjects.Average.push(measure ? measure.objects : null);
+    for (const metric of BUCKET_REQUEST_METRICS) view.metrics[metric].Sum.push(period?.[metric] ?? 0);
+  }
+  return view;
+}
