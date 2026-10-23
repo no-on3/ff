@@ -74,7 +74,7 @@ export class UpdateMeDto {
   locale: Locale;
 }
 
-class MeAccount {
+export class MeAccount {
   @ApiProperty() id: string;
   @ApiProperty() name: string;
   @ApiProperty({ enum: AccountStatus }) status: AccountStatus;
@@ -88,6 +88,12 @@ class MeAccount {
   @ApiProperty({ nullable: true, type: Date, description: "When FF turned the account's databases and buckets off: their users can't log in. Null while they are on" })
   storageDisabledAt: Date | null;
   @ApiProperty({ nullable: true, type: String, description: "FF's reason for it; null while they are on" }) storageDisabledReason: string | null;
+  @ApiProperty({
+    nullable: true,
+    enum: [80, 100],
+    description: "The share of its plan's storage its buckets reached together at their last measure, which its owners were told of: at 100, uploads wait for room. Null under 80%",
+  })
+  bucketStorageNotice: 80 | 100 | null;
 }
 
 /** The API key a request came with, as GET /me shows it to the key itself. */

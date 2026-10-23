@@ -378,6 +378,39 @@ export interface DatabaseUsage {
   cost: string | null;
 }
 
+/** A bucket's fields in GET /usage, as the API's BucketUsageView names them: contract.test.ts checks them. */
+export const BUCKET_USAGE_FIELDS = [
+  'bucketId',
+  'name',
+  'deleted',
+  'hours',
+  'gbMonths',
+  'sizeBytes',
+  'objects',
+  'tier1Requests',
+  'tier2Requests',
+  'cost',
+] as const satisfies ReadonlyArray<keyof BucketUsage>;
+/** A customer's bucket in the month, as its hourly measures and the front door's counts counted it. */
+export interface BucketUsage {
+  bucketId: string;
+  name: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+  /** The hours it was measured in. */
+  hours: number;
+  /** Its storage in GB-months, to six decimals, as a string. */
+  gbMonths: string;
+  /** What it held at its latest measure, in bytes, and its objects then. */
+  sizeBytes: number;
+  objects: number;
+  /** S3's first class of request (PUT, COPY, POST, LIST) and its second (GET and the others); deletes are free. */
+  tier1Requests: number;
+  tier2Requests: number;
+  /** Before the free tier; null without a price book. */
+  cost: string | null;
+}
+
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
@@ -386,6 +419,8 @@ export interface MonthlyUsage {
   functions: FunctionUsage[];
   /** Each of the account's databases measured in the month, the most GB-months first. */
   databases: DatabaseUsage[];
+  /** Each of its buckets measured, or asked something S3 bills, in the month, the most GB-months first. */
+  buckets: BucketUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */
   estimate: UsageEstimate | null;
@@ -637,6 +672,7 @@ export const ME_ACCOUNT_FIELDS = [
   'dataDeletedAt',
   'storageDisabledAt',
   'storageDisabledReason',
+  'bucketStorageNotice',
 ] as const satisfies ReadonlyArray<keyof MeAccount>;
 
 export interface MeAccount {
@@ -658,6 +694,8 @@ export interface MeAccount {
   storageDisabledAt: string | null;
   /** FF's reason for it. */
   storageDisabledReason: string | null;
+  /** The share of its plan's storage its buckets reached together at their last measure: at 100, uploads wait for room; null under 80%. */
+  bucketStorageNotice: 80 | 100 | null;
 }
 // A field missing from ME_ACCOUNT_FIELDS stops the build.
 type UnlistedMeAccountField = Exclude<keyof MeAccount, (typeof ME_ACCOUNT_FIELDS)[number]>;
@@ -1012,6 +1050,79 @@ export const databasesApi = {
   remove: (id: string) => api.delete(`/databases/${id}`),
   /** Its sessions and size, a point an hour; the last 60 hours by default. */
   metrics: (id: string, params: { start?: string; end?: string } = {}) => api.get<DatabaseMetrics>(`/databases/${id}/metrics`, { params }),
+};
+
+/** A bucket's fields, as the API's BucketView names them: contract.test.ts checks them. */
+export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
+
+/** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
+export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
+
+/** A bucket, as AWS S3 gives one, behind FF's S3 front door (ADR 0009). */
+export interface Bucket {
+  name: string;
+  status: 'active' | 'deleting';
+  /** FF's region, as GetBucketLocation answers it. */
+  region: string;
+  /** The S3 endpoint to give AWS's SDKs and CLI. */
+  endpoint: string;
+  /** Its own address, virtual-hosted. */
+  url: string;
+  /** What it held at its last hourly measure, in bytes, and its objects then; null before its first. */
+  sizeBytes: number | null;
+  objects: number | null;
+  /** The hour of that measure. */
+  measuredAt: string | null;
+  createdAt: string;
+}
+
+/** The request metrics a bucket has, as CloudWatch names S3's: each period's Sum. */
+export const BUCKET_REQUEST_METRICS = ['AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'] as const;
+export type BucketRequestMetric = (typeof BUCKET_REQUEST_METRICS)[number];
+
+/** GET /buckets/:name/metrics: what it holds, its hour's measure in each period; its requests, each period's Sum. */
+export interface BucketMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: { BucketSizeBytes: { Average: Array<number | null> }; NumberOfObjects: { Average: Array<number | null> } } & Record<BucketRequestMetric, { Sum: number[] }>;
+}
+
+/** An access key to the account's buckets: never its secret. */
+export interface StorageKey {
+  /** AWS_ACCESS_KEY_ID: AKFF and 16 characters. */
+  id: string;
+  /** The buckets it reaches; null for all the account's. */
+  buckets: string[] | null;
+  readOnly: boolean;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** A key just made: its secret this once, with the endpoint and the region. */
+export interface CreatedStorageKey extends StorageKey {
+  secretAccessKey: string;
+  endpoint: string;
+  region: string;
+}
+
+/** The account's buckets: every member lists them; owners and developers make and delete them. */
+export const bucketsApi = {
+  list: () => api.get<Bucket[]>('/buckets'),
+  get: (name: string) => api.get<Bucket>(`/buckets/${name}`),
+  create: (name: string) => api.post<Bucket>('/buckets', { name }),
+  /** An empty one; with force, its files first. */
+  remove: (name: string, force = false) => api.delete(`/buckets/${name}`, { params: force ? { force: 'true' } : {} }),
+  /** What it holds and its requests, a point per period: a minute, five or an hour. */
+  metrics: (name: string, params: { start?: string; end?: string; period?: 60 | 300 | 3600 } = {}) => api.get<BucketMetrics>(`/buckets/${name}/metrics`, { params }),
+};
+
+/** The account's access keys to its buckets: its owners alone see, make and revoke them. */
+export const storageKeysApi = {
+  list: () => api.get<StorageKey[]>('/storage-keys'),
+  create: (body: { buckets?: string[]; readOnly?: boolean }) => api.post<CreatedStorageKey>('/storage-keys', body),
+  revoke: (id: string) => api.delete(`/storage-keys/${id}`),
 };
 
 /** The account's alarms: every member reads them; owners and developers change them. */

@@ -33,6 +33,8 @@ import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
 import databaseDtoSource from '../../BE/src/databases/dto/database.dto.ts?raw';
 import databaseEntitySource from '../../BE/src/databases/database.entity.ts?raw';
 import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
+import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
+import storageNamesSource from '../../BE/src/storage/storage-names.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
@@ -43,10 +45,15 @@ import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
 import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
 import { DATABASE_NAME } from './lib/databases';
+import { BUCKET_NAME } from './lib/buckets';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { BUCKETS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
+  BUCKET_FIELDS,
+  BUCKET_REQUEST_METRICS,
+  BUCKET_USAGE_FIELDS,
+  STORAGE_KEY_FIELDS,
   DATABASE_FIELDS,
   DATABASE_STATUSES,
   DATABASE_USAGE_FIELDS,
@@ -221,10 +228,10 @@ describe("the account's balance (P-32)", () => {
   });
 });
 
-/** The fields of a class in a DTO file, its own only: `  @ApiProperty(...) name:` or `  name:` lines. */
+/** The fields of a class in a DTO file, its own only: `  @ApiProperty(...) name:` or `  name:` lines, a name quoted when it starts with a digit. */
 function dtoFields(source: string, start: string): string[] {
   const body = source.slice(source.indexOf(start));
-  return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
+  return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) '?(\w+)'?: |^ {2}'?(\w+)'?: /gm)].map((match) => match[1] ?? match[2]);
 }
 
 describe('a pro-forma (P-35)', () => {
@@ -429,6 +436,23 @@ describe("a customer's database (ADR 0008)", () => {
     expect(dtoFields(usageDtoSource, 'export class DatabaseUsageView {')).toEqual([...DATABASE_USAGE_FIELDS]);
     expect(dtoFields(metricsDtoSource, 'class DatabaseMetricSeries {')).toEqual(['DatabaseConnections', 'VolumeBytesUsed']);
     expect(dtoFields(metricsDtoSource, 'class DatabaseStatisticSeries {')).toEqual(['Maximum', 'Average']);
+  });
+});
+
+describe("a customer's bucket and its access keys (ADR 0009)", () => {
+  it("have the API's fields and name rule, so the page reads each one there is and the form refuses what the API would", () => {
+    expect(dtoFields(storageDtoSource, 'export class BucketView {')).toEqual([...BUCKET_FIELDS]);
+    expect(dtoFields(storageDtoSource, 'export class StorageKeyView {')).toEqual([...STORAGE_KEY_FIELDS]);
+    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'region']);
+    expect(/export const BUCKET_NAME = \/(.+)\/;/.exec(storageNamesSource)?.[1]).toBe(BUCKET_NAME.source);
+  });
+
+  it("have the API's metrics, as CloudWatch names S3's, and their month on the Usage page", () => {
+    expect(dtoFields(metricsDtoSource, 'class BucketMetricSeries {')).toEqual(['BucketSizeBytes', 'NumberOfObjects', ...BUCKET_REQUEST_METRICS]);
+    expect(dtoFields(metricsDtoSource, 'class BucketStorageSeries {')).toEqual(['Average']);
+    expect(dtoFields(metricsDtoSource, 'class BucketRequestSeries {')).toEqual(['Sum']);
+    expect(dtoFields(usageDtoSource, 'export class BucketUsageView {')).toEqual([...BUCKET_USAGE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('buckets');
   });
 });
 

@@ -190,6 +190,48 @@ const Usage: React.FC = () => {
             </div>
           )}
 
+          {usage.buckets.length > 0 && (
+            <div className="card overflow-x-auto mb-4" aria-label="Buckets">
+              <table className="data-table">
+                <thead className="text-gray-500">
+                  <tr>
+                    <th className="py-2 pr-4 font-medium">Bucket</th>
+                    <th className="py-2 pr-4 font-medium text-right">GB-months</th>
+                    <th className="py-2 pr-4 font-medium text-right">Size, last measured</th>
+                    <th className="py-2 pr-4 font-medium text-right">PUT, COPY, POST, LIST</th>
+                    <th className="py-2 pr-4 font-medium text-right">GET and others</th>
+                    <th className="py-2 font-medium text-right">Cost (estimated)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.buckets.map((bucket) => (
+                    <tr key={bucket.bucketId} data-bucket-id={bucket.bucketId} className="border-t border-gray-200">
+                      <td className="py-2 pr-4">
+                        {bucket.deleted ? (
+                          <>
+                            {bucket.name} <span className="text-gray-500">(deleted)</span>
+                          </>
+                        ) : (
+                          <Link to={`/buckets/${bucket.name}`} className="text-blue-700 hover:underline">
+                            {bucket.name}
+                          </Link>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{formatGbMonths(bucket.gbMonths)}</td>
+                      <td className="py-2 pr-4 text-right whitespace-nowrap">{bucket.hours > 0 ? formatSize(bucket.sizeBytes) : '–'}</td>
+                      <td className="py-2 pr-4 text-right">{bucket.tier1Requests.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right">{bucket.tier2Requests.toLocaleString('en-US')}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{bucket.cost !== null && usage.estimate ? formatMoney(bucket.cost, usage.estimate.currency) : '–'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-500 mt-3">
+                As AWS S3 bills Standard storage: what each bucket held every hour, by the GB-month, and its requests by S3's two classes; deleting is free.
+              </p>
+            </div>
+          )}
+
           <button type="button" className="btn btn-secondary" onClick={downloadCsv} disabled={downloading}>
             {downloading ? 'Preparing…' : `Download ${monthLabel(usage.month)} as CSV`}
           </button>

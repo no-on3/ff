@@ -6,14 +6,14 @@ const labels = (role: Parameters<typeof consoleNav>[0]) => consoleNav(role).map(
 describe('consoleNav', () => {
   it("gives an owner the account's members and API keys, as the API lets owners alone manage them", () => {
     expect(labels('owner')).toEqual([
-      [null, ['Functions', 'Databases', 'Alarms', 'Usage', 'Billing']],
+      [null, ['Functions', 'Databases', 'Buckets', 'Alarms', 'Usage', 'Billing']],
       ['Account', ['Settings', 'Notifications', 'Members', 'API keys']],
     ]);
   });
 
   it.each(['developer', 'viewer'] as const)('gives a %s the same pages without members and API keys', (role) => {
     expect(labels(role)).toEqual([
-      [null, ['Functions', 'Databases', 'Alarms', 'Usage', 'Billing']],
+      [null, ['Functions', 'Databases', 'Buckets', 'Alarms', 'Usage', 'Billing']],
       ['Account', ['Settings', 'Notifications']],
     ]);
   });
@@ -37,6 +37,7 @@ describe('isOpen', () => {
   it('opens Databases on their list and on a database', () => {
     expect(open('/databases')).toEqual(['Databases']);
     expect(open('/databases/7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f')).toEqual(['Databases']);
+    expect(open('/buckets')).toEqual(['Buckets']);
   });
 
   it("opens one account page at a time: the settings only on their own path, which the others' start with", () => {

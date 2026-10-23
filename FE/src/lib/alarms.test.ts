@@ -11,6 +11,7 @@ describe('the alarm form', () => {
       name: 'Checkout errors',
       functionId: FN,
       databaseId: null,
+      bucketName: null,
       metric: 'Errors',
       statistic: 'Sum',
       period: 60,
@@ -41,6 +42,21 @@ describe('the alarm form', () => {
     expect([formProblem(storage), formProblem({ ...storage, evaluationPeriods: '25', datapointsToAlarm: '1' })]).toEqual([null, 'The periods judged look back more than a day: take fewer']);
     expect(formProblem({ ...storage, databaseId: '' })).toBe('VolumeBytesUsed is a database\'s: choose the database it watches');
     expect(formProblem({ ...storage, period: 60 })).toBe("A database's metrics have a point an hour: the period is an hour");
+  });
+
+  it("watches a bucket's storage or requests, by its name, in any period, and sends its name, no function's or database's", () => {
+    const errors = { ...emptyForm('', '', 'photos'), name: 'Store errors' };
+
+    expect(errors).toMatchObject({ functionId: '', databaseId: '', bucketName: 'photos', metric: '5xxErrors', statistic: 'Sum', period: 300 });
+    expect(metricsFor('', '', 'photos')).toEqual(['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded']);
+    expect(metricsFor('')).not.toContain('BucketSizeBytes');
+    expect(toBody(errors)).toMatchObject({ functionId: null, databaseId: null, bucketName: 'photos', metric: '5xxErrors', period: 300 });
+    expect(withMetric(errors, 'BucketSizeBytes')).toMatchObject({ bucketName: 'photos', statistic: 'Average' });
+    expect([formProblem(errors), formProblem({ ...errors, bucketName: '' })]).toEqual([null, "5xxErrors is a bucket's: choose the bucket it watches"]);
+    expect(withScope(errors, '')).toMatchObject({ bucketName: '', metric: 'Errors' });
+    expect(withScope({ ...emptyForm(FN), name: 'Errors' }, 'bucket:photos')).toMatchObject({ functionId: '', bucketName: 'photos', metric: '5xxErrors' });
+    expect(scopeOf(errors)).toBe('bucket:photos');
+    expect(formFromAlarm({ ...toBody(errors), id: 'a', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm).bucketName).toBe('photos');
   });
 
   it('changes scope with a metric the scope has: a database to the account, a function to a database', () => {

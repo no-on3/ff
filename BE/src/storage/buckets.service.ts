@@ -52,26 +52,28 @@ export class BucketsService {
     this.region = config.getOrThrow<string>('storage.region');
   }
 
-  /** The account's buckets, by name. */
+  /** The account's buckets, by name, each with what it held at its last hourly measure. */
   async list(accountId: string): Promise<BucketView[]> {
-    return (await this.buckets.find({ where: { accountId }, order: { name: 'ASC' } })).map((row) => this.view(row));
+    return (await this.measured(accountId)).map((row) => this.view(row));
   }
 
   async get(accountId: string, name: string): Promise<BucketView> {
-    return this.view(await this.bucketOf(accountId, name));
+    const [row] = await this.measured(accountId, name);
+    if (!row) throw new NotFoundException(`The account has no bucket named "${name}"`);
+    return this.view(row);
   }
 
-  /** The account's buckets as FF's operators see them: their names in the store, and what each held at its last hourly measure. */
-  async measured(accountId: string): Promise<MeasuredBucket[]> {
+  /** The account's buckets, or the one named, as FF's operators see them too: their names in the store, and what each held at its last hourly measure. */
+  async measured(accountId: string, name?: string): Promise<MeasuredBucket[]> {
     const rows = await this.buckets.manager.query<
       Array<{ name: string; store_name: string; status: BucketStatus; created_at: Date; size_bytes: string | null; objects: string | null; hour: Date | null }>
     >(
       `SELECT b."name", b."store_name", b."status", b."created_at", s."size_bytes"::text, s."objects"::text, s."hour"
          FROM "buckets" b
          LEFT JOIN LATERAL (SELECT "size_bytes", "objects", "hour" FROM "bucket_samples" WHERE "bucket_id" = b."id" ORDER BY "hour" DESC LIMIT 1) s ON true
-        WHERE b."account_id" = $1
+        WHERE b."account_id" = $1 AND ($2::text IS NULL OR b."name" = $2)
         ORDER BY b."name"`,
-      [accountId],
+      [accountId, name ?? null],
     );
     return rows.map((row) => ({
       name: row.name,
@@ -166,7 +168,8 @@ export class BucketsService {
     }
   }
 
-  private view(row: Bucket): BucketView {
+  /** A bucket as the API answers it; a new one has no measure yet. */
+  private view(row: Pick<Bucket, 'name' | 'status' | 'createdAt'> & Partial<Pick<MeasuredBucket, 'sizeBytes' | 'objects' | 'measuredAt'>>): BucketView {
     const url = new URL(this.endpoint);
     url.hostname = `${row.name}.${this.endpoint.hostname}`;
     return {
@@ -175,6 +178,9 @@ export class BucketsService {
       region: this.region,
       endpoint: this.endpoint.origin,
       url: url.origin,
+      sizeBytes: row.sizeBytes ?? null,
+      objects: row.objects ?? null,
+      measuredAt: row.measuredAt ?? null,
       createdAt: row.createdAt,
     };
   }

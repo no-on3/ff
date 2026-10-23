@@ -43,6 +43,15 @@ export class BucketView {
   @ApiProperty({ example: 'https://photos.s3.ffunc.tn', description: 'Its own address, virtual-hosted' })
   url: string;
 
+  @ApiProperty({ nullable: true, type: Number, example: 161_480_253, description: 'What it held at its last hourly measure, in bytes, as S3 bills storage; null before its first' })
+  sizeBytes: number | null;
+
+  @ApiProperty({ nullable: true, type: Number, example: 1_204, description: 'Its objects then' })
+  objects: number | null;
+
+  @ApiProperty({ nullable: true, type: Date, description: 'The hour of its last measure; the next comes within the next hour' })
+  measuredAt: Date | null;
+
   @ApiProperty()
   createdAt: Date;
 }

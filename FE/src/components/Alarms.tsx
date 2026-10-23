@@ -25,7 +25,7 @@ import {
 } from '../lib/alarms';
 import { apiErrorMessage } from '../lib/functions';
 import { can } from '../lib/session';
-import { Alarm, AlarmState, Database, Function, alarmsApi, databasesApi, functionsApi } from '../services/api';
+import { Alarm, AlarmState, Bucket, Database, Function, alarmsApi, bucketsApi, databasesApi, functionsApi } from '../services/api';
 import StatusPill from './StatusPill';
 import { useSession } from '../session/session';
 
@@ -48,11 +48,12 @@ const Field: React.FC<{ id: string; label: string; hint?: string; children: Reac
 );
 
 /** The form that creates an alarm, or replaces one. */
-const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functions: Function[]; databases: Database[]; onDone(saved: boolean): void }> = ({
+const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functions: Function[]; databases: Database[]; buckets: Bucket[]; onDone(saved: boolean): void }> = ({
   editing,
   initial,
   functions,
   databases,
+  buckets,
   onDone,
 }) => {
   const [form, setForm] = useState<AlarmForm>(initial);
@@ -99,11 +100,16 @@ const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functio
                 The database {database.name}
               </option>
             ))}
+            {buckets.map((bucket) => (
+              <option key={bucket.name} value={`bucket:${bucket.name}`}>
+                The bucket {bucket.name}
+              </option>
+            ))}
           </select>
         </Field>
         <Field id="alarm-metric" label="Metric">
           <select id="alarm-metric" className="input" value={form.metric} onChange={(e) => setForm(withMetric(form, e.target.value as Metric))}>
-            {metricsFor(form.functionId, form.databaseId).map((metric) => (
+            {metricsFor(form.functionId, form.databaseId, form.bucketName).map((metric) => (
               <option key={metric} value={metric}>
                 {metric}
               </option>
@@ -206,6 +212,7 @@ const Alarms: React.FC = () => {
   const [alarms, setAlarms] = useState<Alarm[] | null>(null);
   const [functions, setFunctions] = useState<Function[]>([]);
   const [databases, setDatabases] = useState<Database[]>([]);
+  const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ alarm: Alarm | null; form: AlarmForm } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -229,17 +236,23 @@ const Alarms: React.FC = () => {
       .list()
       .then(({ data }) => setDatabases(data))
       .catch(() => setDatabases([]));
+    bucketsApi
+      .list()
+      .then(({ data }) => setBuckets(data))
+      .catch(() => setBuckets([]));
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
   }, [load, account?.id]);
 
-  // A function's page and a database's link here to make an alarm on it.
+  // A function's page, a database's and a bucket's link here to make an alarm on it.
   const forFunction = params.get('function');
   const forDatabase = params.get('database');
+  const forBucket = params.get('bucket');
   useEffect(() => {
     if (forFunction) setEditing({ alarm: null, form: emptyForm(forFunction) });
     else if (forDatabase) setEditing({ alarm: null, form: emptyForm('', forDatabase) });
-  }, [forFunction, forDatabase]);
+    else if (forBucket) setEditing({ alarm: null, form: emptyForm('', '', forBucket) });
+  }, [forFunction, forDatabase, forBucket]);
 
   if (!account) return null;
   const writer = account.status === 'active' && can(account.role, 'change functions');
@@ -248,7 +261,7 @@ const Alarms: React.FC = () => {
 
   const done = async (saved: boolean) => {
     setEditing(null);
-    if (forFunction || forDatabase) setParams({});
+    if (forFunction || forDatabase || forBucket) setParams({});
     if (saved) await load();
   };
   const remove = async (id: string) => {
@@ -272,10 +285,12 @@ const Alarms: React.FC = () => {
         )}
       </div>
       <p className="mb-6 text-gray-600">
-        Each alarm watches a metric of a function, of a database or of the account, or its money, and is judged every minute, a database's hour by hour.
+        Each alarm watches a metric of a function, of a database, of a bucket or of the account, or its money, and is judged every minute, a database's hour by hour.
         Going into alarm, and out of it, it tells the account's owners and its webhooks.
       </p>
-      {editing && <AlarmEditor key={editing.alarm?.id ?? 'new'} editing={editing.alarm} initial={editing.form} functions={functions} databases={databases} onDone={done} />}
+      {editing && (
+        <AlarmEditor key={editing.alarm?.id ?? 'new'} editing={editing.alarm} initial={editing.form} functions={functions} databases={databases} buckets={buckets} onDone={done} />
+      )}
       {error && (
         <div role="alert" className="mb-4 text-red-600">
           {error}
@@ -299,6 +314,10 @@ const Alarms: React.FC = () => {
                   ) : onDatabase ? (
                     <>
                       on the database <Link to={`/databases/${alarm.databaseId}`}>{onDatabase}</Link>
+                    </>
+                  ) : alarm.bucketName ? (
+                    <>
+                      on the bucket <Link to={`/buckets/${alarm.bucketName}`}>{alarm.bucketName}</Link>
                     </>
                   ) : (
                     'on the account'

@@ -81,11 +81,27 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
     const view = await service().create(ACCOUNT, { name });
 
     const row = await rowOf(name);
-    expect(view).toEqual({ name, status: 'active', region: 'tn-tunis-1', endpoint: 'https://s3.example.tn', url: `https://${name}.s3.example.tn`, createdAt: row?.createdAt });
+    expect(view).toEqual({
+      name,
+      status: 'active',
+      region: 'tn-tunis-1',
+      endpoint: 'https://s3.example.tn',
+      url: `https://${name}.s3.example.tn`,
+      sizeBytes: null, // not measured yet
+      objects: null,
+      measuredAt: null,
+      createdAt: row?.createdAt,
+    });
     expect(row?.storeName).toMatch(/^ff-[0-9a-f]{24}$/);
     expect(await exists(row!.storeName)).toBe(true);
     await expect(service().create(OTHER, { name })).rejects.toThrow(new ConflictException(`The bucket name "${name}" is taken: bucket names are unique across FF, as on AWS`));
     expect(await service().list(ACCOUNT)).toEqual([view]);
+    // Once measured, its view says what it held at its last measure, in the list and alone.
+    for (const [hour, size] of [['2026-10-23T08:00:00Z', 10], ['2026-10-23T09:00:00Z', 7_634_423]] as const) {
+      await db.dataSource.query(`INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES ($1, $2, $3, $4, $5, 3)`, [row!.id, hour, ACCOUNT, name, size]);
+    }
+    const measured = { ...view, sizeBytes: 7_634_423, objects: 3, measuredAt: new Date('2026-10-23T09:00:00Z') };
+    expect([await service().list(ACCOUNT), await service().get(ACCOUNT, name)]).toEqual([[measured], measured]);
     expect(await service().list(OTHER)).toEqual([]);
     await expect(service().get(OTHER, name)).rejects.toThrow(NotFoundException);
     expect(await actions(ACCOUNT)).toContain(`bucket.create bucket:${name}`);

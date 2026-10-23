@@ -25,6 +25,7 @@ const account = (id: string, status: MeAccount['status'] = 'active'): MeAccount 
   dataDeletedAt: null,
   storageDisabledAt: null,
   storageDisabledReason: null,
+  bucketStorageNotice: null,
 });
 
 describe('requestHeaders', () => {
@@ -52,6 +53,7 @@ describe('can', () => {
       false,
     ]);
     expect([can('owner', 'change databases'), can('developer', 'change databases'), can('viewer', 'change databases')]).toEqual([true, true, false]);
+    expect([can('owner', 'change buckets'), can('developer', 'change buckets'), can('viewer', 'change buckets')]).toEqual([true, true, false]);
   });
 
   it('lets owners alone manage the account: members, API keys, its details', () => {

@@ -464,7 +464,7 @@ Buckets for files come as AWS S3 gives them ([ADR 0009](adr/0009-buckets.md)): A
 - checks a body as it streams to the store: its signed SHA-256, each chunk of the SDKs' `aws-chunked` uploads and its trailer, the checksum it carries (CRC-32, CRC-32C, CRC-64/NVME, SHA-1, SHA-256); a body that fails never completes in the store, which gets FF's own signature, the bucket's name there (`ff-` and 24 characters), and no checksum;
 - counts each request let into a bucket in its minute, by AWS's two classes of request (deletes free), with its bytes in and out, written once a minute to `storage_request_counts`.
 
-Buckets and the account's access keys to them are made through FF's API:
+Buckets and the account's access keys to them are made on the console's Buckets page, which lists each bucket with what it held at its last measure and warns when the account's buckets near or reach the plan's storage; a bucket's own page has its addresses, the AWS CLI's command for it, its last hours (what it held, its requests and those that failed) and its alarms; the Usage page has each bucket's month. Or through FF's API:
 
 ```bash
 curl -s -X POST "$FF/buckets" -H 'content-type: application/json' -d '{"name": "photos"}'   # 201, its endpoint and address
@@ -473,6 +473,8 @@ curl -s -X POST "$FF/storage-keys" -H 'content-type: application/json' -d '{}' |
 aws --endpoint-url http://s3.localhost:3002 s3 cp ./cat.jpg s3://photos/2026/cat.jpg
 aws --endpoint-url http://s3.localhost:3002 s3 ls s3://photos --recursive
 ```
+
+`GET /buckets` and `GET /buckets/<name>` give each bucket's last measure too (`sizeBytes`, `objects`, `measuredAt`), and `GET /me` how full the account's buckets are together (`bucketStorageNotice`: 80, 100, or null under 80%).
 
 **A bucket's name** is AWS's, without dots (3 to 63 lower-case letters, digits and hyphens), and unique across FF, as on AWS: whoever has `photos`, nobody else may, until it is deleted. In the store it is a name of FF's, `ff-` and 24 characters, which says nothing of whose it is. The plan sets how many an account has (five on beta), what they hold together (5 GB), the requests a second (100) and the largest file in one `PutObject` (5 GB; a multipart upload sends more). `GET /buckets` and `GET /buckets/<name>` show them; `DELETE /buckets/<name>` deletes an empty one, as S3 does, and `?force=true` deletes its files first, and the uploads under way.
 
