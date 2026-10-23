@@ -30,6 +30,9 @@ import functionUrlEntitySource from '../../BE/src/functions/entities/function-ur
 import customDomainDtoSource from '../../BE/src/function-urls/dto/custom-domain.dto.ts?raw';
 import customDomainEntitySource from '../../BE/src/function-urls/custom-domain.entity.ts?raw';
 import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
+import databaseDtoSource from '../../BE/src/databases/dto/database.dto.ts?raw';
+import databaseEntitySource from '../../BE/src/databases/database.entity.ts?raw';
+import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
@@ -39,10 +42,14 @@ import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
 import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
+import { DATABASE_NAME } from './lib/databases';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
+  DATABASE_FIELDS,
+  DATABASE_STATUSES,
+  DATABASE_USAGE_FIELDS,
   EVENT_FORMATS,
   PACKAGE_TYPES,
   SECRET_FIELDS,
@@ -403,6 +410,23 @@ describe("a function URL's own domain", () => {
     expect(dtoFields(customDomainDtoSource, 'export class CustomDomainView {')).toEqual([...CUSTOM_DOMAIN_FIELDS]);
     expect([...statuses.slice(0, statuses.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...DOMAIN_STATUSES]);
     expect(dtoFields(customDomainDtoSource, 'export class DomainRecordsView {')).toEqual(['cname', 'txt']);
+  });
+});
+
+describe("a customer's database (ADR 0008)", () => {
+  it("has the API's fields, statuses and name rule, so its pages read each one there is and the form refuses what the API would", () => {
+    const statuses = databaseEntitySource.slice(databaseEntitySource.indexOf('export enum DatabaseStatus'));
+
+    expect(dtoFields(databaseDtoSource, 'export class DatabaseView {')).toEqual([...DATABASE_FIELDS]);
+    expect(dtoFields(databaseDtoSource, 'export class DatabaseWithPassword extends DatabaseView {')).toEqual(['password', 'connectionString']);
+    expect([...statuses.slice(0, statuses.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...DATABASE_STATUSES]);
+    expect(/export const DATABASE_NAME = \/(.+)\/;/.exec(databaseNamesSource)?.[1]).toBe(DATABASE_NAME.source);
+  });
+
+  it("has its month's fields in GET /usage, and its metrics' names", () => {
+    expect(dtoFields(usageDtoSource, 'export class DatabaseUsageView {')).toEqual([...DATABASE_USAGE_FIELDS]);
+    expect(dtoFields(metricsDtoSource, 'class DatabaseMetricSeries {')).toEqual(['DatabaseConnections', 'VolumeBytesUsed']);
+    expect(dtoFields(metricsDtoSource, 'class DatabaseStatisticSeries {')).toEqual(['Maximum', 'Average']);
   });
 });
 

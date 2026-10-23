@@ -359,12 +359,33 @@ export interface UsageEstimate {
   priceBooks: string[];
 }
 
+/** A database's fields in GET /usage, as the API's DatabaseUsageView names them: contract.test.ts checks them. */
+export const DATABASE_USAGE_FIELDS = ['databaseId', 'name', 'deleted', 'hours', 'gbMonths', 'sizeBytes', 'cost'] as const satisfies ReadonlyArray<keyof DatabaseUsage>;
+/** A customer's database in the month, as its hourly measures counted it. */
+export interface DatabaseUsage {
+  databaseId: string;
+  /** Its name at its latest measure of the month. */
+  name: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+  /** The hours it was measured in. */
+  hours: number;
+  /** Its storage in GB-months, to six decimals, as a string. */
+  gbMonths: string;
+  /** Its size at its latest measure, in bytes. */
+  sizeBytes: number;
+  /** Before the free tier; null without a price book. */
+  cost: string | null;
+}
+
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
   month: string;
   /** Each function with calls in the month, the most GB-seconds first, then any that cost something without a call. */
   functions: FunctionUsage[];
+  /** Each of the account's databases measured in the month, the most GB-months first. */
+  databases: DatabaseUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */
   estimate: UsageEstimate | null;
@@ -897,6 +918,88 @@ export interface Alarm extends AlarmBody {
 type UnlistedAlarmField = Exclude<keyof Alarm, (typeof ALARM_FIELDS)[number]>;
 const everyAlarmFieldListed: [UnlistedAlarmField] extends [never] ? true : never = true;
 void everyAlarmFieldListed;
+
+/** A customer's database's status, as the API's DatabaseStatus names them: contract.test.ts checks them. */
+export const DATABASE_STATUSES = ['creating', 'active', 'read_only', 'suspended', 'deleting'] as const;
+export type DatabaseStatus = (typeof DATABASE_STATUSES)[number];
+
+/** A database's fields, as the API's DatabaseView names them: contract.test.ts checks them. */
+export const DATABASE_FIELDS = [
+  'id',
+  'name',
+  'status',
+  'host',
+  'port',
+  'database',
+  'user',
+  'connectionUrl',
+  'sizeBytes',
+  'connections',
+  'connectionLimit',
+  'storageLimitMb',
+  'passwordSetAt',
+  'createdAt',
+] as const satisfies ReadonlyArray<keyof Database>;
+
+/** A customer's PostgreSQL database, as AWS RDS gives one: never its password, which FF doesn't keep. */
+export interface Database {
+  id: string;
+  /** Its name in the account. */
+  name: string;
+  status: DatabaseStatus;
+  /** The server, as functions and developers reach it. */
+  host: string;
+  port: number;
+  /** Its name on the server, and its user's: the same, opaque. */
+  database: string;
+  user: string;
+  /** How to connect, without the password. */
+  connectionUrl: string;
+  /** Its size now, in bytes; null when the server could not be asked. */
+  sizeBytes: number | null;
+  /** Its sessions now; null when the server could not be asked. */
+  connections: number | null;
+  /** The plan's sessions at most. */
+  connectionLimit: number;
+  /** The plan's storage for it, in MB: past it, its new sessions start read-only. */
+  storageLimitMb: number;
+  passwordSetAt: string | null;
+  createdAt: string;
+}
+// A field missing from DATABASE_FIELDS stops the build.
+type UnlistedDatabaseField = Exclude<keyof Database, (typeof DATABASE_FIELDS)[number]>;
+const everyDatabaseFieldListed: [UnlistedDatabaseField] extends [never] ? true : never = true;
+void everyDatabaseFieldListed;
+
+/** A database just made, or given a new password: the password and the connection string, in this answer only. */
+export interface DatabaseWithPassword extends Database {
+  password: string;
+  connectionString: string;
+}
+
+/** GET /databases/:id/metrics: a point an hour, oldest first, null for an hour without a measure. */
+export interface DatabaseMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: {
+    DatabaseConnections: { Maximum: Array<number | null>; Average: Array<number | null> };
+    VolumeBytesUsed: { Maximum: Array<number | null>; Average: Array<number | null> };
+  };
+}
+
+/** The account's PostgreSQL databases: every member reads them; owners and developers make, change and delete them. */
+export const databasesApi = {
+  list: () => api.get<Database[]>('/databases'),
+  get: (id: string) => api.get<Database>(`/databases/${id}`),
+  create: (name: string) => api.post<DatabaseWithPassword>('/databases', { name }),
+  /** A new password: the old one opens no new session. */
+  resetPassword: (id: string) => api.post<DatabaseWithPassword>(`/databases/${id}/password`),
+  remove: (id: string) => api.delete(`/databases/${id}`),
+  /** Its sessions and size, a point an hour; the last 60 hours by default. */
+  metrics: (id: string, params: { start?: string; end?: string } = {}) => api.get<DatabaseMetrics>(`/databases/${id}/metrics`, { params }),
+};
 
 /** The account's alarms: every member reads them; owners and developers change them. */
 export const alarmsApi = {

@@ -5,6 +5,7 @@ import {
   AlarmForm,
   BILLING_METRICS,
   COMPARISONS,
+  DATABASE_METRICS,
   MAX_EVALUATION_PERIODS,
   MISSING_DATA,
   Metric,
@@ -17,12 +18,14 @@ import {
   formFromAlarm,
   formProblem,
   metricsFor,
+  scopeOf,
   toBody,
   withMetric,
+  withScope,
 } from '../lib/alarms';
 import { apiErrorMessage } from '../lib/functions';
 import { can } from '../lib/session';
-import { Alarm, AlarmState, Function, alarmsApi, functionsApi } from '../services/api';
+import { Alarm, AlarmState, Database, Function, alarmsApi, databasesApi, functionsApi } from '../services/api';
 import StatusPill from './StatusPill';
 import { useSession } from '../session/session';
 
@@ -45,12 +48,19 @@ const Field: React.FC<{ id: string; label: string; hint?: string; children: Reac
 );
 
 /** The form that creates an alarm, or replaces one. */
-const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functions: Function[]; onDone(saved: boolean): void }> = ({ editing, initial, functions, onDone }) => {
+const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functions: Function[]; databases: Database[]; onDone(saved: boolean): void }> = ({
+  editing,
+  initial,
+  functions,
+  databases,
+  onDone,
+}) => {
   const [form, setForm] = useState<AlarmForm>(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const problem = formProblem(form);
   const billing = BILLING_METRICS.includes(form.metric);
+  const hourly = DATABASE_METRICS.includes(form.metric);
   const set = (change: Partial<AlarmForm>) => setForm({ ...form, ...change });
 
   const save = async (event: React.FormEvent) => {
@@ -77,24 +87,23 @@ const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functio
           <input id="alarm-name" className="input" maxLength={100} value={form.name} onChange={(e) => set({ name: e.target.value })} />
         </Field>
         <Field id="alarm-scope" label="Watches" hint={billing ? "The account's money is the account's." : undefined}>
-          <select
-            id="alarm-scope"
-            className="input"
-            value={form.functionId}
-            disabled={billing}
-            onChange={(e) => setForm(withMetric({ ...form, functionId: e.target.value }, metricsFor(e.target.value).includes(form.metric) ? form.metric : 'Errors'))}
-          >
+          <select id="alarm-scope" className="input" value={scopeOf(form)} disabled={billing} onChange={(e) => setForm(withScope(form, e.target.value))}>
             <option value="">The whole account</option>
             {functions.map((fn) => (
               <option key={fn.id} value={fn.id}>
                 The function {fn.name}
               </option>
             ))}
+            {databases.map((database) => (
+              <option key={database.id} value={`database:${database.id}`}>
+                The database {database.name}
+              </option>
+            ))}
           </select>
         </Field>
         <Field id="alarm-metric" label="Metric">
           <select id="alarm-metric" className="input" value={form.metric} onChange={(e) => setForm(withMetric(form, e.target.value as Metric))}>
-            {metricsFor(form.functionId).map((metric) => (
+            {metricsFor(form.functionId, form.databaseId).map((metric) => (
               <option key={metric} value={metric}>
                 {metric}
               </option>
@@ -125,8 +134,8 @@ const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functio
         </Field>
         {!billing && (
           <>
-            <Field id="alarm-period" label="Period">
-              <select id="alarm-period" className="input" value={form.period} onChange={(e) => set({ period: Number(e.target.value) })}>
+            <Field id="alarm-period" label="Period" hint={hourly ? "A database's metrics have a point an hour" : undefined}>
+              <select id="alarm-period" className="input" value={form.period} disabled={hourly} onChange={(e) => set({ period: Number(e.target.value) })}>
                 {PERIODS.map((p) => (
                   <option key={p.value} value={p.value}>
                     {p.label}
@@ -196,6 +205,7 @@ const Alarms: React.FC = () => {
   const [params, setParams] = useSearchParams();
   const [alarms, setAlarms] = useState<Alarm[] | null>(null);
   const [functions, setFunctions] = useState<Function[]>([]);
+  const [databases, setDatabases] = useState<Database[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ alarm: Alarm | null; form: AlarmForm } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -215,23 +225,30 @@ const Alarms: React.FC = () => {
       .getAllFunctions()
       .then(({ data }) => setFunctions(data))
       .catch(() => setFunctions([]));
+    databasesApi
+      .list()
+      .then(({ data }) => setDatabases(data))
+      .catch(() => setDatabases([]));
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
   }, [load, account?.id]);
 
-  // A function's page links here to make an alarm on it.
+  // A function's page and a database's link here to make an alarm on it.
   const forFunction = params.get('function');
+  const forDatabase = params.get('database');
   useEffect(() => {
     if (forFunction) setEditing({ alarm: null, form: emptyForm(forFunction) });
-  }, [forFunction]);
+    else if (forDatabase) setEditing({ alarm: null, form: emptyForm('', forDatabase) });
+  }, [forFunction, forDatabase]);
 
   if (!account) return null;
   const writer = account.status === 'active' && can(account.role, 'change functions');
   const nameOf = (id: string | null) => (id ? (functions.find((fn) => fn.id === id)?.name ?? 'a function') : null);
+  const databaseNameOf = (id: string | null | undefined) => (id ? (databases.find((database) => database.id === id)?.name ?? 'a database') : null);
 
   const done = async (saved: boolean) => {
     setEditing(null);
-    if (forFunction) setParams({});
+    if (forFunction || forDatabase) setParams({});
     if (saved) await load();
   };
   const remove = async (id: string) => {
@@ -255,10 +272,10 @@ const Alarms: React.FC = () => {
         )}
       </div>
       <p className="mb-6 text-gray-600">
-        Each alarm watches a metric of a function or of the account, or its money, and is judged every minute. Going into alarm, and out of it, it tells the
-        account's owners and its webhooks.
+        Each alarm watches a metric of a function, of a database or of the account, or its money, and is judged every minute, a database's hour by hour.
+        Going into alarm, and out of it, it tells the account's owners and its webhooks.
       </p>
-      {editing && <AlarmEditor key={editing.alarm?.id ?? 'new'} editing={editing.alarm} initial={editing.form} functions={functions} onDone={done} />}
+      {editing && <AlarmEditor key={editing.alarm?.id ?? 'new'} editing={editing.alarm} initial={editing.form} functions={functions} databases={databases} onDone={done} />}
       {error && (
         <div role="alert" className="mb-4 text-red-600">
           {error}
@@ -269,6 +286,7 @@ const Alarms: React.FC = () => {
       <ul className="space-y-3" aria-label="Alarms">
         {alarms?.map((alarm) => {
           const on = nameOf(alarm.functionId);
+          const onDatabase = databaseNameOf(alarm.databaseId);
           return (
             <li key={alarm.id} data-alarm={alarm.id} className="card">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -277,6 +295,10 @@ const Alarms: React.FC = () => {
                   {on ? (
                     <>
                       on <Link to={`/functions/${alarm.functionId}`}>{on}</Link>
+                    </>
+                  ) : onDatabase ? (
+                    <>
+                      on the database <Link to={`/databases/${alarm.databaseId}`}>{onDatabase}</Link>
                     </>
                   ) : (
                     'on the account'

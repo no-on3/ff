@@ -1,14 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { Alarm } from '../services/api';
-import { STATE_INFO, conditionText, emptyForm, firingCount, formFromAlarm, formProblem, metricsFor, toBody, withMetric } from './alarms';
+import { STATE_INFO, conditionText, emptyForm, firingCount, formFromAlarm, formProblem, metricsFor, scopeOf, toBody, withMetric, withScope } from './alarms';
 
 const FN = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
+const DB = '7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f';
 
 describe('the alarm form', () => {
   it('starts on a function\'s errors as soon as there is one, or the account\'s calls, told to the owners', () => {
     expect(toBody({ ...emptyForm(FN), name: ' Checkout errors ' })).toEqual({
       name: 'Checkout errors',
       functionId: FN,
+      databaseId: null,
       metric: 'Errors',
       statistic: 'Sum',
       period: 60,
@@ -27,6 +29,26 @@ describe('the alarm form', () => {
   it("offers a function's calls, durations and instances, and the account its money too", () => {
     expect(metricsFor(FN)).toEqual(['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances']);
     expect(metricsFor('')).toContain('Balance');
+    expect(metricsFor('')).not.toContain('DatabaseConnections');
+  });
+
+  it("watches a database's sessions or storage, an hour a period, and sends its ID, no function's", () => {
+    const storage = { ...emptyForm('', DB), name: 'Storage', threshold: '900000000' };
+
+    expect(storage).toMatchObject({ functionId: '', databaseId: DB, metric: 'VolumeBytesUsed', statistic: 'Maximum', period: 3600 });
+    expect(metricsFor('', DB)).toEqual(['DatabaseConnections', 'VolumeBytesUsed']);
+    expect(toBody(storage)).toMatchObject({ functionId: null, databaseId: DB, metric: 'VolumeBytesUsed', period: 3600, threshold: 900_000_000 });
+    expect([formProblem(storage), formProblem({ ...storage, evaluationPeriods: '25', datapointsToAlarm: '1' })]).toEqual([null, 'The periods judged look back more than a day: take fewer']);
+    expect(formProblem({ ...storage, databaseId: '' })).toBe('VolumeBytesUsed is a database\'s: choose the database it watches');
+    expect(formProblem({ ...storage, period: 60 })).toBe("A database's metrics have a point an hour: the period is an hour");
+  });
+
+  it('changes scope with a metric the scope has: a database to the account, a function to a database', () => {
+    const storage = { ...emptyForm('', DB), name: 'Storage' };
+
+    expect(withScope(storage, '')).toMatchObject({ functionId: '', databaseId: '', metric: 'Errors' });
+    expect(withScope({ ...emptyForm(FN), name: 'Errors' }, `database:${DB}`)).toMatchObject({ functionId: '', databaseId: DB, metric: 'VolumeBytesUsed', period: 3600 });
+    expect([scopeOf(storage), scopeOf(emptyForm(FN)), scopeOf(emptyForm())]).toEqual([`database:${DB}`, FN, '']);
   });
 
   it("keeps a statistic the new metric has, else takes its first; the money is the account's, one period", () => {

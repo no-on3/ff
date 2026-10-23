@@ -45,12 +45,13 @@ describe('requestHeaders', () => {
 });
 
 describe('can', () => {
-  it("lets owners and developers change functions, as the API's route rules do (D4)", () => {
+  it("lets owners and developers change functions, and databases, as the API's route rules do (D4)", () => {
     expect([can('owner', 'change functions'), can('developer', 'change functions'), can('viewer', 'change functions')]).toEqual([
       true,
       true,
       false,
     ]);
+    expect([can('owner', 'change databases'), can('developer', 'change databases'), can('viewer', 'change databases')]).toEqual([true, true, false]);
   });
 
   it('lets owners alone manage the account: members, API keys, its details', () => {
