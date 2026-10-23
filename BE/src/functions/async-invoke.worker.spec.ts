@@ -4,6 +4,7 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, OrchestratorError } from '../orchestrator/orchestrator.errors';
 import { ClaimedEvent } from '../queues/queue-store';
+import { LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES } from './async-invoke';
 import { AsyncInvokeWorker } from './async-invoke.worker';
 import { InvocationSource } from './entities/function-invocation.entity';
 import { FunctionStatus } from './entities/function.entity';
@@ -13,8 +14,11 @@ const NOW = new Date('2026-10-23T10:00:00Z');
 const later = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
 
 describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
-  const fn = { id: 'fn-1', accountId: ACCOUNT, status: FunctionStatus.ACTIVE };
-  let queues: { claimEvents: jest.Mock; retryEvent: jest.Mock; deleteEvent: jest.Mock };
+  const fn = { id: 'fn-1', name: 'orders', accountId: ACCOUNT, status: FunctionStatus.ACTIVE };
+  const records = { id: 'fn-2', name: 'records', accountId: ACCOUNT, status: FunctionStatus.ACTIVE };
+  const RECORDS_ARN = `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:records`;
+  let queues: { claimEvents: jest.Mock; retryEvent: jest.Mock; deleteEvent: jest.Mock; deleteEventAndSend: jest.Mock };
+  let configs: { settingsFor: jest.Mock; arnOf: (f: { accountId: string; name: string }) => string; destinationFunction: jest.Mock };
   let functions: { findOne: jest.Mock; call: jest.Mock };
   let credit: { admit: jest.Mock };
   let accounts: { findOne: jest.Mock };
@@ -49,10 +53,23 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       functions as never,
       credit as never,
       accounts as never,
+      configs as never,
     );
+  /** The record the worker handed its destination, as the destination's event. */
+  const handed = () => JSON.parse(queues.deleteEventAndSend.mock.calls[0][3] as string) as Record<string, unknown>;
 
   beforeEach(() => {
-    queues = { claimEvents: jest.fn(async () => []), retryEvent: jest.fn(async () => true), deleteEvent: jest.fn(async () => true) };
+    queues = {
+      claimEvents: jest.fn(async () => []),
+      retryEvent: jest.fn(async () => true),
+      deleteEvent: jest.fn(async () => true),
+      deleteEventAndSend: jest.fn(async () => true),
+    };
+    configs = {
+      settingsFor: jest.fn(async () => ({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: null })),
+      arnOf: (f) => `arn:aws:lambda:tn-tunis-1:${f.accountId}:function:${f.name}`,
+      destinationFunction: jest.fn(async () => records),
+    };
     functions = { findOne: jest.fn(async () => fn), call: jest.fn(async () => ({ ok: true, output: 1, invocation: {} })) };
     credit = { admit: jest.fn(async () => undefined) };
     accounts = { findOne: jest.fn(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE })) };
@@ -83,10 +100,30 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     const [[first, firstAt, firstKept], [second, secondAt, secondKept]] = queues.retryEvent.mock.calls;
     expect([first.id, second.id]).toEqual(['7', '8']);
     for (const at of [firstAt, secondAt]) expect(Math.abs((at as Date).getTime() - later(60).getTime())).toBeLessThan(1000);
+    // Each keeps its failure, for its record should it end at a later claim.
     expect([firstKept, secondKept]).toEqual([
-      { other: 'kept as it was', failures: 1, throttles: 0, settled: 1 },
-      { failures: 1, throttles: 0, settled: 1 },
+      {
+        other: 'kept as it was',
+        failures: 1,
+        throttles: 0,
+        settled: 1,
+        lastResponse: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Error', errorMessage: 'boom' } },
+      },
+      {
+        failures: 1,
+        throttles: 0,
+        settled: 1,
+        lastResponse: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Sandbox.Timedout', errorMessage: 'Task timed out after 5.00 seconds' } },
+      },
     ]);
+  });
+
+  it("keeps no more than 4,096 characters of a failure's message with its event", async () => {
+    functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'x'.repeat(10_000)), invocation: {} });
+
+    await tick(event());
+
+    expect(queues.retryEvent.mock.calls[0][2].lastResponse.payload.errorMessage).toHaveLength(4096);
   });
 
   it("drops an event after its third failure, Lambda's two retries used, and says so", async () => {
@@ -100,17 +137,28 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
   });
 
   it('backs off a throttled call from a second, and a call that failed on FF\'s side the same way, neither a retry', async () => {
-    functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionThrottledError('Rate exceeded'), invocation: {} });
-    functions.call.mockResolvedValueOnce({ ok: false, error: new OrchestratorError('no endpoints'), invocation: {} });
+    functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionThrottledError('Rate exceeded'), visible: 'Rate exceeded', invocation: {} });
+    functions.call.mockResolvedValueOnce({
+      ok: false,
+      error: new OrchestratorError('no endpoints'),
+      visible: 'The invocation failed because of an internal error (request req-2).',
+      invocation: {},
+    });
 
     await tick(event(), event({ id: '8', requestId: 'req-2', attributes: { failures: 0, throttles: 3, settled: 3 }, receiveCount: 4 }));
 
     const [[, throttledAt, throttled], [, failedAt, failed]] = queues.retryEvent.mock.calls;
     expect(Math.round(((throttledAt as Date).getTime() - NOW.getTime()) / 1000)).toBe(1);
     expect(Math.round(((failedAt as Date).getTime() - NOW.getTime()) / 1000)).toBe(8);
+    // FF's own failure keeps only what the caller may see of it.
     expect([throttled, failed]).toEqual([
-      { failures: 0, throttles: 1, settled: 1 },
-      { failures: 0, throttles: 4, settled: 4 },
+      { failures: 0, throttles: 1, settled: 1, lastResponse: { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded' } } },
+      {
+        failures: 0,
+        throttles: 4,
+        settled: 4,
+        lastResponse: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: 'The invocation failed because of an internal error (request req-2).' } },
+      },
     ]);
   });
 
@@ -130,10 +178,10 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event({ id: '3' }));
 
     expect(functions.call).not.toHaveBeenCalled();
-    expect(queues.retryEvent.mock.calls.map(([claimed, , kept]) => [claimed.id, kept])).toEqual([
-      ['1', { failures: 0, throttles: 1, settled: 1 }],
-      ['2', { failures: 0, throttles: 1, settled: 1 }],
-      ['3', { failures: 0, throttles: 1, settled: 1 }],
+    expect(queues.retryEvent.mock.calls.map(([claimed, , kept]) => [claimed.id, kept.throttles, kept.lastResponse.payload.errorMessage])).toEqual([
+      ['1', 1, "FF couldn't make the call: the function is not ACTIVE"],
+      ['2', 1, "FF couldn't make the call: the account is not active"],
+      ['3', 1, "FF couldn't make the call: the account's credit has run out"],
     ]);
   });
 
@@ -155,7 +203,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     const [[, at, kept]] = queues.retryEvent.mock.calls;
     // Its second failure: two minutes.
     expect(Math.round(((at as Date).getTime() - NOW.getTime()) / 1000)).toBe(120);
-    expect(kept).toEqual({ failures: 2, throttles: 0, settled: 2 });
+    expect(kept).toEqual(expect.objectContaining({ failures: 2, throttles: 0, settled: 2 }));
   });
 
   it('drops an event past its maximum age without a call', async () => {
@@ -171,6 +219,76 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event());
 
     expect(warnings).toHaveBeenCalledWith('The attempt of asynchronous call req-1 ended after its lease: another claim has the event, which stands');
+  });
+
+  it("follows the function's own settings: no retry when it allows none", async () => {
+    configs.settingsFor.mockResolvedValueOnce({ policy: { maximumRetryAttempts: 0, maximumEventAgeSeconds: 3600 }, onSuccess: null, onFailure: null });
+    functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'boom'), invocation: {} });
+
+    await tick(event());
+
+    expect(configs.settingsFor).toHaveBeenCalledWith('fn-1');
+    expect([queues.retryEvent.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 1]);
+  });
+
+  it("hands a call that succeeded to its onSuccess destination, Lambda's record of it, in the transaction that deletes the event", async () => {
+    configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: RECORDS_ARN, onFailure: null });
+    functions.call.mockResolvedValueOnce({ ok: true, output: { receipt: 'r-42' }, invocation: {} });
+
+    await tick(event({ receiveCount: 2, attributes: { failures: 1, throttles: 0, settled: 1 } }));
+
+    const [[ended, target, requestId, , expiresAt]] = queues.deleteEventAndSend.mock.calls;
+    expect([ended.id, target, requestId, queues.deleteEvent.mock.calls.length]).toEqual(['7', records, expect.stringMatching(/^[0-9a-f-]{36}$/), 0]);
+    expect((expiresAt as Date).getTime() - NOW.getTime()).toBeGreaterThanOrEqual(7 * 3600 * 1000 - 1000);
+    expect(configs.destinationFunction).toHaveBeenCalledWith(ACCOUNT, RECORDS_ARN);
+    expect(handed()).toEqual({
+      version: '1.0',
+      timestamp: expect.stringMatching(/^2026-10-23T10:00:0\d\.\d{3}Z$/),
+      requestContext: { requestId: 'req-1', functionArn: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders:$LATEST`, condition: 'Success', approximateInvokeCount: 2 },
+      requestPayload: { order: 42 },
+      responseContext: { statusCode: 200, executedVersion: '$LATEST' },
+      responsePayload: { receipt: 'r-42' },
+    });
+  });
+
+  it('hands a call whose retries are used up to its onFailure destination, with the error its function gave', async () => {
+    configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: RECORDS_ARN });
+    functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('TypeError', 'x is undefined'), invocation: {} });
+
+    await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 } }));
+
+    expect(handed()).toMatchObject({
+      requestContext: { condition: 'RetriesExhausted', approximateInvokeCount: 3 },
+      responseContext: { statusCode: 200, executedVersion: '$LATEST', functionError: 'Unhandled' },
+      responsePayload: { errorType: 'TypeError', errorMessage: 'x is undefined' },
+    });
+  });
+
+  it('hands a call too old at its claim to onFailure, with the last failure it kept; one with no attempt run, without an answer', async () => {
+    configs.settingsFor.mockResolvedValue({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: RECORDS_ARN });
+    const lastResponse = { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded' } };
+
+    await tick(event({ sentAt: later(-6 * 3600 - 1), receiveCount: 9, attributes: { failures: 0, throttles: 8, settled: 8, lastResponse } }));
+    await tick(event({ id: '8', requestId: 'req-2', sentAt: later(-6 * 3600 - 1) }));
+
+    expect(functions.call).not.toHaveBeenCalled();
+    const [first, second] = queues.deleteEventAndSend.mock.calls.map(([, , , body]) => JSON.parse(body as string) as Record<string, unknown>);
+    expect(first).toMatchObject({ requestContext: { condition: 'EventAgeExceeded' }, responseContext: { statusCode: 429 }, responsePayload: lastResponse.payload });
+    expect([second.requestContext, 'responseContext' in second]).toEqual([expect.objectContaining({ requestId: 'req-2', condition: 'EventAgeExceeded' }), false]);
+  });
+
+  it("deletes the event of a call whose destination is gone, or whose record is over an asynchronous call's 1 MB, saying the record wasn't delivered", async () => {
+    configs.settingsFor.mockResolvedValue({ policy: LAMBDA_RETRY_POLICY, onSuccess: RECORDS_ARN, onFailure: null });
+    configs.destinationFunction.mockResolvedValueOnce(undefined);
+    functions.call.mockResolvedValueOnce({ ok: true, output: 'small', invocation: {} });
+    functions.call.mockResolvedValueOnce({ ok: true, output: 'x'.repeat(MAX_ASYNC_INPUT_BYTES), invocation: {} });
+
+    await tick(event());
+    await tick(event({ id: '8', requestId: 'req-2' }));
+
+    expect([queues.deleteEventAndSend.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 2]);
+    expect(warnings).toHaveBeenCalledWith(`The record of asynchronous call req-1 of function fn-1 was not delivered: its destination ${RECORDS_ARN} is no function of the account any more`);
+    expect(warnings).toHaveBeenCalledWith(expect.stringMatching(/^The record of asynchronous call req-2 of function fn-1 was not delivered: its record is \d+ bytes, over an asynchronous call's 1048576$/));
   });
 
   it('claims only what it has room for, and nothing while full', async () => {

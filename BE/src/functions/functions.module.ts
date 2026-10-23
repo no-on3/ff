@@ -14,6 +14,9 @@ import { QueuesModule } from '../queues/queues.module';
 import { Account } from '../accounts/entities/account.entity';
 import { AsyncInvocationsService } from './async-invocations.service';
 import { AsyncInvokeWorker } from './async-invoke.worker';
+import { FunctionEventInvokeConfig } from './entities/function-event-invoke-config.entity';
+import { EventInvokeConfigController } from './event-invoke-config.controller';
+import { EventInvokeConfigService } from './event-invoke-config.service';
 import { FunctionEnvironment } from './entities/function-environment.entity';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
@@ -23,7 +26,7 @@ import { FunctionsService } from './functions.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment, Account]),
+    TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment, FunctionEventInvokeConfig, Account]),
     ObjectStoreModule,
     OrchestratorModule,
     MetricsModule,
@@ -39,8 +42,8 @@ import { FunctionsService } from './functions.service';
     // Its asynchronous calls wait in a queue of its own.
     QueuesModule,
   ],
-  controllers: [FunctionsController],
-  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker],
+  controllers: [FunctionsController, EventInvokeConfigController],
+  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService],
   exports: [FunctionsService],
 })
 export class FunctionsModule {}

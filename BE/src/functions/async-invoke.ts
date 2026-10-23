@@ -58,6 +58,73 @@ export enum EventEnd {
   FUNCTION_GONE = 'function-gone',
 }
 
+/** How an attempt answered, as a destination's record gives it: Lambda's status, and the function's output or the error. */
+export interface AttemptResponse {
+  statusCode: number;
+  /** "Unhandled" when the function failed, as Lambda says it. */
+  functionError?: 'Unhandled';
+  payload: unknown;
+}
+
+/** The longest error message an event keeps of its last failed attempt, for its record. */
+const KEPT_ERROR_CHARS = 4096;
+
+/** A failed attempt's answer, as its event keeps it for its record: the error's type and the start of its message. */
+export function keptResponse(response: AttemptResponse): AttemptResponse {
+  const payload = response.payload as { errorType?: unknown; errorMessage?: unknown } | null;
+  const text = (value: unknown, otherwise: string) => (typeof value === 'string' ? value : otherwise);
+  return {
+    ...response,
+    payload: { errorType: text(payload?.errorType, 'Error'), errorMessage: text(payload?.errorMessage, '').slice(0, KEPT_ERROR_CHARS) },
+  };
+}
+
+/** The last failed attempt's answer that an event kept, if any. */
+export function lastResponseOf(attributes: Record<string, unknown> | null): AttemptResponse | undefined {
+  const kept = attributes?.lastResponse as AttemptResponse | undefined;
+  return kept && Number.isInteger(kept.statusCode) ? kept : undefined;
+}
+
+/** Why a record is sent, as Lambda's condition names it. */
+const CONDITIONS: Record<Exclude<EventEnd, EventEnd.FUNCTION_GONE>, string> = {
+  [EventEnd.SUCCEEDED]: 'Success',
+  [EventEnd.RETRIES_EXHAUSTED]: 'RetriesExhausted',
+  [EventEnd.TOO_OLD]: 'EventAgeExceeded',
+};
+
+/**
+ * A call's record, as AWS Lambda sends a destination one: the request, why
+ * it is sent, the event, and the last attempt's answer, when one ran.
+ */
+export function invocationRecord(call: {
+  requestId: string;
+  functionArn: string;
+  end: Exclude<EventEnd, EventEnd.FUNCTION_GONE>;
+  approximateInvokeCount: number;
+  requestPayload: unknown;
+  response?: AttemptResponse;
+  timestamp: Date;
+}): Record<string, unknown> {
+  const { response } = call;
+  return {
+    version: '1.0',
+    timestamp: call.timestamp.toISOString(),
+    requestContext: {
+      requestId: call.requestId,
+      functionArn: `${call.functionArn}:$LATEST`,
+      condition: CONDITIONS[call.end],
+      approximateInvokeCount: call.approximateInvokeCount,
+    },
+    requestPayload: call.requestPayload,
+    ...(response
+      ? {
+          responseContext: { statusCode: response.statusCode, executedVersion: '$LATEST', ...(response.functionError ? { functionError: response.functionError } : {}) },
+          responsePayload: response.payload,
+        }
+      : {}),
+  };
+}
+
 /** What comes after an attempt: the event's end, or its next attempt. */
 export type Settlement = { end: EventEnd; attempts: EventAttempts } | { retryAt: Date; attempts: EventAttempts };
 

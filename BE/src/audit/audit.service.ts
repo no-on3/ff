@@ -29,6 +29,9 @@ export type AuditAction =
   | 'function.update'
   | 'function.delete'
   | 'function.scaling'
+  // A function's settings for its asynchronous calls, as Lambda's EventInvokeConfig: set, deleted.
+  | 'event_invoke_config.put'
+  | 'event_invoke_config.delete'
   // A function's package, uploaded: its SHA-256 and its sizes, once per account and package.
   | 'package.upload'
   // A function's URL, its public address: given, changed, taken away.

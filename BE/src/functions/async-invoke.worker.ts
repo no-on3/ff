@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'node:crypto';
 import { Repository } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
@@ -9,9 +10,24 @@ import { describeError } from '../common/describe-error';
 import { withRequestContext } from '../common/request-context';
 import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/orchestrator.errors';
 import { ClaimedEvent, QueueStore } from '../queues/queue-store';
-import { AttemptOutcome, EventAttempts, EventEnd, LAMBDA_RETRY_POLICY, Settlement, afterAttempt, attemptsOf, onClaim } from './async-invoke';
+import {
+  AttemptOutcome,
+  AttemptResponse,
+  EXPIRY_GRACE_SECONDS,
+  EventEnd,
+  LAMBDA_RETRY_POLICY,
+  MAX_ASYNC_INPUT_BYTES,
+  Settlement,
+  afterAttempt,
+  attemptsOf,
+  invocationRecord,
+  keptResponse,
+  lastResponseOf,
+  onClaim,
+} from './async-invoke';
 import { InvocationSource } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
+import { AsyncSettings, EventInvokeConfigService } from './event-invoke-config.service';
 import { FunctionsService } from './functions.service';
 
 /** Why an event ended without succeeding, as the server log says it. */
@@ -21,6 +37,12 @@ const ENDS: Record<Exclude<EventEnd, EventEnd.SUCCEEDED>, string> = {
   [EventEnd.FUNCTION_GONE]: 'its function is gone',
 };
 
+/** An attempt's outcome, and how it answered, for the event's record. */
+interface Attempted {
+  outcome: AttemptOutcome;
+  response: AttemptResponse;
+}
+
 /**
  * Runs functions' asynchronous calls (ADR 0010). Every
  * FF_ASYNC_INTERVAL_SECONDS, it claims the events due, as many as it has room
@@ -29,7 +51,10 @@ const ENDS: Record<Exclude<EventEnd, EventEnd.SUCCEEDED>, string> = {
  * function ACTIVE, the account active with credit, the record and the bill,
  * the history's source `async` and its attempt, under the event's request ID.
  * The plan's rate was counted when the call came. Then the event is deleted,
- * or put back for its next attempt as Lambda retries (async-invoke.ts). A
+ * or put back for its next attempt as Lambda retries, by the function's own
+ * settings, else Lambda's defaults (async-invoke.ts, EventInvokeConfigService).
+ * An event that ends hands its record, Lambda's, to the destination its
+ * function names for how it ended, in the transaction that deletes it. A
  * backend that stops during an attempt leaves its event to come back when its
  * lease ends, the attempt counted as failed.
  */
@@ -50,6 +75,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     private readonly functions: FunctionsService,
     private readonly credit: CreditService,
     @InjectRepository(Account) private readonly accounts: Repository<Account>,
+    private readonly configs: EventInvokeConfigService,
   ) {
     const settings = config.getOrThrow<{ intervalSeconds: number; concurrency: number }>('asyncInvoke');
     this.intervalSeconds = settings.intervalSeconds;
@@ -99,8 +125,14 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     const now = () => new Date(Date.now() + offset);
     try {
       await withRequestContext({ requestId: event.requestId }, async () => {
-        const claim = onClaim(attemptsOf(event.attributes), event.receiveCount, event.sentAt, claimedAt, LAMBDA_RETRY_POLICY);
-        await this.settle(event, 'run' in claim ? await this.run(event, claim.run, now) : claim);
+        const fn = await this.functionOf(event);
+        if (!fn) return this.settle(event, { end: EventEnd.FUNCTION_GONE, attempts: attemptsOf(event.attributes) });
+        const settings = await this.configs.settingsFor(fn.id);
+        const claim = onClaim(attemptsOf(event.attributes), event.receiveCount, event.sentAt, claimedAt, settings.policy);
+        if (!('run' in claim)) return this.settle(event, claim, { fn, settings, response: lastResponseOf(event.attributes), at: now() });
+        const attempted = await this.run(fn, event);
+        const settlement = afterAttempt(claim.run, attempted.outcome, event.sentAt, now(), settings.policy);
+        await this.settle(event, settlement, { fn, settings, response: attempted.response, at: now() });
       });
     } catch (error) {
       this.logger.error(
@@ -109,27 +141,23 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** The attempt, and when the next one comes, or why there is none. */
-  private async run(event: ClaimedEvent, attempts: EventAttempts, now: () => Date): Promise<Settlement> {
-    const outcome = await this.outcomeOf(event);
-    if (outcome === undefined) return { end: EventEnd.FUNCTION_GONE, attempts };
-    return afterAttempt(attempts, outcome, event.sentAt, now(), LAMBDA_RETRY_POLICY);
-  }
-
-  /** The call, as the API's invoke makes one; FF's own failure when the function or the account can't take one now; undefined when the function is gone. */
-  private async outcomeOf(event: ClaimedEvent): Promise<AttemptOutcome | undefined> {
-    let function_: Function;
+  /** The event's function, unless it is gone. */
+  private async functionOf(event: ClaimedEvent): Promise<Function | undefined> {
     try {
-      function_ = await this.functions.findOne(event.accountId, event.functionId);
+      return await this.functions.findOne(event.accountId, event.functionId);
     } catch (error) {
       if (error instanceof NotFoundException) return undefined;
       throw error;
     }
-    const waits = (why: string) => {
+  }
+
+  /** The call, as the API's invoke makes one; FF's own failure when the function or the account can't take one now. */
+  private async run(fn: Function, event: ClaimedEvent): Promise<Attempted> {
+    const waits = (why: string): Attempted => {
       this.logger.log(`Asynchronous call ${event.requestId} of function ${event.functionId} waits: ${why}`);
-      return AttemptOutcome.SYSTEM_ERROR;
+      return { outcome: AttemptOutcome.SYSTEM_ERROR, response: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: `FF couldn't make the call: ${why}` } } };
     };
-    if (function_.status !== FunctionStatus.ACTIVE) return waits('the function is not ACTIVE');
+    if (fn.status !== FunctionStatus.ACTIVE) return waits('the function is not ACTIVE');
     const account = await this.accounts.findOne({ where: { id: event.accountId }, select: { id: true, status: true } });
     if (!account || account.status !== AccountStatus.ACTIVE) return waits('the account is not active');
     try {
@@ -138,23 +166,44 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       if (error instanceof InsufficientCreditException) return waits("the account's credit has run out");
       throw error;
     }
-    const outcome = await this.functions.call(function_, JSON.parse(event.body) as unknown, {
+    const outcome = await this.functions.call(fn, JSON.parse(event.body) as unknown, {
       source: InvocationSource.ASYNC,
       requestId: event.requestId,
       attempt: event.receiveCount,
     });
-    if (outcome.ok) return AttemptOutcome.SUCCESS;
-    if (outcome.error instanceof FunctionThrottledError) return AttemptOutcome.THROTTLED;
-    if (outcome.error instanceof FunctionRuntimeError) return AttemptOutcome.FUNCTION_ERROR;
-    return AttemptOutcome.SYSTEM_ERROR;
+    if (outcome.ok) return { outcome: AttemptOutcome.SUCCESS, response: { statusCode: 200, payload: outcome.output } };
+    if (outcome.error instanceof FunctionThrottledError) {
+      return { outcome: AttemptOutcome.THROTTLED, response: { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: outcome.visible } } };
+    }
+    if (outcome.error instanceof FunctionRuntimeError) {
+      const failed = outcome.error;
+      return {
+        outcome: AttemptOutcome.FUNCTION_ERROR,
+        response: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: failed.errorType, errorMessage: failed.message } },
+      };
+    }
+    return { outcome: AttemptOutcome.SYSTEM_ERROR, response: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: outcome.visible } } };
   }
 
-  /** The event deleted, or put back for its next attempt, unless its lease ended and another claim has it. */
-  private async settle(event: ClaimedEvent, settlement: Settlement): Promise<void> {
-    const kept =
-      'end' in settlement
-        ? await this.queues.deleteEvent(event)
-        : await this.queues.retryEvent(event, settlement.retryAt, { ...event.attributes, ...settlement.attempts });
+  /**
+   * The event deleted, its record handed to its destination, or put back for
+   * its next attempt with its last failure kept for that record; unless its
+   * lease ended and another claim has it.
+   */
+  private async settle(
+    event: ClaimedEvent,
+    settlement: Settlement,
+    context?: { fn: Function; settings: AsyncSettings; response?: AttemptResponse; at: Date },
+  ): Promise<void> {
+    let kept: boolean;
+    if (!('end' in settlement)) {
+      // Only a failure is retried: its answer is kept for the record, should the event end at a later claim.
+      const lastResponse = context?.response ? keptResponse(context.response) : undefined;
+      kept = await this.queues.retryEvent(event, settlement.retryAt, { ...event.attributes, ...settlement.attempts, ...(lastResponse ? { lastResponse } : {}) });
+    } else {
+      const destination = context && settlement.end !== EventEnd.FUNCTION_GONE ? (settlement.end === EventEnd.SUCCEEDED ? context.settings.onSuccess : context.settings.onFailure) : null;
+      kept = destination && context ? await this.deliver(event, settlement.end as Exclude<EventEnd, EventEnd.FUNCTION_GONE>, destination, context) : await this.queues.deleteEvent(event);
+    }
     if (!kept) {
       this.logger.warn(`The attempt of asynchronous call ${event.requestId} ended after its lease: another claim has the event, which stands`);
       return;
@@ -162,5 +211,36 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     if ('end' in settlement && settlement.end !== EventEnd.SUCCEEDED) {
       this.logger.warn(`Asynchronous call ${event.requestId} of function ${event.functionId} was dropped: ${ENDS[settlement.end]}`);
     }
+  }
+
+  /** The event deleted and its record handed to the destination as an asynchronous call of its own; a record that can't be delivered is said, and the event deleted all the same. */
+  private async deliver(
+    event: ClaimedEvent,
+    end: Exclude<EventEnd, EventEnd.FUNCTION_GONE>,
+    destination: string,
+    context: { fn: Function; response?: AttemptResponse; at: Date },
+  ): Promise<boolean> {
+    const record = invocationRecord({
+      requestId: event.requestId,
+      functionArn: this.configs.arnOf(context.fn),
+      end,
+      approximateInvokeCount: event.receiveCount,
+      requestPayload: JSON.parse(event.body) as unknown,
+      response: context.response,
+      timestamp: context.at,
+    });
+    const body = JSON.stringify(record);
+    const target = await this.configs.destinationFunction(event.accountId, destination);
+    const undelivered = !target
+      ? `its destination ${destination} is no function of the account any more`
+      : Buffer.byteLength(body) > MAX_ASYNC_INPUT_BYTES
+        ? `its record is ${Buffer.byteLength(body)} bytes, over an asynchronous call's ${MAX_ASYNC_INPUT_BYTES}`
+        : undefined;
+    if (!target || undelivered) {
+      this.logger.warn(`The record of asynchronous call ${event.requestId} of function ${event.functionId} was not delivered: ${undelivered}`);
+      return this.queues.deleteEvent(event);
+    }
+    const expiresAt = new Date(context.at.getTime() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
+    return this.queues.deleteEventAndSend(event, target, randomUUID(), body, expiresAt);
   }
 }

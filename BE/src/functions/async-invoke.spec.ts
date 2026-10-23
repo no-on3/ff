@@ -1,4 +1,4 @@
-import { AttemptOutcome, EventEnd, LAMBDA_RETRY_POLICY, afterAttempt, attemptsOf, onClaim } from './async-invoke';
+import { AttemptOutcome, EventEnd, LAMBDA_RETRY_POLICY, afterAttempt, attemptsOf, invocationRecord, keptResponse, lastResponseOf, onClaim } from './async-invoke';
 
 const SENT = new Date('2026-10-23T10:00:00Z');
 const at = (seconds: number) => new Date(SENT.getTime() + seconds * 1000);
@@ -55,6 +55,40 @@ describe('asynchronous calls, as AWS Lambda retries them (L1)', () => {
 
       expect(afterAttempt(none, AttemptOutcome.FUNCTION_ERROR, SENT, at(1), policy)).toMatchObject({ end: EventEnd.RETRIES_EXHAUSTED });
       expect(afterAttempt(none, AttemptOutcome.THROTTLED, SENT, at(59.5), policy)).toMatchObject({ end: EventEnd.TOO_OLD });
+    });
+  });
+
+  describe("a call's record, as Lambda sends a destination one", () => {
+    const call = { requestId: 'req-1', functionArn: 'arn:aws:lambda:tn-tunis-1:000000000001:function:orders', approximateInvokeCount: 3, requestPayload: { order: 42 }, timestamp: SENT };
+
+    it("names the request, why it ends, the event and the last attempt's answer", () => {
+      const response = { statusCode: 200, functionError: 'Unhandled' as const, payload: { errorType: 'Error', errorMessage: 'boom' } };
+
+      expect(invocationRecord({ ...call, end: EventEnd.RETRIES_EXHAUSTED, response })).toEqual({
+        version: '1.0',
+        timestamp: '2026-10-23T10:00:00.000Z',
+        requestContext: { requestId: 'req-1', functionArn: 'arn:aws:lambda:tn-tunis-1:000000000001:function:orders:$LATEST', condition: 'RetriesExhausted', approximateInvokeCount: 3 },
+        requestPayload: { order: 42 },
+        responseContext: { statusCode: 200, executedVersion: '$LATEST', functionError: 'Unhandled' },
+        responsePayload: { errorType: 'Error', errorMessage: 'boom' },
+      });
+    });
+
+    it("says Success and EventAgeExceeded as Lambda does, and leaves out the answer of an attempt that never ran", () => {
+      expect(invocationRecord({ ...call, end: EventEnd.SUCCEEDED, response: { statusCode: 200, payload: 'done' } })).toMatchObject({
+        requestContext: { condition: 'Success' },
+        responseContext: { statusCode: 200, executedVersion: '$LATEST' },
+        responsePayload: 'done',
+      });
+      const aged = invocationRecord({ ...call, end: EventEnd.TOO_OLD });
+      expect([(aged.requestContext as { condition: string }).condition, 'responseContext' in aged, 'responsePayload' in aged]).toEqual(['EventAgeExceeded', false, false]);
+    });
+
+    it("keeps a failure's type and the start of its message with its event, and reads it back", () => {
+      const kept = keptResponse({ statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Error', errorMessage: 'y'.repeat(5000), stack: ['a'] } });
+
+      expect(kept).toEqual({ statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Error', errorMessage: 'y'.repeat(4096) } });
+      expect([lastResponseOf({ lastResponse: kept }), lastResponseOf(null), lastResponseOf({ lastResponse: { statusCode: 'x' } })]).toEqual([kept, undefined, undefined]);
     });
   });
 

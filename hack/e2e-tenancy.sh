@@ -340,6 +340,7 @@ body_for() {
     "PUT /functions/{id}") echo '{"name": "l5-taken-over"}' ;;
     "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}}' ;;
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
+    "PUT /functions/{id}/event-invoke-config") echo '{"maximumRetryAttempts": 0}' ;;
     "PATCH /functions/{id}/secrets") echo '{"secrets": {"L5_SECRET": "l5"}}' ;;
     "POST /functions/{id}/url" | "PUT /functions/{id}/url") echo '{"authType": "NONE"}' ;;
     "POST /functions/{id}/url/domains") echo '{"domain": "l5.example.tn"}' ;;
@@ -619,6 +620,9 @@ for type in Event DryRun; do
   check "POST /functions/{id}/invoke as $type: B's call of A's function answers as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
 done
 check "  ... and nothing of B's waits in A's function's queue" 0 "$(waiting_for "$id")"
+as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
+check "B can't name A's function as the destination of its own function's calls" \
+  "400 destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_b:function:l5-a" "$(status) $(message)"
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
 as_b DELETE "/functions/$own" >/dev/null
 check "B deletes its own function" 200 "$(status)"
@@ -1000,6 +1004,9 @@ for type in Event DryRun; do
   check "POST /functions/{id}/invoke as $type: account 2's call of account 1's function answers as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
 check "  ... and nothing of account 2's waits in account 1's function's queue" 0 "$(waiting_for "$fn_1")"
+as_user_2 PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_1:function:l5-one" '{destinationConfig: {onSuccess: {destination: $arn}}}')" >/dev/null
+check "account 2 can't name account 1's function as the destination of its own function's calls" \
+  "400 destinationConfig.onSuccess.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_2:function:l5-one" "$(status) $(message)"
 check "account 1's function, history and limits are unchanged" "$before_1" "$(snapshot as_user_1 "$fn_1")"
 check "and so is its name" "$name_1" "$(as_user_1 GET "/accounts/$account_1" | jq -r .name)"
 check "and so are its members and invitations" "$members_1" \
@@ -1068,11 +1075,21 @@ for route in "${routes[@]}"; do
   with_token "$key_1" "${route%% *}" "${route#* }" "$(body_for "${route%% *}" "${route#* }")" >/dev/null
   check "a key can't call $route (P-70)" "403 API keys can't call the admin routes" "$(status) $(message)"
 done
+# Account 2's changes in its user's loop above count against its plan's 60 a minute: a change its key makes past them
+# answers 429, and is sent again once the wait it gives is over, as a client does.
+patiently() {
+  "$@" >/dev/null
+  [ "$(status)" = 429 ] || return 0
+  local wait
+  wait="$(message | sed -nE 's/.*Retry after ([0-9]+) s\..*/\1/p')"
+  sleep "${wait:-60}"
+  "$@" >/dev/null
+}
 for route in "${routes[@]}"; do
   method="${route%% *}"
   template="${route#* }"
   case $template in /functions/*) ;; *) continue ;; esac
-  with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
+  patiently with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")"
   check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
 echo "== a function URL that takes the account's credentials"

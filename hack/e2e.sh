@@ -27,7 +27,9 @@
 # 1 MB limit; a failing Event retried a minute, then two minutes after its
 # failure (the waits read in FF's database, then cut short there), then
 # dropped, each attempt in the history and billed; one past its age dropped
-# without another attempt. Then a
+# without another attempt; a function's own settings, as Lambda's
+# EventInvokeConfig: no retry, and a destination function getting Lambda's
+# record of each call, on success and on failure. Then a
 # customer's database on the run's own server of customers' databases: made, its
 # connection string over TLS as its own user, the plan's one database, a new
 # password, a function reaching it with its account's internet access off and
@@ -707,6 +709,36 @@ put_back "$aged" 1
 env_q "UPDATE queue_messages SET sent_at = now() - interval '6 hours 1 minute', visible_at = now() WHERE message_id = '$aged'" >/dev/null
 gone_soon "$aged"
 check "an Event past its maximum age is dropped at its next claim, without another attempt" "0 1" "$(kept_events "$aged") $(attempts_of "$aged" | jq length)"
+records_fn="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-async-records", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+records_arn="arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async-records"
+http GET "/functions/$async_fn/event-invoke-config" >/dev/null
+check "a function without settings for its asynchronous calls follows Lambda's defaults, which the 404 says" \
+  "404 The function arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async has no event invoke configuration: its asynchronous calls are retried twice and kept 6 hours, AWS Lambda's defaults" \
+  "$(status) $(jq -r .message "$work/body")"
+set_config="$(http PUT "/functions/$async_fn/event-invoke-config" "$(jq -cn --arg arn "$records_arn" '{maximumRetryAttempts: 0, destinationConfig: {onSuccess: {destination: $arn}, onFailure: {destination: $arn}}}')")"
+check "its own settings, as Lambda's EventInvokeConfig: no retry, and another function as the destination of each call's record" \
+  "200 arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 0 null $records_arn $records_arn" \
+  "$(status) $(jq -r '"\(.functionArn) \(.maximumRetryAttempts) \(.maximumEventAgeInSeconds) \(.destinationConfig.onSuccess.destination) \(.destinationConfig.onFailure.destination)"' <<<"$set_config")"
+# The records come to the destination as asynchronous calls of its own, their event Lambda's record.
+record_of() {
+  for _ in $(seq 1 30); do
+    found="$(http GET "/functions/$records_fn/invocations?limit=20" | jq -c --arg r "$1" '[.invocations[] | select(.status == "COMPLETED" and .input.requestContext.requestId == $r)][0].input // empty')"
+    [ -n "$found" ] && echo "$found" && return 0
+    sleep 1
+  done
+}
+succeeded="$(http POST "/functions/$async_fn/invoke" '{"input": {"order": 9}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+check "a call that succeeds hands its destination Lambda's record of it: Success, its event, its answer" \
+  "Success arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 1 9 9 200" \
+  "$(record_of "$succeeded" | jq -r '"\(.requestContext.condition) \(.requestContext.functionArn) \(.requestContext.approximateInvokeCount) \(.requestPayload.order) \(.responsePayload.got.order) \(.responseContext.statusCode)"')"
+failed="$(http POST "/functions/$async_fn/invoke" '{"input": {"fail": true}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+check "one that fails, with no retry, hands it at once its record: RetriesExhausted, the function's error" \
+  "RetriesExhausted 1 Unhandled Error asked to fail" \
+  "$(record_of "$failed" | jq -r '"\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.responseContext.functionError) \(.responsePayload.errorType) \(.responsePayload.errorMessage)"')"
+check "  ... after its one attempt" 1 "$(attempts_of "$failed" | jq length)"
+http DELETE "/functions/$async_fn/event-invoke-config" >/dev/null
+check "its settings deleted, it follows Lambda's defaults again" "204 404" "$(status) $(http GET "/functions/$async_fn/event-invoke-config" >/dev/null; status)"
+http DELETE "/functions/$records_fn" >/dev/null
 http DELETE "/functions/$async_fn" >/dev/null
 check "deleting the function deletes its queue" 0 "$(env_q "SELECT count(*) FROM queues WHERE function_id = '$async_fn'")"
 

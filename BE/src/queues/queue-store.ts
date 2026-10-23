@@ -55,21 +55,53 @@ export class QueueStore {
 
   /**
    * Keeps an asynchronous call of the function: its event, under its request
-   * ID, in the function's own queue, made at its first call. Due at once;
-   * deleted unhandled at `expiresAt`.
+   * ID, in the function's own queue, made at its first call, with what its
+   * origin keeps beside it. Due at once; deleted unhandled at `expiresAt`.
+   * In the transaction given, else in one of its own.
    */
-  async sendEvent(fn: { id: string; accountId: string }, requestId: string, body: string, expiresAt: Date): Promise<void> {
-    await this.dataSource.transaction(async (manager) => {
+  async sendEvent(
+    fn: { id: string; accountId: string },
+    requestId: string,
+    body: string,
+    expiresAt: Date,
+    options: { manager?: EntityManager; attributes?: Record<string, unknown> } = {},
+  ): Promise<void> {
+    const write = async (manager: EntityManager) => {
       await manager.query(
         `INSERT INTO "queues" ("account_id", "name", "kind", "function_id") VALUES ($1, $2::text, 'function', $2::uuid)
          ON CONFLICT ("function_id") WHERE "kind" = 'function' DO NOTHING`,
         [fn.accountId, fn.id],
       );
       await manager.query(
-        `INSERT INTO "queue_messages" ("queue_id", "function_id", "message_id", "body", "size_bytes", "expires_at")
-         SELECT "id", $1, $2, $3, $4, $5 FROM "queues" WHERE "function_id" = $1 AND "kind" = 'function'`,
-        [fn.id, requestId, body, Buffer.byteLength(body), expiresAt],
+        `INSERT INTO "queue_messages" ("queue_id", "function_id", "message_id", "body", "attributes", "size_bytes", "expires_at")
+         SELECT "id", $1, $2, $3, $4, $5, $6 FROM "queues" WHERE "function_id" = $1 AND "kind" = 'function'`,
+        [fn.id, requestId, body, options.attributes ?? null, Buffer.byteLength(body), expiresAt],
       );
+    };
+    if (options.manager) await write(options.manager);
+    else await this.dataSource.transaction(write);
+  }
+
+  /**
+   * Ends a claimed event and hands its record to another function as an
+   * asynchronous call, in one transaction: the record is kept exactly when the
+   * event goes. False, and nothing sent, when another claim has the event since.
+   */
+  async deleteEventAndSend(
+    event: Pick<ClaimedEvent, 'id' | 'receiveCount'>,
+    target: { id: string; accountId: string },
+    requestId: string,
+    body: string,
+    expiresAt: Date,
+  ): Promise<boolean> {
+    return this.dataSource.transaction(async (manager) => {
+      const [, count] = await manager.query<[unknown[], number]>(`DELETE FROM "queue_messages" WHERE "id" = $1 AND "receive_count" = $2`, [
+        event.id,
+        event.receiveCount,
+      ]);
+      if (count !== 1) return false;
+      await this.sendEvent(target, requestId, body, expiresAt, { manager });
+      return true;
     });
   }
 

@@ -7,7 +7,9 @@
  * under the event's request ID, with a usage record each, through the real
  * call path (the orchestrator is a stand-in); an event past its age dropped;
  * messages gone with their function, or past their expiry; a lost attempt
- * marked under its request. Each run works in a scratch database, dropped
+ * marked under its request; a function's own settings, and the record of a
+ * call that ended handed to its destination function in the transaction that
+ * deletes it, which then runs it. Each run works in a scratch database, dropped
  * afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
@@ -23,6 +25,8 @@ import { QueueStore } from '../queues/queue-store';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
 import { AsyncInvokeWorker } from './async-invoke.worker';
+import { FunctionEventInvokeConfig } from './entities/function-event-invoke-config.entity';
+import { EventInvokeConfigService } from './event-invoke-config.service';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
@@ -37,6 +41,7 @@ run('asynchronous calls, in the database (L2)', () => {
   let queues: QueueStore;
   let functions: FunctionsService;
   let usage: UsageService;
+  let configs: EventInvokeConfigService;
   const invoke = jest.fn<Promise<InvokeResult>, Parameters<Orchestrator['invoke']>>();
   const config = {
     getOrThrow: () => ({ intervalSeconds: 0, concurrency: 10 }),
@@ -52,11 +57,12 @@ run('asynchronous calls, in the database (L2)', () => {
       calls ? ({ findOne: (accountId: string, id: string) => functions.findOne(accountId, id), call: calls.call } as unknown as FunctionsService) : functions,
       { admit: async () => undefined } as never,
       db.dataSource.getRepository(Account),
+      configs,
     );
   const send = (fn: Function, requestId: string, body = '{"order":1}', expiresAt = new Date(Date.now() + 7 * HOUR)) => queues.sendEvent(fn, requestId, body, expiresAt);
   const message = async (requestId: string) =>
     (
-      await db.dataSource.query<Array<{ visible_at: Date; receive_count: number; attributes: Record<string, number> | null }>>(
+      await db.dataSource.query<Array<{ visible_at: Date; receive_count: number; attributes: Record<string, unknown> | null }>>(
         'SELECT visible_at, receive_count, attributes FROM queue_messages WHERE message_id = $1',
         [requestId],
       )
@@ -97,6 +103,9 @@ run('asynchronous calls, in the database (L2)', () => {
       ...noPackages(),
       noFunctionKeys(),
     );
+    configs = new EventInvokeConfigService(db.dataSource.getRepository(FunctionEventInvokeConfig), functions, { record: async () => undefined } as never, {
+      getOrThrow: () => 'tn-tunis-1',
+    } as unknown as ConfigService);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
@@ -180,7 +189,7 @@ run('asynchronous calls, in the database (L2)', () => {
     // Its second failure, the lost one first: retried two minutes after.
     expect([kept.receive_count, kept.attributes, kept.visible_at.getTime() - afterLease.getTime()]).toEqual([
       2,
-      { failures: 2, throttles: 0, settled: 2 },
+      { failures: 2, throttles: 0, settled: 2, lastResponse: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Error', errorMessage: 'boom' } } },
       expect.any(Number),
     ]);
     expect(Math.round((kept.visible_at.getTime() - afterLease.getTime()) / 1000)).toBe(120);
@@ -284,5 +293,55 @@ run('asynchronous calls, in the database (L2)', () => {
 
     expect(await db.dataSource.query(`SELECT status FROM usage_records WHERE request_id = $1`, [requestId])).toEqual([{ status: 'lost' }]);
     expect(await db.dataSource.query(`SELECT status FROM function_invocations WHERE request_id = $1`, [requestId])).toEqual([{ status: 'LOST' }]);
+  });
+  it("hands the record of a call whose retries are used up to its destination function, in the transaction that deletes it, which then runs it", async () => {
+    const [orders, failed] = [await newFunction(), await newFunction()];
+    await configs.put(ACCOUNT, orders.id, { maximumRetryAttempts: 0, destinationConfig: { onFailure: { destination: configs.arnOf(failed) } } });
+    const requestId = uuid(800);
+    await send(orders, requestId, '{"order":8}');
+    invoke.mockImplementation(async (fn) => {
+      if (fn.id === orders.id) throw new FunctionRuntimeError('TypeError', 'x is undefined', { durationMs: 2 });
+      return { output: 'recorded', durationMs: 1 };
+    });
+    const w = worker();
+
+    await w.tick(new Date(Date.now() + 1000));
+    await w.settled();
+
+    expect(await message(requestId)).toBeUndefined();
+    const [handed] = await db.dataSource.query<Array<{ message_id: string; body: string }>>(`SELECT message_id, body FROM queue_messages WHERE function_id = $1`, [failed.id]);
+    expect(JSON.parse(handed.body)).toEqual({
+      version: '1.0',
+      timestamp: expect.any(String),
+      requestContext: { requestId, functionArn: `${configs.arnOf(orders)}:$LATEST`, condition: 'RetriesExhausted', approximateInvokeCount: 1 },
+      requestPayload: { order: 8 },
+      responseContext: { statusCode: 200, executedVersion: '$LATEST', functionError: 'Unhandled' },
+      responsePayload: { errorType: 'TypeError', errorMessage: 'x is undefined' },
+    });
+
+    await w.tick(new Date(Date.now() + 1000));
+    await w.settled();
+
+    const ran = await db.dataSource.getRepository(FunctionInvocation).findOneByOrFail({ requestId: handed.message_id });
+    expect([ran.functionId, ran.source, ran.status, (ran.input as { requestContext: { requestId: string } }).requestContext.requestId]).toEqual([
+      failed.id,
+      InvocationSource.ASYNC,
+      InvocationStatus.COMPLETED,
+      requestId,
+    ]);
+    invoke.mockReset();
+  });
+
+  it('hands nothing over for a claim another has taken since, and deletes a function\'s settings with it', async () => {
+    const [orders, failed] = [await newFunction(), await newFunction()];
+    await send(orders, uuid(900));
+    const [{ id }] = await db.dataSource.query<Array<{ id: string }>>(`SELECT id FROM queue_messages WHERE message_id = $1`, [uuid(900)]);
+
+    expect(await queues.deleteEventAndSend({ id, receiveCount: 5 }, failed, uuid(901), '{}', new Date(Date.now() + HOUR))).toBe(false);
+    expect([await message(uuid(900)), await message(uuid(901))]).toEqual([expect.anything(), undefined]);
+
+    await configs.put(ACCOUNT, orders.id, { maximumEventAgeInSeconds: 60 });
+    await db.dataSource.getRepository(Function).delete({ id: orders.id });
+    expect(await db.dataSource.getRepository(FunctionEventInvokeConfig).countBy({ functionId: orders.id })).toBe(0);
   });
 });

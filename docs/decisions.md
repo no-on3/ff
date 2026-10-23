@@ -42,7 +42,8 @@ The [step-3 plan](step-3-plan.md)'s §9, each answered as it recommended.
 - **Still to change:** Q-07.
 
 **31. Destinations: a queue or a function,** on success and on failure, as Lambda's. ✅ Confirmed.
-- **Still to change:** Q-03.
+- **Changed already:** Q-03, part 1: a function as a destination, getting Lambda's record of each call as an asynchronous call of its own.
+- **Still to change:** a queue as a destination, with Q-04, when there are queues to name.
 
 **32. An asynchronous call lost when the backend stops is retried,** as one of its attempts; a synchronous one stays lost, as today. ✅ Confirmed.
 - **Changed already:** Q-02, part 2: its event comes back when its lease ends, and the claim that kept no outcome counts as a failed attempt; the reaper marks that attempt `LOST`, unbilled, under its request.
