@@ -1355,7 +1355,43 @@ export const queuesApi = {
   receive: (name: string, options: { maxMessages?: number; visibilityTimeout?: number; waitTimeSeconds?: number } = {}) =>
     api.post<ReceivedMessage[]>(`/queues/${name}/receive`, options),
   deleteMessage: (name: string, receiptHandle: string) => api.delete(`/queues/${name}/messages/${encodeURIComponent(receiptHandle)}`),
+  metrics: (name: string, params: { period: number; start?: string; end?: string }) => api.get<QueueMetrics>(`/queues/${name}/metrics`, { params }),
 };
+
+/** A queue's metrics series, as the API's DTO names them after CloudWatch's SQS metrics: contract.test.ts checks them. */
+export const QUEUE_METRIC_NAMES = [
+  'ApproximateNumberOfMessagesVisible',
+  'ApproximateNumberOfMessagesNotVisible',
+  'ApproximateNumberOfMessagesDelayed',
+  'ApproximateAgeOfOldestMessage',
+  'NumberOfMessagesSent',
+  'NumberOfMessagesReceived',
+  'NumberOfMessagesDeleted',
+  'NumberOfEmptyReceives',
+  'SentMessageSize',
+] as const;
+
+/** GET /queues/:name/metrics: a point per period of the window, oldest first. */
+export interface QueueMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: {
+    /** Messages waiting, in flight and delayed: the most and the mean of the period's minutes, an empty queue's 0. */
+    ApproximateNumberOfMessagesVisible: { Maximum: number[]; Average: number[] };
+    ApproximateNumberOfMessagesNotVisible: { Maximum: number[]; Average: number[] };
+    ApproximateNumberOfMessagesDelayed: { Maximum: number[]; Average: number[] };
+    /** Seconds: its oldest message's age, the most of the period's minutes. */
+    ApproximateAgeOfOldestMessage: { Maximum: number[] };
+    NumberOfMessagesSent: { Sum: number[] };
+    NumberOfMessagesReceived: { Sum: number[] };
+    NumberOfMessagesDeleted: { Sum: number[] };
+    NumberOfEmptyReceives: { Sum: number[] };
+    /** Bytes; null for a period without a message sent. */
+    SentMessageSize: { Average: Array<number | null>; Maximum: Array<number | null> };
+  };
+}
 
 /** A function reading a queue of its account, as AWS Lambda's event source mapping for SQS, in Lambda's names. */
 export interface EventSource {

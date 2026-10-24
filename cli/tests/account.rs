@@ -207,6 +207,26 @@ fn metrics_of_a_function_show_a_row_per_period_and_the_totals() {
 }
 
 #[test]
+fn metrics_say_the_calls_that_didnt_wait_as_lambdas_metrics_count_them_when_there_were_any() {
+    let mut answer = metrics();
+    answer["metrics"]["AsyncEventsReceived"] = json!([4, 1]);
+    answer["metrics"]["AsyncEventAge"] = json!({ "Average": [120.0, null], "Maximum": [200.0, null] });
+    answer["metrics"]["AsyncEventsDropped"] = json!([0, 3]);
+    answer["metrics"]["DestinationDeliveryFailures"] = json!([1, 0]);
+    let api = Server::start(vec![Reply::json(200, answer)]);
+
+    let output = ff(&with_key(&api.url)).args(["metrics", "--since", "2m"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.ends_with(
+            "cold starts 1; calls without waiting: 5 kept, 3 dropped, 1 record its destination didn't take\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
 fn metrics_of_the_account_and_a_wrong_period() {
     let api = Server::start(vec![Reply::json(200, metrics())]);
     let dir = with_key(&api.url);

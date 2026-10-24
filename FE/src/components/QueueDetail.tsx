@@ -1,11 +1,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { formatWhen } from '../lib/accounts';
 import { apiErrorMessage } from '../lib/functions';
-import { QUEUE_ATTRIBUTES, QueueForm, bytesText, cliCommands, durationText, endpointOf, nameOfQueueArn, queueAttributesBody, queueForm } from '../lib/queues';
+import {
+  QUEUE_ATTRIBUTES,
+  QueueForm,
+  ageText,
+  bytesText,
+  cliCommands,
+  durationText,
+  endpointOf,
+  nameOfQueueArn,
+  queueAttributesBody,
+  queueForm,
+  queueHours,
+} from '../lib/queues';
 import { can } from '../lib/session';
-import { Queue, ReceivedMessage, queuesApi } from '../services/api';
+import { Alarm, Queue, QueueMetrics, ReceivedMessage, alarmsApi, queuesApi } from '../services/api';
 import { useSession } from '../session/session';
+import { StateBadge } from './Alarms';
 import Copyable from './Copyable';
 import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { Page, PageHeader } from './Page';
@@ -20,6 +33,113 @@ const Fact: React.FC<{ label: string; children: React.ReactNode }> = ({ label, c
     <dd className="m-0 min-w-0 break-all font-mono text-[13px] text-ink">{children}</dd>
   </div>
 );
+
+/** The hours the page shows: half a day. */
+const HOURS = 12;
+
+/** A queue's last hours, from its metrics: the most messages it held and its oldest's age, as sampled each minute, and the messages sent, received and deleted. */
+const QueueHours: React.FC<{ name: string }> = ({ name }) => {
+  /** undefined while loading; null when they can't be read, and the panel isn't shown. */
+  const [metrics, setMetrics] = useState<QueueMetrics | null | undefined>(undefined);
+  useEffect(() => {
+    let current = true;
+    const start = new Date(Date.now() - (HOURS - 1) * 3_600_000).toISOString();
+    queuesApi
+      .metrics(name, { period: 3600, start })
+      .then(({ data }) => current && setMetrics(data))
+      .catch(() => current && setMetrics(null));
+    return () => {
+      current = false;
+    };
+  }, [name]);
+  if (metrics === null) return null;
+  const hours = metrics ? queueHours(metrics, HOURS) : [];
+  return (
+    <Panel
+      title="The last hours"
+      description="Its messages as sampled each minute, the most in each hour, and those sent, received and deleted in it, as CloudWatch has SQS's metrics."
+      flush
+    >
+      {metrics === undefined ? (
+        <p className="px-5 py-4 text-[13px] text-gray-500">Loading…</p>
+      ) : hours.length === 0 ? (
+        <p className="px-5 py-4 text-[13px] text-gray-600">Nothing in the last {HOURS} hours: no message held, sent or received.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          {/* On a phone the table is wider than the panel: it scrolls, rather than lose its last columns. */}
+          <table className="w-full text-left text-[13px]">
+            <thead className="bg-gray-50/70 text-xs text-gray-500">
+              <tr className="border-b border-line">
+                <th scope="col" className="px-5 py-2 font-medium">Hour</th>
+                <th scope="col" className="px-5 py-2 text-right font-medium whitespace-nowrap">Waiting</th>
+                <th scope="col" className="px-5 py-2 text-right font-medium whitespace-nowrap">In flight</th>
+                <th scope="col" className="px-5 py-2 text-right font-medium whitespace-nowrap">Oldest</th>
+                <th scope="col" className="px-5 py-2 text-right font-medium whitespace-nowrap">Sent</th>
+                <th scope="col" className="px-5 py-2 text-right font-medium whitespace-nowrap">Received</th>
+                <th scope="col" className="px-5 py-2 text-right font-medium whitespace-nowrap">Deleted</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {hours.map((hour) => (
+                <tr key={hour.at}>
+                  <td className="px-5 py-2 whitespace-nowrap">{formatWhen(hour.at)}</td>
+                  <td className="px-5 py-2 text-right tabular-nums">{hour.waiting.toLocaleString('en-US')}</td>
+                  <td className="px-5 py-2 text-right tabular-nums">{hour.inFlight.toLocaleString('en-US')}</td>
+                  <td className="px-5 py-2 text-right whitespace-nowrap">{hour.oldestSeconds ? ageText(hour.oldestSeconds) : '–'}</td>
+                  <td className="px-5 py-2 text-right tabular-nums">{hour.sent.toLocaleString('en-US')}</td>
+                  <td className="px-5 py-2 text-right tabular-nums">{hour.received.toLocaleString('en-US')}</td>
+                  <td className="px-5 py-2 text-right tabular-nums">{hour.deleted.toLocaleString('en-US')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+};
+
+/** A queue's alarms: each one's state and name, and where to set them. */
+const QueueAlarms: React.FC<{ queueName: string; mayChange: boolean }> = ({ queueName, mayChange }) => {
+  const [alarms, setAlarms] = useState<Alarm[] | null>(null);
+  useEffect(() => {
+    let current = true;
+    alarmsApi
+      .list()
+      .then(({ data }) => current && setAlarms(data.filter((alarm) => alarm.queueName === queueName)))
+      .catch(() => current && setAlarms(null));
+    return () => {
+      current = false;
+    };
+  }, [queueName]);
+  if (alarms === null) return null;
+  return (
+    <Panel
+      aria-label="Alarms"
+      title="Alarms"
+      description="On its messages waiting, their age and size, or its requests, as CloudWatch has SQS's; a dead-letter queue's waiting messages are the ones to watch."
+      actions={
+        mayChange && (
+          <Link to={`/alarms?queue=${encodeURIComponent(queueName)}`} className="text-[13px]">
+            Add one
+          </Link>
+        )
+      }
+    >
+      {alarms.length === 0 ? (
+        <p className="text-[13px] text-gray-600">None watches this queue.</p>
+      ) : (
+        <ul className="space-y-2.5">
+          {alarms.map((alarm) => (
+            <li key={alarm.id} data-alarm={alarm.id} className="flex items-center gap-2 text-[13px]">
+              <StateBadge state={alarm.state} /> <span className="min-w-0 truncate text-gray-800">{alarm.name}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+};
 
 /** An attribute as the page says it: seconds as a duration, bytes as a size. */
 const valueText = (unit: string, value: number) => (unit === 'bytes' ? bytesText(value) : durationText(value));
@@ -369,8 +489,13 @@ const QueueDetail: React.FC = () => {
         <div className="min-w-0 space-y-6">
           <Attributes queue={queue} others={others} mayChange={writer} onSaved={setQueue} />
           <QueueReaders queue={queue} />
+          <QueueAlarms queueName={queue.name} mayChange={writer && account.status === 'active'} />
           <p className="text-[13px] text-gray-500">Created {formatWhen(queue.createdAt)}; changed {formatWhen(queue.updatedAt)}.</p>
         </div>
+      </div>
+      {/* Seven columns: the page's whole width, which the left column's isn't. */}
+      <div className="mt-6">
+        <QueueHours name={queue.name} />
       </div>
     </Page>
   );

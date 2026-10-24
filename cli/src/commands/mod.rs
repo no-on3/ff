@@ -148,6 +148,9 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Queues(QueuesCommand::Create { name, attributes }) => queues::create(&name, &attributes, context),
         Command::Queues(QueuesCommand::List) => queues::list(context),
         Command::Queues(QueuesCommand::Get { name }) => queues::get(&name, context),
+        Command::Queues(QueuesCommand::Metrics { name, period, since }) => {
+            queues::metrics(&name, period, &since, context)
+        }
         Command::Queues(QueuesCommand::Set { name, attributes, no_dead_letter_queue }) => {
             queues::set(&name, &attributes, no_dead_letter_queue, context)
         }

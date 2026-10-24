@@ -4,7 +4,7 @@
 //! receiving and deleting a message are there to debug a queue, or for a script.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -112,6 +112,16 @@ fn short(seconds: u64) -> String {
         s if s % 3600 == 0 => format!("{}h", s / 3600),
         s if s % 60 == 0 => format!("{}m", s / 60),
         s => format!("{s}s"),
+    }
+}
+
+/// An age, short: seconds under two minutes, then minutes, hours, days.
+fn age(seconds: u64) -> String {
+    match seconds {
+        s if s < 120 => format!("{s}s"),
+        s if s < 7200 => format!("{}m", s / 60),
+        s if s < 172_800 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
     }
 }
 
@@ -303,6 +313,88 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
             reach(&queue),
             attributes_text(&queue),
             time(&queue.created_at)
+        )
+    })
+}
+
+/// A queue's metric that is sampled: each period's most.
+#[derive(Deserialize)]
+struct Most {
+    #[serde(rename = "Maximum")]
+    maximum: Vec<u64>,
+}
+
+/// A queue's metric that is counted: each period's total.
+#[derive(Deserialize)]
+struct Total {
+    #[serde(rename = "Sum")]
+    sum: Vec<u64>,
+}
+
+/// The queue's metrics a table shows, as CloudWatch names SQS's.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct QueueSeries {
+    approximate_number_of_messages_visible: Most,
+    approximate_number_of_messages_not_visible: Most,
+    approximate_age_of_oldest_message: Most,
+    number_of_messages_sent: Total,
+    number_of_messages_received: Total,
+    number_of_messages_deleted: Total,
+    number_of_empty_receives: Total,
+}
+
+#[derive(Deserialize)]
+struct QueueMetrics {
+    period: u64,
+    timestamps: Vec<String>,
+    metrics: QueueSeries,
+}
+
+/// A queue's metrics over the last `since`, a row per period: what it held at most and its oldest message, as
+/// sampled each minute, and the messages sent, received and deleted, and the receives that found none.
+pub fn metrics(name: &str, period: u32, since: &str, context: &Context) -> Result<(), Error> {
+    let name = checked_name(name)?;
+    let start = super::account::start_of(since, SystemTime::now())?;
+    let client = Client::new(&context.settings()?)?;
+    let answer: Value =
+        client.json(&Call::get(format!("/queues/{name}/metrics")).query("period", period).query("start", &start))?;
+    let metrics: QueueMetrics = serde_json::from_value(answer.clone())
+        .map_err(|error| Error::new(Kind::Failed, format!("the API answered metrics ff can't read: {error}")))?;
+    let series = &metrics.metrics;
+    let rows: Vec<Vec<String>> = metrics
+        .timestamps
+        .iter()
+        .enumerate()
+        .map(|(index, timestamp)| {
+            let oldest = series.approximate_age_of_oldest_message.maximum[index];
+            vec![
+                time(timestamp),
+                series.approximate_number_of_messages_visible.maximum[index].to_string(),
+                series.approximate_number_of_messages_not_visible.maximum[index].to_string(),
+                if oldest == 0 { "-".to_owned() } else { age(oldest) },
+                series.number_of_messages_sent.sum[index].to_string(),
+                series.number_of_messages_received.sum[index].to_string(),
+                series.number_of_messages_deleted.sum[index].to_string(),
+                series.number_of_empty_receives.sum[index].to_string(),
+            ]
+        })
+        .collect();
+    let total = |values: &[u64]| values.iter().sum::<u64>();
+    let summary = format!(
+        "{name} for {}, a point each {}: sent {}, received {}, deleted {}, empty receives {}; at most {} waiting",
+        humantime::format_duration(Duration::from_secs(u64::from(period) * metrics.timestamps.len() as u64)),
+        humantime::format_duration(Duration::from_secs(metrics.period)),
+        total(&series.number_of_messages_sent.sum),
+        total(&series.number_of_messages_received.sum),
+        total(&series.number_of_messages_deleted.sum),
+        total(&series.number_of_empty_receives.sum),
+        series.approximate_number_of_messages_visible.maximum.iter().max().copied().unwrap_or(0)
+    );
+    context.out.result(&answer, || {
+        format!(
+            "{}\n{summary}",
+            table(&["TIME (UTC)", "WAITING", "IN FLIGHT", "OLDEST", "SENT", "RECEIVED", "DELETED", "EMPTY"], &rows)
         )
     })
 }

@@ -726,6 +726,21 @@ pub enum QueuesCommand {
         name: String,
     },
 
+    /// Show a queue's metrics, as CloudWatch names SQS's: what it held and its oldest message, its messages sent,
+    /// received and deleted, a row per period
+    Metrics {
+        /// The queue's name
+        name: String,
+
+        /// Seconds per row
+        #[arg(long, default_value_t = 60, value_parser = period)]
+        period: u32,
+
+        /// How far back: 30m, 6h, 2d
+        #[arg(long, default_value = "1h")]
+        since: String,
+    },
+
     /// Change a queue's attributes, as SQS's SetQueueAttributes: those given change, the others stay
     Set {
         /// The queue's name

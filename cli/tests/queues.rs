@@ -285,3 +285,42 @@ fn the_apis_refusals_come_in_its_words() {
         .stderr(predicate::str::contains("the Beta plan's limit"));
     assert_eq!(calls(&api), ["GET /queues/orders-dlq", "POST /queues", "POST /queues/orders/messages"]);
 }
+
+#[test]
+fn metrics_show_a_row_per_period_what_the_queue_held_and_its_messages_and_the_apis_own_json() {
+    let answer = json!({
+        "period": 3600, "start": "2026-10-24T07:00:00.000Z", "end": "2026-10-24T09:00:00.000Z",
+        "timestamps": ["2026-10-24T07:00:00.000Z", "2026-10-24T08:00:00.000Z"],
+        "metrics": {
+            "ApproximateNumberOfMessagesVisible": { "Maximum": [2, 0], "Average": [1.5, 0] },
+            "ApproximateNumberOfMessagesNotVisible": { "Maximum": [1, 0], "Average": [0.5, 0] },
+            "ApproximateNumberOfMessagesDelayed": { "Maximum": [0, 0], "Average": [0, 0] },
+            "ApproximateAgeOfOldestMessage": { "Maximum": [245, 0] },
+            "NumberOfMessagesSent": { "Sum": [3, 0] },
+            "NumberOfMessagesReceived": { "Sum": [1, 2] },
+            "NumberOfMessagesDeleted": { "Sum": [0, 2] },
+            "NumberOfEmptyReceives": { "Sum": [4, 0] },
+            "SentMessageSize": { "Average": [12.0, null], "Maximum": [20, null] }
+        }
+    });
+    let api = Server::start(vec![Reply::json(200, answer.clone()), Reply::json(200, answer)]);
+    let dir = with_key(&api.url);
+
+    ff(&dir).args(["queues", "metrics", "orders", "--period", "3600", "--since", "2h"]).assert().success().stdout(
+        "TIME (UTC)           WAITING  IN FLIGHT  OLDEST  SENT  RECEIVED  DELETED  EMPTY\n\
+         2026-10-24 07:00:00  2        1          4m      3     1         0        4\n\
+         2026-10-24 08:00:00  0        0          -       0     2         2        0\n\
+         orders for 2h, a point each 1h: sent 3, received 3, deleted 2, empty receives 4; at most 2 waiting\n",
+    );
+    let path = &api.requests()[0].path;
+    assert!(path.starts_with("/queues/orders/metrics?period=3600&start=20"), "{path}");
+    // JSON is the API's answer, the series the table leaves out included.
+    ff(&dir)
+        .args(["queues", "metrics", "orders", "--output", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"SentMessageSize\""));
+    ff(&dir).args(["queues", "metrics", "orders.fifo"]).assert().code(2);
+    ff(&dir).args(["queues", "metrics", "orders", "--period", "120"]).assert().code(2);
+    assert_eq!(api.requests().len(), 2);
+}

@@ -24,7 +24,7 @@
 # with its attributes and a dead-letter queue by name, a message sent by ff and received by the AWS CLI
 # with a key naming that queue alone, received again by ff until the third receive moves it to the
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
-# CLI, the queue deleted and the other account seeing none, its month in ff usage; the getting-started
+# CLI, its metrics, the queue deleted and the other account seeing none, its month in ff usage; the getting-started
 # guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
 # each one's receipt written to a bucket with the function's own key, read back by a GET and by the
 # AWS CLI, both gone after the night 90 days on; and ff local, in
@@ -675,6 +675,11 @@ check "  ... as the AWS CLI sees it" "3600" \
   "$(aws_sqs get-queue-attributes --queue-url "$queue_url" --attribute-names MessageRetentionPeriod 2>/dev/null | jq -r .Attributes.MessageRetentionPeriod)"
 ff queues list --profile b
 check "the other account has none of them" "0 The account has no queue: \`ff queues create <name>\` makes one" "$(code) $(out)"
+# Its requests are counted a minute at a time: in its metrics within two.
+for _ in $(seq 150); do "$ff_bin" queues metrics cli-orders --output json 2>/dev/null | jq -e '[.metrics.NumberOfMessagesSent.Sum[]] | add >= 3' >/dev/null && break; sleep 1; done
+ff queues metrics cli-orders --period 300
+check "ff queues metrics shows a row each five minutes, SQS's metrics as CloudWatch names them: the messages sent, received and deleted" "0 true true" \
+  "$(code) $(out | head -1 | grep -qE '^TIME \(UTC\) +WAITING +IN FLIGHT +OLDEST +SENT +RECEIVED +DELETED +EMPTY$' && echo true || echo false) $(out | tail -1 | grep -qE '^cli-orders for [0-9hm ]+, a point each 5m: sent ([3-9]|[1-9][0-9]+), received [1-9][0-9]*, deleted [0-9]+, empty receives [1-9][0-9]*; at most [0-9]+ waiting$' && echo true || echo false)"
 ff queues delete cli-orders --yes
 check "ff queues delete deletes it" "0 deleted the queue cli-orders" "$(code) $(out)"
 ff queues get cli-orders
@@ -819,6 +824,11 @@ ff balance --output json
 check "ff balance says the balance, in dinars" "0 TND" "$(code) $(out | jq -r .currency)"
 ff metrics --since 2h --output json
 check "ff metrics counts the account's invocations of the last two hours" "0 true" "$(code) $(out | jq '[.metrics.Invocations[]] | add > 10')"
+# Its calls that don't wait are counted a minute at a time too: in its metrics within two.
+for _ in $(seq 150); do "$ff_bin" metrics --since 2h --output json 2>/dev/null | jq -e '([.metrics.AsyncEventsReceived[]] | add >= 2) and ([.metrics.AsyncEventsDropped[]] | add >= 1)' >/dev/null && break; sleep 1; done
+ff metrics --since 2h --period 3600
+check "  ... and its calls that didn't wait, as Lambda's metrics count them, cli-raises's dropped among them" "0 true" \
+  "$(code) $(out | tail -1 | grep -qE '; calls without waiting: ([2-9]|[1-9][0-9]+) kept, [1-9][0-9]* dropped' && echo true || echo false)"
 
 echo "== ff local: on this machine, in Docker, as production runs it"
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Queue } from '../services/api';
-import { bytesText, cliCommands, deadLetterText, durationText, endpointOf, messagesText, nameOfQueueArn, queueAttributesBody, queueForm, queueNameProblem } from './queues';
+import type { Queue, QueueMetrics } from '../services/api';
+import { ageText, bytesText, cliCommands, deadLetterText, durationText, endpointOf, messagesText, nameOfQueueArn, queueAttributesBody, queueForm, queueHours, queueNameProblem } from './queues';
 
 const ARN = 'arn:aws:sqs:tn-tunis-1:000000000001';
 const queue = (values: Partial<Queue> = {}): Queue => ({
@@ -113,5 +113,38 @@ describe("a queue's attributes, as the form changes them", () => {
     expect(queueAttributesBody({ ...queueForm(queue()), deadLetterQueue: 'dlq', maxReceiveCount: '0' }, queue())).toEqual({
       problem: 'Received before it goes to the dead-letter queue: from 1 to 1,000 times',
     });
+  });
+});
+
+describe("a queue's last hours, from its metrics", () => {
+  const gauge = (maximum: number[]) => ({ Maximum: maximum, Average: maximum.map((value) => value / 2) });
+  const metrics: QueueMetrics = {
+    period: 3600,
+    start: '2026-10-24T07:00:00.000Z',
+    end: '2026-10-24T10:00:00.000Z',
+    timestamps: ['2026-10-24T07:00:00.000Z', '2026-10-24T08:00:00.000Z', '2026-10-24T09:00:00.000Z'],
+    metrics: {
+      ApproximateNumberOfMessagesVisible: gauge([2, 0, 0]),
+      ApproximateNumberOfMessagesNotVisible: gauge([1, 0, 0]),
+      ApproximateNumberOfMessagesDelayed: gauge([0, 0, 0]),
+      ApproximateAgeOfOldestMessage: { Maximum: [240, 0, 0] },
+      NumberOfMessagesSent: { Sum: [3, 0, 0] },
+      NumberOfMessagesReceived: { Sum: [1, 0, 2] },
+      NumberOfMessagesDeleted: { Sum: [0, 0, 2] },
+      NumberOfEmptyReceives: { Sum: [0, 0, 0] },
+      SentMessageSize: { Average: [12, null, null], Maximum: [20, null, null] },
+    },
+  };
+
+  it('gives each hour it held a message in or was asked something, newest first, a quiet hour left out', () => {
+    expect(queueHours(metrics)).toEqual([
+      { at: '2026-10-24T09:00:00.000Z', waiting: 0, inFlight: 0, oldestSeconds: 0, sent: 0, received: 2, deleted: 2 },
+      { at: '2026-10-24T07:00:00.000Z', waiting: 2, inFlight: 1, oldestSeconds: 240, sent: 3, received: 1, deleted: 0 },
+    ]);
+    expect(queueHours(metrics, 1)).toHaveLength(1);
+  });
+
+  it('says an age in seconds, minutes, hours or days, as it is long', () => {
+    expect([ageText(1), ageText(90), ageText(240), ageText(7_200), ageText(200_000)]).toEqual(['1 second', '90 seconds', '4 minutes', '2 hours', '2 days']);
   });
 });

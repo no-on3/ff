@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { EventInvokeConfig } from '../services/api';
-import { asyncSettingsBody, asyncSettingsForm, asyncSettingsText, destinationText, keptText, nameOfArn } from './async-settings';
+import type { EventInvokeConfig, Metrics } from '../services/api';
+import { asyncCallsText, asyncSettingsBody, asyncSettingsForm, asyncSettingsText, destinationText, keptText, nameOfArn } from './async-settings';
 
 const ARN = 'arn:aws:lambda:tn-tunis-1:000000000001:function:failed-orders';
 const QUEUE_ARN = 'arn:aws:sqs:tn-tunis-1:000000000001:failed-orders';
@@ -59,5 +59,19 @@ describe("a function's settings for its calls that don't wait", () => {
     const form = asyncSettingsForm(queued);
     expect(form.onFailure).toBe(QUEUE_ARN);
     expect(asyncSettingsBody(form)).toEqual({ body: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 21600, destinationConfig: { onFailure: { destination: QUEUE_ARN } } } });
+  });
+});
+
+describe("a function's calls that don't wait, in words", () => {
+  const view = (received: number[], dropped: number[], failures: number[], ages: Array<number | null>) =>
+    ({ metrics: { AsyncEventsReceived: received, AsyncEventsDropped: dropped, DestinationDeliveryFailures: failures, AsyncEventAge: { Average: ages, Maximum: ages } } }) as Pick<Metrics, 'metrics'>;
+
+  it("says those kept, those dropped, the records not taken and the longest wait, as Lambda's metrics count them", () => {
+    expect(asyncCallsText(view([4, 1], [0, 3], [0, 1], [120, 61_400]))).toBe("5 calls kept, 3 dropped, 1 record its destination didn't take; the longest wait for an attempt 61 s.");
+    expect(asyncCallsText(view([1, 0], [0, 0], [0, 0], [450, null]))).toBe('1 call kept, 0 dropped; the longest wait for an attempt 450 ms.');
+  });
+
+  it('says nothing of a function without any', () => {
+    expect(asyncCallsText(view([0, 0], [0, 0], [0, 0], [null, null]))).toBeNull();
   });
 });

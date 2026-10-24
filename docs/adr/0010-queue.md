@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-3 plan](../step-3-plan.md)'s D1, and its choices (its §9), confirmed by you on 2026-10-23; where its messages live, measured by Q-01's spike the same day |
 | **Date** | 2026-10-23 |
-| **Implementation** | Step-3 plan: decisions D1 to D9 and D11; tasks Q-02 to Q-08. As built so far: Q-02 to Q-07, and Q-08's first two parts (below) |
+| **Implementation** | Step-3 plan: decisions D1 to D9 and D11; tasks Q-02 to Q-08. As built so far: Q-02 to Q-08 (below) |
 | **Related** | [Parent plan](../local-markets-and-aws-portability-plan.md): ADR-003 (the queue's backend), E-03, E-05, E-04's notifications, §4.6, §6.7; [What to build next](../what-to-build-next.md) §6; the spike, [`hack/spikes/queue`](../../hack/spikes/queue/README.md) |
 
 ## Context
@@ -136,6 +136,11 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 - **CloudWatch's names for SQS's metrics:** `GET /queues/:name/metrics` gives the messages visible, in flight and delayed (each period's Maximum and Average over its minutes) and the oldest's age from the samples; the messages sent, received and deleted, the empty receives and the size of what was sent from the requests' counts.
 - **Lambda's for asynchronous calls:** each event kept counts once its transaction committed (the scheduler's runs after its own), each attempt its age as the function is called, each event that ends without success as dropped, each record a destination didn't take as a failure, counted a minute at a time per function as queues' requests are (`async_event_counts`); `GET /functions/:id/metrics` and `GET /metrics` give them.
 - **Alarms** on all of them: a queue's by its name, going with the queue; the asynchronous calls' as a function's or the account's. Reverting the migration deletes the alarms on what it added, which the code before it can't judge.
+
+### As built (Q-08, part 3): the console and `ff`
+
+- **The console reads the same metrics:** a queue's page asks for its last 12 hours an hour a point and shows those with any activity, beside the queue's alarms; a function's "Calls that don't wait" asks for its last day's and says them in a line. Neither keeps metrics of its own.
+- **`ff queues metrics`** prints a queue's a row per period, as `ff metrics` prints a function's, whose totals now end with the calls that didn't wait. An API without those series reads as none, so a newer `ff` works against an older FF.
 
 ## Consequences
 

@@ -1,4 +1,4 @@
-import type { EventInvokeConfig } from '../services/api';
+import type { EventInvokeConfig, Metrics } from '../services/api';
 
 /** Lambda's defaults for a function's calls that don't wait: two retries after a failure, each call kept 6 hours. */
 export const DEFAULT_RETRIES = 2;
@@ -71,4 +71,23 @@ export function asyncSettingsText(config: EventInvokeConfig | null): string {
   const sentence = `A call that fails is ${retriesText(retries)}, and kept ${kept} at most`;
   const ending = destinations.length ? `; ${destinations.join(', ')}.` : ', going nowhere once it ends.';
   return config ? `${sentence}${ending}` : `AWS Lambda's defaults: ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}${ending}`;
+}
+
+const count = (n: number, one: string, many: string) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
+
+/**
+ * A function's calls that don't wait over its metrics' window, in words, as Lambda's metrics count them: those kept,
+ * those dropped, the records a destination didn't take, and the longest a call waited for an attempt. null when there
+ * was none.
+ */
+export function asyncCallsText(metrics: Pick<Metrics, 'metrics'>): string | null {
+  const m = metrics.metrics;
+  const sum = (series: number[]) => series.reduce((total, value) => total + value, 0);
+  const [received, dropped, failures] = [sum(m.AsyncEventsReceived), sum(m.AsyncEventsDropped), sum(m.DestinationDeliveryFailures)];
+  const waits = m.AsyncEventAge.Maximum.filter((age): age is number => age !== null);
+  if (!received && !dropped && !failures && waits.length === 0) return null;
+  const parts = [count(received, 'call kept', 'calls kept'), `${dropped.toLocaleString('en-US')} dropped`];
+  if (failures) parts.push(count(failures, "record its destination didn't take", "records their destination didn't take"));
+  const longest = waits.length ? Math.max(...waits) : null;
+  return `${parts.join(', ')}${longest === null ? '' : `; the longest wait for an attempt ${longest < 2000 ? `${Math.round(longest)} ms` : `${Math.round(longest / 1000)} s`}`}.`;
 }

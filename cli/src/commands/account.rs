@@ -389,6 +389,13 @@ struct Series {
     cold_starts: Vec<u64>,
     duration: Durations,
     instances: Instances,
+    /// Lambda's metrics of calls that don't wait; absent from an API before them.
+    #[serde(default)]
+    async_events_received: Vec<u64>,
+    #[serde(default)]
+    async_events_dropped: Vec<u64>,
+    #[serde(default)]
+    destination_delivery_failures: Vec<u64>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -452,8 +459,24 @@ pub fn metrics(name: Option<&str>, period: u32, since: &str, context: &Context) 
         })
         .collect();
     let total = |values: &[u64]| values.iter().sum::<u64>();
+    // Its calls that don't wait, as Lambda's metrics count them, when there were any.
+    let (kept, dropped, refused) = (
+        total(&series.async_events_received),
+        total(&series.async_events_dropped),
+        total(&series.destination_delivery_failures),
+    );
+    let without_waiting = match (kept, dropped, refused) {
+        (0, 0, 0) => String::new(),
+        (_, _, 0) => format!("; calls without waiting: {kept} kept, {dropped} dropped"),
+        (_, _, 1) => {
+            format!("; calls without waiting: {kept} kept, {dropped} dropped, 1 record its destination didn't take")
+        }
+        _ => format!(
+            "; calls without waiting: {kept} kept, {dropped} dropped, {refused} records their destination didn't take"
+        ),
+    };
     let summary = format!(
-        "{} for {}, a point each {}: invocations {}, errors {}, throttles {}, cold starts {}",
+        "{} for {}, a point each {}: invocations {}, errors {}, throttles {}, cold starts {}{without_waiting}",
         name.map(|name| format!("\"{name}\"")).unwrap_or_else(|| "the account".to_owned()),
         humantime::format_duration(Duration::from_secs(u64::from(period) * metrics.timestamps.len() as u64)),
         humantime::format_duration(Duration::from_secs(metrics.period)),

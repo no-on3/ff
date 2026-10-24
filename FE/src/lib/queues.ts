@@ -1,4 +1,4 @@
-import type { Queue, QueueAttributes, QueueMessages, RedrivePolicy } from '../services/api';
+import type { Queue, QueueAttributes, QueueMessages, QueueMetrics, RedrivePolicy } from '../services/api';
 import { formatSize } from './databases';
 
 /** A queue's name, as the API takes it: SQS's rule. contract.test.ts checks it against the API's. */
@@ -109,3 +109,42 @@ export function cliCommands(queue: Pick<Queue, 'url'>): string {
 
 /** The SQS endpoint a queue's URL is under: AWS_ENDPOINT_URL_SQS. */
 export const endpointOf = (queue: Pick<Queue, 'url'>): string => new URL(queue.url).origin;
+
+/** One hour of a queue, as its page lists it: the most messages waiting and in flight, its oldest message's age, and its messages sent, received and deleted. */
+export interface QueueHour {
+  at: string;
+  waiting: number;
+  inFlight: number;
+  oldestSeconds: number;
+  sent: number;
+  received: number;
+  deleted: number;
+}
+
+/** The hours of a queue's metrics, a point an hour, newest first: those it held a message in, or was asked something; quiet ones left out. */
+export function queueHours(metrics: QueueMetrics, count = 12): QueueHour[] {
+  const m = metrics.metrics;
+  const hours: QueueHour[] = [];
+  for (let index = metrics.timestamps.length - 1; index >= 0 && hours.length < count; index--) {
+    const hour: QueueHour = {
+      at: metrics.timestamps[index],
+      waiting: m.ApproximateNumberOfMessagesVisible.Maximum[index],
+      inFlight: m.ApproximateNumberOfMessagesNotVisible.Maximum[index],
+      oldestSeconds: m.ApproximateAgeOfOldestMessage.Maximum[index],
+      sent: m.NumberOfMessagesSent.Sum[index],
+      received: m.NumberOfMessagesReceived.Sum[index],
+      deleted: m.NumberOfMessagesDeleted.Sum[index],
+    };
+    const delayed = m.ApproximateNumberOfMessagesDelayed.Maximum[index];
+    if (hour.waiting || hour.inFlight || delayed || hour.sent || hour.received || hour.deleted || m.NumberOfEmptyReceives.Sum[index]) hours.push(hour);
+  }
+  return hours;
+}
+
+/** An age in seconds, in a few words: seconds under two minutes, then minutes, then hours, then days. */
+export function ageText(seconds: number): string {
+  if (seconds < 120) return plural(seconds, 'second');
+  if (seconds < 7200) return plural(Math.floor(seconds / 60), 'minute');
+  if (seconds < 172_800) return plural(Math.floor(seconds / 3600), 'hour');
+  return plural(Math.floor(seconds / 86_400), 'day');
+}

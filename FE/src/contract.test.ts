@@ -87,6 +87,7 @@ import {
   INVOCATION_STATUSES,
   ME_ACCOUNT_FIELDS,
   METRIC_NAMES,
+  QUEUE_METRIC_NAMES,
   INVOICE_FIELDS,
   LOGS_PAGE_FIELDS,
   LOGS_QUERY_PARAMS,
@@ -187,6 +188,7 @@ describe("what brought an invocation", () => {
 describe('the metrics', () => {
   it("are the API's series, named as CloudWatch names Lambda's", () => {
     expect(dtoFields(metricsDtoSource, 'class MetricSeries {')).toEqual([...METRIC_NAMES]);
+    expect(dtoFields(metricsDtoSource, 'class QueueMetricSeries {')).toEqual([...QUEUE_METRIC_NAMES]);
   });
 });
 
