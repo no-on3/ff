@@ -16,7 +16,8 @@
 #   - buckets' S3 front door and queues' SQS endpoint: the edge's host for each the backend's, the backend's port for
 #     each reached by the edge and tenants' functions alone, functions' fixed address for it, each host sent there;
 #   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image, both ways to function URLs' and
-#     buckets' certificates;
+#     buckets' certificates; behind a proxy, its allowlist believing X-Forwarded-For from FF_EDGE_TRUSTED_PROXIES
+#     alone, the edge run and asked on a Docker network of its own;
 #   - the code registry: Zot's settings valid for its pinned image, where its volume and its users' Secret are
 #     mounted, its fixed address and port the backend's settings name, and the backend alone reaching it;
 #   - all of it valid for the dev cluster's API, no field unknown (a server dry run, which writes nothing).
@@ -25,7 +26,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 platform="$FF_REPO_ROOT/deploy/k8s/platform"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+edge_test="ff-edge-proxies-$$" # the edge behind a proxy: a container and its network, both by this name
+trap 'rm -rf "$work"; docker rm -f "$edge_test" >/dev/null 2>&1 || true; docker network rm "$edge_test" >/dev/null 2>&1 || true' EXIT
 passed=0
 check() { # <description> <expected> <actual>
   if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else echo "  FAIL $1 (expected '$2', got '$3')"; exit 1; fi
@@ -288,6 +290,30 @@ for mode in wildcard on-demand; do
       ff-edge:test caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$work/validate-$mode.log" 2>&1; echo $?) "
 done
 check "its Caddyfile, with its settings, valid for Caddy, function URLs' and buckets' certificates by DNS or on demand" "0 0 " "$validated"
+# Behind a proxy of the server's own (deploy/dev-server), the allowlist believes X-Forwarded-For from the addresses
+# FF_EDGE_TRUSTED_PROXIES names, and from nobody else. The edge on a network of its own, asked from another container
+# there: past the allowlist, the admin app it proxies to isn't there, a 502; refused, a 403.
+docker network create "$edge_test" >/dev/null
+subnet="$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$edge_test")"
+admin_status() { # [X-Forwarded-For]: the admin app's answer, from another container on the network
+  docker run --rm --network "$edge_test" ff-edge:test sh -c \
+    "wget -q -S -O /dev/null --no-check-certificate ${1:+--header 'X-Forwarded-For: $1'} https://admin.example.tn:8443/ 2>&1 | sed -n 's|^ *HTTP/[0-9.]* \([0-9]*\).*|\1|p' | head -1"
+}
+edge_trusting() { # <proxies>: the edge started anew, trusting them, 198.51.100.7 the one address allowed
+  docker rm -f "$edge_test" >/dev/null 2>&1 || true
+  docker run -d --name "$edge_test" --network "$edge_test" --network-alias admin.example.tn --read-only --tmpfs /tmp --tmpfs /data \
+    --cap-drop ALL --security-opt no-new-privileges --env-file "$platform/edge.env" -e FF_EDGE_TLS=local_certs \
+    -e FF_FUNCTION_URL_TLS=on-demand -e FF_STORAGE_TLS=on-demand -e FF_ADMIN_ALLOW=198.51.100.7/32 -e FF_EDGE_TRUSTED_PROXIES="$1" \
+    -v "$platform/edge/Caddyfile:/etc/caddy/Caddyfile:ro" ff-edge:test >/dev/null
+  for _ in $(seq 1 30); do [ -n "$(admin_status)" ] && return; sleep 1; done
+}
+edge_trusting ""
+untrusted="$(admin_status 198.51.100.7)"
+edge_trusting "$subnet"
+check "behind a proxy, the allowlist believes X-Forwarded-For from FF_EDGE_TRUSTED_PROXIES alone, its last address but theirs" \
+  "403 502 403 403 403" \
+  "$untrusted $(admin_status 198.51.100.7) $(admin_status 203.0.113.9) $(admin_status) $(admin_status '198.51.100.7, 203.0.113.9')"
+docker rm -f "$edge_test" >/dev/null
 
 echo "== the code registry"
 # Zot's own check of its settings, in the image the Deployment pins, its storage and its users' file where the

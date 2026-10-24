@@ -33,6 +33,7 @@ Elsewhere in the repository:
 - [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md): the function runtimes, their protocol and their handler contracts;
 - [`deploy/k8s`](../deploy/k8s/README.md): what the backend may do in a cluster, and why; the platform's manifests and how to deploy them; the log pipeline's and the monitoring's;
 - [`deploy/backup`](../deploy/backup/README.md): the backups of both databases and of customers' databases to a second site, the mirror of the legal records and functions' packages, and the restore runbooks, one customer's database from a point in time among them;
-- [`deploy/data-db`](../deploy/data-db/README.md): the server of customers' databases, and how to install it.
+- [`deploy/data-db`](../deploy/data-db/README.md): the server of customers' databases, and how to install it;
+- [`deploy/dev-server`](../deploy/dev-server/README.md): FF on its development server, beside other sites, behind that server's own proxy, under `dev.ffunc.cloud`.
 
 Older documents described the platform before Kubernetes: Nomad, MinIO, the old CLI, and an auto-scaling design. They were removed because they no longer matched the code. Git history still has them, for example at commit `46f8397`.

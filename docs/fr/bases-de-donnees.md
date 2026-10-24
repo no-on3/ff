@@ -24,7 +24,7 @@ Dans la console, la page « Databases » ; ou avec l'outil `ff` :
 ```bash
 ff db create commandes --secret-for commandes-api
 # commandes made: its connection string, shown this once (…)
-# postgresql://ff_3f9c…:Xq3v…@db.ffunc.tn:5432/ff_3f9c…?sslmode=require
+# postgresql://ff_3f9c…:Xq3v…@db.ffunc.cloud:5432/ff_3f9c…?sslmode=require
 # DATABASE_URL set on commandes-api
 ```
 

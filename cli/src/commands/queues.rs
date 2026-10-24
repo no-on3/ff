@@ -596,7 +596,7 @@ mod tests {
     fn queue() -> Queue {
         serde_json::from_value(json!({
             "name": "orders",
-            "url": "https://sqs.ffunc.tn/000000000001/orders",
+            "url": "https://sqs.ffunc.cloud/000000000001/orders",
             "arn": "arn:aws:sqs:tn-tunis-1:000000000001:orders",
             "visibilityTimeout": 30,
             "messageRetentionPeriod": 345_600,
@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn a_queue_reads_with_its_attributes_in_words_and_its_endpoint() {
         let queue = queue();
-        assert_eq!(endpoint_of(&queue.url), "https://sqs.ffunc.tn");
+        assert_eq!(endpoint_of(&queue.url), "https://sqs.ffunc.cloud");
         assert_eq!(endpoint_of("http://localhost:3003/000000000001/orders"), "http://localhost:3003");
         assert_eq!(messages_text(&queue.messages), "3 waiting, 1 in flight");
         assert_eq!(

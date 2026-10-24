@@ -89,7 +89,7 @@ export class QueueView {
   @ApiProperty({ example: 'orders' })
   name: string;
 
-  @ApiProperty({ example: 'https://sqs.ffunc.tn/000000000001/orders', description: "Its URL, which SQS's requests name, under the SQS endpoint" })
+  @ApiProperty({ example: 'https://sqs.ffunc.cloud/000000000001/orders', description: "Its URL, which SQS's requests name, under the SQS endpoint" })
   url: string;
 
   @ApiProperty({ example: 'arn:aws:sqs:tn-tunis-1:000000000001:orders', description: 'Its ARN, as a redrive policy or a destination names it' })

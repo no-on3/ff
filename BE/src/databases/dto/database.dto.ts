@@ -33,7 +33,7 @@ export class DatabaseView {
   @ApiProperty({ enum: DatabaseStatus, description: 'active; read_only past the plan\'s storage (its new sessions read-only); suspended with its account; creating, deleting' })
   status: DatabaseStatus;
 
-  @ApiProperty({ example: 'db.ffunc.tn', description: 'The server, as functions and developers reach it' })
+  @ApiProperty({ example: 'db.ffunc.cloud', description: 'The server, as functions and developers reach it' })
   host: string;
 
   @ApiProperty({ example: 5432 })
@@ -45,7 +45,7 @@ export class DatabaseView {
   @ApiProperty({ example: 'ff_3f9c2a1e8b7d4c6a9e5f1a2b' })
   user: string;
 
-  @ApiProperty({ example: 'postgresql://ff_3f9c2a1e8b7d4c6a9e5f1a2b@db.ffunc.tn:5432/ff_3f9c2a1e8b7d4c6a9e5f1a2b?sslmode=require', description: 'How to connect, without the password' })
+  @ApiProperty({ example: 'postgresql://ff_3f9c2a1e8b7d4c6a9e5f1a2b@db.ffunc.cloud:5432/ff_3f9c2a1e8b7d4c6a9e5f1a2b?sslmode=require', description: 'How to connect, without the password' })
   connectionUrl: string;
 
   @ApiPropertyOptional({ type: Number, nullable: true, example: 7_634_423, description: 'Its size now, in bytes; null when the server could not be asked' })
@@ -73,7 +73,7 @@ export class DatabaseWithPassword extends DatabaseView {
   password: string;
 
   @ApiProperty({
-    example: 'postgresql://ff_3f9c…:Xq3v…@db.ffunc.tn:5432/ff_3f9c…?sslmode=require',
+    example: 'postgresql://ff_3f9c…:Xq3v…@db.ffunc.cloud:5432/ff_3f9c…?sslmode=require',
     description: "The connection string with the password, for a function's DATABASE_URL secret: shown this once",
   })
   connectionString: string;

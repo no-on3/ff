@@ -1,0 +1,17 @@
+# Alertmanager's configuration on FF's development server: every alert to the operator, through the server's
+# Mailpit, which keeps it and sends it nowhere. server.sh makes it the Secret alertmanager-config.
+global:
+  smtp_smarthost: ff-dev-smtp.ff-system.svc.cluster.local:1025
+  smtp_from: FF alerts <alerts@dev.ffunc.cloud>
+  smtp_require_tls: false
+route:
+  receiver: operator
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+receivers:
+  - name: operator
+    email_configs:
+      - to: operator@dev.ffunc.cloud
+        send_resolved: true
