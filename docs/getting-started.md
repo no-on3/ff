@@ -332,30 +332,6 @@ curl -s "$FF/schedules/next-runs?expression=rate(15%20minutes)" | jq -c .runs   
 - **In the console**, a function's Schedules tab lists its schedules, with when each runs next and how its last run went, in your time and in UTC, and the last run's request ID. It makes one, showing the next five runs as you type the expression, or what is wrong in it, with a few examples to start from; it changes one, disables and enables it, and deletes it. Every member sees them; owners and developers change them.
 - **The rest.** `GET /functions/<id>/schedules` lists them with their next run; `PUT …/schedules/<scheduleId>` changes what you send (`"enabled": false` stops the runs, `true` starts them again from now); `DELETE` removes one, and deleting the function removes them all. Names are unique within a function: letters, digits, `.`, `-` and `_`, as EventBridge rules'. The plan limits how many an account has (20 on the beta plan). Only functions with AWS Lambda's event can have schedules.
 
-**Call a function without waiting.** As AWS Lambda's asynchronous invoke: the invocation type `Event`, in the header `X-Amz-Invocation-Type` or as `invocationType` in the body, keeps the call and answers at once, 202, with its request ID, the answer's `x-ff-request-id` too; FF runs it within seconds:
-
-```bash
-curl -s -X POST "$FF/functions/$ID/invoke" -H 'content-type: application/json' -H 'X-Amz-Invocation-Type: Event' \
-  -d '{"input": {"name": "Tunis"}}' -w ' %{http_code}\n'
-# {"requestId":"5f0c2b9e-…"} 202
-curl -s "$FF/functions/$ID/invocations?limit=3" | jq -c '.invocations[] | {requestId, attempt, source, status}'
-# {"requestId":"5f0c2b9e-…","attempt":1,"source":"async","status":"COMPLETED"}
-```
-
-- **Retried as Lambda retries it.** A failure of the function (it threw, timed out, or couldn't load) is retried a minute after, and a second one two minutes after; after the third attempt the call is dropped, which the backend's log says. A call that found no free instance, or that FF couldn't make (the function not `ACTIVE`, the account suspended or out of credit), is tried again after 1, 2, 4… seconds, up to five minutes apart, until it is six hours old. Each attempt is a call of its own in the history, its `source` `async` and its `attempt`, under the request ID, which its log lines name; each has its usage record, and is billed as any call. The waiting isn't.
-- **At least once.** The call waits in FF's database until it ends ([ADR 0010](adr/0010-queue.md)). Two backends never run an attempt at once; one stopped during an attempt leaves the call to come back when its lease ends (twice the function's timeout, the cold start's limit and a minute), and that attempt counts as failed. A function may so see a call twice: as on Lambda, it should do its work once per request ID (`context.awsRequestId`).
-- **Limits.** The event is at most 1 MB as JSON, Lambda's limit for asynchronous calls (413 past it). The calls waiting count against the plan's room for messages (100 MB on the beta plan, its queues' messages with them): past it, 429 until some have run. The plan's invocations per second count each call when it comes, not its attempts.
-- **`DryRun`** only checks that the call could be made, the function and the input's size, and answers 204: nothing runs.
-- **A function's own settings**, as Lambda's `EventInvokeConfig`: its retries (0 to 2), how long a call is kept (60 s to 6 hours), and destinations, another function of the account by its ARN or its name (kept as its ARN), which gets Lambda's record of each call as an asynchronous call of its own, or a queue of the account by its ARN (`arn:aws:sqs:tn-tunis-1:<account>:<queue>`, "Queues, as Amazon SQS", below), which gets it as a message's body, as Lambda sends one to SQS: `onSuccess` once a call succeeded, `onFailure` once its retries are used up or it is too old. The record is Lambda's: `requestContext` (the request ID, the function's ARN, the `condition`, `Success`, `RetriesExhausted` or `EventAgeExceeded`, and how many attempts were made), `requestPayload`, the event, and the last attempt's `responseContext` and `responsePayload`, the function's answer or its error. A call that aged out before any attempt ran has no response in it. A `PUT` replaces the settings whole, what it leaves out back to Lambda's default; `GET` answers 404 for a function without any, and `DELETE` removes them. A destination must be there when it is set; one deleted since gets nothing, which the backend's log says. A queue as a destination comes with queues. In the console, the Invocations tab's "Calls that don't wait" panel shows them and changes them, or goes back to Lambda's defaults; with `ff`, `ff async-config <name>` shows them, `--retries`, `--max-age 30m`, `--on-success` and `--on-failure` (a function's name), and `--no-on-success` or `--no-on-failure`, change what they name and keep the rest, and `--reset` goes back to Lambda's defaults.
-
-  ```bash
-  curl -s -X PUT "$FF/functions/$ID/event-invoke-config" -H 'content-type: application/json' \
-    -d "{\"maximumRetryAttempts\": 0, \"destinationConfig\": {\"onFailure\": {\"destination\": \"arn:aws:lambda:tn-tunis-1:$ACCOUNT:function:failed-orders\"}}}" | jq -c
-  ```
-- **The worker:** as soon as a call is kept, PostgreSQL tells every backend (`NOTIFY`), and each claims the calls due, at most ten running at once (`FF_ASYNC_CONCURRENCY`); every 5 s too (`FF_ASYNC_INTERVAL_SECONDS`; 0 for a backend that runs none), for the retries come due and the calls a stopped backend left. A record that can't go to its destination (gone since, over what it takes, or the account's messages at the plan's limit) is said in the server log, and its call ends all the same.
-- **Its metrics, as Lambda's:** `GET /functions/<id>/metrics`, and the account's `GET /metrics`, give `AsyncEventsReceived` (the calls kept), `AsyncEventAge` (how long a call waited until each attempt, its `Average` and `Maximum` in ms, `null` in a period without an attempt), `AsyncEventsDropped` (the calls that ended without the function succeeding, past their retries or their age, whether their record went to a destination or not) and `DestinationDeliveryFailures` (records a destination didn't take), each backend counting them a minute at a time. Alarms watch them as they watch `Errors`. In the console, the Invocations tab's "Calls that don't wait" panel says the last day's in a line; `ff metrics` ends its totals with the calls kept and dropped, and the records their destination didn't take.
-- **In the console**, a function's Invocations tab invokes without waiting when "Don't wait for the answer" is ticked: it says the call's request ID, and its attempts join the history, each "asynchronously, attempt n", linked to its request's log lines. **With `ff`**, `ff invoke <name> --async` prints the request ID at once (`--raw`: the ID alone), `ff history <name>` lists the attempts, and `--dry-run` only checks.
-
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, handler, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
 ```bash
@@ -536,6 +512,66 @@ In production the backend runs in the cluster, and functions reach its pods thro
 eval "$(ff buckets keys create --read-only | grep '^export ')"
 cli/templates/export/data/s3-sync.sh photos my-photos-on-s3     # my-photos-on-s3 made on S3 first
 ```
+
+### Background work
+
+Work that runs later, as AWS runs it ([ADR 0010](adr/0010-queue.md)). All of it waits in one table of FF's own PostgreSQL until it is handled: through retries, and whatever backend stops.
+
+| Work | On AWS | On FF |
+|---|---|---|
+| A call that doesn't wait for its answer, retried when it fails | Lambda's asynchronous invoke, its retries, `EventInvokeConfig` and destinations | "Call a function without waiting", below |
+| Messages sent from anywhere, kept until read | Amazon SQS's standard queues, through AWS's SDKs and CLI | "Queues, as Amazon SQS", below |
+| A function that reads a queue in batches | Lambda's event source mappings for SQS | "A function reading a queue", below |
+| A function that runs when a file lands, or a queue that hears of it | S3's event notifications | "A bucket's notifications, as S3's", below |
+| A function at set times | EventBridge's schedules, as SAM's `Schedule` event declares one | "Run a function on a schedule", above |
+
+**Which one:**
+
+1. Work that one call starts and nobody waits for, such as an e-mail after a sign-up: call the function without waiting. Recommended for most apps' first background job: nothing to create.
+2. Work that many senders make, or that code outside FF sends (a phone app, a server elsewhere), or that should go at its own pace: a queue, which a function reads.
+3. Work that follows a file: the bucket's notification, to a function or to a queue.
+4. Work at set times: a schedule.
+
+**What they share:**
+
+- **At least once.** A call or a message waits in FF's database until it is handled, and comes back when an attempt fails or a backend stops during it. So code should do its work once per request ID (`context.awsRequestId`) or message ID: a repeat then changes nothing.
+- **Retries, then a place for what failed.** A call that doesn't wait is retried twice, as Lambda retries it, then goes to its function's `onFailure` destination when it names one, a function or a queue; a queue's message comes back after its visibility timeout, and moves to the queue's dead-letter queue past `maxReceiveCount`. An alarm on a dead-letter queue's `ApproximateNumberOfMessagesVisible` says that something failed for good.
+- **One room for what waits.** The plan's `queueStorageMb` (100 MB on beta) holds an account's queues' messages and its calls waiting, together; past it, a send answers `OverLimit`, and a call that doesn't wait 429, until some are handled.
+- **Billed as AWS bills them.** Each attempt is a call, billed as any call; a queue's requests as SQS bills them, the first million each month free. What waits isn't billed.
+- **Watched as CloudWatch watches them:** Lambda's metrics for the calls that don't wait, SQS's for queues, and alarms on both.
+
+**What differs from AWS, today:**
+
+- Standard queues only: a FIFO queue's name (`.fifo`) is refused, and so are a message's group and deduplication IDs.
+- A bucket's event is sent at most once: a backend that stops between the store's answer and the event's write loses it, where S3 promises at least once.
+- Every backend reads every mapping, so with two backends a queue's batches may be twice as many at once.
+- Destinations and notifications reach a function or a queue: SNS topics and EventBridge come later. SQS's permissions, tags and message move tasks answer `UnsupportedOperation`: to send a dead-letter queue's messages back, receive them and send them again.
+
+**The way out:** the export kit's [`data/sqs.md`](../cli/templates/export/data/sqs.md) says how queues, mappings, a function's settings for these calls and a bucket's notifications become their AWS resources, and how to empty what waits before the move.
+
+**Call a function without waiting.** As AWS Lambda's asynchronous invoke: the invocation type `Event`, in the header `X-Amz-Invocation-Type` or as `invocationType` in the body, keeps the call and answers at once, 202, with its request ID, the answer's `x-ff-request-id` too; FF runs it within seconds:
+
+```bash
+curl -s -X POST "$FF/functions/$ID/invoke" -H 'content-type: application/json' -H 'X-Amz-Invocation-Type: Event' \
+  -d '{"input": {"name": "Tunis"}}' -w ' %{http_code}\n'
+# {"requestId":"5f0c2b9e-…"} 202
+curl -s "$FF/functions/$ID/invocations?limit=3" | jq -c '.invocations[] | {requestId, attempt, source, status}'
+# {"requestId":"5f0c2b9e-…","attempt":1,"source":"async","status":"COMPLETED"}
+```
+
+- **Retried as Lambda retries it.** A failure of the function (it threw, timed out, or couldn't load) is retried a minute after, and a second one two minutes after; after the third attempt the call is dropped, which the backend's log says. A call that found no free instance, or that FF couldn't make (the function not `ACTIVE`, the account suspended or out of credit), is tried again after 1, 2, 4… seconds, up to five minutes apart, until it is six hours old. Each attempt is a call of its own in the history, its `source` `async` and its `attempt`, under the request ID, which its log lines name; each has its usage record, and is billed as any call. The waiting isn't.
+- **At least once.** The call waits in FF's database until it ends ([ADR 0010](adr/0010-queue.md)). Two backends never run an attempt at once; one stopped during an attempt leaves the call to come back when its lease ends (twice the function's timeout, the cold start's limit and a minute), and that attempt counts as failed. A function may so see a call twice: as on Lambda, it should do its work once per request ID (`context.awsRequestId`).
+- **Limits.** The event is at most 1 MB as JSON, Lambda's limit for asynchronous calls (413 past it). The calls waiting count against the plan's room for messages (100 MB on the beta plan, its queues' messages with them): past it, 429 until some have run. The plan's invocations per second count each call when it comes, not its attempts.
+- **`DryRun`** only checks that the call could be made, the function and the input's size, and answers 204: nothing runs.
+- **A function's own settings**, as Lambda's `EventInvokeConfig`: its retries (0 to 2), how long a call is kept (60 s to 6 hours), and destinations, another function of the account by its ARN or its name (kept as its ARN), which gets Lambda's record of each call as an asynchronous call of its own, or a queue of the account by its ARN (`arn:aws:sqs:tn-tunis-1:<account>:<queue>`, "Queues, as Amazon SQS", below), which gets it as a message's body, as Lambda sends one to SQS: `onSuccess` once a call succeeded, `onFailure` once its retries are used up or it is too old. The record is Lambda's: `requestContext` (the request ID, the function's ARN, the `condition`, `Success`, `RetriesExhausted` or `EventAgeExceeded`, and how many attempts were made), `requestPayload`, the event, and the last attempt's `responseContext` and `responsePayload`, the function's answer or its error. A call that aged out before any attempt ran has no response in it. A `PUT` replaces the settings whole, what it leaves out back to Lambda's default; `GET` answers 404 for a function without any, and `DELETE` removes them. A destination must be there when it is set; one deleted since gets nothing, which the backend's log says. A queue as a destination comes with queues. In the console, the Invocations tab's "Calls that don't wait" panel shows them and changes them, or goes back to Lambda's defaults; with `ff`, `ff async-config <name>` shows them, `--retries`, `--max-age 30m`, `--on-success` and `--on-failure` (a function's name), and `--no-on-success` or `--no-on-failure`, change what they name and keep the rest, and `--reset` goes back to Lambda's defaults.
+
+  ```bash
+  curl -s -X PUT "$FF/functions/$ID/event-invoke-config" -H 'content-type: application/json' \
+    -d "{\"maximumRetryAttempts\": 0, \"destinationConfig\": {\"onFailure\": {\"destination\": \"arn:aws:lambda:tn-tunis-1:$ACCOUNT:function:failed-orders\"}}}" | jq -c
+  ```
+- **The worker:** as soon as a call is kept, PostgreSQL tells every backend (`NOTIFY`), and each claims the calls due, at most ten running at once (`FF_ASYNC_CONCURRENCY`); every 5 s too (`FF_ASYNC_INTERVAL_SECONDS`; 0 for a backend that runs none), for the retries come due and the calls a stopped backend left. A record that can't go to its destination (gone since, over what it takes, or the account's messages at the plan's limit) is said in the server log, and its call ends all the same.
+- **Its metrics, as Lambda's:** `GET /functions/<id>/metrics`, and the account's `GET /metrics`, give `AsyncEventsReceived` (the calls kept), `AsyncEventAge` (how long a call waited until each attempt, its `Average` and `Maximum` in ms, `null` in a period without an attempt), `AsyncEventsDropped` (the calls that ended without the function succeeding, past their retries or their age, whether their record went to a destination or not) and `DestinationDeliveryFailures` (records a destination didn't take), each backend counting them a minute at a time. Alarms watch them as they watch `Errors`. In the console, the Invocations tab's "Calls that don't wait" panel says the last day's in a line; `ff metrics` ends its totals with the calls kept and dropped, and the records their destination didn't take.
+- **In the console**, a function's Invocations tab invokes without waiting when "Don't wait for the answer" is ticked: it says the call's request ID, and its attempts join the history, each "asynchronously, attempt n", linked to its request's log lines. **With `ff`**, `ff invoke <name> --async` prints the request ID at once (`--raw`: the ID alone), `ff history <name>` lists the attempts, and `--dry-run` only checks.
 
 ### Queues, as Amazon SQS
 

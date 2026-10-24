@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-3 plan](../step-3-plan.md)'s D1, and its choices (its §9), confirmed by you on 2026-10-23; where its messages live, measured by Q-01's spike the same day |
 | **Date** | 2026-10-23 |
-| **Implementation** | Step-3 plan: decisions D1 to D9 and D11; tasks Q-02 to Q-08. As built so far: Q-02 to Q-08 (below) |
+| **Implementation** | Step-3 plan: decisions D1 to D9 and D11; tasks Q-02 to Q-08. As built: Q-02 to Q-08 (below); Q-09 documented it: the guide's "Background work", `how-it-works.html`'s three scenarios of it, the page in French, and the export kit's [`data/sqs.md`](../../cli/templates/export/data/sqs.md) |
 | **Related** | [Parent plan](../local-markets-and-aws-portability-plan.md): ADR-003 (the queue's backend), E-03, E-05, E-04's notifications, §4.6, §6.7; [What to build next](../what-to-build-next.md) §6; the spike, [`hack/spikes/queue`](../../hack/spikes/queue/README.md) |
 
 ## Context
@@ -147,6 +147,7 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 - One more append-and-delete table in FF's database, its size bounded by the plans' limits on messages (the decision log, 28); the operator's database alerts and backups cover it, its point-in-time recovery possibly redelivering what was handled in the last minutes.
 - Queue throughput is FF's database's: about 2,500 messages a second claimed and deleted here, far past a beta's needs; past that, a queue of its own in pgmq or NATS JetStream.
 - The history's rows gain a request ID apart from their own ID, the same for every attempt of an event.
+- What the build leaves for later, each said in its part above: a bucket's events sent at most once, where S3 promises at least once; every backend reading every mapping, so that a queue's batches may be as many again with each backend, until a lease per mapping makes one read it; the last minutes' request counts of a backend that dies, its requests then not billed; standard queues only, FIFO ones later; destinations and notifications to functions and queues only, SNS topics and EventBridge later; and SQS's permissions, tags and message move tasks, which answer `UnsupportedOperation`.
 
 ## Alternatives considered
 

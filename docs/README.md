@@ -26,7 +26,7 @@
 | [ADR 0009](adr/0009-buckets.md) | Buckets behind FF's S3 front door: AWS's Signature Version 4 and the SDKs' streaming uploads, checksums as S3 checks them, both addressings, an IP address for functions, requests counted by AWS's classes; measured by step 2's spike against three AWS clients (accepted on 2026-10-23) |
 | [ADR 0010](adr/0010-queue.md) | Step 3's queue: one table of FF's for every queue's messages, in FF's own database, claimed with leases, at least once, rather than pgmq's table per queue, as the spike measured both; a retried call keeping its request ID; SQS's protocol as AWS's SDKs and CLI read it |
 | [Backup drills](backup-drills.md) | The record of each monthly restore drill |
-| [En français](fr/README.md) | For FF's customers, a page per service in French: [databases](fr/bases-de-donnees.md), as AWS RDS gives them, and [files in buckets](fr/compartiments.md), as AWS S3 gives them |
+| [En français](fr/README.md) | For FF's customers, a page per service in French: [databases](fr/bases-de-donnees.md), as AWS RDS gives them, [files in buckets](fr/compartiments.md), as AWS S3 gives them, and [queues and background work](fr/files-d-attente.md), as AWS SQS and Lambda's asynchronous invoke give them |
 
 Elsewhere in the repository:
 - [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md): the function runtimes, their protocol and their handler contracts;
