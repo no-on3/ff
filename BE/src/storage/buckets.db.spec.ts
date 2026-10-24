@@ -128,7 +128,7 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
   it("refuses an account whose storage FF turned off, saying why", async () => {
     await db.dataSource.getRepository(Account).update({ id: OTHER }, { storageDisabledAt: new Date(), storageDisabledReason: 'Abuse' });
     try {
-      await expect(service().create(OTHER, { name: unique('off') })).rejects.toThrow(new ForbiddenException("FF turned this account's databases and buckets off: Abuse"));
+      await expect(service().create(OTHER, { name: unique('off') })).rejects.toThrow(new ForbiddenException("FF turned this account's databases, buckets and queues off: Abuse"));
     } finally {
       await db.dataSource.getRepository(Account).update({ id: OTHER }, { storageDisabledAt: null, storageDisabledReason: null });
     }

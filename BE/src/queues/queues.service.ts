@@ -70,8 +70,9 @@ export class QueuesService {
     return this.view(queue, await this.queues.counts(queue, new Date()));
   }
 
-  /** As SQS's CreateQueue, but for a name the account has already: 409, whatever its attributes. */
+  /** As SQS's CreateQueue, but for a name the account has already: 409, whatever its attributes; none made while FF has the account's queues off, as buckets. */
   async create(principal: Principal, dto: CreateQueueDto): Promise<QueueView> {
+    await this.open(principal.accountId);
     if (await this.queues.find(principal.accountId, dto.name)) throw new ConflictException(`The account has a queue named "${dto.name}" already`);
     const { name, ...attributes } = dto;
     await this.run('CreateQueue', { QueueName: name, Attributes: sqsAttributes(attributes) }, principal, name, HttpStatus.BAD_REQUEST);
@@ -171,7 +172,7 @@ export class QueuesService {
   /** Messages are the account's data: none sent, received or deleted while FF has its databases, buckets and queues off. */
   private async open(accountId: string): Promise<void> {
     const account = await this.directory.account(accountId);
-    if (account?.storageDisabledAt) throw new ForbiddenException(`FF turned the account's databases, buckets and queues off: ${account.storageDisabledReason}`);
+    if (account?.storageDisabledAt) throw new ForbiddenException(`FF turned this account's databases, buckets and queues off: ${account.storageDisabledReason}`);
   }
 
   /** SQS's operation for the caller's account, as the API's caller: its errors as HTTP's, the plan's limits answering `overLimit`. */

@@ -437,4 +437,14 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       `The record of asynchronous call req-3 of function fn-1 was not delivered: the account's messages hold ${plan().limits.queueStorageMb} MB together, the Beta plan's limit`,
     );
   });
+
+  it("sends no record to a queue while FF has the account's queues off, saying so, as their keys are refused", async () => {
+    configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: QUEUE_ARN, onFailure: null });
+    accounts.findOne.mockResolvedValueOnce({ id: ACCOUNT, status: AccountStatus.ACTIVE }).mockResolvedValueOnce({ id: ACCOUNT, storageDisabledAt: new Date() });
+
+    await tick(event());
+
+    expect([customerQueues.send.mock.calls.length, queues.deleteEvent.mock.calls.length, configs.destinationQueue.mock.calls.length]).toEqual([0, 1, 0]);
+    expect(warnings).toHaveBeenCalledWith("The record of asynchronous call req-1 of function fn-1 was not delivered: FF turned the account's databases, buckets and queues off");
+  });
 });

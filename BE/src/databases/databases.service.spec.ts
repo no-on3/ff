@@ -158,7 +158,7 @@ describe('DatabasesService', () => {
       Object.assign(account, { storageDisabledAt: new Date(), storageDisabledReason: 'Files shared against our terms' });
 
       await expect(service.create(ACCOUNT, { name: 'orders' })).rejects.toThrow(
-        new ForbiddenException("FF turned this account's databases and buckets off: Files shared against our terms"),
+        new ForbiddenException("FF turned this account's databases, buckets and queues off: Files shared against our terms"),
       );
       expect([rows, calls]).toEqual([[], []]);
     });

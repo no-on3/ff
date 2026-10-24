@@ -102,8 +102,8 @@ export class AdminAccountsController {
 
   @Put(':id/storage')
   @ApiOperation({
-    summary: "Turn the account's databases and buckets off, with a reason, or on again; its functions go on (operators only)",
-    description: "Off, its databases' users can't log in and their sessions end, and no database can be made; their data stay, and are billed. On, they log in again, unless the account is suspended or closed. The account's members read the reason in their audit log and in GET /me.",
+    summary: "Turn the account's databases, buckets and queues off, with a reason, or on again; its functions go on (operators only)",
+    description: "Off, its databases' users can't log in and their sessions end, its access keys are refused, no database, bucket or queue can be made, and no message is sent or received; their data stay, and are billed. On, they log in again, unless the account is suspended or closed. The account's members read the reason in their audit log and in GET /me.",
   })
   @ApiResponse({ status: 200, type: AdminAccountView })
   storage(@Param() { id }: AccountIdParam, @Body() body: AdminStorageDto): Promise<AdminAccountView> {

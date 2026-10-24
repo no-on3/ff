@@ -14,6 +14,7 @@ mod invoke;
 mod local;
 mod logs;
 mod package;
+mod queues;
 mod schedule;
 mod secrets;
 mod url;
@@ -22,7 +23,7 @@ mod whoami;
 
 use crate::cli::{
     BucketKeysCommand, BucketsCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand, LocalCommand,
-    ScheduleCommand, SecretsCommand, UrlCommand,
+    QueuesCommand, ScheduleCommand, SecretsCommand, UrlCommand,
 };
 use crate::config::Settings;
 use crate::error::Error;
@@ -116,12 +117,29 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Buckets(BucketsCommand::Get { name }) => buckets::get(&name, context),
         Command::Buckets(BucketsCommand::Delete { name, force, yes }) => buckets::delete(&name, force, yes, context),
         Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::List)) => buckets::keys_list(context),
-        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Create { buckets, read_only })) => {
-            buckets::keys_create(&buckets, read_only, context)
+        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Create { buckets, queues, read_only })) => {
+            buckets::keys_create(&buckets, &queues, read_only, context)
         }
         Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Revoke { id, yes })) => {
             buckets::keys_revoke(&id, yes, context)
         }
+        Command::Queues(QueuesCommand::Create { name, attributes }) => queues::create(&name, &attributes, context),
+        Command::Queues(QueuesCommand::List) => queues::list(context),
+        Command::Queues(QueuesCommand::Get { name }) => queues::get(&name, context),
+        Command::Queues(QueuesCommand::Set { name, attributes, no_dead_letter_queue }) => {
+            queues::set(&name, &attributes, no_dead_letter_queue, context)
+        }
+        Command::Queues(QueuesCommand::Send { name, body, delay, attributes }) => {
+            queues::send(&name, &body, delay.as_deref(), &attributes, context)
+        }
+        Command::Queues(QueuesCommand::Receive { name, max, wait, visibility_timeout, delete }) => {
+            queues::receive(&name, max, wait.as_deref(), visibility_timeout.as_deref(), delete, context)
+        }
+        Command::Queues(QueuesCommand::DeleteMessage { name, receipt_handle }) => {
+            queues::delete_message(&name, &receipt_handle, context)
+        }
+        Command::Queues(QueuesCommand::Purge { name, yes }) => queues::purge(&name, yes, context),
+        Command::Queues(QueuesCommand::Delete { name, yes }) => queues::delete(&name, yes, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),

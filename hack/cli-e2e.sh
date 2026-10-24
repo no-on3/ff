@@ -20,7 +20,11 @@
 # in ff usage, then deleted; ff buckets: one made, a key whose secret ff prints once as the
 # variables AWS's tools read, the AWS CLI uploading with them alone, what the bucket held at its
 # measure and its month in ff usage, the export kit's s3-sync.sh copying it out to a folder and on
-# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; the getting-started
+# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; ff queues: a queue made
+# with its attributes and a dead-letter queue by name, a message sent by ff and received by the AWS CLI
+# with a key naming that queue alone, received again by ff until the third receive moves it to the
+# dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
+# CLI, the queue deleted and the other account seeing none; the getting-started
 # guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
 # each one's receipt written to a bucket with the function's own key, read back by a GET and by the
 # AWS CLI, both gone after the night 90 days on; and ff local, in
@@ -59,10 +63,13 @@ e2e_build
 url_port="$(free_port)"
 # Buckets' S3 front door on another, at http://s3.localhost:<port>.
 storage_port="$(free_port)"
+# Queues' SQS endpoint on a third, at http://localhost:<port>, which the AWS CLI reaches with a key of the account's.
+sqs_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
-  FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32" "${e2e_data_db_env[@]}")
+  FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port" "${e2e_data_db_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -561,7 +568,7 @@ check "ff buckets create makes it, and says where AWS's tools reach it" "0 cli-p
 ff buckets list
 check "ff buckets list shows it" "0 cli-photos active" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
 ff buckets keys create --bucket cli-photos
-check "ff buckets keys create prints its secret once, as the four variables AWS's tools read" "0 4" "$(code) $(out | grep -c '^export AWS_')"
+check "ff buckets keys create prints its secret once, as the five variables AWS's tools read" "0 5" "$(code) $(out | grep -c '^export AWS_')"
 out | grep '^export AWS_' >"$work/s3.env"
 key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
 printf 'Ahlan from the CLI' >"$work/hello.txt"
@@ -569,7 +576,7 @@ printf 'Ahlan from the CLI' >"$work/hello.txt"
 # Without one here, AWS's image: as this user, so that the files it writes are this user's, s3.localhost this machine.
 if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
   aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
-    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_ENDPOINT_URL_SQS -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
     -e AWS_PROFILE amazon/aws-cli:2.34.32)
 fi
 aws_with_key() { (set -a; . "$work/s3.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
@@ -615,6 +622,65 @@ ff buckets keys revoke "$key_id" --yes
 # The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
 refused="$(aws_with_key s3 ls 2>&1 || true)"
 check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
+
+echo "== queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
+ff queues create cli-orders.fifo
+check "ff queues create refuses a FIFO queue's name before calling" "2 true" "$(code) $(err | grep -q 'FIFO queues come later' && echo true || echo false)"
+ff queues create cli-orders-dlq
+ff queues create cli-orders --visibility-timeout 2s --retention 1d --dead-letter-queue cli-orders-dlq --max-receive-count 2
+check "ff queues create makes it, and says where AWS's tools reach it" "0 cli-orders made http://localhost:$sqs_port/$account_a/cli-orders" \
+  "$(code) $(out | head -1) $(out | sed -n 's/^url  *//p')"
+ff queues get cli-orders --output json
+check "  ... with its attributes, its dead-letter queue by the ARN of the queue named" "0 2 86400 2 cli-orders-dlq" \
+  "$(code) $(out | jq -r '"\(.visibilityTimeout) \(.messageRetentionPeriod) \(.redrivePolicy.maxReceiveCount) \(.redrivePolicy.deadLetterTargetArn | split(":")[5])"')"
+ff queues send cli-orders '{"order": 1}' --attribute item=bsissa
+check "ff queues send sends a message, an attribute with it" "0 true" "$(code) $(out | grep -qE '^sent [0-9a-f-]{36} to cli-orders$' && echo true || echo false)"
+ff buckets keys create --queue cli-orders
+check "a key for that queue alone gives the SQS endpoint among its five variables" "0 5 http://localhost:$sqs_port" \
+  "$(code) $(out | grep -c '^export AWS_') $(out | sed -n 's/^export AWS_ENDPOINT_URL_SQS=//p')"
+out | grep '^export AWS_' >"$work/sqs.env"
+queue_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/sqs.env")"
+aws_sqs() { (set -a; . "$work/sqs.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" sqs "$@"); }
+queue_url="http://localhost:$sqs_port/$account_a/cli-orders"
+check "the AWS CLI receives ff's message with that key, AWS_ENDPOINT_URL_SQS its only change" '{"order": 1} bsissa 1' \
+  "$(aws_sqs receive-message --queue-url "$queue_url" --message-attribute-names All --attribute-names ApproximateReceiveCount 2>/dev/null |
+    jq -r '.Messages[0] | "\(.Body) \(.MessageAttributes.item.StringValue) \(.Attributes.ApproximateReceiveCount)"')"
+# The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
+denied="$(aws_sqs get-queue-url --queue-name cli-orders-dlq 2>&1 || true)"
+check "  ... and reaches no other queue of the account" "true" "$(grep -q AccessDenied <<<"$denied" && echo true || echo false)"
+# Hidden for its visibility timeout of 2 s, it comes back to the next receive that waits long enough.
+ff queues receive cli-orders --wait 10s --output json
+check "ff queues receive gets it again once its visibility timeout ends, its second receive" '0 {"order": 1} 2 bsissa' \
+  "$(code) $(out | jq -r '.[0] | "\(.body) \(.receiveCount) \(.attributes.item.stringValue)"')"
+ff queues receive cli-orders --wait 5s --output json
+check "  ... and the third moves it to the dead-letter queue, as its redrive policy says" "0 0" "$(code) $(out | jq length)"
+ff queues receive cli-orders-dlq --delete --output json
+check "ff queues receive --delete gets it from the dead-letter queue, and deletes it" '0 {"order": 1} true' \
+  "$(code) $(out | jq -r '.[0] | "\(.body) \(.deleted)"')"
+ff queues get cli-orders-dlq --output json
+check "  ... which then holds nothing" "0 0 0 0" "$(code) $(out | jq -r '"\(.messages.available) \(.messages.inFlight) \(.sizeBytes)"')"
+ff queues send cli-orders one
+ff queues send cli-orders two --delay 1m
+ff queues list --output json
+check "ff queues list counts a queue's messages, one delayed" "0 1 1" "$(code) $(out | jq -r '.[] | select(.name == "cli-orders") | "\(.messages.available) \(.messages.delayed)"')"
+ff queues purge cli-orders
+check "ff queues purge asks first, and a script must say --yes" "2 true" "$(code) $(err | grep -q 'say --yes' && echo true || echo false)"
+ff queues purge cli-orders --yes
+check "  ... and deletes every message" "0 deleted every message of cli-orders 0" \
+  "$(code) $(out) $("$ff_bin" queues get cli-orders --output json | jq '.messages.available + .messages.delayed')"
+ff queues set cli-orders --retention 1h --no-dead-letter-queue
+check "ff queues set changes what it is given, and removes the dead-letter queue" "0 cli-orders changed true" \
+  "$(code) $(out | head -1) $(out | grep -q '^dead letters  *none' && echo true || echo false)"
+check "  ... as the AWS CLI sees it" "3600" \
+  "$(aws_sqs get-queue-attributes --queue-url "$queue_url" --attribute-names MessageRetentionPeriod 2>/dev/null | jq -r .Attributes.MessageRetentionPeriod)"
+ff queues list --profile b
+check "the other account has none of them" "0 The account has no queue: \`ff queues create <name>\` makes one" "$(code) $(out)"
+ff queues delete cli-orders --yes
+check "ff queues delete deletes it" "0 deleted the queue cli-orders" "$(code) $(out)"
+ff queues get cli-orders
+check "  ... which then isn't there, in the API's words, exit 3" '3 true' "$(code) $(err | grep -q 'no queue named "cli-orders"' && echo true || echo false)"
+ff queues delete cli-orders-dlq --yes
+ff buckets keys revoke "$queue_key" --yes
 
 echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt in a bucket"
 # In account A, whose functions don't reach the internet: FF's database and the S3 front door, they do.

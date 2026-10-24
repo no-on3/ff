@@ -15,6 +15,7 @@ import paymentsServiceSource from '../../BE/src/billing/payments/payments.servic
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import invoiceEntitySource from '../../BE/src/billing/invoices/invoice.entity.ts?raw';
 import adminAccountsDtoSource from '../../BE/src/admin/admin-accounts.dto.ts?raw';
+import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
 import adminCreditsDtoSource from '../../BE/src/admin/admin-credits.dto.ts?raw';
 import adminSupportDtoSource from '../../BE/src/admin/admin-support.dto.ts?raw';
 import adminStatsDtoSource from '../../BE/src/admin/admin-stats.dto.ts?raw';
@@ -23,7 +24,7 @@ import ledgerTransactionSource from '../../BE/src/billing/ledger/ledger-transact
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
-import { ACCOUNT_STATUSES, BUCKET_FIELDS, DATABASE_FIELDS, STATUS_CHANGES } from './lib/accounts';
+import { ACCOUNT_STATUSES, BUCKET_FIELDS, DATABASE_FIELDS, QUEUE_FIELDS, QUEUE_MESSAGES_FIELDS, QUEUE_STORAGE_FIELDS, STATUS_CHANGES } from './lib/accounts';
 import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
 import { CALL_FIELDS, CALL_HIT_FIELDS, DOMAIN_FIELDS, FUNCTION_HIT_FIELDS, FUNCTION_PAGE_FIELDS, FUNCTION_URL_FIELDS, SCHEDULE_FIELDS } from './lib/support';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
@@ -232,6 +233,14 @@ describe('credit grants and the account page\'s credit (P-74)', () => {
     expect(fieldsOf(adminAccountsDtoSource, 'export class AdminBucketView {')).toEqual([...BUCKET_FIELDS]);
     expect(adminAccountsDtoSource).toContain("@ApiProperty({ type: [AdminBucketView], description: 'Its buckets, by name' }) buckets: AdminBucketView[];");
     expect(adminAccountsDtoSource).toContain('bucketStorageNotice: 80 | 100 | null;');
+  });
+
+  it("have the API's fields of the account's queues, their messages counted, and what they hold together against the plan's room", () => {
+    expect(fieldsOf(adminAccountsDtoSource, 'export class AdminQueueView {')).toEqual([...QUEUE_FIELDS]);
+    expect(fieldsOf(queueDtoSource, 'export class QueueMessagesView {')).toEqual([...QUEUE_MESSAGES_FIELDS]);
+    expect(fieldsOf(adminAccountsDtoSource, 'export class AdminQueueStorageView {')).toEqual([...QUEUE_STORAGE_FIELDS]);
+    expect(adminAccountsDtoSource).toContain("@ApiProperty({ type: [AdminQueueView], description: 'Its queues, by name' }) queues: AdminQueueView[];");
+    expect(adminAccountsDtoSource).toContain('@ApiProperty({ type: AdminQueueStorageView }) queueStorage: AdminQueueStorageView;');
   });
 
   it("have the API's credit fields on the account page", () => {

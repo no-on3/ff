@@ -317,7 +317,7 @@ export class S3FrontDoor implements OnModuleDestroy {
   private async admitAccount(accountId: string): Promise<{ plan: PlanView; bucketsFull: boolean }> {
     const account = await this.directory.account(accountId);
     if (!account || account.status !== AccountStatus.ACTIVE) throw accountProblem(`it is ${account?.status ?? 'gone'}`);
-    if (account.storageDisabledAt) throw accountProblem(`FF turned its databases and buckets off: ${account.storageDisabledReason}`);
+    if (account.storageDisabledAt) throw accountProblem(`FF turned its databases, buckets and queues off: ${account.storageDisabledReason}`);
     const plan = await this.plans.get(account.planId);
     if ((await countStorageRequest(this.throttler, account.id, plan.limits.storageRequestsPerSecond)) !== undefined) {
       throw new S3Error(503, 'SlowDown', `Please reduce your request rate: the ${plan.name} plan allows ${plan.limits.storageRequestsPerSecond} requests a second.`);

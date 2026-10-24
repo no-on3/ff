@@ -1,6 +1,6 @@
 //! `ff buckets` against a scripted API: a bucket's address, a name held to AWS's rule before any
 //! call, a deletion asked first and emptying only when told, and an access key's secret printed
-//! once, as the variables AWS's tools read.
+//! once, as the variables AWS's tools read, the SQS endpoint among them.
 
 mod common;
 
@@ -23,7 +23,7 @@ fn measured(name: &str) -> Value {
 }
 
 fn key(id: &str, buckets: Value, read_only: bool) -> Value {
-    json!({ "id": id, "buckets": buckets, "readOnly": read_only, "createdAt": "2026-10-23T06:36:00.000Z", "lastUsedAt": null })
+    json!({ "id": id, "buckets": buckets, "queues": null, "readOnly": read_only, "createdAt": "2026-10-23T06:36:00.000Z", "lastUsedAt": null })
 }
 
 const KEY_ID: &str = "AKFF7Q2MLKX4RTZB3W5N";
@@ -130,7 +130,7 @@ fn a_bucket_with_files_answers_the_apis_words() {
 fn keys_create_prints_the_secret_once_as_aws_tools_read_it() {
     let mut made = key(KEY_ID, json!(["photos"]), true);
     made.as_object_mut().unwrap().extend(
-        json!({ "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "endpoint": "https://s3.example.tn", "region": "tn-tunis-1" })
+        json!({ "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "endpoint": "https://s3.example.tn", "sqsEndpoint": "https://sqs.example.tn", "region": "tn-tunis-1" })
             .as_object()
             .unwrap()
             .clone(),
@@ -138,9 +138,9 @@ fn keys_create_prints_the_secret_once_as_aws_tools_read_it() {
     let api = Server::start(vec![Reply::json(201, made)]);
 
     ff(&with_key(&api.url)).args(["buckets", "keys", "create", "--bucket", "photos", "--read-only"]).assert().success().stdout(format!(
-        "{KEY_ID} made, reaching photos (read-only): its secret, shown this once (FF keeps it sealed; `ff buckets keys revoke {KEY_ID}` stops it):\n\
+        "{KEY_ID} made, reaching the bucket photos, read-only: its secret, shown this once (FF keeps it sealed; `ff buckets keys revoke {KEY_ID}` stops it):\n\
          export AWS_ACCESS_KEY_ID={KEY_ID}\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\n\
-         export AWS_ENDPOINT_URL_S3=https://s3.example.tn\n"
+         export AWS_ENDPOINT_URL_S3=https://s3.example.tn\nexport AWS_ENDPOINT_URL_SQS=https://sqs.example.tn\n"
     ));
     assert_eq!(
         serde_json::from_str::<Value>(&api.requests()[0].body).unwrap(),
@@ -149,19 +149,55 @@ fn keys_create_prints_the_secret_once_as_aws_tools_read_it() {
 }
 
 #[test]
+fn keys_create_for_queues_alone_sends_their_names_held_to_sqss_rule_before_any_call() {
+    let mut made = key(KEY_ID, json!(null), false);
+    made["queues"] = json!(["orders", "orders-dlq"]);
+    made.as_object_mut().unwrap().extend(
+        json!({ "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "endpoint": "https://s3.example.tn", "sqsEndpoint": "https://sqs.example.tn", "region": "tn-tunis-1" })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let api = Server::start(vec![Reply::json(201, made)]);
+    let dir = with_key(&api.url);
+
+    ff(&dir)
+        .args(["buckets", "keys", "create", "--queue", "orders.fifo"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("FIFO queues come later"));
+    ff(&dir)
+        .args(["buckets", "keys", "create", "--queue", "orders", "--queue", "orders-dlq"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(format!(
+            "{KEY_ID} made, reaching the queues orders, orders-dlq: its secret"
+        )));
+    let requests = api.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&requests[0].body).unwrap(),
+        json!({ "queues": ["orders", "orders-dlq"], "readOnly": false })
+    );
+}
+
+#[test]
 fn keys_list_shows_what_each_reaches_never_a_secret() {
+    let mut queues = key("AKFFCCCCCCCCCCCCCCCC", json!(null), false);
+    queues["queues"] = json!(["orders"]);
     let api = Server::start(vec![Reply::json(
         200,
-        json!([key(KEY_ID, json!(null), false), key("AKFFBBBBBBBBBBBBBBBB", json!(["photos"]), true)]),
+        json!([key(KEY_ID, json!(null), false), key("AKFFBBBBBBBBBBBBBBBB", json!(["photos"]), true), queues]),
     )]);
 
     let shown = ff(&with_key(&api.url)).args(["buckets", "keys", "list"]).output().unwrap();
     let text = String::from_utf8_lossy(&shown.stdout);
     assert_eq!(
         text,
-        "ID                    BUCKETS             LAST USED (UTC)  CREATED (UTC)\n\
-         AKFF7Q2MLKX4RTZB3W5N  all                 never            2026-10-23 06:36:00\n\
-         AKFFBBBBBBBBBBBBBBBB  photos (read-only)  never            2026-10-23 06:36:00\n"
+        "ID                    BUCKETS  QUEUES  ACCESS      LAST USED (UTC)  CREATED (UTC)\n\
+         AKFF7Q2MLKX4RTZB3W5N  all      all     read-write  never            2026-10-23 06:36:00\n\
+         AKFFBBBBBBBBBBBBBBBB  photos   -       read-only   never            2026-10-23 06:36:00\n\
+         AKFFCCCCCCCCCCCCCCCC  -        orders  read-write  never            2026-10-23 06:36:00\n"
     );
 }
 

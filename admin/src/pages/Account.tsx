@@ -16,9 +16,12 @@ import {
   changesFor,
   dataDeletion,
   bucketStorageLabel,
+  formatBytes,
   formatMegabytes,
   isAccountId,
   ownersSee,
+  queueMessagesLabel,
+  queueStorageLabel,
   storageLabel,
 } from '../lib/accounts';
 import { actionLabel, describeAction } from '../lib/audit';
@@ -221,12 +224,12 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
     }
     if (pending.kind === 'storage') {
       return {
-        title: `Turn ${account.name}'s databases and buckets ${pending.on ? 'on' : 'off'}?`,
+        title: `Turn ${account.name}'s databases, buckets and queues ${pending.on ? 'on' : 'off'}?`,
         body: (
           <p>
             {pending.on
-              ? "Its databases' users log in again, unless the account is suspended or closed."
-              : "Its databases' users can't log in, their sessions end, and it can make no database. Their data stay, and are billed; its functions go on."}{' '}
+              ? "Its databases' users log in again, and its access keys are accepted again, unless the account is suspended or closed."
+              : "Its databases' users can't log in, their sessions end, its access keys are refused, and it can make no database, bucket or queue: no file or message is read or written. Their data stay, and are billed; its functions go on, with no record sent to a queue."}{' '}
             Its owners get an e-mail that gives your reason, and its members read it in their audit log.
           </p>
         ),
@@ -342,7 +345,7 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
               </button>
             </span>
           </Fact>
-          <Fact label="Databases and buckets">
+          <Fact label="Databases, buckets and queues">
             <span className="flex flex-wrap items-center gap-3">
               {storageLabel(account, whenUtc)}
               <button
@@ -418,6 +421,19 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
               b.measuredAt ? whenUtc(b.measuredAt) : 'not yet',
               whenUtc(b.createdAt),
             ])}
+          />
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Queues</h2>
+        <p className="text-sm text-slate-600">Together: {queueStorageLabel(view.queueStorage)}.</p>
+        {view.queues.length === 0 ? (
+          <EmptyState>No queue.</EmptyState>
+        ) : (
+          <Table
+            head={['Name', 'Messages', 'Holding', 'Dead letters to', 'Created']}
+            rows={view.queues.map((q) => [q.name, queueMessagesLabel(q.messages), formatBytes(q.sizeBytes), q.deadLetterQueue ?? '–', whenUtc(q.createdAt)])}
           />
         )}
       </section>

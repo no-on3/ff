@@ -1,6 +1,6 @@
 /**
  * L1: the e-mail an account's owners get when an operator changes its status
- * (client-readiness plan, P-71), or turns its databases and buckets off or on.
+ * (client-readiness plan, P-71), or turns its databases, buckets and queues off or on.
  * Sending it, to each owner, is checked against PostgreSQL in
  * admin-accounts.db.spec.ts.
  */
@@ -84,25 +84,25 @@ describe("the owners' e-mail, in French", () => {
   });
 });
 
-describe("the owners' e-mail when their databases and buckets are turned off, or on", () => {
+describe("the owners' e-mail when their databases, buckets and queues are turned off, or on", () => {
   it('says what stops and what goes on, and why, in English', () => {
     expect(storageMail(ACCOUNT, false, REASON, CONSOLE, 'en')).toEqual({
-      subject: 'The databases and buckets of your FF account are off: Tunis Labs',
+      subject: 'The databases, buckets and queues of your FF account are off: Tunis Labs',
       text: [
-        'FF turned off the databases and buckets of your account "Tunis Labs" (000000000042): their users can\'t log in, and their sessions were ended; no database can be made meanwhile. Their data are kept, and billed; your functions go on.',
+        'FF turned off the databases, buckets and queues of your account "Tunis Labs" (000000000042): the databases\' users can\'t log in, and their sessions were ended; the access keys are refused, and no database, bucket or queue can be made meanwhile. Their data are kept, and billed; your functions go on.',
         `Why: ${REASON}`,
         '',
         'The console: https://console.ff.tn',
       ].join('\n'),
     });
-    expect(storageMail(ACCOUNT, true, REASON, CONSOLE, 'en').subject).toBe('The databases and buckets of your FF account are on again: Tunis Labs');
+    expect(storageMail(ACCOUNT, true, REASON, CONSOLE, 'en').subject).toBe('The databases, buckets and queues of your FF account are on again: Tunis Labs');
   });
 
-  it('and in French, buckets as AWS calls them there: compartiments', () => {
-    expect(storageMail(ACCOUNT, false, REASON, CONSOLE, 'fr').subject).toBe('Les bases de données et compartiments de votre compte FF sont désactivés : Tunis Labs');
+  it("and in French, buckets and queues as AWS calls them there: compartiments, files d'attente", () => {
+    expect(storageMail(ACCOUNT, false, REASON, CONSOLE, 'fr').subject).toBe("Les bases de données, compartiments et files d'attente de votre compte FF sont désactivés : Tunis Labs");
     expect(storageMail(ACCOUNT, false, REASON, CONSOLE, 'fr').text.split('\n')[1]).toBe(`Motif : ${REASON}`);
     expect(storageMail(ACCOUNT, true, REASON, CONSOLE, 'fr').text.split('\n')[0]).toBe(
-      'Les bases de données et les compartiments de votre compte « Tunis Labs » (000000000042) sont réactivés : leurs utilisateurs peuvent de nouveau se connecter.',
+      "Les bases de données, les compartiments et les files d'attente de votre compte « Tunis Labs » (000000000042) sont réactivés : les utilisateurs des bases peuvent de nouveau se connecter, et les clés d'accès sont de nouveau acceptées.",
     );
   });
 });

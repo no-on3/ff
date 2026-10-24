@@ -104,6 +104,12 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 - **Keys that name queues** (the migration `KeyQueues`): a key that names neither buckets nor queues reaches all the account's, as every key made before; one that names some reaches those alone, so that one naming buckets alone reaches no queue, and one naming queues alone no bucket, each refused `AccessDenied` before the queue is looked for, as IAM refuses. Its revert revokes a key that named queues alone, which would otherwise name nothing, and reach every bucket.
 - **The audit log** names each `queue.create`, `queue.update`, `queue.purge` and `queue.delete`, whichever way it came: an SDK's under its access key (`access_key:AKFF…`) and from its address, the API's as its caller.
 
+### As built (Q-05, parts 2 and 3): the console, the admin app and `ff`
+
+- **The console's Queues page and each queue's own**, and **`ff queues`**, are FF's API's callers: neither speaks SQS's protocol, so neither needs an access key. A dead-letter queue is chosen by name in both, and sent as the ARN the API gives that queue.
+- **The account's storage switch is the queues' too:** while FF has an account's databases, buckets and queues off, its keys are refused at both front doors, FF's API makes no queue and sends or receives no message, and the asynchronous worker sends a function's record to no queue, saying so in its log, as for a destination gone; deleting goes on. The owners' e-mail and the admin app say queues.
+- **The admin app's account page** lists the account's queues, their messages counted as the console counts them, and what they hold together with the functions' calls that don't wait, against the plan's room for both, which is one room ("A function's asynchronous events in a queue of its own", above).
+
 ## Consequences
 
 - One more append-and-delete table in FF's database, its size bounded by the plans' limits on messages (the decision log, 28); the operator's database alerts and backups cover it, its point-in-time recovery possibly redelivering what was handled in the last minutes.

@@ -64,8 +64,8 @@ describe('describeAction', () => {
     expect(describeAction(entry({ action: 'account.approve', details: { changes } }))).toBe('Status: pending → active; Plan: beta → large; Internet egress: off → on');
   });
 
-  it("reads the account's databases and buckets turned off or on", () => {
-    expect(describeAction(entry({ action: 'account.storage', details: { reason: 'r', changes: { storageEnabled: { from: true, to: false } } } }))).toBe('Databases and buckets: on → off');
+  it("reads the account's databases, buckets and queues turned off or on", () => {
+    expect(describeAction(entry({ action: 'account.storage', details: { reason: 'r', changes: { storageEnabled: { from: true, to: false } } } }))).toBe('Databases, buckets and queues: on → off');
   });
 
   it("reads a plan's change by each limit's name, its quota in one line (P-73)", () => {

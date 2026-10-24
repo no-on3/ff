@@ -286,8 +286,9 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
    * The event deleted and its record handed to the destination: as an
    * asynchronous call of a function's, or as a message of a queue's, its body,
    * as Lambda sends one to SQS. A record that can't be delivered (its
-   * destination gone, over what the destination takes, or the account's
-   * messages at the plan's limit) is said, and the event deleted all the same.
+   * destination gone, over what the destination takes, the account's
+   * messages at the plan's limit, or a queue while FF has the account's
+   * queues off) is said, and the event deleted all the same.
    */
   private async deliver(
     event: ClaimedEvent,
@@ -314,6 +315,8 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     const room = await this.roomFor(event.accountId, size);
     if (room) return undelivered(room);
     if (destination.startsWith('arn:aws:sqs:')) {
+      const account = await this.accounts.findOne({ where: { id: event.accountId }, select: { id: true, storageDisabledAt: true } });
+      if (account?.storageDisabledAt) return undelivered("FF turned the account's databases, buckets and queues off");
       const queue = await this.configs.destinationQueue(event.accountId, destination);
       if (!queue) return undelivered(`its destination ${destination} is no queue of the account any more`);
       if (size > queue.maximumMessageSize) return undelivered(`its record is ${size} bytes, over the queue's maximum message size of ${queue.maximumMessageSize}`);

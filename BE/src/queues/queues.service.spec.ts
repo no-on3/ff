@@ -163,11 +163,13 @@ describe("QueuesService: customers' queues in FF's API, as SQS's operations (L1)
     expect(await service.receive(user, 'orders', {})).toEqual([]);
   });
 
-  it("sends and receives nothing while FF has the account's queues off, and goes on deleting", async () => {
+  it("makes, sends and receives nothing while FF has the account's queues off, and goes on deleting", async () => {
     account = { storageDisabledAt: new Date(), storageDisabledReason: 'unpaid invoice' };
+    const off = [403, "FF turned this account's databases, buckets and queues off: unpaid invoice"];
 
-    expect(await status(service.send(user, 'orders', { body: 'x' }))).toEqual([403, "FF turned the account's databases, buckets and queues off: unpaid invoice"]);
-    expect(await status(service.receive(user, 'orders', {}))).toEqual([403, "FF turned the account's databases, buckets and queues off: unpaid invoice"]);
+    expect(await status(service.create(user, { name: 'invoices' }))).toEqual(off);
+    expect(await status(service.send(user, 'orders', { body: 'x' }))).toEqual(off);
+    expect(await status(service.receive(user, 'orders', {}))).toEqual(off);
     await expect(service.purge(user, 'orders')).resolves.toBeUndefined();
     await expect(service.deleteMessage(user, 'orders', 'handle-1')).resolves.toBeUndefined();
     await expect(service.remove(user, 'orders')).resolves.toBeUndefined();

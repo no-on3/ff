@@ -8,10 +8,13 @@ import {
   changedNotice,
   changesFor,
   dataDeletion,
+  formatBytes,
   formatMegabytes,
   isAccountId,
   ownersOf,
   ownersSee,
+  queueMessagesLabel,
+  queueStorageLabel,
   statusLabel,
   storageLabel,
 } from './accounts';
@@ -47,7 +50,7 @@ describe('the status changes an account offers (P-71)', () => {
   });
 });
 
-describe("an account's databases and buckets, to read", () => {
+describe("an account's databases, buckets and queues, to read", () => {
   it('says they are on, or off since when and why', () => {
     const when = (at: string) => at.slice(0, 10);
     expect(storageLabel({ storageDisabledAt: null, storageDisabledReason: null }, when)).toBe('On');
@@ -58,6 +61,18 @@ describe("an account's databases and buckets, to read", () => {
 
   it("gives a database's size in MB to a tenth, and a dash when the server couldn't say", () => {
     expect([formatMegabytes(7_634_423), formatMegabytes(1_073_741_824), formatMegabytes(0), formatMegabytes(null)]).toEqual(['7.3 MB', '1,024 MB', '0 MB', '–']);
+  });
+
+  it("gives what a queue holds in bytes, KB under a megabyte, then MB", () => {
+    expect([formatBytes(0), formatBytes(1), formatBytes(46), formatBytes(1536), formatBytes(1_048_576), formatBytes(7_634_423)]).toEqual(['0 bytes', '1 byte', '46 bytes', '1.5 KB', '1 MB', '7.3 MB']);
+  });
+
+  it("says a queue's messages, those in flight and delayed when there are some, and what the queues hold against the plan's room", () => {
+    expect([queueMessagesLabel({ available: 1200, inFlight: 1, delayed: 0 }), queueMessagesLabel({ available: 0, inFlight: 0, delayed: 2 })]).toEqual([
+      '1,200 waiting, 1 in flight',
+      '0 waiting, 2 delayed',
+    ]);
+    expect(queueStorageLabel({ bytes: 2048, limitMb: 100 })).toBe("2 KB of the plan's 100 MB, its functions' calls that don't wait among them; past it, sends and those calls are refused");
   });
 
   it("says how full the buckets are together against the plan's storage, full being when uploads wait", () => {

@@ -39,6 +39,9 @@ import { PlatformSettingsService } from './platform-settings.service';
 import { BucketsService } from '../storage/buckets.service';
 import { Bucket } from '../storage/bucket.entity';
 import { StoreBuckets } from '../storage/store-buckets';
+import { CustomerQueues } from '../queues/customer-queues';
+import { Queue } from '../queues/queue.entity';
+import { QueueStore } from '../queues/queue-store';
 
 const DAY_MS = 86_400_000;
 
@@ -156,6 +159,8 @@ run('accounts, for operators (L2, P-71)', () => {
       } as never,
       // Its buckets' rows and samples are read from the database itself; nothing here makes or empties a bucket in the store.
       new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } })),
+      new CustomerQueues(ds, ds.getRepository(Queue)),
+      new QueueStore(ds),
     );
   });
 
@@ -482,7 +487,7 @@ run('accounts, for operators (L2, P-71)', () => {
     ]);
   });
 
-  it("turns the account's databases and buckets off and on, its reason on the page and in the log, the databases following each time, a retry too, the owners told of each change", async () => {
+  it("turns the account's databases, buckets and queues off and on, its reason on the page and in the log, the databases following each time, a retry too, the owners told of each change", async () => {
     const id = await account({ status: AccountStatus.ACTIVE }, [[await user(`storage-owner-${++n}@ff.test`), 'owner'], [await user(`storage-dev-${++n}@ff.test`), 'developer']]);
 
     const off = await service.setStorage(id, false, 'Files shared against our terms');
@@ -490,8 +495,8 @@ run('accounts, for operators (L2, P-71)', () => {
     const on = await service.setStorage(id, true, 'Cleared with the owner');
 
     expect(sent.map((mail) => [mail.to, mail.subject])).toEqual([
-      [expect.stringMatching(/^storage-owner-/), `The databases and buckets of your FF account are off: ${off.account.name}`],
-      [expect.stringMatching(/^storage-owner-/), `The databases and buckets of your FF account are on again: ${off.account.name}`],
+      [expect.stringMatching(/^storage-owner-/), `The databases, buckets and queues of your FF account are off: ${off.account.name}`],
+      [expect.stringMatching(/^storage-owner-/), `The databases, buckets and queues of your FF account are on again: ${off.account.name}`],
     ]);
 
     expect([off.account.storageDisabledAt instanceof Date, off.account.storageDisabledReason]).toEqual([true, 'Files shared against our terms']);
@@ -533,6 +538,35 @@ run('accounts, for operators (L2, P-71)', () => {
       { name: `zz-new-${id}`, storeName: 'ff-0123456789abcdef0123456b', status: 'active', sizeBytes: null, objects: null, measuredAt: null, createdAt: new Date('2026-10-21T10:00:00Z') },
     ]);
     expect(page.account.bucketStorageNotice).toBe(80);
+  });
+
+  it("shows the account's queues on its page, their messages counted now, what they hold, their dead-letter queue, and the plan's room for them all", async () => {
+    const id = await account({ status: AccountStatus.ACTIVE });
+    await query(`INSERT INTO queues (account_id, name, kind, created_at) VALUES ($1, 'orders-dlq', 'customer', '2026-10-21T10:00:00Z')`, [id]);
+    const [{ id: orders }] = await query<Array<{ id: string }>>(
+      `INSERT INTO queues (account_id, name, kind, redrive_policy, created_at) VALUES ($1, 'orders', 'customer', $2, '2026-10-20T10:00:00Z') RETURNING id`,
+      [id, { deadLetterTargetArn: `arn:aws:sqs:tn-tunis-1:${id}:orders-dlq`, maxReceiveCount: 3 }],
+    );
+    // One waiting, one received and hidden, one delayed; and one expired, which no count has, but whose bytes are held until retention's sweep deletes it.
+    for (const [visibleAt, receives, expiresAt] of [
+      ['-1 minute', 0, '+1 day'],
+      ['+1 minute', 1, '+1 day'],
+      ['+1 minute', 0, '+1 day'],
+      ['-1 minute', 0, '-1 second'],
+    ] as const) {
+      await query(
+        `INSERT INTO queue_messages (queue_id, message_id, body, size_bytes, visible_at, receive_count, expires_at) VALUES ($1, gen_random_uuid(), 'x', 100, now() + $2::interval, $3, now() + $4::interval)`,
+        [orders, visibleAt, receives, expiresAt],
+      );
+    }
+
+    const page = await service.detail(id);
+
+    expect(page.queues).toEqual([
+      { name: 'orders', messages: { available: 1, inFlight: 1, delayed: 1 }, sizeBytes: 400, deadLetterQueue: 'orders-dlq', createdAt: new Date('2026-10-20T10:00:00Z') },
+      { name: 'orders-dlq', messages: { available: 0, inFlight: 0, delayed: 0 }, sizeBytes: 0, deadLetterQueue: null, createdAt: new Date('2026-10-21T10:00:00Z') },
+    ]);
+    expect(page.queueStorage).toEqual({ bytes: 400, limitMb: BETA_LIMITS.queueStorageMb });
   });
 
   it('changes nothing when the cluster refuses the NetworkPolicy; the value the account has writes nothing, but applies it again', async () => {

@@ -744,7 +744,7 @@ export interface MeAccount {
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */
   dataDeletedAt: string | null;
-  /** When FF turned the account's databases and buckets off: their users can't log in. null while they are on. */
+  /** When FF turned the account's databases, buckets and queues off: their users can't log in, its keys are refused. null while they are on. */
   storageDisabledAt: string | null;
   /** FF's reason for it. */
   storageDisabledReason: string | null;

@@ -189,9 +189,14 @@ pub enum Command {
     #[command(subcommand)]
     Db(DbCommand),
 
-    /// The account's buckets, as AWS S3 gives them, and its access keys to them
+    /// The account's buckets, as AWS S3 gives them, and its access keys to them and to its queues
     #[command(subcommand)]
     Buckets(BucketsCommand),
+
+    /// The account's queues, as Amazon SQS's standard queues, which AWS's SDKs and CLI reach with a key of
+    /// `ff buckets keys create`
+    #[command(subcommand)]
+    Queues(QueuesCommand),
 
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
@@ -610,7 +615,7 @@ pub enum BucketsCommand {
         yes: bool,
     },
 
-    /// The account's access keys to its buckets, for AWS's SDKs and CLI
+    /// The account's access keys to its buckets and queues, for AWS's SDKs and CLI
     #[command(subcommand)]
     Keys(BucketKeysCommand),
 }
@@ -622,11 +627,16 @@ pub enum BucketKeysCommand {
 
     /// Make an access key: its secret printed this once, as the variables AWS's tools read
     Create {
-        /// A bucket it reaches, by name; again for each; all the account's without it
+        /// A bucket it reaches, by name; again for each. Naming neither buckets nor queues, it reaches all the
+        /// account's; naming some, those alone
         #[arg(long = "bucket", value_name = "NAME")]
         buckets: Vec<String>,
 
-        /// Reads and lists only: no upload, copy or delete
+        /// A queue it reaches, by name; again for each
+        #[arg(long = "queue", value_name = "NAME")]
+        queues: Vec<String>,
+
+        /// Reads and lists only: no upload, copy or delete, no message sent, received or deleted
         #[arg(long)]
         read_only: bool,
     },
@@ -640,6 +650,142 @@ pub enum BucketKeysCommand {
         #[arg(long, short)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum QueuesCommand {
+    /// Make a queue: SQS's defaults for the attributes not given
+    Create {
+        /// Its name: 1 to 80 letters, digits, hyphens and underscores, as SQS names standard queues
+        name: String,
+
+        #[command(flatten)]
+        attributes: QueueAttributeArgs,
+    },
+
+    /// List the account's queues, with their messages
+    List,
+
+    /// Show a queue: its URL, ARN and endpoint, its messages and its attributes
+    Get {
+        /// The queue's name
+        name: String,
+    },
+
+    /// Change a queue's attributes, as SQS's SetQueueAttributes: those given change, the others stay
+    Set {
+        /// The queue's name
+        name: String,
+
+        #[command(flatten)]
+        attributes: QueueAttributeArgs,
+
+        /// No dead-letter queue: a message is received again and again until it is deleted or its retention ends
+        #[arg(long, conflicts_with = "dead_letter_queue")]
+        no_dead_letter_queue: bool,
+    },
+
+    /// Send a message, as SQS's SendMessage, to debug a queue
+    Send {
+        /// The queue's name
+        name: String,
+
+        /// Its body: text, such as JSON; @file for a file's, - for stdin's
+        body: String,
+
+        /// How long it waits before it can be received, from 0s to 15m, such as 30s; the queue's delay without it
+        #[arg(long)]
+        delay: Option<String>,
+
+        /// A message attribute, NAME=VALUE, a string; again for each
+        #[arg(long = "attribute", value_name = "NAME=VALUE")]
+        attributes: Vec<String>,
+    },
+
+    /// Receive messages, as SQS's ReceiveMessage: each hidden from other receives for the visibility timeout, then
+    /// received again unless deleted
+    Receive {
+        /// The queue's name
+        name: String,
+
+        /// How many at most
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=10))]
+        max: u8,
+
+        /// How long to wait for a message, from 0s to 20s: a long poll; the queue's receive wait without it
+        #[arg(long)]
+        wait: Option<String>,
+
+        /// How long each one is hidden, from 0s to 12h; the queue's visibility timeout without it
+        #[arg(long)]
+        visibility_timeout: Option<String>,
+
+        /// Delete each message received, which is then not received again
+        #[arg(long)]
+        delete: bool,
+    },
+
+    /// Delete a message by the receipt handle its last receive gave; an older receive's handle deletes nothing
+    DeleteMessage {
+        /// The queue's name
+        name: String,
+
+        /// The receipt handle, as `ff queues receive` prints it
+        receipt_handle: String,
+    },
+
+    /// Delete every message of a queue, as SQS's PurgeQueue
+    Purge {
+        /// The queue's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Delete a queue, with its messages
+    Delete {
+        /// The queue's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// SQS's attributes of a queue, each by its own flag; durations such as 30s, 15m or 4d.
+#[derive(Args)]
+pub struct QueueAttributeArgs {
+    /// How long a message received is hidden from other receives, from 0s to 12h (SQS's VisibilityTimeout; 30s)
+    #[arg(long)]
+    pub visibility_timeout: Option<String>,
+
+    /// How long a message is kept, received or not, from 1m to 14d (MessageRetentionPeriod; 4d)
+    #[arg(long)]
+    pub retention: Option<String>,
+
+    /// How long a new message waits before it can be received, from 0s to 15m (DelaySeconds; 0s)
+    #[arg(long)]
+    pub delay: Option<String>,
+
+    /// How long a receive that names no wait waits for a message, from 0s to 20s (ReceiveMessageWaitTimeSeconds; 0s)
+    #[arg(long)]
+    pub receive_wait: Option<String>,
+
+    /// The largest message, its body and attributes together, from 1024 to 1048576 bytes (MaximumMessageSize; 1048576)
+    #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u32).range(1024..=1_048_576))]
+    pub max_message_size: Option<u32>,
+
+    /// Another queue of the account, by name, which gets each message received more than --max-receive-count times
+    /// (RedrivePolicy)
+    #[arg(long, value_name = "QUEUE")]
+    pub dead_letter_queue: Option<String>,
+
+    /// The receives a message may have before it goes to the dead-letter queue, from 1 to 1000 [default: 5]
+    #[arg(long, value_name = "COUNT", requires = "dead_letter_queue", value_parser = clap::value_parser!(u16).range(1..=1000))]
+    pub max_receive_count: Option<u16>,
 }
 
 /// Where the connection string goes besides the terminal: functions' secrets.

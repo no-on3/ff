@@ -177,7 +177,7 @@ run("customers' databases, on the server of customers' databases (L2)", () => {
     await expect(as(made, async () => 'in')).rejects.toThrow(/is not permitted to log in/);
     await service().reactivateAccount(A); // as an operator reactivating the account would: storage is still off
     await expect(as(made, async () => 'in')).rejects.toThrow(/is not permitted to log in/);
-    await expect(service({ databases: 2 }).create(A, { name: 'another' })).rejects.toThrow("FF turned this account's databases and buckets off: Files shared against our terms");
+    await expect(service({ databases: 2 }).create(A, { name: 'another' })).rejects.toThrow("FF turned this account's databases, buckets and queues off: Files shared against our terms");
 
     await storage(null);
     await service().applyAccess(A);

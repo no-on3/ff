@@ -16,7 +16,7 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'account.close', label: 'Account closed' },
   { value: 'account.plan', label: 'Account moved to a plan' },
   { value: 'account.egress', label: 'Internet egress changed' },
-  { value: 'account.storage', label: 'Databases and buckets turned off or on' },
+  { value: 'account.storage', label: 'Databases, buckets and queues turned off or on' },
   { value: 'payment.record', label: 'Bank transfer recorded' },
   { value: 'payment.withholding', label: 'Withholding certificate added' },
   { value: 'payment.cancel', label: 'Pro-forma cancelled' },
@@ -90,7 +90,7 @@ const ACCOUNT_FIELDS: Record<string, { label: string; value?: (value: unknown) =
   status: { label: 'Status' },
   planId: { label: 'Plan' },
   internetEgress: { label: 'Internet egress', value: (value) => (value === true ? 'on' : value === false ? 'off' : shown(value)) },
-  storageEnabled: { label: 'Databases and buckets', value: (value) => (value === true ? 'on' : value === false ? 'off' : shown(value)) },
+  storageEnabled: { label: 'Databases, buckets and queues', value: (value) => (value === true ? 'on' : value === false ? 'off' : shown(value)) },
 };
 
 /** A plan's limits by name (P-73); its quota in one line. A plan's name changes too. */
