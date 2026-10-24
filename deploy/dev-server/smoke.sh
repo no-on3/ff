@@ -84,6 +84,16 @@ digest = hmac.new(sys.argv[1].encode(), struct.pack(">Q", int(time.time()) // 30
 offset = digest[-1] & 15
 print("%06d" % ((struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000))' "$1"
 }
+# <cookie jar>: Keycloak's redirects to its own next step, such as a required action, followed as a browser
+# follows them, until one sends the browser back to the app or a page asks for something.
+keycloak_steps() {
+  local location
+  for _ in 1 2 3 4 5; do
+    location="$(header location)"
+    [[ $location == "https://login.$domain/"* ]] || return 0
+    at "login.$domain" -b "$1" -c "$1" "$location" >/dev/null
+  done
+}
 login() { # <client> <app's URL> <username>: signed in as a browser is, with PKCE; its tokens in $work/<username>.tokens
   local client=$1 redirect="$2/" user=$3 verifier challenge code secret
   local jar="$work/$user.cookies"
@@ -94,14 +104,16 @@ login() { # <client> <app's URL> <username>: signed in as a browser is, with PKC
     -d "code_challenge=$challenge" -d code_challenge_method=S256 -d "state=$(hex 8)" >/dev/null
   at "login.$domain" -b "$jar" -c "$jar" "$(form username)" --data-urlencode "username=$user" \
     --data-urlencode "password@$work/$user.password" -d credentialId= >/dev/null
+  keycloak_steps "$jar"
   # An operator's first login: its one-time password set up as the page asks, from the secret it shows.
   secret="$(form totpSecret value)"
   if [ -n "$secret" ]; then
     at "login.$domain" -b "$jar" -c "$jar" "$(form totpSecret)" -d "totp=$(totp "$secret")" --data-urlencode "totpSecret=$secret" \
       -d userLabel=smoke >/dev/null
+    keycloak_steps "$jar"
   fi
   code="$(header location | python3 -c 'import sys, urllib.parse; print(urllib.parse.parse_qs(urllib.parse.urlparse(sys.stdin.read().strip()).query).get("code", [""])[0])')"
-  [ -n "$code" ] || fail "$user wasn't signed in to $client: Keycloak answered $(head -c 300 "$work/page")"
+  [ -n "$code" ] || fail "$user wasn't signed in to $client: Keycloak answered $(tr -d '\r' <"$work/headers" | head -1), to '$(header location | cut -c1-160)': $(head -c 300 "$work/page")"
   at "login.$domain" "https://login.$domain/realms/ff/protocol/openid-connect/token" -d grant_type=authorization_code \
     -d "client_id=$client" --data-urlencode "redirect_uri=$redirect" -d "code=$code" -d "code_verifier=$verifier" >/dev/null
   cp "$work/page" "$work/$user.tokens"
