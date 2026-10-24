@@ -39,6 +39,8 @@ import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
 import storageNamesSource from '../../BE/src/storage/storage-names.ts?raw';
 import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
 import eventSourceDtoSource from '../../BE/src/event-sources/dto/event-source.dto.ts?raw';
+import bucketNotificationsDtoSource from '../../BE/src/storage/dto/notifications.dto.ts?raw';
+import bucketNotificationsSource from '../../BE/src/storage/bucket-notifications.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
@@ -52,6 +54,7 @@ import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
 import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES } from './lib/event-sources';
+import { EVENT_TYPES as NOTIFICATION_EVENTS } from './lib/bucket-notifications';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { ENDPOINTS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
@@ -502,6 +505,19 @@ describe('a function reading a queue (ADR 0010)', () => {
       [BATCHING_WINDOW.min, BATCHING_WINDOW.max],
       [MAXIMUM_CONCURRENCY.min, MAXIMUM_CONCURRENCY.max],
     ]);
+  });
+});
+
+describe("a bucket's notifications (ADR 0010)", () => {
+  it("has the API's names, S3's in JSON, and the events the API takes", () => {
+    expect(dtoFields(bucketNotificationsDtoSource, 'export class NotificationConfigurationView {')).toEqual(['lambdaFunctionConfigurations', 'queueConfigurations']);
+    expect(dtoFields(bucketNotificationsDtoSource, 'export class LambdaFunctionConfigurationDto extends ConfigurationDto {')).toEqual(['lambdaFunctionArn']);
+    expect(dtoFields(bucketNotificationsDtoSource, 'export class QueueConfigurationDto extends ConfigurationDto {')).toEqual(['queueArn']);
+    // Its other fields are optional, name?: type, which dtoFields doesn't read.
+    const shared = bucketNotificationsDtoSource.slice(bucketNotificationsDtoSource.indexOf('class ConfigurationDto {'));
+    expect([...shared.slice(0, shared.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1])).toEqual(['id', 'events', 'filter']);
+    const events = /export const EVENT_TYPES = \[([\s\S]*?)\] as const;/.exec(bucketNotificationsSource)?.[1].match(/'[^']+'/g)?.map((quoted) => quoted.slice(1, -1));
+    expect(events).toEqual([...NOTIFICATION_EVENTS]);
   });
 });
 

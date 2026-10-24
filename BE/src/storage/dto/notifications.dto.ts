@@ -54,14 +54,14 @@ class ConfigurationDto {
 }
 
 export class LambdaFunctionConfigurationDto extends ConfigurationDto {
-  @ApiProperty({ example: 'arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails', description: "A function of the account, by its ARN: it is called with S3's event without waiting" })
+  @ApiProperty({ example: 'arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails', description: "A function of the account, by its ARN, or its name, kept as its ARN: it is called with S3's event without waiting" })
   @IsString()
   @MaxLength(256)
   lambdaFunctionArn: string;
 }
 
 export class QueueConfigurationDto extends ConfigurationDto {
-  @ApiProperty({ example: 'arn:aws:sqs:tn-tunis-1:000000000001:uploads', description: "A queue of the account, by its ARN: it gets S3's event as a message" })
+  @ApiProperty({ example: 'arn:aws:sqs:tn-tunis-1:000000000001:uploads', description: "A queue of the account, by its ARN, or its name, kept as its ARN: it gets S3's event as a message" })
   @IsString()
   @MaxLength(256)
   queueArn: string;

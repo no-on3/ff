@@ -5,10 +5,10 @@ import { randomUUID } from 'node:crypto';
 import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { Actor } from '../common/request-context';
-import { parseFunctionArn } from '../functions/arns';
+import { functionArn, parseFunctionArn } from '../functions/arns';
 import { Function } from '../functions/entities/function.entity';
 import { Queue, QueueKind } from '../queues/queue.entity';
-import { parseQueueArn } from '../queues/sqs-attributes';
+import { parseQueueArn, queueArn } from '../queues/sqs-attributes';
 import { BucketEvents } from './bucket-events';
 import { NotificationConfigurationJson, NotificationRule, checkRules, rulesFromJson, rulesJson, testEvent } from './bucket-notifications';
 import { Bucket, BucketStatus } from './bucket.entity';
@@ -49,11 +49,17 @@ export class BucketNotificationsService {
     return rulesJson((await this.bucketOf(accountId, name)).notifications ?? []);
   }
 
-  /** PUT /buckets/:name/notifications: as S3's PutBucketNotificationConfiguration, the configuration replaced whole; S3's refusals as 400. */
+  /**
+   * PUT /buckets/:name/notifications: as S3's PutBucketNotificationConfiguration,
+   * the configuration replaced whole; S3's refusals as 400. A destination may be
+   * named by its name too, a function's or a queue's of the account, and is
+   * kept as its ARN, as a function's destinations are.
+   */
   async put(accountId: string, name: string, json: Partial<NotificationConfigurationJson>): Promise<NotificationConfigurationJson> {
     const bucket = await this.bucketOf(accountId, name);
+    const rules = rulesFromJson(json).map((rule) => (rule.arn.startsWith('arn:') ? rule : { ...rule, arn: this.arnOf(accountId, rule.target, rule.arn) }));
     try {
-      await this.keep(bucket, rulesFromJson(json), {});
+      await this.keep(bucket, rules, {});
     } catch (error) {
       if (error instanceof S3Error) throw new BadRequestException(`${error.code}: ${error.message}`);
       throw error;
@@ -95,6 +101,11 @@ export class BucketNotificationsService {
     for (const rule of rules.filter((candidate) => candidate.target === 'queue')) {
       await this.events.publish({ kind: 'test', accountId: bucket.accountId, bucket: bucket.name, queueArn: rule.arn, body: testEvent(bucket.name, requestId, new Date()) });
     }
+  }
+
+  /** A destination's ARN, from its name, in FF's region under the account. */
+  private arnOf(accountId: string, target: NotificationRule['target'], name: string): string {
+    return target === 'queue' ? queueArn(this.region, accountId, name) : functionArn(this.region, accountId, name);
   }
 
   private async exists(accountId: string, target: NotificationRule['target'], name: string): Promise<boolean> {

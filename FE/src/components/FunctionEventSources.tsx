@@ -193,7 +193,15 @@ export const FunctionEventSources: React.FC<{ func: Function; mayChange: boolean
             <button type="submit" className="btn btn-primary" disabled={busy}>
               {busy ? 'Saving…' : editing === 'new' ? 'Read it' : 'Save'}
             </button>
-            <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setEditing(null)}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={busy}
+              onClick={() => {
+                setEditing(null);
+                setError(null);
+              }}
+            >
               Cancel
             </button>
           </div>

@@ -89,7 +89,7 @@ pub fn is_bucket_name(name: &str) -> bool {
         && !RESERVED_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
-fn checked_name(name: &str) -> Result<&str, Error> {
+pub fn checked_name(name: &str) -> Result<&str, Error> {
     if is_bucket_name(name) {
         Ok(name)
     } else {

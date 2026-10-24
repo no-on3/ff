@@ -622,6 +622,56 @@ pub enum BucketsCommand {
     /// The account's access keys to its buckets and queues, for AWS's SDKs and CLI
     #[command(subcommand)]
     Keys(BucketKeysCommand),
+
+    /// Send a bucket's events to a function of the account, called without waiting with S3's event, or to a queue,
+    /// as S3's notifications
+    Notify {
+        /// The bucket's name
+        bucket: String,
+
+        /// The function its events run, by name
+        #[arg(required_unless_present = "queue", conflicts_with = "queue")]
+        function: Option<String>,
+
+        /// A queue of the account its events go to, as messages, by name
+        #[arg(long, value_name = "NAME")]
+        queue: Option<String>,
+
+        /// One of S3's event types, s3:ObjectCreated:* and its kinds, s3:ObjectRemoved:* and its; again for each
+        /// [default: s3:ObjectCreated:*]
+        #[arg(long = "event", value_name = "EVENT")]
+        events: Vec<String>,
+
+        /// Only the objects whose key begins with it
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Only the objects whose key ends with it
+        #[arg(long)]
+        suffix: Option<String>,
+
+        /// The configuration's ID [default: one the API makes]
+        #[arg(long)]
+        id: Option<String>,
+    },
+
+    /// List a bucket's notifications, or remove one by its ID, or all of them
+    Notifications {
+        /// The bucket's name
+        bucket: String,
+
+        /// Remove the configuration of this ID
+        #[arg(long, value_name = "ID", conflicts_with = "clear")]
+        remove: Option<String>,
+
+        /// Remove them all, after asking
+        #[arg(long)]
+        clear: bool,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]

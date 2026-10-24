@@ -1176,7 +1176,44 @@ export const bucketsApi = {
   remove: (name: string, force = false) => api.delete(`/buckets/${name}`, { params: force ? { force: 'true' } : {} }),
   /** What it holds and its requests, a point per period: a minute, five or an hour. */
   metrics: (name: string, params: { start?: string; end?: string; period?: 60 | 300 | 3600 } = {}) => api.get<BucketMetrics>(`/buckets/${name}/metrics`, { params }),
+  /** Its notifications, as S3's configuration in its JSON names. */
+  notifications: (name: string) => api.get<NotificationConfiguration>(`/buckets/${name}/notifications`),
+  /** Replaced whole, as S3's PutBucketNotificationConfiguration: a destination by its ARN or its name. */
+  setNotifications: (name: string, configuration: NotificationConfigurationBody) => api.put<NotificationConfiguration>(`/buckets/${name}/notifications`, configuration),
 };
+
+/** A configuration's key filter, as S3's JSON names it: a prefix, a suffix. */
+export interface NotificationFilter {
+  key: { filterRules: Array<{ name: string; value: string }> };
+}
+
+/** A bucket's configuration that calls a function of the account without waiting, S3's event its input. */
+export interface FunctionNotification {
+  id: string;
+  lambdaFunctionArn: string;
+  events: string[];
+  filter?: NotificationFilter;
+}
+
+/** A bucket's configuration that sends S3's event to a queue of the account. */
+export interface QueueNotification {
+  id: string;
+  queueArn: string;
+  events: string[];
+  filter?: NotificationFilter;
+}
+
+/** A bucket's notifications, as GET /buckets/:name/notifications answers them: contract.test.ts checks the names. */
+export interface NotificationConfiguration {
+  lambdaFunctionConfigurations: FunctionNotification[];
+  queueConfigurations: QueueNotification[];
+}
+
+/** What PUT takes: each configuration's ID made when it has none. */
+export interface NotificationConfigurationBody {
+  lambdaFunctionConfigurations: Array<Omit<FunctionNotification, 'id'> & { id?: string }>;
+  queueConfigurations: Array<Omit<QueueNotification, 'id'> & { id?: string }>;
+}
 
 /** The account's access keys to its buckets: its owners alone see, make and revoke them. */
 export const storageKeysApi = {

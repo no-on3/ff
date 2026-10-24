@@ -720,6 +720,47 @@ check "ff event-sources remove removes it, the queue's messages staying" "0 remo
 ff delete cli-reader --yes
 ff queues delete cli-work --yes
 
+echo "== a bucket's notifications, with ff buckets notify: an upload with the AWS CLI runs a function with S3's event, a deletion goes to a queue"
+# As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
+cat >"$work/on-upload.ts" <<'TS'
+export const handler = async (event: { Records: Array<{ s3: { object: { key: string } } }> }) => ({
+  keys: event.Records.map((record) => decodeURIComponent(record.s3.object.key.replace(/\+/g, " "))),
+});
+TS
+ff deploy "$work/on-upload.ts" --name cli-on-upload
+ff buckets create cli-drop
+ff queues create cli-drop-events
+ff buckets notify cli-drop cli-on-upload --prefix in/ --id uploads
+check "ff buckets notify has the bucket run a function for its uploads, by its name, and says what it sends" "0 true" \
+  "$(code) $(out | grep -qE '^uploads +s3:ObjectCreated:\* +prefix in/ +function cli-on-upload$' && echo true || echo false)"
+ff buckets notify cli-drop --queue cli-drop-events --event 's3:ObjectRemoved:*' --id removals
+check "  ... and its deletions go to a queue, both now listed" "0 uploads,removals" \
+  "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
+ff buckets notify cli-drop cli-on-upload --id again
+check "  ... a configuration one event could match twice refused, in S3's words, exit 3" "3 true" "$(code) $(err | grep -q 'Configuration is ambiguously defined' && echo true || echo false)"
+ff buckets keys create --bucket cli-drop
+out | grep '^export AWS_' >"$work/drop.env"
+drop_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/drop.env")"
+aws_drop() { (set -a; . "$work/drop.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+printf 'dropped in' >"$work/drop.txt"
+aws_drop s3 cp "$work/drop.txt" "s3://cli-drop/in/a b.txt" --only-show-errors
+upload_calls() { "$ff_bin" history cli-on-upload --output json | jq -c '[.invocations[] | select(.source == "async" and .status == "COMPLETED") | .output.keys]'; }
+for _ in $(seq 1 30); do [ "$(upload_calls)" != "[]" ] && break; sleep 1; done
+check "the AWS CLI's upload runs the function without waiting, S3's event its input, the key decoded as Lambda's functions decode it" '[["in/a b.txt"]]' "$(upload_calls)"
+aws_drop s3 rm "s3://cli-drop/in/a b.txt" --only-show-errors
+ff queues receive cli-drop-events --max 10 --wait 10s --delete --output json
+check "  ... and its deletion puts S3's event in the queue, after S3's test event" "s3:TestEvent ObjectRemoved:Delete in%2Fa+b.txt" \
+  "$(out | jq -r '[.[].body | fromjson | (.Event // .Records[0].eventName)] | join(" ")') $(out | jq -r '[.[].body | fromjson | .Records[0].s3.object.key // empty] | join(" ")')"
+ff buckets notifications cli-drop --remove uploads
+check "ff buckets notifications --remove takes one away by its ID" "0 removals" \
+  "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
+ff buckets notifications cli-drop --clear --yes
+check "  ... and --clear all of them" "0 cli-drop sends no event any more" "$(code) $(out)"
+ff buckets keys revoke "$drop_key" --yes
+ff buckets delete cli-drop --force --yes
+ff queues delete cli-drop-events --yes
+ff delete cli-on-upload --yes
+
 echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt in a bucket"
 # In account A, whose functions don't reach the internet: FF's database and the S3 front door, they do.
 ff deploy "$app" --name shop-api --handler index.http

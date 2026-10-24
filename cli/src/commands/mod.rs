@@ -2,6 +2,7 @@
 
 mod account;
 mod async_config;
+mod bucket_notifications;
 mod buckets;
 mod completion;
 mod config;
@@ -124,6 +125,26 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Revoke { id, yes })) => {
             buckets::keys_revoke(&id, yes, context)
         }
+        Command::Buckets(BucketsCommand::Notify { bucket, function, queue, events, prefix, suffix, id }) => {
+            let destination = match (&function, &queue) {
+                (_, Some(queue)) => bucket_notifications::Destination::Queue(queue),
+                (Some(function), None) => bucket_notifications::Destination::Function(function),
+                (None, None) => unreachable!("clap requires a function or --queue"),
+            };
+            let new = bucket_notifications::NewConfiguration {
+                destination,
+                events: &events,
+                prefix: prefix.as_deref(),
+                suffix: suffix.as_deref(),
+                id: id.as_deref(),
+            };
+            bucket_notifications::notify(&bucket, &new, context)
+        }
+        Command::Buckets(BucketsCommand::Notifications { bucket, remove, clear, yes }) => match (remove, clear) {
+            (Some(id), _) => bucket_notifications::remove(&bucket, &id, context),
+            (None, true) => bucket_notifications::clear(&bucket, yes, context),
+            (None, false) => bucket_notifications::list(&bucket, context),
+        },
         Command::Queues(QueuesCommand::Create { name, attributes }) => queues::create(&name, &attributes, context),
         Command::Queues(QueuesCommand::List) => queues::list(context),
         Command::Queues(QueuesCommand::Get { name }) => queues::get(&name, context),

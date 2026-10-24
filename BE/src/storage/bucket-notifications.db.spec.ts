@@ -213,10 +213,12 @@ run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2
   });
 
   it("calls the function with S3's event for an upload its rule names, puts S3's event in the queue for each deletion, DeleteObjects' one per key", async () => {
-    await notifications.put(ACCOUNT, photos.name, {
-      lambdaFunctionConfigurations: [{ id: 'thumbs', lambdaFunctionArn: FUNCTION_ARN, events: ['s3:ObjectCreated:*'], filter: { key: { filterRules: [{ name: 'prefix', value: 'images/' }] } } }],
-      queueConfigurations: [{ id: 'removals', queueArn: QUEUE_ARN, events: ['s3:ObjectRemoved:*'] }],
+    // Through FF's API, each destination by its name, kept as its ARN.
+    const set = await notifications.put(ACCOUNT, photos.name, {
+      lambdaFunctionConfigurations: [{ id: 'thumbs', lambdaFunctionArn: 'thumbnails', events: ['s3:ObjectCreated:*'], filter: { key: { filterRules: [{ name: 'prefix', value: 'images/' }] } } }],
+      queueConfigurations: [{ id: 'removals', queueArn: 'uploads', events: ['s3:ObjectRemoved:*'] }],
     });
+    expect([set.lambdaFunctionConfigurations[0].lambdaFunctionArn, set.queueConfigurations[0].queueArn]).toEqual([FUNCTION_ARN, QUEUE_ARN]);
     await clear();
 
     await client.send(new PutObjectCommand({ Bucket: photos.name, Key: 'images/red cat.jpg', Body: 'hello' }));
