@@ -127,7 +127,8 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 - [What to build next](docs/what-to-build-next.md): what FF adds after functions, in five steps, and the longer view.
 - [Step 1 plan](docs/step-1-plan.md): environment variables and secrets, AWS's events, function URLs, schedules, packages and the CLI, task by task, with its progress log; done in development.
 - [Step 2 plan](docs/step-2-plan.md): a database and file storage, managed PostgreSQL and buckets behind an S3 front door, task by task, with its progress log; done in development.
-- [Step 3 plan](docs/step-3-plan.md): background work, a queue shown as Lambda's asynchronous invoke, SQS queues and bucket notifications, task by task, with its progress log; started on 2026-10-23.
+- [Step 3 plan](docs/step-3-plan.md): background work, a queue shown as Lambda's asynchronous invoke, SQS queues and bucket notifications, task by task, with its progress log; done in development.
+- [Step 4 plan](docs/step-4-plan.md): the whole app runs here, static sites, e-mail from apps and a cache; proposed on 2026-10-24, its choices waiting for you.
 - [Console design plan](docs/console-design-plan.md): the console's new look, navy and paper, chosen on 2026-10-22, task by task.
 - [Decision log](docs/decisions.md): every decision you made about FF, with what it changed and what is still to change, and the questions still waiting for you.
 - [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why; how to deploy the platform.

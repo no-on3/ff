@@ -658,51 +658,60 @@ aws s3api get-bucket-notification-configuration --bucket photos
 
 ### A small app, end to end
 
-[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and kept in PostgreSQL, each order's receipt kept in a bucket, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, and `@aws-sdk/client-s3`, AWS's S3 client, makes its two functions. On FF it keeps its orders in one of FF's databases and its receipts in one of FF's buckets, as it would in RDS and S3 on AWS: its functions reach both with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL` and `RECEIPTS_BUCKET`. In development, functions get their own keys to buckets once the backend knows where they reach the front door (`FF_STORAGE_FUNCTION_ENDPOINT`, in "Files in buckets" above), and the customers' databases' server runs (setup's step 10).
+[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and kept in PostgreSQL, each order's receipt made in the background and kept in a bucket, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, and AWS's S3 and SQS clients, `@aws-sdk/client-s3` and `@aws-sdk/client-sqs`, makes its three functions. On FF it keeps its orders in one of FF's databases, its new orders in one of FF's queues and its receipts in one of FF's buckets, as it would in RDS, SQS and S3 on AWS: its functions reach all three with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL`, `RECEIPTS_QUEUE` and `RECEIPTS_BUCKET`. In development, functions get their own keys to buckets and queues once the backend knows where they reach its two front doors (`FF_STORAGE_FUNCTION_ENDPOINT` and `FF_SQS_FUNCTION_ENDPOINT`, in "Files in buckets" and "Queues, as Amazon SQS" above), and the customers' databases' server runs (setup's step 10).
 
-**The two functions.** From the app's folder; the second has the same package, so nothing goes up again:
+**The three functions.** From the app's folder; the second and the third have the same package, so nothing goes up again:
 
 ```bash
 cd examples/orders-app
-ff deploy . --name orders-api --handler index.http          # npm installs pg and the S3 client in a copy of the folder; the package goes up
-ff deploy . --name orders-nightly --handler index.nightly   # "package: …, which the account had"
+ff deploy . --name orders-api --handler index.http            # npm installs pg and the clients in a copy of the folder; the package goes up
+ff deploy . --name orders-receipts --handler index.receipts   # "package: …, which the account had"
+ff deploy . --name orders-nightly --handler index.nightly
 ```
 
-**Its database and its bucket.** `ff db create` makes the database and sets its connection string as both functions' `DATABASE_URL`, rolling each out; the bucket keeps the receipts, its name in a variable. Each function has a key of its own to the account's buckets, with the region and the front door's address, in its environment, so `new S3Client({})` needs nothing more, as on AWS Lambda with a role:
+**Its database, its bucket and its queue.** `ff db create` makes the database and sets its connection string as the API's and the night's `DATABASE_URL`, rolling each out; the queue holds the new orders, and the bucket the receipts, each named in a variable: the API sends to the queue and reads the receipts back, the receipts' function writes them, the night removes them. Each function has a key of its own to the account's buckets and queues, with the region and the front doors' addresses, in its environment, so `new S3Client({})` and `new SQSClient({})` need nothing more, as on AWS Lambda with a role:
 
 ```bash
 ff db create orders --secret-for orders-api --secret-for orders-nightly
-ff buckets create shop-receipts                             # a name of yours: bucket names are unique across FF
-ff env set orders-api RECEIPTS_BUCKET=shop-receipts
+ff buckets create shop-receipts                               # a name of yours: bucket names are unique across FF
+ff queues create new-orders
+ff env set orders-api RECEIPTS_QUEUE=new-orders RECEIPTS_BUCKET=shop-receipts
+ff env set orders-receipts RECEIPTS_BUCKET=shop-receipts
 ff env set orders-nightly RECEIPTS_BUCKET=shop-receipts
+ff event-sources add new-orders orders-receipts --report-batch-item-failures
 ```
 
 **The web address.**
 
 ```bash
-ff url enable orders-api --auth none                        # its address: http://<id>.fn.localhost:3001/
+ff url enable orders-api --auth none                          # its address: http://<id>.fn.localhost:3001/
 ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}'
-# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…","receipt":"s3://shop-receipts/receipts/1.txt"}
-ff invoke orders-api --http GET /orders                     # or curl http://<id>.fn.localhost:3001/orders
-ff invoke orders-api --http GET /orders/1/receipt           # Order 1, 2 × harissa, and its time
+# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…","receipt":"queued"}
+ff invoke orders-api --http GET /orders                       # or curl http://<id>.fn.localhost:3001/orders
+ff invoke orders-api --http GET /orders/1/receipt             # a moment later: Order 1, 2 × harissa, and its time
+ff history orders-receipts                                    # the call that wrote it, its source sqs
 ```
 
-Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the string the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after. The order is written first, then its receipt, `receipts/<id>.txt`: a receipt that can't be written leaves the order, with `"receipt": null` in the answer and a line in the log. With one of the account's keys, the AWS CLI reads it as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
+Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the string the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after. The order is written first, then put in the queue, found by its name (`GetQueueUrl`) as on AWS: the answer doesn't wait for the receipt. A message that can't be sent leaves the order, with `"receipt": null` in the answer and a line in the log; without `RECEIPTS_QUEUE`, the handler writes the receipt itself, as the app did before it had a queue.
 
-**The nightly report.**
+**The receipts, in the background.** `orders-receipts` reads the queue as Lambda's event source mapping for SQS reads one: FF calls `index.receipts` with SQS's event as soon as an order is sent, and it writes each order's receipt, `receipts/<id>.txt`, to the bucket. With `--report-batch-item-failures`, a receipt it couldn't write names its message in `batchItemFailures`: that message alone comes back, once the queue's visibility timeout ends, and the others are deleted. A message received twice writes the same receipt again, the same file, so a repeat changes nothing. To keep the orders whose receipt never can be written, give the queue a dead-letter queue (`ff queues create new-orders-dlq`, then `ff queues set new-orders --dead-letter-queue new-orders-dlq`), and an alarm on its `ApproximateNumberOfMessagesVisible`. With one of the account's keys, the AWS CLI reads a receipt as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
+
+**The nightly report, called without waiting.**
 
 ```bash
-ff schedule set orders-nightly "cron(0 2 * * ? *)"          # every night at 02:00 UTC; it says the next runs
-ff invoke orders-nightly --data @events/scheduled.json      # a night's run, now, with EventBridge's Scheduled Event
-ff logs orders-nightly                                      # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
+ff schedule set orders-nightly "cron(0 2 * * ? *)"            # every night at 02:00 UTC; it says the next runs
+ff invoke orders-nightly --async --data @events/scheduled.json  # a night's run, now, as the schedule calls it: its request ID at once
+ff history orders-nightly                                     # the run, "asynchronously, attempt 1"
+ff logs orders-nightly                                        # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
 ```
 
-The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself; the run is in `ff history orders-nightly`, and `ff schedule list orders-nightly` says how it went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
+The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself, without waiting, as `--async` does: a run that fails is retried a minute, then two minutes later, as Lambda retries it, and `ff async-config orders-nightly --on-failure <a queue's ARN>` keeps the record of one that fails for good. `ff schedule list orders-nightly` says how the last run went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
 
 ```bash
-ff delete orders-nightly --yes && ff delete orders-api --yes
-ff db delete orders --yes                                   # the database, with its data
-ff buckets delete shop-receipts --force --yes               # the bucket, with its receipts
+ff delete orders-nightly --yes && ff delete orders-receipts --yes && ff delete orders-api --yes
+ff queues delete new-orders --yes                             # the queue, and its mapping with it
+ff db delete orders --yes                                     # the database, with its data
+ff buckets delete shop-receipts --force --yes                 # the bucket, with its receipts
 ```
 
 **A database of your own, elsewhere,** works as well, through the same secret, once the account's internet access is on. A function never reaches a private address, FF's own network included, so in development `hack/k8s/app-database.sh up` runs a PostgreSQL that the cluster's functions reach as they would one on the internet: on a Docker network of its own in 198.18.0.0/15, the range set aside for tests, which the cluster's node joins (Docker 28 or later). It prints the database's address. FF's operator turns the account's internet access on in the admin dashboard, on the account's page (`PUT /admin/accounts/<id>/egress`); in development mode, with no operator, the database stands in, and the next deploy applies it to the account's namespace:
@@ -715,7 +724,7 @@ printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
 hack/k8s/app-database.sh down                               # afterwards: the database, with its data
 ```
 
-**In production** the database and the bucket are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on. The same folder runs on AWS Lambda with an RDS database and an S3 bucket: `ff package` writes its zip, and the function's role gives the S3 client its credentials.
+**In production** the database, the queue and the bucket are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on. The same folder runs on AWS Lambda with an RDS database, an SQS queue and an S3 bucket: `ff package` writes its zip, the function's role gives the clients their credentials, and the export kit's [`data/sqs.md`](../cli/templates/export/data/sqs.md) has the queue and its mapping.
 
 ## 4. Look inside the cluster
 

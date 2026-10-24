@@ -26,8 +26,9 @@
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
 # CLI, its metrics, the queue deleted and the other account seeing none, its month in ff usage; the getting-started
 # guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
-# each one's receipt written to a bucket with the function's own key, read back by a GET and by the
-# AWS CLI, both gone after the night 90 days on; and ff local, in
+# each one put in a queue with the function's own key, read by a function that writes its receipt to a
+# bucket, read back by a GET and by the AWS CLI, both gone after the night 90 days on, called without
+# waiting as its schedule calls it; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -63,13 +64,15 @@ e2e_build
 url_port="$(free_port)"
 # Buckets' S3 front door on another, at http://s3.localhost:<port>.
 storage_port="$(free_port)"
-# Queues' SQS endpoint on a third, at http://localhost:<port>, which the AWS CLI reaches with a key of the account's.
+# Queues' SQS endpoint on a third, at http://localhost:<port>, which the AWS CLI reaches with a key of the account's,
+# and functions with their own at the cluster's gateway.
 sqs_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
   FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
-  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port" "${e2e_data_db_env[@]}")
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
+  FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32" "${e2e_data_db_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -771,42 +774,70 @@ ff buckets delete cli-drop --force --yes
 ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
 
-echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt in a bucket"
-# In account A, whose functions don't reach the internet: FF's database and the S3 front door, they do.
+echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt made through a queue"
+# In account A, whose functions don't reach the internet: FF's database, the S3 front door and the SQS endpoint, they do.
 ff deploy "$app" --name shop-api --handler index.http
-check "examples/orders-app, the S3 client among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
+check "examples/orders-app, the S3 and SQS clients among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
   "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff deploy "$app" --name shop-receipts --handler index.receipts
 ff deploy "$app" --name shop-nightly --handler index.nightly
 ff db create shop --secret-for shop-api --secret-for shop-nightly --output json
-check "ff db create: FF's database, its connection string both functions' DATABASE_URL" "0 active shop-api,shop-nightly" \
+check "ff db create: FF's database, its connection string the API's and the night's DATABASE_URL" "0 active shop-api,shop-nightly" \
   "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
 ff buckets create cli-receipts
-ff env set shop-api RECEIPTS_BUCKET=cli-receipts
+ff queues create cli-new-orders
+ff env set shop-api RECEIPTS_QUEUE=cli-new-orders RECEIPTS_BUCKET=cli-receipts
+ff env set shop-receipts RECEIPTS_BUCKET=cli-receipts
 ff env set shop-nightly RECEIPTS_BUCKET=cli-receipts
-ff env list shop-nightly
-check "a bucket for the receipts, its name each function's RECEIPTS_BUCKET" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
+ff env list shop-receipts
+check "a bucket for the receipts and a queue of new orders, named in the functions' variables" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
+ff event-sources add cli-new-orders shop-receipts --report-batch-item-failures
+check "shop-receipts reads the queue, naming the messages it fails" "0 true" \
+  "$(code) $(out | grep -q '^shop-receipts reads the queue cli-new-orders: .*the answer naming the messages that failed' && echo true || echo false)"
 ff url enable shop-api --auth none
 ff invoke shop-api --http POST /orders --data '{"item": "bsissa", "quantity": 4}'
-check "a POST writes the order to FF's database, then its receipt to the bucket with the function's own key" \
-  "0 HTTP 201 bsissa 4 s3://cli-receipts/receipts/1.txt" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
+check "a POST writes the order to FF's database, then puts it in the queue with the function's own key" \
+  "0 HTTP 201 bsissa 4 queued" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
 order_day="$(out | tail -1 | jq -r '.created_at[0:10]')"
+# shop-receipts gets it from the queue within seconds, and writes the receipt.
+for _ in $(seq 30); do [ "$("$ff_bin" invoke shop-api --http GET /orders/1/receipt 2>/dev/null | head -1)" = "HTTP 200" ] && break; sleep 1; done
 ff invoke shop-api --http GET /orders/1/receipt
-check "  ... and a GET reads the receipt back from the bucket" "0 HTTP 200 Order 1|4 × bsissa" "$(code) $(out | head -1) $(out | sed -n '3,4p' | paste -sd'|')"
+check "  ... which shop-receipts reads, writing its receipt to the bucket: a GET reads it back" "0 HTTP 200 Order 1|4 × bsissa" \
+  "$(code) $(out | head -1) $(out | sed -n '3,4p' | paste -sd'|')"
+# The receipt is written during the call, its message deleted once the call has ended.
+held() { "$ff_bin" queues get cli-new-orders --output json | jq '.messages.available + .messages.inFlight'; }
+for _ in $(seq 30); do
+  [ "$("$ff_bin" history shop-receipts --output json | jq -r '.invocations[0].status')" = COMPLETED ] && [ "$(held)" = 0 ] && break
+  sleep 1
+done
+ff history shop-receipts --output json
+check "  ... as a call of SQS's event, the queue then empty" "sqs COMPLETED 0" "$(out | jq -r '.invocations[0] | "\(.source) \(.status)"') $(held)"
 # The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
 ff buckets keys create --bucket cli-receipts --read-only
 out | grep '^export AWS_' >"$work/receipts.env"
 receipts_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/receipts.env")"
 aws_receipts() { (set -a; . "$work/receipts.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
 check "the AWS CLI reads that receipt in the account's bucket, as the function wrote it" "Order 1" "$(aws_receipts s3 cp s3://cli-receipts/receipts/1.txt - 2>/dev/null | head -1)"
-# The night 91 days after the order's day: the order is older than 90 days, so it goes, its receipt with it.
+# The night 91 days after the order's day, called without waiting as its schedule calls it: the order is older than
+# 90 days, so it goes, its receipt with it.
 jq --arg time "$(date -u -d "$order_day + 91 days" +%Y-%m-%dT02:00:00Z)" '.time = $time' "$app/events/scheduled.json" >"$work/night.json"
-ff invoke shop-nightly --data "@$work/night.json"
-check "the night 91 days on removes the order and its receipt, which the bucket no longer has" "0 1 1 0" \
-  "$(code) $(out | sed '$d' | jq -r '"\(.removed) \(.receipts)"') $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
+ff invoke shop-nightly --async --data "@$work/night.json" --raw
+night_id="$(out)"
+night=""
+for _ in $(seq 30); do
+  night="$("$ff_bin" history shop-nightly --output json | jq -r --arg r "$night_id" '[.invocations[] | select(.requestId == $r and .status == "COMPLETED")][0] | select(. != null) | "\(.source) \(.output.removed) \(.output.receipts)"')"
+  [ -n "$night" ] && break
+  sleep 1
+done
+check "the night 91 days on, called without waiting, removes the order and its receipt, which the bucket no longer has" "async 1 1 0" \
+  "$night $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
 ff buckets keys revoke "$receipts_key" --yes
+ff queues delete cli-new-orders --yes
+check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
 ff buckets delete cli-receipts --force --yes
 ff db delete shop --yes
 ff delete shop-nightly --yes
+ff delete shop-receipts --yes
 ff delete shop-api --yes
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"

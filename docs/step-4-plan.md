@@ -1,0 +1,222 @@
+# Step 4 plan: the whole app runs here
+
+| | |
+|---|---|
+| **Status** | Proposed on 2026-10-24 with step 3's close (the [step-3 plan](step-3-plan.md), Q-10), checked against the code the same day by a read-only survey (§1). **Waiting for you:** the eleven choices of §9, each with a recommendation. Nothing of it is built until you confirm them. |
+| **Goal** | Step 4 of [What to build next](what-to-build-next.md) (§7): a customer moves a whole app to FF. Its built frontend as a static site, at an address of FF's or the customer's own domain; the e-mail the app sends, through an API shaped like AWS SES's; and a cache that speaks Valkey's protocol (Redis's), as AWS ElastiCache gives one. Each in AWS's shape, so that the way out stays open |
+| **Parent plans** | [What to build next](what-to-build-next.md) §7 (static sites, e-mail from apps, a cache) and §9.4 (cache rules in the edge first); the [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): §4.10 (its own mail server, or a local SMTP provider), §9.2 (no foreign service for e-mail), §10 (port 25 closed to functions); the [client-readiness plan](client-readiness-plan.md)'s D5 (FF's own counters in Valkey once the backend runs more than one copy) |
+| **Builds on** | The [step-2 plan](step-2-plan.md): buckets, the S3 front door, the account's and functions' keys, hourly measures, and the server of customers' databases kept apart from the cluster; the [step-1 plan](step-1-plan.md): function URLs' own domains and the edge's certificates; the step-3 plan: the queue, which carries the mail to send |
+| **Decision records** | ADR 0011 (static sites: how a bucket's files reach browsers), ADR 0012 (customers' mail: the server that sends it, and its reputation), ADR 0013 (caches: where Valkey runs), each from W-01's spikes |
+
+Task numbers start with W, for *whole app*. The CLI plan keeps its own numbers; this plan's command-line parts get theirs when it is confirmed.
+
+## 1. Where FF stands
+
+Checked against the code on 2026-10-24, at the end of step 3 (`feat/step-3`).
+
+| Finding | Where | Consequence |
+|---|---|---|
+| **Nothing serves stored files to a browser.** FF's own apps are Vite builds baked into their images, each with its own Caddy: `try_files {path} /index.html`, `/assets/*` cached a year as immutable, the rest `no-cache`, `nosniff` and `X-Frame-Options: DENY`. | `FE/Caddyfile`, `admin/Caddyfile`, `deploy/k8s/platform/20-console.yaml` | The rules a built site needs exist only as Caddyfile text; a site's are this step's (D2). |
+| **The S3 front door is never anonymous.** Every request is signed or presigned (7 days at most); website, policy, ACL and CORS requests answer `NotImplemented`; no `OPTIONS`; content types and cache headers are kept as uploaded, never guessed; no index or error document. | `BE/src/storage/front-door.ts`, `s3-requests.ts`; [ADR 0009](adr/0009-buckets.md) §2 ("public buckets are step 4's"), §6 | A public read is a new path, apart from the S3 API, which stays signed (D1, D2). |
+| **The edge is one Caddy with only the RFC 2136 module,** one replica: FF's named hosts, `*.fn` to the backend's port 3001, the S3 host and its subdomains to 3002, SQS to 3003, and a catch-all with on-demand TLS to 3001. | `deploy/edge/Dockerfile`, `deploy/k8s/platform/edge/Caddyfile`, `edge.env`, `deploy.sh` | A sites host is one more block and one more backend port, as every service so far; Caddy serving the store itself would need a module of its own in the image. |
+| **One endpoint decides every certificate:** `FunctionUrlGateway.tlsAllowed()` says yes to a function URL's host, a verified custom domain, or what the S3 front door allows. On demand, FF's own subdomains share Let's Encrypt's 50 certificates a week; a wildcard needs FF's DNS ([decision 17](decisions.md), its DNS host still waiting for you). | `BE/src/function-urls/function-url.gateway.ts`, `BE/src/storage/front-door.ts`, `deploy/k8s/README.md` | Sites' hosts and domains join `tlsAllowed()` (D3). |
+| **Custom domains belong to function URLs alone:** `custom_domains.function_id`, proved by a CNAME to the URL's host or a TXT record `_ff-verify.<domain>` with the edge's addresses; checked when added and when asked, against the plan's `customDomains` (5 on beta, pending ones counted). | `BE/src/function-urls/custom-domains.service.ts`, `domain-check.ts`, `custom-domain.entity.ts` | The same proof serves sites' domains, and a sender domain's check (D3, D6). |
+| **FF's own mail goes through an outside SMTP relay** (`FF_SMTP_URL`, nodemailer, `FF_MAIL_FROM`): plain text, "sent" once the relay took it; no DKIM, SPF, return path, bounce or complaint code; no mail quota. Notifications are an outbox with retries; other mail is sent once. Mailpit in development. | `BE/src/mail/mail.service.ts`, `BE/src/notifications/notification-worker.service.ts`, `BE/src/config/configuration.ts`, `docker-compose.yml` | Customers' mail needs a sending path of its own, so that one customer's spam never stops FF's own mail (D5). |
+| **Functions with internet access reach every port,** 25 included: the parent plan's "port 25 closed by default" isn't built. | `BE/src/orchestrator/kubernetes/manifests.ts` (`networkPolicyManifest()`) | A function could send around every quota (D6). |
+| **The server of customers' databases is the pattern for a cache's:** a machine of its own, TLS and SCRAM, opaque names, the password shown once and kept by nobody, users stopped when the account is suspended, measured hourly and rated as a kind of its own; functions reach it whatever their internet access (`platformEgress`). ADR 0008 set a StatefulSet aside. | [ADR 0008](adr/0008-customer-databases.md), `deploy/data-db/`, `BE/src/databases/`, `BE/src/config/configuration.ts` | Valkey follows it almost line for line (D7). |
+| **No code uses Valkey or Redis.** The rate limits and the plans' and credit's caches are in the backend's memory, which runs one copy. | `BE/src/plans/rate-limits.ts`, `BE/src/app.module.ts`, `deploy/k8s/platform/10-backend.yaml` | FF's own counters stay in memory in this step (§9, 11). |
+| **A limit, and a billed kind, each follow one recipe,** as step 3's queues did: the plan's strict schema and a migration merging its defaults, the admin app's and console's lists, `ff account`; an append-only count by the minute, a kind of `resource_usage_hourly`, a SKU in the price book with its free tier, the statement, `GET /usage` and its CSV. | `BE/src/plans/plan-limits.ts`, `BE/src/billing/price-book.ts`, `hourly-rating.service.ts`, `BE/src/migrations/…-QueueLimits.ts`, `…-QueueBilling.ts` | E-mails and caches' hours are two kinds more (D9). |
+| **`ff` uploads no file to a bucket today.** | `cli/src/commands/buckets.rs` | `ff sites deploy <folder>` is its first (D1). |
+
+## 2. Goals and non-goals
+
+**Goals:**
+
+1. **A static site:** a built folder at `https://<bucket>.site.<domain>/`, or at the customer's own domain with TLS, updated by one command, as S3's website hosting behind CloudFront serves one; a single-page app's routes answered by its `index.html`.
+2. **E-mail from apps:** SES v2's `SendEmail` through AWS's SDKs with only the endpoint changed, from a domain the account proved (DKIM and SPF), within quotas that start small and grow; bounces and complaints kept out by a suppression list; and the account's switch in the admin app.
+3. **A cache:** a Valkey database for the account, its address and password shown once, reached by the account's functions whatever their internet access, its memory the plan's, billed by the hour, as ElastiCache bills a node.
+
+**Non-goals:** pages made on the server (always-on services, What to build next §9.1); a network of caches abroad, as CloudFront has; receiving mail, beyond the bounces; marketing tools (lists, template editors); Valkey's cluster mode and modules; SES's events to topics (SNS comes later); FF's own counters in Valkey.
+
+## 3. Decisions
+
+Proposed; §9 lists the choices to confirm.
+
+### D1. A site is a bucket with S3's website configuration
+- S3's `PutBucketWebsite`, `GetBucketWebsite` and `DeleteBucketWebsite`, at the S3 front door in S3's XML and in FF's API in its JSON names: the index document (`index.html`), the error document (`404.html`), and one setting of FF's, as CloudFront's custom error responses give it: an unknown path answers the index document with 200, for single-page apps. Routing rules and redirects: later.
+- Files go up as to any bucket: `aws s3 sync ./dist s3://<bucket>`, or `ff sites deploy ./dist`, which syncs, deletes what is gone, and sets each file's content type and cache header by its name: a year and `immutable` for hashed assets, `no-cache` for HTML, as FF's console has them.
+- A bucket with a website configuration is public to read at its website address alone; its S3 API stays signed. No bucket policies or ACLs: the website configuration is the public switch, as S3's public-read policy with "Block public access" off would be.
+- **Why:** S3's shape keeps the way out (S3 and CloudFront), and reuses buckets with their measures, limits and bills. A site with deploys and rollbacks, as Amplify Hosting or Netlify have, can come later on top.
+
+### D2. The website server: the backend's fourth front door
+- A server of the backend's own on a port of its own (`FF_WEBSITE_PORT`), behind the edge: `GET` and `HEAD` only; a folder's path answered by its index document; the error document with its status; `ETag` and `Last-Modified`, with 304; ranges; the content type stored, else by the file's name; `X-Content-Type-Options: nosniff`; no cookies.
+- Requests counted as a bucket's GETs (S3's second class) and their bytes out, as the S3 front door counts them.
+- **Why not Caddy's file server:** the files are in the S3 store under FF's names, which Caddy would need a module to read; the backend already reads the store, checks the account, and counts.
+
+### D3. Addresses and certificates
+- `https://<bucket>.site.<domain>/`: buckets' names are unique across FF and without dots, so each makes a host. A wildcard certificate for `*.site.<domain>` once FF's DNS allows it (decision 17), else one per site on demand.
+- A customer's own domain, proved as a function URL's is, its certificate on demand: `custom_domains` gains a target kind (a function URL or a site), one `customDomains` limit for both.
+
+### D4. E-mail from apps, with SES v2's API
+- An endpoint of the backend's own on a port of its own, SES v2's REST API in JSON, signed with Signature Version 4 for the service `ses`, so that `@aws-sdk/client-sesv2` and boto3's `sesv2` work with the endpoint changed (`AWS_ENDPOINT_URL_SESV2`, which W-01's spike checks for each SDK).
+- First: `CreateEmailIdentity` for a domain (FF makes its DKIM keys, as SES's "bring your own DKIM" takes them, and gives the records to publish), `GetEmailIdentity`, `ListEmailIdentities`, `DeleteEmailIdentity`, `SendEmail` (simple and raw content, 50 recipients at most), `GetAccount` (the quotas and the sandbox), and the suppression list's operations; the others answer `NotImplemented`. The account's keys and functions' own reach it, as they reach buckets and queues.
+- SES's SMTP interface, with a password made from a key as SES makes it: later (§9, 5).
+
+### D5. The server that sends customers' mail
+- Never FF's own relay: customers' mail goes out from an address and a return-path domain of their own (`bounces.mail.<domain>`), so that one customer's spam can't stop FF's mail.
+- Recommended (§9, 6): the backend signs each message with the customer's DKIM key and hands it to a Postfix on a server and IP of its own, which delivers it and gets the bounces back. Postal, which the parent plan names, does more, with more to run; a local relay works if one signs each customer's domain.
+- Queued in step 3's queue, as asynchronous calls are, so that a send is answered at once and retried when a server refuses for now.
+
+### D6. Reputation: proven domains, a sandbox, quotas, a suppression list
+- A sender's domain must be the account's, proved by its DKIM records, which FF checks as it checks a custom domain; SPF and DMARC advised in the records FF gives.
+- **The sandbox, as SES's:** a new account sends only to addresses it proved (a link FF e-mails), 200 a day; an operator lifts it in the admin app, once the account says what it sends.
+- **Quotas, as SES's:** messages a day and a second, from the plan, raised for an account as its age and payments grow, as its internet access may differ from its plan's.
+- **Bounces and complaints:** a hard bounce or a complaint puts the address on the account's suppression list, as SES's; past SES's rates (5% of bounces, 0.1% of complaints) the account is reviewed, past 10% and 0.5% its sending stops and the operator is told.
+- **Port 25 closed to every function,** whatever its internet access, so that no code sends around the quotas.
+- The admin app's switch: an account's sending on or off.
+
+### D7. A cache: a Valkey process for each, on a server of customers' caches
+- Each cache is a Valkey process of its own, its memory the plan's (`maxmemory`, `allkeys-lru`), no persistence, TLS and a password; on a server apart from the cluster, as customers' databases are. One server with a user per account would cost less, but Valkey's users limit keys and commands, not memory: one account could fill it for all (§9, 8).
+- Its address, `rediss://…`, shown once and kept by nobody, set as a function's secret (`ff caches create sessions --secret-for <function>`), as `ff db create` does; reached by the account's functions whatever their internet access, and from developers' machines.
+- Measured each hour (its memory used, its connections) and billed by the hour of its size, as ElastiCache bills a node.
+
+### D8. Plans: new limits
+- `websites` (none apart: a site is one of the account's buckets), `emailIdentities` (2 on beta), `emailsPerDay` and `emailsPerSecond` (the sandbox's 200 and 1 on beta), `caches` (1 on beta) and `cacheMb` (64 on beta). Each in the plan's schema, the admin app, the console and `ff account`.
+
+### D9. Usage and billing
+- Sites: S3's storage and requests, as today; their bytes out counted, not billed (decision 12), with a limit a month per plan (§9, 4).
+- E-mail as SES bills it: 0.10 US$ a thousand messages, each recipient one, and 0.12 US$ a GB of attachments, at the book's rate.
+- Caches by the hour of their size, priced from ElastiCache for Valkey's nodes, at the book's rate.
+
+### D10. Suspension, credit and closure
+- Suspended: its sites answer `AccessDenied`, its mail is refused, its caches' users are turned off. Without credit: sites still answer (reads go on, decision 13), caches go on, as databases do, and sending waits for credit. Closed: all three go with the account's data, at its deletion date.
+
+### D11. Metrics and alarms
+- Sites, as CloudFront names them: `Requests`, `BytesDownloaded`, `4xxErrorRate`, `5xxErrorRate`. Mail, as SES's: `Send`, `Delivery`, `Bounce`, `Complaint`, `Reject`, and the two reputation rates. Caches, as ElastiCache's: `BytesUsedForCache`, `CurrConnections`, `CacheHits`, `CacheMisses`, `Evictions`. Alarms on all of them, as on functions', buckets' and queues'.
+
+### D12. The way out
+- A site: `aws s3 sync` to an S3 bucket with website hosting, behind CloudFront. Mail: SES with the same domains, its DKIM keys brought along (SES's "bring your own DKIM"), the code unchanged but the endpoint. A cache: ElastiCache for Valkey, only the address changed; its data isn't moved, being a cache. The export kit gets a page for each, as for databases, buckets and queues.
+
+## 4. Data model
+
+Proposed, each table with `account_id`:
+
+- `buckets.website`: the website configuration, or none.
+- `custom_domains`: a target kind, and the bucket of a site's domain.
+- `email_identities`: the domain, its DKIM selector and keys (sealed as secrets are), when it was proved; `email_suppressions`: an address, why, since when; `email_counts`: by the minute, the messages sent, delivered, bounced, complained of and rejected.
+- `caches`: its name, its server and port, its size, its status; `cache_samples`: by the hour.
+- `resource_usage_hourly`: the kinds `email` and `cache`.
+
+## 5. API changes
+
+Proposed:
+
+- The S3 front door: `PutBucketWebsite`, `GetBucketWebsite`, `DeleteBucketWebsite`. FF's API: `PUT`, `GET` and `DELETE /buckets/:name/website`, and `/buckets/:name/website/domains` for the customer's domains.
+- The SES endpoint, and in FF's API: `/email/identities`, `/email/suppressions`, `GET /email/account` (the quotas, the sandbox), and `POST /email/messages`, to try a send.
+- `/caches`: `POST`, `GET`, `DELETE`, and `POST /caches/:name/password`.
+- Each one's metrics; and in the admin app, an account's sending, its sandbox and quotas, and its caches.
+
+## 6. Working rules
+
+As step 3's: a commit for each task or part; L1 to L5 for what each part touches, a new route's L5 rules in both loops; the docs and this plan's log in the same commit; the console checked in a browser, a phone's width too.
+
+## 7. Tasks
+
+### Phase 0: groundwork
+
+#### W-00: The plan and the baseline
+- This plan confirmed, the choices of §9 in the decision log; the branch made from step 3's merge; every suite green.
+
+#### W-01: Spikes and ADRs 0011 to 0013
+- The website server: a bucket's files streamed from the store to a browser through the backend, measured (a site's first load, many small files at once). AWS's SDKs and the AWS CLI against a minimal SES v2 endpoint, as Q-01's spike did for SQS. A message signed by the backend with a domain's DKIM key, sent through a Postfix in development, its signature checked at the other end. Valkey processes, one per cache: what each costs in memory and to start, and TLS with a password.
+
+### Phase 1: static sites
+
+#### W-02: The website configuration and the website server
+- D1 and D2: the configuration at both front doors, the public path, the index and error documents, the single-page setting; requests and bytes counted.
+
+#### W-03: Addresses, domains, the console and `ff`
+- D3: `*.site.<domain>`, the customer's domains, their certificates; the console's site panel on a bucket's page; `ff sites deploy|domains`; metrics and alarms.
+
+### Phase 2: caches
+
+#### W-04: The server of customers' caches, and the API
+- D7: the server, installed as the customers' databases' is (`deploy/cache/`), a process per cache; `/caches`; the address shown once; functions' way to it.
+
+#### W-05: The console, `ff`, the admin app, and the bill
+- The Caches page, `ff caches create|list|get|password|delete`, the admin app's account page; hourly samples, the kind `cache`, its SKU; metrics and alarms.
+
+### Phase 3: e-mail
+
+#### W-06: Identities and the SES endpoint
+- D4: the endpoint, its signatures and keys; domains, their DKIM keys and records, their proof.
+
+#### W-07: Sending
+- D5 and D6: the queue of messages to send, the server that sends, the sandbox, the quotas, the suppression list, the bounces; port 25 closed to functions.
+
+#### W-08: The console, `ff`, the admin app, and the bill
+- The E-mail page (domains with their records, the quotas, the suppression list), `ff email …`, the admin app's switch and sandbox; the kind `email`, its SKU; metrics and alarms.
+
+### Phase 4: close
+
+#### W-09: Documentation
+- The guide's three sections, `how-it-works.html`'s scenarios, a page in French for each service, the export kit's three pages, ADRs 0011 to 0013 as built.
+
+#### W-10: The step closed
+- The small app gets its frontend as a site, e-mails each receipt, and keeps its order list in a cache; the guide walks through it, `hack/cli-e2e.sh` runs it. What to build next marks step 4 done, and step 5 gets its plan.
+
+## 8. Risks
+
+| Risk | What lowers it |
+|---|---|
+| One customer's spam gets FF's mail blocked for everyone | Customers' mail from a server, IP and return path of its own (D5); proven domains, the sandbox, quotas, the suppression list, port 25 closed (D6) |
+| The sending server's IP is on block lists from the start (a hosting company's ranges often are) | Checked before W-07, its reputation warmed with low quotas; a local data center's addresses, if the first server's are listed |
+| A public site hosts a phishing page | Sites only for active accounts; the operator's storage switch covers them; a report address on every site's host |
+| Sites' traffic slows the API, in the backend's one process | Measured by W-01's spike; the website server can run as a deployment of its own, the same code |
+| Certificates on demand run into Let's Encrypt's 50 a week | A wildcard for `*.site.<domain>` once decision 17 is answered |
+| A cache's process per account costs too much memory on one server | Measured by W-01; the plan's sizes set from it |
+
+## 9. Choices for you to confirm
+
+Each with what it means and a recommendation:
+
+1. **A site's shape:** S3's website hosting on a bucket, files sent with `aws s3 sync` or `ff sites deploy`, or a site of its own with deploys and rollbacks, as Netlify has. **Recommended: S3's,** the way out kept, the most reused; deploys can come on top.
+2. **Single-page apps:** an unknown path answers `index.html` with 200, as CloudFront's custom error response does, or a 404 with the error document, as S3 alone does. **Recommended: a site's setting,** on when `ff sites deploy --spa` says so.
+3. **Where sites live:** under FF's domain, `<bucket>.site.ffunc.tn`, as function URLs live under `fn.ffunc.tn`; or customers' content (sites and function URLs) on a domain of its own, as GitHub keeps `github.io` apart from `github.com`, so that a phishing page on one never marks FF's own domain. **Recommended: under `ffunc.tn` now, as function URLs are,** and a domain of its own for customers' content before the public launch, a question added to the decision log.
+4. **Bytes sites send out:** counted, not billed, as decision 12 says, with a limit a month per plan to protect the server; or billed now. **Recommended: counted with a limit,** 10 GB a month on beta.
+5. **E-mail's interface:** SES v2's API first, SMTP later; or SMTP first, for code that sends with a library such as nodemailer. **Recommended: SES v2's API first:** AWS's SDKs work with the endpoint changed, and the quotas sit in one place.
+6. **The server that sends:** a Postfix on a server and IP of its own, the backend signing with the customer's DKIM keys; Postal; or a local relay that signs each customer's domain, if one exists. **Recommended: Postfix with the backend's signing,** the fewest pieces, measured by W-01's spike.
+7. **The sandbox and quotas, as SES's:** a new account sends only to addresses it proved, 200 a day, until an operator lifts it; or no sandbox, with quotas alone. **Recommended: the sandbox,** as SES has it.
+8. **A cache's isolation:** a Valkey process for each, on a server of customers' caches; or one Valkey with a user per account, cheaper, its memory shared. **Recommended: a process for each.**
+9. **A cache's persistence:** none, it is a cache; or snapshots. **Recommended: none,** said plainly in the docs.
+10. **The order:** sites, then caches, then e-mail. **Recommended:** sites are the smallest and reuse the most; e-mail has the most risk, and waits on its server's IP.
+11. **FF's own counters (its rate limits) in Valkey:** in this step, or once the backend runs more than one copy. **Recommended: later,** with the second copy, as the client-readiness plan says.
+
+## 10. Effort (rough estimates, one developer)
+
+| Part | Days |
+|---|---|
+| W-00 and W-01: the plan, the spikes, three ADRs | 4 to 6 |
+| Static sites (W-02, W-03) | 7 to 9 |
+| Caches (W-04, W-05) | 7 to 9 |
+| E-mail (W-06 to W-08) | 12 to 16 |
+| Documentation and the close (W-09, W-10) | 4 to 6 |
+| **Together** | **34 to 46** |
+
+E-mail's days depend most on §9's sixth choice and on the sending server's IP.
+
+## 11. Progress log
+
+| Task | Status | Commits | Notes |
+|---|---|---|---|
+| W-00 The plan and the baseline | ⏳ Waiting for your choices (§9) | | |
+| W-01 Spikes and ADRs 0011 to 0013 | ⏳ Planned | | |
+| W-02 The website configuration and the website server | ⏳ Planned | | |
+| W-03 Addresses, domains, the console and `ff` | ⏳ Planned | | |
+| W-04 The server of customers' caches, and the API | ⏳ Planned | | |
+| W-05 Caches in the console, `ff`, the admin app, and the bill | ⏳ Planned | | |
+| W-06 Identities and the SES endpoint | ⏳ Planned | | |
+| W-07 Sending | ⏳ Planned | | |
+| W-08 E-mail in the console, `ff`, the admin app, and the bill | ⏳ Planned | | |
+| W-09 Documentation | ⏳ Planned | | |
+| W-10 The step closed | ⏳ Planned | | |

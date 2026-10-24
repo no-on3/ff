@@ -225,6 +225,7 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
+| The step-4 plan's eleven choices, each with a recommendation: static sites' shape and address, the bytes they send out, e-mail's interface and the server that sends it, the sandbox, caches' isolation and persistence, the order, and FF's own counters | [Step-4 plan](step-4-plan.md) §9 | Step 4: static sites, e-mail from apps, a cache; nothing of it is built before |
 | Who hosts `ffunc.tn`'s DNS: DNS servers FF runs, a DNS company, or neither (decision 17; the domain is registered, 20) | This log, 17 and 20 | How function URLs and, from step 2, buckets get their certificates in production: one for all of them, or one each |
 | Where `ff`'s downloads and the public runtime images are published, if customers can't rely on GitHub | [CLI plan](cli-plan.md) §10, question 3 | The first public release of `ff` |
 | Windows for `ff`: in its phase 4, or when a customer asks | CLI plan §10, question 5 | The CLI's phase 4 |
