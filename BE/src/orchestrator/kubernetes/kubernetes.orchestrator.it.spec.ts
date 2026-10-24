@@ -26,7 +26,8 @@ const itOnline = process.env.K8S_IT_INTERNET === '1' ? it : it.skip;
 // Set by hack/k8s/test-it.sh when the development server of customers' databases runs (hack/k8s/data-db-up.sh): its
 // address, and the CA of its certificate.
 const dataDbAddress = process.env.K8S_IT_DATA_DB;
-const runDataDb = process.env.K8S_IT === '1' && dataDbAddress ? describe : describe.skip;
+const dataDbRuns = process.env.K8S_IT === '1' && Boolean(dataDbAddress);
+const runDataDb = dataDbRuns ? describe : describe.skip;
 const kubeDir = path.resolve(__dirname, '../../../../hack/.kube');
 
 const greeter = (version: number) => `
@@ -424,7 +425,8 @@ runDataDb("functions and customers' database server (ADR 0008, L3)", () => {
     readyTimeoutSeconds: 90,
     ingressAllowCidrs: (process.env.K8S_INGRESS_ALLOW_CIDRS ?? '').split(',').filter(Boolean),
     platformEgress: [{ cidrs: [`${address}/32`], port: 5432 }],
-    dataDbCa: fs.readFileSync(process.env.K8S_IT_DATA_DB_CA ?? path.resolve(kubeDir, '../.data-db/ca.crt'), 'utf8'),
+    // Read only when the case runs: Jest builds a skipped describe's body too, and without the server there is no CA.
+    dataDbCa: dataDbRuns ? fs.readFileSync(process.env.K8S_IT_DATA_DB_CA ?? path.resolve(kubeDir, '../.data-db/ca.crt'), 'utf8') : '',
   });
   const client = new KubeClient({ server: s.apiUrl, tokenFile: s.tokenFile, caFile: s.caFile });
   const orchestrator = new KubernetesOrchestrator(s, client);
