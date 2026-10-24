@@ -7,6 +7,8 @@
 (ff-edge) {
 	header -Server
 	reverse_proxy https://@EDGE_ADDRESS@ {
+		# The edge routes by host: to an HTTPS upstream, Caddy would send the edge's own address instead.
+		header_up Host {http.request.host}
 		transport http {
 			tls_server_name {http.request.host}
 			tls_trust_pool inline {
