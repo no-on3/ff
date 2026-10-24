@@ -1275,7 +1275,7 @@ hack/ci.sh platform          # hack/e2e-platform.sh: nightly on the CI server, a
 hack/ci.sh all               # static, unit, db, security and cluster
 ```
 
-`security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet is accepted in `.trivyignore.yaml`, for the one binary it is in, with why and until when; on that date the scan reports it again. A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
+`security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet, or whose fix is less than two weeks old, is accepted for a while, with why and until when, and on that date it is reported again: in an image, in `.trivyignore.yaml`, for the one binary it is in; in what a Node.js package ships, in `.npmauditignore`, for that directory and package (`hack/lib/npm-audit.py` reads npm audit's report against it, and `hack/test-npm-audit.sh` tests it). A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
 
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 

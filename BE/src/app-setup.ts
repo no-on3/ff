@@ -1,4 +1,4 @@
-import { INestApplication, PayloadTooLargeException, ValidationPipe } from '@nestjs/common';
+import { INestApplication, PayloadTooLargeException, UnsupportedMediaTypeException, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule } from '@nestjs/swagger';
@@ -18,6 +18,18 @@ import { corsOptions } from './cors';
 const LARGE_BODY_ROUTES = /^(?:POST \/functions|PUT \/functions\/[^/]+|POST \/functions\/[^/]+\/invoke)\/?$/;
 export const LARGE_BODY_LIMIT = 7 * 1024 * 1024;
 export const BODY_LIMIT = 100 * 1024;
+
+/**
+ * No client of the API compresses what it sends: a body with a Content-Encoding is refused before anything reads
+ * it, whatever its type, rather than inflated by a parser, Nest's own included.
+ */
+function uncompressedBodies(): RequestHandler {
+  return (request, _response, next) => {
+    const encoding = request.headers['content-encoding'];
+    if (encoding === undefined || encoding.toLowerCase() === 'identity') return next();
+    next(new UnsupportedMediaTypeException(`The request's body is compressed (Content-Encoding: ${encoding}): the API takes bodies uncompressed`));
+  };
+}
 
 /** JSON bodies, with each route's limit, and a refusal past it that says which limit and why. */
 function jsonBodies(): RequestHandler {
@@ -41,8 +53,9 @@ function jsonBodies(): RequestHandler {
 /**
  * Everything main.ts sets up on the app before it listens, here so that the
  * tests set an app up the same way: the request's context first, the
- * security headers, CORS, JSON bodies with each route's limit, the proxies to
- * believe, validation, and the API's documents where the settings say.
+ * security headers, CORS, compressed bodies refused, JSON bodies with each
+ * route's limit, the proxies to believe, validation, and the API's documents
+ * where the settings say.
  */
 export function configureApp(app: INestApplication, config: ConfigService): void {
   // First, each request's ID, so that every line logged while serving it names it.
@@ -50,6 +63,7 @@ export function configureApp(app: INestApplication, config: ConfigService): void
   app.use(helmet());
   app.enableCors(corsOptions(config.getOrThrow<string[]>('cors.origins')));
   // After CORS, so that a browser reads the refusal of a body too large; before Nest's own parser, which then finds it read.
+  app.use(uncompressedBodies());
   app.use(jsonBodies());
   // Behind the edge proxy, the caller is in X-Forwarded-For, which only the proxies named may set: the audit
   // log's address and the rate limits by address see the caller rather than the proxy.

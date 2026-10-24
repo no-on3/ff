@@ -6,6 +6,21 @@ vulnerabilities:
     statement: >-
       Caddy 2.11.7, the latest release, in the console's, the admin app's and the edge's images, is built here with Go 1.26.9, which fixes its release's advisories (HTTP/2 and TLS) but not this one: crypto/x509 may accept a chain through untrusted intermediates. Only Go 1.26.10 (2026-10-19) fixes it, two weeks old on 2026-11-02: Caddy is built with it then. Caddy checks a server's certificate only as the edge's ACME client, to Let's Encrypt: the console's and the admin app's Caddy only serves files, and the edge reaches every app behind it in plain HTTP. Nothing is in production before then.
     expired_at: 2026-11-02
+  - id: CVE-2026-111181
+    paths: [app/node_modules/body-parser/package.json]
+    statement: >-
+      body-parser 2.3.0, through Express 5.2.1, in the backend's image: a denial of service through a compressed request body. The API refuses every compressed body before any parser reads it (BE/src/app-setup.ts), and the backend's other servers (function URLs, buckets, queues) read their bodies without it: nothing reaches the flaw. Fixed in 2.4.0 (2026-10-22), two weeks old on 2026-11-05: updated then. .npmauditignore accepts the same advisory, GHSA-27r3-jxmh-p828.
+    expired_at: 2026-11-05
+  - id: CVE-2026-113872
+    paths: [app/node_modules/multer/package.json]
+    statement: >-
+      multer 2.4.0, which @nestjs/platform-express 12.1.2 pins, in the backend's image: a denial of service through an asynchronous file filter still pending when the request ends. Multer only runs behind Nest's file interceptors, which the backend uses nowhere: nothing reaches it. Fixed in 2.5.0 (2026-10-22), two weeks old on 2026-11-05: an override in BE/package.json then. .npmauditignore accepts the same advisory, GHSA-q7qp-rjg7-q26m.
+    expired_at: 2026-11-05
+  - id: CVE-2023-54404
+    paths: [app/node_modules/zod/package.json]
+    statement: >-
+      zod 4.6.5, in the backend's image: memory exhausted while validating an oversized array. The backend validates with it its own configuration, what operators set, and one customer's request, an owner's shares for the low-balance e-mails, a list the body's 100 KB keep under some 50,000 numbers. Fixed in 4.6.6 (2026-10-11), two weeks old on 2026-10-25: updated then. .npmauditignore accepts the same advisory, GHSA-mrhx-c7xc-m3w5.
+    expired_at: 2026-10-25
   - id: CVE-2026-111943
     paths: [usr/local/bin/wal-g]
     statement: >-

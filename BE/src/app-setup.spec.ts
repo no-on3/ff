@@ -7,8 +7,10 @@
  * character, which PostgreSQL can't store, is refused with a 400 rather than
  * failing at the database with a 500, but for an invocation's input. A
  * function's code and an invocation's input may make a body of 7 MB; any
- * other body has 100 KB, and a larger one is refused saying which limit.
+ * other body has 100 KB, and a larger one is refused saying which limit. A
+ * compressed body is refused before anything reads it.
  */
+import { deflateSync, gzipSync } from 'node:zlib';
 import { Body, Controller, Get, INestApplication, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { IsObject, IsOptional, IsString } from 'class-validator';
 import { ConfigService } from '@nestjs/config';
@@ -215,6 +217,34 @@ describe('the app as main.ts sets it up', () => {
 
       expect([res.status, ((await res.json()) as { message: string }).message]).toEqual([413, "The request's body is over 100 KB (102,400 bytes), this route's limit"]);
       expect([small.status, await small.json()]).toEqual([201, { length: 100 * 1024 - 20 }]);
+    });
+
+    it('is refused when it comes compressed, whatever its type, before anything reads it, with CORS', async () => {
+      const url = await open({ trustProxy: [], apiDocs: false });
+      handled.length = 0;
+      const sent = (type: string, encoding: string, body: Buffer) =>
+        fetch(`${url}/probe/named/1`, {
+          method: 'POST',
+          headers: { 'content-type': type, 'content-encoding': encoding, origin: 'https://console.ff.example' },
+          body: new Uint8Array(body),
+        });
+
+      for (const [type, encoding, body] of [
+        ['application/json', 'gzip', gzipSync(JSON.stringify({ name: 'Atelier Sfax' }))],
+        ['application/x-www-form-urlencoded', 'deflate', deflateSync('name=Atelier+Sfax')],
+      ] as const) {
+        const res = await sent(type, encoding, body);
+        expect([type, res.status, ((await res.json()) as { message: string }).message, res.headers.get('access-control-allow-origin')]).toEqual([
+          type,
+          415,
+          `The request's body is compressed (Content-Encoding: ${encoding}): the API takes bodies uncompressed`,
+          'https://console.ff.example',
+        ]);
+      }
+      expect(handled).toEqual([]);
+      // Saying it isn't compressed is no compression.
+      const identity = await sent('application/json', 'identity', Buffer.from(JSON.stringify({ name: 'Atelier Sfax' })));
+      expect([identity.status, handled]).toEqual([201, [{ id: '1', name: 'Atelier Sfax' }]]);
     });
   });
 

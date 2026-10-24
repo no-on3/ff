@@ -4,13 +4,15 @@
 #             command where the machine has none recent enough (CI only: locally, the installed
 #             dependencies are used as they are)
 #   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
-#             tables, how-it-works.html's script, every shell script parsed, and the CI workflow linted
+#             tables and npm audit's checker, how-it-works.html's script, every shell script parsed, and the CI
+#             workflow linted
 #   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the ff
 #             command's and its binary's (L1, L2), the alert rules' and the log collector's filter (these two
 #             in their own images)
 #   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own
-#   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit), and every image
-#             built, scanned (Trivy) and listed as an SBOM (CycloneDX), into hack/.ci/sbom
+#   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit, but those
+#             .npmauditignore accepts until a date), and every image built, scanned (Trivy, but what
+#             .trivyignore.yaml accepts) and listed as an SBOM (CycloneDX), into hack/.ci/sbom
 #   cluster   on the k3d dev cluster (hack/k8s/cluster-up.sh reuses or makes it): the Kubernetes driver (L3),
 #             the stack (L4), every route as another account (L5), the ff command on the stack and in
 #             Docker, the images run as the cluster runs them, and the platform's manifests
@@ -87,6 +89,7 @@ stage_static() {
   step "ff: formatting" in_dir cli cargo fmt --check
   step "ff: lints, its tests included, and its build (clippy)" in_dir cli cargo clippy --all-targets --locked -- -D warnings
   step "docs: the checker itself, on documents with one problem each" hack/test-check-docs.sh
+  step "npm audit's checker, on reports of each kind" hack/test-npm-audit.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses
@@ -166,8 +169,11 @@ gitleaks_history() { # every commit, with gitleaks' own rules; .gitleaksignore l
     --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
 }
 
-npm_audit() { # <directory>: what ships, high and critical advisories
-  in_dir "$1" npm audit --omit=dev --audit-level=high
+npm_audit() { # <directory>: what ships, high and critical advisories, but those .npmauditignore accepts until a date
+  local report
+  # npm audit exits 1 whenever it reports anything: the checker decides, and fails on a report that isn't one.
+  report="$(in_dir "$1" npm audit --omit=dev --json)" || true
+  python3 "$repo/hack/lib/npm-audit.py" "$1" "$repo/.npmauditignore" <<<"$report"
 }
 
 scan_image() { # <image> <directory> [build arguments]: built, saved, scanned and listed, the scanner never given the Docker socket
@@ -193,7 +199,7 @@ stage_security() {
   cp "$repo/.trivyignore.yaml" "$ci_dir/trivyignore.yaml"
   step "no secret in any commit (gitleaks)" gitleaks_history
   for dir in BE FE admin runtimes/nodejs; do
-    step "$dir: no high or critical advisory in what ships (npm audit)" npm_audit "$dir"
+    step "$dir: no high or critical advisory in what ships, but those accepted until a date (npm audit)" npm_audit "$dir"
   done
   local entry
   for entry in "${IMAGES[@]}"; do

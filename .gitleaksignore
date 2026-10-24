@@ -20,3 +20,21 @@ db4d11ad7f0f48f2e2a4c4ecbca738fc0a8d9074:BE/src/audit/audit.service.spec.ts:gene
 
 # A fake JWT a test feeds to the key format check (eyJhbGciOiJSUzI1NiJ9.e30.sig).
 ba4fdf5f123f7fc2c9801cb8b0407ee598e43017:BE/src/api-keys/api-key-format.spec.ts:generic-api-key:24
+
+# Made-up access key IDs, which are no secret on AWS either (the secret is the other half): how-it-works.html's
+# simulations, a test of ff's key formats, and a test of a function's environment.
+5ab9ba7f103f4deb494a7e9feaa842349ac43803:docs/how-it-works.html:generic-api-key:692
+5ab9ba7f103f4deb494a7e9feaa842349ac43803:docs/how-it-works.html:generic-api-key:693
+5f7a6e01127915d497a42834b1b63fd16d2d119a:docs/how-it-works.html:generic-api-key:1225
+5f7a6e01127915d497a42834b1b63fd16d2d119a:docs/how-it-works.html:generic-api-key:1238
+a032412e1c92022e5e09cb3dd4bad325aaaad595:cli/src/commands/buckets.rs:aws-access-token:284
+6565961b813d57b2ba4a25ff42f0a70bd0d58186:BE/src/functions/functions.service.spec.ts:generic-api-key:1681
+
+# A made-up DNS verification token a test checks a TXT record against.
+d0f5604181033285d0ce20dc5f8a8ea5233a27e6:BE/src/function-urls/domain-check.spec.ts:generic-api-key:5
+
+# A made-up API key ID in a function URL's event (k1a2b3c4d5e6).
+7eb725b157c53dd54174c3b07188c482a596baf9:BE/src/function-urls/function-url.gateway.spec.ts:generic-api-key:261
+
+# "Authorization: Bearer the-callers-own-token": a made-up token the test checks the history masks.
+7eb725b157c53dd54174c3b07188c482a596baf9:hack/e2e.sh:curl-auth-header:325
