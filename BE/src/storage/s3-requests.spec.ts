@@ -1,22 +1,22 @@
 import { addressOf, operationOf } from './s3-requests';
 
-const HOST = 's3.ffunc.tn';
+const HOST = 's3.ffunc.cloud';
 
 describe("a request's bucket and key", () => {
   it('virtual-hosted, as the SDK for JavaScript addresses a host name', () => {
-    expect(addressOf('photos.s3.ffunc.tn', '/2026/a%20b.jpg', HOST)).toEqual({ style: 'virtual-hosted', bucket: 'photos', rawKey: '2026/a%20b.jpg' });
-    expect(addressOf('Photos.S3.ffunc.tn:443', '/', HOST)).toEqual({ style: 'virtual-hosted', bucket: 'photos', rawKey: '' });
+    expect(addressOf('photos.s3.ffunc.cloud', '/2026/a%20b.jpg', HOST)).toEqual({ style: 'virtual-hosted', bucket: 'photos', rawKey: '2026/a%20b.jpg' });
+    expect(addressOf('Photos.S3.ffunc.cloud:443', '/', HOST)).toEqual({ style: 'virtual-hosted', bucket: 'photos', rawKey: '' });
   });
 
   it('path-style, as boto3 and the CLI address any endpoint and every SDK an IP address', () => {
-    expect(addressOf('s3.ffunc.tn', '/photos/2026/a%20b.jpg', HOST)).toEqual({ style: 'path', bucket: 'photos', rawKey: '2026/a%20b.jpg' });
+    expect(addressOf('s3.ffunc.cloud', '/photos/2026/a%20b.jpg', HOST)).toEqual({ style: 'path', bucket: 'photos', rawKey: '2026/a%20b.jpg' });
     expect(addressOf('10.43.0.12:3002', '/photos', HOST)).toEqual({ style: 'path', bucket: 'photos', rawKey: '' });
-    expect(addressOf('s3.ffunc.tn', '/', HOST)).toEqual({ style: 'path', bucket: '', rawKey: '' });
-    expect(addressOf('s3.ffunc.tn', '/photos//double', HOST).rawKey).toBe('/double');
+    expect(addressOf('s3.ffunc.cloud', '/', HOST)).toEqual({ style: 'path', bucket: '', rawKey: '' });
+    expect(addressOf('s3.ffunc.cloud', '/photos//double', HOST).rawKey).toBe('/double');
   });
 
   it('a host two labels deeper is no bucket of FF\'s: path-style, so its path names the bucket', () => {
-    expect(addressOf('a.b.s3.ffunc.tn', '/photos/x', HOST)).toEqual({ style: 'path', bucket: 'photos', rawKey: 'x' });
+    expect(addressOf('a.b.s3.ffunc.cloud', '/photos/x', HOST)).toEqual({ style: 'path', bucket: 'photos', rawKey: 'x' });
   });
 });
 

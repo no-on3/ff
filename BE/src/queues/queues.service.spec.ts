@@ -9,7 +9,7 @@ import { DEFAULT_SETTINGS } from './sqs-attributes';
 import { SqsError, accessDenied, internalError, invalidParameter, overLimit, queueDoesNotExist } from './sqs-error';
 
 const ACCOUNT = '000000000001';
-const BASE = 'https://sqs.ffunc.tn';
+const BASE = 'https://sqs.ffunc.cloud';
 const URL_ = `${BASE}/${ACCOUNT}/orders`;
 const ORDERS: Queue = Object.assign(new Queue(), {
   id: 'queue-orders',

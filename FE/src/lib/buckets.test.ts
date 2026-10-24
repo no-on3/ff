@@ -30,8 +30,8 @@ describe('an access key', () => {
     createdAt: '2026-10-23T06:36:00.000Z',
     lastUsedAt: null,
     secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
-    endpoint: 'https://s3.ffunc.tn',
-    sqsEndpoint: 'https://sqs.ffunc.tn',
+    endpoint: 'https://s3.ffunc.cloud',
+    sqsEndpoint: 'https://sqs.ffunc.cloud',
     region: 'tn-tunis-1',
   };
 
@@ -47,7 +47,7 @@ describe('an access key', () => {
   it("gives the five variables AWS's SDKs and CLI read, the S3 and SQS endpoints among them, as shell lines too", () => {
     expect(awsVariables(key).map(([name]) => name)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL_SQS']);
     expect(exportLines(key)).toBe(
-      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.tn\nexport AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.tn',
+      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.cloud\nexport AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.cloud',
     );
   });
 });
@@ -67,11 +67,11 @@ describe("the account's buckets against its plan's storage", () => {
 });
 
 describe("a bucket's page", () => {
-  const bucket = { name: 'photos', endpoint: 'https://s3.ffunc.tn', url: 'https://photos.s3.ffunc.tn' };
+  const bucket = { name: 'photos', endpoint: 'https://s3.ffunc.cloud', url: 'https://photos.s3.ffunc.cloud' };
 
   it('gives its two addresses, and the CLI listing it', () => {
-    expect(addresses(bucket)).toEqual({ virtualHosted: 'https://photos.s3.ffunc.tn', pathStyle: 'https://s3.ffunc.tn/photos' });
-    expect(listCommand(bucket)).toBe('aws --endpoint-url https://s3.ffunc.tn s3 ls s3://photos');
+    expect(addresses(bucket)).toEqual({ virtualHosted: 'https://photos.s3.ffunc.cloud', pathStyle: 'https://s3.ffunc.cloud/photos' });
+    expect(listCommand(bucket)).toBe('aws --endpoint-url https://s3.ffunc.cloud s3 ls s3://photos');
   });
 
   it('lists the hours measured, newest first, with what it held, its requests and those that failed; an hour unmeasured left out', () => {

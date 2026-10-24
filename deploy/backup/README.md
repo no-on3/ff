@@ -42,7 +42,7 @@ The server of customers' databases ([`deploy/data-db`](../data-db/README.md)) ar
 
 Customers' passwords are SCRAM verifiers in the server's catalog: they come back with it, and the connection strings customers hold work on a restored server. Its certificate is not in the backups (`/var/lib/postgresql/tls/`, beside the data): keep its key with the server's other secrets, or get a new certificate for its name.
 
-**The whole server lost:** as FF's own, on a new machine from the same image: `wal-g backup-fetch "$PGDATA" LATEST`, `touch "$PGDATA/recovery.signal"`, the certificate in `/var/lib/postgresql/tls/`, then start it; it replays the WAL and opens. Give it the old machine's address, as a failover IP moves: functions' network policies name that address (`FF_DATA_DB_CIDRS`), and each account's is written again only at its next deploy, plan or egress change. Connection strings name the server by its name (`db.ffunc.tn`), which DNS then points at it.
+**The whole server lost:** as FF's own, on a new machine from the same image: `wal-g backup-fetch "$PGDATA" LATEST`, `touch "$PGDATA/recovery.signal"`, the certificate in `/var/lib/postgresql/tls/`, then start it; it replays the WAL and opens. Give it the old machine's address, as a failover IP moves: functions' network policies name that address (`FF_DATA_DB_CIDRS`), and each account's is written again only at its next deploy, plan or egress change. Connection strings name the server by its name (`db.ffunc.cloud`), which DNS then points at it.
 
 ### One customer's database, from a point in time
 

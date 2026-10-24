@@ -37,10 +37,10 @@ export class BucketView {
   @ApiProperty({ example: 'tn-tunis-1', description: "FF's region, as GetBucketLocation answers it" })
   region: string;
 
-  @ApiProperty({ example: 'https://s3.ffunc.tn', description: "The S3 endpoint to give AWS's SDKs and CLI" })
+  @ApiProperty({ example: 'https://s3.ffunc.cloud', description: "The S3 endpoint to give AWS's SDKs and CLI" })
   endpoint: string;
 
-  @ApiProperty({ example: 'https://photos.s3.ffunc.tn', description: 'Its own address, virtual-hosted' })
+  @ApiProperty({ example: 'https://photos.s3.ffunc.cloud', description: 'Its own address, virtual-hosted' })
   url: string;
 
   @ApiProperty({ nullable: true, type: Number, example: 161_480_253, description: 'What it held at its last hourly measure, in bytes, as S3 bills storage; null before its first' })
@@ -112,10 +112,10 @@ export class CreatedStorageKey extends StorageKeyView {
   @ApiProperty({ example: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', description: 'The secret access key, AWS_SECRET_ACCESS_KEY: shown once, FF keeps it sealed' })
   secretAccessKey: string;
 
-  @ApiProperty({ example: 'https://s3.ffunc.tn', description: "The S3 endpoint to give AWS's SDKs and CLI with it" })
+  @ApiProperty({ example: 'https://s3.ffunc.cloud', description: "The S3 endpoint to give AWS's SDKs and CLI with it" })
   endpoint: string;
 
-  @ApiProperty({ example: 'https://sqs.ffunc.tn', description: "The SQS endpoint to give them, AWS_ENDPOINT_URL_SQS, for the account's queues" })
+  @ApiProperty({ example: 'https://sqs.ffunc.cloud', description: "The SQS endpoint to give them, AWS_ENDPOINT_URL_SQS, for the account's queues" })
   sqsEndpoint: string;
 
   @ApiProperty({ example: 'tn-tunis-1' })

@@ -5,7 +5,7 @@ import { ageText, bytesText, cliCommands, deadLetterText, durationText, endpoint
 const ARN = 'arn:aws:sqs:tn-tunis-1:000000000001';
 const queue = (values: Partial<Queue> = {}): Queue => ({
   name: 'orders',
-  url: 'https://sqs.ffunc.tn/000000000001/orders',
+  url: 'https://sqs.ffunc.cloud/000000000001/orders',
   arn: `${ARN}:orders`,
   visibilityTimeout: 30,
   messageRetentionPeriod: 345_600,
@@ -71,9 +71,9 @@ describe('a queue, as the console says it', () => {
 
   it("gives the AWS CLI's commands for it, and its endpoint", () => {
     expect(cliCommands(queue())).toBe(
-      "aws sqs send-message --queue-url https://sqs.ffunc.tn/000000000001/orders --message-body '{\"hello\": \"world\"}'\naws sqs receive-message --queue-url https://sqs.ffunc.tn/000000000001/orders --wait-time-seconds 10",
+      "aws sqs send-message --queue-url https://sqs.ffunc.cloud/000000000001/orders --message-body '{\"hello\": \"world\"}'\naws sqs receive-message --queue-url https://sqs.ffunc.cloud/000000000001/orders --wait-time-seconds 10",
     );
-    expect([endpointOf(queue()), nameOfQueueArn(`${ARN}:orders-dlq`)]).toEqual(['https://sqs.ffunc.tn', 'orders-dlq']);
+    expect([endpointOf(queue()), nameOfQueueArn(`${ARN}:orders-dlq`)]).toEqual(['https://sqs.ffunc.cloud', 'orders-dlq']);
   });
 });
 
