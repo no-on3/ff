@@ -1,10 +1,13 @@
 # What the platform finds beside the cluster on the development server (../docker-compose.yml): Services without a
 # selector, whose EndpointSlices server.sh writes with the address they listen on, the Docker bridge's on the host.
+# deploy.sh's first step applies them with the migrations, which reach FF's database through ff-dev-postgres.
 apiVersion: v1
 kind: Service
 metadata:
   name: ff-dev-postgres
   namespace: ff-system
+  labels:
+    ff.dev/deploy-step: migrations
 spec:
   ports:
     - name: postgres
@@ -15,6 +18,8 @@ kind: Service
 metadata:
   name: ff-dev-s3
   namespace: ff-system
+  labels:
+    ff.dev/deploy-step: migrations
 spec:
   ports:
     - name: s3
@@ -25,6 +30,8 @@ kind: Service
 metadata:
   name: ff-dev-smtp
   namespace: ff-system
+  labels:
+    ff.dev/deploy-step: migrations
 spec:
   ports:
     - name: smtp

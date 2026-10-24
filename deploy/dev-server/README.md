@@ -8,7 +8,7 @@ The server has its own rules ([`/data/proxy/README.md`](#its-files) on the serve
 - **k3s** without its ingress (Traefik) or its load balancer (ServiceLB), and node ports on the loopback alone: nothing of the cluster's listens on the public address. Its data is on the data disk, `/data/kubernetes/k3s`; gVisor runs every function, as in production.
 - **The edge** has a fixed address in the cluster, `10.43.0.252`, and the route file `ff.caddy` sends FF's hostnames there. The server's proxy terminates the internet's TLS; the edge does everything else as in production, and believes the caller's address only from that proxy (`FF_EDGE_TRUSTED_PROXIES`).
 - **Beside the cluster,** in the Compose project `ff` (`/data/ff`): PostgreSQL for the backend and Keycloak, S3 (SeaweedFS), Mailpit, and the server of customers' databases ([`deploy/data-db`](../data-db/README.md)). Each listens on the Docker bridge's address (docker0's), which the cluster's pods reach and the internet doesn't.
-- **The firewall:** pods may reach the node's API server (6443) and its kubelet (10250), nothing else of the node.
+- **The firewall:** pods may reach the node's API server (6443) and its kubelet (10250), and, at docker0's address, PostgreSQL, S3 and mail beside the cluster (5433, 8333, 1025), which their Services send to the host itself; nothing else of the node. Functions' NetworkPolicy opens none of those three: customers' databases alone, on their port.
 
 | | Production ([`deploy/k8s`](../k8s/README.md)) | This server |
 |---|---|---|
@@ -32,7 +32,7 @@ deploy/dev-server/install.sh next      # the first time, about 20 minutes; an up
 The same command installs and updates. It copies the checkout's files to `/data/ff/src` (those git tracks and those it doesn't ignore: never a `.env`, a key or `node_modules`), then runs [`server.sh`](server.sh) there as root. Each step of it does nothing when already done:
 1. FF's passwords and keys, made once in `/data/ff/secrets`.
 2. The Compose project, and the backend's and Keycloak's databases.
-3. k3s and gVisor, at the versions the development cluster runs (`hack/k8s/env.sh`, `hack/k8s/gvisor-up.sh`), each checked against its release's checksum; the firewall's two rules; customers' databases' name in the cluster's DNS.
+3. k3s and gVisor, at the versions the development cluster runs (`hack/k8s/env.sh`, `hack/k8s/gvisor-up.sh`), each checked against its release's checksum; the firewall's rules for pods; customers' databases' name in the cluster's DNS.
 4. The images, built on the server and given to k3s, tagged with the commit (with `-dirty-<time>` when the checkout has changes).
 5. `deploy/k8s`: base, the Secrets, logging, monitoring, gVisor's RuntimeClass; then the platform with `deploy/k8s/platform/deploy.sh` and this folder's overlay (`k8s/`), with what is the server's own added on the server (`/data/ff/overlay`).
 6. The first operator, `operator`, once.
@@ -77,7 +77,8 @@ On the server: `/data/ff/secrets` (the passwords and keys, readable by root and 
 ssh next 'sudo rm /data/proxy/sites/ff.caddy && sudo docker compose --project-directory /data/proxy exec -T caddy caddy reload --config /etc/caddy/Caddyfile'
 ssh next 'sudo /usr/local/bin/k3s-uninstall.sh'      # the cluster, its data and its network rules
 ssh next 'sudo docker compose --project-directory /data/ff down --volumes && sudo rm -rf /data/ff /data/kubernetes/k3s'
-ssh next 'sudo ufw delete allow proto tcp from 10.42.0.0/16 to any port 6443 && sudo ufw delete allow proto tcp from 10.42.0.0/16 to any port 10250'
+ssh next 'for p in 6443 10250; do sudo ufw delete allow proto tcp from 10.42.0.0/16 to any port $p; done'
+ssh next 'for p in 5433 8333 1025; do sudo ufw delete allow proto tcp from 10.42.0.0/16 to 172.17.0.1 port $p; done'
 ```
 
 ## What it doesn't do yet

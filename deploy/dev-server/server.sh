@@ -20,6 +20,8 @@ k3s_version="$(sed -n 's/^export FF_K3S_IMAGE="${FF_K3S_IMAGE:-rancher\/k3s:\(.*
 gvisor_release="$(sed -n 's/^GVISOR_RELEASE="${GVISOR_RELEASE:-\(.*\)}"$/\1/p' "$src/hack/k8s/gvisor-up.sh")"
 k3s_data=/data/kubernetes/k3s
 edge_address=10.43.0.252 # the edge's Service, as the overlay fixes it (k8s/kustomization.yaml)
+# The services beside the cluster (docker-compose.yml), <Service>:<port name>:<port docker0's address publishes>.
+beside=(ff-dev-postgres:postgres:5433 ff-dev-s3:s3:8333 ff-dev-smtp:smtp:1025)
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml PATH="/usr/local/bin:$PATH"
 compose=(docker compose --project-directory "$home")
 work="$(mktemp -d "$home/.run-XXXXXX")" # on the data disk, readable by root alone: some files here hold secrets
@@ -150,9 +152,14 @@ for _ in $(seq 1 90); do kubectl get nodes 2>/dev/null | grep -q ' Ready ' && br
 kubectl wait --for=condition=Ready node --all --timeout=180s >/dev/null
 for _ in $(seq 1 60); do kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && break; sleep 2; done
 kubectl -n kube-system rollout status deployment/coredns --timeout=180s >/dev/null
-# Pods reach the node's API server, for CoreDNS and the backend, and its kubelet, and nothing else of the node.
+# Pods reach the node's API server, for CoreDNS and the backend, and its kubelet; and, at docker0's address, the
+# services beside the cluster, as their Services send them to the host itself, where the firewall checks them.
+# Nothing else of the node. Functions' own NetworkPolicy opens none of those services.
 for port in 6443 10250; do
   ufw allow proto tcp from 10.42.0.0/16 to any port "$port" comment "FF dev server: k3s pods to the node" >/dev/null
+done
+for entry in "${beside[@]}"; do
+  ufw allow proto tcp from 10.42.0.0/16 to "$host_address" port "${entry##*:}" comment "FF dev server: k3s pods to ${entry%%:*}" >/dev/null
 done
 # Customers' databases by their name, inside the cluster, where the internet's DNS doesn't answer it yet.
 dns="db.$domain:53 {
@@ -223,10 +230,10 @@ realm["smtpServer"].update({"starttls": "false", "auth": "false"})
 realm["smtpServer"].pop("user", None)
 json.dump(realm, open(sys.argv[2], "w"), indent=2)
 PY
-# The services beside the cluster, where Compose publishes them.
-for entry in ff-dev-postgres:postgres:5433 ff-dev-s3:s3:8333 ff-dev-smtp:smtp:1025; do
+# The services beside the cluster, where Compose publishes them: applied with the migrations, as their Services are.
+for entry in "${beside[@]}"; do
   IFS=: read -r name port_name port <<<"$entry"
-  printf -- '---\napiVersion: discovery.k8s.io/v1\nkind: EndpointSlice\nmetadata:\n  name: %s\n  namespace: ff-system\n  labels: {kubernetes.io/service-name: %s}\naddressType: IPv4\nports: [{name: %s, port: %s, protocol: TCP}]\nendpoints: [{addresses: ["%s"]}]\n' \
+  printf -- '---\napiVersion: discovery.k8s.io/v1\nkind: EndpointSlice\nmetadata:\n  name: %s\n  namespace: ff-system\n  labels: {kubernetes.io/service-name: %s, ff.dev/deploy-step: migrations}\naddressType: IPv4\nports: [{name: %s, port: %s, protocol: TCP}]\nendpoints: [{addresses: ["%s"]}]\n' \
     "$name" "$name" "$port_name" "$port" "$host_address"
 done >"$overlay/endpoints.yaml"
 # The server's own proxy reaches the edge from the host: kube-proxy gives its connections the node's address on the
