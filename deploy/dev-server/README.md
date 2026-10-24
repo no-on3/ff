@@ -69,7 +69,7 @@ They come from the proxy's own authority: one certificate for `*.fn.dev.ffunc.cl
 | `ff.caddy` | The route, which `server.sh` fills in with the edge's root and installs as `/data/proxy/sites/ff.caddy` |
 | `alertmanager.yaml` | The operator's alerts, to Mailpit |
 
-On the server: `/data/ff/secrets` (the passwords and keys, readable by root and `deploy` alone), `/data/ff/overlay` (made on each run), `/data/kubernetes/k3s` (the cluster), `/etc/rancher/k3s` (its settings, and the nodes' login to the code registry), and the Docker volumes `ff_postgres`, `ff_s3`, `ff_mail` and `ff_data_db`. The server's own rules are in `/data/proxy/README.md` there.
+On the server: `/data/ff/secrets` (the passwords and keys, readable by root and `deploy` alone, but `s3.json`, which SeaweedFS's own user reads too), `/data/ff/overlay` (made on each run), `/data/kubernetes/k3s` (the cluster), `/etc/rancher/k3s` (its settings, and the nodes' login to the code registry), and the Docker volumes `ff_postgres`, `ff_s3`, `ff_mail` and `ff_data_db`. The server's own rules are in `/data/proxy/README.md` there.
 
 ## Removing it
 

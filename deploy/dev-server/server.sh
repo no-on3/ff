@@ -74,6 +74,11 @@ import json, sys
 key, secret = (open(f"{sys.argv[1]}/{name}").read() for name in ("s3-access-key", "s3-secret-key"))
 print(json.dumps({"identities": [{"name": "ff", "credentials": [{"accessKey": key, "secretKey": secret}],
   "actions": ["Admin", "Read", "List", "Tagging", "Write"]}]}))' "$secrets"
+# SeaweedFS reads it as the user its image's entrypoint runs it as, uid 1000, which can't read deploy's own files:
+# the file is that uid's, its group deploy's, and nobody else's. On the host, uid 1000 may be a login user (on this
+# server, ubuntu, who has sudo anyway).
+chown 1000:deploy "$secrets/s3.json"
+chmod 0440 "$secrets/s3.json"
 
 step "PostgreSQL, S3, mail and customers' databases beside the cluster, on $host_address ($home)"
 install -o deploy -g deploy -m 0644 "$src/deploy/dev-server/docker-compose.yml" "$home/docker-compose.yml"
@@ -96,7 +101,14 @@ ALTER ROLE $name PASSWORD '$(cat "$secrets/${pair#*:}")';
 SELECT 'CREATE DATABASE $name OWNER $name' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$name') \gexec
 SQL
 done
-echo "  running: $("${compose[@]}" ps --format '{{.Service}}' | sort | paste -sd' ')"
+# S3 refuses an unsigned request once it runs with FF's identities: without them it would answer it, and a
+# SeaweedFS that can't read them stops within seconds, which Compose's "running" doesn't tell.
+for i in $(seq 1 60); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$host_address:8333/")" = 403 ] && break
+  [ "$i" -lt 60 ] || { "${compose[@]}" logs --tail 5 s3 >&2; fail "S3 doesn't refuse an unsigned request on $host_address:8333"; }
+  sleep 2
+done
+echo "  running: $("${compose[@]}" ps --format '{{.Service}}' | sort | paste -sd' '); S3 with FF's identities"
 
 step "k3s $k3s_version, without its ingress and load balancer, and gVisor $gvisor_release"
 changed=false
