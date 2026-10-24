@@ -1,0 +1,64 @@
+# FF's own install on its development server (deploy/dev-server/README.md), never for production: the platform
+# with FF's names under dev.ffunc.cloud, behind the server's own proxy, which terminates the internet's TLS and
+# reaches the edge at a fixed address in the cluster, no port of the edge's public; the edge's certificates from its
+# own authority, function URLs' and buckets' on demand; PostgreSQL, S3, mail and customers' databases beside the
+# cluster, which Services without a selector name (external.yaml). server.sh makes, on the server, the overlay of
+# this one that adds what is the server's own: where those services listen, the addresses the admin app answers, the
+# images' tag, the realm with its mail to the server's Mailpit, and the CA of customers' databases.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../k8s/platform
+  - external.yaml
+configMapGenerator:
+  - name: ff-backend
+    namespace: ff-system
+    behavior: merge
+    envs: [backend.env]
+  - name: keycloak
+    namespace: ff-system
+    behavior: merge
+    envs: [keycloak.env]
+  - name: ff-edge
+    namespace: ff-edge
+    behavior: merge
+    envs: [edge.env]
+patches:
+  # The server's proxy reaches the edge at this address, which the cluster keeps for it: no load balancer, no
+  # node port, nothing of the edge's on the server's public address, where the proxy owns ports 80 and 443.
+  - target:
+      kind: Service
+      name: ff-edge
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP
+      - op: remove
+        path: /spec/externalTrafficPolicy
+      - op: add
+        path: /spec/clusterIP
+        value: 10.43.0.252
+  # Customers' databases have a certificate from a CA of the server's own: the backend reads it, and hands it to
+  # functions' pods (FF_DATA_DB_CA_FILE). The ConfigMap is the server's overlay's.
+  - target:
+      kind: Deployment
+      name: ff-backend
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ff-backend
+        namespace: ff-system
+      spec:
+        template:
+          spec:
+            containers:
+              - name: backend
+                volumeMounts:
+                  - name: data-db-ca
+                    mountPath: /etc/ff/data-db-ca
+                    readOnly: true
+            volumes:
+              - name: data-db-ca
+                configMap:
+                  name: ff-data-db-ca

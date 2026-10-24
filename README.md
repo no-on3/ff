@@ -56,6 +56,7 @@ Nomad is no longer used; its development VM was removed.
 | `admin/` | Admin dashboard for FF's operators (React, Vite, Tailwind): a separate app, behind its own login (P-70) |
 | `runtimes/` | Function runtime images, `nodejs/` and `python/`, runtime protocol 3 |
 | `cli/` | The `ff` command (Rust): one binary that works through the API only, being built as the [CLI plan](docs/cli-plan.md) says |
+| `deploy/dev-server/` | FF on its development server, as production runs it, on one machine that other sites share, behind its own proxy, under `dev.ffunc.cloud`: one command installs and updates it |
 | `deploy/data-db/` | The server of customers' databases: PostgreSQL 18 with WAL-G, TLS and SCRAM only, who may log in where, and how to install it ([ADR 0008](docs/adr/0008-customer-databases.md)) |
 | `deploy/k8s/` | Cluster manifests: `base/` (namespace, RBAC, admission policy), `dev/` (base plus the Service proxy a backend outside the cluster needs), `logging/` (the log pipeline), `monitoring/` (the operator's metrics, alerts and dashboards), `platform/` (the backend, the apps, Keycloak and the edge proxy, with their deploy script), `backup/` (the legal records' mirror) and `optional/` (gVisor) |
 | `hack/` | Development scripts: tools, dev cluster, image import, tests, resource guard |
@@ -133,6 +134,7 @@ To start the console: `cd FE && npm install && npm run dev`. It runs on http://l
 - [Decision log](docs/decisions.md): every decision you made about FF, with what it changed and what is still to change, and the questions still waiting for you.
 - [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why; how to deploy the platform.
 - [deploy/backup](deploy/backup/README.md): the backups, the restore runbook and the monthly drill.
+- [deploy/dev-server](deploy/dev-server/README.md): FF on its development server, how to install it and reach it.
 - [The documentation's index](docs/README.md), with the architecture decisions (ADRs).
 
 ## License

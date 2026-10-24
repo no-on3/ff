@@ -1,0 +1,30 @@
+# FF's route in this server's host-wide proxy (/data/proxy), from FF's repository (deploy/dev-server/ff.caddy):
+# server.sh fills in its three values, installs it as /data/proxy/sites/ff.caddy and reloads the proxy. Every
+# hostname of FF's goes to FF's own edge in the cluster, at the address the cluster keeps for it, which routes the
+# rest (deploy/k8s/platform/edge/Caddyfile): the hosts as the callers sent them, and the caller's address in
+# X-Forwarded-For, which the edge believes from this proxy alone. The edge's own TLS comes from its own authority,
+# checked against its root, given here.
+(ff-edge) {
+	header -Server
+	reverse_proxy https://@EDGE_ADDRESS@ {
+		transport http {
+			tls_server_name {http.request.host}
+			tls_trust_pool inline {
+				trust_der @EDGE_ROOT@
+			}
+		}
+	}
+}
+
+# FF's six fixed names: certificates from Let's Encrypt, which this proxy gets and renews by itself.
+api.@DOMAIN@, console.@DOMAIN@, admin.@DOMAIN@, login.@DOMAIN@, sqs.@DOMAIN@, s3.@DOMAIN@ {
+	import ff-edge
+}
+
+# Function URLs and buckets, a host each: one certificate for each wildcard, from this proxy's own authority, whose
+# root a browser must trust (README.md). Let's Encrypt's would take a DNS-01 challenge, through a key that can change
+# every record of the domain, or a certificate per host on demand, through the proxy's main file.
+*.s3.@DOMAIN@, *.fn.@DOMAIN@ {
+	tls internal
+	import ff-edge
+}

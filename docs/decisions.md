@@ -5,6 +5,41 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-10-24, later: FF's domain is ffunc.cloud, and its repository on GitHub
+
+You said: "I bought ffunc.cloud, i want to use instead", then made its records for the development server at OVH; and: "i also created an empty git repository: https://github.com/no-on3/ff so everything can be automated".
+
+**38. FF's domain is `ffunc.cloud`, instead of `ffunc.tn`.** ✅ Your answer. Registered on 2026-10-24 at OVH, whose DNS serves its zone, which answers who serves it (17); the .tn registry never delegated `ffunc.tn`.
+- **What it means:** production's names are under `ffunc.cloud`: `api`, `console`, `admin`, `login`, `s3`, `sqs`, `db`, `*.fn` and `*.s3`. The development server's are under `dev.ffunc.cloud`, so that production can take the short ones later without moving it: the eight records you made, `api`, `console`, `admin`, `login`, `s3`, `sqs`, `*.fn` and `*.s3`, each an A record to the server. None is AAAA: the server's proxy gets IPv6 callers through Docker's relay, which hides their address from the admin app's allowlist.
+- **Changed already:** the zone (you, on 2026-10-24); the API's examples, the tests and the guides (`beefc12`); the development server's install, with Let's Encrypt's certificates for its six fixed names (37).
+- **Still to change:** production's wildcard certificates. The edge asks for them by DNS-01 through RFC 2136, which OVH's DNS doesn't take (the questions at the end).
+
+**39. FF's repository is on GitHub: `no-on3/ff`.** ✅ Your answer, and "push to github". Public when you made it, private since, the same day.
+- **What it means:** GitHub runs the workflow already in `.github/workflows/ci.yml`, each stage of `hack/ci.sh` on GitHub's own machines. A private repository has 2,000 free minutes of them a month on GitHub Free, and the workflow's jobs may take up to 170 per push to `master`, by their time limits, and 45 a night (the questions at the end). The history pushed has no secret (gitleaks, every commit) and no trace of the server's address.
+- **Changed already:** `master` pushed on 2026-10-24 (`2a381f4`), GitHub's default branch since.
+- **Still to change:** how the development server updates from it (the questions at the end).
+
+## 2026-10-24: step 3 merged, and FF on its development server
+
+You asked, with step 3 done, for four things: the step-3 migrations on your development database, Caddy rebuilt, the merge into `master`, and FF deployed. On DNS you said: "currently the host for the dns is the canada server, made for dev work only, it already hosts other personal websites for dev work".
+
+**34, done: your development database migrated.** ✅ Your answer. `ff_preview` had stopped at step 2's last migration: step 3's ten ran on 2026-10-24, after a copy of it (`pg_dump`, kept outside the repository), 50 of 50 now.
+- **Still to change:** nothing. Your backend's watcher (`nest start --watch` in `BE/`) had stopped its app on the pending migrations: it starts again at its next change, or restart it.
+
+**35, done: Caddy rebuilt.** ✅ Your answer. The three images that carry Caddy now build it themselves, 2.11.7 with Go 1.26.9 and x/net v0.60.0, which fix its release's three advisories (`3d1635a`). A newer one of Go's (CVE-2026-111943, crypto/x509) needs Go 1.26.10, released 2026-10-19: accepted until 2026-11-02, when it is two weeks old.
+- **Found on the way** (`d4eaa94`): the security stage hadn't passed since 2026-10-21. Gitleaks' nine findings were made-up test values, now listed. npm audit found new advisories in the backend's dependencies whose fixes are under two weeks old: `.npmauditignore` now accepts such an advisory for a while, as `.trivyignore.yaml` does for images, and the API refuses compressed bodies, which closes body-parser's.
+- **Still to change:** each fix once it is two weeks old, when its exception expires and the security stage says so: zod 4.6.6 on 2026-10-25, Go 1.26.10 for Caddy on 2026-11-02, body-parser 2.4.0 and multer 2.5.0 on 2026-11-05.
+
+**36, done: step 3 is in `master`.** ✅ Your answer. Merged on 2026-10-24 (`2a381f4`), without a checkout, as step 2 was: `master` had not moved, so no file changed, and your dev servers saw nothing.
+
+**37. FF on its development server, beside your other sites, through the server's own proxy.** ✅ Your answer: deploy there. The server's own rules (its `/data/proxy/README.md`) decide how: its one proxy keeps ports 80 and 443 for every project, FF adds one route file, and k3s runs without its ingress or load balancer.
+- **What it means:** [`deploy/dev-server`](../deploy/dev-server/README.md). The platform as production runs it, with FF's names under `dev.ffunc.cloud` (38); the proxy terminates the internet's TLS, with Let's Encrypt's certificates for the six fixed names and its own authority's for function URLs and buckets, and sends FF's names to FF's edge, which does the rest; PostgreSQL, S3, mail and customers' databases beside the cluster, on no public port.
+- **Changed already:** `4525d2e`: the edge believes the caller's address from that proxy alone (`FF_EDGE_TRUSTED_PROXIES`), so that its allowlist for the admin app still works behind it.
+- **Still to change:** its first run (`deploy/dev-server/install.sh next`), which installs k3s and changes the server's firewall, so it waits for your go-ahead.
+
+**17, answered: OVH serves the zone, `ffunc.cloud`'s (38).** Your answer, in two steps: FF's names point to the server in Canada; then, as `ffunc.tn` still answered "no such domain" on 2026-10-24, its registry having no record of it, `ffunc.cloud`, bought at OVH, whose DNS serves it.
+- **Still open:** the two wildcards' certificates (`*.fn` and `*.s3`), on the development server and in production (the questions at the end).
+
 ## 2026-10-23, later: step 3's ten choices, and the object store's names
 
 You answered: rename the object store's settings, which still carried MinIO's name, before step 3; then start step 3 with every choice of its plan as recommended. Step 2, done the same day, was merged into `master` (`f772e7f`) before step 3's branch was made from it.
@@ -226,7 +261,11 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 | Question | Where it is | What it affects |
 |---|---|---|
 | The step-4 plan's eleven choices, each with a recommendation: static sites' shape and address, the bytes they send out, e-mail's interface and the server that sends it, the sandbox, caches' isolation and persistence, the order, and FF's own counters | [Step-4 plan](step-4-plan.md) §9 | Step 4: static sites, e-mail from apps, a cache; nothing of it is built before |
-| Who hosts `ffunc.tn`'s DNS: DNS servers FF runs, a DNS company, or neither (decision 17; the domain is registered, 20) | This log, 17 and 20 | How function URLs and, from step 2, buckets get their certificates in production: one for all of them, or one each |
+| FF's first install on its development server: `deploy/dev-server/install.sh next`, run by you or allowed to Claude. It installs k3s and gVisor, adds two firewall rules for the cluster's pods, starts FF's Compose project in `/data/ff`, and adds FF's route to the proxy your other sites share (decision 37) | [`deploy/dev-server`](../deploy/dev-server/README.md) | FF running there |
+| GitHub's minutes, now that the repository is private: GitHub Free gives it 2,000 a month, and the workflow may take up to 170 per push to `master` and 45 a night. Public again, where they are free; the nightly run weekly; or the cluster's stage on demand alone | This log, 39 | Whether CI keeps running all month |
+| How the development server updates: by itself, pulling each commit of `master` whose tests passed on GitHub (recommended: GitHub then holds no key to the server; a private repository takes a read-only deploy key of the server's own, and a token that reads the workflow's results), or by GitHub, through a key to the server | This log, 39 | Deploys without anyone running `install.sh` |
+| Function URLs' and buckets' certificates on the development server: the proxy's own authority, as now (recommended); Let's Encrypt's by DNS-01, through an OVH key that can change every record of `ffunc.cloud`, kept on the server other projects share; or one per host on demand, through a line in the shared proxy's main file | [`deploy/dev-server`](../deploy/dev-server/README.md) | Whether a browser that doesn't trust the proxy's root can call a function at its URL |
+| Production's wildcard certificates: the edge's DNS-01 speaks RFC 2136, which OVH's DNS doesn't take: OVH's module in the edge, a DNS server of FF's for the zones of `fn` and `s3`, or one certificate per host on demand | [`deploy/k8s`](../deploy/k8s/README.md); this log, 17 and 38 | Production's install |
 | Where `ff`'s downloads and the public runtime images are published, if customers can't rely on GitHub | [CLI plan](cli-plan.md) §10, question 3 | The first public release of `ff` |
 | Windows for `ff`: in its phase 4, or when a customer asks | CLI plan §10, question 5 | The CLI's phase 4 |
 | `ff login` sooner, so that the first customers never paste a key | CLI plan §10, question 7 | The order of the CLI's next tasks |

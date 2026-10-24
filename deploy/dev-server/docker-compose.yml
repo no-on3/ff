@@ -1,0 +1,73 @@
+# What FF finds beside the cluster on its development server (README.md): its own PostgreSQL (the backend's and
+# Keycloak's databases), S3, a mail catcher, and the server of customers' databases. server.sh installs this file as
+# /data/ff/docker-compose.yml, beside the checkout in /data/ff/src, and writes /data/ff/.env, these variables.
+# No port is public: each listens on the Docker bridge's address on the host (FF_HOST_ADDRESS, docker0's), which
+# the cluster's pods reach and the internet doesn't; Mailpit's pages on the loopback alone, through SSH.
+name: ff
+
+services:
+  postgres:
+    image: postgres:15.19-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    ports:
+      - "${FF_HOST_ADDRESS:?}:5433:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # FF's own object store: functions' packages, and customers' buckets under names of FF's. Its one identity is in
+  # secrets/s3.json, which server.sh writes.
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    restart: unless-stopped
+    command: server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=1024
+    ports:
+      - "${FF_HOST_ADDRESS:?}:8333:8333"
+    volumes:
+      - s3:/data
+      - ./secrets/s3.json:/etc/seaweedfs/s3.json:ro
+
+  # Every e-mail FF and Keycloak send, kept here and sent nowhere: development only.
+  mail:
+    image: axllent/mailpit:v1.31.4
+    restart: unless-stopped
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_MAX_MESSAGES: "5000"
+    ports:
+      - "${FF_HOST_ADDRESS:?}:1025:1025"
+      - "127.0.0.1:8026:8025"
+    volumes:
+      - mail:/data
+
+  # Customers' databases (deploy/data-db), its certificate from a CA it makes at its first start, for its name and
+  # the address functions and the backend reach it at.
+  data-db:
+    build: src/deploy/data-db
+    image: ff-data-db:dev-server
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${FF_DATA_DB_SUPERUSER_PASSWORD:?}
+      FF_DATA_DB_ADMIN_PASSWORD: ${FF_DATA_DB_ADMIN_PASSWORD:?}
+      FF_DATA_DB_TLS_NAMES: "DNS:db.${FF_DOMAIN:?},IP:${FF_HOST_ADDRESS:?}"
+    ports:
+      - "${FF_HOST_ADDRESS:?}:5432:5432"
+    volumes:
+      - data_db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U ff_admin -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres:
+  s3:
+  mail:
+  data_db:
