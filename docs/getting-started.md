@@ -594,6 +594,25 @@ curl -s -X POST "$FF/functions/$ID/event-sources" -H 'content-type: application/
 
 **In the console,** a function's Invocations tab has "Queues it reads": each queue it reads, how (its batches, window, how a failure is read, its concurrency) and whether it reads it; owners and developers have it read another queue of the account, change how, disable or enable a mapping, or remove it, the queue's messages staying. A queue's page says the functions that read it. **With `ff`,** `ff event-sources add orders orders-worker --batching-window 2s --report-batch-item-failures` has the function read the queue (`--batch-size`, `--max-concurrency`, `--disabled` too, each held to Lambda's range before any call), `ff event-sources list [--function NAME] [--queue NAME]` and `get <uuid>` show them, `update <uuid>` changes what it is given (`--enable`, `--disable`, `--no-max-concurrency`, `--no-report-batch-item-failures`), and `remove <uuid>` stops it, after asking.
 
+### A bucket's notifications, as S3's
+
+A bucket may send its objects' events, as S3 does: an upload or a deletion runs a function of the account, called without waiting as S3 calls Lambda, or puts a message in a queue of the account. The configuration is S3's: AWS's SDKs and CLI set it through the S3 front door, as on AWS, and FF's API takes the same in JSON.
+
+```bash
+aws s3api put-bucket-notification-configuration --bucket photos --notification-configuration '{
+  "LambdaFunctionConfigurations": [{"Id": "thumbnails", "LambdaFunctionArn": "arn:aws:lambda:tn-tunis-1:<account>:function:thumbnails",
+    "Events": ["s3:ObjectCreated:*"], "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "images/"}]}}}],
+  "QueueConfigurations": [{"Id": "removals", "QueueArn": "arn:aws:sqs:tn-tunis-1:<account>:removals", "Events": ["s3:ObjectRemoved:*"]}]}'
+aws s3api get-bucket-notification-configuration --bucket photos
+```
+
+- **The events:** `s3:ObjectCreated:*` and its kinds (`Put`, `Copy`, `CompleteMultipartUpload`; `Post` is taken, and FF has no form uploads), and `s3:ObjectRemoved:*` (`Delete`; `DeleteMarkerCreated` is taken, and FF's buckets aren't versioned). A configuration's filter names a key's prefix and suffix; two configurations one event could match are refused (`Configuration is ambiguously defined…`), as S3 refuses them, so that each event goes to one destination.
+- **The destinations** are the account's, in FF's region, and must be there when the configuration is set (`Unable to validate the following destination configurations`), unless `x-amz-skip-destination-validation` says to skip that check; another account's is refused whatever is asked. A queue a configuration names gets S3's test event (`"Event": "s3:TestEvent"`) when it is set.
+- **The event** is S3's, a record of version 2.1 in `Records[]`: `eventName` (`ObjectCreated:Put`…), the bucket and its ARN, the object's key, form-encoded as S3 writes it (a space a `+`, a slash `%2F`: `decodeURIComponent(key.replace(/\+/g, ' '))` reads it, as in a Lambda function written for S3), a created object's size and ETag, a sequencer, and who made the request (`AWS:<access key>`) from where. A function is called with it without waiting, its retries and destinations its own ("Calls that don't wait", above); a queue gets it as a message's body, from `arn:aws:s3:::<bucket>`.
+- **Sent after the store answered:** the client has its answer before the event goes, as with S3's. A backend that stops waits for the events under way; one that dies between the store's answer and its event loses that event. An event whose destination is gone since, or past the plan's room for messages, is dropped, and the backend's log says why.
+
+`GET /buckets/<name>/notifications` answers the configuration in S3's JSON names (`lambdaFunctionConfigurations`, `queueConfigurations`, each with its `id`, ARN, `events` and `filter.key.filterRules`), and `PUT` replaces it whole; `{}` removes it. Every member reads it; owners and developers set it, with `storage:read` and `storage:write` for an API key, and the audit log names each `bucket.notifications`, an SDK's under its access key.
+
 ### A small app, end to end
 
 [`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and kept in PostgreSQL, each order's receipt kept in a bucket, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, and `@aws-sdk/client-s3`, AWS's S3 client, makes its two functions. On FF it keeps its orders in one of FF's databases and its receipts in one of FF's buckets, as it would in RDS and S3 on AWS: its functions reach both with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL` and `RECEIPTS_BUCKET`. In development, functions get their own keys to buckets once the backend knows where they reach the front door (`FF_STORAGE_FUNCTION_ENDPOINT`, in "Files in buckets" above), and the customers' databases' server runs (setup's step 10).

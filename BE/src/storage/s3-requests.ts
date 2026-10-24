@@ -70,6 +70,8 @@ export function operationOf(method: string, address: S3Address, query: URLSearch
   if (!address.bucket) return method === 'GET' && names.length === 0 ? op('ListBuckets', 'tier1') : NOT_IMPLEMENTED;
   if (!address.rawKey) {
     if (method === 'GET' && has('location') && only('location')) return op('GetBucketLocation', 'tier2');
+    if (method === 'GET' && has('notification') && only('notification')) return op('GetBucketNotificationConfiguration', 'tier2');
+    if (method === 'PUT' && has('notification') && only('notification')) return op('PutBucketNotificationConfiguration', 'tier1', true);
     if (method === 'GET' && has('uploads') && only(UPLOADS_LISTING)) return op('ListMultipartUploads', 'tier1');
     if (method === 'GET' && only(LISTING)) return op(query.get('list-type') === '2' ? 'ListObjectsV2' : 'ListObjects', 'tier1');
     if (method === 'HEAD' && names.length === 0) return op('HeadBucket', 'tier2');

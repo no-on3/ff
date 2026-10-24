@@ -1,4 +1,5 @@
 import { Check, Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import type { NotificationRule } from './bucket-notifications';
 
 /** Where a bucket is in its life. */
 export enum BucketStatus {
@@ -34,6 +35,14 @@ export class Bucket {
 
   @Column({ type: 'text', default: BucketStatus.ACTIVE })
   status: BucketStatus;
+
+  /**
+   * Its notification configurations, as S3 keeps them: the functions and
+   * queues its objects' events go to, checked when they are set; null for
+   * none.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  notifications: NotificationRule[] | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

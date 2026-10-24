@@ -307,6 +307,11 @@ as_a POST /queues/l5-orders-a/messages '{"body": "A'"'"'s own"}' >/dev/null
 check "  ... and sends it a message" 201 "$(status)"
 mapping_a="$(as_a POST "/functions/$id/event-sources" "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a\", \"enabled\": false}" | jq -r .uuid)"
 check "  ... which A's function is mapped to, disabled: nothing reads the message" 201 "$(status)"
+as_a POST /queues '{"name": "l5-events-a"}' >/dev/null
+as_a PUT /buckets/l5-photos-a/notifications "{\"queueConfigurations\": [{\"id\": \"l5\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
+check "  ... and A's bucket sends its deletions' events to a queue of A's" "200 l5" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
+# notified_by <as_…> <bucket>: the IDs of the bucket's notification configurations, as its own account reads them.
+notified_by() { "$1" GET "/buckets/$2/notifications" | jq -r '[.queueConfigurations[].id] | join(",")'; }
 # kept_by <as_…> <queue>: the queue's name and its messages that can be received, as its own account reads them.
 kept_by() { "$1" GET "/queues/$2" | jq -r '"\(.name) \(.messages.available)"'; }
 # queue_body <route>: a body each queue route takes, so that only the queue's owner decides its answer.
@@ -561,6 +566,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B gets 404 for A's bucket" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
       check "  ... which A still has" "l5-photos-a 200" "$(as_a GET /buckets/l5-photos-a | jq -r .name) $(status)"
       ;;
+    "GET /buckets/{name}/notifications" | "PUT /buckets/{name}/notifications")
+      as_b "$method" /buckets/l5-photos-a/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
+      check "$route: B gets 404 for A's bucket's notifications" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
+      check "  ... which A still has, as it set them" "l5 200" "$(notified_by as_a l5-photos-a) $(status)"
+      ;;
     "GET /buckets/{name}/metrics")
       as_b GET /buckets/l5-photos-a/metrics >/dev/null
       check "$route: B gets 404 for A's bucket's metrics" '404 The account has no bucket l5-photos-a' "$(status) $(message)"
@@ -706,6 +716,9 @@ check "B can't have its own function read A's queue" \
 patiently as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-orders-a" '{eventSourceArn: $arn}')"
 check "  ... which, under its own account's ARN, is no queue of B's" '400 eventSourceArn: the account has no queue named "l5-orders-a"' "$(status) $(message)"
 check "  ... and A's message is still there, not received" "l5-orders-a 1 200" "$(kept_by as_a l5-orders-a) $(status)"
+patiently as_b PUT /buckets/l5-photos-b/notifications "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" '{queueConfigurations: [{queueArn: $arn, events: ["s3:ObjectCreated:*"]}]}')"
+check "B's bucket can't send its events to A's queue" \
+  "400 InvalidArgument: A destination must be a queue of the bucket's account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" "$(status) $(message)"
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
 patiently as_b DELETE "/functions/$own"
 check "B deletes its own function" 200 "$(status)"
@@ -734,6 +747,10 @@ check "  ... and a copy from the other's bucket too" "refused AccessDenied" \
   "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api copy-object --bucket l5-photos-b --key stolen.txt --copy-source l5-photos-a/anything.txt)"
 check "ListBuckets lists each key's own account's buckets alone" "l5-photos-a" \
   "$(AWS_ACCESS_KEY_ID="$key_a_id" AWS_SECRET_ACCESS_KEY="$key_a_secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$storage_port" s3api list-buckets --query 'Buckets[].Name' --output text)"
+check "B's key can neither read nor set A's bucket's notifications, which A still has" "refused AccessDenied refused AccessDenied l5" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-notification-configuration --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-notification-configuration --bucket l5-photos-a --notification-configuration '{}') \
+$(notified_by as_a l5-photos-a)"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
 
@@ -761,11 +778,11 @@ check "  ... nor purged, nor deleted: A's message is there still" "refused AWS.S
 # Each lists its own: this queue, and the one its account made through FF's API above.
 listed_by() { sqs_with "$1" "$2" list-queues --query QueueUrls | tr '\t' ' '; }
 check "ListQueues lists each key's own account's queues alone" \
-  "$queue_a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a $queue_b http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
+  "http://127.0.0.1:$sqs_port/$account_a/l5-events-a $queue_a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a $queue_b http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
   "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
 sqs_with "$key_a_id" "$key_a_secret" delete-queue --queue-url "$queue_a" >/dev/null
 sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_b" >/dev/null
-check "each deletes its own queue" "http://127.0.0.1:$sqs_port/$account_a/l5-orders-a http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
+check "each deletes its own queue" "http://127.0.0.1:$sqs_port/$account_a/l5-events-a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
   "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
 
 echo "== nobody authenticated, through the guard, on every route (${#routes[@]})"
@@ -871,6 +888,9 @@ as_user_1 POST /queues/l5-orders-1/messages '{"body": "account 1'"'"'s own"}' >/
 check "  ... and sends it a message" 201 "$(status)"
 mapping_1="$(as_user_1 POST "/functions/$fn_1/event-sources" "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_1:l5-orders-1\", \"enabled\": false}" | jq -r .uuid)"
 check "  ... which its function is mapped to, disabled" 201 "$(status)"
+as_user_1 POST /queues '{"name": "l5-events-1"}' >/dev/null
+as_user_1 PUT /buckets/l5-photos-1/notifications "{\"queueConfigurations\": [{\"id\": \"l5-one\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_1:l5-events-1\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
+check "  ... and its bucket sends its deletions' events to a queue of its own" "200 l5-one" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
 key_1_s3="$(as_user_1 POST /storage-keys '{}')"
 check "  ... and an access key to it" 201 "$(status)"
 key_1_s3_id="$(jq -r .id <<<"$key_1_s3")"
@@ -1025,6 +1045,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 "$method" /buckets/l5-photos-1 >/dev/null
       check "$route: account 2 gets 404 for account 1's bucket" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
       check "  ... which account 1 still has" "l5-photos-1 200" "$(as_user_1 GET /buckets/l5-photos-1 | jq -r .name) $(status)"
+      ;;
+    "GET /buckets/{name}/notifications" | "PUT /buckets/{name}/notifications")
+      as_user_2 "$method" /buckets/l5-photos-1/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
+      check "$route: account 2 gets 404 for account 1's bucket's notifications" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
+      check "  ... which account 1 still has, as it set them" "l5-one 200" "$(notified_by as_user_1 l5-photos-1) $(status)"
       ;;
     "GET /buckets/{name}/metrics")
       as_user_2 GET /buckets/l5-photos-1/metrics >/dev/null
@@ -1308,7 +1333,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create queue.create event_source.create storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create queue.create event_source.create queue.create bucket.notifications storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

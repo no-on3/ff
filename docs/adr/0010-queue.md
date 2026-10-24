@@ -117,6 +117,12 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 - **The console and `ff`** make and change mappings through FF's API, as its other callers do: a queue named by its name, sent as the ARN the API gives it, and a function by its page or its name.
 - **What this leaves:** every backend reads every mapping, so a mapping's batches may be as many again with each backend; a lease per mapping would make one backend read it, when FF runs more than one. A batch's messages are hidden from their receive on, so a window longer than the queue's visibility timeout lets the first come back while it fills: the visibility timeout should cover the window and the function's timeout together.
 
+### As built (Q-07, part 1): buckets' notifications
+
+- **S3's configuration, in a column of the bucket's** (the migration `BucketNotifications`), read with the bucket by the S3 front door: PutBucketNotificationConfiguration and GetBucketNotificationConfiguration through it, in S3's XML, read by a small reader of FF's own that refuses a DOCTYPE, and FF's API in S3's JSON names. Checked as S3 checks it, overlapping configurations refused, so that an event goes to one destination; each destination the account's, there unless the caller skips that check.
+- **The front door publishes, the queues' side delivers:** once the store answered a write a configuration names, the front door makes S3's record (a created object's size and ETag from the store) and publishes it in the process; the queues' module delivers it, a function's asynchronous call, as S3 calls Lambda, or a queue's message. The two modules don't import each other's code at run time: storage knows a destination only by its row.
+- **What this leaves:** an event is written after the store's answer, so a backend that dies between the two loses it; one that stops waits for the events under way. S3 promises at least once and usually within seconds; FF sends at most once, within milliseconds.
+
 ## Consequences
 
 - One more append-and-delete table in FF's database, its size bounded by the plans' limits on messages (the decision log, 28); the operator's database alerts and backups cover it, its point-in-time recovery possibly redelivering what was handled in the last minutes.

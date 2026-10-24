@@ -64,6 +64,7 @@ const EVENT_INVOKE_CONFIGS = migrationNames.find((name) => name.startsWith('Even
 const CUSTOMER_QUEUES = migrationNames.find((name) => name.startsWith('CustomerQueues')) as string;
 const ASYNC_NOTIFY = migrationNames.find((name) => name.startsWith('AsyncNotify')) as string;
 const KEY_QUEUES = migrationNames.find((name) => name.startsWith('KeyQueues')) as string;
+const EVENT_SOURCE_MAPPINGS = migrationNames.find((name) => name.startsWith('EventSourceMappings')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -547,6 +548,26 @@ run('database schema (L2, real PostgreSQL)', () => {
       await map(orders);
       await dataSource.query(`DELETE FROM functions WHERE id = $1`, [fn]);
       expect(await dataSource.query(`SELECT count(*)::int AS mappings FROM event_source_mappings`)).toEqual([{ mappings: 0 }]);
+    });
+  });
+
+  it("the bucket-notifications migration gives every bucket there is no notification, and reverts with a bucket's configuration present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, EVENT_SOURCE_MAPPINGS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, 'before', 'ff-0123456789abcdef01234567')`, [ACCOUNT]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT notifications FROM buckets WHERE name = 'before'`)).toEqual([{ notifications: null }]);
+      await dataSource.query(`UPDATE buckets SET notifications = $1 WHERE name = 'before'`, [
+        JSON.stringify([{ id: 'r', target: 'queue', arn: `arn:aws:sqs:tn-tunis-1:${ACCOUNT}:q`, events: ['s3:ObjectCreated:*'], prefix: null, suffix: null }]),
+      ]);
+      await migrateDownTo(dataSource, EVENT_SOURCE_MAPPINGS);
+      expect(await dataSource.query(`SELECT name FROM buckets`)).toEqual([{ name: 'before' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });
 

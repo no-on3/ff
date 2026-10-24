@@ -924,7 +924,7 @@ sleep 2
 check "aws: a presigned URL, fetched; one past its expiry, AccessDenied" "<h1>Ahlan</h1> 403 AccessDenied" \
   "$(curl -s "$presigned") $(curl -s -o "$work/expired" -w '%{http_code}' "$expiring") $(grep -o '<Code>[^<]*' "$work/expired" | cut -c7-)"
 # outcome <command…>: accepted, or refused with the S3 error's code in its message, as the CLI prints it.
-outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
+outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|InvalidArgument)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
 check "aws: a wrong secret, SignatureDoesNotMatch" "refused SignatureDoesNotMatch" "$(AWS_SECRET=wrong-secret outcome aws_ff s3 ls s3://e2e-photos)"
 check "aws: another account's bucket, AccessDenied" "refused AccessDenied" "$(outcome aws_ff s3 ls s3://e2e-theirs)"
 check "a read-only key lists, and writes nothing: AccessDenied" "accepted refused AccessDenied" \
@@ -1206,7 +1206,48 @@ check "  ... and deleted: the message stays" "204 1 []" "$(status) $(http GET /q
 check "the audit log names each change of the mapping" "event_source.create|event_source.update|event_source.delete" \
   "$(env_q "SELECT string_agg(action, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'event_source:$mapping_id'")"
 http DELETE "/functions/$batch_fn" >/dev/null
-for queue in e2e-batch e2e-batch-dlq e2e-cli-orders e2e-fn-orders e2e-fn-records; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
+
+echo "== buckets' notifications, as S3's: an upload runs a function with S3's event, a deletion puts S3's event in a queue"
+# The AWS CLI on buckets with the queues' key, which reaches all the account's buckets and queues.
+s3n() { AWS_KEY="$queue_key_id" AWS_SECRET="$queue_key_secret" aws_ff "$@"; }
+http POST /buckets '{"name": "e2e-notify"}' >/dev/null
+# As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
+upload_code='export const handler = async (event) => ({ keys: event.Records.map((record) => decodeURIComponent(record.s3.object.key.replace(/\+/g, " "))), name: event.Records[0].eventName });'
+upload_fn="$(http POST /functions "$(jq -n --arg code "$upload_code" '{name: "e2e-on-upload", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+aws_sqs create-queue --queue-name e2e-removals >/dev/null
+removals_url="$sqs_endpoint/$tenant/e2e-removals"
+s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn \
+  --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-on-upload" --arg queue "arn:aws:sqs:tn-tunis-1:$tenant:e2e-removals" \
+  '{LambdaFunctionConfigurations: [{Id: "uploads", LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"], Filter: {Key: {FilterRules: [{Name: "prefix", Value: "uploads/"}]}}}],
+    QueueConfigurations: [{Id: "removals", QueueArn: $queue, Events: ["s3:ObjectRemoved:*"]}]}')"
+check "the AWS CLI sets a bucket's notifications, as S3's, and reads them back; FF's API reads the same" "uploads removals uploads removals" \
+  "$(s3n s3api get-bucket-notification-configuration --bucket e2e-notify | jq -r '"\(.LambdaFunctionConfigurations[0].Id) \(.QueueConfigurations[0].Id)"') \
+$(http GET /buckets/e2e-notify/notifications | jq -r '"\(.lambdaFunctionConfigurations[0].id) \(.queueConfigurations[0].id)"')"
+aws_sqs receive-message --queue-url "$removals_url" --wait-time-seconds 5 >"$work/s3-test.json"
+check "  ... and the queue it names gets S3's test event" "s3:TestEvent e2e-notify" "$(jq -r '.Messages[0].Body | fromjson | "\(.Event) \(.Bucket)"' "$work/s3-test.json")"
+aws_sqs delete-message --queue-url "$removals_url" --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' "$work/s3-test.json")"
+printf 'not an upload' >"$work/other.txt"
+printf 'a red cat' >"$work/cat.jpg"
+s3n s3 cp "$work/other.txt" s3://e2e-notify/other/x.txt --only-show-errors
+s3n s3 cp "$work/cat.jpg" "s3://e2e-notify/uploads/red cat.jpg" --only-show-errors
+for _ in $(seq 1 30); do
+  [ "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq '[.invocations[] | select(.source == "async" and .status == "COMPLETED")] | length')" -ge 1 ] && break
+  sleep 1
+done
+check "an upload its rule names runs the function without waiting, S3's event its input, the key decoded as Lambda's functions decode it; another, nothing" \
+  '1 ["uploads/red cat.jpg"] ObjectCreated:Put 9 e2e-notify' \
+  "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq -r '[.invocations[] | select(.source == "async")] | "\(length) \(.[0].output.keys | tojson) \(.[0].output.name) \(.[0].input.Records[0].s3.object.size) \(.[0].input.Records[0].s3.bucket.name)"')"
+s3n s3 rm "s3://e2e-notify/uploads/red cat.jpg" --only-show-errors
+aws_sqs receive-message --queue-url "$removals_url" --wait-time-seconds 10 --attribute-names SenderId >"$work/s3-removed.json"
+check "a deletion puts S3's event in the queue, as S3 sends it to SQS, from the bucket" "ObjectRemoved:Delete uploads%2Fred+cat.jpg removals arn:aws:s3:::e2e-notify" \
+  "$(jq -r '.Messages[0].Body | fromjson | .Records[0] | "\(.eventName) \(.s3.object.key) \(.s3.configurationId)"' "$work/s3-removed.json") $(jq -r '.Messages[0].Attributes.SenderId' "$work/s3-removed.json")"
+check "  ... a destination the account doesn't have refused, as S3 refuses one it can't validate" "refused InvalidArgument" \
+  "$(outcome s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:nowhere" '{LambdaFunctionConfigurations: [{LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"]}]}')")"
+check "the audit log names the change, under the CLI's key" "bucket.notifications access_key:$queue_key_id" \
+  "$(env_q "SELECT action || ' ' || actor FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-notify' AND action = 'bucket.notifications' ORDER BY at DESC LIMIT 1")"
+http DELETE "/functions/$upload_fn" >/dev/null
+http DELETE "/buckets/e2e-notify?force=true" >/dev/null
+for queue in e2e-removals e2e-batch e2e-batch-dlq e2e-cli-orders e2e-fn-orders e2e-fn-records; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
 as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
 check "the queues deleted, their messages with them" "0 0" \
   "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"

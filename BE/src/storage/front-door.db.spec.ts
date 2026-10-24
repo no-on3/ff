@@ -28,6 +28,8 @@ import { EncryptionService } from '../encryption/encryption.service';
 import { Bucket } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { StorageDirectory } from './storage-directory.service';
+import { BucketEvents } from './bucket-events';
+import { BucketNotificationsService } from './bucket-notifications.service';
 import { StorageKey } from './storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey, newStoreName } from './storage-names';
 import { StorageRequestCount } from './storage-request-count.entity';
@@ -106,6 +108,9 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
       onePlan(),
       credit,
       throttler,
+      // The buckets here have no notifications: their own suite has them.
+      {} as BucketNotificationsService,
+      new BucketEvents(),
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
