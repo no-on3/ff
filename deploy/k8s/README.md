@@ -61,7 +61,7 @@ PostgreSQL and S3 are outside the cluster (D13). The images are built from `BE/`
 4. An overlay of `platform/` with FF's values:
    - `backend.env`, merged: the hostnames, the database, S3, the seller's and the bank's details, `FF_TRUST_PROXY` (the cluster's pod network, which only the edge reaches the backend from);
    - `keycloak.env`: the login hostname, its database, the mail server;
-   - `edge.env`: the four hostnames, the ACME e-mail, `FF_ADMIN_ALLOW`, FF's own addresses, and the function domain with its way to certificates ("Function URLs", below);
+   - `edge.env`: the four hostnames, the ACME e-mail, `FF_ADMIN_ALLOW`, FF's own addresses, and the function domain with its way to certificates ("Function URLs", below); `FF_EDGE_TRUSTED_PROXIES` stays empty, unless a proxy of the server's own stands in front of the edge, whose `X-Forwarded-For` then names the caller, as on a server shared with other sites;
    - `images`: the registry's images and their tags.
 5. The Secrets:
 
@@ -157,7 +157,7 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 | `platform/70-code-registry.yaml` | PVC, Service (at a fixed address) and Deployment `ff-code-registry` | Zot 2.1.22, minimal, the functions' code images; user 10001, read-only root; two users from the Secret `ff-code-registry` |
 | `platform/code-registry/config.json` | ConfigMap `ff-code-registry` | Zot's settings: its storage and its collection of blobs nothing names, the login, `ff-backend` pushing and deleting, `ff-node` pulling |
 | `platform/backend.env`, `keycloak.env`, `edge.env` | ConfigMaps | What isn't secret, with example values (`example.tn`) for an overlay to replace |
-| `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites and the function domain's, HSTS, the allowlist, function URLs' certificates by DNS or on demand; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
+| `platform/edge/Caddyfile` | ConfigMap `ff-edge-caddyfile` | The four sites and the function domain's, HSTS, the allowlist, by the caller's address, which a proxy that `FF_EDGE_TRUSTED_PROXIES` names may give; function URLs' certificates by DNS or on demand; `FF_EDGE_TLS=local_certs` for tests, which have no ACME |
 | `platform/keycloak/ff-realm.json` | ConfigMap `keycloak-realm` | The production realm |
 
 `hack/e2e-platform.sh` deploys them on a k3d cluster of its own, with `deploy.sh` and the overlay `hack/k8s/platform-e2e`, and takes a customer's path through the edge (the Kubernetes dev guide, "The platform on a cluster of its own"). `hack/k8s/test-platform-manifests.sh` checks them without deploying:
@@ -167,7 +167,7 @@ The realm is imported at Keycloak's first start only: a realm already there is l
 - the backend's settings, read by the backend's own configuration;
 - the realm up to date;
 - the function domain the same for the backend and the edge, and the backend's port for function URLs reached by the edge alone;
-- the edge's image with the RFC 2136 module, and its Caddyfile valid for Caddy, with function URLs' certificates either way;
+- the edge's image with the RFC 2136 module, and its Caddyfile valid for Caddy, with function URLs' certificates either way; its allowlist believing `X-Forwarded-For` from the proxies `FF_EDGE_TRUSTED_PROXIES` names alone;
 - the code registry: Zot's settings valid for its pinned image, where the volume and the users' Secret are mounted; its fixed address and port the backend's settings name; the backend alone reaching it;
 - the cluster API's schemas, with a server dry run.
 
