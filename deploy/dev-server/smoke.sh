@@ -117,7 +117,8 @@ api() { # <username> <method> <path> [JSON]: the API's answer, as that user; its
 }
 
 customer="smoke-$run@$domain"
-operator="smoke-operator-$run"
+# FF's realm makes each user's e-mail address its username (registrationEmailAsUsername).
+operator="smoke-operator-$run@$domain"
 account="" function="" bucket="" queue=""
 cleanup() {
   local status=$?
@@ -144,7 +145,7 @@ kubectl -n ff-system port-forward service/keycloak 18081:8080 >/dev/null 2>&1 &
 forward=$!
 for _ in $(seq 1 30); do curl -s -o /dev/null "$kc/realms/ff" && break; sleep 1; done
 make_user "$customer" "$customer" >/dev/null
-make_user "$operator" "$operator@$domain" ff-operator >/dev/null
+make_user "$operator" "$operator" ff-operator >/dev/null
 login ff-console "https://console.$domain" "$customer"
 login ff-admin "https://admin.$domain" "$operator"
 check "each signed in as a browser is, the operator after setting up a one-time password" "true true" \

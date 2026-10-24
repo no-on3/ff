@@ -275,7 +275,9 @@ EOF
 "$src/deploy/k8s/platform/deploy.sh" "$overlay" >"$work/deploy.log" 2>&1 || { tail -30 "$work/deploy.log" >&2; fail "deploy.sh failed"; }
 grep -E 'executed successfully|No migrations|^platform deployed$|^functions run' "$work/deploy.log" | sed 's/^/  /'
 
-step "the first operator, once"
+# FF's realm makes each user's e-mail address its username (registrationEmailAsUsername).
+operator="operator@$domain"
+step "the first operator, $operator"
 kubectl -n ff-system port-forward service/keycloak 18080:8080 >/dev/null 2>&1 &
 forward=$!
 trap 'kill "$forward" 2>/dev/null || true; rm -rf "$work"' EXIT
@@ -283,20 +285,21 @@ for _ in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:18080/realms/ff &
 kc="http://127.0.0.1:18080"
 curl -fsS "$kc/realms/master/protocol/openid-connect/token" -d grant_type=password -d client_id=admin-cli -d username=admin \
   --data-urlencode "password@$secrets/keycloak-admin-password" | python3 -c 'import json, sys; print("authorization: Bearer " + json.load(sys.stdin)["access_token"])' >"$work/admin-header"
-if [ "$(curl -fsS -H "@$work/admin-header" "$kc/admin/realms/ff/users?username=operator&exact=true")" = "[]" ]; then
-  python3 - "$secrets/operator-password" "$domain" >"$work/operator.json" <<'PY'
+users_named() { curl -fsS -H "@$work/admin-header" "$kc/admin/realms/ff/users?username=$1&exact=true"; }
+if [ "$(users_named "$operator")" = "[]" ]; then
+  python3 - "$secrets/operator-password" "$operator" >"$work/operator.json" <<'PY'
 import json, sys
-print(json.dumps({"username": "operator", "email": f"operator@{sys.argv[2]}", "emailVerified": True, "enabled": True,
+print(json.dumps({"username": sys.argv[2], "email": sys.argv[2], "emailVerified": True, "enabled": True,
   "firstName": "FF", "lastName": "Operator", "credentials": [{"type": "password", "value": open(sys.argv[1]).read(), "temporary": False}]}))
 PY
   curl -fsS -H "@$work/admin-header" -H 'content-type: application/json' -d "@$work/operator.json" "$kc/admin/realms/ff/users"
-  id="$(curl -fsS -H "@$work/admin-header" "$kc/admin/realms/ff/users?username=operator&exact=true" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["id"])')"
-  curl -fsS -H "@$work/admin-header" "$kc/admin/realms/ff/roles/ff-operator" | python3 -c 'import json, sys; print(json.dumps([json.load(sys.stdin)]))' >"$work/role.json"
-  curl -fsS -H "@$work/admin-header" -H 'content-type: application/json' -d "@$work/role.json" "$kc/admin/realms/ff/users/$id/role-mappings/realm"
-  echo "  the user operator, with the realm role ff-operator; its password in $secrets/operator-password, its one-time password set at its first login"
-else
-  echo "  the user operator is there already"
+  echo "  made, its password in $secrets/operator-password, its one-time password set at its first login"
 fi
+# Its role each run, which Keycloak grants once: a run stopped between the two steps leaves nothing half done.
+id="$(users_named "$operator" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["id"])')"
+curl -fsS -H "@$work/admin-header" "$kc/admin/realms/ff/roles/ff-operator" | python3 -c 'import json, sys; print(json.dumps([json.load(sys.stdin)]))' >"$work/role.json"
+curl -fsS -H "@$work/admin-header" -H 'content-type: application/json' -d "@$work/role.json" "$kc/admin/realms/ff/users/$id/role-mappings/realm"
+echo "  $operator has the realm role ff-operator"
 
 step "FF's route in the server's own proxy ($proxy/sites/ff.caddy)"
 root="$(kubectl -n ff-edge exec deploy/ff-edge -- cat /data/caddy/pki/authorities/local/root.crt | openssl x509 -outform der | base64 -w0)"

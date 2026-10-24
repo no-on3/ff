@@ -35,7 +35,7 @@ The same command installs and updates. It copies the checkout's files to `/data/
 3. k3s and gVisor, at the versions the development cluster runs (`hack/k8s/env.sh`, `hack/k8s/gvisor-up.sh`), each checked against its release's checksum; the firewall's rules for pods; customers' databases' name in the cluster's DNS.
 4. The images, built on the server and given to k3s, tagged with the commit (with `-dirty-<time>` when the checkout has changes).
 5. `deploy/k8s`: base, the Secrets, logging, monitoring, gVisor's RuntimeClass; then the platform with `deploy/k8s/platform/deploy.sh` and this folder's overlay (`k8s/`), with what is the server's own added on the server (`/data/ff/overlay`).
-6. The first operator, `operator`, once.
+6. The first operator, `operator@dev.ffunc.cloud`, once: FF's realm makes each user's e-mail address its username.
 7. The route file, installed and the proxy reloaded. The proxy checks a configuration as it loads it; a route it refuses is put back as it was, so that no other project's next reload meets it.
 8. Every hostname, through the proxy, as from the internet, once Let's Encrypt has given the six fixed names their certificates (a minute or so the first time).
 
@@ -49,7 +49,7 @@ FF's names are under `dev.ffunc.cloud`, in OVH's DNS: `api`, `console`, `admin`,
 
 1. **The proxy's root,** for function URLs and buckets, which your browser and your system must trust: `ssh next 'sudo docker compose --project-directory /data/proxy exec -T caddy cat /data/caddy/pki/authorities/local/root.crt' > ff-dev-root.crt`. It is the one that already signs the other projects' certificates for the server's address. The six fixed names need nothing: their certificates are Let's Encrypt's.
 2. **The console,** `https://console.dev.ffunc.cloud`: sign up, confirm the address from the e-mail in Mailpit, and ask for an account.
-3. **The admin app,** `https://admin.dev.ffunc.cloud`, as `operator`: its password is `ssh next sudo cat /data/ff/secrets/operator-password`, and it sets up its one-time password at its first login. Approve the account there.
+3. **The admin app,** `https://admin.dev.ffunc.cloud`, as `operator@dev.ffunc.cloud`: its password is `ssh next sudo cat /data/ff/secrets/operator-password`, and it sets up its one-time password at its first login. Approve the account there.
 4. **Mail:** `ssh -L 8026:127.0.0.1:8026 next`, then `http://localhost:8026`.
 5. **The `ff` command:** `FF_ENDPOINT=https://api.dev.ffunc.cloud`, with an API key made in the console (the [getting-started guide](../../docs/getting-started.md)). The API's certificate is Let's Encrypt's; calling a function at its URL takes the proxy's root among your system's.
 
