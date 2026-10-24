@@ -46,9 +46,10 @@ import { StorageKey } from '../storage/storage-key.entity';
 import { StorageRequestCount } from '../storage/storage-request-count.entity';
 import { Queue } from '../queues/queue.entity';
 import { QueueMessage } from '../queues/queue-message.entity';
+import { QueueRequestCount } from '../queues/queue-request-count.entity';
 
 /**
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping, QueueRequestCount];

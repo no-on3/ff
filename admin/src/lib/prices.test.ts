@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PriceDocument, draftDocument, earliestStart, formFrom, multiplyDecimals, pricesStorage, sourceLabel, storageTierLabel, tierLabel } from './prices';
+import { PriceDocument, bookRows, draftDocument, earliestStart, formFrom, multiplyDecimals, pricesQueues, pricesStorage, queueTierLabel, sourceLabel, storageTierLabel, tierLabel } from './prices';
 
 /** The first price book, as the backend's migration loads it (P-30). */
 const FIRST: PriceDocument = {
@@ -135,6 +135,26 @@ describe('a new price book, from the active one (P-73)', () => {
   });
 });
 
+/** The book after that, as the backend's queues migration makes it: SQS's request tiers too, at the same rate, and its free million. */
+const QUEUE_TIERS = [
+  { upToRequests: 100_000_000_000, price: '0.40' },
+  { upToRequests: 200_000_000_000, price: '0.30' },
+  { upToRequests: null, price: '0.24' },
+];
+const WITH_QUEUES: PriceDocument = {
+  ...WITH_STORAGE,
+  source: { ...WITH_STORAGE.source, usdPrices: { ...WITH_STORAGE.source.usdPrices!, queueRequestsPerMillion: QUEUE_TIERS } },
+  freeTier: { ...WITH_STORAGE.freeTier, queueRequests: 1_000_000 },
+  prices: {
+    ...WITH_STORAGE.prices,
+    queueRequestsPerMillion: [
+      { upToRequests: 100_000_000_000, price: '1.2032' },
+      { upToRequests: 200_000_000_000, price: '0.9024' },
+      { upToRequests: null, price: '0.72192' },
+    ],
+  },
+};
+
 describe("a new price book from one with customers' databases' and buckets' prices", () => {
   it('gives them back unchanged, their free tier and the fee per database with them', () => {
     expect(draftDocument(formFrom(WITH_STORAGE, NOW), WITH_STORAGE, NOW)).toEqual({
@@ -178,6 +198,74 @@ describe("a new price book from one with customers' databases' and buckets' pric
 
   it("names S3's storage tiers by where they end", () => {
     expect(STORAGE_TIERS.map((_tier, index) => storageTierLabel(STORAGE_TIERS, index))).toEqual(['first 51,200 GB-months', 'up to 512,000 GB-months', 'past 512,000 GB-months']);
+  });
+});
+
+describe("a new price book from one with customers' queues' prices", () => {
+  it('gives them back unchanged, their free million with them', () => {
+    expect(draftDocument(formFrom(WITH_QUEUES, NOW), WITH_QUEUES, NOW)).toEqual({
+      validFrom: '2026-10-17T11:00:00Z',
+      document: { ...WITH_QUEUES, source: { ...WITH_QUEUES.source, readOn: '2026-10-17' } },
+    });
+  });
+
+  it("prices each tier at a new rate too, AWS's US$ price times it, and takes the free requests as set", () => {
+    const form = formFrom(WITH_QUEUES, NOW);
+
+    expect(draftDocument({ ...form, rate: '3.1', storage: { ...form.storage, freeQueueRequests: '2000000' } }, WITH_QUEUES, NOW)).toMatchObject({
+      document: {
+        prices: {
+          queueRequestsPerMillion: [
+            { upToRequests: 100_000_000_000, price: '1.24' },
+            { upToRequests: 200_000_000_000, price: '0.93' },
+            { upToRequests: null, price: '0.744' },
+          ],
+        },
+        freeTier: { queueRequests: 2_000_000, requestsTier1: 2_000 },
+        source: { usdPrices: { queueRequestsPerMillion: QUEUE_TIERS } },
+      },
+    });
+  });
+
+  it('takes TND tiers as given in manual mode', () => {
+    const form = formFrom(WITH_QUEUES, NOW);
+    const manual = { ...form, mode: 'manual' as const, storage: { ...form.storage, tnd: { ...form.storage.tnd, queueTiers: ['1.5', '1', '0.5'] } } };
+
+    const draft = draftDocument(manual, WITH_QUEUES, NOW);
+    expect('document' in draft && draft.document.prices.queueRequestsPerMillion).toEqual([
+      { upToRequests: 100_000_000_000, price: '1.5' },
+      { upToRequests: 200_000_000_000, price: '1' },
+      { upToRequests: null, price: '0.5' },
+    ]);
+  });
+
+  it('names a tier left empty, and adds none to a book from one without them', () => {
+    const form = formFrom(WITH_QUEUES, NOW);
+
+    expect(draftDocument({ ...form, storage: { ...form.storage, usd: { ...form.storage.usd, queueTiers: ['0.40', '', '0.24'] } } }, WITH_QUEUES, NOW)).toEqual({
+      problems: ['Queue requests tier 2 (US$): must be a decimal number, such as 0.0000166667'],
+    });
+    const draft = draftDocument(formFrom(WITH_STORAGE, NOW), WITH_STORAGE, NOW);
+    expect([pricesQueues(WITH_STORAGE), pricesQueues(WITH_QUEUES), 'document' in draft && pricesQueues(draft.document)]).toEqual([false, true, false]);
+  });
+
+  it("lists SQS's tiers in TND and in US$, and its free million, after the storage's, in a book that has them alone", () => {
+    expect(bookRows(WITH_QUEUES).slice(-4)).toEqual([
+      ['Queue requests, first 100,000,000,000 requests, per million', '1.2032', '0.40'],
+      ['Queue requests, up to 200,000,000,000 requests, per million', '0.9024', '0.30'],
+      ['Queue requests, past 200,000,000,000 requests, per million', '0.72192', '0.24'],
+      ['Free tier of queues, a month', '1,000,000 requests', ''],
+    ]);
+    expect(bookRows(WITH_STORAGE).filter(([label]) => label.includes('queue') || label.includes('Queue'))).toEqual([]);
+    expect(bookRows(FIRST)).toHaveLength(10);
+  });
+
+  it("names SQS's request tiers by where they end", () => {
+    expect(QUEUE_TIERS.map((_tier, index) => queueTierLabel(QUEUE_TIERS, index))).toEqual([
+      'first 100,000,000,000 requests',
+      'up to 200,000,000,000 requests',
+      'past 200,000,000,000 requests',
+    ]);
   });
 });
 

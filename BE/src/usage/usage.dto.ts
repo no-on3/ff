@@ -136,21 +136,54 @@ export class BucketUsageView {
   cost: string | null;
 }
 
+export class QueueUsageView {
+  @ApiProperty({ example: '3f1c9a2e-5b7d-4e8f-9a0b-1c2d3e4f5a6b' })
+  queueId: string;
+
+  @ApiProperty({ example: 'orders', description: 'Its name in the month' })
+  name: string;
+
+  @ApiProperty({ description: 'The queue was deleted since: its usage stays' })
+  deleted: boolean;
+
+  @ApiProperty({
+    example: 18_420,
+    description:
+      "Its requests as SQS bills them: each 64 KB of a request's messages a request, through the SQS endpoint or FF's API; each batch a function read counts as the request that would have received it, the reads that find nothing and the deletes after a call as none",
+  })
+  requests: number;
+
+  @ApiProperty({ example: 6_140, description: "The messages kept in it, as CloudWatch's NumberOfMessagesSent counts them" })
+  messagesSent: number;
+
+  @ApiProperty({ example: 6_152, description: "The messages received from it, by a consumer or a function's batch (NumberOfMessagesReceived): a message received twice counts twice" })
+  messagesReceived: number;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    example: '0.000',
+    description: "Its estimated cost in the estimate's currency, before the free tier, rounded to the minor unit; null without a price book",
+  })
+  cost: string | null;
+}
+
 /** The month's estimated cost at FF's prices (P-30, D8). Each amount is rounded once, from the exact ones. */
 export class UsageEstimateView {
   @ApiProperty({ example: 'TND' })
   currency: string;
 
-  @ApiProperty({ example: '28.877', description: 'Every function and database together, before the free tier' })
+  @ApiProperty({ example: '28.877', description: 'Every function, database, bucket and queue together, before the free tier' })
   usage: string;
 
   @ApiProperty({
     example: '-20.655',
-    description: 'What the free tier takes off: 1 million requests and 400,000 GB-s a month, of calls without minInstances (D8); and, in the books that price databases, 1 GB-month of them',
+    description:
+      "What the free tier takes off: 1 million requests and 400,000 GB-s a month, of calls without minInstances (D8); and, in the books that price them, 1 GB-month of databases, 5 GB-months of buckets with 2,000 PUT and 20,000 GET requests, and 1 million requests to queues",
   })
   freeTier: string;
 
-  @ApiProperty({ example: '0.000', description: 'What the duration tiers past 6 billion GB-s a month take off' })
+  @ApiProperty({ example: '0.000', description: "What the duration tiers past 6 billion GB-s a month take off, and those of buckets' storage past 50 TB and of queues' requests past 100 billion" })
   volumeTiers: string;
 
   @ApiProperty({ example: '0.000', description: 'A monthly fee, if the price book has one (D8)' })
@@ -182,6 +215,9 @@ export class MonthlyUsageView {
   @ApiProperty({ type: [BucketUsageView], description: "Each of the account's buckets measured or asked anything in the month (ADR 0009), the most GB-months first" })
   buckets: BucketUsageView[];
 
+  @ApiProperty({ type: [QueueUsageView], description: "Each of the account's queues asked anything in the month (ADR 0010), the most requests first" })
+  queues: QueueUsageView[];
+
   @ApiProperty({ type: UsageAmountsView, description: "The account's calls in the month, from the same records as its functions'" })
   totals: UsageAmountsView;
 
@@ -190,10 +226,13 @@ export class MonthlyUsageView {
 }
 
 /** The month as UsageService reads it from the records, before it is priced. */
-export type UsageMonth = Omit<MonthlyUsageView, 'functions' | 'databases' | 'buckets' | 'estimate'> & { functions: Array<Omit<FunctionUsageView, 'cost'>> };
+export type UsageMonth = Omit<MonthlyUsageView, 'functions' | 'databases' | 'buckets' | 'queues' | 'estimate'> & { functions: Array<Omit<FunctionUsageView, 'cost'>> };
 
 /** A database's month as UsageService reads it from its samples, before it is priced. */
 export type DatabaseMonth = Omit<DatabaseUsageView, 'cost'>;
 
 /** A bucket's month as UsageService reads it from its samples and its request counts, before it is priced. */
 export type BucketMonth = Omit<BucketUsageView, 'cost'>;
+
+/** A queue's month as UsageService reads it from its request counts, before it is priced. */
+export type QueueMonth = Omit<QueueUsageView, 'cost'>;

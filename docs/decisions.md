@@ -29,7 +29,8 @@ The [step-3 plan](step-3-plan.md)'s §9, each answered as it recommended.
 - **Still to change:** Q-04; its address in FF's install.
 
 **27. Queue requests are billed as SQS bills them:** by the million, each 64 KB of a message a request, 1 million free each month; the messages FF hands to functions one request a batch, FF's empty reads not billed. ✅ Confirmed.
-- **Still to change:** Q-08.
+- **Changed already:** Q-08, part 1: each request that names a queue counts, whichever way it came, FF's API's and the console's sends and receives too, as the AWS console's requests are SQS's; the console's pages, reading queues without SQS's operations, count nothing. A batch a function reads is the request that would have received it, each 64 KB of it one, its deletes after the call not billed; a bucket's events and a function's destination records sent to a queue count as S3's and Lambda's requests to SQS. Priced in SQS's three tiers (0.40, 0.30 and 0.24 US$ a million, past 100 and 200 billion in the month), from the book that starts the month after the migration `QueueBilling` runs; the statement, `GET /usage` and its CSV, the console's Usage page and `ff usage` list each queue.
+- **Still to change:** nothing.
 
 **28. Beta's limits:** 10 queues, 5 event source mappings a function, 100 requests a second, 100 MB of messages and waiting events per account. ✅ Confirmed.
 - **Changed already:** Q-02, part 1: the four in every plan, the beta plan's as confirmed (the migration `QueueLimits`), edited in the admin app, listed by the console's account page and `ff account`. Part 2: what the account's messages hold, asynchronous calls waiting among them, enforced: an asynchronous call past it is refused with 429.

@@ -8,7 +8,9 @@ import { Function } from '../functions/entities/function.entity';
 import { PlansService } from '../plans/plans.service';
 import { BucketEvent, BucketEvents } from '../storage/bucket-events';
 import { CustomerQueues } from './customer-queues';
+import { QueueRequestCounts } from './queue-request-counts.service';
 import { QueueStore } from './queue-store';
+import { billedRequests } from './queue-tally';
 import { parseQueueArn } from './sqs-attributes';
 
 /** A megabyte, as the plans count what messages hold. */
@@ -18,9 +20,10 @@ const MB = 1024 * 1024;
  * Delivers buckets' events (ADR 0010), as S3 does: to a function, S3's event
  * as an asynchronous call, which its worker runs with the function's own
  * retries and destinations, as S3 calls Lambda; to a queue, a message, S3's
- * event its body, from the bucket. An event that can't go (its destination
- * gone, past the plan's room for messages, past what the destination takes)
- * is said in the log and dropped, as S3 drops what it can't deliver.
+ * event its body, from the bucket, counted as the request S3 makes to SQS. An
+ * event that can't go (its destination gone, past the plan's room for
+ * messages, past what the destination takes) is said in the log and dropped,
+ * as S3 drops what it can't deliver.
  */
 @Injectable()
 export class BucketEventDelivery implements OnModuleInit, OnModuleDestroy {
@@ -33,6 +36,7 @@ export class BucketEventDelivery implements OnModuleInit, OnModuleDestroy {
     private readonly store: QueueStore,
     private readonly plans: PlansService,
     @InjectRepository(Function) private readonly functions: Repository<Function>,
+    private readonly counts: QueueRequestCounts,
   ) {}
 
   onModuleInit(): void {
@@ -58,7 +62,9 @@ export class BucketEventDelivery implements OnModuleInit, OnModuleDestroy {
       if (!queue) return dropped('it is no queue of the account any more');
       if (size > queue.maximumMessageSize) return dropped(`the event is ${size} bytes, over the queue's maximum message size of ${queue.maximumMessageSize}`);
       const message = { messageId: randomUUID(), body, meta: { senderId: `arn:aws:s3:::${event.bucket}` }, sizeBytes: size, delaySeconds: queue.delaySeconds };
-      return this.queues.send(queue, [message], new Date());
+      await this.queues.send(queue, [message], new Date());
+      this.counts.count({ queueId: queue.id, accountId: queue.accountId, queueName: queue.name, requests: billedRequests(size), sentSizes: [size] });
+      return;
     }
     const named = parseFunctionArn(arn);
     const fn = named && named.accountId === event.accountId ? await this.functions.findOne({ where: { accountId: event.accountId, name: named.name }, select: { id: true, accountId: true } }) : null;

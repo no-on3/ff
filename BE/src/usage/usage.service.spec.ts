@@ -31,7 +31,7 @@ describe('UsageService (P-20)', () => {
 
   // Both are January by the UTC calendar: the first is still December west of UTC, the second already February east of it.
   it.each(['2026-12-31T23:30:00-05:00', '2027-01-31T23:30:00Z'])(
-    "creates the partitions of this month and the next two, by the UTC calendar, wherever the backend runs, for usage, capacity, databases' and buckets' samples and buckets' requests (%s)",
+    "creates the partitions of this month and the next two, by the UTC calendar, wherever the backend runs, for usage, capacity, databases' and buckets' samples and buckets' and queues' requests (%s)",
     async (now) => {
       await expect(service.ensurePartitions(new Date(now))).resolves.toEqual([
         'usage_records_2027_01',
@@ -49,8 +49,11 @@ describe('UsageService (P-20)', () => {
         'storage_request_counts_2027_01',
         'storage_request_counts_2027_02',
         'storage_request_counts_2027_03',
+        'queue_request_counts_2027_01',
+        'queue_request_counts_2027_02',
+        'queue_request_counts_2027_03',
       ]);
-      expect(query.mock.calls.map(([, [, month]]) => month)).toEqual(Array(5).fill(['2027-01-01', '2027-02-01', '2027-03-01']).flat());
+      expect(query.mock.calls.map(([, [, month]]) => month)).toEqual(Array(6).fill(['2027-01-01', '2027-02-01', '2027-03-01']).flat());
     },
   );
 
@@ -82,7 +85,7 @@ describe('UsageService (P-20)', () => {
     jest.useFakeTimers({ now: new Date('2026-10-17T10:00:00Z') });
     await service.onModuleInit();
     const reaps = () => query.mock.calls.filter(([sql]) => String(sql).includes('RUNNING')).length;
-    const partitionRuns = () => query.mock.calls.filter(([sql]) => String(sql).includes('ff_ensure_month_partition')).length / 15;
+    const partitionRuns = () => query.mock.calls.filter(([sql]) => String(sql).includes('ff_ensure_month_partition')).length / 18;
     expect([reaps(), partitionRuns()]).toEqual([1, 1]); // at startup
 
     await jest.advanceTimersByTimeAsync(3 * 60_000);

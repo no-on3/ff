@@ -21,6 +21,8 @@ export class StorageRequestCountsService implements OnModuleInit, OnModuleDestro
   /** This process, as the rows it writes name it. */
   readonly writer = randomUUID();
   private timer?: NodeJS.Timeout;
+  /** The minutes before this one are written, or being written. */
+  private writtenBefore?: Date;
 
   constructor(@InjectRepository(StorageRequestCount) private readonly counts: Repository<StorageRequestCount>) {}
 
@@ -35,11 +37,15 @@ export class StorageRequestCountsService implements OnModuleInit, OnModuleDestro
   }
 
   count(request: CountedRequest): void {
-    this.tally.add(request);
+    // A request that began in a minute written since, such as an upload answered after its minute's turn, counts in
+    // the first minute not written: the key of the one it began in would refuse that minute a second time.
+    const late = this.writtenBefore !== undefined && request.at < this.writtenBefore;
+    this.tally.add(late ? { ...request, at: this.writtenBefore as Date } : request);
   }
 
   /** Writes the minutes that started before `before`, or all of them; answers how many rows went. */
   async flush(before?: Date): Promise<number> {
+    if (before && !(this.writtenBefore && this.writtenBefore >= before)) this.writtenBefore = before;
     const rows = this.tally.take(before);
     if (rows.length === 0) return 0;
     try {

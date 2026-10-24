@@ -26,6 +26,7 @@ const message = (body = 'order'): Received => {
     sentAt: new Date('2026-10-24T08:00:00Z'),
     receiveCount: 1,
     firstReceivedAt: new Date('2026-10-24T08:00:01Z'),
+    sizeBytes: Buffer.byteLength(body),
   };
 };
 const mapping = (values: Partial<EventSourceMapping> = {}): EventSourceMapping & { queue: Queue } => ({
@@ -59,6 +60,7 @@ describe('the event source poller, which reads the queues functions are mapped t
   let accounts: { findOne: jest.Mock };
   let credit: { admit: jest.Mock };
   let mappings: { find: jest.Mock };
+  let counts: { count: jest.Mock };
   let poller: EventSourcePoller;
   let logs: jest.SpyInstance;
   let warnings: jest.SpyInstance;
@@ -73,6 +75,7 @@ describe('the event source poller, which reads the queues functions are mapped t
       { wait: jest.fn(() => new Promise((resolve) => setImmediate(resolve))) } as never,
       functions as never,
       credit as never,
+      counts as never,
     );
   const deleted = () => queues.deleteMessages.mock.calls.flatMap(([, receipts]: [Queue, Array<{ id: string }>]) => receipts.map((receipt) => receipt.id));
   const records = (call: number) => (functions.call.mock.calls[call][1] as { Records: Array<{ body: string }> }).Records;
@@ -85,6 +88,7 @@ describe('the event source poller, which reads the queues functions are mapped t
     accounts = { findOne: jest.fn(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE, storageDisabledAt: null })) };
     credit = { admit: jest.fn(async () => undefined) };
     mappings = { find: jest.fn(async () => [mapping()]) };
+    counts = { count: jest.fn() };
     logs = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     warnings = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     poller = make();
@@ -107,6 +111,18 @@ describe('the event source poller, which reads the queues functions are mapped t
     expect(functions.call).toHaveBeenCalledWith(active, { Records: batch.map((received) => sqsRecord(received, ARN, 'tn-tunis-1')) }, { source: InvocationSource.SQS });
     expect(deleted()).toEqual(['1', '2']);
     expect(queues.deleteMessages.mock.calls[0][1]).toEqual(batch.map(({ id, receiveCount, messageId }) => ({ id, receiveCount, messageId })));
+  });
+
+  it('counts a batch as the request that would have received it, each 64 KB of its messages a request, and the deletes after its call as not billed; finding nothing counts nothing', async () => {
+    waiting.push(message('x'.repeat(70_000)), message('two'));
+
+    await poller.refresh();
+    await until(() => deleted().length === 2);
+    // The reader goes on finding nothing.
+    await until(() => queues.receive.mock.calls.length >= 3);
+
+    const named = { queueId: 'q-1', accountId: ACCOUNT, queueName: 'orders' };
+    expect(counts.count.mock.calls).toEqual([[{ ...named, requests: 2, received: 2 }], [{ ...named, requests: 0, deleted: 2 }]]);
   });
 
   it("deletes nothing of a call that failed: its messages come back after the queue's visibility timeout", async () => {

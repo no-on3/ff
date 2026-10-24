@@ -34,6 +34,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
   let events: { onAsyncCall: jest.Mock };
   let customerQueues: { send: jest.Mock };
   let plans: { forAccount: jest.Mock };
+  let counts: { count: jest.Mock };
   let functions: { findOne: jest.Mock; call: jest.Mock };
   let credit: { admit: jest.Mock };
   let accounts: { findOne: jest.Mock };
@@ -74,6 +75,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       events as never,
       customerQueues as never,
       plans as never,
+      counts as never,
     );
   /** The record the worker handed its destination, as the destination's event. */
   const handed = () => JSON.parse(queues.deleteEventAndSend.mock.calls[0][3] as string) as Record<string, unknown>;
@@ -106,6 +108,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     };
     customerQueues = { send: jest.fn(async () => undefined) };
     plans = { forAccount: jest.fn(async () => plan()) };
+    counts = { count: jest.fn() };
     functions = { findOne: jest.fn(async () => fn), call: jest.fn(async () => ({ ok: true, output: 1, invocation: {} })) };
     credit = { admit: jest.fn(async () => undefined) };
     accounts = { findOne: jest.fn(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE })) };
@@ -331,6 +334,8 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       responseContext: { statusCode: 200, executedVersion: '$LATEST', functionError: 'Unhandled' },
       responsePayload: { errorType: 'TypeError', errorMessage: 'x is undefined' },
     });
+    // A function as the destination: no queue's request.
+    expect(counts.count).not.toHaveBeenCalled();
   });
 
   it('hands a call too old at its claim to onFailure, with the last failure it kept; one with no attempt run, without an answer', async () => {
@@ -418,6 +423,10 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       requestPayload: { order: 42 },
       responsePayload: { errorType: 'TypeError', errorMessage: 'x is undefined' },
     });
+    // As the request Lambda makes to SQS: billed, and the message counted as sent.
+    expect(counts.count.mock.calls).toEqual([
+      [{ queueId: 'queue-1', accountId: ACCOUNT, queueName: 'failed-orders', requests: 1, sentSizes: [Buffer.byteLength(message.body as string)] }],
+    ]);
   });
 
   it("deletes the event of a call whose queue is gone, whose record is over the queue's largest message, or whose account's messages hold the plan's room, saying the record wasn't delivered", async () => {

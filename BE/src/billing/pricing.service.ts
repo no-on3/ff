@@ -44,13 +44,15 @@ interface SampleRow {
   hours: string;
   tier1: string;
   tier2: string;
+  requests: string;
 }
 
 /**
  * Prices usage with FF's price books (P-30, D8): each part of a month with the
- * book valid then, from the usage records (P-20), the capacity samples (P-21)
- * and customers' databases' hourly samples. The amounts are estimates until
- * rating debits them (P-32).
+ * book valid then, from the usage records (P-20), the capacity samples (P-21),
+ * customers' databases' and buckets' hourly samples, and their buckets' and
+ * queues' request counts. The amounts are estimates until rating debits them
+ * (P-32).
  */
 @Injectable()
 export class PricingService {
@@ -110,7 +112,7 @@ export class PricingService {
     };
   }
 
-  /** The accounts that used something in the month: a call, an instance sampled, a database or a bucket, or a request to one that S3 bills. */
+  /** The accounts that used something in the month: a call, an instance sampled, a database or a bucket, or a request to a bucket or a queue that S3 or SQS bills. */
   async accountsWithUsage(month: string): Promise<string[]> {
     const { from, to } = monthBounds(month);
     const rows = await this.books.manager.query<Array<{ account_id: string }>>(
@@ -119,6 +121,7 @@ export class PricingService {
        UNION SELECT "account_id" FROM "database_samples" WHERE "hour" >= $1 AND "hour" < $2
        UNION SELECT "account_id" FROM "bucket_samples" WHERE "hour" >= $1 AND "hour" < $2
        UNION SELECT "account_id" FROM "storage_request_counts" WHERE "minute" >= $1 AND "minute" < $2 AND "class" <> 'free'
+       UNION SELECT "account_id" FROM "queue_request_counts" WHERE "minute" >= $1 AND "minute" < $2 AND "requests" > 0
        ORDER BY 1`,
       [from, to],
     );
@@ -165,14 +168,14 @@ export class PricingService {
   }
 
   /**
-   * The account's databases and buckets in [start, end), as the rater takes
-   * them: from their hourly samples, each one's byte-hours and the hours it
-   * was sampled in; and a bucket's requests by S3's two classes, from the
-   * front door's counts.
+   * The account's databases, buckets and queues in [start, end), as the
+   * rater takes them: from their hourly samples, each one's byte-hours and
+   * the hours it was sampled in; a bucket's requests by S3's two classes,
+   * from the front door's counts; a queue's requests as SQS bills them.
    */
   private async resourceUsage(accountId: string, start: Date, end: Date): Promise<ResourceUsage[]> {
     const databases = await this.books.manager.query<SampleRow[]>(
-      `SELECT "database_id" AS "resourceId", sum("size_bytes")::text AS "byteHours", count(*)::text AS "hours", '0' AS "tier1", '0' AS "tier2"
+      `SELECT "database_id" AS "resourceId", sum("size_bytes")::text AS "byteHours", count(*)::text AS "hours", '0' AS "tier1", '0' AS "tier2", '0' AS "requests"
          FROM "database_samples"
         WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3
         GROUP BY "database_id"`,
@@ -180,7 +183,7 @@ export class PricingService {
     );
     const buckets = await this.books.manager.query<SampleRow[]>(
       `SELECT coalesce(s."bucket_id", r."bucket_id") AS "resourceId", coalesce(s."byteHours", '0') AS "byteHours", coalesce(s."hours", '0') AS "hours",
-              coalesce(r."tier1", '0') AS "tier1", coalesce(r."tier2", '0') AS "tier2"
+              coalesce(r."tier1", '0') AS "tier1", coalesce(r."tier2", '0') AS "tier2", '0' AS "requests"
          FROM (SELECT "bucket_id", sum("size_bytes")::text AS "byteHours", count(*)::text AS "hours" FROM "bucket_samples"
                 WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3 GROUP BY "bucket_id") s
          FULL JOIN (SELECT "bucket_id", coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0)::text AS "tier1",
@@ -190,14 +193,22 @@ export class PricingService {
            ON r."bucket_id" = s."bucket_id"`,
       [accountId, start, end],
     );
-    const usage = (kind: 'database' | 'bucket') => (row: SampleRow): ResourceUsage => ({
+    const queues = await this.books.manager.query<SampleRow[]>(
+      `SELECT "queue_id" AS "resourceId", '0' AS "byteHours", '0' AS "hours", '0' AS "tier1", '0' AS "tier2", sum("requests")::text AS "requests"
+         FROM "queue_request_counts"
+        WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3
+        GROUP BY "queue_id" HAVING sum("requests") > 0`,
+      [accountId, start, end],
+    );
+    const usage = (kind: ResourceUsage['kind']) => (row: SampleRow): ResourceUsage => ({
       resourceId: row.resourceId,
       kind,
       byteHours: BigInt(row.byteHours),
       hours: BigInt(row.hours),
       tier1Requests: BigInt(row.tier1),
       tier2Requests: BigInt(row.tier2),
+      requests: BigInt(row.requests),
     });
-    return [...databases.map(usage('database')), ...buckets.map(usage('bucket'))];
+    return [...databases.map(usage('database')), ...buckets.map(usage('bucket')), ...queues.map(usage('queue'))];
   }
 }

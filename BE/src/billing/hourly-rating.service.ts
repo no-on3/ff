@@ -33,8 +33,9 @@ interface HourlyRow {
 
 /**
  * The hourly rating (P-32, D9). Once an hour has settled, its usage is summed
- * into usage_hourly, its databases' samples into resource_usage_hourly, and
- * each account that used something in it is charged:
+ * into usage_hourly, its databases' and buckets' samples and its buckets' and
+ * queues' requests into resource_usage_hourly, and each account that used
+ * something in it is charged:
  * its month so far, rated with the books of P-30 and rounded once, less what
  * the month's earlier hours were charged. The free tier and the duration
  * tiers count from the month's start, and the month's charges add up to its
@@ -168,6 +169,16 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
                       FROM "storage_request_counts" WHERE "minute" >= $1 AND "minute" < $3 GROUP BY "bucket_id") r
            ON r."bucket_id" = s."bucket_id"
         WHERE s."bucket_id" IS NOT NULL OR r."tier1" > 0 OR r."tier2" > 0
+       ON CONFLICT DO NOTHING`,
+      [hour, book.id, new Date(hour.getTime() + HOUR_MS)],
+    );
+    // Each queue asked something billed in the hour: its requests as SQS bills them, and its name then. One that only
+    // had FF's deletes after a function's batch costs nothing, and has no row.
+    await this.dataSource.query(
+      `INSERT INTO "resource_usage_hourly" ("account_id", "hour", "resource_id", "kind", "name", "price_book_id", "byte_hours", "hours", "tier1_requests", "tier2_requests", "requests")
+       SELECT max("account_id"), $1, "queue_id", 'queue', max("name"), $2, 0, 0, 0, 0, sum("requests")
+         FROM "queue_request_counts" WHERE "minute" >= $1 AND "minute" < $3
+        GROUP BY "queue_id" HAVING sum("requests") > 0
        ON CONFLICT DO NOTHING`,
       [hour, book.id, new Date(hour.getTime() + HOUR_MS)],
     );

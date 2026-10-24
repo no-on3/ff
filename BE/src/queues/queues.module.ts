@@ -11,6 +11,8 @@ import { BucketEventDelivery } from './bucket-event-delivery';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueMessage } from './queue-message.entity';
+import { QueueRequestCount } from './queue-request-count.entity';
+import { QueueRequestCounts } from './queue-request-counts.service';
 import { QueueStore } from './queue-store';
 import { Queue } from './queue.entity';
 import { QueuesController } from './queues.controller';
@@ -27,24 +29,25 @@ import { SqsOperations } from './sqs-operations';
  */
 @Module({
   // Buckets' events go to the account's functions and queues: a function by its row.
-  imports: [TypeOrmModule.forFeature([Queue, QueueMessage, Function]), StorageModule, PlansModule, BillingModule, AuditModule],
+  imports: [TypeOrmModule.forFeature([Queue, QueueMessage, QueueRequestCount, Function]), StorageModule, PlansModule, BillingModule, AuditModule],
   controllers: [QueuesController],
   providers: [
     QueueStore,
     QueueEvents,
     CustomerQueues,
+    QueueRequestCounts,
     {
       provide: SqsOperations,
-      inject: [CustomerQueues, QueueStore, QueueEvents, AuditService, ConfigService],
-      useFactory: (queues: CustomerQueues, store: QueueStore, events: QueueEvents, audit: AuditService, config: ConfigService) => {
+      inject: [CustomerQueues, QueueStore, QueueEvents, AuditService, QueueRequestCounts, ConfigService],
+      useFactory: (queues: CustomerQueues, store: QueueStore, events: QueueEvents, audit: AuditService, counts: QueueRequestCounts, config: ConfigService) => {
         const sqs = config.getOrThrow<{ base: string; region: string }>('sqs');
-        return new SqsOperations(queues, store, events, audit, sqs.base, sqs.region);
+        return new SqsOperations(queues, store, events, audit, counts, sqs.base, sqs.region);
       },
     },
     SqsFrontDoor,
     QueuesService,
     BucketEventDelivery,
   ],
-  exports: [QueueStore, QueueEvents, CustomerQueues, SqsFrontDoor],
+  exports: [QueueStore, QueueEvents, CustomerQueues, QueueRequestCounts, SqsFrontDoor],
 })
 export class QueuesModule {}

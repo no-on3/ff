@@ -31,6 +31,8 @@ export interface Received {
   sentAt: Date;
   receiveCount: number;
   firstReceivedAt: Date;
+  /** Its body and attributes, as SQS sizes a message. */
+  sizeBytes: number;
 }
 
 interface ReceivedRow {
@@ -41,6 +43,7 @@ interface ReceivedRow {
   sent_at: Date;
   receive_count: number;
   first_received_at: Date;
+  size_bytes: number;
 }
 
 /** A page of the account's queues, by name, and where the next begins. */
@@ -198,7 +201,7 @@ export class CustomerQueues {
         WHERE m."id" IN (SELECT "id" FROM "queue_messages"
                           WHERE "queue_id" = $1 AND "visible_at" <= $2 AND "expires_at" > $2
                           ORDER BY "id" LIMIT $3 FOR UPDATE SKIP LOCKED)
-      RETURNING m."id", m."message_id", m."body", m."attributes", m."sent_at", m."receive_count", m."first_received_at"`,
+      RETURNING m."id", m."message_id", m."body", m."attributes", m."sent_at", m."receive_count", m."first_received_at", m."size_bytes"`,
       [queue.id, now, max, visibility],
     );
     return rows
@@ -211,6 +214,7 @@ export class CustomerQueues {
         sentAt: row.sent_at,
         receiveCount: row.receive_count,
         firstReceivedAt: row.first_received_at,
+        sizeBytes: row.size_bytes,
       }));
   }
 

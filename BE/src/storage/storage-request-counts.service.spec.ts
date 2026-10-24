@@ -52,6 +52,28 @@ describe("buckets' requests, counted by the minute", () => {
     expect(inserted[1][0]).toMatchObject({ minute: new Date('2026-10-23T06:01:00Z'), requests: 1 });
   });
 
+  it('counts a request that began in a minute written since, a long upload, in the first minute not written, which its key takes', async () => {
+    const keys = new Set<string>();
+    service = new StorageRequestCountsService({
+      insert: async (rows: StorageRequestCount[]) => {
+        // As the table's primary key: a bucket's minute, class and writer once.
+        const added = rows.map((row) => `${row.bucketId}|${row.minute.toISOString()}|${row.class}|${row.writer}`);
+        if (added.some((key) => keys.has(key))) throw new Error('duplicate key value violates unique constraint');
+        added.forEach((key) => keys.add(key));
+        inserted.push(rows);
+      },
+    } as unknown as Repository<StorageRequestCount>);
+    service.count(request('2026-10-23T06:00:10Z'));
+    expect(await service.flush(new Date('2026-10-23T06:01:00Z'))).toBe(1);
+
+    // Begun at 06:00:50, answered after 06:00 was written.
+    service.count(request('2026-10-23T06:00:50Z', { bytesIn: 7 }));
+    service.count(request('2026-10-23T06:01:20Z'));
+    expect(await service.flush(new Date('2026-10-23T06:02:00Z'))).toBe(1);
+
+    expect(inserted[1]).toEqual([expect.objectContaining({ minute: new Date('2026-10-23T06:01:00Z'), requests: 2, bytesIn: 107n })]);
+  });
+
   it('keeps the minutes the database refused, added to those counted since, for the next turn', async () => {
     service.count(request('2026-10-23T06:00:01Z'));
     refuse = true;

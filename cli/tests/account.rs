@@ -120,6 +120,27 @@ fn usage_shows_each_bucket_after_the_databases_its_requests_by_s3s_classes_and_w
 }
 
 #[test]
+fn usage_shows_each_queue_after_the_buckets_its_requests_as_sqs_bills_them_and_its_messages() {
+    let mut month = usage();
+    month["queues"] = json!([
+        { "queueId": "q1", "name": "orders", "deleted": false, "requests": 18_420, "messagesSent": 6_140, "messagesReceived": 6_152, "cost": "0.022" },
+        { "queueId": "q2", "name": "old", "deleted": true, "requests": 3, "messagesSent": 1, "messagesReceived": 0, "cost": "0.000" }
+    ]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "total          15        3.14375     1           0.852\nQUEUE          REQUESTS  SENT  RECEIVED  COST\n\
+             orders         18420     6140  6152      0.022\nold (deleted)  3         1     0         0.000\nestimated cost:"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
 fn usage_as_csv_is_the_apis_own_and_a_wrong_month_is_refused_before_calling() {
     let csv = "functionId,functionName,requests\r\nf1,hello,12\r\n";
     let api = Server::start(vec![Reply::text(200, "text/csv; charset=utf-8", csv)]);

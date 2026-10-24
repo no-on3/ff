@@ -20,6 +20,7 @@ describe("the delivery of buckets' events", () => {
   let queues: { find: jest.Mock; send: jest.Mock };
   let store: { accountBytes: jest.Mock; sendEvent: jest.Mock };
   let functions: { findOne: jest.Mock };
+  let counts: { count: jest.Mock };
   let events: BucketEvents;
   let delivery: BucketEventDelivery;
   let warnings: jest.SpyInstance;
@@ -28,8 +29,9 @@ describe("the delivery of buckets' events", () => {
     queues = { find: jest.fn(async () => uploads), send: jest.fn(async () => undefined) };
     store = { accountBytes: jest.fn(async () => 0), sendEvent: jest.fn(async () => undefined) };
     functions = { findOne: jest.fn(async () => ({ id: 'fn-1', accountId: ACCOUNT })) };
+    counts = { count: jest.fn() };
     events = new BucketEvents();
-    delivery = new BucketEventDelivery(events, queues as never, store as never, onePlan(plan()), functions as never);
+    delivery = new BucketEventDelivery(events, queues as never, store as never, onePlan(plan()), functions as never, counts as never);
     delivery.onModuleInit();
     warnings = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   });
@@ -47,6 +49,8 @@ describe("the delivery of buckets' events", () => {
     expect(queue).toBe(uploads);
     expect(JSON.parse(message.body)).toEqual({ Records: [{ eventName: 'ObjectCreated:Put', s3: { object: { key: 'cat.jpg' } } }] });
     expect([message.meta, message.sizeBytes, message.delaySeconds]).toEqual([{ senderId: 'arn:aws:s3:::photos' }, Buffer.byteLength(message.body), 0]);
+    // As the request S3 makes to SQS: billed to the queue's account, the message counted as sent.
+    expect(counts.count.mock.calls).toEqual([[{ queueId: 'q-1', accountId: ACCOUNT, queueName: 'uploads', requests: 1, sentSizes: [message.sizeBytes] }]]);
   });
 
   it("calls a function without waiting, S3's event kept in its queue for its worker, as S3 calls Lambda", async () => {
@@ -76,7 +80,7 @@ describe("the delivery of buckets' events", () => {
     queues.find.mockResolvedValueOnce({ ...uploads, maximumMessageSize: 10 });
     await events.publish(record('queue', QUEUE_ARN));
 
-    expect([queues.send.mock.calls.length, store.sendEvent.mock.calls.length]).toEqual([0, 0]);
+    expect([queues.send.mock.calls.length, store.sendEvent.mock.calls.length, counts.count.mock.calls.length]).toEqual([0, 0, 0]);
     expect(warnings.mock.calls.map(([message]) => message)).toEqual([
       `An event of bucket photos was not delivered to ${QUEUE_ARN}: it is no queue of the account any more`,
       `An event of bucket photos was not delivered to ${FUNCTION_ARN}: it is no function of the account any more`,

@@ -13,6 +13,8 @@ import { MAX_INPUT_BYTES } from '../functions/limits';
 import { CustomerQueues, Received } from '../queues/customer-queues';
 import { Queue } from '../queues/queue.entity';
 import { QueueEvents } from '../queues/queue-events';
+import { QueueRequestCounts } from '../queues/queue-request-counts.service';
+import { billedRequests } from '../queues/queue-tally';
 import { queueArn } from '../queues/sqs-attributes';
 import { EventSourceMapping } from './event-source-mapping.entity';
 import { EVENT_ENVELOPE_BYTES, SqsRecord, failedMessages, recordBytes, sqsRecord } from './sqs-event';
@@ -75,7 +77,9 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
  * until they can take a call. The mappings are loaded again every
  * FF_EVENT_SOURCE_REFRESH_SECONDS, and as soon as this backend changes one;
  * 0 reads none. Every backend reads every mapping: the batches of each can
- * be twice as many with two backends.
+ * be twice as many with two backends. Each batch counts as the request that
+ * would have received it, each 64 KB of its messages a request; the receives
+ * that find nothing, and the deletes after a call, aren't billed.
  */
 @Injectable()
 export class EventSourcePoller implements OnModuleInit, OnModuleDestroy {
@@ -98,6 +102,7 @@ export class EventSourcePoller implements OnModuleInit, OnModuleDestroy {
     private readonly events: QueueEvents,
     private readonly functions: FunctionsService,
     private readonly credit: CreditService,
+    private readonly counts: QueueRequestCounts,
   ) {
     this.refreshSeconds = config.getOrThrow<{ refreshSeconds: number }>('eventSources').refreshSeconds;
     this.region = config.getOrThrow<{ region: string }>('sqs').region;
@@ -183,6 +188,11 @@ export class EventSourcePoller implements OnModuleInit, OnModuleDestroy {
           continue;
         }
         const batch = await this.gather(reader);
+        if (batch.length > 0) {
+          const { queue } = reader.mapping;
+          const bytes = batch.reduce((sum, item) => sum + item.message.sizeBytes, 0);
+          this.counts.count({ queueId: queue.id, accountId: queue.accountId, queueName: queue.name, requests: billedRequests(bytes), received: batch.length });
+        }
         if (batch.length === 0 || signal.aborted) continue;
         reader.inFlight += 1;
         const call = this.handle(reader, batch).finally(() => {
@@ -304,6 +314,7 @@ export class EventSourcePoller implements OnModuleInit, OnModuleDestroy {
         queue,
         handled.map(({ message }) => ({ id: message.id, receiveCount: message.receiveCount, messageId: message.messageId })),
       );
+      this.counts.count({ queueId: queue.id, accountId: queue.accountId, queueName: queue.name, requests: 0, deleted: handled.length });
     } catch (error) {
       this.logger.error(`The batch of ${some} for function ${mapping.functionId} failed; its messages come back after the queue's visibility timeout: ${describeError(error)}`);
     }

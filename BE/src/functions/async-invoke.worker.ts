@@ -12,7 +12,9 @@ import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/or
 import { PlansService } from '../plans/plans.service';
 import { CustomerQueues } from '../queues/customer-queues';
 import { QueueEvents } from '../queues/queue-events';
+import { QueueRequestCounts } from '../queues/queue-request-counts.service';
 import { ClaimedEvent, QueueStore } from '../queues/queue-store';
+import { billedRequests } from '../queues/queue-tally';
 import {
   AttemptOutcome,
   AttemptResponse,
@@ -104,6 +106,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     private readonly events: QueueEvents,
     private readonly customerQueues: CustomerQueues,
     private readonly plans: PlansService,
+    private readonly counts: QueueRequestCounts,
   ) {
     const settings = config.getOrThrow<{ intervalSeconds: number; concurrency: number }>('asyncInvoke');
     this.intervalSeconds = settings.intervalSeconds;
@@ -321,7 +324,10 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       if (!queue) return undelivered(`its destination ${destination} is no queue of the account any more`);
       if (size > queue.maximumMessageSize) return undelivered(`its record is ${size} bytes, over the queue's maximum message size of ${queue.maximumMessageSize}`);
       const message = { messageId: randomUUID(), body, meta: { senderId: functionArn }, sizeBytes: size, delaySeconds: queue.delaySeconds };
-      return this.queues.deleteEventAnd(event, (manager) => this.customerQueues.send(queue, [message], context.at, manager));
+      const sent = await this.queues.deleteEventAnd(event, (manager) => this.customerQueues.send(queue, [message], context.at, manager));
+      // As the request Lambda makes to SQS.
+      if (sent) this.counts.count({ queueId: queue.id, accountId: queue.accountId, queueName: queue.name, requests: billedRequests(size), sentSizes: [size] });
+      return sent;
     }
     const target = await this.configs.destinationFunction(event.accountId, destination);
     if (!target) return undelivered(`its destination ${destination} is no function of the account any more`);

@@ -3,6 +3,7 @@ import { AuditService } from '../audit/audit.service';
 import { plan } from '../plans/test-fixtures';
 import { CustomerQueues, Outgoing, Received } from './customer-queues';
 import { QueueEvents } from './queue-events';
+import { QueueRequestCounts } from './queue-request-counts.service';
 import { QueueStore } from './queue-store';
 import { Queue, QueueKind } from './queue.entity';
 import { DEFAULT_SETTINGS } from './sqs-attributes';
@@ -36,6 +37,7 @@ const received = (n: number, extra: Partial<Received> = {}): Received => ({
   sentAt: new Date('2026-10-23T08:00:00Z'),
   receiveCount: 1,
   firstReceivedAt: new Date('2026-10-23T08:00:05Z'),
+  sizeBytes: Buffer.byteLength(`message ${n}`),
   ...extra,
 });
 
@@ -59,8 +61,17 @@ function setup(options: { bytes?: number; receives?: Received[][] } = {}) {
   const store = { accountBytes: jest.fn(async () => options.bytes ?? 0) };
   const events = { wait: jest.fn(async (): Promise<void> => undefined) };
   const audit = { record: jest.fn(async (_event: object): Promise<void> => undefined) };
-  const operations = new SqsOperations(queues as unknown as CustomerQueues, store as unknown as QueueStore, events as unknown as QueueEvents, audit as unknown as AuditService, BASE, REGION);
-  return { operations, queues, store, events, sent, audit };
+  const counts = { count: jest.fn() };
+  const operations = new SqsOperations(
+    queues as unknown as CustomerQueues,
+    store as unknown as QueueStore,
+    events as unknown as QueueEvents,
+    audit as unknown as AuditService,
+    counts as unknown as QueueRequestCounts,
+    BASE,
+    REGION,
+  );
+  return { operations, queues, store, events, sent, audit, counts };
 }
 
 const caller = (extra: Partial<Caller> = {}): Caller => ({ accountId: ACCOUNT, keyId: 'AKFFAAAAAAAAAAAAAAAA', readOnly: false, plan: plan(), ...extra });
@@ -356,6 +367,47 @@ describe("SQS's operations on an account's queues", () => {
       // FF's API names no caller: the audit log takes its request's.
       { accountId: ACCOUNT, action: 'queue.delete', resource: 'queue:orders' },
     ]);
+  });
+
+  describe('what each request counts, as SQS bills it and CloudWatch counts its messages', () => {
+    const counted = (extra: object = {}) => ({ queueId: 'queue-orders', accountId: ACCOUNT, queueName: 'orders', requests: 1, sentSizes: [], received: 0, deleted: 0, emptyReceives: 0, ...extra });
+
+    it('bills a send each 64 KB of its messages, and counts the messages kept with their sizes, a failed entry none', async () => {
+      const { operations, counts } = setup();
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x'.repeat(70_000) }, caller());
+      await operations.run('SendMessageBatch', { QueueUrl: URL_, Entries: [{ Id: 'a', MessageBody: 'one' }, { Id: 'b', MessageBody: '' }, { Id: 'c', MessageBody: 'three' }] }, caller());
+
+      expect(counts.count.mock.calls).toEqual([[counted({ requests: 2, sentSizes: [70_000] })], [counted({ sentSizes: [3, 5] })]]);
+    });
+
+    it("bills a receive each 64 KB of the messages it answers, counts them, and counts one that answers none as an empty receive", async () => {
+      const big = received(1, { body: 'y'.repeat(100_000), sizeBytes: 100_000 });
+      const { operations, counts } = setup({ receives: [[big, received(2)], []] });
+      await operations.run('ReceiveMessage', { QueueUrl: URL_, MaxNumberOfMessages: 10 }, caller());
+      await operations.run('ReceiveMessage', { QueueUrl: URL_ }, caller());
+
+      expect(counts.count.mock.calls).toEqual([[counted({ requests: 2, received: 2 })], [counted({ emptyReceives: 1 })]]);
+    });
+
+    it('counts each valid receipt handle a delete takes as a message deleted, one refused none', async () => {
+      const { operations, counts } = setup();
+      const handle = receiptHandle({ id: '101', receiveCount: 1, messageId: received(1).messageId });
+      await operations.run('DeleteMessage', { QueueUrl: URL_, ReceiptHandle: handle }, caller());
+      await operations.run('DeleteMessageBatch', { QueueUrl: URL_, Entries: [{ Id: 'a', ReceiptHandle: handle }, { Id: 'b', ReceiptHandle: 'not one' }] }, caller());
+
+      expect(counts.count.mock.calls).toEqual([[counted({ deleted: 1 })], [counted({ deleted: 1 })]]);
+    });
+
+    it('bills a request refused once its queue is found, and counts nothing of one that names no queue there, of ListQueues, or of a read-only key refused', async () => {
+      const { operations, counts } = setup();
+      await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: '' }, caller()));
+      await operations.run('CreateQueue', { QueueName: 'invoices' }, caller());
+      await refusal(operations.run('GetQueueAttributes', { QueueUrl: `${BASE}/${ACCOUNT}/nope` }, caller()));
+      await operations.run('ListQueues', {}, caller());
+      await refusal(operations.run('PurgeQueue', { QueueUrl: URL_ }, caller({ readOnly: true })));
+
+      expect(counts.count.mock.calls).toEqual([[counted()], [counted({ queueName: 'invoices' })]]);
+    });
   });
 
   it("answers ListQueues' URLs, and GetQueueAttributes' counts", async () => {

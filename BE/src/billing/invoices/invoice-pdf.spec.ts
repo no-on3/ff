@@ -110,8 +110,8 @@ describe('the invoice PDF (L1, P-36)', () => {
 
   it('lists the databases after the functions, each with its GB-months and amount', async () => {
     const resources = [
-      { resourceId: 'd-1', kind: 'database' as const, name: 'audit', gbMonths: '0.268817', tier1Requests: 0n, tier2Requests: 0n, amountMinor: 93n },
-      { resourceId: 'd-2', kind: 'database' as const, name: 'orders', gbMonths: '1234.5', tier1Requests: 0n, tier2Requests: 0n, amountMinor: 427_038n },
+      { resourceId: 'd-1', kind: 'database' as const, name: 'audit', gbMonths: '0.268817', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, amountMinor: 93n },
+      { resourceId: 'd-2', kind: 'database' as const, name: 'orders', gbMonths: '1234.5', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, amountMinor: 427_038n },
     ];
 
     const [page] = await read(renderStatementPdf({ ...STATEMENT, resources }, SELLER, BUYER));
@@ -122,6 +122,18 @@ describe('the invoice PDF (L1, P-36)', () => {
     // Without a function, only the databases' table: no line saying there was nothing.
     expect(alone).toEqual(expect.arrayContaining(['Base de données | Go-mois | Montant HT']));
     expect(alone.join('\n')).not.toMatch(/Fonction|Aucune consommation/);
+  });
+
+  it('lists the queues after the databases, each with its requests and amount', async () => {
+    const resources = [
+      { resourceId: 'd-1', kind: 'database' as const, name: 'audit', gbMonths: '0.268817', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, amountMinor: 93n },
+      { resourceId: 'q-1', kind: 'queue' as const, name: 'orders', gbMonths: '0', tier1Requests: 0n, tier2Requests: 0n, requests: 3_000_000n, amountMinor: 3_610n },
+    ];
+
+    const [page] = await read(renderStatementPdf({ ...STATEMENT, resources }, SELLER, BUYER));
+
+    const rows = page.slice(page.indexOf('audit | 0,268817 | 0,093 TND') + 1);
+    expect(rows.slice(0, 3)).toEqual(["File d'attente | Requêtes | Montant HT", 'orders | 3 000 000 | 3,610 TND', 'Consommation | 51,337 TND']);
   });
 
   it('writes a credit note as such: the invoice it corrects, its lines and total, its reason, and no stamp duty', async () => {

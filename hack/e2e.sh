@@ -62,7 +62,7 @@
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
 # Then GET /usage (P-22) against the raw records, as JSON and as CSV, the deleted
-# database's and bucket's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
+# database's, bucket's and queue's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
 # since the first book rated as the backend started, in shadow mode, the balance,
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
 # invokes refused with 402, a top-up, and invokes accepted again at once. Then an
@@ -1384,6 +1384,11 @@ check "the capacity report shows the account's day: capacity reserved, and capac
 echo "== usage API (P-22)"
 month="$(date -u +%Y-%m)"
 billed="status IN ('success', 'error', 'timeout')"
+# Queues' requests are written a minute at a time: the queues sections' are by now, minutes after; waited for all the same.
+for _ in $(seq 75); do
+  [ "$(env_q "SELECT coalesce(sum(received), 0) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")" = 7 ] && break
+  sleep 1
+done
 usage="$(http GET /usage)"
 check "GET /usage answers this month, by the UTC calendar" "200 $month" "$(status) $(jq -r .month <<<"$usage")"
 check "the meter function: requests billed, the lost call apart, billed duration and GB-s, exactly as its records" \
@@ -1414,6 +1419,15 @@ csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$mont
 check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
   "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,throttled,platform_errors,lost,cost|true|true|true" \
   "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,0\.000$" && echo true || echo false)"
+cli_queue_id="$(env_q "SELECT DISTINCT queue_id FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-cli-orders'")"
+cli_counted="$(env_q "SELECT sum(requests) || ' ' || sum(sent) || ' ' || sum(received) FROM queue_request_counts WHERE queue_id = '$cli_queue_id'")"
+check "the AWS CLI's queue, deleted earlier, keeps its month: its requests as SQS bills them, its messages sent and received, as counted, at nothing before the book that prices queues" \
+  "true e2e-cli-orders $cli_counted 0.000" \
+  "$(jq -r --arg id "$cli_queue_id" '.queues[] | select(.queueId == $id) | "\(.deleted) \(.name) \(.requests) \(.messagesSent) \(.messagesReceived) \(.cost)"' <<<"$usage")"
+check "  ... in the CSV, its requests in the requests column" true \
+  "$(tr -d '\r' <<<"$csv" | grep -qE "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,0\.000$" && echo true || echo false)"
+check "a function's batches counted as received: the five, then the two again; the three handled deleted" "7 3" \
+  "$(env_q "SELECT sum(received) || ' ' || sum(deleted) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")"
 empty="$(http GET '/usage?month=2001-01')"
 check "a month without calls is empty, and before the first price book, unpriced" "200 0 0 null" \
   "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"

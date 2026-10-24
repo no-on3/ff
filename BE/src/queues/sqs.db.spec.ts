@@ -46,6 +46,8 @@ import { StorageKey } from '../storage/storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey } from '../storage/storage-names';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
+import { QueueRequestCount } from './queue-request-count.entity';
+import { QueueRequestCounts } from './queue-request-counts.service';
 import { QueueStore } from './queue-store';
 import { Queue } from './queue.entity';
 import { SqsFrontDoor } from './sqs-front-door';
@@ -65,6 +67,7 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
   let db: ScratchDatabase;
   let events: QueueEvents;
   let store: QueueStore;
+  let counts: QueueRequestCounts;
   let frontDoor: SqsFrontDoor;
   let endpoint: string;
   const key = { id: newAccessKeyId(), secret: newSecretAccessKey() };
@@ -125,7 +128,8 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
     await events.onModuleInit();
     store = new QueueStore(db.dataSource);
     const customerQueues = new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue));
-    const operations = new SqsOperations(customerQueues, store, events, new AuditService(db.dataSource.getRepository(AuditEntry)), BASE, REGION);
+    counts = new QueueRequestCounts(db.dataSource.getRepository(QueueRequestCount));
+    const operations = new SqsOperations(customerQueues, store, events, new AuditService(db.dataSource.getRepository(AuditEntry)), counts, BASE, REGION);
     // Every account on that plan, with credit, and as many requests a second as it sends: the checks of each have their own tests.
     frontDoor = new SqsFrontDoor(
       new ConfigService({ sqs: { base: BASE, region: REGION } }),
@@ -401,6 +405,27 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
 
   describe("FF's API, beside the endpoint", () => {
     const owner: Principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'owner', userId: 'u-1' };
+
+    it("counts each request that names a queue, the endpoint's and the API's, as SQS bills them, written once a minute", async () => {
+      const QueueUrl = await newQueue();
+      const [{ id }] = await db.dataSource.query<Array<{ id: string }>>('SELECT "id" FROM "queues" WHERE "account_id" = $1 AND "name" = $2', [ACCOUNT, `queue-${n}`]);
+      await sqs.send(new SendMessageCommand({ QueueUrl, MessageBody: 'x'.repeat(70_000) }));
+      const { Messages } = await sqs.send(new ReceiveMessageCommand({ QueueUrl }));
+      await sqs.send(new DeleteMessageCommand({ QueueUrl, ReceiptHandle: Messages?.[0].ReceiptHandle }));
+      await sqs.send(new ReceiveMessageCommand({ QueueUrl }));
+      await api.send(owner, `queue-${n}`, { body: 'from the console' });
+      await sqs.send(new ListQueuesCommand({}));
+      await counts.flush();
+
+      const [row] = await db.dataSource.query<Array<Record<string, unknown>>>(
+        `SELECT min("name") AS "name", sum("requests")::int AS "requests", sum("sent")::int AS "sent", sum("sent_bytes")::int AS "sentBytes", max("sent_max_bytes") AS "largest",
+                sum("received")::int AS "received", sum("deleted")::int AS "deleted", sum("empty_receives")::int AS "emptyReceives", count(DISTINCT "writer")::int AS "writers"
+           FROM "queue_request_counts" WHERE "queue_id" = $1`,
+        [id],
+      );
+      // CreateQueue 1, the send of 70,000 bytes 2, its receive 2, the delete 1, the empty receive 1, the API's send 1; ListQueues names no queue.
+      expect(row).toEqual({ name: `queue-${n}`, requests: 8, sent: 2, sentBytes: 70_016, largest: 70_000, received: 1, deleted: 1, emptyReceives: 1, writers: 1 });
+    });
 
     it('makes a queue that AWS\'s SDK finds, receives what the SDK sent with its attributes, and deletes it by its handle', async () => {
       const made = await api.create(owner, { name: 'orders', visibilityTimeout: 45 });

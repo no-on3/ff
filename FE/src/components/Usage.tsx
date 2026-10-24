@@ -235,6 +235,47 @@ const Usage: React.FC = () => {
             </div>
           )}
 
+          {usage.queues.length > 0 && (
+            <div className="card overflow-x-auto mb-4" aria-label="Queues">
+              <table className="data-table">
+                <thead className="text-gray-500">
+                  <tr>
+                    <th className="py-2 pr-4 font-medium">Queue</th>
+                    <th className="py-2 pr-4 font-medium text-right">Requests</th>
+                    <th className="py-2 pr-4 font-medium text-right">Messages sent</th>
+                    <th className="py-2 pr-4 font-medium text-right">Messages received</th>
+                    <th className="py-2 font-medium text-right">Cost (estimated)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.queues.map((queue) => (
+                    <tr key={queue.queueId} data-queue-id={queue.queueId} className="border-t border-gray-200">
+                      <td className="py-2 pr-4">
+                        {queue.deleted ? (
+                          <>
+                            {queue.name} <span className="text-gray-500">(deleted)</span>
+                          </>
+                        ) : (
+                          <Link to={`/queues/${queue.name}`} className="text-blue-700 hover:underline">
+                            {queue.name}
+                          </Link>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{queue.requests.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right">{queue.messagesSent.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right">{queue.messagesReceived.toLocaleString('en-US')}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{queue.cost !== null && usage.estimate ? formatMoney(queue.cost, usage.estimate.currency) : '–'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-500 mt-3">
+                As AWS SQS bills its requests: each 64 KB of the messages a request carries counts as one, and a function's batch as the request that would have
+                received it. The first million each month are free.
+              </p>
+            </div>
+          )}
+
           <button type="button" className="btn btn-secondary" onClick={downloadCsv} disabled={downloading}>
             {downloading ? 'Preparing…' : `Download ${monthLabel(usage.month)} as CSV`}
           </button>

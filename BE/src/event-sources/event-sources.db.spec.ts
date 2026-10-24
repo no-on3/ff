@@ -23,6 +23,8 @@ import { Function, FunctionStatus, Runtime } from '../functions/entities/functio
 import { onePlan, plan } from '../plans/test-fixtures';
 import { CustomerQueues } from '../queues/customer-queues';
 import { Queue } from '../queues/queue.entity';
+import { QueueRequestCount } from '../queues/queue-request-count.entity';
+import { QueueRequestCounts } from '../queues/queue-request-counts.service';
 import { QueueEvents } from '../queues/queue-events';
 import { QueueSettings } from '../queues/sqs-attributes';
 import { EventSourceMapping } from './event-source-mapping.entity';
@@ -48,6 +50,7 @@ run('functions reading queues, as Lambda\'s event source mappings (L2)', () => {
   let queues: CustomerQueues;
   let events: QueueEvents;
   let poller: EventSourcePoller;
+  let counts: QueueRequestCounts;
   let service: EventSourcesService;
   let n = 0;
   /** What the function answers a batch with; each call's event is kept. */
@@ -97,6 +100,7 @@ run('functions reading queues, as Lambda\'s event source mappings (L2)', () => {
     };
     // Loaded again only when a mapping changes here, so that each test says when.
     const config = new ConfigService({ sqs: { region: REGION }, eventSources: { refreshSeconds: 3600 } });
+    counts = new QueueRequestCounts(db.dataSource.getRepository(QueueRequestCount));
     poller = new EventSourcePoller(
       config,
       db.dataSource.getRepository(EventSourceMapping),
@@ -105,6 +109,7 @@ run('functions reading queues, as Lambda\'s event source mappings (L2)', () => {
       events,
       functions as never,
       { admit: async () => undefined } as never,
+      counts,
     );
     poller.onModuleInit();
     service = new EventSourcesService(
@@ -246,6 +251,15 @@ run('functions reading queues, as Lambda\'s event source mappings (L2)', () => {
         ['two', arnOf(queue.name)],
       ]);
       await service.remove(ACCOUNT, mapping.uuid);
+      // The batch counted as the one request that would have received it, its deletes not billed, its empty receives not counted.
+      await poller.settled();
+      await counts.flush();
+      expect(
+        await db.dataSource.query(
+          'SELECT sum("requests")::int AS "requests", sum("received")::int AS "received", sum("deleted")::int AS "deleted", sum("empty_receives")::int AS "empty" FROM "queue_request_counts" WHERE "queue_id" = $1',
+          [queue.id],
+        ),
+      ).toEqual([{ requests: 1, received: 2, deleted: 2, empty: 0 }]);
     });
 
     it("keeps a message the answer names, which comes back after its visibility timeout until the dead-letter queue takes it", async () => {

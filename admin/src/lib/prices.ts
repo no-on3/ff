@@ -1,8 +1,8 @@
 /**
  * Price books, as the admin routes give them (P-73, D8): AWS Lambda's SKUs in
- * TND, and those of customers' databases and buckets, as AWS RDS and S3 price
- * them, in the books that have them. contract.test.ts checks the SKUs against
- * the backend's priceDocumentSchema.
+ * TND, and those of customers' databases, buckets and queues, as AWS RDS, S3
+ * and SQS price them, in the books that have them. contract.test.ts checks the
+ * SKUs against the backend's priceDocumentSchema.
  */
 export type BookStatus = 'past' | 'active' | 'scheduled';
 
@@ -17,12 +17,19 @@ export interface StorageTier {
   price: string;
 }
 
-/** The SKUs of customers' databases and buckets: RDS's gp3 storage, S3 Standard's storage and its two classes of request. */
+/** SQS's request tiers, by the account's requests in the month: a price per million. */
+export interface QueueTier {
+  upToRequests: number | null;
+  price: string;
+}
+
+/** The SKUs of customers' databases, buckets and queues: RDS's gp3 storage, S3 Standard's storage and its two classes of request, SQS's requests. */
 export interface StoragePrices {
   databaseStorageGbMonth?: string;
   bucketStorageGbMonth?: StorageTier[];
   requestsTier1PerThousand?: string;
   requestsTier2PerThousand?: string;
+  queueRequestsPerMillion?: QueueTier[];
 }
 
 /** AWS's US$ prices, as a book from them records them. */
@@ -36,7 +43,15 @@ export interface UsdPrices extends StoragePrices {
 export interface PriceDocument {
   currency: string;
   source: { kind: string; readOn?: string; usdRate?: string; usdRateDate?: string; usdPrices?: UsdPrices; [more: string]: unknown };
-  freeTier: { requests: number; gbSeconds: number; databaseStorageGbMonths?: number; bucketStorageGbMonths?: number; requestsTier1?: number; requestsTier2?: number };
+  freeTier: {
+    requests: number;
+    gbSeconds: number;
+    databaseStorageGbMonths?: number;
+    bucketStorageGbMonths?: number;
+    requestsTier1?: number;
+    requestsTier2?: number;
+    queueRequests?: number;
+  };
   prices: UsdPrices & { minimumBilledMs: number; idleInstanceGbSecond: string; monthlyPlanFee: string; databaseMonthlyFee?: string };
 }
 
@@ -72,6 +87,7 @@ export const SKUS = [
   'bucketStorageGbMonth',
   'requestsTier1PerThousand',
   'requestsTier2PerThousand',
+  'queueRequestsPerMillion',
 ] as const;
 
 export const STATUS_LABELS: Record<BookStatus, string> = { past: 'Past', active: 'Active', scheduled: 'Scheduled' };
@@ -113,22 +129,26 @@ export interface DraftForm {
   minimumBilledMs: string;
   idleInstanceGbSecond: string;
   monthlyPlanFee: string;
-  /** Customers' databases' and buckets' prices and free tier, as text; only those the book drafted from has are used. */
+  /** Customers' databases', buckets' and queues' prices and free tier, as text; only those the book drafted from has are used. */
   storage: StorageForm;
 }
 
 export interface StorageForm {
-  usd: { databaseStorageGbMonth: string; bucketTiers: string[]; requestsTier1PerThousand: string; requestsTier2PerThousand: string };
-  tnd: { databaseStorageGbMonth: string; bucketTiers: string[]; requestsTier1PerThousand: string; requestsTier2PerThousand: string };
+  usd: { databaseStorageGbMonth: string; bucketTiers: string[]; requestsTier1PerThousand: string; requestsTier2PerThousand: string; queueTiers: string[] };
+  tnd: { databaseStorageGbMonth: string; bucketTiers: string[]; requestsTier1PerThousand: string; requestsTier2PerThousand: string; queueTiers: string[] };
   databaseMonthlyFee: string;
   freeDatabaseGbMonths: string;
   freeBucketGbMonths: string;
   freeRequestsTier1: string;
   freeRequestsTier2: string;
+  freeQueueRequests: string;
 }
 
 /** Whether a book prices customers' databases and buckets: the page shows those SKUs, and a book drafted from it has them too. */
 export const pricesStorage = (book: PriceDocument): boolean => book.prices.databaseStorageGbMonth !== undefined;
+
+/** Whether a book prices customers' queues, as SQS does: the page shows the SKU, and a book drafted from it has it too. */
+export const pricesQueues = (book: PriceDocument): boolean => book.prices.queueRequestsPerMillion !== undefined;
 
 /** A form that starts from a book, the active one: its prices, its rate, and the next hour. */
 export function formFrom(book: PriceDocument, now: Date): DraftForm {
@@ -164,18 +184,21 @@ export function formFrom(book: PriceDocument, now: Date): DraftForm {
         bucketTiers: (prices.bucketStorageGbMonth ?? []).map((_tier, index) => usd?.bucketStorageGbMonth?.[index]?.price ?? ''),
         requestsTier1PerThousand: usd?.requestsTier1PerThousand ?? '',
         requestsTier2PerThousand: usd?.requestsTier2PerThousand ?? '',
+        queueTiers: (prices.queueRequestsPerMillion ?? []).map((_tier, index) => usd?.queueRequestsPerMillion?.[index]?.price ?? ''),
       },
       tnd: {
         databaseStorageGbMonth: prices.databaseStorageGbMonth ?? '',
         bucketTiers: (prices.bucketStorageGbMonth ?? []).map((tier) => tier.price),
         requestsTier1PerThousand: prices.requestsTier1PerThousand ?? '',
         requestsTier2PerThousand: prices.requestsTier2PerThousand ?? '',
+        queueTiers: (prices.queueRequestsPerMillion ?? []).map((tier) => tier.price),
       },
       databaseMonthlyFee: prices.databaseMonthlyFee ?? '',
       freeDatabaseGbMonths: String(book.freeTier.databaseStorageGbMonths ?? ''),
       freeBucketGbMonths: String(book.freeTier.bucketStorageGbMonths ?? ''),
       freeRequestsTier1: String(book.freeTier.requestsTier1 ?? ''),
       freeRequestsTier2: String(book.freeTier.requestsTier2 ?? ''),
+      freeQueueRequests: String(book.freeTier.queueRequests ?? ''),
     },
   };
 }
@@ -183,10 +206,10 @@ export function formFrom(book: PriceDocument, now: Date): DraftForm {
 /**
  * The book a form describes, on the base book's tiers and currency, or what
  * is wrong with it, each named. In "aws" mode, each TND price is the US$
- * price times the rate, exactly. Customers' databases' and buckets' SKUs and
- * free tier are those the base book has, each as the form sets it: a book
- * without them would price them at nothing, which the API refuses after a
- * book that has them.
+ * price times the rate, exactly. Customers' databases', buckets' and queues'
+ * SKUs and free tier are those the base book has, each as the form sets it: a
+ * book without them would price them at nothing, which the API refuses after
+ * a book that has them.
  */
 export function draftDocument(form: DraftForm, base: PriceDocument, today: Date): { document: PriceDocument; validFrom: string } | { problems: string[] } {
   const problems: string[] = [];
@@ -216,6 +239,12 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
       }),
       ...(basePrices.requestsTier1PerThousand !== undefined && { requestsTier1PerThousand: decimal(`PUT, COPY, POST and LIST requests, per 1,000${unit}`, given.requestsTier1PerThousand) }),
       ...(basePrices.requestsTier2PerThousand !== undefined && { requestsTier2PerThousand: decimal(`GET and other requests, per 1,000${unit}`, given.requestsTier2PerThousand) }),
+      ...(basePrices.queueRequestsPerMillion && {
+        queueRequestsPerMillion: basePrices.queueRequestsPerMillion.map((tier, index) => ({
+          upToRequests: tier.upToRequests,
+          price: decimal(`Queue requests tier ${index + 1}${unit}`, given.queueTiers[index] ?? ''),
+        })),
+      }),
     };
   };
   if (form.mode === 'aws') {
@@ -239,6 +268,7 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
       ...(usd.bucketStorageGbMonth && { bucketStorageGbMonth: usd.bucketStorageGbMonth.map((tier) => ({ ...tier, price: times(tier.price) })) }),
       ...(usd.requestsTier1PerThousand !== undefined && { requestsTier1PerThousand: times(usd.requestsTier1PerThousand) }),
       ...(usd.requestsTier2PerThousand !== undefined && { requestsTier2PerThousand: times(usd.requestsTier2PerThousand) }),
+      ...(usd.queueRequestsPerMillion && { queueRequestsPerMillion: usd.queueRequestsPerMillion.map((tier) => ({ ...tier, price: times(tier.price) })) }),
     };
     source = { ...base.source, kind: 'aws-lambda', readOn: today.toISOString().slice(0, 10), usdPrices: usd, usdRate: rate, usdRateDate: form.rateDate };
   } else {
@@ -259,6 +289,7 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
     ...(baseFree.bucketStorageGbMonths !== undefined && { bucketStorageGbMonths: whole('Free bucket GB-months', form.storage.freeBucketGbMonths) }),
     ...(baseFree.requestsTier1 !== undefined && { requestsTier1: whole('Free PUT, COPY, POST and LIST requests', form.storage.freeRequestsTier1) }),
     ...(baseFree.requestsTier2 !== undefined && { requestsTier2: whole('Free GET and other requests', form.storage.freeRequestsTier2) }),
+    ...(baseFree.queueRequests !== undefined && { queueRequests: whole('Free queue requests', form.storage.freeQueueRequests) }),
   };
   const knobs = {
     minimumBilledMs: whole('Minimum billed duration', form.minimumBilledMs),
@@ -282,6 +313,50 @@ export function storageTierLabel(tiers: StorageTier[], index: number): string {
   const end = tiers[index].upToGbMonths;
   if (end !== null) return index === 0 ? `first ${end.toLocaleString('en-US')} GB-months` : `up to ${end.toLocaleString('en-US')} GB-months`;
   return `past ${(tiers[index - 1]?.upToGbMonths ?? 0).toLocaleString('en-US')} GB-months`;
+}
+
+/** An SQS request tier's name, from where it ends: "first 100,000,000,000 requests", "past 200,000,000,000 requests". */
+export function queueTierLabel(tiers: QueueTier[], index: number): string {
+  const end = tiers[index].upToRequests;
+  if (end !== null) return index === 0 ? `first ${end.toLocaleString('en-US')} requests` : `up to ${end.toLocaleString('en-US')} requests`;
+  return `past ${(tiers[index - 1]?.upToRequests ?? 0).toLocaleString('en-US')} requests`;
+}
+
+/** A book's SKUs as its page lists them: each one's label, its price in the book's currency, and AWS's US$ price where the book has it. */
+export function bookRows(document: PriceDocument): Array<[string, string, string]> {
+  const { prices, freeTier, source } = document;
+  const usd = source.usdPrices;
+  const rows: Array<[string, string, string]> = [
+    ['Requests, per million', prices.requestsPerMillion, usd?.requestsPerMillion ?? ''],
+    ...prices.gbSecond.map((tier, index): [string, string, string] => [`Duration, ${tierLabel(prices.gbSecond, index)}, per GB-s`, tier.price, usd?.gbSecond[index]?.price ?? '']),
+    ['Provisioned concurrency (minInstances), per GB-s', prices.provisionedGbSecond, usd?.provisionedGbSecond ?? ''],
+    ['Duration on provisioned concurrency, per GB-s', prices.provisionedDurationGbSecond, usd?.provisionedDurationGbSecond ?? ''],
+    ['Free tier, a month', `${freeTier.requests.toLocaleString('en-US')} requests, ${freeTier.gbSeconds.toLocaleString('en-US')} GB-s`, ''],
+    ['Minimum billed duration', `${prices.minimumBilledMs} ms`, ''],
+    ['Idle instance time, per GB-s', prices.idleInstanceGbSecond, ''],
+    ['Monthly fee', prices.monthlyPlanFee, ''],
+  ];
+  // Customers' databases and buckets, as AWS RDS and S3 price them, in a book that has them.
+  if (prices.databaseStorageGbMonth !== undefined) rows.push(['Database storage, per GB-month', prices.databaseStorageGbMonth, usd?.databaseStorageGbMonth ?? '']);
+  if (prices.databaseMonthlyFee !== undefined) rows.push(['Monthly fee per database', prices.databaseMonthlyFee, '']);
+  for (const [index, tier] of (prices.bucketStorageGbMonth ?? []).entries()) {
+    rows.push([`Bucket storage, ${storageTierLabel(prices.bucketStorageGbMonth ?? [], index)}, per GB-month`, tier.price, usd?.bucketStorageGbMonth?.[index]?.price ?? '']);
+  }
+  if (prices.requestsTier1PerThousand !== undefined) rows.push(['PUT, COPY, POST and LIST requests, per 1,000', prices.requestsTier1PerThousand, usd?.requestsTier1PerThousand ?? '']);
+  if (prices.requestsTier2PerThousand !== undefined) rows.push(['GET and other requests, per 1,000', prices.requestsTier2PerThousand, usd?.requestsTier2PerThousand ?? '']);
+  if (freeTier.databaseStorageGbMonths !== undefined) {
+    rows.push([
+      'Free tier of databases and buckets, a month',
+      `${freeTier.databaseStorageGbMonths} GB-month of databases, ${freeTier.bucketStorageGbMonths ?? 0} of buckets, ${(freeTier.requestsTier1 ?? 0).toLocaleString('en-US')} PUT and ${(freeTier.requestsTier2 ?? 0).toLocaleString('en-US')} GET requests`,
+      '',
+    ]);
+  }
+  // Customers' queues, as AWS SQS prices them, in a book that has them.
+  for (const [index, tier] of (prices.queueRequestsPerMillion ?? []).entries()) {
+    rows.push([`Queue requests, ${queueTierLabel(prices.queueRequestsPerMillion ?? [], index)}, per million`, tier.price, usd?.queueRequestsPerMillion?.[index]?.price ?? '']);
+  }
+  if (freeTier.queueRequests !== undefined) rows.push(['Free tier of queues, a month', `${freeTier.queueRequests.toLocaleString('en-US')} requests`, '']);
+  return rows;
 }
 
 /** Where a book's prices come from, to read. */

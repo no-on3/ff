@@ -24,7 +24,7 @@
 # with its attributes and a dead-letter queue by name, a message sent by ff and received by the AWS CLI
 # with a key naming that queue alone, received again by ff until the third receive moves it to the
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
-# CLI, the queue deleted and the other account seeing none; the getting-started
+# CLI, the queue deleted and the other account seeing none, its month in ff usage; the getting-started
 # guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
 # each one's receipt written to a bucket with the function's own key, read back by a GET and by the
 # AWS CLI, both gone after the night 90 days on; and ff local, in
@@ -680,6 +680,11 @@ check "ff queues delete deletes it" "0 deleted the queue cli-orders" "$(code) $(
 ff queues get cli-orders
 check "  ... which then isn't there, in the API's words, exit 3" '3 true' "$(code) $(err | grep -q 'no queue named "cli-orders"' && echo true || echo false)"
 ff queues delete cli-orders-dlq --yes
+# Its requests are counted a minute at a time: in ff usage within two, deleted and all.
+for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.queues[] | select(.name == "cli-orders" and .deleted and .messagesSent >= 3)' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists the queue's month after the buckets, deleted since: its requests as SQS bills them, the messages sent and received" "0 true" \
+  "$(code) $(out | grep -qE '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' && echo true || echo false)"
 ff buckets keys revoke "$queue_key" --yes
 
 echo "== functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"

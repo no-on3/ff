@@ -65,6 +65,7 @@ import {
   BUCKET_FIELDS,
   BUCKET_REQUEST_METRICS,
   BUCKET_USAGE_FIELDS,
+  QUEUE_USAGE_FIELDS,
   STORAGE_KEY_FIELDS,
   DATABASE_FIELDS,
   DATABASE_STATUSES,
@@ -535,6 +536,11 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
     expect(dtoFields(metricsDtoSource, 'class BucketRequestSeries {')).toEqual(['Sum']);
     expect(dtoFields(usageDtoSource, 'export class BucketUsageView {')).toEqual([...BUCKET_USAGE_FIELDS]);
     expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('buckets');
+  });
+
+  it("have the API's fields of a queue's month on the Usage page", () => {
+    expect(dtoFields(usageDtoSource, 'export class QueueUsageView {')).toEqual([...QUEUE_USAGE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('queues');
   });
 });
 

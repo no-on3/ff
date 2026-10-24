@@ -151,6 +151,9 @@ struct Usage {
     /// Absent from an API before customers' buckets.
     #[serde(default)]
     buckets: Vec<BucketUsage>,
+    /// Absent from an API before customers' queues.
+    #[serde(default)]
+    queues: Vec<QueueUsage>,
     totals: Amounts,
     estimate: Option<Estimate>,
 }
@@ -178,6 +181,18 @@ struct BucketUsage {
     /// What its requests sent out, counted and not billed. Absent from an API before it was shown.
     #[serde(default)]
     bytes_downloaded: u64,
+    cost: Option<String>,
+}
+
+/// A queue's month, as its requests were counted: SQS's requests, and its messages.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueueUsage {
+    name: String,
+    deleted: bool,
+    requests: u64,
+    messages_sent: u64,
+    messages_received: u64,
     cost: Option<String>,
 }
 
@@ -295,8 +310,28 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
                 .collect();
             format!("\n{}", table(&["BUCKET", "GB-MONTHS", "PUT, LIST…", "GET…", "SENT OUT", "COST"], &rows))
         };
+        // As SQS bills them: each 64 KB of a request's messages a request, a function's batch as the request that would
+        // have received it.
+        let queues = if usage.queues.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .queues
+                .iter()
+                .map(|queue| {
+                    vec![
+                        if queue.deleted { format!("{} (deleted)", queue.name) } else { queue.name.clone() },
+                        queue.requests.to_string(),
+                        queue.messages_sent.to_string(),
+                        queue.messages_received.to_string(),
+                        queue.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["QUEUE", "REQUESTS", "SENT", "RECEIVED", "COST"], &rows))
+        };
         format!(
-            "{}\n{}{databases}{buckets}\n{estimate}",
+            "{}\n{}{databases}{buckets}{queues}\n{estimate}",
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )

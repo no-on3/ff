@@ -27,15 +27,16 @@ export const SAMPLE_SUMS = [
   `sum(GREATEST("instances" - "min_instances", 0)::bigint * "memory_mb" * 60000) AS "reservedMbMs"`,
 ].join(', ');
 
-/** A database's or bucket's rated hours with one book, summed, as RESOURCE_SUMS selects them. */
+/** A database's, bucket's or queue's rated hours with one book, summed, as RESOURCE_SUMS selects them. */
 export interface ResourceRow {
   resourceId: string;
-  kind: 'database' | 'bucket';
+  kind: 'database' | 'bucket' | 'queue';
   priceBookId: string;
   byteHours: string;
   hours: string;
   tier1: string;
   tier2: string;
+  requests: string;
 }
 
 /** Over resource_usage_hourly, grouped by "resource_id", "kind" and "price_book_id": the hourly rating's sums and the statement's alike. */
@@ -47,6 +48,7 @@ export const RESOURCE_SUMS = [
   `sum("hours")::text AS "hours"`,
   `sum("tier1_requests")::text AS "tier1"`,
   `sum("tier2_requests")::text AS "tier2"`,
+  `sum("requests")::text AS "requests"`,
 ].join(', ');
 
 /** The same, as the rater takes them. */
@@ -57,4 +59,5 @@ export const resourceUsage = (row: ResourceRow): ResourceUsage => ({
   hours: BigInt(row.hours),
   tier1Requests: BigInt(row.tier1),
   tier2Requests: BigInt(row.tier2),
+  requests: BigInt(row.requests),
 });

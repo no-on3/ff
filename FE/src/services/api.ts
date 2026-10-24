@@ -457,6 +457,23 @@ export interface BucketUsage {
   cost: string | null;
 }
 
+/** A queue's fields in GET /usage, as the API's QueueUsageView names them: contract.test.ts checks them. */
+export const QUEUE_USAGE_FIELDS = ['queueId', 'name', 'deleted', 'requests', 'messagesSent', 'messagesReceived', 'cost'] as const satisfies ReadonlyArray<keyof QueueUsage>;
+/** A customer's queue in the month, as its requests were counted. */
+export interface QueueUsage {
+  queueId: string;
+  name: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+  /** Its requests as SQS bills them: each 64 KB of a request's messages a request; a function's batch as the request that would have received it. */
+  requests: number;
+  /** The messages kept in it, and those received from it, a message received twice counting twice. */
+  messagesSent: number;
+  messagesReceived: number;
+  /** Before the free tier; null without a price book. */
+  cost: string | null;
+}
+
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
@@ -467,6 +484,8 @@ export interface MonthlyUsage {
   databases: DatabaseUsage[];
   /** Each of its buckets measured, or asked anything, in the month, the most GB-months first. */
   buckets: BucketUsage[];
+  /** Each of its queues asked anything in the month, the most requests first. */
+  queues: QueueUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */
   estimate: UsageEstimate | null;

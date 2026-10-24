@@ -138,6 +138,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
             monthly: async () => ({ month: '2026-10', functions: [], totals: { requests: 0, billedMs: 0, gbSeconds: '0', throttled: 0, platformErrors: 0, lost: 0 } }),
             monthlyDatabases: async () => [],
             monthlyBuckets: async () => [],
+            monthlyQueues: async () => [],
           }),
         },
         { provide: PricingService, useValue: succeeding(PricingService, { estimate: async () => null }) },

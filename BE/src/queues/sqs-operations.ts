@@ -5,7 +5,9 @@ import { PlanView } from '../plans/plan-limits';
 import { KeyNames, reachesQueue } from '../storage/key-reach';
 import { CustomerQueues, MessageMeta, Outgoing, Received } from './customer-queues';
 import { QueueEvents } from './queue-events';
+import { QueueRequestCounts } from './queue-request-counts.service';
 import { QueueStore } from './queue-store';
+import { billedRequests } from './queue-tally';
 import { Queue } from './queue.entity';
 import { attributesOf, checkQueueName, queueArn, settingsOf } from './sqs-attributes';
 import { SqsError, accessDenied, invalidParameter, missingParameter, overLimit, queueDoesNotExist, receiptHandleIsInvalid, unsupportedOperation } from './sqs-error';
@@ -41,6 +43,18 @@ export interface Caller {
 
 type Input = Record<string, unknown>;
 type Output = Record<string, unknown>;
+
+/** What one request did to the queue it named, as SQS bills it and CloudWatch counts it. */
+interface Usage {
+  /** The queue it named, once found: a request that names none, or none there, isn't counted. */
+  queue?: Queue;
+  /** The bytes of the messages it carried, sent or received. */
+  payloadBytes: number;
+  sentSizes: number[];
+  received: number;
+  deleted: number;
+  emptyReceives: number;
+}
 
 /** The operations a read-only key may call, as IAM's read access level has them. */
 export const READ_OPERATIONS = new Set(['GetQueueUrl', 'GetQueueAttributes', 'ListQueues', 'ReceiveMessage']);
@@ -104,7 +118,10 @@ const asked = (names: unknown, name: string): boolean =>
  * <endpoint>/<account>/<name>, under the endpoint the caller reached; a URL
  * names its queue by its path, whatever its host; another account's queue is
  * one that doesn't exist. A long poll waits for its queue's news, from any
- * backend.
+ * backend. Each request that names a queue of the account is counted, as SQS
+ * bills it, each 64 KB of the messages it carries a request, with the
+ * messages it sent, received and deleted, whether it came by the SQS endpoint
+ * or by FF's API.
  */
 export class SqsOperations {
   constructor(
@@ -112,6 +129,7 @@ export class SqsOperations {
     private readonly store: QueueStore,
     private readonly events: QueueEvents,
     private readonly audit: AuditService,
+    private readonly counts: QueueRequestCounts,
     private readonly base: string,
     private readonly region: string,
   ) {}
@@ -127,59 +145,80 @@ export class SqsOperations {
     const handler = this.handlers[operation];
     if (!handler) throw unsupportedOperation(`The operation ${operation || '(none)'} is not one of SQS's that FF offers.`);
     if (caller.readOnly && !READ_OPERATIONS.has(operation)) throw accessDenied(`The access key is read-only: it can't call ${operation}.`);
-    return handler(input, caller);
+    const usage: Usage = { payloadBytes: 0, sentSizes: [], received: 0, deleted: 0, emptyReceives: 0 };
+    try {
+      return await handler(input, caller, usage);
+    } finally {
+      // Each request that named a queue there, answered or refused, whichever way it came; ListQueues names none.
+      const { queue } = usage;
+      if (queue) {
+        this.counts.count({
+          queueId: queue.id,
+          accountId: queue.accountId,
+          queueName: queue.name,
+          requests: billedRequests(usage.payloadBytes),
+          sentSizes: usage.sentSizes,
+          received: usage.received,
+          deleted: usage.deleted,
+          emptyReceives: usage.emptyReceives,
+        });
+      }
+    }
   }
 
-  private readonly handlers: Record<string, (input: Input, caller: Caller) => Promise<Output>> = {
-    CreateQueue: (input, caller) => this.createQueue(input, caller),
-    GetQueueUrl: (input, caller) => this.getQueueUrl(input, caller),
+  private readonly handlers: Record<string, (input: Input, caller: Caller, usage: Usage) => Promise<Output>> = {
+    CreateQueue: (input, caller, usage) => this.createQueue(input, caller, usage),
+    GetQueueUrl: (input, caller, usage) => this.getQueueUrl(input, caller, usage),
     ListQueues: (input, caller) => this.listQueues(input, caller),
-    GetQueueAttributes: async (input, caller) => {
-      const queue = await this.queueOf(input, caller);
+    GetQueueAttributes: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
       return { Attributes: attributesOf(queue, await this.queues.counts(queue, new Date()), input.AttributeNames, this.region) };
     },
-    SetQueueAttributes: async (input, caller) => {
-      const queue = await this.queueOf(input, caller);
+    SetQueueAttributes: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
       if (input.Attributes === undefined) throw missingParameter('Attributes');
       const settings = settingsOf(input.Attributes, this.region, caller.accountId);
       await this.queues.setAttributes(queue, settings, this.region);
       await this.record(caller, 'queue.update', queue.name, { attributes: settings });
       return {};
     },
-    DeleteQueue: async (input, caller) => {
-      const queue = await this.queueOf(input, caller);
+    DeleteQueue: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
       await this.queues.delete(queue);
       await this.record(caller, 'queue.delete', queue.name);
       return {};
     },
-    PurgeQueue: async (input, caller) => {
-      const queue = await this.queueOf(input, caller);
+    PurgeQueue: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
       await this.queues.purge(queue);
       await this.record(caller, 'queue.purge', queue.name);
       return {};
     },
-    SendMessage: (input, caller) => this.sendMessage(input, caller),
-    SendMessageBatch: (input, caller) => this.sendMessageBatch(input, caller),
-    ReceiveMessage: (input, caller) => this.receiveMessage(input, caller),
-    DeleteMessage: async (input, caller) => {
-      const queue = await this.queueOf(input, caller);
+    SendMessage: (input, caller, usage) => this.sendMessage(input, caller, usage),
+    SendMessageBatch: (input, caller, usage) => this.sendMessageBatch(input, caller, usage),
+    ReceiveMessage: (input, caller, usage) => this.receiveMessage(input, caller, usage),
+    // A valid receipt handle counts as a message deleted, as CloudWatch counts one, an older one too.
+    DeleteMessage: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
       await this.queues.deleteMessages(queue, [this.receipt(input.ReceiptHandle)]);
+      usage.deleted = 1;
       return {};
     },
-    DeleteMessageBatch: async (input, caller) => {
-      const queue = await this.queueOf(input, caller);
+    DeleteMessageBatch: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
       return this.batch(input, async (entry) => {
         await this.queues.deleteMessages(queue, [this.receipt(entry.ReceiptHandle)]);
+        usage.deleted += 1;
         return {};
       });
     },
-    ChangeMessageVisibility: async (input, caller) => {
-      const queue = await this.queueOf(input, caller);
+    ChangeMessageVisibility: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
       await this.changeVisibility(queue, input);
       return {};
     },
-    ChangeMessageVisibilityBatch: async (input, caller) => {
-      const queue = await this.queueOf(input, caller);
+    ChangeMessageVisibilityBatch: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
       return this.batch(input, async (entry) => {
         await this.changeVisibility(queue, entry);
         return {};
@@ -193,7 +232,7 @@ export class SqsOperations {
   }
 
   /** The caller's account's queue a URL names, whatever its host: by its path, /<account>/<name>; another account's doesn't exist for it. */
-  private async queueOf(input: Input, caller: Caller): Promise<Queue> {
+  private async queueOf(input: Input, caller: Caller, usage: Usage): Promise<Queue> {
     const url = text(input, 'QueueUrl');
     if (url === undefined) throw missingParameter('QueueUrl');
     let path: string;
@@ -207,6 +246,7 @@ export class SqsOperations {
     this.reach(caller, match[2], url);
     const queue = await this.queues.find(caller.accountId, match[2]);
     if (!queue) throw queueDoesNotExist();
+    usage.queue = queue;
     return queue;
   }
 
@@ -217,17 +257,18 @@ export class SqsOperations {
     }
   }
 
-  private async createQueue(input: Input, caller: Caller): Promise<Output> {
+  private async createQueue(input: Input, caller: Caller, usage: Usage): Promise<Output> {
     const name = checkQueueName(input.QueueName);
     this.reach(caller, name, this.urlOf({ accountId: caller.accountId, name }, caller.endpoint));
     if (input.tags !== undefined && Object.keys(input.tags as object).length > 0) throw invalidParameter("FF's queues have no tags yet.");
     const settings = settingsOf(input.Attributes, this.region, caller.accountId);
     const { queue, created } = await this.queues.create(caller.accountId, name, settings, { limit: caller.plan.limits.queues, name: caller.plan.name }, this.region);
+    usage.queue = queue;
     if (created) await this.record(caller, 'queue.create', queue.name, { attributes: settings });
     return { QueueUrl: this.urlOf(queue, caller.endpoint) };
   }
 
-  private async getQueueUrl(input: Input, caller: Caller): Promise<Output> {
+  private async getQueueUrl(input: Input, caller: Caller, usage: Usage): Promise<Output> {
     const name = text(input, 'QueueName');
     if (!name) throw missingParameter('QueueName');
     const owner = text(input, 'QueueOwnerAWSAccountId');
@@ -235,6 +276,7 @@ export class SqsOperations {
     this.reach(caller, name, this.urlOf({ accountId: caller.accountId, name }, caller.endpoint));
     const queue = await this.queues.find(caller.accountId, name);
     if (!queue) throw queueDoesNotExist();
+    usage.queue = queue;
     return { QueueUrl: this.urlOf(queue, caller.endpoint) };
   }
 
@@ -291,16 +333,18 @@ export class SqsOperations {
     };
   }
 
-  private async sendMessage(input: Input, caller: Caller): Promise<Output> {
-    const queue = await this.queueOf(input, caller);
+  private async sendMessage(input: Input, caller: Caller, usage: Usage): Promise<Output> {
+    const queue = await this.queueOf(input, caller, usage);
     const message = this.outgoing(queue, input, caller);
     await this.checkRoom(caller, message.sizeBytes);
     await this.queues.send(queue, [message], new Date());
+    usage.payloadBytes = message.sizeBytes;
+    usage.sentSizes = [message.sizeBytes];
     return this.sent(message);
   }
 
-  private async sendMessageBatch(input: Input, caller: Caller): Promise<Output> {
-    const queue = await this.queueOf(input, caller);
+  private async sendMessageBatch(input: Input, caller: Caller, usage: Usage): Promise<Output> {
+    const queue = await this.queueOf(input, caller, usage);
     const entries = this.entries(input);
     const kept: Array<{ id: string; message: Outgoing }> = [];
     const failed: Output[] = [];
@@ -318,6 +362,8 @@ export class SqsOperations {
     }
     await this.checkRoom(caller, bytes);
     await this.queues.send(queue, kept.map(({ message }) => message), new Date());
+    usage.payloadBytes = bytes;
+    usage.sentSizes = kept.map(({ message }) => message.sizeBytes);
     return { Successful: kept.map(({ id, message }) => ({ Id: id, ...this.sent(message) })), Failed: failed };
   }
 
@@ -374,8 +420,8 @@ export class SqsOperations {
    * with a wait, a long poll: none now, it waits for its queue's news, up to
    * the wait, answering as soon as there are messages.
    */
-  private async receiveMessage(input: Input, caller: Caller): Promise<Output> {
-    const queue = await this.queueOf(input, caller);
+  private async receiveMessage(input: Input, caller: Caller, usage: Usage): Promise<Output> {
+    const queue = await this.queueOf(input, caller, usage);
     const max = integer(input, 'MaxNumberOfMessages', 1, 10, 1);
     const visibility = integer(input, 'VisibilityTimeout', 0, 43_200, queue.visibilityTimeout);
     const wait = integer(input, 'WaitTimeSeconds', 0, 20, queue.receiveWaitSeconds);
@@ -385,6 +431,9 @@ export class SqsOperations {
       await this.events.wait(queue.id, Math.min(POLL_MS, deadline - Date.now()), caller.signal);
       received = await this.queues.receive(queue, max, visibility, new Date());
     }
+    usage.received = received.length;
+    usage.payloadBytes = received.reduce((sum, message) => sum + message.sizeBytes, 0);
+    usage.emptyReceives = received.length === 0 ? 1 : 0;
     const systemNames = [...list(input.AttributeNames), ...list(input.MessageSystemAttributeNames)];
     return received.length ? { Messages: received.map((message) => this.message(message, systemNames, input.MessageAttributeNames)) } : {};
   }

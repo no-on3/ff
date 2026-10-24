@@ -384,8 +384,11 @@ run('usage records (L2, P-20)', () => {
       'storage_request_counts_2031_02',
       'storage_request_counts_2031_03',
       'storage_request_counts_2031_04',
+      'queue_request_counts_2031_02',
+      'queue_request_counts_2031_03',
+      'queue_request_counts_2031_04',
     ]);
-    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(15); // again: nothing to do
+    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(18); // again: nothing to do
 
     const fn = await newFunction();
     const at = async (startedAt: string, requestId: string) => {

@@ -74,6 +74,7 @@ run('asynchronous calls, in the database (L2)', () => {
       events,
       customerQueues,
       onePlan(),
+      { count: () => undefined } as never,
     );
   const send = (fn: Function, requestId: string, body = '{"order":1}', expiresAt = new Date(Date.now() + 7 * HOUR)) => queues.sendEvent(fn, requestId, body, expiresAt);
   const message = async (requestId: string) =>

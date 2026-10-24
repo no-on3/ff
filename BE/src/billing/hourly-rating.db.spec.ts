@@ -6,8 +6,8 @@
  * the free tier at a month's start, minInstances and the monthly fee, shadow
  * mode, and the parent's reconciliation criterion (rated usage equals raw
  * usage); customers' databases, from their hourly samples to the month's
- * statement; then the job: settling, catching up, two backends at once, and
- * what an account reads of its money.
+ * statement, their buckets and their queues; then the job: settling,
+ * catching up, two backends at once, and what an account reads of its money.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -48,7 +48,7 @@ async function ratingWorld() {
   const db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
   await db.dataSource.runMigrations({ transaction: 'each' });
   for (let month = 1; month <= 9; month++) {
-    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts']) {
+    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts']) {
       await db.dataSource.query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-${String(month).padStart(2, '0')}-01`]);
     }
   }
@@ -106,6 +106,12 @@ async function ratingWorld() {
         `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
          VALUES ($1, $2, $3, gen_random_uuid(), $4, $5, $6, 0, 0, 0, 0, 0, 0)`,
         [bucketId, minute, kind, accountId, name, requests],
+      ),
+    queueRequests: (accountId: string, queueId: string, name: string, minute: Date, requests: number, deleted = 0) =>
+      query(
+        `INSERT INTO queue_request_counts (queue_id, minute, writer, account_id, name, requests, sent, received, deleted, empty_receives, sent_bytes, sent_max_bytes)
+         VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, 0, 0, $6, 0, 0, 0)`,
+        [queueId, minute, accountId, name, requests, deleted],
       ),
     sample: (accountId: string, functionId: string, minute: Date, instances: number, minInstances: number, memoryMb: number) =>
       query('INSERT INTO capacity_samples (function_id, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, $5, $6)', [
@@ -577,6 +583,94 @@ run("the hourly rating of customers' buckets (L2, ADR 0009)", () => {
 
     const [after] = (await reconcile(w.db.dataSource, w.pricing, `${Y}-09`)).accounts;
     expect([reconciled(after), after.countedStorageRequests - after.ratedStorageRequests]).toEqual([false, 500n]);
+  });
+});
+
+run("the hourly rating of customers' queues (L2, ADR 0010)", () => {
+  let w: Awaited<ReturnType<typeof ratingWorld>>;
+  const first = at('09-01T00:00:00');
+  const [orders, gone] = [randomUUID(), randomUUID()];
+  let a: string;
+
+  beforeAll(async () => {
+    w = await ratingWorld();
+    // Plain prices: 0.4 TND a million requests, 0.2 past 3 million in the month; the first million free; calls free: only
+    // queues cost here.
+    await w.addBook(
+      first,
+      { ...REQUESTS_ONLY('0'), queueRequestsPerMillion: [{ upToRequests: 3_000_000, price: '0.4' }, { upToRequests: null, price: '0.2' }] },
+      { requests: 0, gbSeconds: 0, queueRequests: 1_000_000 },
+    );
+    a = await w.account();
+    // 00:00: 900,000 requests; 01:00: 2,100,000, two backends counting one minute; 02:00: 1,000,000. "gone" had only FF's
+    // deletes after a function's batch, which aren't billed, and makes no row.
+    await w.queueRequests(a, orders, 'orders', at('09-01T00:10:00'), 600_000);
+    await w.queueRequests(a, orders, 'orders', at('09-01T00:59:00'), 300_000);
+    await w.queueRequests(a, orders, 'orders', at('09-01T01:20:00'), 2_000_000);
+    await w.queueRequests(a, orders, 'orders', at('09-01T01:20:00'), 100_000);
+    await w.queueRequests(a, gone, 'gone', at('09-01T01:30:00'), 0, 5);
+    await w.queueRequests(a, orders, 'orders', at('09-01T02:05:00'), 1_000_000);
+    await w.startAt(first);
+    w.state.shadow = false;
+    for (let i = 0; i < 3; i++) await w.rating.rateHour(new Date(first.getTime() + i * HOUR_MS));
+  });
+
+  afterAll(async () => {
+    await w?.db.drop();
+  });
+
+  it("rates each queue's hour by its requests, as SQS bills them, with its name then; one without any billed, none", async () => {
+    const rows = await w.query(
+      `SELECT hour, resource_id AS id, kind, name, byte_hours::int AS "byteHours", hours, tier1_requests::int AS tier1, tier2_requests::int AS tier2, requests::int AS requests
+         FROM resource_usage_hourly WHERE account_id = $1 ORDER BY hour, name`,
+      [a],
+    );
+
+    const row = (hour: Date, requests: number) => ({ hour, id: orders, kind: 'queue', name: 'orders', byteHours: 0, hours: 0, tier1: 0, tier2: 0, requests });
+    expect(rows).toEqual([row(first, 900_000), row(at('09-01T01:00:00'), 2_100_000), row(at('09-01T02:00:00'), 1_000_000)]);
+  });
+
+  it('charges each hour the month so far less the free million, the requests past 3 million at the tier above', async () => {
+    // 00:00: within the free million. 01:00: 3,000,000 so far, 2,000,000 past the free ones: 0.8 TND. 02:00: 1,000,000 more,
+    // at 0.2: 0.2.
+    expect(await w.charges(a)).toEqual([
+      ['09-01T00', 0, 0, false, false],
+      ['09-01T01', 800, 800, false, true],
+      ['09-01T02', 200, 1000, false, true],
+    ]);
+    expect(await w.ledger.balance(a, 'TND')).toBe(-1000n);
+  });
+
+  it("lists them on the month's statement and its PDF, by name, with their requests and the amount before the free tier", async () => {
+    const config = { getOrThrow: () => ({ seller: { name: 'FF SARL', taxId: null, address: '1 rue du Lac, 1053 Tunis' }, bank: null }) } as unknown as ConfigService;
+    const invoices = new InvoicesService(w.db.dataSource, w.ledger, w.pricing, {} as AuditService, {} as never, {} as ObjectStoreService, config);
+    const now = at('09-02T00:00:00');
+
+    const statement = await invoices.statementIn(w.db.dataSource.manager, a, `${Y}-09`, now);
+
+    expect(statement.resources.map((r) => [r.kind, r.name, r.requests, r.amountMinor])).toEqual([['queue', 'orders', 4_000_000n, 1_600n]]);
+    expect([statement.usageMinor, statement.freeTierMinor, statement.volumeTiersMinor, statement.totalMinor, statement.debitedMinor]).toEqual([1_600n, -400n, -200n, 1_000n, 1_000n]);
+    const [page] = pdfRows(await invoices.statementPdf(a, `${Y}-09`, now)).map((rows) => rows.map((row) => row.replaceAll(String.fromCharCode(0xa0), ' ')));
+    expect(page).toEqual(expect.arrayContaining(["File d'attente | Requêtes | Montant HT", 'orders | 4 000 000 | 1,600 TND', 'Paliers de volume | -0,200 TND', 'Total HT | 1,000 TND']));
+  });
+
+  it('reconciles them: the requests rated equal those counted; a count written after its hour was rated shows', async () => {
+    const before = await reconcile(w.db.dataSource, w.pricing, `${Y}-09`);
+    expect(before.accounts.map((account) => [account.accountId, reconciled(account), account.ratedQueueRequests, account.countedQueueRequests])).toEqual([
+      [a, true, 4_000_000n, 4_000_000n],
+    ]);
+
+    await w.queueRequests(a, orders, 'orders', at('09-01T00:30:00'), 500);
+
+    const [after] = (await reconcile(w.db.dataSource, w.pricing, `${Y}-09`)).accounts;
+    expect([reconciled(after), after.countedQueueRequests - after.ratedQueueRequests]).toEqual([false, 500n]);
+  });
+
+  it("counts the account among those that used something in the month, a price book's preview prices; not one whose queue had only deletes that cost nothing", async () => {
+    const b = await w.account();
+    await w.queueRequests(b, randomUUID(), 'drained', at('09-01T03:00:00'), 0, 5);
+
+    expect(await w.pricing.accountsWithUsage(`${Y}-09`)).toEqual([a]);
   });
 });
 

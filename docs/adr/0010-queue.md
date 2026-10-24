@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-3 plan](../step-3-plan.md)'s D1, and its choices (its §9), confirmed by you on 2026-10-23; where its messages live, measured by Q-01's spike the same day |
 | **Date** | 2026-10-23 |
-| **Implementation** | Step-3 plan: decisions D1 to D5 and D9; tasks Q-02 to Q-07. As built so far: Q-02 (below) |
+| **Implementation** | Step-3 plan: decisions D1 to D9 and D11; tasks Q-02 to Q-08. As built so far: Q-02 to Q-07, and Q-08's first part (below) |
 | **Related** | [Parent plan](../local-markets-and-aws-portability-plan.md): ADR-003 (the queue's backend), E-03, E-05, E-04's notifications, §4.6, §6.7; [What to build next](../what-to-build-next.md) §6; the spike, [`hack/spikes/queue`](../../hack/spikes/queue/README.md) |
 
 ## Context
@@ -122,6 +122,13 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 - **S3's configuration, in a column of the bucket's** (the migration `BucketNotifications`), read with the bucket by the S3 front door: PutBucketNotificationConfiguration and GetBucketNotificationConfiguration through it, in S3's XML, read by a small reader of FF's own that refuses a DOCTYPE, and FF's API in S3's JSON names. Checked as S3 checks it, overlapping configurations refused, so that an event goes to one destination; each destination the account's, there unless the caller skips that check.
 - **The front door publishes, the queues' side delivers:** once the store answered a write a configuration names, the front door makes S3's record (a created object's size and ETag from the store) and publishes it in the process; the queues' module delivers it, a function's asynchronous call, as S3 calls Lambda, or a queue's message. The two modules don't import each other's code at run time: storage knows a destination only by its row.
 - **What this leaves:** an event is written after the store's answer, so a backend that dies between the two loses it; one that stops waits for the events under way. S3 promises at least once and usually within seconds; FF sends at most once, within milliseconds.
+
+### As built (Q-08, part 1): queues' requests counted and billed
+
+- **Counted where SQS's operations run** (the migration `QueueBilling`): `SqsOperations`, which the endpoint and FF's API share, counts each request that names a queue of the account, answered or refused once the queue was found, each 64 KB of the messages it carries a request, with the messages it sent, received and deleted. The poller counts a batch as the request that would have received it, and its deletes as not billed; the deliveries of buckets' events and of destination records count as the requests S3 and Lambda make. Each backend adds them up in memory by queue and minute and writes each minute once it is over, a row per queue, minute and backend, in `queue_request_counts`, partitioned by month and append-only, as buckets' counts are.
+- **In the minute it was answered:** a long poll of 20 s answered after its first minute was written would otherwise write that minute twice, which the row's key refuses. Buckets' counts filed a request under the minute it began: one answered after that minute was written, such as a long upload, made every later write of its backend fail, and was found here; such a request counts in the first minute not written now.
+- **Rated with the rest:** each hour of a queue is a row of `resource_usage_hourly`, of the kind `queue`, its requests in a column of their own; priced by the book's SQS tiers and free tier, counted from the month's start, as S3 Standard's storage tiers are; the reconciliation compares the requests rated with those counted.
+- **What this leaves:** a backend that dies loses the counts of the minutes it hadn't written yet, two at most, as with buckets': those requests aren't billed; the messages they sent are in the queue all the same.
 
 ## Consequences
 

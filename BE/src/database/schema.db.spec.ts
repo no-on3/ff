@@ -18,6 +18,7 @@ import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { MIGRATIONS } from '../migrations';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
+import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
@@ -65,6 +66,7 @@ const CUSTOMER_QUEUES = migrationNames.find((name) => name.startsWith('CustomerQ
 const ASYNC_NOTIFY = migrationNames.find((name) => name.startsWith('AsyncNotify')) as string;
 const KEY_QUEUES = migrationNames.find((name) => name.startsWith('KeyQueues')) as string;
 const EVENT_SOURCE_MAPPINGS = migrationNames.find((name) => name.startsWith('EventSourceMappings')) as string;
+const BUCKET_NOTIFICATIONS = migrationNames.find((name) => name.startsWith('BucketNotifications')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -571,6 +573,55 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the queue-billing migration counts queues' requests by month, append-only, gives books not started yet SQS's SKU, adds its own from next month's first hour, and reverts unless a queue's hour is rated", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, BUCKET_NOTIFICATIONS);
+      // As after the database-billing migration, in a month later than its own: no book starts next month yet.
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      await dataSource.query(`DELETE FROM price_books WHERE valid_from > now()`);
+      const [{ id: future }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T00:00:00Z', $1, 'test') RETURNING id`, [
+        JSON.stringify(withStoragePrices(FIRST_PRICE_BOOK)),
+      ]);
+      const [{ prices: current }] = await dataSource.query(`SELECT prices FROM price_books WHERE valid_from <= now() ORDER BY valid_from DESC LIMIT 1`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
+        { valid_from: next, prices: withQueuePrices(current), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'test' },
+      ]);
+      const minute = `date_trunc('minute', now())`;
+      await dataSource.query(
+        `INSERT INTO queue_request_counts (queue_id, minute, writer, account_id, name, requests, sent, received, deleted, empty_receives, sent_bytes, sent_max_bytes)
+         VALUES (gen_random_uuid(), ${minute}, gen_random_uuid(), $1, 'orders', 3, 1, 1, 1, 0, 70000, 70000)`,
+        [ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE queue_request_counts SET requests = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM queue_request_counts`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'queue_request_counts')).toEqual([{ relname: monthPartition('queue_request_counts', 0) }, { relname: monthPartition('queue_request_counts', 1) }]);
+
+      // Reverted with counts present: the book it made goes, the other loses SQS's SKU.
+      await migrateDownTo(dataSource, BUCKET_NOTIFICATIONS);
+
+      expect(await dataSource.query(`SELECT to_regclass('queue_request_counts') AS c, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'resource_usage_hourly' AND column_name = 'requests') AS r`)).toEqual([
+        { c: null, r: 0 },
+      ]);
+      expect(await dataSource.query(`SELECT id, prices FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([{ id: future, prices: withStoragePrices(FIRST_PRICE_BOOK) }]);
+
+      // Once a queue's hour is rated, it refuses: those are billed records.
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(
+        `INSERT INTO resource_usage_hourly (account_id, hour, resource_id, kind, name, price_book_id, byte_hours, hours, tier1_requests, tier2_requests, requests)
+         VALUES ($1, date_trunc('hour', now()), gen_random_uuid(), 'queue', 'orders', (SELECT id FROM price_books LIMIT 1), 0, 0, 0, 0, 3)`,
+        [ACCOUNT],
+      );
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow("1 hour(s) of queues were rated: they are billed records, and reverting would drop them");
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it('the closed-account-deletion migration gives an account closed before it the whole default notice from now, one not closed none, and reverts with a deletion recorded', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -929,8 +980,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
       const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
       expect(books).toEqual([
-        { id: expect.any(String), valid_from: next, prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'system' },
-        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'test' },
+        // The queues' migration after it gives both SQS's SKU too.
+        { id: expect.any(String), valid_from: next, prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'test' },
       ]);
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -1050,7 +1102,7 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts)_\d{4}_\d{2}$/; // their partitions, one per month
+      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
@@ -1089,6 +1141,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'platform_settings',
         'price_books',
         'queue_messages',
+        'queue_request_counts',
         'queues',
         'rate_limited_invocations',
         'rating_runs',
@@ -1110,6 +1163,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         monthPartition('capacity_samples', 1),
         monthPartition('database_samples', 0),
         monthPartition('database_samples', 1),
+        monthPartition('queue_request_counts', 0),
+        monthPartition('queue_request_counts', 1),
         monthPartition('storage_request_counts', 0),
         monthPartition('storage_request_counts', 1),
         usagePartition(0),

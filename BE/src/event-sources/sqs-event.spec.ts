@@ -11,6 +11,7 @@ const message = (values: Partial<Received> = {}): Received => ({
   sentAt: new Date('2026-10-24T08:00:00.000Z'),
   receiveCount: 2,
   firstReceivedAt: new Date('2026-10-24T08:00:01.500Z'),
+  sizeBytes: 13,
   ...values,
 });
 

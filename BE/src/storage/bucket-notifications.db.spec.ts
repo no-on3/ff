@@ -37,6 +37,8 @@ import { onePlan } from '../plans/test-fixtures';
 import { BucketEventDelivery } from '../queues/bucket-event-delivery';
 import { CustomerQueues } from '../queues/customer-queues';
 import { Queue } from '../queues/queue.entity';
+import { QueueRequestCount } from '../queues/queue-request-count.entity';
+import { QueueRequestCounts } from '../queues/queue-request-counts.service';
 import { QueueStore } from '../queues/queue-store';
 import { BucketEvents } from './bucket-events';
 import { BucketNotificationsService } from './bucket-notifications.service';
@@ -144,7 +146,7 @@ run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2
     const config = new ConfigService({ storage: { base: 'http://s3.localhost:3002', region: REGION }, objectStore });
     const events = new BucketEvents();
     notifications = new BucketNotificationsService(buckets, ds.getRepository(Function), ds.getRepository(Queue), new AuditService(ds.getRepository(AuditEntry)), events, config);
-    delivery = new BucketEventDelivery(events, customerQueues, new QueueStore(ds), onePlan(), ds.getRepository(Function));
+    delivery = new BucketEventDelivery(events, customerQueues, new QueueStore(ds), onePlan(), ds.getRepository(Function), new QueueRequestCounts(ds.getRepository(QueueRequestCount)));
     delivery.onModuleInit();
     frontDoor = new S3FrontDoor(
       config,

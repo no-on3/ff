@@ -7,7 +7,7 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { PLATFORM_LIMITS } from '../plans/plan-limits';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
-import { BucketMonth, DatabaseMonth, UsageAmountsView, UsageMonth } from './usage.dto';
+import { BucketMonth, DatabaseMonth, QueueMonth, UsageAmountsView, UsageMonth } from './usage.dto';
 import { gbMonths, hoursIn } from '../billing/rating';
 import { coldStartSeconds, invocationSeconds, invocations } from '../monitoring/operator-metrics';
 
@@ -44,8 +44,8 @@ const amounts = (row: UsageRow): UsageAmountsView => ({
   lost: Number(row.lost),
 });
 
-/** The tables partitioned by month, written once and never changed: usage records, capacity samples, customers' databases' and buckets' samples, and buckets' request counts. */
-const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts'];
+/** The tables partitioned by month, written once and never changed: usage records, capacity samples, customers' databases' and buckets' samples, and buckets' and queues' request counts. */
+const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts'];
 
 /**
  * Usage records (client-readiness plan, P-20, D6): written once per
@@ -283,6 +283,35 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
       tier2Requests: Number(row.tier2),
       bytesDownloaded: Number(row.bytes_out),
       bytesUploaded: Number(row.bytes_in),
+    }));
+  }
+
+  /**
+   * An account's queues in a month by the UTC calendar (ADR 0010), from their
+   * request counts: each one's requests as SQS bills them, and the messages
+   * sent to it and received from it. The most requests first.
+   */
+  async monthlyQueues(accountId: string, month: string): Promise<QueueMonth[]> {
+    const [year, number] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(year, number - 1, 1));
+    const to = new Date(Date.UTC(year, number, 1));
+    const rows = await this.records.manager.query<Array<{ id: string; name: string; deleted: boolean; requests: string; sent: string; received: string }>>(
+      `SELECT r."queue_id" AS "id", max(r."name") AS "name", bool_and(q."id" IS NULL) AS "deleted", sum(r."requests")::text AS "requests",
+              sum(r."sent")::text AS "sent", sum(r."received")::text AS "received"
+         FROM "queue_request_counts" r
+         LEFT JOIN "queues" q ON q."id" = r."queue_id"
+        WHERE r."account_id" = $1 AND r."minute" >= $2 AND r."minute" < $3
+        GROUP BY r."queue_id"
+        ORDER BY sum(r."requests") DESC, 2, 1`,
+      [accountId, from, to],
+    );
+    return rows.map((row) => ({
+      queueId: row.id,
+      name: row.name,
+      deleted: row.deleted,
+      requests: Number(row.requests),
+      messagesSent: Number(row.sent),
+      messagesReceived: Number(row.received),
     }));
   }
 

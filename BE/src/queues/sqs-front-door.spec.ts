@@ -12,6 +12,7 @@ import { onePlan, plan } from '../plans/test-fixtures';
 import { ActiveKey, StorageDirectory } from '../storage/storage-directory.service';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
+import { QueueRequestCounts } from './queue-request-counts.service';
 import { QueueStore } from './queue-store';
 import { Queue, QueueKind } from './queue.entity';
 import { DEFAULT_SETTINGS } from './sqs-attributes';
@@ -77,6 +78,7 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
         { accountBytes: async () => 0 } as unknown as QueueStore,
         events as unknown as QueueEvents,
         { record: async () => undefined } as unknown as AuditService,
+        { count: () => undefined } as unknown as QueueRequestCounts,
         sqs.base,
         sqs.region,
       ),
