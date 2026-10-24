@@ -8,9 +8,12 @@
 # one --with below.
 # The builder would give the binary the capability to bind ports below 1024 (XCADDY_SETCAP), which a container
 # without any capability may not execute: it is built without, and listens on 8080 and 8443, which the Service maps
-# to 80 and 443.
-FROM caddy:2.11.7-builder-alpine AS builder
-RUN XCADDY_SETCAP=0 xcaddy build v2.11.7 --with github.com/caddy-dns/rfc2136@v1.0.0 --output /tmp/caddy
+# to 80 and 443. It is built with Go 1.26.9 and golang.org/x/net v0.60.0, which fix advisories in Caddy's release
+# (Go 1.26.8, x/net v0.59.0), as the console's and the admin app's Caddy is.
+FROM golang:1.26.9-alpine3.24 AS builder
+RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7 \
+ && XCADDY_SETCAP=0 xcaddy build v2.11.7 --with github.com/caddy-dns/rfc2136@v1.0.0 \
+      --replace golang.org/x/net=golang.org/x/net@v0.60.0 --output /tmp/caddy
 
 FROM alpine:3.24.2
 LABEL org.opencontainers.image.title="ff-edge" \
