@@ -1282,6 +1282,54 @@ export const queuesApi = {
   deleteMessage: (name: string, receiptHandle: string) => api.delete(`/queues/${name}/messages/${encodeURIComponent(receiptHandle)}`),
 };
 
+/** A function reading a queue of its account, as AWS Lambda's event source mapping for SQS, in Lambda's names. */
+export interface EventSource {
+  uuid: string;
+  eventSourceArn: string;
+  functionArn: string;
+  batchSize: number;
+  maximumBatchingWindowInSeconds: number;
+  /** ['ReportBatchItemFailures'] when the call's answer names the messages that failed; [] when a failure keeps the whole batch. */
+  functionResponseTypes: string[];
+  /** Null: as many batches at once as the function's instances. */
+  scalingConfig: { maximumConcurrency: number } | null;
+  state: 'Enabled' | 'Disabled';
+  stateTransitionReason: string;
+  lastModified: string;
+}
+
+/** A mapping's fields, as the API's EventSourceView names them: contract.test.ts checks them. */
+export const EVENT_SOURCE_FIELDS = [
+  'uuid',
+  'eventSourceArn',
+  'functionArn',
+  'batchSize',
+  'maximumBatchingWindowInSeconds',
+  'functionResponseTypes',
+  'scalingConfig',
+  'state',
+  'stateTransitionReason',
+  'lastModified',
+] as const satisfies ReadonlyArray<keyof EventSource>;
+
+/** What a mapping is made or changed with, by Lambda's names: each left as it is when not given; a scalingConfig of null removes the maximum. */
+export interface EventSourceSettings {
+  batchSize?: number;
+  maximumBatchingWindowInSeconds?: number;
+  functionResponseTypes?: string[];
+  scalingConfig?: { maximumConcurrency: number } | null;
+  enabled?: boolean;
+}
+
+/** The queues functions read: every member reads the mappings; owners and developers make, change and delete them. */
+export const eventSourcesApi = {
+  forFunction: (functionId: string) => api.get<EventSource[]>(`/functions/${functionId}/event-sources`),
+  forQueue: (queueArn: string) => api.get<EventSource[]>('/event-sources', { params: { eventSourceArn: queueArn } }),
+  create: (functionId: string, body: EventSourceSettings & { eventSourceArn: string }) => api.post<EventSource>(`/functions/${functionId}/event-sources`, body),
+  update: (uuid: string, body: EventSourceSettings) => api.patch<EventSource>(`/event-sources/${uuid}`, body),
+  remove: (uuid: string) => api.delete(`/event-sources/${uuid}`),
+};
+
 /** The account's alarms: every member reads them; owners and developers change them. */
 export const alarmsApi = {
   list: () => api.get<Alarm[]>('/alarms'),

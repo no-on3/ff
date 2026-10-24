@@ -38,6 +38,7 @@ import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
 import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
 import storageNamesSource from '../../BE/src/storage/storage-names.ts?raw';
 import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
+import eventSourceDtoSource from '../../BE/src/event-sources/dto/event-source.dto.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
@@ -50,11 +51,13 @@ import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
 import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
+import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES } from './lib/event-sources';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { ENDPOINTS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
   QUEUE_FIELDS,
+  EVENT_SOURCE_FIELDS,
   RECEIVED_MESSAGE_FIELDS,
   BUCKET_FIELDS,
   BUCKET_REQUEST_METRICS,
@@ -480,6 +483,25 @@ describe("a customer's queue (ADR 0010)", () => {
       const declared = new RegExp(`@Min\\((\\d[\\d_]*)\\)\\s*@Max\\((\\d[\\d_]*)\\)\\s*${field}\\?:`).exec(queueDtoSource);
       expect([field, Number(declared?.[1].replace(/_/g, '')), Number(declared?.[2].replace(/_/g, ''))]).toEqual([field, min, max]);
     }
+  });
+});
+
+describe('a function reading a queue (ADR 0010)', () => {
+  it("has the API's fields, Lambda's names, so the panels read each one there is", () => {
+    expect(dtoFields(eventSourceDtoSource, 'export class EventSourceView {')).toEqual([...EVENT_SOURCE_FIELDS]);
+    expect(eventSourceDtoSource).toContain(`export const REPORT_BATCH_ITEM_FAILURES = '${REPORT_BATCH_ITEM_FAILURES}';`);
+  });
+
+  it("refuses what the API would: a batch's size, its window and the batches at once within its bounds", () => {
+    const bounds = (field: string) => {
+      const declared = new RegExp(`@Min\\((\\d[\\d_]*)\\)\\s*@Max\\((\\d[\\d_]*)\\)\\s*${field}\\?:`).exec(eventSourceDtoSource);
+      return [Number(declared?.[1].replace(/_/g, '')), Number(declared?.[2].replace(/_/g, ''))];
+    };
+    expect([bounds('batchSize'), bounds('maximumBatchingWindowInSeconds'), bounds('maximumConcurrency')]).toEqual([
+      [BATCH_SIZE.min, BATCH_SIZE.max],
+      [BATCHING_WINDOW.min, BATCHING_WINDOW.max],
+      [MAXIMUM_CONCURRENCY.min, MAXIMUM_CONCURRENCY.max],
+    ]);
   });
 });
 

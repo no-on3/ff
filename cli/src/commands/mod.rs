@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod deploy;
 mod env;
+mod event_sources;
 mod functions;
 mod init;
 mod invoke;
@@ -22,8 +23,8 @@ mod version;
 mod whoami;
 
 use crate::cli::{
-    BucketKeysCommand, BucketsCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand, LocalCommand,
-    QueuesCommand, ScheduleCommand, SecretsCommand, UrlCommand,
+    BucketKeysCommand, BucketsCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand,
+    EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, UrlCommand,
 };
 use crate::config::Settings;
 use crate::error::Error;
@@ -140,6 +141,49 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         }
         Command::Queues(QueuesCommand::Purge { name, yes }) => queues::purge(&name, yes, context),
         Command::Queues(QueuesCommand::Delete { name, yes }) => queues::delete(&name, yes, context),
+        Command::EventSources(EventSourcesCommand::Add {
+            queue,
+            function,
+            batches,
+            report_batch_item_failures,
+            disabled,
+        }) => {
+            let settings = event_sources::Settings {
+                batch_size: batches.batch_size,
+                batching_window: batches.batching_window.as_deref(),
+                report_batch_item_failures: report_batch_item_failures.then_some(true),
+                max_concurrency: batches.max_concurrency.map(Some),
+                enabled: disabled.then_some(false),
+            };
+            event_sources::add(&queue, &function, &settings, context)
+        }
+        Command::EventSources(EventSourcesCommand::List { function, queue }) => {
+            event_sources::list(function.as_deref(), queue.as_deref(), context)
+        }
+        Command::EventSources(EventSourcesCommand::Get { uuid }) => event_sources::get(&uuid, context),
+        Command::EventSources(EventSourcesCommand::Update {
+            uuid,
+            batches,
+            report_batch_item_failures,
+            no_report_batch_item_failures,
+            no_max_concurrency,
+            enable,
+            disable,
+        }) => {
+            let settings = event_sources::Settings {
+                batch_size: batches.batch_size,
+                batching_window: batches.batching_window.as_deref(),
+                report_batch_item_failures: if report_batch_item_failures {
+                    Some(true)
+                } else {
+                    no_report_batch_item_failures.then_some(false)
+                },
+                max_concurrency: if no_max_concurrency { Some(None) } else { batches.max_concurrency.map(Some) },
+                enabled: if enable { Some(true) } else { disable.then_some(false) },
+            };
+            event_sources::update(&uuid, &settings, context)
+        }
+        Command::EventSources(EventSourcesCommand::Remove { uuid, yes }) => event_sources::remove(&uuid, yes, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),

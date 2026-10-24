@@ -31,6 +31,7 @@ import { EnvironmentTab } from './FunctionEnvironment';
 import { FunctionUrlTab } from './FunctionUrl';
 import { FunctionSchedules } from './FunctionSchedules';
 import { FunctionAsyncSettings } from './FunctionAsyncSettings';
+import { FunctionEventSources } from './FunctionEventSources';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
 import Icon from './Icon';
@@ -432,6 +433,8 @@ const FunctionDetail: React.FC = () => {
           </Panel>
 
           <FunctionAsyncSettings func={func} mayChange={mayChange} />
+
+          <FunctionEventSources func={func} mayChange={mayChange} />
 
           <Panel
             flush

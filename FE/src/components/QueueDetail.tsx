@@ -10,6 +10,7 @@ import Copyable from './Copyable';
 import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { Page, PageHeader } from './Page';
 import { Callout, Panel } from './Panel';
+import { QueueReaders } from './QueueReaders';
 import StatusPill from './StatusPill';
 
 /** A fact of how to reach it: its name, and its value in code. */
@@ -367,6 +368,7 @@ const QueueDetail: React.FC = () => {
         </div>
         <div className="min-w-0 space-y-6">
           <Attributes queue={queue} others={others} mayChange={writer} onSaved={setQueue} />
+          <QueueReaders queue={queue} />
           <p className="text-[13px] text-gray-500">Created {formatWhen(queue.createdAt)}; changed {formatWhen(queue.updatedAt)}.</p>
         </div>
       </div>

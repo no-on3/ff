@@ -198,6 +198,10 @@ pub enum Command {
     #[command(subcommand)]
     Queues(QueuesCommand),
 
+    /// Functions reading queues of the account in batches, as AWS Lambda's event source mappings for SQS
+    #[command(subcommand)]
+    EventSources(EventSourcesCommand),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -753,6 +757,102 @@ pub enum QueuesCommand {
         #[arg(long, short)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum EventSourcesCommand {
+    /// Have a function read a queue of the account, as Lambda's CreateEventSourceMapping
+    Add {
+        /// The queue's name
+        queue: String,
+
+        /// The function's name
+        function: String,
+
+        #[command(flatten)]
+        batches: BatchArgs,
+
+        /// The answer names the messages that failed, {"batchItemFailures": [{"itemIdentifier": "<messageId>"}]}, and the
+        /// others are deleted (ReportBatchItemFailures)
+        #[arg(long)]
+        report_batch_item_failures: bool,
+
+        /// Made disabled: nothing is read until `ff event-sources update <uuid> --enable`
+        #[arg(long)]
+        disabled: bool,
+    },
+
+    /// List the account's mappings: which function reads which queue, and how
+    List {
+        /// Those of this function
+        #[arg(long, value_name = "NAME")]
+        function: Option<String>,
+
+        /// Those reading this queue
+        #[arg(long, value_name = "NAME")]
+        queue: Option<String>,
+    },
+
+    /// Show a mapping
+    Get {
+        /// The mapping's UUID, as `ff event-sources list` shows it
+        uuid: String,
+    },
+
+    /// Change a mapping, as Lambda's UpdateEventSourceMapping: what is given changes, the rest stays
+    Update {
+        /// The mapping's UUID
+        uuid: String,
+
+        #[command(flatten)]
+        batches: BatchArgs,
+
+        /// The answer names the messages that failed (ReportBatchItemFailures)
+        #[arg(long, conflicts_with = "no_report_batch_item_failures")]
+        report_batch_item_failures: bool,
+
+        /// A call that fails keeps its whole batch
+        #[arg(long)]
+        no_report_batch_item_failures: bool,
+
+        /// As many batches at once as the function's instances
+        #[arg(long, conflicts_with = "max_concurrency")]
+        no_max_concurrency: bool,
+
+        /// Read the queue again
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+
+        /// Read nothing: the messages wait in the queue
+        #[arg(long)]
+        disable: bool,
+    },
+
+    /// Stop a function reading a queue: its messages stay in the queue
+    Remove {
+        /// The mapping's UUID
+        uuid: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// How a function's batches of a queue are made, by Lambda's settings.
+#[derive(Args)]
+pub struct BatchArgs {
+    /// The most messages in one call, from 1 to 10000; over 10, with a batching window [default at first: 10]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+    pub batch_size: Option<u32>,
+
+    /// How long to wait to fill a batch, from 0s to 5m, such as 2s [default at first: 0s]
+    #[arg(long)]
+    pub batching_window: Option<String>,
+
+    /// The most batches in calls at once, from 2 to 1000, within the function's instances [default: as many as them]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=1000))]
+    pub max_concurrency: Option<u32>,
 }
 
 /// SQS's attributes of a queue, each by its own flag; durations such as 30s, 15m or 4d.

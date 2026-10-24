@@ -682,6 +682,44 @@ check "  ... which then isn't there, in the API's words, exit 3" '3 true' "$(cod
 ff queues delete cli-orders-dlq --yes
 ff buckets keys revoke "$queue_key" --yes
 
+echo "== functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"
+# As a function written for Lambda answers: the messages it couldn't handle, by their IDs.
+cat >"$work/reader.ts" <<'TS'
+export const handler = async (event: { Records: Array<{ messageId: string; body: string }> }) => ({
+  batchItemFailures: event.Records.filter((record) => record.body === "fail").map((record) => ({ itemIdentifier: record.messageId })),
+});
+TS
+ff deploy "$work/reader.ts" --name cli-reader --timeout 3
+ff queues create cli-work --visibility-timeout 5
+ff event-sources add cli-work cli-reader --batching-window 1s --report-batch-item-failures
+check "ff event-sources add has the function read the queue, and says how" "0 true" \
+  "$(code) $(out | grep -q '^cli-reader reads the queue cli-work: batches of 10 at most, a window of 1 second, the answer naming the messages that failed' && echo true || echo false)"
+mapping_id="$(out | grep -oE '\([0-9a-f-]{36}\)$' | tr -d '()')"
+ff event-sources add cli-work cli-reader
+check "  ... once: again, the API's words name the mapping there is, exit 3" "3 true" "$(code) $(err | grep -q "UUID $mapping_id" && echo true || echo false)"
+ff queues send cli-work done
+ff queues send cli-work fail
+reader_calls() { "$ff_bin" history cli-reader --output json | jq '[.invocations[] | select(.source == "sqs")] | length'; }
+for _ in $(seq 1 30); do
+  [ "$("$ff_bin" queues get cli-work --output json | jq '.messages.available + .messages.inFlight')" = 1 ] && [ "$(reader_calls)" -ge 1 ] && break
+  sleep 1
+done
+check "the function called with the queue's batches, its history's source sqs, the message it handled deleted" "true 1" \
+  "$([ "$(reader_calls)" -ge 1 ] && echo true || echo false) $("$ff_bin" queues get cli-work --output json | jq '.messages.available + .messages.inFlight')"
+ff event-sources list --queue cli-work
+check "ff event-sources list shows it, by the queue's and the function's names" "0 $mapping_id cli-work cli-reader Enabled" \
+  "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $8 }')"
+ff event-sources update "$mapping_id" --disable
+check "ff event-sources update --disable stops its reads" "0 true" "$(code) $(out | grep -q 'disabled: nothing read' && echo true || echo false)"
+ff queues receive cli-work --wait 15s --output json
+check "  ... the message the function failed still there, received again once its visibility timeout ended" '0 fail true' \
+  "$(code) $(out | jq -r '.[0] | "\(.body) \(.receiveCount >= 2)"')"
+ff event-sources remove "$mapping_id" --yes
+check "ff event-sources remove removes it, the queue's messages staying" "0 removed the mapping $mapping_id: the queue's messages stay 1 0" \
+  "$(code) $(out) $("$ff_bin" queues get cli-work --output json | jq '.messages.available + .messages.inFlight') $("$ff_bin" event-sources list --function cli-reader --output json | jq length)"
+ff delete cli-reader --yes
+ff queues delete cli-work --yes
+
 echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt in a bucket"
 # In account A, whose functions don't reach the internet: FF's database and the S3 front door, they do.
 ff deploy "$app" --name shop-api --handler index.http
