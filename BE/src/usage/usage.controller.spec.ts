@@ -14,7 +14,7 @@ import { Decimal } from '../billing/decimal';
 import { AccountEstimate, PricingService } from '../billing/pricing.service';
 import { usageCsv } from './usage-csv';
 import { UsageController } from './usage.controller';
-import { BucketMonth, DatabaseMonth, MonthlyUsageView, UsageMonth } from './usage.dto';
+import { BucketMonth, DatabaseMonth, MonthlyUsageView, QueueMonth, UsageMonth } from './usage.dto';
 import { UsageService } from './usage.service';
 
 const ACCOUNT = '000000000001';
@@ -46,6 +46,8 @@ const BUCKETS: BucketMonth[] = [
     bytesUploaded: 734_003_200,
   },
 ];
+const ORDERS_QUEUE = '3f1c9a2e-5b7d-4e8f-9a0b-1c2d3e4f5a6b';
+const QUEUES: QueueMonth[] = [{ queueId: ORDERS_QUEUE, name: 'orders', deleted: false, requests: 3_000_000, messagesSent: 1_000_000, messagesReceived: 1_000_400 }];
 const d = (text: string) => Decimal.parse(text);
 const costOf = (total: string) => ({ requests: Decimal.ZERO, duration: d(total), provisioned: Decimal.ZERO, idle: Decimal.ZERO, total: d(total) });
 const ESTIMATE: AccountEstimate = {
@@ -59,6 +61,7 @@ const ESTIMATE: AccountEstimate = {
   resources: new Map([
     [ORDERS, { kind: 'database' as const, gbMonths: d('0.003182'), storage: d('0.0011'), requests: Decimal.ZERO, fee: Decimal.ZERO, total: d('0.0011') }],
     [PHOTOS, { kind: 'bucket' as const, gbMonths: d('0.215231'), storage: d('0.0148'), requests: d('0.0934'), fee: Decimal.ZERO, total: d('0.1082') }],
+    [ORDERS_QUEUE, { kind: 'queue' as const, gbMonths: Decimal.ZERO, storage: Decimal.ZERO, requests: d('3.6096'), fee: Decimal.ZERO, total: d('3.6096') }],
   ]),
   usage: d('1.7623456'),
   freeTier: d('-0.0123456'),
@@ -80,6 +83,7 @@ const PRICED: MonthlyUsageView = {
   ],
   databases: [{ ...DATABASES[0], cost: '0.001' }],
   buckets: [{ ...BUCKETS[0], cost: '0.108' }],
+  queues: [{ ...QUEUES[0], cost: '3.610' }],
   estimate: {
     currency: 'TND',
     usage: '1.762',
@@ -98,6 +102,7 @@ describe('GET /usage (L1, P-22, P-30)', () => {
   const monthly = jest.fn(async (_accountId: string, month: string) => ({ ...RECORDS, month }));
   const monthlyDatabases = jest.fn(async () => DATABASES);
   const monthlyBuckets = jest.fn(async () => BUCKETS);
+  const monthlyQueues = jest.fn(async () => QUEUES);
   const functionNames = jest.fn(async () => new Map([[WARM, 'warm']]));
   const estimate = jest.fn(async (): Promise<AccountEstimate | null> => ESTIMATE);
 
@@ -105,7 +110,7 @@ describe('GET /usage (L1, P-22, P-30)', () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [UsageController],
       providers: [
-        { provide: UsageService, useValue: { monthly, monthlyDatabases, monthlyBuckets, functionNames } },
+        { provide: UsageService, useValue: { monthly, monthlyDatabases, monthlyBuckets, monthlyQueues, functionNames } },
         { provide: PricingService, useValue: { estimate } },
       ],
     }).compile();
@@ -143,12 +148,13 @@ describe('GET /usage (L1, P-22, P-30)', () => {
     expect([monthly.mock.calls, estimate.mock.calls]).toEqual([[[ACCOUNT, month]], [[ACCOUNT, month]]]);
   });
 
-  it("prices it (P-30): each function's, database's and bucket's cost before the free tier, the month's estimate, each rounded to the millime", async () => {
+  it("prices it (P-30): each function's, database's, bucket's and queue's cost before the free tier, the month's estimate, each rounded to the millime", async () => {
     const res = await fetch(`${baseUrl}/usage?month=2026-09`);
 
     expect(await res.json()).toEqual(JSON.parse(JSON.stringify(PRICED)));
     expect(monthlyDatabases).toHaveBeenCalledWith(ACCOUNT, '2026-09');
     expect(monthlyBuckets).toHaveBeenCalledWith(ACCOUNT, '2026-09');
+    expect(monthlyQueues).toHaveBeenCalledWith(ACCOUNT, '2026-09');
   });
 
   it('gives a line to a function that cost something without a call, named when it still exists', async () => {
@@ -163,7 +169,7 @@ describe('GET /usage (L1, P-22, P-30)', () => {
     const body = await (await fetch(`${baseUrl}/usage?month=2025-01`)).json();
 
     const costs = (rows: Array<{ cost: unknown }>) => rows.map((row) => row.cost);
-    expect([costs(body.functions), costs(body.databases), costs(body.buckets), body.estimate]).toEqual([[null], [null], [null], null]);
+    expect([costs(body.functions), costs(body.databases), costs(body.buckets), costs(body.queues), body.estimate]).toEqual([[null], [null], [null], [null], null]);
   });
 
   it('reads the month asked for, and refuses one that is not YYYY-MM, or another parameter', async () => {

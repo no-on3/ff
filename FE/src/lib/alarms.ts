@@ -9,6 +9,10 @@ export const STATISTICS = {
   ColdStarts: ['Sum'],
   Duration: ['Average', 'Maximum', 'p50', 'p95', 'p99'],
   Instances: ['Maximum', 'Average'],
+  AsyncEventsReceived: ['Sum'],
+  AsyncEventAge: ['Average', 'Maximum'],
+  AsyncEventsDropped: ['Sum'],
+  DestinationDeliveryFailures: ['Sum'],
   DatabaseConnections: ['Maximum', 'Average'],
   VolumeBytesUsed: ['Maximum', 'Average'],
   BucketSizeBytes: ['Average'],
@@ -20,6 +24,15 @@ export const STATISTICS = {
   '5xxErrors': ['Sum'],
   BytesDownloaded: ['Sum'],
   BytesUploaded: ['Sum'],
+  ApproximateNumberOfMessagesVisible: ['Maximum', 'Average'],
+  ApproximateNumberOfMessagesNotVisible: ['Maximum', 'Average'],
+  ApproximateNumberOfMessagesDelayed: ['Maximum', 'Average'],
+  ApproximateAgeOfOldestMessage: ['Maximum'],
+  NumberOfMessagesSent: ['Sum'],
+  NumberOfMessagesReceived: ['Sum'],
+  NumberOfMessagesDeleted: ['Sum'],
+  NumberOfEmptyReceives: ['Sum'],
+  SentMessageSize: ['Average', 'Maximum'],
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
 } as const;
@@ -31,6 +44,18 @@ export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharge
 export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
 /** A customer's bucket's, as CloudWatch names S3's: what it holds, and its requests. */
 export const BUCKET_METRICS: readonly Metric[] = ['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'];
+/** A customer's queue's, as CloudWatch names SQS's: its messages, their age and size, and its requests. */
+export const QUEUE_METRICS: readonly Metric[] = [
+  'ApproximateNumberOfMessagesVisible',
+  'ApproximateNumberOfMessagesNotVisible',
+  'ApproximateNumberOfMessagesDelayed',
+  'ApproximateAgeOfOldestMessage',
+  'NumberOfMessagesSent',
+  'NumberOfMessagesReceived',
+  'NumberOfMessagesDeleted',
+  'NumberOfEmptyReceives',
+  'SentMessageSize',
+];
 
 /** Each metric's unit, as the threshold is written. */
 export const UNITS: Record<Metric, string> = {
@@ -40,6 +65,10 @@ export const UNITS: Record<Metric, string> = {
   ColdStarts: 'calls',
   Duration: 'ms',
   Instances: 'instances',
+  AsyncEventsReceived: 'events',
+  AsyncEventAge: 'ms',
+  AsyncEventsDropped: 'events',
+  DestinationDeliveryFailures: 'records',
   DatabaseConnections: 'sessions',
   VolumeBytesUsed: 'bytes',
   BucketSizeBytes: 'bytes',
@@ -51,6 +80,15 @@ export const UNITS: Record<Metric, string> = {
   '5xxErrors': 'requests',
   BytesDownloaded: 'bytes',
   BytesUploaded: 'bytes',
+  ApproximateNumberOfMessagesVisible: 'messages',
+  ApproximateNumberOfMessagesNotVisible: 'messages',
+  ApproximateNumberOfMessagesDelayed: 'messages',
+  ApproximateAgeOfOldestMessage: 's',
+  NumberOfMessagesSent: 'messages',
+  NumberOfMessagesReceived: 'messages',
+  NumberOfMessagesDeleted: 'messages',
+  NumberOfEmptyReceives: 'receives',
+  SentMessageSize: 'bytes',
   Balance: 'TND',
   MonthToDateCharges: 'TND',
 };
@@ -89,6 +127,8 @@ export interface AlarmForm {
   databaseId: string;
   /** '': none; a bucket's name, for its own metrics. */
   bucketName: string;
+  /** '': none; a queue's name, for its own metrics. */
+  queueName: string;
   metric: Metric;
   statistic: string;
   period: number;
@@ -102,15 +142,19 @@ export interface AlarmForm {
   webhookUrls: string;
 }
 
-/** A new alarm: a function's errors, as soon as there is one; a database's storage, an hour at a time; a bucket's 5xx errors; told to the owners. */
-export const emptyForm = (functionId = '', databaseId = '', bucketName = ''): AlarmForm => ({
+/**
+ * A new alarm: a function's errors, as soon as there is one; a database's storage, an hour at a time; a bucket's 5xx
+ * errors; a queue's messages waiting, as a dead-letter queue's are watched; told to the owners.
+ */
+export const emptyForm = (functionId = '', databaseId = '', bucketName = '', queueName = ''): AlarmForm => ({
   name: '',
-  functionId: databaseId || bucketName ? '' : functionId,
-  databaseId: bucketName ? '' : databaseId,
-  bucketName,
-  metric: bucketName ? '5xxErrors' : databaseId ? 'VolumeBytesUsed' : functionId ? 'Errors' : 'Invocations',
-  statistic: databaseId && !bucketName ? 'Maximum' : 'Sum',
-  period: databaseId && !bucketName ? 3600 : bucketName ? 300 : 60,
+  functionId: databaseId || bucketName || queueName ? '' : functionId,
+  databaseId: bucketName || queueName ? '' : databaseId,
+  bucketName: queueName ? '' : bucketName,
+  queueName,
+  metric: queueName ? 'ApproximateNumberOfMessagesVisible' : bucketName ? '5xxErrors' : databaseId ? 'VolumeBytesUsed' : functionId ? 'Errors' : 'Invocations',
+  statistic: queueName || (databaseId && !bucketName) ? 'Maximum' : 'Sum',
+  period: databaseId && !bucketName && !queueName ? 3600 : bucketName && !queueName ? 300 : 60,
   comparison: 'GreaterThanThreshold',
   threshold: '0',
   evaluationPeriods: '1',
@@ -125,6 +169,7 @@ export const formFromAlarm = (alarm: Alarm): AlarmForm => ({
   functionId: alarm.functionId ?? '',
   databaseId: alarm.databaseId ?? '',
   bucketName: alarm.bucketName ?? '',
+  queueName: alarm.queueName ?? '',
   metric: alarm.metric as Metric,
   statistic: alarm.statistic,
   period: alarm.period,
@@ -137,36 +182,46 @@ export const formFromAlarm = (alarm: Alarm): AlarmForm => ({
   webhookUrls: alarm.actions.webhookUrls.join('\n'),
 });
 
-/** The metrics a scope offers: a function's calls, durations and instances; the account's too, and its money; a database's and a bucket's their own. */
-export const metricsFor = (functionId: string, databaseId = '', bucketName = ''): Metric[] =>
-  bucketName
-    ? [...BUCKET_METRICS]
-    : databaseId
-      ? [...DATABASE_METRICS]
-      : METRICS.filter((metric) => !DATABASE_METRICS.includes(metric) && !BUCKET_METRICS.includes(metric) && !(functionId && BILLING_METRICS.includes(metric)));
+/** The metrics a scope offers: a function's calls, durations and instances; the account's too, and its money; a database's, a bucket's and a queue's their own. */
+export const metricsFor = (functionId: string, databaseId = '', bucketName = '', queueName = ''): Metric[] =>
+  queueName
+    ? [...QUEUE_METRICS]
+    : bucketName
+      ? [...BUCKET_METRICS]
+      : databaseId
+        ? [...DATABASE_METRICS]
+        : METRICS.filter(
+            (metric) => !DATABASE_METRICS.includes(metric) && !BUCKET_METRICS.includes(metric) && !QUEUE_METRICS.includes(metric) && !(functionId && BILLING_METRICS.includes(metric)),
+          );
 
-/** The form once the metric changes: a statistic it has; for the money the account's, one datapoint; for a database's, an hour a period; for a bucket's, the bucket. */
+/** The form once the metric changes: a statistic it has; for the money the account's, one datapoint; for a database's, an hour a period; for a bucket's or a queue's, it alone. */
 export function withMetric(form: AlarmForm, metric: Metric): AlarmForm {
   const statistics = STATISTICS[metric] as readonly string[];
   const next = { ...form, metric, statistic: statistics.includes(form.statistic) ? form.statistic : statistics[0] };
-  if (BILLING_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '', bucketName: '', evaluationPeriods: '1', datapointsToAlarm: '1' };
-  if (BUCKET_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '' };
-  return DATABASE_METRICS.includes(metric) ? { ...next, functionId: '', bucketName: '', period: 3600 } : { ...next, bucketName: '' };
+  if (BILLING_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '', bucketName: '', queueName: '', evaluationPeriods: '1', datapointsToAlarm: '1' };
+  if (BUCKET_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '', queueName: '' };
+  if (QUEUE_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '', bucketName: '' };
+  return DATABASE_METRICS.includes(metric) ? { ...next, functionId: '', bucketName: '', queueName: '', period: 3600 } : { ...next, bucketName: '', queueName: '' };
 }
 
-/** The form once its scope changes: the account (''), a function (its ID), a database ('database:' and its ID), or a bucket ('bucket:' and its name), each with a metric it has. */
+/**
+ * The form once its scope changes: the account (''), a function (its ID), a database ('database:' and its ID), a bucket
+ * ('bucket:' and its name) or a queue ('queue:' and its name), each with a metric it has.
+ */
 export function withScope(form: AlarmForm, scope: string): AlarmForm {
+  const queueName = scope.startsWith('queue:') ? scope.slice('queue:'.length) : '';
   const bucketName = scope.startsWith('bucket:') ? scope.slice('bucket:'.length) : '';
   const databaseId = scope.startsWith('database:') ? scope.slice('database:'.length) : '';
-  const functionId = databaseId || bucketName ? '' : scope;
-  const metrics = metricsFor(functionId, databaseId, bucketName);
-  const next = { ...form, functionId, databaseId, bucketName };
-  return withMetric(next, metrics.includes(form.metric) ? form.metric : bucketName ? '5xxErrors' : databaseId ? 'VolumeBytesUsed' : 'Errors');
+  const functionId = databaseId || bucketName || queueName ? '' : scope;
+  const metrics = metricsFor(functionId, databaseId, bucketName, queueName);
+  const next = { ...form, functionId, databaseId, bucketName, queueName };
+  const fallback: Metric = queueName ? 'ApproximateNumberOfMessagesVisible' : bucketName ? '5xxErrors' : databaseId ? 'VolumeBytesUsed' : 'Errors';
+  return withMetric(next, metrics.includes(form.metric) ? form.metric : fallback);
 }
 
 /** The form's scope, as the scope select names it. */
-export const scopeOf = (form: Pick<AlarmForm, 'functionId' | 'databaseId' | 'bucketName'>): string =>
-  form.bucketName ? `bucket:${form.bucketName}` : form.databaseId ? `database:${form.databaseId}` : form.functionId;
+export const scopeOf = (form: Pick<AlarmForm, 'functionId' | 'databaseId' | 'bucketName' | 'queueName'>): string =>
+  form.queueName ? `queue:${form.queueName}` : form.bucketName ? `bucket:${form.bucketName}` : form.databaseId ? `database:${form.databaseId}` : form.functionId;
 
 const webhookList = (text: string) => text.split('\n').map((url) => url.trim()).filter(Boolean);
 const wholeNumber = (text: string) => (/^\d+$/.test(text.trim()) ? Number(text) : NaN);
@@ -188,6 +243,8 @@ export function formProblem(form: AlarmForm): string | null {
     if (n > 24) return 'The periods judged look back more than a day: take fewer';
   } else if (BUCKET_METRICS.includes(form.metric) && !form.bucketName) {
     return `${form.metric} is a bucket's: choose the bucket it watches`;
+  } else if (QUEUE_METRICS.includes(form.metric) && !form.queueName) {
+    return `${form.metric} is a queue's: choose the queue it watches`;
   } else if (form.period * n > 86_400) {
     return 'The periods judged look back more than a day: take fewer, or shorter ones';
   }
@@ -206,6 +263,7 @@ export const toBody = (form: AlarmForm): AlarmBody => ({
   functionId: form.functionId || null,
   databaseId: form.databaseId || null,
   bucketName: form.bucketName || null,
+  queueName: form.queueName || null,
   metric: form.metric,
   statistic: form.statistic,
   period: form.period,

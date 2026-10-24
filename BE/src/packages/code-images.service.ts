@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Repository } from 'typeorm';
-import { MinioClientService } from '../minio-client/minio-client.service';
+import { ObjectStoreService } from '../object-store/object-store.service';
 import { buildLayer } from './code-layer';
 import { Package, packageKey } from './package.entity';
 import { MEDIA_TYPES, Registry, bytesBlob, fileBlob } from './registry';
@@ -73,7 +73,7 @@ export class CodeImagesService {
 
   constructor(
     @InjectRepository(Package) private readonly packages: Repository<Package>,
-    private readonly storage: MinioClientService,
+    private readonly storage: ObjectStoreService,
     config: ConfigService,
   ) {
     this.settings = config.getOrThrow<CodeImagesSettings>('codeImages');

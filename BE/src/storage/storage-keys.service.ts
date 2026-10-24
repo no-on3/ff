@@ -13,15 +13,16 @@ import { newAccessKeyId, newSecretAccessKey } from './storage-names';
 export const MAX_ACCOUNT_KEYS = 2;
 
 /**
- * The account's own access keys to its buckets (ADR 0009): an ID like AWS's,
- * and a secret shown once, which FF keeps sealed since the front door needs it
- * to check signatures. Two at most, counted under a lock on the account. A
- * revoked key keeps its row, so that its ID is never another's. Functions' own
- * keys are their functions'.
+ * The account's own access keys to its buckets (ADR 0009) and queues (ADR
+ * 0010): an ID like AWS's, and a secret shown once, which FF keeps sealed since
+ * the S3 front door and the SQS endpoint need it to check signatures. Two at
+ * most, counted under a lock on the account. A revoked key keeps its row, so
+ * that its ID is never another's. Functions' own keys are their functions'.
  */
 @Injectable()
 export class StorageKeysService {
   private readonly endpoint: string;
+  private readonly sqsEndpoint: string;
   private readonly region: string;
 
   constructor(
@@ -31,6 +32,7 @@ export class StorageKeysService {
     config: ConfigService,
   ) {
     this.endpoint = new URL(config.getOrThrow<string>('storage.base')).origin;
+    this.sqsEndpoint = config.get<string>('sqs.base') ?? '';
     this.region = config.getOrThrow<string>('storage.region');
   }
 
@@ -52,11 +54,18 @@ export class StorageKeysService {
       }
       return manager.save(
         StorageKey,
-        manager.create(StorageKey, { id, accountId, secret: this.directory.sealSecret(id, secretAccessKey), buckets: dto.buckets ?? null, readOnly: dto.readOnly ?? false }),
+        manager.create(StorageKey, {
+          id,
+          accountId,
+          secret: this.directory.sealSecret(id, secretAccessKey),
+          buckets: dto.buckets ?? null,
+          queues: dto.queues ?? null,
+          readOnly: dto.readOnly ?? false,
+        }),
       );
     });
-    await this.audit.record({ accountId, action: 'storage_key.create', resource: `storage_key:${id}`, details: { buckets: row.buckets, readOnly: row.readOnly } });
-    return { ...this.view(row), secretAccessKey, endpoint: this.endpoint, region: this.region };
+    await this.audit.record({ accountId, action: 'storage_key.create', resource: `storage_key:${id}`, details: { buckets: row.buckets, queues: row.queues, readOnly: row.readOnly } });
+    return { ...this.view(row), secretAccessKey, endpoint: this.endpoint, sqsEndpoint: this.sqsEndpoint, region: this.region };
   }
 
   /** The key stops working at once: the front door refuses its next request. */
@@ -67,6 +76,6 @@ export class StorageKeysService {
   }
 
   private view(row: StorageKey): StorageKeyView {
-    return { id: row.id, buckets: row.buckets, readOnly: row.readOnly, createdAt: row.createdAt, lastUsedAt: row.lastUsedAt };
+    return { id: row.id, buckets: row.buckets, queues: row.queues, readOnly: row.readOnly, createdAt: row.createdAt, lastUsedAt: row.lastUsedAt };
   }
 }

@@ -119,13 +119,15 @@ export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' 
 export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'COMPLETED', 'THROTTLED', 'LOST'] as const;
 export type InvocationStatus = (typeof INVOCATION_STATUSES)[number];
 
-/** What brought an invocation: the API's invoke, the function's URL, or one of its schedules. contract.test.ts checks them. */
-export const INVOCATION_SOURCES = ['api', 'url', 'schedule'] as const;
+/** What brought an invocation: the API's invoke, the function's URL, one of its schedules, or an asynchronous call's attempt. contract.test.ts checks them. */
+export const INVOCATION_SOURCES = ['api', 'url', 'schedule', 'async', 'sqs'] as const;
 export type InvocationSource = (typeof INVOCATION_SOURCES)[number];
 
 /** An invocation's fields, as the API's entity names them: contract.test.ts checks them against it. */
 export const INVOCATION_FIELDS = [
   'id',
+  'requestId',
+  'attempt',
   'functionId',
   'input',
   'output',
@@ -144,13 +146,17 @@ export const INVOCATION_FIELDS = [
 /** An invocation, as the API returns it: from POST /functions/:id/invoke, and in the history. */
 export interface FunctionInvocation {
   id: string;
+  /** The request's ID, which its log lines name: the invocation's own, but an asynchronous call's retries keep the first attempt's. */
+  requestId: string;
+  /** Which attempt of its request it was: an asynchronous call's are counted from 1; any other call is its first. */
+  attempt: number;
   functionId: string;
   /** In the history, the start of its JSON text, as a string, when inputTruncated. */
   input: unknown;
   /** In the history, the start of its JSON text, as a string, when outputTruncated. */
   output: unknown;
   status: InvocationStatus;
-  /** What brought it: the API, the function's URL, or a schedule. */
+  /** What brought it: the API, the function's URL, a schedule, or an asynchronous call. */
   source: InvocationSource;
   /** Milliseconds, as the runtime measured it. */
   duration: number;
@@ -170,6 +176,12 @@ export interface FunctionInvocation {
 type UnlistedInvocationField = Exclude<keyof FunctionInvocation, (typeof INVOCATION_FIELDS)[number]>;
 const everyInvocationFieldListed: [UnlistedInvocationField] extends [never] ? true : never = true;
 void everyInvocationFieldListed;
+
+/** The answer to an asynchronous call, 202: its request ID, which each of its attempts keeps. contract.test.ts checks it. */
+export const ASYNC_INVOCATION_FIELDS = ['requestId'] as const satisfies ReadonlyArray<keyof AsyncInvocation>;
+export interface AsyncInvocation {
+  requestId: string;
+}
 
 /** One page of GET /functions/:id/invocations, newest first. */
 export interface InvocationPage {
@@ -214,6 +226,31 @@ export const domainsApi = {
   remove: (functionId: string, domain: string) => api.delete(`/functions/${functionId}/url/domains/${encodeURIComponent(domain)}`),
 };
 
+/**
+ * A function's settings for its calls that don't wait, as AWS Lambda's
+ * EventInvokeConfig: null values are Lambda's defaults. contract.test.ts checks
+ * the fields against the API's.
+ */
+export const EVENT_INVOKE_CONFIG_FIELDS = ['functionArn', 'maximumRetryAttempts', 'maximumEventAgeInSeconds', 'destinationConfig', 'lastModified'] as const satisfies ReadonlyArray<
+  keyof EventInvokeConfig
+>;
+export interface EventInvokeConfig {
+  functionArn: string;
+  maximumRetryAttempts: number | null;
+  maximumEventAgeInSeconds: number | null;
+  /** Each destination's ARN, another function of the account; none when it has none. */
+  destinationConfig: { onSuccess: { destination?: string }; onFailure: { destination?: string } };
+  lastModified: string;
+}
+
+/** GET, PUT and DELETE /functions/:id/event-invoke-config. GET answers 404 for a function without settings: its calls follow Lambda's defaults. */
+export const eventInvokeConfigApi = {
+  get: (functionId: string) => api.get<EventInvokeConfig>(`/functions/${functionId}/event-invoke-config`),
+  /** Replaced whole, as Lambda's PutFunctionEventInvokeConfig: what is left out goes back to Lambda's default. */
+  put: (functionId: string, body: Record<string, unknown>) => api.put<EventInvokeConfig>(`/functions/${functionId}/event-invoke-config`, body),
+  remove: (functionId: string) => api.delete(`/functions/${functionId}/event-invoke-config`),
+};
+
 /** A function's schedules, and an expression's next runs for the form's preview. */
 export const schedulesApi = {
   list: (functionId: string) => api.get<Schedule[]>(`/functions/${functionId}/schedules`),
@@ -250,6 +287,10 @@ export const functionsApi = {
   /** `input` is the handler's event, any JSON value; for a function made before, its event.body. */
   invokeFunction: (id: string, input: unknown) =>
     api.post<FunctionInvocation>(`/functions/${id}/invoke`, { input }),
+
+  /** The same call without waiting, as AWS Lambda's invocation type Event: kept, then run and retried on failure. */
+  invokeFunctionAsync: (id: string, input: unknown) =>
+    api.post<AsyncInvocation>(`/functions/${id}/invoke`, { input, invocationType: 'Event' }),
 
   getFunctionInvocations: (id: string, limit = 20) =>
     api.get<InvocationPage>(`/functions/${id}/invocations`, { params: { limit } }),
@@ -416,6 +457,23 @@ export interface BucketUsage {
   cost: string | null;
 }
 
+/** A queue's fields in GET /usage, as the API's QueueUsageView names them: contract.test.ts checks them. */
+export const QUEUE_USAGE_FIELDS = ['queueId', 'name', 'deleted', 'requests', 'messagesSent', 'messagesReceived', 'cost'] as const satisfies ReadonlyArray<keyof QueueUsage>;
+/** A customer's queue in the month, as its requests were counted. */
+export interface QueueUsage {
+  queueId: string;
+  name: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+  /** Its requests as SQS bills them: each 64 KB of a request's messages a request; a function's batch as the request that would have received it. */
+  requests: number;
+  /** The messages kept in it, and those received from it, a message received twice counting twice. */
+  messagesSent: number;
+  messagesReceived: number;
+  /** Before the free tier; null without a price book. */
+  cost: string | null;
+}
+
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
@@ -426,6 +484,8 @@ export interface MonthlyUsage {
   databases: DatabaseUsage[];
   /** Each of its buckets measured, or asked anything, in the month, the most GB-months first. */
   buckets: BucketUsage[];
+  /** Each of its queues asked anything in the month, the most requests first. */
+  queues: QueueUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */
   estimate: UsageEstimate | null;
@@ -588,7 +648,18 @@ export const billingApi = {
 };
 
 /** A metrics answer's series names, as the API's DTO names them, after CloudWatch's: contract.test.ts checks them. */
-export const METRIC_NAMES = ['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances'] as const;
+export const METRIC_NAMES = [
+  'Invocations',
+  'Errors',
+  'Throttles',
+  'ColdStarts',
+  'Duration',
+  'Instances',
+  'AsyncEventsReceived',
+  'AsyncEventAge',
+  'AsyncEventsDropped',
+  'DestinationDeliveryFailures',
+] as const;
 
 /** GET /functions/:id/metrics and GET /metrics: a point per period of the window, oldest first. */
 export interface Metrics {
@@ -610,6 +681,11 @@ export interface Metrics {
     /** Milliseconds; null for a period without a measured call. */
     Duration: { Average: Array<number | null>; Maximum: Array<number | null>; p50: Array<number | null>; p95: Array<number | null>; p99: Array<number | null> };
     Instances: { Maximum: number[]; Average: number[] };
+    /** Lambda's metrics of calls that don't wait: events kept, their age at each attempt in ms (null without one), events dropped, records a destination didn't take. */
+    AsyncEventsReceived: number[];
+    AsyncEventAge: { Average: Array<number | null>; Maximum: Array<number | null> };
+    AsyncEventsDropped: number[];
+    DestinationDeliveryFailures: number[];
   };
 }
 
@@ -656,6 +732,14 @@ export interface PlanLimits {
   storageRequestsPerSecond: number;
   /** The largest object one PutObject may send, in MB. */
   maxObjectMb: number;
+  /** Customers' queues, all together. */
+  queues: number;
+  /** The queues one function may read in batches. */
+  eventSourceMappingsPerFunction: number;
+  /** SQS requests per second, all the keys together. */
+  queueRequestsPerSecond: number;
+  /** What the account's messages may hold together, in MB, its functions' waiting asynchronous calls among them. */
+  queueStorageMb: number;
 }
 
 export interface Plan {
@@ -695,7 +779,7 @@ export interface MeAccount {
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */
   dataDeletedAt: string | null;
-  /** When FF turned the account's databases and buckets off: their users can't log in. null while they are on. */
+  /** When FF turned the account's databases, buckets and queues off: their users can't log in, its keys are refused. null while they are on. */
   storageDisabledAt: string | null;
   /** FF's reason for it. */
   storageDisabledReason: string | null;
@@ -761,6 +845,8 @@ export const SCOPES = [
   'databases:write',
   'storage:read',
   'storage:write',
+  'queues:read',
+  'queues:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 
@@ -922,6 +1008,8 @@ export interface AlarmBody {
   databaseId?: string | null;
   /** The bucket watched, by its name, for its storage and its requests; null otherwise. */
   bucketName?: string | null;
+  /** The queue watched, by its name, for its messages and its requests; null otherwise. */
+  queueName?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -942,6 +1030,7 @@ export const ALARM_FIELDS = [
   'functionId',
   'databaseId',
   'bucketName',
+  'queueName',
   'metric',
   'statistic',
   'period',
@@ -1061,7 +1150,7 @@ export const databasesApi = {
 export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
 
 /** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
-export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
+export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'queues', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
 
 /** A bucket, as AWS S3 gives one, behind FF's S3 front door (ADR 0009). */
 export interface Bucket {
@@ -1098,8 +1187,10 @@ export interface BucketMetrics {
 export interface StorageKey {
   /** AWS_ACCESS_KEY_ID: AKFF and 16 characters. */
   id: string;
-  /** The buckets it reaches; null for all the account's. */
+  /** The buckets it names; null for none named. Naming neither buckets nor queues, it reaches all the account's. */
   buckets: string[] | null;
+  /** The queues it names; null for none named. */
+  queues: string[] | null;
   readOnly: boolean;
   createdAt: string;
   lastUsedAt: string | null;
@@ -1109,6 +1200,8 @@ export interface StorageKey {
 export interface CreatedStorageKey extends StorageKey {
   secretAccessKey: string;
   endpoint: string;
+  /** The SQS endpoint, AWS_ENDPOINT_URL_SQS, for the account's queues. */
+  sqsEndpoint: string;
   region: string;
 }
 
@@ -1121,13 +1214,231 @@ export const bucketsApi = {
   remove: (name: string, force = false) => api.delete(`/buckets/${name}`, { params: force ? { force: 'true' } : {} }),
   /** What it holds and its requests, a point per period: a minute, five or an hour. */
   metrics: (name: string, params: { start?: string; end?: string; period?: 60 | 300 | 3600 } = {}) => api.get<BucketMetrics>(`/buckets/${name}/metrics`, { params }),
+  /** Its notifications, as S3's configuration in its JSON names. */
+  notifications: (name: string) => api.get<NotificationConfiguration>(`/buckets/${name}/notifications`),
+  /** Replaced whole, as S3's PutBucketNotificationConfiguration: a destination by its ARN or its name. */
+  setNotifications: (name: string, configuration: NotificationConfigurationBody) => api.put<NotificationConfiguration>(`/buckets/${name}/notifications`, configuration),
 };
+
+/** A configuration's key filter, as S3's JSON names it: a prefix, a suffix. */
+export interface NotificationFilter {
+  key: { filterRules: Array<{ name: string; value: string }> };
+}
+
+/** A bucket's configuration that calls a function of the account without waiting, S3's event its input. */
+export interface FunctionNotification {
+  id: string;
+  lambdaFunctionArn: string;
+  events: string[];
+  filter?: NotificationFilter;
+}
+
+/** A bucket's configuration that sends S3's event to a queue of the account. */
+export interface QueueNotification {
+  id: string;
+  queueArn: string;
+  events: string[];
+  filter?: NotificationFilter;
+}
+
+/** A bucket's notifications, as GET /buckets/:name/notifications answers them: contract.test.ts checks the names. */
+export interface NotificationConfiguration {
+  lambdaFunctionConfigurations: FunctionNotification[];
+  queueConfigurations: QueueNotification[];
+}
+
+/** What PUT takes: each configuration's ID made when it has none. */
+export interface NotificationConfigurationBody {
+  lambdaFunctionConfigurations: Array<Omit<FunctionNotification, 'id'> & { id?: string }>;
+  queueConfigurations: Array<Omit<QueueNotification, 'id'> & { id?: string }>;
+}
 
 /** The account's access keys to its buckets: its owners alone see, make and revoke them. */
 export const storageKeysApi = {
   list: () => api.get<StorageKey[]>('/storage-keys'),
-  create: (body: { buckets?: string[]; readOnly?: boolean }) => api.post<CreatedStorageKey>('/storage-keys', body),
+  /** Naming neither buckets nor queues, it reaches all the account's; naming some, those alone. */
+  create: (body: { buckets?: string[]; queues?: string[]; readOnly?: boolean }) => api.post<CreatedStorageKey>('/storage-keys', body),
   revoke: (id: string) => api.delete(`/storage-keys/${id}`),
+};
+
+/** SQS's redrive policy: after maxReceiveCount receives, a message goes to the dead-letter queue its ARN names. */
+export interface RedrivePolicy {
+  deadLetterTargetArn: string;
+  maxReceiveCount: number;
+}
+
+/** A queue's messages, as SQS counts them, roughly. */
+export interface QueueMessages {
+  /** That can be received now. */
+  available: number;
+  /** Received and hidden for their visibility timeout. */
+  inFlight: number;
+  /** Waiting for their delay. */
+  delayed: number;
+}
+
+/** A customer's queue (ADR 0010), as GET /queues answers it: SQS's attributes by their names, in seconds and bytes. */
+export interface Queue {
+  name: string;
+  /** Its URL, which SQS's requests name, under the SQS endpoint. */
+  url: string;
+  arn: string;
+  visibilityTimeout: number;
+  messageRetentionPeriod: number;
+  delaySeconds: number;
+  maximumMessageSize: number;
+  receiveMessageWaitTimeSeconds: number;
+  redrivePolicy: RedrivePolicy | null;
+  messages: QueueMessages;
+  /** What its messages hold together, as the plan counts them. */
+  sizeBytes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A queue's fields, as the API's QueueView names them: contract.test.ts checks them. */
+export const QUEUE_FIELDS = [
+  'name',
+  'url',
+  'arn',
+  'visibilityTimeout',
+  'messageRetentionPeriod',
+  'delaySeconds',
+  'maximumMessageSize',
+  'receiveMessageWaitTimeSeconds',
+  'redrivePolicy',
+  'messages',
+  'sizeBytes',
+  'createdAt',
+  'updatedAt',
+] as const satisfies ReadonlyArray<keyof Queue>;
+
+/** The attributes a queue is made or changed with: SQS's, each left as it is when not given; a redrive policy of null removes it. */
+export type QueueAttributes = Partial<Pick<Queue, 'visibilityTimeout' | 'messageRetentionPeriod' | 'delaySeconds' | 'maximumMessageSize' | 'receiveMessageWaitTimeSeconds'>> & {
+  redrivePolicy?: RedrivePolicy | null;
+};
+
+/** A message attribute, as SQS's: its type, and a string, or binary in base64. */
+export interface MessageAttribute {
+  dataType: string;
+  stringValue?: string;
+  binaryValue?: string;
+}
+
+/** A message received: as it was sent, with the receipt handle that deletes it until it is received again. */
+export interface ReceivedMessage {
+  messageId: string;
+  receiptHandle: string;
+  body: string;
+  attributes: Record<string, MessageAttribute>;
+  /** How many times it was received, this time included. */
+  receiveCount: number;
+  /** Who sent it: an access key, an API key or a user, or a function's ARN for its destination records. */
+  senderId: string;
+  sentAt: string;
+}
+
+/** A received message's fields, as the API's ReceivedMessageView names them: contract.test.ts checks them. */
+export const RECEIVED_MESSAGE_FIELDS = ['messageId', 'receiptHandle', 'body', 'attributes', 'receiveCount', 'senderId', 'sentAt'] as const satisfies ReadonlyArray<keyof ReceivedMessage>;
+
+/** The account's queues: every member reads them; owners and developers make, change and delete them, and send and receive to debug them. */
+export const queuesApi = {
+  list: () => api.get<Queue[]>('/queues'),
+  get: (name: string) => api.get<Queue>(`/queues/${name}`),
+  create: (name: string, attributes: QueueAttributes = {}) => api.post<Queue>('/queues', { name, ...attributes }),
+  update: (name: string, attributes: QueueAttributes) => api.patch<Queue>(`/queues/${name}`, attributes),
+  remove: (name: string) => api.delete(`/queues/${name}`),
+  purge: (name: string) => api.post(`/queues/${name}/purge`),
+  send: (name: string, message: { body: string; delaySeconds?: number; attributes?: Record<string, MessageAttribute> }) =>
+    api.post<{ messageId: string; md5OfBody: string }>(`/queues/${name}/messages`, message),
+  /** Each message received is hidden for its visibility timeout and its receive counted, as any receive's. */
+  receive: (name: string, options: { maxMessages?: number; visibilityTimeout?: number; waitTimeSeconds?: number } = {}) =>
+    api.post<ReceivedMessage[]>(`/queues/${name}/receive`, options),
+  deleteMessage: (name: string, receiptHandle: string) => api.delete(`/queues/${name}/messages/${encodeURIComponent(receiptHandle)}`),
+  metrics: (name: string, params: { period: number; start?: string; end?: string }) => api.get<QueueMetrics>(`/queues/${name}/metrics`, { params }),
+};
+
+/** A queue's metrics series, as the API's DTO names them after CloudWatch's SQS metrics: contract.test.ts checks them. */
+export const QUEUE_METRIC_NAMES = [
+  'ApproximateNumberOfMessagesVisible',
+  'ApproximateNumberOfMessagesNotVisible',
+  'ApproximateNumberOfMessagesDelayed',
+  'ApproximateAgeOfOldestMessage',
+  'NumberOfMessagesSent',
+  'NumberOfMessagesReceived',
+  'NumberOfMessagesDeleted',
+  'NumberOfEmptyReceives',
+  'SentMessageSize',
+] as const;
+
+/** GET /queues/:name/metrics: a point per period of the window, oldest first. */
+export interface QueueMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: {
+    /** Messages waiting, in flight and delayed: the most and the mean of the period's minutes, an empty queue's 0. */
+    ApproximateNumberOfMessagesVisible: { Maximum: number[]; Average: number[] };
+    ApproximateNumberOfMessagesNotVisible: { Maximum: number[]; Average: number[] };
+    ApproximateNumberOfMessagesDelayed: { Maximum: number[]; Average: number[] };
+    /** Seconds: its oldest message's age, the most of the period's minutes. */
+    ApproximateAgeOfOldestMessage: { Maximum: number[] };
+    NumberOfMessagesSent: { Sum: number[] };
+    NumberOfMessagesReceived: { Sum: number[] };
+    NumberOfMessagesDeleted: { Sum: number[] };
+    NumberOfEmptyReceives: { Sum: number[] };
+    /** Bytes; null for a period without a message sent. */
+    SentMessageSize: { Average: Array<number | null>; Maximum: Array<number | null> };
+  };
+}
+
+/** A function reading a queue of its account, as AWS Lambda's event source mapping for SQS, in Lambda's names. */
+export interface EventSource {
+  uuid: string;
+  eventSourceArn: string;
+  functionArn: string;
+  batchSize: number;
+  maximumBatchingWindowInSeconds: number;
+  /** ['ReportBatchItemFailures'] when the call's answer names the messages that failed; [] when a failure keeps the whole batch. */
+  functionResponseTypes: string[];
+  /** Null: as many batches at once as the function's instances. */
+  scalingConfig: { maximumConcurrency: number } | null;
+  state: 'Enabled' | 'Disabled';
+  stateTransitionReason: string;
+  lastModified: string;
+}
+
+/** A mapping's fields, as the API's EventSourceView names them: contract.test.ts checks them. */
+export const EVENT_SOURCE_FIELDS = [
+  'uuid',
+  'eventSourceArn',
+  'functionArn',
+  'batchSize',
+  'maximumBatchingWindowInSeconds',
+  'functionResponseTypes',
+  'scalingConfig',
+  'state',
+  'stateTransitionReason',
+  'lastModified',
+] as const satisfies ReadonlyArray<keyof EventSource>;
+
+/** What a mapping is made or changed with, by Lambda's names: each left as it is when not given; a scalingConfig of null removes the maximum. */
+export interface EventSourceSettings {
+  batchSize?: number;
+  maximumBatchingWindowInSeconds?: number;
+  functionResponseTypes?: string[];
+  scalingConfig?: { maximumConcurrency: number } | null;
+  enabled?: boolean;
+}
+
+/** The queues functions read: every member reads the mappings; owners and developers make, change and delete them. */
+export const eventSourcesApi = {
+  forFunction: (functionId: string) => api.get<EventSource[]>(`/functions/${functionId}/event-sources`),
+  forQueue: (queueArn: string) => api.get<EventSource[]>('/event-sources', { params: { eventSourceArn: queueArn } }),
+  create: (functionId: string, body: EventSourceSettings & { eventSourceArn: string }) => api.post<EventSource>(`/functions/${functionId}/event-sources`, body),
+  update: (uuid: string, body: EventSourceSettings) => api.patch<EventSource>(`/event-sources/${uuid}`, body),
+  remove: (uuid: string) => api.delete(`/event-sources/${uuid}`),
 };
 
 /** The account's alarms: every member reads them; owners and developers change them. */

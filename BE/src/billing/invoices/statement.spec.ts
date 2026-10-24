@@ -19,6 +19,19 @@ const database = (resourceId: string, name: string, priceBookId: string, gb: big
   hours,
   tier1Requests: 0n,
   tier2Requests: 0n,
+  requests: 0n,
+});
+/** A queue asked `requests` requests in the month, as SQS bills them. */
+const queue = (resourceId: string, name: string, priceBookId: string, requests: bigint) => ({
+  resourceId,
+  kind: 'queue' as const,
+  name,
+  priceBookId,
+  byteHours: 0n,
+  hours: 0n,
+  tier1Requests: 0n,
+  tier2Requests: 0n,
+  requests,
 });
 
 const book = (id: string, validFrom: string, perMillion: string): BookPrices => ({
@@ -115,10 +128,24 @@ describe("a month's usage statement (L1, P-36)", () => {
 
     expect(statement.resources).toEqual([
       // 2 GB for 100 of October's 744 hours: 0.268817 GB-month, 0.092989 TND; 10 GB all month: 3.4592 TND.
-      { resourceId: 'd-1', kind: 'database', name: 'audit', gbMonths: '0.268817', tier1Requests: 0n, tier2Requests: 0n, amountMinor: 93n },
-      { resourceId: 'd-2', kind: 'database', name: 'orders', gbMonths: '10', tier1Requests: 0n, tier2Requests: 0n, amountMinor: 3_459n },
+      { resourceId: 'd-1', kind: 'database', name: 'audit', gbMonths: '0.268817', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, amountMinor: 93n },
+      { resourceId: 'd-2', kind: 'database', name: 'orders', gbMonths: '10', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, amountMinor: 3_459n },
     ]);
     expect([statement.functions, statement.usageMinor, statement.freeTierMinor, statement.totalMinor]).toEqual([[], 3_552n, -346n, 3_206n]);
+  });
+
+  it('lists each queue by name, its requests and cost before the free tier, and takes the free million off', () => {
+    // SQS's $0.40 a million times 3.0080, and 1,000,000 requests free in the month.
+    const priced = { ...book('b1', '2026-10-01T00:00:00Z', '0.6016'), queueRequestTiers: [{ upTo: null, price: Decimal.parse('0.0000012032') }], freeQueueRequests: Decimal.of(1_000_000) };
+
+    const statement = buildStatement({ ...OCTOBER, books: [priced], rows: [], resources: [queue('q-2', 'receipts', 'b1', 500_000n), queue('q-1', 'orders', 'b1', 3_000_000n)] });
+
+    expect(statement.resources).toEqual([
+      // 3,000,000 requests: 3.6096 TND; 500,000: 0.6016 TND.
+      { resourceId: 'q-1', kind: 'queue', name: 'orders', gbMonths: '0', tier1Requests: 0n, tier2Requests: 0n, requests: 3_000_000n, amountMinor: 3_610n },
+      { resourceId: 'q-2', kind: 'queue', name: 'receipts', gbMonths: '0', tier1Requests: 0n, tier2Requests: 0n, requests: 500_000n, amountMinor: 602n },
+    ]);
+    expect([statement.usageMinor, statement.freeTierMinor, statement.totalMinor]).toEqual([4_211n, -1_203n, 3_008n]);
   });
 
   it("names a function by its ID when its name is gone, and lists nothing for a month without usage", () => {

@@ -11,6 +11,9 @@ import { formatMinor } from '../billing/money';
 import { describeError } from '../common/describe-error';
 import { DatabasesService } from '../databases/databases.service';
 import { BucketsService } from '../storage/buckets.service';
+import { CustomerQueues } from '../queues/customer-queues';
+import { QueueStore } from '../queues/queue-store';
+import { parseQueueArn } from '../queues/sqs-attributes';
 import { frenchTime } from '../common/french';
 import { likeLiteral } from '../common/like';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
@@ -28,6 +31,7 @@ import {
   AdminAccountPageView,
   AdminAccountSummaryView,
   AdminAccountView,
+  AdminQueueView,
   AdminStatusEventView,
 } from './admin-accounts.dto';
 
@@ -143,21 +147,25 @@ function frenchOwnerMail(account: Pick<Account, 'id' | 'name' | 'dataDeletionDue
 }
 
 /**
- * The e-mail an account's owners get when an operator turns its databases and
- * buckets off, with the reason, or on again, in their language.
+ * The e-mail an account's owners get when an operator turns its databases,
+ * buckets and queues off, with the reason, or on again, in their language.
  */
 export function storageMail(account: Pick<Account, 'id' | 'name'>, enabled: boolean, reason: string, consoleUrl: string, language: Language): Omit<Mail, 'to'> {
   if (language === 'fr') {
     const which = `votre compte « ${account.name} » (${account.id})`;
     return enabled
       ? {
-          subject: `Les bases de données et compartiments de votre compte FF sont réactivés : ${account.name}`,
-          text: [`Les bases de données et les compartiments de ${which} sont réactivés : leurs utilisateurs peuvent de nouveau se connecter.`, '', `La console : ${consoleUrl}`].join('\n'),
+          subject: `Les bases de données, compartiments et files d'attente de votre compte FF sont réactivés : ${account.name}`,
+          text: [
+            `Les bases de données, les compartiments et les files d'attente de ${which} sont réactivés : les utilisateurs des bases peuvent de nouveau se connecter, et les clés d'accès sont de nouveau acceptées.`,
+            '',
+            `La console : ${consoleUrl}`,
+          ].join('\n'),
         }
       : {
-          subject: `Les bases de données et compartiments de votre compte FF sont désactivés : ${account.name}`,
+          subject: `Les bases de données, compartiments et files d'attente de votre compte FF sont désactivés : ${account.name}`,
           text: [
-            `FF a désactivé les bases de données et les compartiments de ${which} : leurs utilisateurs ne peuvent plus se connecter, et leurs sessions ont été fermées ; aucune base ne peut être créée entre-temps. Leurs données sont conservées, et facturées ; vos fonctions continuent.`,
+            `FF a désactivé les bases de données, les compartiments et les files d'attente de ${which} : les utilisateurs des bases ne peuvent plus se connecter, et leurs sessions ont été fermées ; les clés d'accès sont refusées, et aucune base, aucun compartiment ni aucune file ne peut être créé entre-temps. Leurs données sont conservées, et facturées ; vos fonctions continuent.`,
             `Motif : ${reason}`,
             '',
             `La console : ${consoleUrl}`,
@@ -167,13 +175,13 @@ export function storageMail(account: Pick<Account, 'id' | 'name'>, enabled: bool
   const which = `your account "${account.name}" (${account.id})`;
   return enabled
     ? {
-        subject: `The databases and buckets of your FF account are on again: ${account.name}`,
-        text: [`The databases and buckets of ${which} are on again: their users can log in.`, '', `The console: ${consoleUrl}`].join('\n'),
+        subject: `The databases, buckets and queues of your FF account are on again: ${account.name}`,
+        text: [`The databases, buckets and queues of ${which} are on again: the databases' users can log in, and the access keys are accepted again.`, '', `The console: ${consoleUrl}`].join('\n'),
       }
     : {
-        subject: `The databases and buckets of your FF account are off: ${account.name}`,
+        subject: `The databases, buckets and queues of your FF account are off: ${account.name}`,
         text: [
-          `FF turned off the databases and buckets of ${which}: their users can't log in, and their sessions were ended; no database can be made meanwhile. Their data are kept, and billed; your functions go on.`,
+          `FF turned off the databases, buckets and queues of ${which}: the databases' users can't log in, and their sessions were ended; the access keys are refused, and no database, bucket or queue can be made meanwhile. Their data are kept, and billed; your functions go on.`,
           `Why: ${reason}`,
           '',
           `The console: ${consoleUrl}`,
@@ -205,6 +213,8 @@ export class AdminAccountsService {
     private readonly settings: PlatformSettingsService,
     private readonly databases: DatabasesService,
     private readonly buckets: BucketsService,
+    private readonly customerQueues: CustomerQueues,
+    private readonly queueStore: QueueStore,
   ) {}
 
   /** GET /admin/accounts: newest first, a page at a time, each with its owners. */
@@ -282,11 +292,29 @@ export class AdminAccountsService {
         createdAt,
       })),
       buckets: await this.buckets.measured(id),
+      queues: await this.queuesOf(id),
+      queueStorage: { bytes: await this.queueStore.accountBytes(id), limitMb: (await this.plans.get(account.planId)).limits.queueStorageMb },
       usage: { month, totals },
       balances: (await this.ledger.balances(id)).map(({ currency, exponent, balanceMinor }) => ({ currency, balance: formatMinor(balanceMinor, exponent) })),
       credit: await this.credits.view(id),
       statusHistory: (await this.audit.statusHistory(id)).map(statusEvent),
     };
+  }
+
+  /** The account's queues by name, each with its messages counted now, what they hold, and its dead-letter queue. */
+  private async queuesOf(accountId: string): Promise<AdminQueueView[]> {
+    const { queues } = await this.customerQueues.list(accountId, '', 1000);
+    const counts = await this.customerQueues.countsOf(accountId, new Date());
+    return queues.map(({ id, name, sizeBytes, redrivePolicy, createdAt }) => {
+      const count = counts.get(id) ?? { visible: 0, notVisible: 0, delayed: 0 };
+      return {
+        name,
+        messages: { available: count.visible, inFlight: count.notVisible, delayed: count.delayed },
+        sizeBytes: Number(sizeBytes),
+        deadLetterQueue: redrivePolicy ? (parseQueueArn(redrivePolicy.deadLetterTargetArn)?.name ?? null) : null,
+        createdAt,
+      };
+    });
   }
 
   /** GET /admin/accounts/:id/audit-log: everything in the account's log, operators named. */

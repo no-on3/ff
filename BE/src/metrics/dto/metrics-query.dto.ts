@@ -38,6 +38,11 @@ class InstancesSeries {
   @ApiProperty({ type: [Number], description: 'The mean over the period\'s minutes, a minute without one counting 0' }) Average: number[];
 }
 
+class AsyncEventAgeSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "Milliseconds from an event's keeping to its attempt, the mean of the period's attempts; null for a period without one" }) Average: Array<number | null>;
+  @ApiProperty({ type: [Number], nullable: true, description: 'The oldest of them' }) Maximum: Array<number | null>;
+}
+
 class MetricSeries {
   @ApiProperty({ type: [Number], description: 'Calls that reached a function, failed or not: all but the throttled' }) Invocations: number[];
   @ApiProperty({ type: [Number], description: "Calls that failed: the function's error or timeout, FF's failure, or lost when the backend stopped" }) Errors: number[];
@@ -45,6 +50,10 @@ class MetricSeries {
   @ApiProperty({ type: [Number], description: 'Calls that started an instance first' }) ColdStarts: number[];
   @ApiProperty({ type: DurationSeries }) Duration: DurationSeries;
   @ApiProperty({ type: InstancesSeries }) Instances: InstancesSeries;
+  @ApiProperty({ type: [Number], description: 'Calls kept to run without waiting, as Lambda counts its asynchronous events received' }) AsyncEventsReceived: number[];
+  @ApiProperty({ type: AsyncEventAgeSeries, description: "How long they waited for each attempt: Lambda's AsyncEventAge" }) AsyncEventAge: AsyncEventAgeSeries;
+  @ApiProperty({ type: [Number], description: 'Those that ended without the function succeeding, past their retries or their age, sent to a destination or not' }) AsyncEventsDropped: number[];
+  @ApiProperty({ type: [Number], description: "Records a destination didn't take: gone, too large, or the account's messages full" }) DestinationDeliveryFailures: number[];
 }
 
 /** A point per period of the window, oldest first. */
@@ -102,4 +111,43 @@ export class BucketMetricsView {
   @ApiProperty({ description: 'Excluded' }) end: Date;
   @ApiProperty({ type: [Date], description: "Each period's start" }) timestamps: Date[];
   @ApiProperty({ type: BucketMetricSeries }) metrics: BucketMetricSeries;
+}
+
+class QueueGaugeSeries {
+  @ApiProperty({ type: [Number], description: "The most of the period's minutes; 0 where the queue was empty" }) Maximum: number[];
+  @ApiProperty({ type: [Number], description: "The mean over the period's minutes, a minute without a sample counting 0" }) Average: number[];
+}
+
+class QueueAgeSeries {
+  @ApiProperty({ type: [Number], description: "Seconds: the oldest message's age, the most of the period's minutes; 0 where the queue was empty" }) Maximum: number[];
+}
+
+class QueueCountSeries {
+  @ApiProperty({ type: [Number], description: "The period's total; 0 for a quiet period" }) Sum: number[];
+}
+
+class QueueSizeSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: 'Bytes, body and attributes; null for a period without a message sent' }) Average: Array<number | null>;
+  @ApiProperty({ type: [Number], nullable: true }) Maximum: Array<number | null>;
+}
+
+class QueueMetricSeries {
+  @ApiProperty({ type: QueueGaugeSeries, description: 'Messages that can be received' }) ApproximateNumberOfMessagesVisible: QueueGaugeSeries;
+  @ApiProperty({ type: QueueGaugeSeries, description: 'Messages received and hidden for their visibility timeout' }) ApproximateNumberOfMessagesNotVisible: QueueGaugeSeries;
+  @ApiProperty({ type: QueueGaugeSeries, description: 'Messages waiting for their delay' }) ApproximateNumberOfMessagesDelayed: QueueGaugeSeries;
+  @ApiProperty({ type: QueueAgeSeries }) ApproximateAgeOfOldestMessage: QueueAgeSeries;
+  @ApiProperty({ type: QueueCountSeries, description: 'Messages kept in it' }) NumberOfMessagesSent: QueueCountSeries;
+  @ApiProperty({ type: QueueCountSeries, description: "Messages received from it, a function's batches among them" }) NumberOfMessagesReceived: QueueCountSeries;
+  @ApiProperty({ type: QueueCountSeries, description: 'Messages deleted by a valid receipt handle' }) NumberOfMessagesDeleted: QueueCountSeries;
+  @ApiProperty({ type: QueueCountSeries, description: 'Receives that found no message' }) NumberOfEmptyReceives: QueueCountSeries;
+  @ApiProperty({ type: QueueSizeSeries, description: 'The size of the messages kept' }) SentMessageSize: QueueSizeSeries;
+}
+
+/** A queue's metrics: a point per period of the window, oldest first. */
+export class QueueMetricsView {
+  @ApiProperty({ enum: PERIODS }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each period's start" }) timestamps: Date[];
+  @ApiProperty({ type: QueueMetricSeries }) metrics: QueueMetricSeries;
 }

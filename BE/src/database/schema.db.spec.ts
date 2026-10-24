@@ -18,6 +18,7 @@ import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
 import { MIGRATIONS } from '../migrations';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
+import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
@@ -59,6 +60,14 @@ const DATABASES = migrationNames.find((name) => name.startsWith('Databases1')) a
 const DATABASE_BILLING = migrationNames.find((name) => name.startsWith('DatabaseBilling')) as string;
 const DATABASE_OPERATIONS = migrationNames.find((name) => name.startsWith('DatabaseOperations')) as string;
 const FUNCTION_KEYS = migrationNames.find((name) => name.startsWith('FunctionKeys')) as string;
+const QUEUE_LIMITS = migrationNames.find((name) => name.startsWith('QueueLimits')) as string;
+const EVENT_INVOKE_CONFIGS = migrationNames.find((name) => name.startsWith('EventInvokeConfigs')) as string;
+const CUSTOMER_QUEUES = migrationNames.find((name) => name.startsWith('CustomerQueues')) as string;
+const ASYNC_NOTIFY = migrationNames.find((name) => name.startsWith('AsyncNotify')) as string;
+const KEY_QUEUES = migrationNames.find((name) => name.startsWith('KeyQueues')) as string;
+const EVENT_SOURCE_MAPPINGS = migrationNames.find((name) => name.startsWith('EventSourceMappings')) as string;
+const BUCKET_NOTIFICATIONS = migrationNames.find((name) => name.startsWith('BucketNotifications')) as string;
+const QUEUE_BILLING = migrationNames.find((name) => name.startsWith('QueueBilling')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -236,8 +245,8 @@ run('database schema (L2, real PostgreSQL)', () => {
   it("the capacity-samples migration replaces P-20's partition function, and reverts with samples present (P-21)", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
-      // P-30's price book guard, P-31's ledger check, P-33's NOTIFY and inline code's hash too, which reverting their migrations removes.
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_refuse_change']);
+      // The price book's guard, the ledger's check and its NOTIFY, inline code's hash, and the queues' sizes and NOTIFY too, which reverting their migrations removes.
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_own_request', 'ff_queue_notify', 'ff_queue_size', 'ff_refuse_change']);
       expect(await partitionsOf(dataSource, 'capacity_samples')).toEqual([
         { relname: monthPartition('capacity_samples', 0) },
         { relname: monthPartition('capacity_samples', 1) },
@@ -256,7 +265,7 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
-      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_refuse_change']);
+      expect(await ffFunctions(dataSource)).toEqual(['ff_check_ledger_transaction', 'ff_ensure_month_partition', 'ff_guard_price_book', 'ff_inline_code_facts', 'ff_notify_ledger', 'ff_own_request', 'ff_queue_notify', 'ff_queue_size', 'ff_refuse_change']);
     });
   });
 
@@ -347,6 +356,311 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'function_invocations' AND column_name LIKE '%truncated'`)).toEqual([]);
       expect(await dataSource.query(`SELECT output #>> '{}' AS output FROM function_invocations ORDER BY created_at`)).toEqual([{ output: 'x'.repeat(100000) }, { output: '{"rows":[1,2' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the async-invoke migration gives each call its own ID as its request's, the first of its attempts, and reverts with an asynchronous call and a waiting event present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, QUEUE_LIMITS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('f', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      const [{ id: before }] = await dataSource.query(`INSERT INTO function_invocations (function_id, input, status, source) VALUES ($1, '{}', 'COMPLETED', 'url') RETURNING id`, [id]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT id, request_id, attempt, source FROM function_invocations`)).toEqual([{ id: before, request_id: before, attempt: 1, source: 'url' }]);
+      // A row that names no request is its own, as every call before.
+      const [{ id: own, request_id: itsRequest }] = await dataSource.query(`INSERT INTO function_invocations (function_id, input, status) VALUES ($1, '{}', 'COMPLETED') RETURNING id, request_id`, [id]);
+      expect(itsRequest).toBe(own);
+      await dataSource.query(`DELETE FROM function_invocations WHERE id = $1`, [own]);
+      await dataSource.query(
+        `INSERT INTO function_invocations (function_id, request_id, attempt, input, status, source) VALUES ($1, $2, 2, '{}', 'ERROR', 'async')`,
+        [id, before],
+      );
+      const [{ id: queue }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind, function_id) VALUES ($1, $2::text, 'function', $2::uuid) RETURNING id`, [ACCOUNT, id]);
+      await dataSource.query(`INSERT INTO queue_messages (queue_id, function_id, message_id, body, size_bytes, expires_at) VALUES ($1, $2, gen_random_uuid(), '{}', 2, now() + interval '1 hour')`, [queue, id]);
+
+      await migrateDownTo(dataSource, QUEUE_LIMITS);
+
+      expect(await dataSource.query(`SELECT source FROM function_invocations ORDER BY created_at`)).toEqual([{ source: 'url' }, { source: 'api' }]);
+      expect(await dataSource.query(`SELECT to_regclass('queues') AS q, to_regclass('queue_messages') AS m`)).toEqual([{ q: null, m: null }]);
+      expect(await ffFunctions(dataSource)).not.toEqual(expect.arrayContaining(['ff_own_request']));
+      expect(await ffFunctions(dataSource)).not.toEqual(expect.arrayContaining(['ff_queue_size']));
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the customer-queues migration gives each queue SQS's defaults, moves a message's size with it, tells the queue's consumers, and reverts with customers' queues present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, EVENT_INVOKE_CONFIGS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: orders }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [ACCOUNT]);
+      const [{ id: dead }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders-dlq', 'customer') RETURNING id`, [ACCOUNT]);
+      const message = `INSERT INTO queue_messages (queue_id, message_id, body, size_bytes, expires_at) VALUES ($1, gen_random_uuid(), 'harissa', 7, now() + interval '1 day') RETURNING id`;
+      const [{ id: kept }] = await dataSource.query(message, [orders]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(
+        await dataSource.query(
+          `SELECT visibility_timeout, message_retention_seconds, delay_seconds, maximum_message_size, receive_wait_seconds, redrive_policy, size_bytes FROM queues WHERE id = $1`,
+          [orders],
+        ),
+      ).toEqual([{ visibility_timeout: 30, message_retention_seconds: 345600, delay_seconds: 0, maximum_message_size: 1048576, receive_wait_seconds: 0, redrive_policy: null, size_bytes: '7' }]);
+      await dataSource.query(`UPDATE queue_messages SET queue_id = $2 WHERE id = $1`, [kept, dead]);
+      expect(await dataSource.query(`SELECT name, size_bytes FROM queues ORDER BY name`)).toEqual([
+        { name: 'orders', size_bytes: '0' },
+        { name: 'orders-dlq', size_bytes: '7' },
+      ]);
+      // Each message written, or moved, NOTIFYs ff_queue with its queue's ID as its write commits.
+      const runner = dataSource.createQueryRunner();
+      const client = (await runner.connect()) as { on(event: 'notification', listener: (message: { channel: string; payload?: string }) => void): void };
+      const heard: string[] = [];
+      client.on('notification', (notification) => heard.push(`${notification.channel} ${notification.payload}`));
+      await runner.query('LISTEN ff_queue');
+      await dataSource.query(message, [orders]);
+      await dataSource.query(`UPDATE queue_messages SET queue_id = $2 WHERE id = $1`, [kept, orders]);
+      await runner.query('SELECT 1');
+      expect(heard).toEqual([`ff_queue ${orders}`, `ff_queue ${orders}`]);
+      await runner.query('UNLISTEN ff_queue');
+      await runner.release();
+      await expect(dataSource.query(`UPDATE queues SET visibility_timeout = 43201 WHERE id = $1`, [orders])).rejects.toThrow(/violates check constraint/);
+
+      await migrateDownTo(dataSource, EVENT_INVOKE_CONFIGS);
+
+      expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'queues' AND column_name IN ('visibility_timeout', 'redrive_policy', 'updated_at')`)).toEqual([]);
+      expect(await ffFunctions(dataSource)).not.toEqual(expect.arrayContaining(['ff_queue_notify']));
+      expect(await dataSource.query(`SELECT name, size_bytes FROM queues ORDER BY name`)).toEqual([
+        { name: 'orders', size_bytes: '14' },
+        { name: 'orders-dlq', size_bytes: '0' },
+      ]);
+      await dataSource.query(`DELETE FROM queue_messages WHERE id = $1`, [kept]);
+      expect(await dataSource.query(`SELECT size_bytes FROM queues WHERE id = $1`, [orders])).toEqual([{ size_bytes: '7' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the async-notify migration tells a function's asynchronous calls on a channel of their own, ff_async, and customers' messages on ff_queue, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: fn }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('f', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      const [{ id: own }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind, function_id) VALUES ($1, $2::text, 'function', $2::uuid) RETURNING id`, [ACCOUNT, fn]);
+      const [{ id: orders }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [ACCOUNT]);
+      const write = async () => {
+        await dataSource.query(`INSERT INTO queue_messages (queue_id, message_id, body, size_bytes, expires_at) VALUES ($1, gen_random_uuid(), 'm', 1, now() + interval '1 day')`, [orders]);
+        await dataSource.query(`INSERT INTO queue_messages (queue_id, function_id, message_id, body, size_bytes, expires_at) VALUES ($1, $2, gen_random_uuid(), '{}', 2, now() + interval '1 day')`, [
+          own,
+          fn,
+        ]);
+      };
+      const heard = async (): Promise<string[]> => {
+        const runner = dataSource.createQueryRunner();
+        const client = (await runner.connect()) as { on(event: 'notification', listener: (message: { channel: string; payload?: string }) => void): void };
+        const notes: string[] = [];
+        client.on('notification', (note) => notes.push(`${note.channel} ${note.payload}`));
+        await runner.query('LISTEN ff_queue');
+        await runner.query('LISTEN ff_async');
+        await write();
+        await runner.query('SELECT 1');
+        await runner.query('UNLISTEN *');
+        await runner.release();
+        return notes;
+      };
+
+      expect(await heard()).toEqual([`ff_queue ${orders}`, `ff_async ${own}`]);
+
+      await migrateDownTo(dataSource, CUSTOMER_QUEUES);
+      expect(await heard()).toEqual([`ff_queue ${orders}`, `ff_queue ${own}`]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the key-queues migration gives each key the queues it names, none for a key made before it, and reverts revoking a key that named queues alone, which would reach every bucket", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, ASYNC_NOTIFY);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO storage_keys (id, account_id, secret, buckets) VALUES ('AKFFAAAAAAAAAAAAAAAA', $1, '{}', '{photos}')`, [ACCOUNT]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT buckets, queues FROM storage_keys`)).toEqual([{ buckets: ['photos'], queues: null }]);
+      await dataSource.query(`INSERT INTO storage_keys (id, account_id, secret, queues) VALUES ('AKFFBBBBBBBBBBBBBBBB', $1, '{}', '{orders}')`, [ACCOUNT]);
+
+      await migrateDownTo(dataSource, ASYNC_NOTIFY);
+
+      expect(await dataSource.query(`SELECT id, buckets, revoked_at IS NOT NULL AS revoked FROM storage_keys ORDER BY id`)).toEqual([
+        { id: 'AKFFAAAAAAAAAAAAAAAA', buckets: ['photos'], revoked: false },
+        { id: 'AKFFBBBBBBBBBBBBBBBB', buckets: null, revoked: true },
+      ]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the event-source-mappings migration maps a function to a queue once, the pair going with either, gives the history its source sqs, and reverts with both, a queue's call becoming an asynchronous one", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: fn }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('reader', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      const queue = async (name: string) =>
+        (await dataSource.query<Array<{ id: string }>>(`INSERT INTO queues (account_id, name, kind) VALUES ($1, $2, 'customer') RETURNING id`, [ACCOUNT, name]))[0].id;
+      const [orders, invoices] = [await queue('orders'), await queue('invoices')];
+      const map = (queueId: string, batch = 10, window = 0) =>
+        dataSource.query(`INSERT INTO event_source_mappings (account_id, function_id, queue_id, batch_size, maximum_batching_window_in_seconds) VALUES ($1, $2, $3, $4, $5)`, [
+          ACCOUNT,
+          fn,
+          queueId,
+          batch,
+          window,
+        ]);
+      await map(orders);
+      await map(invoices, 100, 5);
+      await expect(map(orders)).rejects.toThrow(/duplicate key/);
+      await expect(map(await queue('more'), 11)).rejects.toThrow(/violates check constraint/);
+      await dataSource.query(`INSERT INTO function_invocations (function_id, input, status, source) VALUES ($1, '{}', 'COMPLETED', 'sqs')`, [fn]);
+
+      await dataSource.query(`DELETE FROM queues WHERE id = $1`, [invoices]);
+      expect(await dataSource.query(`SELECT queue_id FROM event_source_mappings`)).toEqual([{ queue_id: orders }]);
+
+      await migrateDownTo(dataSource, KEY_QUEUES);
+      expect(await dataSource.query(`SELECT to_regclass('event_source_mappings') AS mappings, (SELECT source FROM function_invocations) AS source`)).toEqual([
+        { mappings: null, source: 'async' },
+      ]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+      await map(orders);
+      await dataSource.query(`DELETE FROM functions WHERE id = $1`, [fn]);
+      expect(await dataSource.query(`SELECT count(*)::int AS mappings FROM event_source_mappings`)).toEqual([{ mappings: 0 }]);
+    });
+  });
+
+  it("the bucket-notifications migration gives every bucket there is no notification, and reverts with a bucket's configuration present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, EVENT_SOURCE_MAPPINGS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, 'before', 'ff-0123456789abcdef01234567')`, [ACCOUNT]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT notifications FROM buckets WHERE name = 'before'`)).toEqual([{ notifications: null }]);
+      await dataSource.query(`UPDATE buckets SET notifications = $1 WHERE name = 'before'`, [
+        JSON.stringify([{ id: 'r', target: 'queue', arn: `arn:aws:sqs:tn-tunis-1:${ACCOUNT}:q`, events: ['s3:ObjectCreated:*'], prefix: null, suffix: null }]),
+      ]);
+      await migrateDownTo(dataSource, EVENT_SOURCE_MAPPINGS);
+      expect(await dataSource.query(`SELECT name FROM buckets`)).toEqual([{ name: 'before' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the queue-billing migration counts queues' requests by month, append-only, gives books not started yet SQS's SKU, adds its own from next month's first hour, and reverts unless a queue's hour is rated", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, BUCKET_NOTIFICATIONS);
+      // As after the database-billing migration, in a month later than its own: no book starts next month yet.
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      await dataSource.query(`DELETE FROM price_books WHERE valid_from > now()`);
+      const [{ id: future }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T00:00:00Z', $1, 'test') RETURNING id`, [
+        JSON.stringify(withStoragePrices(FIRST_PRICE_BOOK)),
+      ]);
+      const [{ prices: current }] = await dataSource.query(`SELECT prices FROM price_books WHERE valid_from <= now() ORDER BY valid_from DESC LIMIT 1`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
+        { valid_from: next, prices: withQueuePrices(current), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'test' },
+      ]);
+      const minute = `date_trunc('minute', now())`;
+      await dataSource.query(
+        `INSERT INTO queue_request_counts (queue_id, minute, writer, account_id, name, requests, sent, received, deleted, empty_receives, sent_bytes, sent_max_bytes)
+         VALUES (gen_random_uuid(), ${minute}, gen_random_uuid(), $1, 'orders', 3, 1, 1, 1, 0, 70000, 70000)`,
+        [ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE queue_request_counts SET requests = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM queue_request_counts`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'queue_request_counts')).toEqual([{ relname: monthPartition('queue_request_counts', 0) }, { relname: monthPartition('queue_request_counts', 1) }]);
+
+      // Reverted with counts present: the book it made goes, the other loses SQS's SKU.
+      await migrateDownTo(dataSource, BUCKET_NOTIFICATIONS);
+
+      expect(await dataSource.query(`SELECT to_regclass('queue_request_counts') AS c, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'resource_usage_hourly' AND column_name = 'requests') AS r`)).toEqual([
+        { c: null, r: 0 },
+      ]);
+      expect(await dataSource.query(`SELECT id, prices FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([{ id: future, prices: withStoragePrices(FIRST_PRICE_BOOK) }]);
+
+      // Once a queue's hour is rated, it refuses: those are billed records.
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(
+        `INSERT INTO resource_usage_hourly (account_id, hour, resource_id, kind, name, price_book_id, byte_hours, hours, tier1_requests, tier2_requests, requests)
+         VALUES ($1, date_trunc('hour', now()), gen_random_uuid(), 'queue', 'orders', (SELECT id FROM price_books LIMIT 1), 0, 0, 0, 0, 3)`,
+        [ACCOUNT],
+      );
+      await expect(migrateDownTo(dataSource, BUCKET_NOTIFICATIONS)).rejects.toThrow('1 hour(s) of queues were rated: they are billed records, and reverting would drop them');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the queue-metrics migration samples queues and counts asynchronous calls by month, append-only, lets an alarm watch a queue and go with it, and reverts dropping the alarms on what it adds", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const queue = async (name: string) => (await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, $2, 'customer') RETURNING id`, [ACCOUNT, name]))[0].id as string;
+      const alarm = (queueId: string | null, metric: string, statistic: string) =>
+        dataSource.query(
+          `INSERT INTO alarms (account_id, queue_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+           VALUES ($1, $2, $3, $3, $4, 60, 'GreaterThanThreshold', 0, 1, 1, '{"email": true, "webhookUrls": []}')`,
+          [ACCOUNT, queueId, metric, statistic],
+        );
+      const gone = await queue('gone');
+      await alarm(gone, 'ApproximateNumberOfMessagesVisible', 'Maximum');
+      await dataSource.query(`DELETE FROM queues WHERE id = $1`, [gone]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM alarms`)).toEqual([{ n: 0 }]); // it went with its queue
+      const minute = `date_trunc('minute', now())`;
+      const kept = await queue('kept');
+      await dataSource.query(`INSERT INTO queue_samples (queue_id, minute, account_id, visible, not_visible, delayed, oldest_age_seconds) VALUES ($1, ${minute}, $2, 1, 0, 0, 5)`, [kept, ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO async_event_counts (function_id, minute, writer, account_id, received, dropped, destination_failures, attempts, age_ms_sum, age_ms_max)
+         VALUES (gen_random_uuid(), ${minute}, gen_random_uuid(), $1, 1, 0, 0, 1, 10, 10)`,
+        [ACCOUNT],
+      );
+      for (const table of ['queue_samples', 'async_event_counts']) {
+        await expect(dataSource.query(`UPDATE ${table} SET account_id = account_id`)).rejects.toThrow(/is append-only: UPDATE refused/);
+        await expect(dataSource.query(`DELETE FROM ${table}`)).rejects.toThrow(/is append-only: DELETE refused/);
+        expect(await partitionsOf(dataSource, table)).toEqual([{ relname: monthPartition(table, 0) }, { relname: monthPartition(table, 1) }]);
+      }
+      await alarm(kept, 'NumberOfMessagesSent', 'Sum');
+      await alarm(null, 'AsyncEventsDropped', 'Sum');
+      await alarm(null, 'Errors', 'Sum');
+
+      await migrateDownTo(dataSource, QUEUE_BILLING);
+
+      // The alarms the code before it doesn't know go; the others stay.
+      expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Errors' }]);
+      expect(await dataSource.query(`SELECT to_regclass('queue_samples') AS s, to_regclass('async_event_counts') AS c`)).toEqual([{ s: null, c: null }]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -710,8 +1024,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
       const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
       expect(books).toEqual([
-        { id: expect.any(String), valid_from: next, prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'system' },
-        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withStoragePrices(FIRST_PRICE_BOOK), created_by: 'test' },
+        // The queues' migration after it gives both SQS's SKU too.
+        { id: expect.any(String), valid_from: next, prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'test' },
       ]);
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -831,12 +1146,13 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts)_\d{4}_\d{2}$/; // their partitions, one per month
+      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts|queue_samples|async_event_counts)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
         'alarms',
         'api_keys',
+        'async_event_counts',
         'audit_log',
         'bucket_samples',
         'buckets',
@@ -845,7 +1161,9 @@ run('database schema (L2, real PostgreSQL)', () => {
         'custom_domains',
         'database_samples',
         'databases',
+        'event_source_mappings',
         'function_environments',
+        'function_event_invoke_configs',
         'function_invocations',
         'function_metrics',
         'function_urls',
@@ -867,6 +1185,10 @@ run('database schema (L2, real PostgreSQL)', () => {
         'plans',
         'platform_settings',
         'price_books',
+        'queue_messages',
+        'queue_request_counts',
+        'queue_samples',
+        'queues',
         'rate_limited_invocations',
         'rating_runs',
         'resource_usage_hourly',
@@ -881,19 +1203,25 @@ run('database schema (L2, real PostgreSQL)', () => {
         'webhook_secrets',
       ]);
       expect(tables.filter((table) => monthly.test(table))).toEqual([
+        monthPartition('async_event_counts', 0),
+        monthPartition('async_event_counts', 1),
         monthPartition('bucket_samples', 0),
         monthPartition('bucket_samples', 1),
         monthPartition('capacity_samples', 0),
         monthPartition('capacity_samples', 1),
         monthPartition('database_samples', 0),
         monthPartition('database_samples', 1),
+        monthPartition('queue_request_counts', 0),
+        monthPartition('queue_request_counts', 1),
+        monthPartition('queue_samples', 0),
+        monthPartition('queue_samples', 1),
         monthPartition('storage_request_counts', 0),
         monthPartition('storage_request_counts', 1),
         usagePartition(0),
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets', 'queues']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

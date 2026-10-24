@@ -1,7 +1,7 @@
 //! `ff buckets create|list|get|delete <name>` and `ff buckets keys list|create|revoke`: the account's
-//! buckets, as AWS S3 gives them, and its access keys to them. AWS's SDKs and CLI reach them at FF's
-//! S3 endpoint with one of those keys: a key's secret is shown once, when it is made, as the four
-//! variables AWS's tools read.
+//! buckets, as AWS S3 gives them, and its access keys to them and to its queues. AWS's SDKs and CLI
+//! reach them at FF's S3 and SQS endpoints with one of those keys: a key's secret is shown once, when
+//! it is made, as the five variables AWS's tools read.
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -44,12 +44,15 @@ fn held(bucket: &Bucket) -> String {
     }
 }
 
-/// An access key, as `GET /storage-keys` lists it: never its secret.
+/// An access key, as `GET /storage-keys` lists it: never its secret. Naming neither buckets nor queues, it reaches
+/// all the account's; naming some, those alone.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StorageKey {
     id: String,
     buckets: Option<Vec<String>>,
+    #[serde(default)]
+    queues: Option<Vec<String>>,
     read_only: bool,
     created_at: String,
     last_used_at: Option<String>,
@@ -63,6 +66,9 @@ struct CreatedKey {
     key: StorageKey,
     secret_access_key: String,
     endpoint: String,
+    /// The SQS endpoint, AWS_ENDPOINT_URL_SQS, for the account's queues.
+    #[serde(default)]
+    sqs_endpoint: Option<String>,
     region: String,
 }
 
@@ -83,7 +89,7 @@ pub fn is_bucket_name(name: &str) -> bool {
         && !RESERVED_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
-fn checked_name(name: &str) -> Result<&str, Error> {
+pub fn checked_name(name: &str) -> Result<&str, Error> {
     if is_bucket_name(name) {
         Ok(name)
     } else {
@@ -182,10 +188,27 @@ pub fn delete(name: &str, force: bool, yes: bool, context: &Context) -> Result<(
     })
 }
 
+/// The buckets or the queues a key reaches, for a column: all, those it names, or none when it names the others alone.
+fn column(names: Option<&Vec<String>>, others: Option<&Vec<String>>) -> String {
+    match (names, others) {
+        (Some(names), _) => names.join(","),
+        (None, Some(_)) => "-".to_owned(),
+        (None, None) => "all".to_owned(),
+    }
+}
+
 /// What a key reaches, in words.
 fn reaches(key: &StorageKey) -> String {
-    let buckets = key.buckets.as_ref().map(|names| names.join(",")).unwrap_or_else(|| "all".to_owned());
-    if key.read_only { format!("{buckets} (read-only)") } else { buckets }
+    let named = |kind: &str, names: &[String]| {
+        format!("the {kind}{} {}", if names.len() == 1 { "" } else { "s" }, names.join(", "))
+    };
+    let reach = match (&key.buckets, &key.queues) {
+        (None, None) => "every bucket and queue of the account".to_owned(),
+        (Some(buckets), None) => named("bucket", buckets),
+        (None, Some(queues)) => named("queue", queues),
+        (Some(buckets), Some(queues)) => format!("{} and {}", named("bucket", buckets), named("queue", queues)),
+    };
+    if key.read_only { format!("{reach}, read-only") } else { reach }
 }
 
 pub fn keys_list(context: &Context) -> Result<(), Error> {
@@ -193,35 +216,44 @@ pub fn keys_list(context: &Context) -> Result<(), Error> {
     let keys: Vec<StorageKey> = client.json(&Call::get("/storage-keys"))?;
     context.out.result(&keys, || {
         if keys.is_empty() {
-            return "The account has no access key to its buckets: `ff buckets keys create` makes one".to_owned();
+            return "The account has no access key to its buckets and queues: `ff buckets keys create` makes one"
+                .to_owned();
         }
         let rows: Vec<Vec<String>> = keys
             .iter()
             .map(|key| {
                 vec![
                     key.id.clone(),
-                    reaches(key),
+                    column(key.buckets.as_ref(), key.queues.as_ref()),
+                    column(key.queues.as_ref(), key.buckets.as_ref()),
+                    if key.read_only { "read-only" } else { "read-write" }.to_owned(),
                     key.last_used_at.as_deref().map(time).unwrap_or_else(|| "never".to_owned()),
                     time(&key.created_at),
                 ]
             })
             .collect();
-        table(&["ID", "BUCKETS", "LAST USED (UTC)", "CREATED (UTC)"], &rows)
+        table(&["ID", "BUCKETS", "QUEUES", "ACCESS", "LAST USED (UTC)", "CREATED (UTC)"], &rows)
     })
 }
 
-pub fn keys_create(buckets: &[String], read_only: bool, context: &Context) -> Result<(), Error> {
+pub fn keys_create(buckets: &[String], queues: &[String], read_only: bool, context: &Context) -> Result<(), Error> {
     for bucket in buckets {
         checked_name(bucket)?;
+    }
+    for queue in queues {
+        super::queues::checked_name(queue)?;
     }
     let client = Client::new(&context.settings()?)?;
     let mut body = json!({ "readOnly": read_only });
     if !buckets.is_empty() {
         body["buckets"] = json!(buckets);
     }
+    if !queues.is_empty() {
+        body["queues"] = json!(queues);
+    }
     let made: CreatedKey = client.json(&Call::post("/storage-keys", body))?;
     context.out.result(&made, || {
-        format!(
+        let mut text = format!(
             "{} made, reaching {}: its secret, shown this once (FF keeps it sealed; `ff buckets keys revoke {}` stops it):\n\
              export AWS_ACCESS_KEY_ID={}\nexport AWS_SECRET_ACCESS_KEY={}\nexport AWS_REGION={}\nexport AWS_ENDPOINT_URL_S3={}",
             made.key.id,
@@ -231,7 +263,11 @@ pub fn keys_create(buckets: &[String], read_only: bool, context: &Context) -> Re
             made.secret_access_key,
             made.region,
             made.endpoint
-        )
+        );
+        if let Some(sqs) = &made.sqs_endpoint {
+            text.push_str(&format!("\nexport AWS_ENDPOINT_URL_SQS={sqs}"));
+        }
+        text
     })
 }
 
@@ -277,6 +313,44 @@ mod tests {
             assert!(!is_bucket_name(name), "{name}");
         }
         assert_eq!(checked_name("my.photos").unwrap_err().exit_code(), 2);
+    }
+
+    fn key(buckets: Option<&[&str]>, queues: Option<&[&str]>, read_only: bool) -> StorageKey {
+        let names = |names: Option<&[&str]>| names.map(|names| names.iter().map(|name| name.to_string()).collect());
+        StorageKey {
+            id: "AKFF7Q2MLKX4RTZB3W5N".into(),
+            buckets: names(buckets),
+            queues: names(queues),
+            read_only,
+            created_at: "2026-10-24T08:00:00.000Z".into(),
+            last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn a_key_reaches_every_bucket_and_queue_or_those_it_names_alone() {
+        let all = key(None, None, false);
+        let photos = key(Some(&["photos"]), None, true);
+        let orders = key(None, Some(&["orders", "orders-dlq"]), false);
+        let both = key(Some(&["photos"]), Some(&["orders"]), false);
+        assert_eq!(
+            [reaches(&all), reaches(&photos), reaches(&orders), reaches(&both)],
+            [
+                "every bucket and queue of the account",
+                "the bucket photos, read-only",
+                "the queues orders, orders-dlq",
+                "the bucket photos and the queue orders"
+            ]
+        );
+        let columns = |key: &StorageKey| {
+            (column(key.buckets.as_ref(), key.queues.as_ref()), column(key.queues.as_ref(), key.buckets.as_ref()))
+        };
+        assert_eq!(columns(&all), ("all".into(), "all".into()));
+        assert_eq!(columns(&photos), ("photos".into(), "-".into()));
+        assert_eq!(columns(&orders), ("-".into(), "orders,orders-dlq".into()));
+        // An API before queues says nothing of them: such a key reaches what its buckets say.
+        let older: StorageKey = serde_json::from_value(json!({ "id": "AKFF7Q2MLKX4RTZB3W5N", "buckets": null, "readOnly": false, "createdAt": "x", "lastUsedAt": null })).unwrap();
+        assert_eq!(reaches(&older), "every bucket and queue of the account");
     }
 
     #[test]

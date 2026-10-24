@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { DatabaseStatus } from '../databases/database.entity';
 import { BucketStatus } from '../storage/bucket.entity';
+import { QueueMessagesView } from '../queues/dto/queue.dto';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import type { Role } from '../auth/principal';
@@ -77,7 +78,7 @@ export class AdminEgressDto extends AdminChange {
 
 /** PUT /admin/accounts/:id/storage. */
 export class AdminStorageDto extends AdminChange {
-  @ApiProperty({ example: false, description: "Whether the account's databases and buckets are on: off, its databases' users can't log in and their sessions end; its functions go on" })
+  @ApiProperty({ example: false, description: "Whether the account's databases, buckets and queues are on: off, its databases' users can't log in and their sessions end, its keys are refused; its functions go on" })
   @IsBoolean()
   enabled: boolean;
 }
@@ -101,7 +102,7 @@ export class AdminAccountSummaryView {
   @ApiProperty({ nullable: true, type: Date, description: "When a closed account's functions, their invocation history and logs are deleted: its closure plus the notice period set then. Null unless the account is closed" })
   dataDeletionDueAt: Date | null;
   @ApiProperty({ nullable: true, type: Date, description: 'When they were deleted; null until then' }) dataDeletedAt: Date | null;
-  @ApiProperty({ nullable: true, type: Date, description: "When an operator turned its databases and buckets off; null while they are on" }) storageDisabledAt: Date | null;
+  @ApiProperty({ nullable: true, type: Date, description: "When an operator turned its databases, buckets and queues off; null while they are on" }) storageDisabledAt: Date | null;
   @ApiProperty({ nullable: true, type: String, description: 'Why, as the operator wrote it, which its members read too' }) storageDisabledReason: string | null;
   @ApiProperty({
     nullable: true,
@@ -159,6 +160,21 @@ export class AdminBucketView {
   @ApiProperty() createdAt: Date;
 }
 
+/** One of the account's queues (ADR 0010): its messages counted now, and what they hold. */
+export class AdminQueueView {
+  @ApiProperty({ example: 'orders' }) name: string;
+  @ApiProperty({ type: QueueMessagesView }) messages: QueueMessagesView;
+  @ApiProperty({ example: 2_048, description: 'What its messages hold together, in bytes, as the plan counts them' }) sizeBytes: number;
+  @ApiProperty({ nullable: true, type: String, example: 'orders-dlq', description: "The queue its messages go to after too many receives; null for none" }) deadLetterQueue: string | null;
+  @ApiProperty() createdAt: Date;
+}
+
+/** What the account's queues hold together with its functions' calls that don't wait, against its plan's room for them. */
+export class AdminQueueStorageView {
+  @ApiProperty({ example: 2_048, description: "Bytes: its queues' messages and its functions' calls that don't wait, as the plan counts them" }) bytes: number;
+  @ApiProperty({ example: 100, description: "The plan's room for them, in MB: past it, messages and calls that don't wait are refused" }) limitMb: number;
+}
+
 /** One status the account went through: its creation, or an operator's change. */
 export class AdminStatusEventView {
   @ApiProperty() at: Date;
@@ -200,6 +216,8 @@ export class AdminAccountView {
   @ApiProperty({ type: [AdminFunctionView] }) functions: AdminFunctionView[];
   @ApiProperty({ type: [AdminDatabaseView], description: 'Its databases, by name' }) databases: AdminDatabaseView[];
   @ApiProperty({ type: [AdminBucketView], description: 'Its buckets, by name' }) buckets: AdminBucketView[];
+  @ApiProperty({ type: [AdminQueueView], description: 'Its queues, by name' }) queues: AdminQueueView[];
+  @ApiProperty({ type: AdminQueueStorageView }) queueStorage: AdminQueueStorageView;
   @ApiProperty({ type: AdminAccountUsageView }) usage: AdminAccountUsageView;
   @ApiProperty({ type: [AdminBalanceView], description: "Each wallet's balance (P-31); none before the account's first credit or debit" })
   balances: AdminBalanceView[];

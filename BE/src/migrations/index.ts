@@ -38,6 +38,16 @@ import { BucketLimits1792739264070 } from './1792739264070-BucketLimits';
 import { FunctionKeys1792743758847 } from './1792743758847-FunctionKeys';
 import { BucketSamples1792746521862 } from './1792746521862-BucketSamples';
 import { BucketAlarms1792748816752 } from './1792748816752-BucketAlarms';
+import { QueueLimits1792770408267 } from './1792770408267-QueueLimits';
+import { AsyncInvoke1792771678484 } from './1792771678484-AsyncInvoke';
+import { EventInvokeConfigs1792777408931 } from './1792777408931-EventInvokeConfigs';
+import { CustomerQueues1792783890375 } from './1792783890375-CustomerQueues';
+import { AsyncNotify1792790149607 } from './1792790149607-AsyncNotify';
+import { KeyQueues1792792790340 } from './1792792790340-KeyQueues';
+import { EventSourceMappings1792803225587 } from './1792803225587-EventSourceMappings';
+import { BucketNotifications1792810703773 } from './1792810703773-BucketNotifications';
+import { QueueBilling1792816013937 } from './1792816013937-QueueBilling';
+import { QueueMetrics1792820562033 } from './1792820562033-QueueMetrics';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -85,4 +95,14 @@ export const MIGRATIONS: Array<new () => object> = [
   FunctionKeys1792743758847,
   BucketSamples1792746521862,
   BucketAlarms1792748816752,
+  QueueLimits1792770408267,
+  AsyncInvoke1792771678484,
+  EventInvokeConfigs1792777408931,
+  CustomerQueues1792783890375,
+  AsyncNotify1792790149607,
+  KeyQueues1792792790340,
+  EventSourceMappings1792803225587,
+  BucketNotifications1792810703773,
+  QueueBilling1792816013937,
+  QueueMetrics1792820562033,
 ];

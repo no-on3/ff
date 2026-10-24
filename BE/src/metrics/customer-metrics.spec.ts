@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 import { Logger } from '@nestjs/common';
-import { MAX_POINTS, MetricsWindow, bucketMetricsView, databaseMetricsView, metricsView, metricsWindow } from './customer-metrics';
+import { MAX_POINTS, MetricsWindow, bucketMetricsView, databaseMetricsView, metricsView, metricsWindow, queueMetricsView } from './customer-metrics';
 import { MAX_HELD, RefusedInvocationsService } from './refused-invocations.service';
 
 const NOW = new Date('2026-10-19T10:07:30Z');
@@ -121,8 +121,66 @@ describe('metricsView', () => {
       Duration: { Average: [null, 12.346, null], Maximum: [null, 30, null], p50: [null, 10, null], p95: [null, 28.5, null], p99: [null, 29.7, null] },
       // The mean over the period's five minutes: 7 instance-minutes, 1.4 instances.
       Instances: { Maximum: [0, 3, 0], Average: [0, 1.4, 0] },
+      // No call without waiting: zeros, and no age.
+      AsyncEventsReceived: [0, 0, 0],
+      AsyncEventAge: { Average: [null, null, null], Maximum: [null, null, null] },
+      AsyncEventsDropped: [0, 0, 0],
+      DestinationDeliveryFailures: [0, 0, 0],
     });
     expect([view.period, view.start, view.end]).toEqual([300, window.start, window.end]);
+  });
+
+  it("gives Lambda's metrics of asynchronous calls: events received, dropped and records not delivered by the period, and the age of each attempt, none without one", () => {
+    const view = metricsView(window, [], [], [
+      { bucket: at('2026-10-19T09:00:00Z'), received: 5, dropped: 0, destinationFailures: 0, attempts: 0, ageMsSum: 0, ageMsMax: 0 },
+      { bucket: at('2026-10-19T09:10:00Z'), received: 1, dropped: 2, destinationFailures: 1, attempts: 3, ageMsSum: 1000, ageMsMax: 700 },
+    ]);
+
+    expect([view.metrics.AsyncEventsReceived, view.metrics.AsyncEventAge, view.metrics.AsyncEventsDropped, view.metrics.DestinationDeliveryFailures]).toEqual([
+      [5, 0, 1],
+      { Average: [null, null, 333.333], Maximum: [null, null, 700] },
+      [0, 0, 2],
+      [0, 0, 1],
+    ]);
+  });
+});
+
+describe('queueMetricsView', () => {
+  const window: MetricsWindow = { start: new Date('2026-10-24T09:00:00Z'), end: new Date('2026-10-24T09:15:00Z'), period: 300 };
+  const at = (iso: string) => new Date(iso).getTime() / 1000;
+  const gauge = (maximum: number, minuteSum: number) => ({ maximum, minuteSum });
+
+  it("gives SQS's metrics a point per period: its messages' most and mean over the minutes, an empty minute 0, their age, its requests' counts, and the size of what was sent", () => {
+    const view = queueMetricsView(
+      window,
+      [
+        {
+          bucket: at('2026-10-24T09:05:00Z'),
+          ApproximateNumberOfMessagesVisible: gauge(9, 12),
+          ApproximateNumberOfMessagesNotVisible: gauge(2, 3),
+          ApproximateNumberOfMessagesDelayed: gauge(1, 1),
+          oldestAgeSeconds: 240,
+        },
+      ],
+      [
+        { bucket: at('2026-10-24T09:00:00Z'), NumberOfMessagesSent: 4, NumberOfMessagesReceived: 3, NumberOfMessagesDeleted: 3, NumberOfEmptyReceives: 7, sentBytes: 1000, sentMaxBytes: 700 },
+        { bucket: at('2026-10-24T09:10:00Z'), NumberOfMessagesSent: 0, NumberOfMessagesReceived: 0, NumberOfMessagesDeleted: 2, NumberOfEmptyReceives: 0, sentBytes: 0, sentMaxBytes: 0 },
+      ],
+    );
+
+    expect(view.timestamps).toEqual([new Date('2026-10-24T09:00:00Z'), new Date('2026-10-24T09:05:00Z'), new Date('2026-10-24T09:10:00Z')]);
+    expect(view.metrics).toEqual({
+      // 12 message-minutes over the period's five minutes: 2.4 on average.
+      ApproximateNumberOfMessagesVisible: { Maximum: [0, 9, 0], Average: [0, 2.4, 0] },
+      ApproximateNumberOfMessagesNotVisible: { Maximum: [0, 2, 0], Average: [0, 0.6, 0] },
+      ApproximateNumberOfMessagesDelayed: { Maximum: [0, 1, 0], Average: [0, 0.2, 0] },
+      ApproximateAgeOfOldestMessage: { Maximum: [0, 240, 0] },
+      NumberOfMessagesSent: { Sum: [4, 0, 0] },
+      NumberOfMessagesReceived: { Sum: [3, 0, 0] },
+      NumberOfMessagesDeleted: { Sum: [3, 0, 2] },
+      NumberOfEmptyReceives: { Sum: [7, 0, 0] },
+      SentMessageSize: { Average: [250, null, null], Maximum: [700, null, null] },
+    });
   });
 });
 

@@ -45,10 +45,13 @@ const FF_RESERVED = ['FUNCTION_NAME', 'FUNCTION_VERSION', 'FUNCTION_MEMORY_LIMIT
 
 /**
  * FF sets these, with the credentials' names AWS Lambda reserves, to give a
- * function its own key to its account's buckets (ADR 0009): the S3 endpoint,
- * inside the cluster.
+ * function its own key to its account's buckets (ADR 0009) and queues (ADR
+ * 0010): the S3 and SQS endpoints, inside the cluster.
  */
-const BUCKETS_RESERVED = ['AWS_ENDPOINT_URL_S3'];
+const ENDPOINTS_RESERVED = new Map([
+  ['AWS_ENDPOINT_URL_S3', "FF sets it, with the function's own key to its account's buckets"],
+  ['AWS_ENDPOINT_URL_SQS', "FF sets it, with the function's own key to its account's queues"],
+]);
 
 const RESERVED = new Set([...LAMBDA_RESERVED, ...FF_RESERVED]);
 
@@ -59,7 +62,8 @@ export function nameProblem(name: string): string | undefined {
     return `${JSON.stringify(shown)} is not a variable name: a letter first, then letters, digits or underscores, two characters at least, as on AWS Lambda`;
   }
   if (RESERVED.has(name)) return `${name} is reserved: AWS Lambda or FF's runtime sets it`;
-  if (BUCKETS_RESERVED.includes(name)) return `${name} is reserved: FF sets it, with the function's own key to its account's buckets`;
+  const endpoint = ENDPOINTS_RESERVED.get(name);
+  if (endpoint) return `${name} is reserved: ${endpoint}`;
   if (name.startsWith('FF_')) return `${name} is reserved: names starting with FF_ are FF's own`;
   return undefined;
 }

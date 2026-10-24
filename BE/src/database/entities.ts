@@ -9,6 +9,8 @@ import { FunctionInvocation } from '../functions/entities/function-invocation.en
 import { Function } from '../functions/entities/function.entity';
 import { FunctionEnvironment } from '../functions/entities/function-environment.entity';
 import { FunctionUrl } from '../functions/entities/function-url.entity';
+import { FunctionEventInvokeConfig } from '../functions/entities/function-event-invoke-config.entity';
+import { EventSourceMapping } from '../event-sources/event-source-mapping.entity';
 import { CustomDomain } from '../function-urls/custom-domain.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
@@ -42,9 +44,14 @@ import { BucketSample } from '../storage/bucket-sample.entity';
 import { Bucket } from '../storage/bucket.entity';
 import { StorageKey } from '../storage/storage-key.entity';
 import { StorageRequestCount } from '../storage/storage-request-count.entity';
+import { Queue } from '../queues/queue.entity';
+import { QueueMessage } from '../queues/queue-message.entity';
+import { QueueRequestCount } from '../queues/queue-request-count.entity';
+import { QueueSample } from '../queues/queue-sample.entity';
+import { AsyncEventCount } from '../queues/async-event-count.entity';
 
 /**
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, BucketSample];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping, QueueRequestCount, QueueSample, AsyncEventCount];

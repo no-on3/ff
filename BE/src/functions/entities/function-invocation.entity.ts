@@ -22,19 +22,36 @@ export enum InvocationStatus {
   LOST = 'LOST',
 }
 
-/** What brought an invocation: the API's invoke, a request to the function's URL, or one of its schedules. */
+/** What brought an invocation: the API's invoke, a request to the function's URL, one of its schedules, or an asynchronous call's attempt. */
 export enum InvocationSource {
   API = 'api',
   URL = 'url',
   SCHEDULE = 'schedule',
+  /** The API's invoke with the invocation type Event, run from the function's queue, as AWS Lambda runs it (ADR 0010). */
+  ASYNC = 'async',
+  /** A batch of a queue the function reads, as Lambda's event source mapping calls it with SQS's event. */
+  SQS = 'sqs',
 }
 
 @Entity('function_invocations')
 // The history lists a function's invocations newest first; deleting a function finds them too.
 @Index(['functionId', 'createdAt'])
+@Index(['requestId'])
 export class FunctionInvocation {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  /**
+   * The request's ID, as the function's runtime, its logs and its usage record
+   * name it: the invocation's own ID, but for an asynchronous call's later
+   * attempts, which keep the first's, as AWS Lambda's retries keep theirs.
+   */
+  @Column({ type: 'uuid' })
+  requestId: string;
+
+  /** Which attempt of its request it was: an asynchronous call's are counted from 1, as its queue received it; any other call is its first. */
+  @Column({ type: 'smallint', default: 1 })
+  attempt: number;
 
   @Column()
   functionId: string;
@@ -59,7 +76,7 @@ export class FunctionInvocation {
   })
   status: InvocationStatus;
 
-  /** What brought it: the API, the function's URL, or a schedule. */
+  /** What brought it: the API, the function's URL, a schedule, or an asynchronous call. */
   @Column({ type: 'enum', enum: InvocationSource, default: InvocationSource.API })
   source: InvocationSource;
 

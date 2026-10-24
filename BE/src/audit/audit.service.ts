@@ -23,12 +23,19 @@ export type AuditAction =
   | 'support.view_invocation'
   | 'support.view_logs'
   | 'account.egress'
-  // An operator turned the account's databases and buckets off, or on again.
+  // An operator turned the account's databases, buckets and queues off, or on again.
   | 'account.storage'
   | 'function.create'
   | 'function.update'
   | 'function.delete'
   | 'function.scaling'
+  // A function's settings for its asynchronous calls, as Lambda's EventInvokeConfig: set, deleted.
+  | 'event_invoke_config.put'
+  | 'event_invoke_config.delete'
+  // A function reading a queue, as Lambda's event source mapping: made, changed (its batches, enabled or not), deleted.
+  | 'event_source.create'
+  | 'event_source.update'
+  | 'event_source.delete'
   // A function's package, uploaded: its SHA-256 and its sizes, once per account and package.
   | 'package.upload'
   // A function's URL, its public address: given, changed, taken away.
@@ -51,8 +58,15 @@ export type AuditAction =
   // A customer's bucket, made and deleted, and an access key to the account's buckets, made and revoked (ADR 0009).
   | 'bucket.create'
   | 'bucket.delete'
+  // A bucket's notification configuration, set whole, through the S3 front door or FF's API.
+  | 'bucket.notifications'
   | 'storage_key.create'
   | 'storage_key.delete'
+  // A customer's queue, made, changed, purged and deleted through FF's API or the SQS endpoint's (ADR 0010).
+  | 'queue.create'
+  | 'queue.update'
+  | 'queue.purge'
+  | 'queue.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

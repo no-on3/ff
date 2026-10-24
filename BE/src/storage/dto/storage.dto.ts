@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ArrayMaxSize, ArrayNotEmpty, ArrayUnique, IsArray, IsBoolean, IsOptional, IsString, MaxLength, Validate, ValidatorConstraint, ValidatorConstraintInterface } from 'class-validator';
+import { ArrayMaxSize, ArrayNotEmpty, ArrayUnique, IsArray, IsBoolean, IsOptional, IsString, Matches, MaxLength, Validate, ValidatorConstraint, ValidatorConstraintInterface } from 'class-validator';
 import { BucketStatus } from '../bucket.entity';
 import { bucketNameProblem } from '../storage-names';
 
@@ -58,7 +58,11 @@ export class BucketView {
 
 /** POST /storage-keys: what the key reaches. */
 export class CreateStorageKeyDto {
-  @ApiPropertyOptional({ type: [String], example: ['photos'], description: "The buckets it reaches, by name, as an IAM policy names them; all the account's without it" })
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['photos'],
+    description: "The buckets it reaches, by name, as an IAM policy names them. Naming neither buckets nor queues, it reaches all the account's; naming some, those alone",
+  })
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
@@ -67,19 +71,31 @@ export class CreateStorageKeyDto {
   @Validate(BucketNameRule, { each: true })
   buckets?: string[];
 
+  @ApiPropertyOptional({ type: [String], example: ['orders'], description: 'The queues it reaches, by name, as buckets: naming queues alone, it reaches no bucket' })
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayUnique()
+  @ArrayMaxSize(100)
+  @Matches(/^[A-Za-z0-9_-]{1,80}$/, { each: true, message: "each of queues must be a queue's name: 1 to 80 letters, digits, hyphens or underscores" })
+  queues?: string[];
+
   @ApiPropertyOptional({ default: false, description: 'Reads and lists only: no write, copy or delete' })
   @IsOptional()
   @IsBoolean()
   readOnly?: boolean;
 }
 
-/** An access key to the account's buckets, as its owners see it: never its secret. */
+/** An access key to the account's buckets and queues, as its owners see it: never its secret. */
 export class StorageKeyView {
   @ApiProperty({ example: 'AKFF7Q2MLKX4RTZB3W5N', description: 'The access key ID, AWS_ACCESS_KEY_ID: safe to show and to log' })
   id: string;
 
-  @ApiProperty({ type: [String], nullable: true, example: ['photos'], description: "The buckets it reaches; null for all the account's" })
+  @ApiProperty({ type: [String], nullable: true, example: ['photos'], description: "The buckets it names; null for none named. A key that names neither buckets nor queues reaches all the account's" })
   buckets: string[] | null;
+
+  @ApiProperty({ type: [String], nullable: true, example: null, description: 'The queues it names; null for none named' })
+  queues: string[] | null;
 
   @ApiProperty()
   readOnly: boolean;
@@ -98,6 +114,9 @@ export class CreatedStorageKey extends StorageKeyView {
 
   @ApiProperty({ example: 'https://s3.ffunc.tn', description: "The S3 endpoint to give AWS's SDKs and CLI with it" })
   endpoint: string;
+
+  @ApiProperty({ example: 'https://sqs.ffunc.tn', description: "The SQS endpoint to give them, AWS_ENDPOINT_URL_SQS, for the account's queues" })
+  sqsEndpoint: string;
 
   @ApiProperty({ example: 'tn-tunis-1' })
   region: string;

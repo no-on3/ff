@@ -2,13 +2,13 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryColumn } from 'typeorm'
 import { Sealed } from '../encryption/envelope';
 
 /**
- * An access key to an account's buckets (ADR 0009), as an IAM user's is: its
- * ID, AKFF and 16 characters, and its secret, which the front door needs to
- * check signatures, so it is sealed rather than hashed, for this key alone. It
- * reaches all the account's buckets, or those it names, read-write or
- * read-only. A function's own key names its function, which has one that
- * works at most. A revoked key keeps its row, so that its ID is never
- * another's.
+ * An access key to an account's buckets (ADR 0009) and queues (ADR 0010), as
+ * an IAM user's is: its ID, AKFF and 16 characters, and its secret, which the
+ * S3 front door and the SQS endpoint need to check signatures, so it is
+ * sealed rather than hashed, for this key alone. It reaches all the account's
+ * buckets and queues, or, naming some, those alone, read-write or read-only.
+ * A function's own key names its function, which has one that works at most.
+ * A revoked key keeps its row, so that its ID is never another's.
  */
 @Entity('storage_keys')
 @Index(['accountId'])
@@ -29,9 +29,13 @@ export class StorageKey {
   @Column({ type: 'jsonb' })
   secret: Sealed;
 
-  /** The buckets it reaches, by name, as an IAM policy names them; null for all the account's. */
+  /** The buckets it reaches, by name, as an IAM policy names them; null for none named (keyReach says what it reaches). */
   @Column({ type: 'text', array: true, nullable: true })
   buckets: string[] | null;
+
+  /** The queues it reaches, by name; null for none named. */
+  @Column({ type: 'text', array: true, nullable: true })
+  queues: string[] | null;
 
   @Column({ type: 'boolean', default: false })
   readOnly: boolean;

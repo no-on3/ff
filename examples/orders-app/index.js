@@ -1,20 +1,26 @@
 // A small app on FF, as it would run on AWS Lambda: orders taken at a web address and kept in PostgreSQL, each
-// order's receipt kept in a bucket, and a report each night. One package, two functions:
-//   orders-api      handler index.http     its function URL: POST /orders, GET /orders, GET /orders/<id>/receipt
-//   orders-nightly  handler index.nightly  a schedule, cron(0 2 * * ? *): yesterday's orders counted, those older
-//                                          than 90 days removed, with their receipts
-// Each reads DATABASE_URL, a secret (ff db create orders --secret-for orders-api), and RECEIPTS_BUCKET, a variable
-// naming the bucket (ff env set orders-api RECEIPTS_BUCKET=<name>); without it, orders go without receipts. The
-// bucket's key, region and endpoint are the function's own, in its environment, as AWS Lambda gives a function its
-// role's: new S3Client({}) needs nothing more, on FF as on AWS.
+// order's receipt made in the background and kept in a bucket, and a report each night. One package, three functions:
+//   orders-api       handler index.http      its function URL: POST /orders, GET /orders, GET /orders/<id>/receipt
+//   orders-receipts  handler index.receipts  reads the queue of new orders (ff event-sources add): each one's receipt
+//   orders-nightly   handler index.nightly   a schedule, cron(0 2 * * ? *): yesterday's orders counted, those older
+//                                            than 90 days removed, with their receipts
+// orders-api and orders-nightly read DATABASE_URL, a secret (ff db create orders --secret-for orders-api). A new
+// order goes to the queue RECEIPTS_QUEUE names, for orders-receipts to write its receipt to the bucket RECEIPTS_BUCKET
+// names, where orders-api reads it back; without the queue, orders-api writes it itself, and without the bucket,
+// orders go without receipts. The
+// key, region and endpoints are the function's own, in its environment, as AWS Lambda gives a function its role's:
+// new S3Client({}) and new SQSClient({}) need nothing more, on FF as on AWS.
 const { Pool } = require('pg');
 const { DeleteObjectsCommand, GetObjectCommand, PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
+const { GetQueueUrlCommand, SendMessageCommand, SQSClient } = require('@aws-sdk/client-sqs');
 
 // One connection per instance, made at its first call and kept for the calls after, as an
 // instance takes one call at a time.
 let pool;
 let ready;
 let s3;
+let sqs;
+let queueUrl;
 
 function database() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not set: ff secrets set <function> DATABASE_URL');
@@ -28,6 +34,7 @@ function database() {
 }
 
 const bucket = () => process.env.RECEIPTS_BUCKET;
+const queue = () => process.env.RECEIPTS_QUEUE;
 const receiptKey = (id) => `receipts/${id}.txt`;
 const receipt = (order) => `Order ${order.id}\n${order.quantity} × ${order.item}\n${new Date(order.created_at).toISOString()}\n`;
 const answer = (statusCode, body) => ({ statusCode, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -52,8 +59,20 @@ exports.http = async (event) => {
       [order.item, order.quantity],
     );
     const made = rows[0];
+    // The order is kept first: a receipt that can't be asked for, or written, leaves it, said in the answer and the log.
+    if (queue()) {
+      sqs ??= new SQSClient({});
+      try {
+        // The queue found by its name, as on AWS: its URL is the endpoint's this function reaches.
+        queueUrl ??= (await sqs.send(new GetQueueUrlCommand({ QueueName: queue() }))).QueueUrl;
+        await sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: JSON.stringify(made) }));
+        return answer(201, { ...made, receipt: 'queued' });
+      } catch (error) {
+        console.error(`order ${made.id}: its receipt could not be asked for: ${error.name}: ${error.message}`);
+        return answer(201, { ...made, receipt: null });
+      }
+    }
     if (!bucket()) return answer(201, made);
-    // The order is kept first: a receipt that can't be written leaves it, said in the answer and the log.
     s3 ??= new S3Client({});
     try {
       await s3.send(
@@ -82,6 +101,28 @@ exports.http = async (event) => {
     }
   }
   return answer(404, { message: 'POST /orders, GET /orders or GET /orders/<id>/receipt' });
+};
+
+// SQS's event in, as Lambda gives it to a function that reads a queue: each record a new order, whose receipt goes to
+// the bucket. A receipt that can't be written names its message in batchItemFailures, so that it alone comes back
+// once the queue's visibility timeout ends, and goes to the queue's dead-letter queue if it never can. A message
+// received twice writes the same receipt again.
+exports.receipts = async (event) => {
+  if (!bucket()) throw new Error('RECEIPTS_BUCKET is not set: ff env set <function> RECEIPTS_BUCKET=<name>');
+  s3 ??= new S3Client({});
+  const batchItemFailures = [];
+  for (const record of event.Records) {
+    try {
+      const order = JSON.parse(record.body);
+      await s3.send(
+        new PutObjectCommand({ Bucket: bucket(), Key: receiptKey(order.id), Body: receipt(order), ContentType: 'text/plain; charset=utf-8' }),
+      );
+    } catch (error) {
+      console.error(`message ${record.messageId}: its receipt could not be written: ${error.name}: ${error.message}`);
+      batchItemFailures.push({ itemIdentifier: record.messageId });
+    }
+  }
+  return { batchItemFailures };
 };
 
 // EventBridge's Scheduled Event in: the day before its time, counted; what is older than 90 days, removed, the

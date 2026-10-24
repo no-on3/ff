@@ -13,6 +13,7 @@ import {
   parseInvokeInput,
   scalingLimitsError,
   sourceText,
+  keptCallText,
   codeText,
   formatBytes,
 } from './functions';
@@ -199,9 +200,18 @@ describe('eventFormatText', () => {
   });
 });
 
+describe('an asynchronous call, kept', () => {
+  it('says its request ID, and what happens next', () => {
+    expect(keptCallText('3f9c2a1e')).toBe(
+      'Kept: request 3f9c2a1e. It runs within seconds, without anyone waiting, and is retried twice if it fails, a minute then two minutes later; each attempt joins the history.',
+    );
+  });
+});
+
 describe('what brought a call', () => {
   it('is said as the history says it', () => {
-    expect((['api', 'url', 'schedule'] as const).map(sourceText)).toEqual(['through the API', 'through its URL', 'by a schedule']);
+    expect((['api', 'url', 'schedule', 'sqs'] as const).map((source) => sourceText(source))).toEqual(['through the API', 'through its URL', 'by a schedule', 'with a batch of a queue it reads']);
+    expect([sourceText('async'), sourceText('async', 3)]).toEqual(['asynchronously, attempt 1', 'asynchronously, attempt 3']);
   });
 });
 

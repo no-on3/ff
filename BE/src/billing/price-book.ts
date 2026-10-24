@@ -17,12 +17,25 @@ const gbMonthTiers = z
     { message: 'must go up, tier by tier, and the last tier has no end (upToGbMonths null)' },
   );
 
+/** SQS's requests, per million, in tiers by the account's requests in the month: they go up, and the last has no end. */
+const requestTiers = z
+  .array(z.strictObject({ upToRequests: z.number().int().positive().nullable(), price: decimal }))
+  .min(1)
+  .refine(
+    (list) =>
+      list.every((tier, index) =>
+        index === list.length - 1 ? tier.upToRequests === null : tier.upToRequests !== null && (index === 0 || tier.upToRequests > (list[index - 1].upToRequests as number)),
+      ),
+    { message: 'must go up, tier by tier, and the last tier has no end (upToRequests null)' },
+  );
+
 /**
  * A price book's document (P-30, D8): AWS Lambda's SKUs, in the book's
  * currency, required; the duration tiers go up, and the last has no end. Three
  * prices are D8's knobs, at zero to price as AWS does. Customers' databases'
- * and buckets' SKUs (ADR 0008, ADR 0009), and their free tier, came later:
- * optional, so that every book from before still reads, pricing them at 0.
+ * and buckets' SKUs (ADR 0008, ADR 0009), their queues' (ADR 0010), and their
+ * free tier, came later: optional, so that every book from before still
+ * reads, pricing them at 0.
  */
 export const priceDocumentSchema = z.strictObject({
   currency: z.string().regex(/^[A-Z]{3}$/, 'must be a currency code, such as TND'),
@@ -33,7 +46,7 @@ export const priceDocumentSchema = z.strictObject({
     usdRate: decimal.optional(),
     usdRateDate: day.optional(),
   }),
-  /** Per account and month: functions without provisioned concurrency (D8); databases' and buckets' GB-months, S3's requests. */
+  /** Per account and month: functions without provisioned concurrency (D8); databases' and buckets' GB-months, S3's requests, SQS's. */
   freeTier: z.strictObject({
     requests: count,
     gbSeconds: count,
@@ -41,6 +54,7 @@ export const priceDocumentSchema = z.strictObject({
     bucketStorageGbMonths: count.optional(),
     requestsTier1: count.optional(),
     requestsTier2: count.optional(),
+    queueRequests: count.optional(),
   }),
   prices: z.strictObject({
     requestsPerMillion: decimal,
@@ -74,6 +88,8 @@ export const priceDocumentSchema = z.strictObject({
     /** S3's requests, per 1,000: its first class (PUT, COPY, POST, LIST) and its second (GET and the others). */
     requestsTier1PerThousand: decimal.optional(),
     requestsTier2PerThousand: decimal.optional(),
+    /** SQS's standard queues' requests, per million, each 64 KB of a request's messages one, in tiers by the account's requests in the month. */
+    queueRequestsPerMillion: requestTiers.optional(),
   }),
 });
 
@@ -92,7 +108,7 @@ export interface BookPrices {
   minimumBilledMs: number;
   idleInstanceGbSecond: Decimal;
   monthlyPlanFee: Decimal;
-  /** Customers' databases and buckets (ADR 0008, ADR 0009): 0, and no free tier, in a book without them. */
+  /** Customers' databases, buckets and queues (ADR 0008, ADR 0009, ADR 0010): 0, and no free tier, in a book without them. */
   databaseStorageGbMonth: Decimal;
   databaseMonthlyFee: Decimal;
   bucketStorageTiers: Array<{ upTo: Decimal | null; price: Decimal }>;
@@ -102,6 +118,9 @@ export interface BookPrices {
   freeBucketGbMonths: Decimal;
   freeTier1Requests: Decimal;
   freeTier2Requests: Decimal;
+  /** SQS's requests, each tier's price per request. */
+  queueRequestTiers: Array<{ upTo: Decimal | null; price: Decimal }>;
+  freeQueueRequests: Decimal;
 }
 
 /** A book as the rater uses it. A document that doesn't fit stops the rating, naming the book and the problems. */
@@ -136,12 +155,18 @@ export function bookPrices(book: { id: string; validFrom: Date; prices: unknown 
     freeBucketGbMonths: Decimal.of(freeTier.bucketStorageGbMonths ?? 0),
     freeTier1Requests: Decimal.of(freeTier.requestsTier1 ?? 0),
     freeTier2Requests: Decimal.of(freeTier.requestsTier2 ?? 0),
+    queueRequestTiers: (prices.queueRequestsPerMillion ?? [{ upToRequests: null, price: '0' }]).map((tier) => ({
+      upTo: tier.upToRequests === null ? null : Decimal.of(tier.upToRequests),
+      price: Decimal.parse(tier.price).times(PER_MILLION),
+    })),
+    freeQueueRequests: Decimal.of(freeTier.queueRequests ?? 0),
   };
 }
 
 const PER_THOUSAND = Decimal.ratio(1n, 1000n);
+const PER_MILLION = Decimal.ratio(1n, 1_000_000n);
 
-/** What a book without databases' and buckets' SKUs prices them at: nothing, and no free tier. */
+/** What a book without databases', buckets' and queues' SKUs prices them at: nothing, and no free tier. */
 export const NO_RESOURCE_PRICES: Pick<
   BookPrices,
   | 'databaseStorageGbMonth'
@@ -153,6 +178,8 @@ export const NO_RESOURCE_PRICES: Pick<
   | 'freeBucketGbMonths'
   | 'freeTier1Requests'
   | 'freeTier2Requests'
+  | 'queueRequestTiers'
+  | 'freeQueueRequests'
 > = {
   databaseStorageGbMonth: Decimal.ZERO,
   databaseMonthlyFee: Decimal.ZERO,
@@ -163,9 +190,11 @@ export const NO_RESOURCE_PRICES: Pick<
   freeBucketGbMonths: Decimal.ZERO,
   freeTier1Requests: Decimal.ZERO,
   freeTier2Requests: Decimal.ZERO,
+  queueRequestTiers: [{ upTo: null, price: Decimal.ZERO }],
+  freeQueueRequests: Decimal.ZERO,
 };
 
-/** AWS's US$ prices, as a book that says it comes from them records them (P-30, P-73): RDS's and S3's too, in a book that prices databases and buckets. */
+/** AWS's US$ prices, as a book that says it comes from them records them (P-30, P-73): RDS's, S3's and SQS's too, in a book that prices databases, buckets and queues. */
 const usdPricesSchema = z.strictObject({
   requestsPerMillion: decimal,
   gbSecond: z.array(z.strictObject({ upToGbSeconds: z.number().int().positive().nullable(), price: decimal })).min(1),
@@ -175,6 +204,7 @@ const usdPricesSchema = z.strictObject({
   bucketStorageGbMonth: z.array(z.strictObject({ upToGbMonths: z.number().int().positive().nullable(), price: decimal })).min(1).optional(),
   requestsTier1PerThousand: decimal.optional(),
   requestsTier2PerThousand: decimal.optional(),
+  queueRequestsPerMillion: z.array(z.strictObject({ upToRequests: z.number().int().positive().nullable(), price: decimal })).min(1).optional(),
 });
 
 /**
@@ -219,6 +249,17 @@ export function awsPriceProblems(document: PriceDocument): string[] {
   } else if (bucket || usdBucket) {
     problems.push('prices.bucketStorageGbMonth: must be in both prices and source.usdPrices, or in neither');
   }
+  const queue = prices.queueRequestsPerMillion;
+  const usdQueue = usd.data.queueRequestsPerMillion;
+  if (queue && usdQueue) {
+    if (usdQueue.length !== queue.length || usdQueue.some((tier, index) => tier.upToRequests !== queue[index].upToRequests)) {
+      problems.push('prices.queueRequestsPerMillion: must have the tiers of source.usdPrices.queueRequestsPerMillion');
+    } else {
+      usdQueue.forEach((tier, index) => expect(`queueRequestsPerMillion.${index}.price`, queue[index].price, tier.price));
+    }
+  } else if (queue || usdQueue) {
+    problems.push('prices.queueRequestsPerMillion: must be in both prices and source.usdPrices, or in neither');
+  }
   return problems;
 }
 
@@ -229,15 +270,15 @@ export function priceDocumentProblems(value: unknown): string[] {
   return awsPriceProblems(parsed.data);
 }
 
-/** Customers' databases' and buckets' SKUs and free tiers, which a book may lack, pricing them at nothing. */
-const STORAGE_PRICES = ['databaseStorageGbMonth', 'databaseMonthlyFee', 'bucketStorageGbMonth', 'requestsTier1PerThousand', 'requestsTier2PerThousand'] as const;
-const STORAGE_FREE_TIER = ['databaseStorageGbMonths', 'bucketStorageGbMonths', 'requestsTier1', 'requestsTier2'] as const;
+/** Customers' databases', buckets' and queues' SKUs and free tiers, which a book may lack, pricing them at nothing. */
+const STORAGE_PRICES = ['databaseStorageGbMonth', 'databaseMonthlyFee', 'bucketStorageGbMonth', 'requestsTier1PerThousand', 'requestsTier2PerThousand', 'queueRequestsPerMillion'] as const;
+const STORAGE_FREE_TIER = ['databaseStorageGbMonths', 'bucketStorageGbMonths', 'requestsTier1', 'requestsTier2', 'queueRequests'] as const;
 
 /**
  * Those of the book before that a new one lacks, by their paths: a book that
  * follows one with them must have them too, its free tier included, or
- * customers' databases and buckets would be priced at nothing from it on,
- * which no operator means by leaving a field out.
+ * customers' databases, buckets and queues would be priced at nothing from it
+ * on, which no operator means by leaving a field out.
  */
 export function storageKeysMissing(before: PriceDocument, after: PriceDocument): string[] {
   return [

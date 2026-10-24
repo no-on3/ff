@@ -72,8 +72,9 @@ export class Account {
   dataDeletedAt: Date | null;
 
   /**
-   * When FF's operator turned the account's databases and buckets off, its
-   * functions going on: its databases' users can't log in. Null while they are on.
+   * When FF's operator turned the account's databases, buckets and queues off,
+   * its functions going on: its databases' users can't log in, and its access
+   * keys are refused. Null while they are on.
    */
   @Column({ type: 'timestamptz', nullable: true })
   storageDisabledAt: Date | null;

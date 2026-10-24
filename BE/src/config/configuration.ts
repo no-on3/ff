@@ -36,8 +36,8 @@ export const logFormat = (env: Env): LogFormat =>
 /** Development defaults that production refuses (docker-compose.yml, BE/.env.example, infrastructure/seaweedfs). */
 export const DEVELOPMENT_CREDENTIALS = {
   DB_PASSWORD: ['postgres'],
-  MINIO_ACCESS_KEY: ['minioadmin', 'ffdevaccesskey'],
-  MINIO_SECRET_KEY: ['minioadmin', 'ffdevsecretkey-local-only'],
+  FF_OBJECT_STORE_ACCESS_KEY: ['minioadmin', 'ffdevaccesskey'],
+  FF_OBJECT_STORE_SECRET_KEY: ['minioadmin', 'ffdevsecretkey-local-only'],
   // The development server of customers' databases (docker-compose.yml's data-db).
   FF_DATA_DB_ADMIN_PASSWORD: ['ff-data-admin-dev'],
 } as const;
@@ -50,6 +50,8 @@ const DEV_CORS_ORIGIN = 'http://localhost:5199';
 export const DEV_FUNCTION_URL_BASE = 'http://fn.localhost:3001';
 /** Buckets' S3 endpoint in development: path-style there, and virtual-hosted under its host, which resolves to this machine. */
 export const DEV_STORAGE_BASE = 'http://s3.localhost:3002';
+/** Queues' SQS endpoint in development, which a queue's URL begins with: AWS's SDKs reach a queue at its URL. */
+export const DEV_SQS_BASE = 'http://localhost:3003';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
@@ -277,6 +279,23 @@ const storageBase = {
   test: functionUrlBase.test,
   expected: 'an origin whose host has a dot, such as https://s3.example.tn, at which a bucket is https://s3.example.tn/<bucket> and https://<bucket>.s3.example.tn',
 };
+/** Queues' SQS endpoint: a scheme, a host and a port if any; no path. A queue's URL is <endpoint>/<account>/<name>. */
+const sqsBase = {
+  test: (v: string) => {
+    try {
+      const url = new URL(v);
+      return ['http:', 'https:'].includes(url.protocol) && url.origin === v.replace(/\/$/, '');
+    } catch {
+      return false;
+    }
+  },
+  expected: 'an origin, such as https://sqs.example.tn, under which a queue is https://sqs.example.tn/<account>/<queue>',
+};
+/** Where functions reach queues' SQS endpoint inside the cluster: a scheme, a host and a port if any; no path. */
+const functionSqsEndpoint = {
+  test: sqsBase.test,
+  expected: "an origin, such as http://10.43.0.251:3003, at which functions reach queues' SQS endpoint inside the cluster",
+};
 /**
  * Where functions reach buckets' S3 front door inside the cluster: a scheme, an IP address, and a port if any; no path.
  * An address rather than a name: AWS's SDKs address buckets path-style at an IP address by themselves, where a name
@@ -346,12 +365,19 @@ const appShape = {
   FF_OIDC_JWKS_URL: optionalText(httpUrl),
   FF_DEV_USER_ID: optionalText(),
 
-  MINIO_ENDPOINT: text('localhost'),
-  MINIO_PORT: port(9003),
-  MINIO_USE_SSL: flag(false),
-  MINIO_ACCESS_KEY: secret('minioadmin'),
-  MINIO_SECRET_KEY: secret('minioadmin'),
-  MINIO_BUCKET_NAME: text('functions', bucketName),
+  FF_OBJECT_STORE_ENDPOINT: text('localhost'),
+  FF_OBJECT_STORE_PORT: port(9003),
+  FF_OBJECT_STORE_USE_SSL: flag(false),
+  FF_OBJECT_STORE_ACCESS_KEY: secret('ffdevaccesskey'),
+  FF_OBJECT_STORE_SECRET_KEY: secret('ffdevsecretkey-local-only'),
+  FF_OBJECT_STORE_BUCKET: text('functions', bucketName),
+  // Their names from when FF's store was MinIO: read only to say what they are called now.
+  MINIO_ENDPOINT: optionalText(),
+  MINIO_PORT: optionalText(),
+  MINIO_USE_SSL: optionalText(),
+  MINIO_ACCESS_KEY: optionalText(),
+  MINIO_SECRET_KEY: optionalText(),
+  MINIO_BUCKET_NAME: optionalText(),
 
   ORCHESTRATOR: oneOf(['kubernetes'], 'kubernetes'),
   FF_READY_TIMEOUT_SECONDS: integer(90, 1, 3600),
@@ -368,6 +394,12 @@ const appShape = {
   // events name, as AWS's do theirs.
   FF_SCHEDULER_INTERVAL_SECONDS: integer(5, 0, 60),
   FF_REGION: text('tn-tunis-1', region),
+  // How often the backend looks for the asynchronous calls due without being told, its retries' and its lost claims'
+  // (0: never, a backend that runs none): a call kept is told at once. And how many it runs at once.
+  FF_ASYNC_INTERVAL_SECONDS: integer(5, 0, 60),
+  FF_ASYNC_CONCURRENCY: integer(10, 1, 1000),
+  // How often the event source mappings are loaded again, a mapping changed on this backend loaded at once (0: none read).
+  FF_EVENT_SOURCE_REFRESH_SECONDS: integer(10, 0, 3600),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
@@ -418,6 +450,15 @@ const appShape = {
   // backend's own pods in ff-system, on FF_STORAGE_PORT, as when the backend runs in the cluster).
   FF_STORAGE_FUNCTION_ENDPOINT: optionalText(functionStorageEndpoint),
   FF_STORAGE_FUNCTION_CIDRS: list(cidr),
+  // Queues' SQS endpoint (ADR 0010): the port of its server, apart from the API's (0: none), and the endpoint
+  // customers give AWS's SDKs and CLI, which a queue's URL begins with.
+  FF_SQS_PORT: integer(3003, 0, 65535),
+  FF_SQS_BASE: text(DEV_SQS_BASE, sqsBase),
+  // Functions reach queues with their own keys at this endpoint, inside the cluster (unset: their pods get no
+  // AWS_ENDPOINT_URL_SQS), and their NetworkPolicy opens these addresses on its port (none: the backend's own pods in
+  // ff-system, on FF_SQS_PORT, as when the backend runs in the cluster).
+  FF_SQS_FUNCTION_ENDPOINT: optionalText(functionSqsEndpoint),
+  FF_SQS_FUNCTION_CIDRS: list(cidr),
   // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
   // servers that check domains' records (none: the system's).
   FF_EDGE_ADDRESSES: list(ipAddress),
@@ -450,6 +491,16 @@ const appShape = {
 const databaseSchema = z.object(databaseShape);
 const appSchema = z.object(appShape);
 
+/** The object store's variables from when FF's store was MinIO, and their names now. */
+export const RENAMED_VARIABLES = {
+  MINIO_ENDPOINT: 'FF_OBJECT_STORE_ENDPOINT',
+  MINIO_PORT: 'FF_OBJECT_STORE_PORT',
+  MINIO_USE_SSL: 'FF_OBJECT_STORE_USE_SSL',
+  MINIO_ACCESS_KEY: 'FF_OBJECT_STORE_ACCESS_KEY',
+  MINIO_SECRET_KEY: 'FF_OBJECT_STORE_SECRET_KEY',
+  MINIO_BUCKET_NAME: 'FF_OBJECT_STORE_BUCKET',
+} as const;
+
 /** Variables that are still recognized only to explain what replaced them. */
 export const OBSOLETE_VARIABLES = [
   'FF_DEV_USER_ID',
@@ -457,6 +508,7 @@ export const OBSOLETE_VARIABLES = [
   'K8S_TENANT_QUOTA_PODS',
   'K8S_TENANT_QUOTA_CPU',
   'K8S_TENANT_QUOTA_MEMORY',
+  ...Object.keys(RENAMED_VARIABLES),
 ];
 /** Every variable the backend reads. */
 export const VARIABLES = Object.keys(appShape).filter((name) => !OBSOLETE_VARIABLES.includes(name));
@@ -504,6 +556,14 @@ function appRules(env: AppEnv): string[] {
     problems.push("FF_STORAGE_FUNCTION_CIDRS is set, but FF_STORAGE_FUNCTION_ENDPOINT is not: it names where functions reach buckets' S3 front door");
   }
 
+  if (env.FF_SQS_FUNCTION_ENDPOINT) {
+    if (env.FF_SQS_PORT === 0) {
+      problems.push("FF_SQS_FUNCTION_ENDPOINT is set, but FF_SQS_PORT is 0: functions' keys reach queues through the SQS endpoint, which isn't running");
+    }
+  } else if (env.FF_SQS_FUNCTION_CIDRS.length > 0) {
+    problems.push("FF_SQS_FUNCTION_CIDRS is set, but FF_SQS_FUNCTION_ENDPOINT is not: it names where functions reach queues' SQS endpoint");
+  }
+
   if (env.FF_DEV_USER_ID !== undefined) {
     problems.push(
       'FF_DEV_USER_ID is no longer read: set FF_AUTH_MODE=dev and FF_DEV_ACCOUNT_ID (12 digits) instead, as in BE/.env.example',
@@ -515,6 +575,9 @@ function appRules(env: AppEnv): string[] {
   }
   for (const name of ['K8S_TENANT_QUOTA_PODS', 'K8S_TENANT_QUOTA_CPU', 'K8S_TENANT_QUOTA_MEMORY'] as const) {
     if (env[name] !== undefined) problems.push(`${name} is no longer read: each account's plan sets its quota (plans.limits.quota); remove it`);
+  }
+  for (const [name, now] of Object.entries(RENAMED_VARIABLES) as Array<[keyof typeof RENAMED_VARIABLES, string]>) {
+    if (env[name] !== undefined) problems.push(`${name} is no longer read: it is ${now} now, as in BE/.env.example; rename it`);
   }
   // FF tags its runtime images by their protocol: before 3, a runtime hands every function FF's original wrapper as
   // its event, which a function made now, given AWS Lambda's, would misread at every call.
@@ -539,7 +602,7 @@ function appRules(env: AppEnv): string[] {
   }
 
   if (production) {
-    for (const name of ['MINIO_ACCESS_KEY', 'MINIO_SECRET_KEY'] as const) {
+    for (const name of ['FF_OBJECT_STORE_ACCESS_KEY', 'FF_OBJECT_STORE_SECRET_KEY'] as const) {
       if ((DEVELOPMENT_CREDENTIALS[name] as readonly string[]).includes(env[name])) {
         problems.push(`${name} must be set, and not to a development default, when NODE_ENV=production`);
       }
@@ -563,6 +626,9 @@ function appRules(env: AppEnv): string[] {
     }
     if (!env.FF_FUNCTION_URL_BASE.startsWith('https://')) {
       problems.push('FF_FUNCTION_URL_BASE must be an https:// origin when NODE_ENV=production, such as https://fn.example.tn: function URLs are served over TLS');
+    }
+    if (!env.FF_SQS_BASE.startsWith('https://')) {
+      problems.push("FF_SQS_BASE must be an https:// origin when NODE_ENV=production, such as https://sqs.example.tn: queues' requests carry customers' messages");
     }
     if (!env.FF_STORAGE_BASE.startsWith('https://')) {
       problems.push("FF_STORAGE_BASE must be an https:// origin when NODE_ENV=production, such as https://s3.example.tn: buckets' requests carry customers' files");
@@ -634,15 +700,15 @@ function readCertificate(name: string, path: string): string {
 }
 
 /**
- * How functions reach buckets' S3 front door with their own keys: at the addresses named, on the endpoint's port; with
- * none named, at the backend's own pods, on the front door's port, which the endpoint's Service forwards to. Nothing
- * when functions get no key.
+ * How functions reach one of FF's endpoints with their own keys, buckets' S3 front door or queues' SQS endpoint: at
+ * the addresses named, on the endpoint's port; with none named, at the backend's own pods, on the server's port, which
+ * the endpoint's Service forwards to. Nothing when functions aren't given the endpoint.
  */
-function storageEgress(env: AppEnv): Array<{ cidrs: string[]; port: number }> {
-  if (!env.FF_STORAGE_FUNCTION_ENDPOINT) return [];
-  if (env.FF_STORAGE_FUNCTION_CIDRS.length === 0) return [{ cidrs: [], port: env.FF_STORAGE_PORT }];
-  const endpoint = new URL(env.FF_STORAGE_FUNCTION_ENDPOINT);
-  return [{ cidrs: env.FF_STORAGE_FUNCTION_CIDRS, port: Number(endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80)) }];
+function functionEgress(endpoint: string | undefined, cidrs: string[], serverPort: number): Array<{ cidrs: string[]; port: number }> {
+  if (!endpoint) return [];
+  if (cidrs.length === 0) return [{ cidrs: [], port: serverPort }];
+  const url = new URL(endpoint);
+  return [{ cidrs, port: Number(url.port || (url.protocol === 'https:' ? 443 : 80)) }];
 }
 
 /** Customers' database server (ADR 0008), as the backend reaches it, and as connection strings and functions name it. */
@@ -736,13 +802,13 @@ export default function configuration(env: Env = process.env) {
           : undefined,
     },
     database: toDatabaseSettings(parsed),
-    minio: {
-      endPoint: parsed.MINIO_ENDPOINT,
-      port: parsed.MINIO_PORT,
-      useSSL: parsed.MINIO_USE_SSL,
-      accessKey: parsed.MINIO_ACCESS_KEY,
-      secretKey: parsed.MINIO_SECRET_KEY,
-      bucketName: parsed.MINIO_BUCKET_NAME,
+    objectStore: {
+      endPoint: parsed.FF_OBJECT_STORE_ENDPOINT,
+      port: parsed.FF_OBJECT_STORE_PORT,
+      useSSL: parsed.FF_OBJECT_STORE_USE_SSL,
+      accessKey: parsed.FF_OBJECT_STORE_ACCESS_KEY,
+      secretKey: parsed.FF_OBJECT_STORE_SECRET_KEY,
+      bucketName: parsed.FF_OBJECT_STORE_BUCKET,
     },
     orchestrator: {
       // Scheduler driver behind the ORCHESTRATOR token (see OrchestratorModule).
@@ -777,6 +843,15 @@ export default function configuration(env: Env = process.env) {
       intervalSeconds: parsed.FF_SCHEDULER_INTERVAL_SECONDS,
       region: parsed.FF_REGION,
     },
+    // Asynchronous calls: how often the due ones are claimed, and how many one backend runs at once.
+    asyncInvoke: {
+      intervalSeconds: parsed.FF_ASYNC_INTERVAL_SECONDS,
+      concurrency: parsed.FF_ASYNC_CONCURRENCY,
+    },
+    // Functions reading queues: how often their mappings are loaded again.
+    eventSources: {
+      refreshSeconds: parsed.FF_EVENT_SOURCE_REFRESH_SECONDS,
+    },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.
       smtpUrl: parsed.FF_SMTP_URL ?? '',
@@ -802,6 +877,14 @@ export default function configuration(env: Env = process.env) {
       region: parsed.FF_REGION,
       // Where functions reach it with their own keys, inside the cluster; '': functions get no key.
       functionEndpoint: parsed.FF_STORAGE_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
+    },
+    // Queues' SQS endpoint (ADR 0010): its server, the endpoint customers use, which queues' URLs begin with, and the region their ARNs name.
+    sqs: {
+      port: parsed.FF_SQS_PORT,
+      base: parsed.FF_SQS_BASE.replace(/\/$/, ''),
+      region: parsed.FF_REGION,
+      // Where functions reach it with their own keys, inside the cluster; '': their pods get no AWS_ENDPOINT_URL_SQS.
+      functionEndpoint: parsed.FF_SQS_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
     },
     // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
     codeImages: {
@@ -847,7 +930,11 @@ export default function configuration(env: Env = process.env) {
       logStoreDeleteKeyFile: parsed.K8S_LOG_STORE_DELETE_KEY_FILE,
       // What functions reach of the platform whatever their account's internet access: customers' database server, and
       // buckets' S3 front door.
-      platformEgress: [...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []), ...storageEgress(parsed)],
+      platformEgress: [
+        ...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []),
+        ...functionEgress(parsed.FF_STORAGE_FUNCTION_ENDPOINT, parsed.FF_STORAGE_FUNCTION_CIDRS, parsed.FF_STORAGE_PORT),
+        ...functionEgress(parsed.FF_SQS_FUNCTION_ENDPOINT, parsed.FF_SQS_FUNCTION_CIDRS, parsed.FF_SQS_PORT),
+      ],
       // The CA of that server's certificate when it isn't a public one: functions' pods get it (none: '').
       dataDbCa: dataDb?.ca ?? '',
     },

@@ -10,6 +10,8 @@ import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw
 import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
+import invokeDtoSource from '../../BE/src/functions/dto/invoke-function.dto.ts?raw';
+import eventInvokeConfigDtoSource from '../../BE/src/functions/dto/event-invoke-config.dto.ts?raw';
 import functionsServiceSource from '../../BE/src/functions/functions.service.ts?raw';
 import functionEntitySource from '../../BE/src/functions/entities/function.entity.ts?raw';
 import createFunctionDtoSource from '../../BE/src/functions/dto/create-function.dto.ts?raw';
@@ -35,6 +37,10 @@ import databaseEntitySource from '../../BE/src/databases/database.entity.ts?raw'
 import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
 import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
 import storageNamesSource from '../../BE/src/storage/storage-names.ts?raw';
+import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
+import eventSourceDtoSource from '../../BE/src/event-sources/dto/event-source.dto.ts?raw';
+import bucketNotificationsDtoSource from '../../BE/src/storage/dto/notifications.dto.ts?raw';
+import bucketNotificationsSource from '../../BE/src/storage/bucket-notifications.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
@@ -46,13 +52,20 @@ import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
 import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
 import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
+import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
+import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES } from './lib/event-sources';
+import { EVENT_TYPES as NOTIFICATION_EVENTS } from './lib/bucket-notifications';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
-import { BUCKETS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
+import { ENDPOINTS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
   ALARM_FIELDS,
+  QUEUE_FIELDS,
+  EVENT_SOURCE_FIELDS,
+  RECEIVED_MESSAGE_FIELDS,
   BUCKET_FIELDS,
   BUCKET_REQUEST_METRICS,
   BUCKET_USAGE_FIELDS,
+  QUEUE_USAGE_FIELDS,
   STORAGE_KEY_FIELDS,
   DATABASE_FIELDS,
   DATABASE_STATUSES,
@@ -68,10 +81,13 @@ import {
   EMAIL_LANGUAGES,
   WEBHOOK_SECRET_FIELDS,
   INVOCATION_FIELDS,
+  ASYNC_INVOCATION_FIELDS,
+  EVENT_INVOKE_CONFIG_FIELDS,
   INVOCATION_SOURCES,
   INVOCATION_STATUSES,
   ME_ACCOUNT_FIELDS,
   METRIC_NAMES,
+  QUEUE_METRIC_NAMES,
   INVOICE_FIELDS,
   LOGS_PAGE_FIELDS,
   LOGS_QUERY_PARAMS,
@@ -172,6 +188,7 @@ describe("what brought an invocation", () => {
 describe('the metrics', () => {
   it("are the API's series, named as CloudWatch names Lambda's", () => {
     expect(dtoFields(metricsDtoSource, 'class MetricSeries {')).toEqual([...METRIC_NAMES]);
+    expect(dtoFields(metricsDtoSource, 'class QueueMetricSeries {')).toEqual([...QUEUE_METRIC_NAMES]);
   });
 });
 
@@ -189,6 +206,19 @@ describe('an invocation', () => {
     // `function` is the relation, which the API never loads into an invocation it returns.
     expect(fields.filter((field) => field !== 'function')).toEqual([...INVOCATION_FIELDS]);
     expect(INVOCATION_FIELDS).toEqual(expect.arrayContaining(['inputTruncated', 'outputTruncated', 'errorTruncated']));
+  });
+});
+
+describe('an asynchronous call', () => {
+  it("is answered with the API's fields, its request ID, which the console shows; and the console names its type as the API does", () => {
+    expect(dtoFields(invokeDtoSource, 'export class AsyncInvocationView {')).toEqual([...ASYNC_INVOCATION_FIELDS]);
+    expect(invokeDtoSource).toContain("EVENT = 'Event',");
+  });
+});
+
+describe("a function's settings for its asynchronous calls", () => {
+  it("are the API's fields, which the console reads", () => {
+    expect(dtoFields(eventInvokeConfigDtoSource, 'export class EventInvokeConfigView {')).toEqual([...EVENT_INVOKE_CONFIG_FIELDS]);
   });
 });
 
@@ -358,7 +388,9 @@ describe("a function's environment variables", () => {
     expect(Number(/export const MAX_ENVIRONMENT_BYTES = (\d+);/.exec(environmentSource)![1])).toBe(MAX_ENVIRONMENT_BYTES);
     expect(LAMBDA_RESERVED).toEqual(listed('LAMBDA_RESERVED'));
     expect(FF_RESERVED).toEqual(listed('FF_RESERVED'));
-    expect(BUCKETS_RESERVED).toEqual(listed('BUCKETS_RESERVED'));
+    // The endpoints FF sets, a map of each name to why, ['NAME', "why"] pairs in the API's source.
+    const endpoints = /const ENDPOINTS_RESERVED = new Map\(\[([\s\S]*?)\]\);/.exec(environmentSource)![1];
+    expect([...ENDPOINTS_RESERVED]).toEqual([...endpoints.matchAll(/\['([^']+)', "([^"]+)"\]/g)].map((m) => [m[1], m[2]]));
     expect(environmentSource).toContain("name.startsWith('FF_')");
   });
 });
@@ -439,11 +471,64 @@ describe("a customer's database (ADR 0008)", () => {
   });
 });
 
+describe("a customer's queue (ADR 0010)", () => {
+  it("has the API's fields and name rule, so its pages read each one there is and the form refuses what the API would", () => {
+    expect(dtoFields(queueDtoSource, 'export class QueueView {')).toEqual([...QUEUE_FIELDS]);
+    expect(dtoFields(queueDtoSource, 'export class ReceivedMessageView {')).toEqual([...RECEIVED_MESSAGE_FIELDS]);
+    expect(dtoFields(queueDtoSource, 'export class QueueMessagesView {')).toEqual(['available', 'inFlight', 'delayed']);
+    expect(/@Matches\(\/\^\[A-Za-z0-9_-\]\+\$\//.test(queueDtoSource)).toBe(true);
+    expect(QUEUE_NAME.source).toBe('^[A-Za-z0-9_-]+$');
+  });
+
+  it("edits the attributes the API takes, within its bounds", () => {
+    // Its fields are all optional, name?: type, which dtoFields doesn't read.
+    const body = queueDtoSource.slice(queueDtoSource.indexOf('export class QueueAttributesDto {'));
+    const attributes = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+)\?: /gm)].map((match) => match[1]);
+    expect([...QUEUE_ATTRIBUTES.map(({ field }) => field), 'redrivePolicy'].sort()).toEqual([...attributes].sort());
+    for (const { field, min, max } of QUEUE_ATTRIBUTES) {
+      const declared = new RegExp(`@Min\\((\\d[\\d_]*)\\)\\s*@Max\\((\\d[\\d_]*)\\)\\s*${field}\\?:`).exec(queueDtoSource);
+      expect([field, Number(declared?.[1].replace(/_/g, '')), Number(declared?.[2].replace(/_/g, ''))]).toEqual([field, min, max]);
+    }
+  });
+});
+
+describe('a function reading a queue (ADR 0010)', () => {
+  it("has the API's fields, Lambda's names, so the panels read each one there is", () => {
+    expect(dtoFields(eventSourceDtoSource, 'export class EventSourceView {')).toEqual([...EVENT_SOURCE_FIELDS]);
+    expect(eventSourceDtoSource).toContain(`export const REPORT_BATCH_ITEM_FAILURES = '${REPORT_BATCH_ITEM_FAILURES}';`);
+  });
+
+  it("refuses what the API would: a batch's size, its window and the batches at once within its bounds", () => {
+    const bounds = (field: string) => {
+      const declared = new RegExp(`@Min\\((\\d[\\d_]*)\\)\\s*@Max\\((\\d[\\d_]*)\\)\\s*${field}\\?:`).exec(eventSourceDtoSource);
+      return [Number(declared?.[1].replace(/_/g, '')), Number(declared?.[2].replace(/_/g, ''))];
+    };
+    expect([bounds('batchSize'), bounds('maximumBatchingWindowInSeconds'), bounds('maximumConcurrency')]).toEqual([
+      [BATCH_SIZE.min, BATCH_SIZE.max],
+      [BATCHING_WINDOW.min, BATCHING_WINDOW.max],
+      [MAXIMUM_CONCURRENCY.min, MAXIMUM_CONCURRENCY.max],
+    ]);
+  });
+});
+
+describe("a bucket's notifications (ADR 0010)", () => {
+  it("has the API's names, S3's in JSON, and the events the API takes", () => {
+    expect(dtoFields(bucketNotificationsDtoSource, 'export class NotificationConfigurationView {')).toEqual(['lambdaFunctionConfigurations', 'queueConfigurations']);
+    expect(dtoFields(bucketNotificationsDtoSource, 'export class LambdaFunctionConfigurationDto extends ConfigurationDto {')).toEqual(['lambdaFunctionArn']);
+    expect(dtoFields(bucketNotificationsDtoSource, 'export class QueueConfigurationDto extends ConfigurationDto {')).toEqual(['queueArn']);
+    // Its other fields are optional, name?: type, which dtoFields doesn't read.
+    const shared = bucketNotificationsDtoSource.slice(bucketNotificationsDtoSource.indexOf('class ConfigurationDto {'));
+    expect([...shared.slice(0, shared.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1])).toEqual(['id', 'events', 'filter']);
+    const events = /export const EVENT_TYPES = \[([\s\S]*?)\] as const;/.exec(bucketNotificationsSource)?.[1].match(/'[^']+'/g)?.map((quoted) => quoted.slice(1, -1));
+    expect(events).toEqual([...NOTIFICATION_EVENTS]);
+  });
+});
+
 describe("a customer's bucket and its access keys (ADR 0009)", () => {
   it("have the API's fields and name rule, so the page reads each one there is and the form refuses what the API would", () => {
     expect(dtoFields(storageDtoSource, 'export class BucketView {')).toEqual([...BUCKET_FIELDS]);
     expect(dtoFields(storageDtoSource, 'export class StorageKeyView {')).toEqual([...STORAGE_KEY_FIELDS]);
-    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'region']);
+    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'region']);
     expect(/export const BUCKET_NAME = \/(.+)\/;/.exec(storageNamesSource)?.[1]).toBe(BUCKET_NAME.source);
   });
 
@@ -453,6 +538,11 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
     expect(dtoFields(metricsDtoSource, 'class BucketRequestSeries {')).toEqual(['Sum']);
     expect(dtoFields(usageDtoSource, 'export class BucketUsageView {')).toEqual([...BUCKET_USAGE_FIELDS]);
     expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('buckets');
+  });
+
+  it("have the API's fields of a queue's month on the Usage page", () => {
+    expect(dtoFields(usageDtoSource, 'export class QueueUsageView {')).toEqual([...QUEUE_USAGE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('queues');
   });
 });
 

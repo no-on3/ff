@@ -23,14 +23,15 @@ e2e_cleanups=()
 e2e_teardown=false
 passed=0
 mkdir -p "$work"
+: >"$work/ports-given"
 
 # The backend's settings, explicit so that BE/.env (read for any missing variable)
 # can't change the test. Callers add the port and the authentication mode.
 e2e_base_env=(
   NODE_ENV=development
   DB_HOST=127.0.0.1 DB_PORT="$FF_PG_PORT" DB_USERNAME=postgres DB_PASSWORD=postgres DB_NAME=serverless_platform
-  MINIO_ENDPOINT=127.0.0.1 MINIO_PORT="$FF_S3_PORT" MINIO_USE_SSL=false MINIO_BUCKET_NAME=functions
-  MINIO_ACCESS_KEY=ffdevaccesskey MINIO_SECRET_KEY=ffdevsecretkey-local-only
+  FF_OBJECT_STORE_ENDPOINT=127.0.0.1 FF_OBJECT_STORE_PORT="$FF_S3_PORT" FF_OBJECT_STORE_USE_SSL=false FF_OBJECT_STORE_BUCKET=functions
+  FF_OBJECT_STORE_ACCESS_KEY=ffdevaccesskey FF_OBJECT_STORE_SECRET_KEY=ffdevsecretkey-local-only
   ORCHESTRATOR=kubernetes K8S_API_URL="https://127.0.0.1:$FF_API_PORT" K8S_INVOKE_MODE=proxy
   K8S_TOKEN_FILE="$FF_SA_TOKEN_FILE" K8S_CA_FILE="$FF_CA_FILE" K8S_LOG_STORE_DELETE_KEY_FILE="$FF_LOG_STORE_DELETE_KEY_FILE"
   K8S_RUNTIME_CLASS="${K8S_RUNTIME_CLASS:-}"
@@ -42,6 +43,12 @@ e2e_base_env=(
   FF_FUNCTION_URL_PORT=0
   # Nor buckets' S3 front door: a test that sends S3 requests gives it a free port.
   FF_STORAGE_PORT=0
+  # Nor queues' SQS endpoint, for the same reason.
+  FF_SQS_PORT=0
+  # Nor functions' own keys to buckets, nor customers' databases, whichever a developer's BE/.env names: a test that
+  # uses them gives its own after these (the cluster's gateway; e2e_data_db's server).
+  FF_STORAGE_FUNCTION_ENDPOINT= FF_STORAGE_FUNCTION_CIDRS=
+  FF_DATA_DB_HOST= FF_DATA_DB_ADMIN_HOST= FF_DATA_DB_ADMIN_PASSWORD= FF_DATA_DB_CIDRS= FF_DATA_DB_CA_FILE=
   # Every function's code runs as a code image (ADR 0003), pushed to the cluster's registry (hack/k8s/registry-up.sh), pulled by its node.
   FF_CODE_REGISTRY="http://127.0.0.1:$FF_REGISTRY_PORT" FF_CODE_REGISTRY_PULL="$FF_REGISTRY_NAME:5000"
 )
@@ -134,8 +141,18 @@ http_at() {
 status() { cat "$work/status"; }
 # archived <path>: an object of the "functions" bucket, read through SeaweedFS's filer inside the s3 container.
 archived() { "${compose[@]}" exec -T s3 wget -qO- "http://127.0.0.1:8888/buckets/functions/$1" 2>/dev/null || true; }
-# A free port chosen by the OS, so the test never collides with other servers on the machine.
-free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
+# free_port: a free port chosen by the OS, so the test never collides with other servers on the machine, and none
+# this run was given before: the ports are all chosen before anything listens, and the OS may offer a port it just
+# offered again. A command substitution runs it in a subshell, so the ports given are kept in a file.
+free_port() {
+  local port
+  for _ in $(seq 1 20); do
+    port="$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"
+    grep -qx "$port" "$work/ports-given" 2>/dev/null || break
+  done
+  echo "$port" >>"$work/ports-given"
+  echo "$port"
+}
 # A random account (12 digits, ADR 0004), so runs never share a namespace.
 random_account() { node -e "console.log(String(require('crypto').randomInt(1e12)).padStart(12, '0'))"; }
 tenant_namespace() { printf 'ff-t-%s' "$(printf %s "$1" | sha256sum | cut -c1-12)"; }

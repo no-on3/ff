@@ -10,6 +10,8 @@ import CreditBanner from '../components/CreditBanner';
 import DatabaseDetail from '../components/DatabaseDetail';
 import BucketDetail from '../components/BucketDetail';
 import Buckets from '../components/Buckets';
+import QueueDetail from '../components/QueueDetail';
+import Queues from '../components/Queues';
 import Databases from '../components/Databases';
 import FunctionDetail from '../components/FunctionDetail';
 import FunctionList from '../components/FunctionList';
@@ -58,6 +60,8 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
               <Route path="/databases/:id" element={<DatabaseDetail />} />
               <Route path="/buckets" element={<Buckets />} />
               <Route path="/buckets/:name" element={<BucketDetail />} />
+              <Route path="/queues" element={<Queues />} />
+              <Route path="/queues/:name" element={<QueueDetail />} />
               <Route path="/usage" element={<Usage />} />
               <Route path="/billing" element={<Billing />} />
               <Route path="/billing/pro-formas/:id" element={<ProFormaPage />} />

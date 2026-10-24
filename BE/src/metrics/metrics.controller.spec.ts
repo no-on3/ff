@@ -1,5 +1,5 @@
 /**
- * L1: GET /functions/:id/metrics, GET /metrics, GET /databases/:id/metrics and GET /buckets/:name/metrics
+ * L1: GET /functions/:id/metrics, GET /metrics, GET /databases/:id/metrics, GET /buckets/:name/metrics and GET /queues/:name/metrics
  * through HTTP, with the validation main.ts sets up: who may read them, the
  * account and the window they pass on, and what they refuse before asking the
  * database. Their SQL runs against PostgreSQL in customer-metrics.db.spec.ts.
@@ -25,6 +25,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   const forAccount = jest.fn(async (_accountId: string, _window: MetricsWindow) => ({ metrics: {} }));
   const forDatabase = jest.fn(async (_accountId: string, _id: string, _window: MetricsWindow) => ({ metrics: {} }));
   const forBucket = jest.fn(async (_accountId: string, _name: string, _window: MetricsWindow) => ({ metrics: {} }));
+  const forQueue = jest.fn(async (_accountId: string, _name: string, _window: MetricsWindow) => ({ metrics: {} }));
 
   const get = (path: string) => fetch(`${baseUrl}${path}`);
   const refusal = async (path: string) => {
@@ -35,7 +36,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [MetricsController],
-      providers: [{ provide: CustomerMetricsService, useValue: { forFunction, forAccount, forDatabase, forBucket } }],
+      providers: [{ provide: CustomerMetricsService, useValue: { forFunction, forAccount, forDatabase, forBucket, forQueue } }],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
@@ -52,7 +53,13 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
 
   it('lets every member read them, viewers included, even in an account that is not active, and a key with metrics:read', () => {
     const reflector = new Reflector();
-    for (const handler of [MetricsController.prototype.forFunction, MetricsController.prototype.forAccount, MetricsController.prototype.forDatabase, MetricsController.prototype.forBucket]) {
+    for (const handler of [
+      MetricsController.prototype.forFunction,
+      MetricsController.prototype.forAccount,
+      MetricsController.prototype.forDatabase,
+      MetricsController.prototype.forBucket,
+      MetricsController.prototype.forQueue,
+    ]) {
       expect([reflector.get(ROLES, handler), reflector.get(ACTIVE_ACCOUNT, handler), reflector.get(SCOPE, handler)]).toEqual([undefined, undefined, 'metrics:read']);
     }
   });
@@ -117,6 +124,13 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
     expect(forBucket.mock.calls[1][2].period).toBe(60);
     expect(await refusal('/buckets/photos/metrics?period=86400')).toEqual([400, ['period must be one of 60, 300, 3600 seconds']]);
     expect(forBucket).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks for the caller's account's queue by its name, in any of the periods, over the window named", async () => {
+    expect((await get('/queues/orders/metrics?start=2026-10-24T09:30:00Z&end=2026-10-24T12:10:00Z&period=300')).status).toBe(200);
+    expect(forQueue).toHaveBeenCalledWith(ACCOUNT, 'orders', { start: new Date('2026-10-24T09:30:00Z'), end: new Date('2026-10-24T12:10:00Z'), period: 300 });
+    expect(await refusal('/queues/orders/metrics?period=86400')).toEqual([400, ['period must be one of 60, 300, 3600 seconds']]);
+    expect(forQueue).toHaveBeenCalledTimes(1);
   });
 
   it("refuses a function's ID that isn't one", async () => {

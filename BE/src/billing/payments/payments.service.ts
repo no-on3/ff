@@ -8,7 +8,7 @@ import { currentRequest } from '../../common/request-context';
 import { describeError } from '../../common/describe-error';
 import { Language, recipientsOf } from '../../mail/language';
 import { Mail, MailService } from '../../mail/mail.service';
-import { MinioClientService } from '../../minio-client/minio-client.service';
+import { ObjectStoreService } from '../../object-store/object-store.service';
 import { billingCurrency } from '../billing-currency';
 import { LedgerAccountType } from '../ledger/ledger-account.entity';
 import { LedgerTransactionKind } from '../ledger/ledger-transaction.entity';
@@ -54,7 +54,7 @@ export class PaymentsService {
     private readonly ledger: LedgerService,
     private readonly audit: AuditService,
     private readonly mail: MailService,
-    private readonly storage: MinioClientService,
+    private readonly storage: ObjectStoreService,
     private readonly config: ConfigService,
   ) {}
 

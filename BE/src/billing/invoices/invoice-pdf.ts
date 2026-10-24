@@ -179,7 +179,7 @@ function table(pages: Pages, columns: Column[], rows: string[][], empty?: string
   pages.rule();
 }
 
-/** The statement's pages: each function's month, each database's, each bucket's, then the month's lines and what it was charged. */
+/** The statement's pages: each function's month, each database's, each bucket's, each queue's, then the month's lines and what it was charged. */
 function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller: Seller, attached: boolean): void {
   const money = (minor: bigint) => frenchMoney(minor, statement.exponent, statement.currency);
   if (attached) {
@@ -194,6 +194,7 @@ function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller
   const amount = { title: 'Montant HT', x: 460, width: RIGHT - 460, right: true };
   const databases = statement.resources.filter((resource) => resource.kind === 'database');
   const buckets = statement.resources.filter((resource) => resource.kind === 'bucket');
+  const queues = statement.resources.filter((resource) => resource.kind === 'queue');
   if (statement.functions.length > 0 || statement.resources.length === 0) {
     table(
       pages,
@@ -233,6 +234,16 @@ function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller
         groupDigits(bucket.tier2Requests.toString()),
         money(bucket.amountMinor),
       ]),
+    );
+  }
+  if (queues.length > 0) {
+    if (statement.functions.length > 0 || databases.length > 0 || buckets.length > 0) pages.y += 10;
+    pages.room(50);
+    // As SQS bills them: each 64 KB of a request's messages a request.
+    table(
+      pages,
+      [{ title: "File d'attente", x: PAGE.margin, width: 300 }, { title: 'Requêtes', x: 360, width: 95, right: true }, amount],
+      queues.map((queue) => [queue.name, groupDigits(queue.requests.toString()), money(queue.amountMinor)]),
     );
   }
   pages.room(110);

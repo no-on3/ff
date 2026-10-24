@@ -1,5 +1,7 @@
 //! `ff invoke <name>`: a call, its answer, and how it went: the request ID that finds its logs,
-//! its duration and memory. A function that raised or timed out exits 5.
+//! its duration and memory. A function that raised or timed out exits 5. With `--async`, the call
+//! is kept and runs without waiting, as AWS Lambda's invocation type Event: its request ID at once;
+//! with `--dry-run`, it is only checked.
 
 use std::io::Read;
 use std::time::Duration;
@@ -77,6 +79,33 @@ fn invocation_failed(mut error: Error) -> Error {
     error
 }
 
+/// An asynchronous call, or a dry run: the invocation type in the body, which the API takes as it
+/// takes Lambda's header. An asynchronous call's answer is its request ID, which each of its
+/// attempts keeps.
+fn without_waiting(
+    client: &Client,
+    name: &str,
+    function_id: &str,
+    mut body: Value,
+    args: &InvokeArgs,
+    context: &Context,
+) -> Result<(), Error> {
+    body["invocationType"] = json!(if args.dry_run { "DryRun" } else { "Event" });
+    let call = Call::post(format!("/functions/{function_id}/invoke"), body);
+    if args.dry_run {
+        client.done(&call)?;
+        return context.out.result(&json!({ "dryRun": true }), || format!("{name} would take the call: nothing ran"));
+    }
+    let answer: Value = client.json(&call)?;
+    let request_id = answer.get("requestId").and_then(Value::as_str).unwrap_or_default().to_owned();
+    if args.raw && context.out.format == Format::Text {
+        return context.out.result(&answer, || request_id.clone());
+    }
+    context.out.result(&answer, || {
+        format!("Kept: request {request_id}, run without waiting and retried on failure\nff history {name} shows its attempts")
+    })
+}
+
 /// `request 7d1e… · 12 ms · 36 MB`
 fn summary(invocation: &Invocation) -> String {
     let mut parts = vec![format!("request {}", invocation.id)];
@@ -101,6 +130,9 @@ pub fn run(args: InvokeArgs, context: &Context) -> Result<(), Error> {
         Some(input) => json!({ "input": input }),
         None => json!({}),
     };
+    if args.asynchronous || args.dry_run {
+        return without_waiting(&client, &args.name, &function.id, body, &args, context);
+    }
     let call = Call::post(format!("/functions/{}/invoke", function.id), body).timeout(timeout_for(function.timeout));
     let invocation: Invocation = client.json(&call).map_err(invocation_failed)?;
 

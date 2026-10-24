@@ -40,6 +40,12 @@ describe('parsePlanLimits (P-15, D5)', () => {
     );
   });
 
+  it('lets a plan have no queues and no mappings, but not a rate or a room of zero for messages', () => {
+    expect(refusal({ ...BETA_LIMITS, queues: 0, eventSourceMappingsPerFunction: 0 })).toBe('accepted');
+    expect(refusal({ ...BETA_LIMITS, queueRequestsPerSecond: 0 })).toMatch(/queueRequestsPerSecond: Too small/);
+    expect(refusal({ ...BETA_LIMITS, queueStorageMb: 0 })).toMatch(/queueStorageMb: Too small/);
+  });
+
   it('refuses an empty plan, as the beta plan was before P-15', () => {
     expect(refusal({})).toMatch(/^The plan "pro" has invalid limits: functions: .*; memoryMb: /);
   });

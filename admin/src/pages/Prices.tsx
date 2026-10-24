@@ -10,10 +10,13 @@ import {
   PriceDocument,
   STATUS_LABELS,
   StorageForm,
+  bookRows,
   draftDocument,
   earliestStart,
   formFrom,
+  pricesQueues,
   pricesStorage,
+  queueTierLabel,
   sourceLabel,
   storageTierLabel,
   tierLabel,
@@ -28,33 +31,9 @@ const STATUS_COLORS: Record<PriceBook['status'], string> = {
 
 /** A book's prices: each SKU in its currency, and in US$ where they are AWS's. */
 const BookPrices: React.FC<{ document: PriceDocument }> = ({ document }) => {
-  const { prices, freeTier, source, currency } = document;
+  const { source, currency } = document;
   const usd = source.usdPrices;
-  const rows: Array<[string, string, string]> = [
-    ['Requests, per million', prices.requestsPerMillion, usd?.requestsPerMillion ?? ''],
-    ...prices.gbSecond.map((tier, index): [string, string, string] => [`Duration, ${tierLabel(prices.gbSecond, index)}, per GB-s`, tier.price, usd?.gbSecond[index]?.price ?? '']),
-    ['Provisioned concurrency (minInstances), per GB-s', prices.provisionedGbSecond, usd?.provisionedGbSecond ?? ''],
-    ['Duration on provisioned concurrency, per GB-s', prices.provisionedDurationGbSecond, usd?.provisionedDurationGbSecond ?? ''],
-    ['Free tier, a month', `${freeTier.requests.toLocaleString('en-US')} requests, ${freeTier.gbSeconds.toLocaleString('en-US')} GB-s`, ''],
-    ['Minimum billed duration', `${prices.minimumBilledMs} ms`, ''],
-    ['Idle instance time, per GB-s', prices.idleInstanceGbSecond, ''],
-    ['Monthly fee', prices.monthlyPlanFee, ''],
-  ];
-  // Customers' databases and buckets, as AWS RDS and S3 price them, in a book that has them.
-  if (prices.databaseStorageGbMonth !== undefined) rows.push(['Database storage, per GB-month', prices.databaseStorageGbMonth, usd?.databaseStorageGbMonth ?? '']);
-  if (prices.databaseMonthlyFee !== undefined) rows.push(['Monthly fee per database', prices.databaseMonthlyFee, '']);
-  for (const [index, tier] of (prices.bucketStorageGbMonth ?? []).entries()) {
-    rows.push([`Bucket storage, ${storageTierLabel(prices.bucketStorageGbMonth ?? [], index)}, per GB-month`, tier.price, usd?.bucketStorageGbMonth?.[index]?.price ?? '']);
-  }
-  if (prices.requestsTier1PerThousand !== undefined) rows.push(['PUT, COPY, POST and LIST requests, per 1,000', prices.requestsTier1PerThousand, usd?.requestsTier1PerThousand ?? '']);
-  if (prices.requestsTier2PerThousand !== undefined) rows.push(['GET and other requests, per 1,000', prices.requestsTier2PerThousand, usd?.requestsTier2PerThousand ?? '']);
-  if (freeTier.databaseStorageGbMonths !== undefined) {
-    rows.push([
-      'Free tier of databases and buckets, a month',
-      `${freeTier.databaseStorageGbMonths} GB-month of databases, ${freeTier.bucketStorageGbMonths ?? 0} of buckets, ${(freeTier.requestsTier1 ?? 0).toLocaleString('en-US')} PUT and ${(freeTier.requestsTier2 ?? 0).toLocaleString('en-US')} GET requests`,
-      '',
-    ]);
-  }
+  const rows = bookRows(document);
   return (
     <div className="card overflow-x-auto p-0">
       <table className="w-full text-left text-sm">
@@ -359,6 +338,29 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
                   <Field id="freeBucketGbMonths" label="Free bucket GB-months, a month" value={form.storage.freeBucketGbMonths} onChange={(freeBucketGbMonths) => setStorage({ freeBucketGbMonths })} />
                   <Field id="freeRequestsTier1" label="Free PUT, COPY, POST and LIST requests, a month" value={form.storage.freeRequestsTier1} onChange={(freeRequestsTier1) => setStorage({ freeRequestsTier1 })} />
                   <Field id="freeRequestsTier2" label="Free GET and other requests, a month" value={form.storage.freeRequestsTier2} onChange={(freeRequestsTier2) => setStorage({ freeRequestsTier2 })} />
+                </div>
+              </fieldset>
+            )}
+            {pricesQueues(latest.document) && (
+              <fieldset className="space-y-3">
+                <legend className="text-sm font-medium text-gray-700">Customers' queues, as AWS SQS prices them</legend>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {(() => {
+                    const currency = form.mode === 'aws' ? 'US$' : 'TND';
+                    const given = form.mode === 'aws' ? form.storage.usd : form.storage.tnd;
+                    const change = (queueTiers: string[]) => setStorage(form.mode === 'aws' ? { usd: { ...given, queueTiers } } : { tnd: { ...given, queueTiers } });
+                    const tiers = latest.document.prices.queueRequestsPerMillion ?? [];
+                    return tiers.map((_tier, index) => (
+                      <Field
+                        key={`queue-tier-${index}`}
+                        id={`queue-tier-${index}`}
+                        label={`Queue requests, ${queueTierLabel(tiers, index)}, per million, ${currency}`}
+                        value={given.queueTiers[index] ?? ''}
+                        onChange={(value) => change(given.queueTiers.map((price, at) => (at === index ? value : price)))}
+                      />
+                    ));
+                  })()}
+                  <Field id="freeQueueRequests" label="Free queue requests, a month" value={form.storage.freeQueueRequests} onChange={(freeQueueRequests) => setStorage({ freeQueueRequests })} />
                 </div>
               </fieldset>
             )}

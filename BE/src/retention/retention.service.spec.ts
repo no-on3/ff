@@ -11,6 +11,7 @@ import { FunctionsService } from '../functions/functions.service';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { PackagesService } from '../packages/packages.service';
 import { BETA_LIMITS } from '../plans/test-fixtures';
+import { QueueStore } from '../queues/queue-store';
 import { DELIVERY_DAYS, RetentionService } from './retention.service';
 
 const HOUR_MS = 3_600_000;
@@ -35,6 +36,7 @@ describe('RetentionService', () => {
   let buckets: { deleteAll: jest.Mock };
   let orchestrator: { removeTenant: jest.Mock; deleteLogs: jest.Mock };
   let audit: { record: jest.Mock };
+  const queues = { purgeExpired: jest.fn(async () => 0) };
   let service: RetentionService;
   let errors: jest.SpyInstance;
   let logs: jest.SpyInstance;
@@ -59,8 +61,11 @@ describe('RetentionService', () => {
       steps.push(`mark ${criteria.id}`);
       return { affected: marked };
     });
-    // The account's notification deliveries and webhook secret, deleted in the transaction that marks it.
-    const managerQuery = jest.fn(async (sql: string, [accountId]: string[]) => void steps.push(`${/webhook_secrets/.test(sql) ? 'secret' : /alarms/.test(sql) ? 'alarms' : 'deliveries'} ${accountId}`));
+    // The account's notification deliveries, webhook secret, alarms and queues, deleted in the transaction that marks it.
+    const managerQuery = jest.fn(
+      async (sql: string, [accountId]: string[]) =>
+        void steps.push(`${/webhook_secrets/.test(sql) ? 'secret' : /alarms/.test(sql) ? 'alarms' : /queues/.test(sql) ? 'queues' : 'deliveries'} ${accountId}`),
+    );
     const manager = { update, query: managerQuery };
     const dataSource = {
       query,
@@ -105,6 +110,7 @@ describe('RetentionService', () => {
       orchestrator as unknown as Orchestrator,
       audit as unknown as AuditService,
       config,
+      queues as unknown as QueueStore,
     );
     errors = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     logs = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
@@ -190,6 +196,7 @@ describe('RetentionService', () => {
         'deliveries 300000000001',
         'secret 300000000001',
         'alarms 300000000001',
+        'queues 300000000001',
         'mark 300000000001',
         'audit account.data_delete 300000000001',
       ]);
@@ -221,6 +228,7 @@ describe('RetentionService', () => {
         'deliveries 300000000002',
         'secret 300000000002',
         'alarms 300000000002',
+        'queues 300000000002',
         'mark 300000000002',
         'audit account.data_delete 300000000002',
       ]);
@@ -243,6 +251,7 @@ describe('RetentionService', () => {
         'deliveries 300000000001',
         'secret 300000000001',
         'alarms 300000000001',
+        'queues 300000000001',
         'mark 300000000001',
       ]);
       expect(audit.record).not.toHaveBeenCalled();
@@ -378,6 +387,7 @@ describe('RetentionService', () => {
         orchestrator as unknown as Orchestrator,
         audit as unknown as AuditService,
         config,
+        queues as unknown as QueueStore,
       );
       try {
         fast.onModuleInit();

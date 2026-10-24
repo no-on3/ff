@@ -16,8 +16,10 @@ export interface ActiveKey {
   id: string;
   accountId: string;
   functionId: string | null;
-  /** The buckets it reaches by name; null for all the account's. */
+  /** The buckets it names; null for none named (key-reach.ts says what it reaches). */
   buckets: string[] | null;
+  /** The queues it names; null for none named. */
+  queues: string[] | null;
   readOnly: boolean;
   secret: string;
 }
@@ -51,7 +53,7 @@ export class StorageDirectory {
   async key(accessKeyId: string): Promise<ActiveKey | null> {
     const key = await this.keys.findOneBy({ id: accessKeyId, revokedAt: IsNull() });
     if (!key) return null;
-    return { id: key.id, accountId: key.accountId, functionId: key.functionId, buckets: key.buckets, readOnly: key.readOnly, secret: this.secretOf(key) };
+    return { id: key.id, accountId: key.accountId, functionId: key.functionId, buckets: key.buckets, queues: key.queues, readOnly: key.readOnly, secret: this.secretOf(key) };
   }
 
   /** The account a key belongs to: its status, whether FF turned its storage off, and whether its buckets are full; null for none. */

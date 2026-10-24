@@ -7,7 +7,7 @@ import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
-import { MinioClientService } from './minio-client.service';
+import { ObjectStoreService } from './object-store.service';
 
 interface Captured {
   method: string;
@@ -48,20 +48,20 @@ async function fakeS3(reply: (req: Captured) => { status: number; body?: string 
 
 const s3Error = (code: string) => `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>${code}</Message></Error>`;
 
-describe('MinioClientService (L1, P-09)', () => {
+describe('ObjectStoreService (L1)', () => {
   const opened: Array<{ close: () => unknown }> = [];
 
   function storage(port: number) {
     const values: Record<string, unknown> = {
       // A host name, as in production: with an IP address the SDK puts the bucket in the path anyway.
-      'minio.endPoint': 'localhost',
-      'minio.port': port,
-      'minio.useSSL': false,
-      'minio.accessKey': 'ffdevaccesskey',
-      'minio.secretKey': 'ffdevsecretkey-local-only',
-      'minio.bucketName': 'functions',
+      'objectStore.endPoint': 'localhost',
+      'objectStore.port': port,
+      'objectStore.useSSL': false,
+      'objectStore.accessKey': 'ffdevaccesskey',
+      'objectStore.secretKey': 'ffdevsecretkey-local-only',
+      'objectStore.bucketName': 'functions',
     };
-    const service = new MinioClientService({ get: (key: string) => values[key] } as unknown as ConfigService);
+    const service = new ObjectStoreService({ get: (key: string) => values[key] } as unknown as ConfigService);
     opened.push({ close: () => service.onModuleDestroy() });
     return service;
   }

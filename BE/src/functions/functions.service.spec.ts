@@ -4,7 +4,7 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
-import { MinioClientService, StoredObjectMissingError } from '../minio-client/minio-client.service';
+import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import {
   FunctionLoadError,
   FunctionRuntimeError,
@@ -41,10 +41,13 @@ import { Observable } from 'rxjs';
 
 /** What the caller sees of a platform failure (D4): no details, and the request ID. */
 const internal = (action: string) => new RegExp(`^${action} failed because of an internal error \\(request [0-9a-f-]{36}\\)\\.$`);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 describe('FunctionsService (orchestrator-agnostic)', () => {
   let service: FunctionsService;
   let orchestrator: jest.Mocked<Orchestrator>;
+  /** The n-th invocation the service made, as it made it: its ID is its request's. */
+  const created = (n = 0) => invocationsRepo.create.mock.results[n].value as FunctionInvocation;
   let savedStatuses: FunctionStatus[];
   const functionsRepo = {
     create: jest.fn(),
@@ -138,8 +141,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     Object.assign(functionsRepo, {
       manager: { transaction: jest.fn(async (work) => work(transaction)), existsBy: jest.fn(async (_target, where: { name: string }) => named(where)) },
     });
-    // The database's ID, unless the caller chose one.
-    invocationsRepo.create.mockImplementation((dto) => ({ id: 'inv-1', ...dto, createdAt: new Date('2026-10-17T10:00:00Z') }));
+    // The row as made, with the database's time.
+    invocationsRepo.create.mockImplementation((dto) => ({ ...dto, createdAt: new Date('2026-10-17T10:00:00Z') }));
     ending.findOne.mockImplementation(async () => ({ status: InvocationStatus.RUNNING }));
     ending.save.mockImplementation(async (_target, entity) => invocationsRepo.save({ ...entity, updatedAt: new Date('2026-10-17T10:00:02Z') }));
     Object.assign(invocationsRepo, { manager: { transaction: jest.fn(async (work) => work(ending)) } });
@@ -168,7 +171,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         FunctionsService,
         { provide: getRepositoryToken(Function), useValue: functionsRepo },
         { provide: getRepositoryToken(FunctionInvocation), useValue: invocationsRepo },
-        { provide: MinioClientService, useValue: storage },
+        { provide: ObjectStoreService, useValue: storage },
         { provide: ORCHESTRATOR, useValue: orchestrator },
         // Return each key's default, as ConfigService does without overrides.
         { provide: ConfigService, useValue: { get: jest.fn((_key: string, fallback?: unknown) => fallback) } },
@@ -922,19 +925,30 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await expect(service.invoke('user-1', 'fn-1', {})).rejects.toBe(refusal);
 
       expect(credit.admit).toHaveBeenCalledWith('user-1');
-      expect([invocationsRepo.save.mock.calls.length, orchestrator.invoke.mock.calls.length, usage.record.mock.calls.length]).toEqual([0, 0, 0]);
+      expect([invocationsRepo.insert.mock.calls.length, orchestrator.invoke.mock.calls.length, usage.record.mock.calls.length]).toEqual([0, 0, 0]);
       expect(refusal.getStatus()).toBe(HttpStatus.PAYMENT_REQUIRED);
     });
 
-    it('records a call through the API as such, under the ID the database gives it', async () => {
+    it("records a call through the API as such, under a new request's ID, its first and only attempt, inserted at once", async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       orchestrator.invoke.mockResolvedValue({ output: 1, durationMs: 1, memoryUsedMb: 1 });
 
       await service.invoke('user-1', 'fn-1', {});
 
-      expect(invocationsRepo.create).toHaveBeenCalledWith(expect.objectContaining({ source: InvocationSource.API }));
-      expect(invocationsRepo.create.mock.calls[0][0]).not.toHaveProperty('id');
-      expect(invocationsRepo.insert).not.toHaveBeenCalled();
+      expect(invocationsRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ source: InvocationSource.API, attempt: 1 }));
+      expect(created().id).toMatch(UUID);
+      expect(created().requestId).toBe(created().id);
+    });
+
+    it("records an asynchronous call's retry as an invocation of its own, under the request's ID with its attempt, which the runtime and the record name", async () => {
+      orchestrator.invoke.mockResolvedValue({ output: 'done', durationMs: 4 });
+
+      const outcome = await service.call(activeFunction(), { n: 1 }, { source: InvocationSource.ASYNC, requestId: 'req-3', attempt: 2 });
+
+      expect(outcome.invocation).toMatchObject({ requestId: 'req-3', attempt: 2, source: InvocationSource.ASYNC, status: InvocationStatus.COMPLETED });
+      expect(outcome.invocation.id).toMatch(UUID);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, 'req-3');
+      expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-3' }), ending);
     });
 
     it('records a call that came another way under the ID its caller chose, keeping what the caller says to keep', async () => {
@@ -984,7 +998,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1', { a: 1 });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, 'inv-1');
+      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, created().requestId);
       expect(invocation).toMatchObject({
         status: InvocationStatus.COMPLETED,
         output: { hello: 'world' },
@@ -1023,7 +1037,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1');
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, 'inv-1');
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, created().requestId);
       expect(invocation.duration).toBeGreaterThanOrEqual(0);
     });
 
@@ -1059,9 +1073,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect([raised.getStatus(), raised.getResponse()]).toEqual([
         400,
-        { statusCode: 400, error: 'Bad Request', message: 'Error: boom', invocation: { id: 'inv-1', status: InvocationStatus.ERROR, duration: 12, memoryUsed: 61 } },
+        { statusCode: 400, error: 'Bad Request', message: 'Error: boom', invocation: { id: created(0).id, status: InvocationStatus.ERROR, duration: 12, memoryUsed: 61 } },
       ]);
-      expect(timedOut.getResponse()).toMatchObject({ invocation: { id: 'inv-1', status: InvocationStatus.TIMEOUT, duration: 5003, memoryUsed: null } });
+      expect(timedOut.getResponse()).toMatchObject({ invocation: { id: created(1).id, status: InvocationStatus.TIMEOUT, duration: 5003, memoryUsed: null } });
     });
 
     it('records a platform failure as ERROR with a generic message, in the history too; the details go to the log (D4)', async () => {
@@ -1303,10 +1317,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await service.invoke('user-1', 'fn-1', { name: 'x' });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, 'inv-1');
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, created().requestId);
       expect(usage.record).toHaveBeenCalledWith(
         {
-          requestId: 'inv-1',
+          requestId: created().requestId,
           startedAt: new Date('2026-10-17T10:00:00Z'),
           endedAt: new Date('2026-10-17T10:00:02Z'),
           accountId: 'user-1',
@@ -1390,7 +1404,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await service.invoke('user-1', 'fn-1', {});
 
-      expect(ending.findOne).toHaveBeenCalledWith(FunctionInvocation, { where: { id: 'inv-1' }, lock: { mode: 'pessimistic_write' } });
+      expect(ending.findOne).toHaveBeenCalledWith(FunctionInvocation, { where: { id: created().id }, lock: { mode: 'pessimistic_write' } });
       expect(ending.findOne.mock.invocationCallOrder[0]).toBeLessThan(ending.save.mock.invocationCallOrder[0]);
     });
 
@@ -1414,7 +1428,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.invoke('user-1', 'fn-1', {});
 
       expect(ending.save).not.toHaveBeenCalled();
-      expect(record()).toMatchObject({ requestId: 'inv-1', status: 'success', billedMs: 31, endedAt: expect.any(Date) });
+      expect(record()).toMatchObject({ requestId: created().requestId, status: 'success', billedMs: 31, endedAt: expect.any(Date) });
     });
   });
 
@@ -1687,6 +1701,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         AWS_REGION: 'tn-tunis-1',
         AWS_DEFAULT_REGION: 'tn-tunis-1',
         AWS_ENDPOINT_URL_S3: 'http://10.43.0.251:3002',
+        AWS_ENDPOINT_URL_SQS: 'http://10.43.0.251:3003',
       },
     };
     const given = () => [...orchestrator.deploy.mock.calls, ...orchestrator.update.mock.calls].map(([fn]) => fn.environment);
@@ -1755,9 +1770,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       });
 
       it("keeps FF's names FF's, over a variable a function was given before they were reserved", () => {
-        const before = { ...environment, variables: { AWS_ENDPOINT_URL_S3: 'https://s3.amazonaws.com' } };
+        const before = { ...environment, variables: { AWS_ENDPOINT_URL_S3: 'https://s3.amazonaws.com', AWS_ENDPOINT_URL_SQS: 'https://sqs.us-east-1.amazonaws.com' } };
 
-        expect(workloadOf(fn, before, 'image', credentials).environment?.values.AWS_ENDPOINT_URL_S3).toBe('http://10.43.0.251:3002');
+        expect(workloadOf(fn, before, 'image', credentials).environment?.values).toMatchObject({
+          AWS_ENDPOINT_URL_S3: 'http://10.43.0.251:3002',
+          AWS_ENDPOINT_URL_SQS: 'http://10.43.0.251:3003',
+        });
       });
     });
   });

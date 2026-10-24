@@ -1,12 +1,13 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
-import { ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
+import { ApiHeader, ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
 import type { ServerResponse } from 'node:http';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { Invocation } from '../plans/rate-limits';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
-import { InvokeFunctionDto } from './dto/invoke-function.dto';
+import { AsyncInvocationView, InvocationType, InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListFunctionsQuery } from './dto/list-functions.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { SecretsView, UpdateSecretsDto } from './dto/secrets.dto';
@@ -15,7 +16,17 @@ import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-conf
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
 import { sendEvents } from './event-stream';
+import { AsyncInvocationsService } from './async-invocations.service';
 import { FunctionView, FunctionsService } from './functions.service';
+
+const INVOCATION_TYPES = Object.values(InvocationType) as string[];
+
+/** The call's invocation type: the header's, as Lambda takes it, else the body's, else RequestResponse. */
+export function invocationTypeOf(header: string | undefined, body: InvocationType | undefined): InvocationType {
+  if (header === undefined) return body ?? InvocationType.REQUEST_RESPONSE;
+  if (!INVOCATION_TYPES.includes(header)) throw new BadRequestException(`X-Amz-Invocation-Type must be ${INVOCATION_TYPES.join(', ')}: "${header}" is none of them`);
+  return header as InvocationType;
+}
 
 /**
  * Every route acts for the caller's account (D4): without a principal it
@@ -26,7 +37,10 @@ import { FunctionView, FunctionsService } from './functions.service';
 @ApiTags('functions')
 @Controller('functions')
 export class FunctionsController {
-  constructor(private readonly functionsService: FunctionsService) {}
+  constructor(
+    private readonly functionsService: FunctionsService,
+    private readonly asyncInvocations: AsyncInvocationsService,
+  ) {}
 
   @Post()
   @RequireScope('functions:write')
@@ -100,14 +114,42 @@ export class FunctionsController {
   @RequireScope('functions:invoke')
   @RequireRole(...WRITERS)
   @RequireActiveAccount()
-  @ApiOperation({ summary: 'Invoke a function' })
+  @ApiOperation({
+    summary: 'Invoke a function',
+    description:
+      "As AWS Lambda's Invoke, its invocation type in the header X-Amz-Invocation-Type or in invocationType: RequestResponse waits for the call; " +
+      "Event keeps it in the function's queue and answers 202 with its request ID at once, then runs it, retried twice on the function's " +
+      'failure (a minute, then two minutes later), with a backoff when throttled, for six hours at most, each attempt in the history under ' +
+      'that request ID; DryRun only checks, and answers 204.',
+  })
+  @ApiHeader({ name: 'X-Amz-Invocation-Type', required: false, enum: InvocationType })
   @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
-  @ApiResponse({ status: 413, description: 'The input is over 6 MB as JSON, AWS Lambda\'s limit for a synchronous call: RequestEntityTooLargeException, as Lambda names it' })
+  @ApiResponse({ status: 202, description: "Event: the call is kept, and runs without waiting; its attempts are in the function's history", type: AsyncInvocationView })
+  @ApiResponse({ status: 204, description: 'DryRun: the call could be made; nothing ran' })
+  @ApiResponse({
+    status: 413,
+    description:
+      "The input is over AWS Lambda's limit as JSON, 6 MB for a call waited for, 1 MB for an Event: RequestEntityTooLargeException, as Lambda names it",
+  })
+  @ApiResponse({ status: 429, description: "Over the plan's invocations per second; or, for an Event, the account's messages hold the plan's limit together" })
   async invoke(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() invokeFunctionDto: InvokeFunctionDto,
+    @Headers('x-amz-invocation-type') invocationType: string | undefined,
     @Principal() principal: Principal,
-  ): Promise<FunctionInvocation> {
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<FunctionInvocation | AsyncInvocationView | void> {
+    const type = invocationTypeOf(invocationType, invokeFunctionDto.invocationType);
+    if (type === InvocationType.EVENT) {
+      const queued = await this.asyncInvocations.queue(principal.accountId, id, invokeFunctionDto.input);
+      response.status(202);
+      return queued;
+    }
+    if (type === InvocationType.DRY_RUN) {
+      await this.asyncInvocations.dryRun(principal.accountId, id, invokeFunctionDto.input);
+      response.status(204);
+      return;
+    }
     return this.functionsService.invoke(principal.accountId, id, invokeFunctionDto.input);
   }
 

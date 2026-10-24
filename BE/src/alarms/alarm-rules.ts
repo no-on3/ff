@@ -1,12 +1,12 @@
-import type { BucketMetricsView, BucketRequestMetric, DatabaseMetricsView, MetricsView } from '../metrics/customer-metrics';
+import type { BucketMetricsView, BucketRequestMetric, DatabaseMetricsView, MetricsView, QueueMetricsView } from '../metrics/customer-metrics';
 import { DATABASE_PERIOD } from '../metrics/customer-metrics';
 
 /**
  * An alarm's rules, as CloudWatch's: a metric and its statistic over a
  * period, compared with a threshold, "M out of N" periods breaching, and what
  * a period without a datapoint counts as. The metrics are those of the
- * metrics API, a database's and a bucket's among them, and two of the
- * account's money, read as they are.
+ * metrics API, a database's, a bucket's and a queue's among them, and two of
+ * the account's money, read as they are.
  */
 
 /** The metrics an alarm watches, and the statistics each has. */
@@ -17,6 +17,11 @@ export const STATISTICS = {
   ColdStarts: ['Sum'],
   Duration: ['Average', 'Maximum', 'p50', 'p95', 'p99'],
   Instances: ['Maximum', 'Average'],
+  // A function's calls that don't wait, as Lambda names its metrics of them.
+  AsyncEventsReceived: ['Sum'],
+  AsyncEventAge: ['Average', 'Maximum'],
+  AsyncEventsDropped: ['Sum'],
+  DestinationDeliveryFailures: ['Sum'],
   // A customer's database's, a point an hour, as CloudWatch names RDS's and Aurora's.
   DatabaseConnections: ['Maximum', 'Average'],
   VolumeBytesUsed: ['Maximum', 'Average'],
@@ -30,6 +35,16 @@ export const STATISTICS = {
   '5xxErrors': ['Sum'],
   BytesDownloaded: ['Sum'],
   BytesUploaded: ['Sum'],
+  // A customer's queue's, as CloudWatch names SQS's: its messages, sampled each minute, and its requests.
+  ApproximateNumberOfMessagesVisible: ['Maximum', 'Average'],
+  ApproximateNumberOfMessagesNotVisible: ['Maximum', 'Average'],
+  ApproximateNumberOfMessagesDelayed: ['Maximum', 'Average'],
+  ApproximateAgeOfOldestMessage: ['Maximum'],
+  NumberOfMessagesSent: ['Sum'],
+  NumberOfMessagesReceived: ['Sum'],
+  NumberOfMessagesDeleted: ['Sum'],
+  NumberOfEmptyReceives: ['Sum'],
+  SentMessageSize: ['Average', 'Maximum'],
   // The account's money, in the prices' currency, read as it is at each evaluation.
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
@@ -44,6 +59,18 @@ export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharge
 export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
 /** A bucket's: the alarm names it. */
 export const BUCKET_METRICS: readonly Metric[] = ['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'];
+/** A queue's: the alarm names it. */
+export const QUEUE_METRICS: readonly Metric[] = [
+  'ApproximateNumberOfMessagesVisible',
+  'ApproximateNumberOfMessagesNotVisible',
+  'ApproximateNumberOfMessagesDelayed',
+  'ApproximateAgeOfOldestMessage',
+  'NumberOfMessagesSent',
+  'NumberOfMessagesReceived',
+  'NumberOfMessagesDeleted',
+  'NumberOfEmptyReceives',
+  'SentMessageSize',
+];
 
 export const COMPARISONS = ['GreaterThanThreshold', 'GreaterThanOrEqualToThreshold', 'LessThanThreshold', 'LessThanOrEqualToThreshold'] as const;
 export type Comparison = (typeof COMPARISONS)[number];
@@ -67,6 +94,8 @@ export interface AlarmRule {
   databaseId: string | null;
   /** The bucket it names, if any. */
   bucketId: string | null;
+  /** The queue it names, if any. */
+  queueId: string | null;
   metric: Metric;
   statistic: Statistic;
   period: number;
@@ -92,6 +121,11 @@ export function alarmProblem(rule: AlarmRule): string | null {
     if (!rule.bucketId || rule.functionId || rule.databaseId) return `${rule.metric} is a bucket's: the alarm names a bucketName, and no function or database`;
   } else if (rule.bucketId) {
     return `A bucketName goes with a bucket's metrics only: ${BUCKET_METRICS.join(', ')}`;
+  }
+  if (QUEUE_METRICS.includes(rule.metric)) {
+    if (!rule.queueId || rule.functionId || rule.databaseId || rule.bucketId) return `${rule.metric} is a queue's: the alarm names a queueName, and no function, database or bucket`;
+  } else if (rule.queueId) {
+    return `A queueName goes with a queue's metrics only: ${QUEUE_METRICS.join(', ')}`;
   }
   if (BILLING_METRICS.includes(rule.metric)) {
     if (rule.functionId) return `${rule.metric} is the account's: a billing alarm names no function`;
@@ -177,13 +211,35 @@ export function bucketDatapointsOf(view: BucketMetricsView, metric: Metric, stat
   return requests.Sum;
 }
 
+/** A queue's metric's datapoints, oldest first: its messages and their age every period, an empty queue's 0; the size of messages sent null where none was. */
+export function queueDatapointsOf(view: QueueMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
+  const m = view.metrics;
+  switch (metric) {
+    case 'ApproximateNumberOfMessagesVisible':
+    case 'ApproximateNumberOfMessagesNotVisible':
+    case 'ApproximateNumberOfMessagesDelayed':
+      return m[metric][statistic as 'Maximum' | 'Average'];
+    case 'ApproximateAgeOfOldestMessage':
+      return m.ApproximateAgeOfOldestMessage.Maximum;
+    case 'NumberOfMessagesSent':
+    case 'NumberOfMessagesReceived':
+    case 'NumberOfMessagesDeleted':
+    case 'NumberOfEmptyReceives':
+      return m[metric].Sum;
+    case 'SentMessageSize':
+      return m.SentMessageSize[statistic as 'Average' | 'Maximum'];
+    default:
+      throw new Error(`${metric} isn't a queue's metric`);
+  }
+}
+
 /** A database's metric's datapoints, oldest first: null for an hour it wasn't sampled in. */
 export function databaseDatapointsOf(view: DatabaseMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
   if (metric !== 'DatabaseConnections' && metric !== 'VolumeBytesUsed') throw new Error(`${metric} isn't a database's metric`);
   return view.metrics[metric][statistic as 'Maximum' | 'Average'];
 }
 
-/** A metric's datapoints in a metrics answer, oldest first: a count's every period, a duration's null where no call was measured. */
+/** A metric's datapoints in a metrics answer, oldest first: a count's every period, a duration's and an event's age null where nothing was measured. */
 export function datapointsOf(view: MetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
   const m = view.metrics;
   switch (metric) {
@@ -191,7 +247,12 @@ export function datapointsOf(view: MetricsView, metric: Metric, statistic: Stati
     case 'Errors':
     case 'Throttles':
     case 'ColdStarts':
+    case 'AsyncEventsReceived':
+    case 'AsyncEventsDropped':
+    case 'DestinationDeliveryFailures':
       return m[metric];
+    case 'AsyncEventAge':
+      return m.AsyncEventAge[statistic as 'Average' | 'Maximum'];
     case 'Duration':
       return m.Duration[statistic as keyof MetricsView['metrics']['Duration']];
     case 'Instances':

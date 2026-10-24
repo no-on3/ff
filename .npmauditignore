@@ -1,0 +1,22 @@
+# Advisories hack/ci.sh's npm audit accepts in what ships, each in the one directory and package named, with why, and
+# until when: from that date on, the audit reports it again. Any other high or critical advisory fails the stage.
+# One line each, the comment above it saying why (hack/lib/npm-audit.py reads them):
+#   <directory> <package> <advisory> <expires>
+
+# body-parser 2.3.0, through Express 5.2.1: a compressed body with bytes after its end, a denial of service. The API
+# refuses every compressed body before any parser reads it (BE/src/app-setup.ts), and the backend's other servers
+# (function URLs, buckets, queues) read their bodies without it: nothing reaches the flaw. Fixed in 2.4.0
+# (2026-10-22), two weeks old on 2026-11-05: updated then.
+BE body-parser GHSA-27r3-jxmh-p828 2026-11-05
+
+# multer 2.4.0, which @nestjs/platform-express 12.1.2 pins: a denial of service through an asynchronous fileFilter
+# still pending when the request ends. Multer only runs behind Nest's file interceptors, which the backend uses
+# nowhere: nothing reaches it. Fixed in 2.5.0 (2026-10-22), two weeks old on 2026-11-05: an override in
+# BE/package.json then, until Nest pins it.
+BE multer GHSA-q7qp-rjg7-q26m 2026-11-05
+
+# zod 4.6.5: memory exhausted while validating an oversized collection with constraints. The backend validates with
+# it its own configuration, what operators set (platform settings, price books, plan limits), and one customer's
+# request, an owner's shares for the low-balance e-mails: a list the body's limit, 100 KB, keeps under some 50,000
+# numbers. Fixed in 4.6.6 (2026-10-11), two weeks old on 2026-10-25: updated then.
+BE zod GHSA-mrhx-c7xc-m3w5 2026-10-25

@@ -95,7 +95,7 @@ export interface AccountSummary {
   dataDeletionDueAt: string | null;
   /** When they were deleted; null until then. */
   dataDeletedAt: string | null;
-  /** When an operator turned its databases and buckets off; null while they are on. */
+  /** When an operator turned its databases, buckets and queues off; null while they are on. */
   storageDisabledAt: string | null;
   /** Why, which its members read too. */
   storageDisabledReason: string | null;
@@ -136,11 +136,53 @@ export interface AccountBucket {
 /** The fields the API gives for each of them. */
 export const BUCKET_FIELDS = ['name', 'storeName', 'status', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const;
 
+/** One of the account's queues: its messages counted now, what they hold, and where its dead letters go. */
+export interface AccountQueue {
+  name: string;
+  messages: { available: number; inFlight: number; delayed: number };
+  sizeBytes: number;
+  /** The queue its messages go to after too many receives; null for none. */
+  deadLetterQueue: string | null;
+  createdAt: string;
+}
+
+/** The fields the API gives for each of them, and for their messages. */
+export const QUEUE_FIELDS = ['name', 'messages', 'sizeBytes', 'deadLetterQueue', 'createdAt'] as const;
+export const QUEUE_MESSAGES_FIELDS = ['available', 'inFlight', 'delayed'] as const;
+
+/** What the account's queues hold together with its functions' calls that don't wait, against the plan's room for them. */
+export interface QueueStorage {
+  bytes: number;
+  limitMb: number;
+}
+
+export const QUEUE_STORAGE_FIELDS = ['bytes', 'limitMb'] as const;
+
+/** A queue's messages, in a few words: those in flight and delayed when there are some. */
+export function queueMessagesLabel(messages: AccountQueue['messages']): string {
+  const parts = [`${messages.available.toLocaleString('en-US')} waiting`];
+  if (messages.inFlight) parts.push(`${messages.inFlight.toLocaleString('en-US')} in flight`);
+  if (messages.delayed) parts.push(`${messages.delayed.toLocaleString('en-US')} delayed`);
+  return parts.join(', ');
+}
+
+/** What the page says of the queues' room: what they hold with the calls that don't wait, of the plan's. */
+export function queueStorageLabel(storage: QueueStorage): string {
+  return `${formatBytes(storage.bytes)} of the plan's ${storage.limitMb.toLocaleString('en-US')} MB, its functions' calls that don't wait among them; past it, sends and those calls are refused`;
+}
+
 /** What the page says of the account's buckets together against its plan's storage. */
 export function bucketStorageLabel(account: Pick<AccountSummary, 'bucketStorageNotice'>): string {
   if (account.bucketStorageNotice === 100) return "Full: they hold all of the plan's storage, and uploads wait for room";
   if (account.bucketStorageNotice === 80) return "80% or more of the plan's storage";
   return "Under 80% of the plan's storage";
+}
+
+/** A size as people read it, for what queues hold: bytes, KB under a megabyte, then MB as formatMegabytes says them. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
+  if (bytes < 1_048_576) return `${(Math.round((bytes / 1024) * 10) / 10).toLocaleString('en-US', { maximumFractionDigits: 1 })} KB`;
+  return formatMegabytes(bytes);
 }
 
 /** A size in MB of 1,048,576 bytes, to a tenth: "7.3 MB"; "–" when unknown. */
@@ -149,7 +191,7 @@ export function formatMegabytes(bytes: number | null): string {
   return `${(Math.round((bytes / 1_048_576) * 10) / 10).toLocaleString('en-US', { maximumFractionDigits: 1 })} MB`;
 }
 
-/** What the page says of the account's databases and buckets: on, or off since when and why. */
+/** What the page says of the account's databases, buckets and queues: on, or off since when and why. */
 export function storageLabel(account: Pick<AccountSummary, 'storageDisabledAt' | 'storageDisabledReason'>, when: (at: string) => string): string {
   return account.storageDisabledAt ? `Off since ${when(account.storageDisabledAt)}: ${account.storageDisabledReason ?? ''}` : 'On';
 }
@@ -179,6 +221,9 @@ export interface AccountView {
   databases: AccountDatabase[];
   /** Its buckets, by name. */
   buckets: AccountBucket[];
+  /** Its queues, by name. */
+  queues: AccountQueue[];
+  queueStorage: QueueStorage;
   usage: { month: string; totals: UsageTotals };
   /** Each wallet's balance (P-31), with its currency's decimals; none before the account's first credit or debit. */
   balances: Array<{ currency: string; balance: string }>;

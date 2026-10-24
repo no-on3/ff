@@ -10,9 +10,13 @@ import type { AccountSummary } from './accounts';
 export const FUNCTION_HIT_FIELDS = ['id', 'name', 'runtime', 'status', 'accountId', 'accountName'] as const;
 export type FunctionHit = Record<(typeof FUNCTION_HIT_FIELDS)[number], string>;
 
-export const CALL_HIT_FIELDS = ['requestId', 'functionId', 'functionName', 'accountId', 'status', 'at', 'inHistory', 'functionExists'] as const;
+export const CALL_HIT_FIELDS = ['requestId', 'invocationId', 'attempt', 'functionId', 'functionName', 'accountId', 'status', 'at', 'inHistory', 'functionExists'] as const;
 export interface CallHit {
   requestId: string;
+  /** The attempt's invocation, which the function's page opens; null when only its usage record was found. */
+  invocationId: string | null;
+  /** Which attempt of the request it was, an asynchronous call's from 1; null when only its usage record was found. */
+  attempt: number | null;
   functionId: string;
   /** Its name when it was called. */
   functionName: string;
@@ -30,12 +34,17 @@ export interface SearchResults {
   calls: CallHit[];
 }
 
-export const CALL_FIELDS = ['id', 'status', 'source', 'duration', 'memoryUsed', 'createdAt', 'errorType'] as const;
-/** What brought a call: the API, the function's URL, or a schedule. */
-export type CallSource = 'api' | 'url' | 'schedule';
+export const CALL_FIELDS = ['id', 'requestId', 'attempt', 'status', 'source', 'duration', 'memoryUsed', 'createdAt', 'errorType'] as const;
+/** What brought a call: the API, the function's URL, a schedule, or an asynchronous call. */
+export type CallSource = 'api' | 'url' | 'schedule' | 'async' | 'sqs';
 /** A call, without what went in or out. */
 export interface Call {
+  /** The invocation's ID: its request's, but for an asynchronous call's retries. */
   id: string;
+  /** Its request ID, which its log lines name: every attempt of an asynchronous call keeps the first's. */
+  requestId: string;
+  /** Which attempt of its request it was: an asynchronous call's from 1. */
+  attempt: number;
   status: string;
   source: CallSource;
   /** Milliseconds. */
@@ -156,8 +165,9 @@ export const outcome = (call: Pick<Call, 'status' | 'errorType'>): string => (ca
 /** Where a call was found: the history, or only its usage record once the history no longer keeps it. */
 export const foundIn = (call: Pick<CallHit, 'inHistory'>): string => (call.inHistory ? 'the history' : 'its usage record only: the history no longer keeps it');
 
-/** What brought a call, to read. */
-export const sourceText = (source: CallSource): string => ({ api: 'API', url: 'URL', schedule: 'Schedule' })[source] ?? source;
+/** What brought a call, to read; an asynchronous call's attempt with its number. */
+export const sourceText = (source: CallSource, attempt = 1): string =>
+  source === 'async' ? `Asynchronous, attempt ${attempt}` : (({ api: 'API', url: 'URL', schedule: 'Schedule', sqs: 'A queue it reads' })[source] ?? source);
 
 /** The event a function takes, to read. */
 export const eventFormatText = (format: FunctionPage['function']['eventFormat']): string =>

@@ -1,11 +1,14 @@
 import {
   CopyObjectCommand,
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   GetBucketLocationCommand,
+  GetBucketNotificationConfigurationCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListBucketsCommand,
   ListObjectsV2Command,
+  PutBucketNotificationConfigurationCommand,
   PutBucketPolicyCommand,
   PutObjectCommand,
   S3Client,
@@ -21,6 +24,9 @@ import { CreditService } from '../billing/credit.service';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { plan } from '../plans/test-fixtures';
+import { BucketEvent, BucketEvents } from './bucket-events';
+import { NotificationRule } from './bucket-notifications';
+import { BucketNotificationsService } from './bucket-notifications.service';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
@@ -30,10 +36,12 @@ import { StorageRequestCountsService } from './storage-request-counts.service';
 
 const STORE_KEY = 'storekey';
 const STORE_SECRET = 'store-secret';
-const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, readOnly: false, secret: 'a'.repeat(40) };
+const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, queues: null, readOnly: false, secret: 'a'.repeat(40) };
 const READ_ONLY: ActiveKey = { ...KEY, id: 'AKFFBBBBBBBBBBBBBBBB', readOnly: true };
 const OTHERS: ActiveKey = { ...KEY, id: 'AKFFCCCCCCCCCCCCCCCC', accountId: '000000000002' };
 const NARROW: ActiveKey = { ...KEY, id: 'AKFFDDDDDDDDDDDDDDDD', buckets: ['photos'] };
+/** A key that names queues alone: it reaches no bucket. */
+const QUEUES_ONLY: ActiveKey = { ...KEY, id: 'AKFFEEEEEEEEEEEEEEEE', queues: ['orders'] };
 const bucket = (name: string, accountId: string, storeName: string): Bucket =>
   Object.assign(new Bucket(), { id: `id-${name}`, accountId, name, storeName, status: BucketStatus.ACTIVE, createdAt: new Date('2026-10-23T06:00:00Z') });
 const BUCKETS = [bucket('photos', KEY.accountId, 'ff-000000000000000000000001'), bucket('exports', KEY.accountId, 'ff-000000000000000000000002'), bucket('theirs', OTHERS.accountId, 'ff-000000000000000000000003')];
@@ -93,6 +101,10 @@ function fakeStore(seen: StoreRequestSeen[]): Server {
         response
           .writeHead(200, { 'content-type': 'application/xml' })
           .end(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${storeName}</Name><KeyCount>${keys.length}</KeyCount>${keys.map((k) => `<Contents><Key>${k}</Key><Size>1</Size></Contents>`).join('')}<IsTruncated>false</IsTruncated></ListBucketResult>`);
+      } else if (request.method === 'HEAD' && key.length) {
+        const object = objects.get(name);
+        if (!object) response.writeHead(404).end();
+        else response.writeHead(200, { 'content-length': object.length, etag: '"etag-1"' }).end();
       } else if (request.method === 'POST') {
         response.writeHead(200, { 'content-type': 'application/xml' }).end('<DeleteResult><Deleted><Key>a.txt</Key></Deleted></DeleteResult>');
       } else {
@@ -113,7 +125,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   let endpoint: string;
   const seen: StoreRequestSeen[] = [];
   const counted: CountedRequest[] = [];
-  const keys = new Map([KEY, READ_ONLY, OTHERS, NARROW].map((key) => [key.id, key]));
+  const keys = new Map([KEY, READ_ONLY, OTHERS, NARROW, QUEUES_ONLY].map((key) => [key.id, key]));
   const directory = {
     key: async (id: string) => keys.get(id) ?? null,
     bucket: async (name: string) => BUCKETS.find((b) => b.name === name) ?? null,
@@ -142,6 +154,11 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       return { totalHits: total, timeToExpire: 1, isBlocked: total > limit, timeToBlockExpire: 1 };
     },
   };
+  /** What the bucket's notifications got: each configuration kept, and each event published. */
+  const kept: Array<[Bucket, NotificationRule[], unknown]> = [];
+  const notifications = { keep: async (bucket: Bucket, rules: NotificationRule[], options: unknown) => void kept.push([bucket, rules, options]) } as unknown as BucketNotificationsService;
+  const published: BucketEvent[] = [];
+  const bucketEvents = { publish: async (event: BucketEvent) => void published.push(event) } as unknown as BucketEvents;
   const client = (key: ActiveKey = KEY, secret = key.secret) =>
     new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: secret }, maxAttempts: 1 });
   /** The SDK's error for a refused call: its name and status. */
@@ -160,9 +177,9 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     const storePort = await listening(store);
     const config = new ConfigService({
       storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
-      minio: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
+      objectStore: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
-    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler);
+    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents);
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 
@@ -175,6 +192,8 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     seen.length = 0;
     counted.length = 0;
     hits.clear();
+    kept.length = 0;
+    published.length = 0;
   });
 
   it("puts a string, its SHA-256 and CRC-32 checked, and the store gets the object under its own name, FF's signature, no checksum", async () => {
@@ -242,23 +261,26 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   it("answers ListBuckets, GetBucketLocation and HeadBucket itself, from FF's own records", async () => {
     const listed = await client().send(new ListBucketsCommand({}));
     const narrow = await client(NARROW).send(new ListBucketsCommand({}));
+    const queuesOnly = await client(QUEUES_ONLY).send(new ListBucketsCommand({}));
     const location = await client().send(new GetBucketLocationCommand({ Bucket: 'photos' }));
     const head = await client().send(new HeadBucketCommand({ Bucket: 'photos' }));
 
     expect(listed.Buckets?.map((b) => b.Name)).toEqual(['photos', 'exports']);
     expect(narrow.Buckets?.map((b) => b.Name)).toEqual(['photos']);
+    expect(queuesOnly.Buckets ?? []).toEqual([]);
     expect(location.LocationConstraint).toBe('tn-tunis-1');
     expect(head.$metadata.httpStatusCode).toBe(200);
     expect(seen).toEqual([]);
   });
 
-  it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, another account's bucket, a bucket the key doesn't name, a write with a read-only key, none at all", async () => {
+  it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, another account's bucket, a bucket the key doesn't reach, a write with a read-only key, none at all", async () => {
     const get = new GetObjectCommand({ Bucket: 'photos', Key: 'range.txt' });
 
     expect(await refused(client(KEY, 'b'.repeat(40)).send(get))).toBe('403 SignatureDoesNotMatch');
     expect(await refused(client({ ...KEY, id: 'AKFFZZZZZZZZZZZZZZZZ' }).send(get))).toBe('403 InvalidAccessKeyId');
     expect(await refused(client().send(new GetObjectCommand({ Bucket: 'theirs', Key: 'x' })))).toBe('403 AccessDenied');
     expect(await refused(client(NARROW).send(new ListObjectsV2Command({ Bucket: 'exports' })))).toBe('403 AccessDenied');
+    expect(await refused(client(QUEUES_ONLY).send(new ListObjectsV2Command({ Bucket: 'photos' })))).toBe('403 AccessDenied');
     expect(await refused(client(READ_ONLY).send(new PutObjectCommand({ Bucket: 'photos', Key: 'x', Body: 'x' })))).toBe('403 AccessDenied');
     expect(await refused(client().send(new GetObjectCommand({ Bucket: 'nowhere', Key: 'x' })))).toBe('404 NoSuchBucket');
     expect(await refused(client().send(new PutBucketPolicyCommand({ Bucket: 'photos', Policy: '{}' })))).toBe('501 NotImplemented');
@@ -397,5 +419,128 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     const asked = ['s3.example.test', 'Photos.S3.example.test', 'nowhere.s3.example.test', 'evil.example.test', 'a.photos.s3.example.test', 'theirs.s3.example.test'];
 
     expect(await Promise.all(asked.map((domain) => frontDoor.allowsCertificate(domain)))).toEqual([true, true, false, false, false, true]);
+  });
+  describe("a bucket's notifications, as S3's", () => {
+    const FUNCTION_ARN = `arn:aws:lambda:tn-tunis-1:${KEY.accountId}:function:thumbnails`;
+    const QUEUE_ARN = `arn:aws:sqs:tn-tunis-1:${KEY.accountId}:uploads`;
+    const photos = BUCKETS[0];
+    const records = () =>
+      published.map((event) => {
+        const { eventName, s3 } = (event as unknown as { record: { eventName: string; s3: { configurationId: string; object: Record<string, unknown> } } }).record;
+        return [eventName, s3.configurationId, s3.object.key, s3.object.size];
+      });
+
+    afterEach(() => {
+      photos.notifications = null;
+    });
+
+    it("answers GetBucketNotificationConfiguration in S3's XML, which AWS's SDK reads; the store never hears of it", async () => {
+      photos.notifications = [
+        { id: 'thumbs', target: 'function', arn: FUNCTION_ARN, events: ['s3:ObjectCreated:*'], prefix: 'images/', suffix: '.jpg' },
+        { id: 'removals', target: 'queue', arn: QUEUE_ARN, events: ['s3:ObjectRemoved:*'], prefix: null, suffix: null },
+      ];
+
+      const got = await client().send(new GetBucketNotificationConfigurationCommand({ Bucket: 'photos' }));
+
+      expect(got.LambdaFunctionConfigurations).toEqual([
+        {
+          Id: 'thumbs',
+          LambdaFunctionArn: FUNCTION_ARN,
+          Events: ['s3:ObjectCreated:*'],
+          Filter: { Key: { FilterRules: [{ Name: 'prefix', Value: 'images/' }, { Name: 'suffix', Value: '.jpg' }] } },
+        },
+      ]);
+      expect(got.QueueConfigurations).toEqual([{ Id: 'removals', QueueArn: QUEUE_ARN, Events: ['s3:ObjectRemoved:*'] }]);
+      expect(seen).toEqual([]);
+    });
+
+    it("reads PutBucketNotificationConfiguration as AWS's SDK writes it, and keeps it under the key, which may skip the destinations' check", async () => {
+      await client().send(
+        new PutBucketNotificationConfigurationCommand({
+          Bucket: 'photos',
+          NotificationConfiguration: {
+            LambdaFunctionConfigurations: [{ Id: 'thumbs', LambdaFunctionArn: FUNCTION_ARN, Events: ['s3:ObjectCreated:*'], Filter: { Key: { FilterRules: [{ Name: 'prefix', Value: 'images/' }] } } }],
+            QueueConfigurations: [{ QueueArn: QUEUE_ARN, Events: ['s3:ObjectRemoved:Delete'] }],
+          },
+          SkipDestinationValidation: true,
+        }),
+      );
+
+      expect(kept).toHaveLength(1);
+      const [bucket, rules, options] = kept[0];
+      expect([bucket.name, rules.length]).toEqual(['photos', 2]);
+      expect(rules).toEqual(
+        expect.arrayContaining([
+          { id: 'thumbs', target: 'function', arn: FUNCTION_ARN, events: ['s3:ObjectCreated:*'], prefix: 'images/', suffix: null },
+          { id: expect.stringMatching(/^[A-Za-z0-9+/=]+$/), target: 'queue', arn: QUEUE_ARN, events: ['s3:ObjectRemoved:Delete'], prefix: null, suffix: null },
+        ]),
+      );
+      expect(options).toEqual({
+        skipDestinationValidation: true,
+        changedBy: { actor: { id: `access_key:${KEY.id}`, label: `access key ${KEY.id}` }, ip: '127.0.0.1', requestId: expect.any(String) },
+      });
+      expect(seen).toEqual([]);
+      expect(await refused(client(READ_ONLY).send(new PutBucketNotificationConfigurationCommand({ Bucket: 'photos', NotificationConfiguration: {} })))).toBe('403 AccessDenied');
+      expect(
+        await refused(
+          client().send(
+            new PutBucketNotificationConfigurationCommand({
+              Bucket: 'photos',
+              NotificationConfiguration: { TopicConfigurations: [{ TopicArn: 'arn:aws:sns:tn-tunis-1:000000000001:t', Events: ['s3:ObjectCreated:*'] }] },
+            }),
+          ),
+        ),
+      ).toBe('400 InvalidArgument');
+      expect(kept).toHaveLength(1);
+    });
+
+    it("sends S3's event for a write the store took to the destination of the rule that names it, a created object's with its size and ETag; none for a key no rule names", async () => {
+      photos.notifications = [{ id: 'thumbs', target: 'function', arn: FUNCTION_ARN, events: ['s3:ObjectCreated:*'], prefix: 'images/', suffix: null }];
+
+      await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'images/red flower(1).jpg', Body: 'hello' }));
+      await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'docs/a.txt', Body: 'not an image' }));
+      await frontDoor.notified();
+
+      expect(published).toHaveLength(1);
+      expect(published[0]).toMatchObject({ kind: 'record', accountId: KEY.accountId, bucket: 'photos', rule: { id: 'thumbs' } });
+      expect((published[0] as { record: unknown }).record).toEqual({
+        eventVersion: '2.1',
+        eventSource: 'aws:s3',
+        awsRegion: 'tn-tunis-1',
+        eventTime: expect.stringMatching(/^\d{4}-\d\d-\d\dT[\d:.]+Z$/),
+        eventName: 'ObjectCreated:Put',
+        userIdentity: { principalId: `AWS:${KEY.id}` },
+        requestParameters: { sourceIPAddress: '127.0.0.1' },
+        responseElements: { 'x-amz-request-id': expect.any(String), 'x-amz-id-2': expect.any(String) },
+        s3: {
+          s3SchemaVersion: '1.0',
+          configurationId: 'thumbs',
+          bucket: { name: 'photos', ownerIdentity: { principalId: KEY.accountId }, arn: 'arn:aws:s3:::photos' },
+          object: { key: 'images%2Fred+flower%281%29.jpg', size: 5, eTag: 'etag-1', sequencer: expect.stringMatching(/^[0-9A-F]{18}$/) },
+        },
+      });
+      // The object's size and ETag, asked of the store once, for the write a rule named.
+      expect(seen.filter((request) => request.method === 'HEAD')).toHaveLength(1);
+    });
+
+    it('sends a copy as ObjectCreated:Copy, and a deletion as ObjectRemoved:Delete, one for each key DeleteObjects deleted', async () => {
+      photos.notifications = [
+        { id: 'copies', target: 'queue', arn: QUEUE_ARN, events: ['s3:ObjectCreated:Copy'], prefix: null, suffix: null },
+        { id: 'removals', target: 'queue', arn: QUEUE_ARN, events: ['s3:ObjectRemoved:*'], prefix: null, suffix: null },
+      ];
+
+      await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'original.txt', Body: 'abc' }));
+      await client().send(new CopyObjectCommand({ Bucket: 'photos', Key: 'copy.txt', CopySource: 'photos/original.txt' }));
+      await client().send(new DeleteObjectCommand({ Bucket: 'photos', Key: 'copy.txt' }));
+      const deleted = await client().send(new DeleteObjectsCommand({ Bucket: 'photos', Delete: { Objects: [{ Key: 'a.txt' }] } }));
+      await frontDoor.notified();
+
+      expect(deleted.Deleted).toEqual([{ Key: 'a.txt' }]);
+      expect(records()).toEqual([
+        ['ObjectCreated:Copy', 'copies', 'copy.txt', 3],
+        ['ObjectRemoved:Delete', 'removals', 'copy.txt', undefined],
+        ['ObjectRemoved:Delete', 'removals', 'a.txt', undefined],
+      ]);
+    });
   });
 });

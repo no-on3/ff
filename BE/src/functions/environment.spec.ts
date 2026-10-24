@@ -1,4 +1,4 @@
-import { NO_ENVIRONMENT, changedSecrets, combinedProblems, processEnvironment, secretsView, storedSecrets, withSecrets } from './environment';
+import { NO_ENVIRONMENT, changedSecrets, combinedProblems, nameProblem, processEnvironment, secretsView, storedSecrets, withSecrets } from './environment';
 
 describe("a function's secrets", () => {
   const then = new Date('2026-10-21T08:00:00.000Z');
@@ -53,5 +53,16 @@ describe("a function's secrets", () => {
   it('give a new revision when there is anything, none when nothing is left', () => {
     expect(withSecrets(NO_ENVIRONMENT, kept).revision).toMatch(/^[0-9a-f]{16}$/);
     expect(withSecrets({ ...NO_ENVIRONMENT, secrets: kept, revision: 'r' }, {}).revision).toBe('');
+  });
+});
+
+describe("a variable's name", () => {
+  it("is FF's when FF sets it, with the function's own key: its account's buckets and queues", () => {
+    expect(nameProblem('AWS_ENDPOINT_URL_S3')).toBe("AWS_ENDPOINT_URL_S3 is reserved: FF sets it, with the function's own key to its account's buckets");
+    expect(nameProblem('AWS_ENDPOINT_URL_SQS')).toBe("AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues");
+  });
+
+  it('is anyone\'s otherwise, a name every object inherits too, such as constructor', () => {
+    for (const name of ['constructor', 'toString', 'hasOwnProperty', 'AWS_ENDPOINT_URL_DYNAMODB']) expect(nameProblem(name)).toBeUndefined();
   });
 });

@@ -26,5 +26,9 @@ export const BETA_PLAN: Plan = {
     bucketStorageMb: 5120,
     storageRequestsPerSecond: 100,
     maxObjectMb: 5120,
+    queues: 10,
+    eventSourceMappingsPerFunction: 5,
+    queueRequestsPerSecond: 100,
+    queueStorageMb: 100,
   },
 };

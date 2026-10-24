@@ -9,6 +9,7 @@ import { describeError } from './common/describe-error';
 import { logFormat, winstonConfig } from './config/winston.config';
 import { assertSchemaUpToDate } from './database/schema-check';
 import { FunctionUrlGateway } from './function-urls/function-url.gateway';
+import { SqsFrontDoor } from './queues/sqs-front-door';
 import { S3FrontDoor } from './storage/front-door';
 
 async function bootstrap() {
@@ -42,6 +43,13 @@ async function bootstrap() {
   if (storagePort > 0) {
     await app.get(S3FrontDoor).listen(storagePort);
     new Logger('Bootstrap').log(`Buckets' S3 requests are answered on port ${storagePort}, at ${configService.getOrThrow<string>('storage.base')}`);
+  }
+
+  // And queues' SQS endpoint, on a port of its own, which the edge and functions reach (0: none).
+  const sqsPort = configService.getOrThrow<number>('sqs.port');
+  if (sqsPort > 0) {
+    await app.get(SqsFrontDoor).listen(sqsPort);
+    new Logger('Bootstrap').log(`Queues' SQS requests are answered on port ${sqsPort}, at ${configService.getOrThrow<string>('sqs.base')}`);
   }
 }
 

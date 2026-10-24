@@ -1,6 +1,6 @@
 // Imported through the "@/" alias on purpose: this spec also proves the
 // Jest moduleNameMapper matches the tsconfig "paths" mapping.
-import configuration, { ConfigurationError, Env, VARIABLES, databaseConfiguration } from '@/config/configuration';
+import configuration, { ConfigurationError, Env, RENAMED_VARIABLES, VARIABLES, databaseConfiguration } from '@/config/configuration';
 import { DEVELOPMENT_KEY } from '@/encryption/key-ring';
 import { parse as parseEnvFile } from 'dotenv';
 import { randomBytes } from 'node:crypto';
@@ -23,8 +23,8 @@ const production: Env = {
   FF_OIDC_ISSUER: 'https://login.ff.example/realms/ff',
   FF_OIDC_AUDIENCE: 'ff-api',
   DB_PASSWORD: 'a-long-database-secret',
-  MINIO_ACCESS_KEY: 'prod-access-key',
-  MINIO_SECRET_KEY: 'prod-secret-key',
+  FF_OBJECT_STORE_ACCESS_KEY: 'prod-access-key',
+  FF_OBJECT_STORE_SECRET_KEY: 'prod-secret-key',
   CORS_ORIGIN: 'https://console.ff.example',
   FF_SMTP_URL: 'smtps://ff:mail-secret@mail.ff.example:465',
   FF_OPERATOR_EMAIL: 'ops@ff.example',
@@ -38,6 +38,7 @@ const production: Env = {
   FF_ENCRYPTION_KEYS_FILE: keysFile,
   FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
   FF_STORAGE_BASE: 'https://s3.ff.example',
+  FF_SQS_BASE: 'https://sqs.ff.example',
   FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
 
@@ -70,7 +71,7 @@ describe('configuration', () => {
         logging: true,
         ssl: false,
       },
-      minio: { endPoint: 'localhost', port: 9003, useSSL: false, bucketName: 'functions' },
+      objectStore: { endPoint: 'localhost', port: 9003, useSSL: false, bucketName: 'functions' },
       orchestrator: { driver: 'kubernetes', readyTimeoutSeconds: 90 },
       kubernetes: {
         apiUrl: '',
@@ -95,9 +96,9 @@ describe('configuration', () => {
       DB_HOST: 'db.internal',
       DB_PORT: '6543',
       DB_NAME: 'ff',
-      MINIO_PORT: '9100',
-      MINIO_USE_SSL: 'true',
-      MINIO_BUCKET_NAME: 'artifacts',
+      FF_OBJECT_STORE_PORT: '9100',
+      FF_OBJECT_STORE_USE_SSL: 'true',
+      FF_OBJECT_STORE_BUCKET: 'artifacts',
       FF_READY_TIMEOUT_SECONDS: '30',
       CORS_ORIGIN: 'http://localhost:5173, http://localhost:5174/',
       K8S_EGRESS_INTERNET: 'false',
@@ -109,7 +110,7 @@ describe('configuration', () => {
 
     expect(config.port).toBe(4100);
     expect(config.database).toMatchObject({ host: 'db.internal', port: 6543, name: 'ff' });
-    expect(config.minio).toMatchObject({ port: 9100, useSSL: true, bucketName: 'artifacts' });
+    expect(config.objectStore).toMatchObject({ port: 9100, useSSL: true, bucketName: 'artifacts' });
     expect(config.orchestrator.readyTimeoutSeconds).toBe(30);
     expect(config.cors.origins).toEqual(['http://localhost:5173', 'http://localhost:5174/']);
     expect(config.kubernetes).toMatchObject({
@@ -314,10 +315,10 @@ describe('configuration', () => {
       ['the dev authentication mode', { FF_AUTH_MODE: 'dev', FF_DEV_ACCOUNT_ID: '000000000001' }, 'FF_AUTH_MODE=dev is for development only'],
       ['the default database password', { DB_PASSWORD: undefined }, 'DB_PASSWORD must be set, and not to the development default'],
       ['the default database password, set explicitly', { DB_PASSWORD: 'postgres' }, 'DB_PASSWORD must be set'],
-      ['the default storage access key', { MINIO_ACCESS_KEY: undefined }, 'MINIO_ACCESS_KEY must be set, and not to a development default'],
-      ['the dev storage access key', { MINIO_ACCESS_KEY: 'ffdevaccesskey' }, 'MINIO_ACCESS_KEY must be set'],
-      ['the default storage secret key', { MINIO_SECRET_KEY: 'minioadmin' }, 'MINIO_SECRET_KEY must be set'],
-      ['the dev storage secret key', { MINIO_SECRET_KEY: 'ffdevsecretkey-local-only' }, 'MINIO_SECRET_KEY must be set'],
+      ['the default storage access key', { FF_OBJECT_STORE_ACCESS_KEY: undefined }, 'FF_OBJECT_STORE_ACCESS_KEY must be set, and not to a development default'],
+      ['the dev storage access key', { FF_OBJECT_STORE_ACCESS_KEY: 'ffdevaccesskey' }, 'FF_OBJECT_STORE_ACCESS_KEY must be set'],
+      ['the default storage secret key', { FF_OBJECT_STORE_SECRET_KEY: 'minioadmin' }, 'FF_OBJECT_STORE_SECRET_KEY must be set'],
+      ['the dev storage secret key', { FF_OBJECT_STORE_SECRET_KEY: 'ffdevsecretkey-local-only' }, 'FF_OBJECT_STORE_SECRET_KEY must be set'],
       ['a missing Keycloak issuer', { FF_OIDC_ISSUER: undefined }, 'FF_OIDC_ISSUER is required when FF_AUTH_MODE is oidc'],
       ['a missing Keycloak audience', { FF_OIDC_AUDIENCE: '' }, 'FF_OIDC_AUDIENCE is required when FF_AUTH_MODE is oidc'],
       ['an issuer without TLS', { FF_OIDC_ISSUER: 'http://login.ff.example/realms/ff' }, 'FF_OIDC_ISSUER must be an https:// URL'],
@@ -348,14 +349,14 @@ describe('configuration', () => {
     it('never repeats a refused credential in the message', () => {
       const message = (() => {
         try {
-          configuration({ ...production, MINIO_SECRET_KEY: 'ffdevsecretkey-local-only', DB_PASSWORD: 'postgres' });
+          configuration({ ...production, FF_OBJECT_STORE_SECRET_KEY: 'ffdevsecretkey-local-only', DB_PASSWORD: 'postgres' });
         } catch (error) {
           return (error as Error).message;
         }
         return '';
       })();
 
-      expect(message).toContain('MINIO_SECRET_KEY');
+      expect(message).toContain('FF_OBJECT_STORE_SECRET_KEY');
       expect(message).not.toContain('ffdevsecretkey-local-only');
       expect(message).not.toMatch(/"postgres"|: postgres/);
     });
@@ -457,6 +458,58 @@ describe('configuration', () => {
     });
   });
 
+  describe("queues' SQS endpoint", () => {
+    it("is served on port 3003, apart from the API, at localhost in development, naming FF's region", () => {
+      expect(configuration(dev).sqs).toEqual({ port: 3003, base: 'http://localhost:3003', region: 'tn-tunis-1', functionEndpoint: '' });
+    });
+
+    it('takes an origin, a trailing slash dropped, and port 0 for none', () => {
+      expect(configuration({ ...production, FF_SQS_BASE: 'https://sqs.example.tn/', FF_SQS_PORT: '0' }).sqs).toMatchObject({ port: 0, base: 'https://sqs.example.tn' });
+    });
+
+    it.each(['https://sqs.example.tn/queues', 'ftp://sqs.example.tn', 'sqs.example.tn'])('refuses %s as its endpoint', (base) => {
+      expect(problems({ ...dev, FF_SQS_BASE: base })).toEqual([expect.stringMatching(/^FF_SQS_BASE must be an origin, such as https:\/\/sqs.example.tn/)]);
+    });
+
+    it('is reached over TLS in production', () => {
+      expect(problems({ ...production, FF_SQS_BASE: 'http://sqs.example.tn' })).toEqual([expect.stringMatching(/^FF_SQS_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
+    });
+
+    it("is reached by functions where it names: a backend outside the cluster at its addresses, on the endpoint's port", () => {
+      const config = configuration({ ...dev, FF_SQS_FUNCTION_ENDPOINT: 'http://172.18.0.1:3003/', FF_SQS_FUNCTION_CIDRS: '172.18.0.1/32' });
+
+      expect(config.sqs.functionEndpoint).toBe('http://172.18.0.1:3003');
+      expect(config.kubernetes.platformEgress).toEqual([{ cidrs: ['172.18.0.1/32'], port: 3003 }]);
+    });
+
+    it("is reached by functions at a Service's fixed address, in plain HTTP inside the cluster even in production: the backend's own pods, on the endpoint's port, beside the S3 front door", () => {
+      const config = configuration({
+        ...production,
+        FF_SQS_PORT: '3103',
+        FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003',
+        FF_STORAGE_FUNCTION_ENDPOINT: 'http://10.43.0.251:3002',
+      });
+
+      expect(config.sqs.functionEndpoint).toBe('http://10.43.0.251:3003');
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: [], port: 3002 },
+        { cidrs: [], port: 3103 },
+      ]);
+    });
+
+    it("refuses functions' endpoint without the SQS endpoint, their addresses without functions' endpoint, and one with a path", () => {
+      expect(problems({ ...dev, FF_SQS_PORT: '0', FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003' })).toEqual([
+        "FF_SQS_FUNCTION_ENDPOINT is set, but FF_SQS_PORT is 0: functions' keys reach queues through the SQS endpoint, which isn't running",
+      ]);
+      expect(problems({ ...dev, FF_SQS_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
+        "FF_SQS_FUNCTION_CIDRS is set, but FF_SQS_FUNCTION_ENDPOINT is not: it names where functions reach queues' SQS endpoint",
+      ]);
+      expect(problems({ ...dev, FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003/sqs' })).toEqual([
+        expect.stringMatching(/^FF_SQS_FUNCTION_ENDPOINT must be an origin, such as http:\/\/10.43.0.251:3003, at which functions reach queues' SQS endpoint/),
+      ]);
+    });
+  });
+
   describe('schedules', () => {
     it('are taken every 5 s, and name the region tn-tunis-1, by default', () => {
       expect(configuration(dev).schedules).toEqual({ intervalSeconds: 5, region: 'tn-tunis-1' });
@@ -468,6 +521,28 @@ describe('configuration', () => {
 
     it.each(['Tunis', 'tn_tunis_1', 'tn-tunis'])('refuse %s as a region', (region) => {
       expect(problems({ ...dev, FF_REGION: region })).toEqual([expect.stringMatching(/^FF_REGION must be a region name, such as tn-tunis-1/)]);
+    });
+  });
+
+  describe('asynchronous calls', () => {
+    it('are looked for every 5 s without being told, a call kept being told at once, ten at once on each backend, by default', () => {
+      expect(configuration(dev).asyncInvoke).toEqual({ intervalSeconds: 5, concurrency: 10 });
+    });
+
+    it('take 0 for a backend that runs none, and more at once', () => {
+      expect(configuration({ ...dev, FF_ASYNC_INTERVAL_SECONDS: '0', FF_ASYNC_CONCURRENCY: '50' }).asyncInvoke).toEqual({ intervalSeconds: 0, concurrency: 50 });
+    });
+
+    it('refuse none at once, which would never run one', () => {
+      expect(problems({ ...dev, FF_ASYNC_CONCURRENCY: '0' })).toEqual([expect.stringMatching(/^FF_ASYNC_CONCURRENCY/)]);
+    });
+  });
+
+  describe('event source mappings', () => {
+    it('are loaded again every 10 s by default, and never with 0, on a backend that reads no queue for functions', () => {
+      expect(configuration(dev).eventSources).toEqual({ refreshSeconds: 10 });
+      expect(configuration({ ...dev, FF_EVENT_SOURCE_REFRESH_SECONDS: '0' }).eventSources).toEqual({ refreshSeconds: 0 });
+      expect(problems({ ...dev, FF_EVENT_SOURCE_REFRESH_SECONDS: '3601' })).toEqual([expect.stringMatching(/^FF_EVENT_SOURCE_REFRESH_SECONDS/)]);
     });
   });
 
@@ -621,6 +696,10 @@ describe('configuration', () => {
       expect(problems({ ...dev, [name]: value })).toEqual([expected]);
     });
 
+    it.each(Object.entries(RENAMED_VARIABLES))("refuses %s, the object store's old name from when it was MinIO, naming %s", (name, now) => {
+      expect(problems({ ...dev, [name]: 'localhost' })).toEqual([`${name} is no longer read: it is ${now} now, as in BE/.env.example; rename it`]);
+    });
+
     it('accepts oidc outside production with a plain http issuer (a local Keycloak)', () => {
       const config = configuration({ FF_OIDC_ISSUER: 'http://localhost:8180/realms/ff', FF_OIDC_AUDIENCE: 'ff-api' });
 
@@ -633,7 +712,7 @@ describe('configuration', () => {
       ['DB_PORT', 'abc', 'DB_PORT must be a whole number from 1 to 65535; got "abc"'],
       ['PORT', '0', 'PORT must be a whole number from 1 to 65535; got "0"'],
       ['FF_READY_TIMEOUT_SECONDS', '-5', 'FF_READY_TIMEOUT_SECONDS must be a whole number from 1 to 3600; got "-5"'],
-      ['MINIO_USE_SSL', 'yes', 'MINIO_USE_SSL must be true or false; got "yes"'],
+      ['FF_OBJECT_STORE_USE_SSL', 'yes', 'FF_OBJECT_STORE_USE_SSL must be true or false; got "yes"'],
       ['NODE_ENV', 'staging', 'NODE_ENV must be one of development, production, test; got "staging"'],
       ['ORCHESTRATOR', 'nomad', 'ORCHESTRATOR must be one of kubernetes; got "nomad"'],
       ['K8S_IMAGE_PULL_POLICY', 'Sometimes', 'K8S_IMAGE_PULL_POLICY must be one of IfNotPresent, Always, Never; got "Sometimes"'],
@@ -644,7 +723,7 @@ describe('configuration', () => {
       ['K8S_NAMESPACE_PREFIX', 'ff-u-', 'K8S_NAMESPACE_PREFIX must be ff-t-, the only prefix the admission policy allows'],
       ['K8S_API_URL', '127.0.0.1:6550', 'K8S_API_URL must be an http:// or https:// URL; got "127.0.0.1:6550"'],
       ['FF_OIDC_ISSUER', 'login.ff.example', 'FF_OIDC_ISSUER must be an http:// or https:// URL'],
-      ['MINIO_BUCKET_NAME', 'Functions_Bucket', 'MINIO_BUCKET_NAME must be an S3 bucket name'],
+      ['FF_OBJECT_STORE_BUCKET', 'Functions_Bucket', 'FF_OBJECT_STORE_BUCKET must be an S3 bucket name'],
       ['CORS_ORIGIN', 'https://console.ff.example/app', 'CORS_ORIGIN must be a comma-separated list of origins'],
       ['K8S_INGRESS_ALLOW_CIDRS', '10.0.0.0/8,10.0.0.0/33', 'K8S_INGRESS_ALLOW_CIDRS must be a comma-separated list of CIDR blocks such as 10.42.0.0/16; got "10.0.0.0/33"'],
     ])('%s=%s', (name, value, expected) => {
@@ -652,9 +731,9 @@ describe('configuration', () => {
     });
 
     it('lists every bad variable at once', () => {
-      const found = problems({ ...dev, DB_PORT: 'x', MINIO_USE_SSL: 'maybe', K8S_IMAGE_PULL_POLICY: 'Sometimes' });
+      const found = problems({ ...dev, DB_PORT: 'x', FF_OBJECT_STORE_USE_SSL: 'maybe', K8S_IMAGE_PULL_POLICY: 'Sometimes' });
 
-      expect(found.map((problem) => problem.split(' ')[0])).toEqual(['DB_PORT', 'MINIO_USE_SSL', 'K8S_IMAGE_PULL_POLICY']);
+      expect(found.map((problem) => problem.split(' ')[0])).toEqual(['DB_PORT', 'FF_OBJECT_STORE_USE_SSL', 'K8S_IMAGE_PULL_POLICY']);
     });
 
     it('says how many problems there are, one per line', () => {

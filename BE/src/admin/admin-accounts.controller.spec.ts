@@ -142,7 +142,7 @@ describe('the admin account routes (L1, P-71)', () => {
     expect(accounts.setEgress).toHaveBeenCalledTimes(1);
   });
 
-  it("PUT /admin/accounts/:id/storage turns the account's databases and buckets off or on, with a reason, and takes only true or false", async () => {
+  it("PUT /admin/accounts/:id/storage turns the account's databases, buckets and queues off or on, with a reason, and takes only true or false", async () => {
     await call('PUT', `/admin/accounts/${ID}/storage`, { enabled: false, reason: 'Files shared against our terms' });
     expect(accounts.setStorage).toHaveBeenCalledWith(ID, false, 'Files shared against our terms');
 

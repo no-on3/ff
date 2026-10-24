@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed on 2026-10-21. It is a view with an order and reasons, not a plan with tasks. When you pick a step, it gets its own plan, in the format of the [client-readiness plan](client-readiness-plan.md). **Step 1 done on 2026-10-21,** in development: its plan is the [step-1 plan](step-1-plan.md), tasks U-00 to U-09, whose progress log says what was built. You confirmed [ADR 0003](adr/0003-code-delivery.md) the same day: production's code registry is in the platform's manifests, and inline code has moved onto it. **Step 2 done on 2026-10-23,** in development: its plan is the [step-2 plan](step-2-plan.md), which you confirmed on 2026-10-22 with the step-1 plan's choices, tasks V-00 to V-10, whose progress log says what was built. **Step 3's plan** is the [step-3 plan](step-3-plan.md), proposed on 2026-10-23 for you to confirm: its §9 has ten choices, each with a recommendation. Every decision you made is in the [decision log](decisions.md). |
+| **Status** | Proposed on 2026-10-21. It is a view with an order and reasons, not a plan with tasks. When you pick a step, it gets its own plan, in the format of the [client-readiness plan](client-readiness-plan.md). **Step 1 done on 2026-10-21,** in development: its plan is the [step-1 plan](step-1-plan.md), tasks U-00 to U-09, whose progress log says what was built. You confirmed [ADR 0003](adr/0003-code-delivery.md) the same day: production's code registry is in the platform's manifests, and inline code has moved onto it. **Step 2 done on 2026-10-23,** in development: its plan is the [step-2 plan](step-2-plan.md), which you confirmed on 2026-10-22 with the step-1 plan's choices, tasks V-00 to V-10, whose progress log says what was built. **Step 3 done on 2026-10-24,** in development: its plan is the [step-3 plan](step-3-plan.md), which you confirmed on 2026-10-23 with its ten choices as recommended, tasks Q-00 to Q-10, whose progress log says what was built. **Step 4's plan** is the [step-4 plan](step-4-plan.md), proposed on 2026-10-24; its choices wait for you. Every decision you made is in the [decision log](decisions.md). |
 | **Parent plan** | [Local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): its Phase 3 (E-01 to E-10), its Phase 4 (S-01 to S-10), §4.6 event sources, §4.7 storage and queues, §6.7 AWS-compatible services, §10 go-to-market |
 | **Builds on** | The [client-readiness plan](client-readiness-plan.md), done up to its pilot-launch tasks, and the [CLI plan](cli-plan.md), its phases 0 to 2 done with step 1 |
 | **What it is for** | To answer "what do we add after functions?", and to look further ahead |
@@ -95,7 +95,7 @@ These two are the heart of the "local cloud" idea. Almost every app needs both, 
 
 ## 6. Step 3: background work, where the queue fits
 
-**Proposed on 2026-10-23, for you to confirm:** the [step-3 plan](step-3-plan.md). It takes what follows further: where the queue's messages live (pgmq, or FF's own tables in its shape, which its first task's spike compares), Lambda's asynchronous invoke and its retries, SQS's API with the account's keys, functions reading queues in batches, and bucket notifications from the S3 front door; its §9 has ten choices for you.
+**Done on 2026-10-24, in development:** the [step-3 plan](step-3-plan.md), confirmed and started on 2026-10-23; its progress log says what was built. It took what follows further: where the queue's messages live (FF's own table in pgmq's shape, as its first task's spike measured, [ADR 0010](adr/0010-queue.md)), Lambda's asynchronous invoke and its retries, SQS's API with the account's keys, functions reading queues in batches, and bucket notifications from the S3 front door; its §9's ten choices were answered, as the decision log says (24 to 33). The small app makes its receipts in the background since.
 
 A queue is the right idea, and its time comes after steps 1 and 2. Build **one queue that keeps its messages until they are handled** (pgmq, a queue inside PostgreSQL, as the parent plan's ADR-003 says; NATS JetStream later if the load needs it), and show it to customers in three ways:
 
@@ -110,6 +110,8 @@ A queue is the right idea, and its time comes after steps 1 and 2. Build **one q
 ## 7. Step 4: the whole app runs here
 
 After step 3, a customer can run an API with a database, files and background jobs. Three more things let them move the **whole** app.
+
+**Proposed on 2026-10-24:** the [step-4 plan](step-4-plan.md), with step 3's close; its choices (its §9) wait for you.
 
 ### 7.1 Static site hosting
 
@@ -246,8 +248,8 @@ From the parent plan's non-goals (§1.3, §3.3), with the reason in plain words:
 |---|---|---|---|
 | 1 | Step 1: function URLs, secrets, packages and the CLI, schedules. **Done** in development: the [step-1 plan](step-1-plan.md) | nothing | the CLI plan, plus about 4 weeks; the step-1 plan says 22 to 32 days besides the CLI (its §10) |
 | 2 | Step 2: managed PostgreSQL, file storage. **Done** in development on 2026-10-23: the [step-2 plan](step-2-plan.md) | secrets | medium, plus 2.5 weeks; the step-2 plan says 35 to 45 days (its §10), counting all that every service needs |
-| 3 | Step 3: the queue, as async invoke, SQS queues and bucket notifications. **Proposed:** the [step-3 plan](step-3-plan.md), for you to confirm | storage | about 6.5 weeks; the step-3 plan says 29 to 38 days (its §10) |
-| 4 | Step 4: static sites, e-mail, a cache | storage | medium |
+| 3 | Step 3: the queue, as async invoke, SQS queues and bucket notifications. **Done** in development on 2026-10-24: the [step-3 plan](step-3-plan.md) | storage | about 6.5 weeks; the step-3 plan says 29 to 38 days (its §10) |
+| 4 | Step 4: static sites, e-mail, a cache. **Proposed** on 2026-10-24: the [step-4 plan](step-4-plan.md), its choices waiting for you | storage | medium; the step-4 plan says how much (its §10) |
 | 5 | Step 5: the Lambda API, versions, Terraform, the export kit | steps 1 to 3 | about 15 weeks |
 | 6 | Card top-ups, e-invoicing for FF's invoices, two sites | nothing; they can run alongside | in the client and parent plans |
 | 7 | Always-on web services, container functions | step 1 | large |

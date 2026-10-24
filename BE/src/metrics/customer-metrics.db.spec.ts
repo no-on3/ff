@@ -3,16 +3,21 @@
  * dropped after, each figure worked out by hand from the rows written here:
  * the counts, the duration's statistics (percentiles interpolated), the
  * throttles of both kinds, the cold starts and the instances, a function's
- * and its account's, quiet periods and the window's edges; and a customer's
- * database's, from its hourly samples.
+ * and its account's, its asynchronous calls', quiet periods and the window's
+ * edges; a customer's database's, from its hourly samples; a bucket's; and a
+ * queue's, sampled each minute from its messages, with its requests' counts.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
+import { randomUUID } from 'node:crypto';
 import { NotFoundException } from '@nestjs/common';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
+import { CustomerQueues } from '../queues/customer-queues';
+import { QueueSamples } from '../queues/queue-samples.service';
+import { Queue } from '../queues/queue.entity';
 import { CustomerMetricsService } from './customer-metrics.service';
 import { MetricsWindow } from './customer-metrics';
 import { RefusedInvocationsService } from './refused-invocations.service';
@@ -49,7 +54,7 @@ run('metrics (L2)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts']) {
+    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'queue_samples', 'async_event_counts']) {
       await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
     }
     for (const [id, name] of [[A, 'A'], [B, 'B']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
@@ -115,7 +120,36 @@ run('metrics (L2)', () => {
       },
       // 2 then 3 ready: at most 3, and 5 instance-minutes over 5 minutes, 1 on average; 1 for a minute later.
       Instances: { Maximum: [3, 0, 1], Average: [1, 0, 0.2] },
+      // No call without waiting yet.
+      AsyncEventsReceived: [0, 0, 0],
+      AsyncEventAge: { Average: [null, null, null], Maximum: [null, null, null] },
+      AsyncEventsDropped: [0, 0, 0],
+      DestinationDeliveryFailures: [0, 0, 0],
     });
+  });
+
+  it("gives a function's asynchronous calls as Lambda counts them, each backend's counts added up: received, their age at each attempt, dropped, not delivered", async () => {
+    const counted = (f: Function, minute: string, received: number, attempts: number, ageMsSum: number, ageMsMax: number, dropped: number, failures: number) =>
+      query(
+        `INSERT INTO async_event_counts (function_id, minute, writer, account_id, received, dropped, destination_failures, attempts, age_ms_sum, age_ms_max)
+         VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6, $7, $8, $9)`,
+        [f.id, minute, f.accountId, received, dropped, failures, attempts, ageMsSum, ageMsMax],
+      );
+    await counted(f1, '2026-10-01T10:00:00Z', 3, 2, 400, 300, 0, 0);
+    await counted(f1, '2026-10-01T10:01:00Z', 1, 1, 200, 200, 0, 0); // another backend's, the same period
+    await counted(f1, '2026-10-01T10:11:00Z', 0, 1, 61_000, 61_000, 1, 1);
+    await counted(g, '2026-10-01T10:00:00Z', 9, 9, 9, 9, 9, 9); // another account's
+
+    const view = await metrics.forFunction(A, f1.id, WINDOW);
+
+    expect([view.metrics.AsyncEventsReceived, view.metrics.AsyncEventAge, view.metrics.AsyncEventsDropped, view.metrics.DestinationDeliveryFailures]).toEqual([
+      [4, 0, 0],
+      // Three attempts, 600 ms together: 200 on average, the oldest 300; then one of 61 s.
+      { Average: [200, null, 61_000], Maximum: [300, null, 61_000] },
+      [0, 0, 1],
+      [0, 0, 1],
+    ]);
+    expect((await metrics.forAccount(A, WINDOW)).metrics.AsyncEventsReceived).toEqual([4, 0, 0]);
   });
 
   it("gives the account's, all its functions together, a deleted one included, no other account's", async () => {
@@ -194,6 +228,45 @@ run('metrics (L2)', () => {
     });
     await expect(metrics.forBucket(A, 'm-theirs', periods)).rejects.toThrow(new NotFoundException('The account has no bucket m-theirs'));
     await expect(metrics.forBucket(A, 'm-nobody', periods)).rejects.toThrow(NotFoundException);
+  });
+
+  it("samples each queue holding a message each minute, as SQS's approximate counts, and gives its metrics by its name, with its requests' counts, no other account's", async () => {
+    const queues = new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue));
+    const made = async (accountId: string, name: string) => (await queues.create(accountId, name, {}, { limit: 10, name: 'Beta' }, 'tn-tunis-1')).queue;
+    const [orders, , theirs] = [await made(A, 'm-orders'), await made(A, 'm-empty'), await made(B, 'm-theirs')];
+    const message = (body: string, delaySeconds = 0) => ({ messageId: randomUUID(), body, meta: {}, sizeBytes: Buffer.byteLength(body), delaySeconds });
+    const now = new Date();
+    // Sent 90 s ago: two waiting, one received now and in flight, one delayed ten minutes.
+    await queues.send(orders, [message('one'), message('two'), message('three'), message('later', 600)], new Date(now.getTime() - 90_000));
+    await queues.receive(orders, 1, 30, now);
+    await queues.send(theirs, [message('theirs')], now);
+    const sampler = new QueueSamples(db.dataSource);
+
+    expect(await sampler.sample(now)).toBe(2); // the empty queue has no row
+    expect(await sampler.sample(now)).toBe(0); // the same minute again keeps its first rows
+
+    const minute = new Date(Math.floor(now.getTime() / 60_000) * 60_000);
+    await query(
+      `INSERT INTO queue_request_counts (queue_id, minute, writer, account_id, name, requests, sent, received, deleted, empty_receives, sent_bytes, sent_max_bytes)
+       VALUES ($1, $2, gen_random_uuid(), $3, 'm-orders', 6, 4, 1, 0, 2, 16, 5)`,
+      [orders.id, minute, A],
+    );
+    const window: MetricsWindow = { start: minute, end: new Date(minute.getTime() + 60_000), period: 60 };
+
+    expect((await metrics.forQueue(A, 'm-orders', window)).metrics).toEqual({
+      ApproximateNumberOfMessagesVisible: { Maximum: [2], Average: [2] },
+      ApproximateNumberOfMessagesNotVisible: { Maximum: [1], Average: [1] },
+      ApproximateNumberOfMessagesDelayed: { Maximum: [1], Average: [1] },
+      ApproximateAgeOfOldestMessage: { Maximum: [90] },
+      NumberOfMessagesSent: { Sum: [4] },
+      NumberOfMessagesReceived: { Sum: [1] },
+      NumberOfMessagesDeleted: { Sum: [0] },
+      NumberOfEmptyReceives: { Sum: [2] },
+      SentMessageSize: { Average: [4], Maximum: [5] },
+    });
+    const quiet = (await metrics.forQueue(A, 'm-empty', window)).metrics;
+    expect([quiet.ApproximateNumberOfMessagesVisible, quiet.SentMessageSize]).toEqual([{ Maximum: [0], Average: [0] }, { Average: [null], Maximum: [null] }]);
+    await expect(metrics.forQueue(A, 'm-theirs', window)).rejects.toThrow(new NotFoundException('The account has no queue m-theirs'));
   });
 
   it("answers another account's function, and one that doesn't exist, with 404", async () => {

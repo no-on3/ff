@@ -5,6 +5,53 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-10-23, later: step 3's ten choices, and the object store's names
+
+You answered: rename the object store's settings, which still carried MinIO's name, before step 3; then start step 3 with every choice of its plan as recommended. Step 2, done the same day, was merged into `master` (`f772e7f`) before step 3's branch was made from it.
+
+**23, done: the object store's settings are `FF_OBJECT_STORE_*`.** ✅ Your answer: renamed now, while FF runs nowhere yet.
+- **What it means:** MinIO itself left FF with the parent plan's F-15 (SeaweedFS by default, any S3-compatible store in production); its name stayed on six settings and a module. They are `FF_OBJECT_STORE_ENDPOINT`, `_PORT`, `_USE_SSL`, `_ACCESS_KEY`, `_SECRET_KEY` and `_BUCKET` now, and `BE/src/object-store/`; a backend still given an old name refuses to start, naming the new one. History in the plans keeps MinIO's name.
+- **Changed already:** the step-3 branch's first commit: the backend, `BE/.env.example`, the platform's manifests and the test scripts; your `BE/.env` the same day.
+- **Still to change:** nothing.
+
+### Step 3: background work, where the queue fits
+
+The [step-3 plan](step-3-plan.md)'s §9, each answered as it recommended.
+
+**24. The queue's messages live in FF's own PostgreSQL; Q-01's spike picks pgmq or FF's own tables in its shape.** ✅ Confirmed. Backed up with FF's database, and written in the same transaction as what makes them; NATS JetStream later, when throughput requires it.
+- **Changed already:** Q-01: [ADR 0010](adr/0010-queue.md), FF's own table, pgmq's throughput the same as measured but 7 relations a queue made while FF runs. Q-02, part 2: the tables `queues` and `queue_messages`, claimed with leases; functions' asynchronous calls kept there.
+- **Still to change:** customers' queues, with Q-04 and Q-05.
+
+**25. The account's keys, and each function's own, reach queues too.** ✅ Confirmed. One kind of key, as IAM's access keys reach every service.
+- **Still to change:** Q-04.
+
+**26. The SQS endpoint is a port of the backend's own, beside the S3 front door's,** at `sqs.ffunc.tn` in production. ✅ Confirmed.
+- **Still to change:** Q-04; its address in FF's install.
+
+**27. Queue requests are billed as SQS bills them:** by the million, each 64 KB of a message a request, 1 million free each month; the messages FF hands to functions one request a batch, FF's empty reads not billed. ✅ Confirmed.
+- **Changed already:** Q-08, part 1: each request that names a queue counts, whichever way it came, FF's API's and the console's sends and receives too, as the AWS console's requests are SQS's; the console's pages, reading queues without SQS's operations, count nothing. A batch a function reads is the request that would have received it, each 64 KB of it one, its deletes after the call not billed; a bucket's events and a function's destination records sent to a queue count as S3's and Lambda's requests to SQS. Priced in SQS's three tiers (0.40, 0.30 and 0.24 US$ a million, past 100 and 200 billion in the month), from the book that starts the month after the migration `QueueBilling` runs; the statement, `GET /usage` and its CSV, the console's Usage page and `ff usage` list each queue.
+- **Still to change:** nothing.
+
+**28. Beta's limits:** 10 queues, 5 event source mappings a function, 100 requests a second, 100 MB of messages and waiting events per account. ✅ Confirmed.
+- **Changed already:** Q-02, part 1: the four in every plan, the beta plan's as confirmed (the migration `QueueLimits`), edited in the admin app, listed by the console's account page and `ff account`. Part 2: what the account's messages hold, asynchronous calls waiting among them, enforced: an asynchronous call past it is refused with 429.
+- **Still to change:** each other enforced with what it limits: requests and queues in Q-04 and Q-05, mappings in Q-06.
+
+**29. FIFO queues later, once a customer asks;** standard queues first. ✅ Confirmed.
+- **Still to change:** nothing in step 3.
+
+**30. Bucket notifications go to a function or a queue;** SNS and EventBridge later, with those services. ✅ Confirmed.
+- **Still to change:** Q-07.
+
+**31. Destinations: a queue or a function,** on success and on failure, as Lambda's. ✅ Confirmed.
+- **Changed already:** Q-03, part 1: a function as a destination, getting Lambda's record of each call as an asynchronous call of its own.
+- **Still to change:** a queue as a destination, with Q-04, when there are queues to name.
+
+**32. An asynchronous call lost when the backend stops is retried,** as one of its attempts; a synchronous one stays lost, as today. ✅ Confirmed.
+- **Changed already:** Q-02, part 2: its event comes back when its lease ends, and the claim that kept no outcome counts as a failed attempt; the reaper marks that attempt `LOST`, unbilled, under its request.
+
+**33. The docs: the guide in English, a page in French "comme AWS SQS".** ✅ Confirmed.
+- **Still to change:** Q-09.
+
 ## 2026-10-23: the console merged, the domain registered, the server for development
 
 You answered the readiness check of that day: merge the console's new look, remove a test container left running, the domain is registered, and the server in Canada is for development. Then, step 2, to its end.
@@ -152,7 +199,7 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 
 **19. A failed scheduled run is not retried, until step 3.** ✅ Confirmed.
 - **Changed already:** `57101f7` and `b66e09e` (U-07): each run happens at most once; a failure is kept in the history, the metrics and the schedule's last outcome.
-- **Still to change:** step 3's background calls retry, and schedules will use them; the [roadmap](what-to-build-next.md)'s step 3 says so.
+- **Changed already:** the step-3 plan's Q-03, part 2: each run is kept in its function's queue in the transaction that moves its schedule on, then run as an asynchronous call, so retried, and lost by no backend's stop (D3).
 
 ## Earlier decisions
 
@@ -178,7 +225,7 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
-| Step 3's ten choices: where the queue's messages live (pgmq or FF's own tables, as a spike shows), one kind of key for buckets and queues, the SQS endpoint's place, how queue requests are billed, beta's limits, FIFO queues later, where notifications and destinations go, retrying a call lost when the backend stops, the docs' languages | [Step-3 plan](step-3-plan.md) §9, each with a recommendation | Step 3: nothing of it starts until you answer |
+| The step-4 plan's eleven choices, each with a recommendation: static sites' shape and address, the bytes they send out, e-mail's interface and the server that sends it, the sandbox, caches' isolation and persistence, the order, and FF's own counters | [Step-4 plan](step-4-plan.md) §9 | Step 4: static sites, e-mail from apps, a cache; nothing of it is built before |
 | Who hosts `ffunc.tn`'s DNS: DNS servers FF runs, a DNS company, or neither (decision 17; the domain is registered, 20) | This log, 17 and 20 | How function URLs and, from step 2, buckets get their certificates in production: one for all of them, or one each |
 | Where `ff`'s downloads and the public runtime images are published, if customers can't rely on GitHub | [CLI plan](cli-plan.md) §10, question 3 | The first public release of `ff` |
 | Windows for `ff`: in its phase 4, or when a customer asks | CLI plan §10, question 5 | The CLI's phase 4 |

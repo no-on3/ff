@@ -21,7 +21,16 @@
 # and the usage records; the URL's own domains, proved through a DNS server of
 # the test's, a subdomain by its CNAME and an apex by its TXT record. Then a
 # function on schedules: rate(1 minute) within about 70 s, with EventBridge's
-# Scheduled Event or the schedule's input, a disabled one never. Then a
+# Scheduled Event or the schedule's input, a disabled one never, and a failing
+# run retried a minute after, as an asynchronous call. Then
+# asynchronous calls, as AWS Lambda's: an Event answered 202 at once and run
+# within seconds under its request ID, a DryRun that runs nothing, Lambda's
+# 1 MB limit; a failing Event retried a minute, then two minutes after its
+# failure (the waits read in FF's database, then cut short there), then
+# dropped, each attempt in the history and billed; one past its age dropped
+# without another attempt; a function's own settings, as Lambda's
+# EventInvokeConfig: no retry, and a destination function getting Lambda's
+# record of each call, on success and on failure. Then a
 # customer's database on the run's own server of customers' databases: made, its
 # connection string over TLS as its own user, the plan's one database, a new
 # password, a function reaching it with its account's internet access off and
@@ -38,7 +47,16 @@
 # within a minute; an account past its plan's storage, its uploads waiting for
 # room and let in again once it has some; the requests counted by the minute; its
 # metrics, and an alarm on its errors firing; a bucket deleted empty, or emptied
-# first when asked, its alarm with it. Then plans:
+# first when asked, its alarm with it. Then customers' queues: the AWS CLI, AWS's
+# SDK for JavaScript v3 and boto3 through the SQS endpoint, only their endpoint
+# changed (queues made and listed, messages with attributes sent and received,
+# long polls, batches, visibility, a dead-letter queue, a queue that isn't there,
+# another account's, a wrong secret, an unknown key); two functions with no
+# setting at all, the SDK's own queue URL inside the cluster and boto3 with one
+# from outside, which the SDK for JavaScript sends to its host; a queue as a
+# function's destination, receiving Lambda's record of a call that failed; an
+# alarm on a queue's messages waiting, firing once a minute sampled them, and the
+# queue's metrics. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -46,7 +64,7 @@
 # it, which the restarted backend marks LOST without billing it. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
 # Then GET /usage (P-22) against the raw records, as JSON and as CSV, the deleted
-# database's and bucket's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
+# database's, bucket's and queue's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
 # since the first book rated as the backend started, in shadow mode, the balance,
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
 # invokes refused with 402, a top-up, and invokes accepted again at once. Then an
@@ -101,6 +119,8 @@ metrics_port="${FF_E2E_METRICS_PORT:-$(free_port)}"
 url_port="$(free_port)"
 # Buckets' S3 front door on another, at http://s3.localhost:<port>, each bucket at http://<bucket>.s3.localhost:<port> too.
 storage_port="$(free_port)"
+# Queues' SQS endpoint on a third, at http://localhost:<port>; functions reach it at the cluster's gateway.
+sqs_port="$(free_port)"
 # Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
 dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
@@ -108,6 +128,8 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
   FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
+  FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
@@ -622,6 +644,9 @@ http POST "/functions/$sched_fn/schedules" '{"name": "off", "expression": "rate(
 check "and one with an input of its own, and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
 http PUT "/functions/$sched_fn" '{"eventFormat": "wrapped"}' >/dev/null
 check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
+# A function whose runs fail: each run is an asynchronous call, retried.
+failing_sched_fn="$(http POST /functions "$(jq -n '{name: "e2e-scheduled-fails", runtime: "nodejs", code: "export const handler = async () => { throw new Error(\"the report failed\"); };", memory: 128, timeout: 5}')" | jq -r .id)"
+http POST "/functions/$failing_sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}' >/dev/null
 # Within about 70 s: a minute, and the scheduler's tick, every 5 s.
 for _ in $(seq 1 30); do
   [ "$(http GET "/functions/$sched_fn/invocations?limit=10" | jq '[.invocations[] | select(.source == "schedule")] | length')" -ge 2 ] && break
@@ -640,8 +665,123 @@ check "each schedule says how its run went, and which call it was; the disabled 
   "every-minute success true off null with-input success" \
   "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
 check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM usage_records WHERE function_id = '$sched_fn'")"
+# The attempts of its runs that have ended, or of the one run whose request ID is given.
+sched_attempts() {
+  http GET "/functions/$failing_sched_fn/invocations?limit=10" |
+    jq -r --arg r "${1:-}" '[.invocations[] | select(.status != "RUNNING" and ($r == "" or .requestId == $r))] | sort_by(.attempt) | map("\(.source):\(.attempt):\(.status)") | join(" ")'
+}
+for _ in $(seq 1 20); do [ -n "$(sched_attempts)" ] && break; sleep 1; done
+first_run="$(http GET "/functions/$failing_sched_fn/schedules" | jq -r '.[0] | "\(.lastOutcome) \(.lastRequestId)"')"
+check "a run that fails is the schedule's call, its outcome on the schedule" "schedule:1:ERROR error" "$(sched_attempts) ${first_run% *}"
+# Its retry, a minute after, as an asynchronous call's: cut short in FF's database, so that the run needn't wait.
+for _ in $(seq 1 25); do [ "$(env_q "SELECT attributes->>'settled' FROM queue_messages WHERE message_id = '${first_run#* }'")" = 1 ] && break; sleep 0.2; done
+run_wait="$(env_q "SELECT round(extract(epoch FROM m.visible_at - i.updated_at))::int FROM queue_messages m JOIN function_invocations i ON i.request_id = m.message_id AND i.attempt = 1 WHERE m.message_id = '${first_run#* }'")"
+env_q "UPDATE queue_messages SET visible_at = now() WHERE message_id = '${first_run#* }'" >/dev/null
+for _ in $(seq 1 20); do [[ "$(sched_attempts "${first_run#* }")" == *":2:"* ]] && break; sleep 1; done
+check "  ... retried as an asynchronous call is, a minute after its failure, under the run's request ID" "60 schedule:1:ERROR schedule:2:ERROR" \
+  "$run_wait $(sched_attempts "${first_run#* }")"
+http DELETE "/functions/$failing_sched_fn" >/dev/null
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
+
+echo "== asynchronous calls (ADR 0010)"
+async_code='export const handler = async (event: { fail?: boolean }, context: { awsRequestId: string }) => { if (event.fail) throw new Error("asked to fail"); return { got: event, requestId: context.awsRequestId }; };'
+async_fn="$(http POST /functions "$(jq -n --arg code "$async_code" '{name: "e2e-async", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+# A request's attempts in the history, the first first; the n-th's end awaited, as the worker claims every second.
+attempts_of() { http GET "/functions/$async_fn/invocations?limit=50" | jq -c --arg r "$1" '[.invocations[] | select(.requestId == $r)] | sort_by(.attempt)'; }
+attempt_ended() {
+  for _ in $(seq 1 30); do
+    [ "$(attempts_of "$1" | jq --argjson n "$2" '[.[] | select(.attempt == $n and .status != "RUNNING")] | length')" = 1 ] && return 0
+    sleep 1
+  done
+}
+kept_events() { env_q "SELECT count(*) FROM queue_messages WHERE message_id = '$1'"; }
+gone_soon() { for _ in $(seq 1 15); do [ "$(kept_events "$1")" = 0 ] && return 0; sleep 1; done; }
+# The event put back after its attempt n, which the worker does a moment after the attempt's end.
+put_back() { for _ in $(seq 1 50); do [ "$(env_q "SELECT attributes->>'settled' FROM queue_messages WHERE message_id = '$1'")" = "$2" ] && return 0; sleep 0.2; done; }
+# How long the event waits after its attempt n ended, by FF's database: the next attempt's time, less the attempt's end.
+retry_wait() {
+  put_back "$1" "$2"
+  env_q "SELECT round(extract(epoch FROM m.visible_at - i.updated_at))::int FROM queue_messages m JOIN function_invocations i ON i.request_id = m.message_id AND i.attempt = $2 WHERE m.message_id = '$1'"
+}
+queued="$(http POST "/functions/$async_fn/invoke" '{"input": {"order": 7}}' -H 'X-Amz-Invocation-Type: Event' -D "$work/async-headers")"
+async_request="$(jq -r .requestId <<<"$queued")"
+check "an Event is kept and answered at once: 202 and its request ID, the answer's own" "202 true" \
+  "$(status) $(grep -qi "^x-ff-request-id: $async_request" "$work/async-headers" && echo true || echo false)"
+attempt_ended "$async_request" 1
+gone_soon "$async_request"
+check "it runs without anyone waiting, as its first attempt, the function seeing its request ID; it is kept no more" \
+  "COMPLETED async 1 true {\"order\":7} $async_request 0" \
+  "$(attempts_of "$async_request" | jq -r '.[0] | "\(.status) \(.source) \(.attempt) \(.id == .requestId) \(.output.got | tojson) \(.output.requestId)"') $(kept_events "$async_request")"
+http POST "/functions/$async_fn/invoke" '{"input": {}}' -H 'X-Amz-Invocation-Type: DryRun' >/dev/null
+check "a DryRun only checks: 204, nothing kept, nothing run" "204 0 1" \
+  "$(status) $(env_q "SELECT count(*) FROM queue_messages WHERE function_id = '$async_fn'") $(http GET "/functions/$async_fn/invocations" | jq .total)"
+xs 1048576 >"$work/async-big.txt"
+jq -n --rawfile big "$work/async-big.txt" '{input: $big}' >"$work/async-big.json"
+http POST "/functions/$async_fn/invoke" "" --data-binary @"$work/async-big.json" -H 'X-Amz-Invocation-Type: Event' >/dev/null
+check "an Event over AWS Lambda's 1 MB as JSON is refused as Lambda refuses it" "413 RequestEntityTooLargeException" "$(status) $(jq -r .error "$work/body")"
+failing="$(http POST "/functions/$async_fn/invoke" '{"input": {"fail": true}, "invocationType": "Event"}' | jq -r .requestId)"
+check "an Event named in the body is kept too" 202 "$(status)"
+attempt_ended "$failing" 1
+first_wait="$(retry_wait "$failing" 1)"
+# The rest of its wait cut short, in FF's database, so that the run needn't wait three minutes.
+env_q "UPDATE queue_messages SET visible_at = now() WHERE message_id = '$failing'" >/dev/null
+attempt_ended "$failing" 2
+second_wait="$(retry_wait "$failing" 2)"
+env_q "UPDATE queue_messages SET visible_at = now() WHERE message_id = '$failing'" >/dev/null
+attempt_ended "$failing" 3
+gone_soon "$failing"
+check "a failing Event is retried a minute after its first failure, then two minutes after its second, as Lambda retries it" "60 120" "$first_wait $second_wait"
+check "then dropped after its third attempt, each attempt in the history under its request ID" "1:ERROR 2:ERROR 3:ERROR 0" \
+  "$(attempts_of "$failing" | jq -r '[.[] | "\(.attempt):\(.status)"] | join(" ")') $(kept_events "$failing")"
+check "each attempt a call billed on its own" 3 "$(env_q "SELECT count(*) FROM usage_records WHERE request_id = '$failing'")"
+aged="$(http POST "/functions/$async_fn/invoke" '{"input": {"fail": true}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+attempt_ended "$aged" 1
+put_back "$aged" 1
+# Waiting for its retry, it is made six hours and a minute old, past Lambda's maximum age, and due at once.
+env_q "UPDATE queue_messages SET sent_at = now() - interval '6 hours 1 minute', visible_at = now() WHERE message_id = '$aged'" >/dev/null
+gone_soon "$aged"
+check "an Event past its maximum age is dropped at its next claim, without another attempt" "0 1" "$(kept_events "$aged") $(attempts_of "$aged" | jq length)"
+records_fn="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-async-records", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+records_arn="arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async-records"
+http GET "/functions/$async_fn/event-invoke-config" >/dev/null
+check "a function without settings for its asynchronous calls follows Lambda's defaults, which the 404 says" \
+  "404 The function arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async has no event invoke configuration: its asynchronous calls are retried twice and kept 6 hours, AWS Lambda's defaults" \
+  "$(status) $(jq -r .message "$work/body")"
+set_config="$(http PUT "/functions/$async_fn/event-invoke-config" "$(jq -cn --arg arn "$records_arn" '{maximumRetryAttempts: 0, destinationConfig: {onSuccess: {destination: $arn}, onFailure: {destination: $arn}}}')")"
+check "its own settings, as Lambda's EventInvokeConfig: no retry, and another function as the destination of each call's record" \
+  "200 arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 0 null $records_arn $records_arn" \
+  "$(status) $(jq -r '"\(.functionArn) \(.maximumRetryAttempts) \(.maximumEventAgeInSeconds) \(.destinationConfig.onSuccess.destination) \(.destinationConfig.onFailure.destination)"' <<<"$set_config")"
+# The records come to the destination as asynchronous calls of its own, their event Lambda's record.
+record_of() {
+  for _ in $(seq 1 30); do
+    found="$(http GET "/functions/$records_fn/invocations?limit=20" | jq -c --arg r "$1" '[.invocations[] | select(.status == "COMPLETED" and .input.requestContext.requestId == $r)][0].input // empty')"
+    [ -n "$found" ] && echo "$found" && return 0
+    sleep 1
+  done
+}
+succeeded="$(http POST "/functions/$async_fn/invoke" '{"input": {"order": 9}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+check "a call that succeeds hands its destination Lambda's record of it: Success, its event, its answer" \
+  "Success arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 1 9 9 200" \
+  "$(record_of "$succeeded" | jq -r '"\(.requestContext.condition) \(.requestContext.functionArn) \(.requestContext.approximateInvokeCount) \(.requestPayload.order) \(.responsePayload.got.order) \(.responseContext.statusCode)"')"
+failed="$(http POST "/functions/$async_fn/invoke" '{"input": {"fail": true}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+check "one that fails, with no retry, hands it at once its record: RetriesExhausted, the function's error" \
+  "RetriesExhausted 1 Unhandled Error asked to fail" \
+  "$(record_of "$failed" | jq -r '"\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.responseContext.functionError) \(.responsePayload.errorType) \(.responsePayload.errorMessage)"')"
+check "  ... after its one attempt" 1 "$(attempts_of "$failed" | jq length)"
+http DELETE "/functions/$async_fn/event-invoke-config" >/dev/null
+check "its settings deleted, it follows Lambda's defaults again" "204 404" "$(status) $(http GET "/functions/$async_fn/event-invoke-config" >/dev/null; status)"
+# Its calls as Lambda's metrics count them, each backend's counts written a minute at a time: within one.
+async_metrics() {
+  http GET "/functions/$async_fn/metrics?period=3600&start=$(date -u -d '-2 hour' +%Y-%m-%dT%H:00:00Z)" |
+    jq -r '"\([.metrics.AsyncEventsReceived[]] | add) \([.metrics.AsyncEventsDropped[]] | add) \([.metrics.DestinationDeliveryFailures[]] | add) \([.metrics.AsyncEventAge.Maximum[] | select(. != null)] | max > 0)"'
+}
+for _ in $(seq 90); do [ "$(async_metrics)" = "5 3 0 true" ] && break; sleep 1; done
+check "its metrics, as Lambda's: the five events kept, the three that ended without success dropped, records to its destination all taken, each attempt's age" \
+  "5 3 0 true" "$(async_metrics)"
+http DELETE "/functions/$records_fn" >/dev/null
+http DELETE "/functions/$async_fn" >/dev/null
+check "deleting the function deletes its queue" 0 "$(env_q "SELECT count(*) FROM queues WHERE function_id = '$async_fn'")"
 
 echo "== customers' databases (ADR 0008)"
 made="$(http POST /databases '{"name": "e2e-orders"}')"
@@ -706,7 +846,7 @@ store_s3() { AWS_ACCESS_KEY_ID=ffdevaccesskey AWS_SECRET_ACCESS_KEY=ffdevsecretk
   "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$FF_S3_PORT" "$@"; }
 if command -v aws >/dev/null; then aws_cli=(aws); else
   aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
-    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE amazon/aws-cli:2.34.32)
+    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS amazon/aws-cli:2.34.32)
 fi
 # held <command…>: whether the store has the bucket, as head-bucket answers.
 held() { "$@" >/dev/null 2>&1 && echo held || echo gone; }
@@ -794,7 +934,7 @@ sleep 2
 check "aws: a presigned URL, fetched; one past its expiry, AccessDenied" "<h1>Ahlan</h1> 403 AccessDenied" \
   "$(curl -s "$presigned") $(curl -s -o "$work/expired" -w '%{http_code}' "$expiring") $(grep -o '<Code>[^<]*' "$work/expired" | cut -c7-)"
 # outcome <command…>: accepted, or refused with the S3 error's code in its message, as the CLI prints it.
-outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
+outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|InvalidArgument)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
 check "aws: a wrong secret, SignatureDoesNotMatch" "refused SignatureDoesNotMatch" "$(AWS_SECRET=wrong-secret outcome aws_ff s3 ls s3://e2e-photos)"
 check "aws: another account's bucket, AccessDenied" "refused AccessDenied" "$(outcome aws_ff s3 ls s3://e2e-theirs)"
 check "a read-only key lists, and writes nothing: AccessDenied" "accepted refused AccessDenied" \
@@ -918,6 +1058,224 @@ http DELETE "/buckets/e2e-photos?force=true" >/dev/null
 check "  ... which deletes its files, then the bucket, gone from the store too, and its alarm with it" "204 404 gone 404" \
   "$(status) $(http GET /buckets/e2e-photos >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$store_name") $(http GET "/alarms/$bucket_alarm" >/dev/null; status)"
 http DELETE "/storage-keys/$key_id" >/dev/null
+
+echo "== customers' queues (ADR 0010): AWS's own clients through the SQS endpoint, then functions with no setting"
+sqs_endpoint="http://localhost:$sqs_port"
+queue_key="$(http POST /storage-keys '{}')"
+queue_key_id="$(jq -r .id <<<"$queue_key")"
+queue_key_secret="$(jq -r .secretAccessKey <<<"$queue_key")"
+# The AWS CLI, its endpoint from AWS_ENDPOINT_URL_SQS alone, as a function's environment gives it, and no setting of
+# this machine's; as the other account with AWS_KEY and AWS_SECRET.
+aws_sqs() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$queue_key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$queue_key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 \
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_SQS="$sqs_endpoint" "${aws_cli[@]}" sqs "$@"; }
+as_other_sqs() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
+check "the AWS CLI makes a queue, its URL under the endpoint and the account" "$sqs_endpoint/$tenant/e2e-cli-orders" \
+  "$(aws_sqs create-queue --queue-name e2e-cli-orders --query QueueUrl --output text)"
+cli_url="$sqs_endpoint/$tenant/e2e-cli-orders"
+aws_sqs send-message --queue-url "$cli_url" --message-body 'Ahlan from the CLI' \
+  --message-attributes '{"source": {"DataType": "String", "StringValue": "aws-cli"}}' >/dev/null
+aws_sqs receive-message --queue-url "$cli_url" --wait-time-seconds 2 --message-attribute-names All >"$work/received.json"
+check "  ... sends a message with an attribute, receives it back, and deletes it" "Ahlan from the CLI aws-cli 0" \
+  "$(jq -r '.Messages[0] | "\(.Body) \(.MessageAttributes.source.StringValue)"' "$work/received.json") \
+$(aws_sqs delete-message --queue-url "$cli_url" --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' "$work/received.json")" >/dev/null; \
+aws_sqs get-queue-attributes --queue-url "$cli_url" --attribute-names ApproximateNumberOfMessages --query Attributes.ApproximateNumberOfMessages --output text)"
+# outcome_sqs <command…>: accepted, or refused with the error's query code, as the CLI prints it.
+outcome_sqs() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((AWS\.SimpleQueueService\.[A-Za-z]+|SignatureDoesNotMatch|InvalidClientTokenId|AccessDenied|OverLimit|RequestThrottled)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
+check "  ... a queue that isn't there, by its query code" "refused AWS.SimpleQueueService.NonExistentQueue" "$(outcome_sqs aws_sqs get-queue-url --queue-name nowhere)"
+other_url="$(as_other_sqs aws_sqs create-queue --queue-name e2e-cli-orders --query QueueUrl --output text)"
+check "another account's queue of the same name is its own: its URL under its account, which this account's key doesn't find" \
+  "$sqs_endpoint/$other/e2e-cli-orders refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$other_url $(outcome_sqs aws_sqs send-message --queue-url "$other_url" --message-body 'not mine')"
+check "  ... nor lists" "$cli_url" "$(aws_sqs list-queues --query 'QueueUrls' --output text)"
+# AWS's SDK for JavaScript v3, pinned to the version ADR 0010 measured, fetched once into hack/.cache; boto3 from the
+# buckets' clients.
+sqs_clients="$FF_REPO_ROOT/hack/.cache/sqs-clients"
+if [ ! -d "$sqs_clients/node_modules/@aws-sdk/client-sqs" ]; then
+  npm install --prefix "$sqs_clients" --no-audit --no-fund --silent @aws-sdk/client-sqs@3.1156.0 >/dev/null
+fi
+MODULES="$sqs_clients/node_modules" ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
+  node "$FF_REPO_ROOT/hack/lib/sqs-clients/sdk.mjs" >"$work/sqs-sdk.jsonl" 2>"$work/sqs-sdk.log" || true
+client_checks "$work/sqs-sdk.jsonl" 13
+ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
+  "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/sqs-clients/boto3_checks.py" >"$work/sqs-boto3.jsonl" 2>"$work/sqs-boto3.log" || true
+client_checks "$work/sqs-boto3.jsonl" 8
+# Two messages left waiting in a queue, and an alarm on them, as a dead-letter queue is watched: judged at the end of
+# the queues' sections, by when a minute has sampled them.
+aws_sqs create-queue --queue-name e2e-waiting >/dev/null
+for body in one two; do aws_sqs send-message --queue-url "$sqs_endpoint/$tenant/e2e-waiting" --message-body "$body" >/dev/null; done
+waiting_alarm="$(http POST /alarms '{"name": "e2e-waiting", "queueName": "e2e-waiting", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 1, "evaluationPeriods": 3, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' | jq -r .id)"
+check "an alarm on a queue's messages, naming the queue as CloudWatch's QueueName" "201 e2e-waiting" "$(status) $(http GET "/alarms/$waiting_alarm" | jq -r .queueName)"
+# Functions as on AWS Lambda with a role: AWS's SDK for JavaScript v3 and boto3 with no setting at all, in packages
+# as npm and pip install them; FF gives their pods the function's own key, the region and the endpoint.
+aws_sqs create-queue --queue-name e2e-fn-orders >/dev/null
+package_with "$work/sqs-node.zip" "$sqs_clients/node_modules" node_modules "index.mjs=$FF_REPO_ROOT/hack/lib/sqs-clients/functions/index.mjs"
+package_with "$work/sqs-python.zip" "$clients/python" '' "function.py=$FF_REPO_ROOT/hack/lib/sqs-clients/functions/function.py"
+upload "$work/sqs-node.zip" >/dev/null
+upload "$work/sqs-python.zip" >/dev/null
+node_sqs="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$work/sqs-node.zip")" '{name: "e2e-sqs-node", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 256, timeout: 30}')" | jq -r .id)"
+python_sqs="$(http POST /functions "$(jq -n --arg sha "$(sha256_of "$work/sqs-python.zip")" '{name: "e2e-sqs-python", runtime: "python", codeSha256: $sha, handler: "function.handler", memory: 256, timeout: 30}')" | jq -r .id)"
+sqs_input="$(jq -cn --arg url "$sqs_endpoint/$tenant/e2e-fn-orders" --arg other "$other" '{input: {queue: "e2e-fn-orders", publicUrl: $url, otherAccount: $other}}')"
+check "a Node.js function, new SQSClient({}) as on Lambda: the queue's URL by its name under FF's endpoint inside the cluster, and a send to it; another account's, QueueDoesNotExist" \
+  "{\"url\":\"http://$cluster_gateway:$sqs_port/$tenant/e2e-fn-orders\",\"byName\":\"sent\",\"other\":\"QueueDoesNotExist\"}" \
+  "$(http POST "/functions/$node_sqs/invoke" "$sqs_input" | jq -c '.output | {url, byName, other}')"
+check "  ... a URL from outside: the SDK sends to its host, which a function doesn't reach, unless its client keeps to its endpoint (useQueueUrlAsEndpoint: false)" \
+  "ECONNREFUSED sent" "$(jq -r '.output | "\(.fromOutside) \(.keptToEndpoint)"' "$work/body")"
+check "a Python function, boto3.client(\"sqs\") as on Lambda: the URL from outside works as it is, boto3 sending to its endpoint; it receives both functions' messages" \
+  '{"bodies":["sent by a Node.js function","sent by a Node.js function, to the URL from outside","sent by a Python function"],"other":"AWS.SimpleQueueService.NonExistentQueue"}' \
+  "$(http POST "/functions/$python_sqs/invoke" "$sqs_input" | jq -c .output)"
+check "their pods get the SQS endpoint inside the cluster with their own key, through the Secret" \
+  "http://$cluster_gateway:$sqs_port $(function_secret "$node_sqs" AWS_ACCESS_KEY_ID)" \
+  "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SQS) $(env_q "SELECT id FROM storage_keys WHERE function_id = '$node_sqs' AND revoked_at IS NULL")"
+http PUT "/functions/$python_sqs" '{"environment": {"AWS_ENDPOINT_URL_SQS": "https://sqs.us-east-1.amazonaws.com"}}' >/dev/null
+check "a function can't point it elsewhere: AWS_ENDPOINT_URL_SQS is FF's" "400 AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues" \
+  "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+http DELETE "/functions/$node_sqs" >/dev/null
+http DELETE "/functions/$python_sqs" >/dev/null
+# A queue as the destination of a function's calls that don't wait: the record, Lambda's, as the message's body.
+aws_sqs create-queue --queue-name e2e-fn-records >/dev/null
+records_queue_arn="arn:aws:sqs:tn-tunis-1:$tenant:e2e-fn-records"
+failing_code='export const handler = async () => { throw new Error("asked to fail"); };'
+failing_fn="$(http POST /functions "$(jq -n --arg code "$failing_code" '{name: "e2e-async-to-queue", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+http PUT "/functions/$failing_fn/event-invoke-config" "$(jq -cn --arg arn "$records_queue_arn" '{maximumRetryAttempts: 0, destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
+check "a queue of the account as a function's destination, by its ARN" "200 $records_queue_arn" "$(status) $(jq -r .destinationConfig.onFailure.destination "$work/body")"
+to_queue="$(http POST "/functions/$failing_fn/invoke" '{"input": {"order": 11}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+aws_sqs receive-message --queue-url "$sqs_endpoint/$tenant/e2e-fn-records" --wait-time-seconds 20 --attribute-names SenderId >"$work/record.json"
+check "  ... a call that fails for good sends it Lambda's record, the message's body, its sender the function" \
+  "RetriesExhausted $to_queue 11 asked to fail arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async-to-queue" \
+  "$(jq -r '.Messages[0].Body | fromjson | "\(.requestContext.condition) \(.requestContext.requestId) \(.requestPayload.order) \(.responsePayload.errorMessage)"' "$work/record.json") $(jq -r '.Messages[0].Attributes.SenderId' "$work/record.json")"
+http PUT "/functions/$failing_fn/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$other:e2e-cli-orders" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
+check "  ... never another account's queue" "400 destinationConfig.onFailure.destination must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$tenant:e2e-cli-orders" \
+  "$(status) $(jq -r .message "$work/body")"
+http DELETE "/functions/$failing_fn" >/dev/null
+# FF's API beside the endpoint: the same queues, through SQS's own operations.
+api_queue="$(http POST /queues '{"name": "e2e-api-orders", "visibilityTimeout": 45}')"
+check "FF's API makes a queue, its URL under the endpoint, which the AWS CLI finds" \
+  "201 $sqs_endpoint/$tenant/e2e-api-orders 45 $sqs_endpoint/$tenant/e2e-api-orders" \
+  "$(status) $(jq -r '"\(.url) \(.visibilityTimeout)"' <<<"$api_queue") $(aws_sqs get-queue-url --queue-name e2e-api-orders --query QueueUrl --output text)"
+api_url="$sqs_endpoint/$tenant/e2e-api-orders"
+http POST /queues/e2e-api-orders/messages '{"body": "from the API", "attributes": {"via": {"dataType": "String", "stringValue": "api"}}}' >/dev/null
+check "  ... sends a message the AWS CLI receives, with its attribute" "201 from the API api" \
+  "$(status) $(aws_sqs receive-message --queue-url "$api_url" --message-attribute-names All --query 'Messages[0].[Body, MessageAttributes.via.StringValue]' --output text | tr '\t' ' ')"
+check "  ... and counts it in flight, hidden for the queue's 45 s" "0 1 0" "$(http GET /queues/e2e-api-orders | jq -r '"\(.messages.available) \(.messages.inFlight) \(.messages.delayed)"')"
+aws_sqs send-message --queue-url "$api_url" --message-body 'from the CLI' >/dev/null
+api_received="$(http POST /queues/e2e-api-orders/receive '{"maxMessages": 10}')"
+check "  ... receives what the CLI sent, its sender the CLI's key, and deletes it by its handle" "200 from the CLI $queue_key_id 204" \
+  "$(status) $(jq -r '.[0] | "\(.body) \(.senderId)"' <<<"$api_received") $(http DELETE "/queues/e2e-api-orders/messages/$(jq -r '.[0].receiptHandle' <<<"$api_received")" >/dev/null; status)"
+http POST /queues '{"name": "e2e-api-orders"}' >/dev/null
+check "  ... refuses a name the account has" '409 The account has a queue named "e2e-api-orders" already' "$(status) $(jq -r .message "$work/body")"
+# A key that names a queue reaches it alone.
+named_key="$(http POST /storage-keys '{"queues": ["e2e-api-orders"]}')"
+named_sqs() { AWS_KEY="$(jq -r .id <<<"$named_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$named_key")" "$@"; }
+check "a key that names a queue lists it alone, and is refused another, AccessDenied" "201 e2e-api-orders $api_url refused AccessDenied" \
+  "$(status) $(jq -r '.queues | join(",")' <<<"$named_key") $(named_sqs aws_sqs list-queues --query 'QueueUrls' --output text) $(named_sqs outcome_sqs aws_sqs get-queue-url --queue-name e2e-fn-records)"
+http DELETE "/storage-keys/$(jq -r .id <<<"$named_key")" >/dev/null
+http POST /queues/e2e-api-orders/purge >/dev/null
+check "FF's API purges a queue, and deletes it, which the CLI then doesn't find" "204 0 204 refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$(status) $(http GET /queues/e2e-api-orders | jq -r .sizeBytes) $(http DELETE /queues/e2e-api-orders >/dev/null; status) $(outcome_sqs aws_sqs get-queue-url --queue-name e2e-api-orders)"
+check "the audit log names each change of a queue, whichever way it came: the CLI's under its access key, the API's as its caller" \
+  "queue.create access_key:$queue_key_id|queue.create dev|queue.purge dev|queue.delete dev" \
+  "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
+
+echo "== functions reading queues, as Lambda's event source mappings: a batch, a partial batch failure, the dead-letter queue"
+aws_sqs create-queue --queue-name e2e-batch-dlq >/dev/null
+aws_sqs create-queue --queue-name e2e-batch --attributes "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$tenant:e2e-batch-dlq" \
+  '{VisibilityTimeout: "5", RedrivePolicy: ({deadLetterTargetArn: $arn, maxReceiveCount: 2} | tojson)}')" >/dev/null
+batch_arn="arn:aws:sqs:tn-tunis-1:$tenant:e2e-batch"
+# As a function written for Lambda answers: the messages it couldn't handle, by their IDs, in batchItemFailures.
+batch_code='export const handler = async (event) => ({ batchItemFailures: event.Records.filter((record) => JSON.parse(record.body).fail).map((record) => ({ itemIdentifier: record.messageId })) });'
+batch_fn="$(http POST /functions "$(jq -n --arg code "$batch_code" '{name: "e2e-batch-reader", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')" | jq -r .id)"
+# Warm, so that its first batch isn't held past the queue's visibility timeout by a cold start.
+http POST "/functions/$batch_fn/invoke" '{"input": {"Records": []}}' >/dev/null
+mapping="$(http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn, maximumBatchingWindowInSeconds: 2, functionResponseTypes: ["ReportBatchItemFailures"]}')")"
+check "a function made to read a queue, as Lambda's CreateEventSourceMapping: 10 a batch, a window of 2 s, partial batch responses" \
+  "201 Enabled 10 2 ReportBatchItemFailures $batch_arn" \
+  "$(status) $(jq -r '"\(.state) \(.batchSize) \(.maximumBatchingWindowInSeconds) \(.functionResponseTypes[0]) \(.eventSourceArn)"' <<<"$mapping")"
+mapping_id="$(jq -r .uuid <<<"$mapping")"
+http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn}')" >/dev/null
+check "  ... once: another for the same queue names the first, in Lambda's words" "409 Please update or delete the existing mapping with UUID $mapping_id" \
+  "$(status) $(jq -r .message "$work/body" | grep -oE 'Please update or delete the existing mapping with UUID [0-9a-f-]+$')"
+check "  ... which the function's list and the queue's show" "$mapping_id $mapping_id" \
+  "$(http GET "/functions/$batch_fn/event-sources" | jq -r '.[0].uuid') $(http GET "/event-sources?eventSourceArn=$(jq -rn --arg arn "$batch_arn" '$arn | @uri')" | jq -r '.[0].uuid')"
+aws_sqs send-message-batch --queue-url "$sqs_endpoint/$tenant/e2e-batch" \
+  --entries "$(jq -cn '[range(1; 6) | {Id: "m\(.)", MessageBody: ({order: ., fail: (. == 2 or . == 4)} | tojson)}]')" >/dev/null
+# The batch at once, PostgreSQL telling FF; the two that failed back after the 5 s of their visibility timeout, then a
+# second time, and moved by the receive after to the dead-letter queue.
+for _ in $(seq 1 60); do
+  [ "$(http GET /queues/e2e-batch-dlq | jq .messages.available)" = 2 ] && [ "$(http GET /queues/e2e-batch | jq '.messages.available + .messages.inFlight')" = 0 ] && break
+  sleep 1
+done
+check "the AWS CLI's five messages in one call of the function, SQS's event; the two its answer names called again, then in the dead-letter queue" \
+  "5 aws:sqs $batch_arn 1,3,5 2,4 0 2" \
+  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | last | .input.Records | "\(length) \(.[0].eventSource) \(.[0].eventSourceARN) \([.[].body | fromjson | select(.fail | not) | .order] | map(tostring) | join(","))"') \
+$(aws_sqs receive-message --queue-url "$sqs_endpoint/$tenant/e2e-batch-dlq" --max-number-of-messages 10 | jq -r '[.Messages[].Body | fromjson | .order] | sort | map(tostring) | join(",")') \
+$(http GET /queues/e2e-batch | jq '.messages.available + .messages.inFlight') $(http GET /queues/e2e-batch-dlq | jq '.messages.available + .messages.inFlight')"
+check "  ... each call in the function's history as the queue's: the batch, then the two again" "2 sqs" \
+  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | "\(length) \(.[0].source)"')"
+http PATCH "/event-sources/$mapping_id" '{"enabled": false}' >/dev/null
+check "a mapping disabled, as Lambda's UpdateEventSourceMapping: nothing read" "200 Disabled" "$(status) $(jq -r .state "$work/body")"
+aws_sqs send-message --queue-url "$sqs_endpoint/$tenant/e2e-batch" --message-body '{"order": 6}' >/dev/null
+sleep 4
+check "  ... the message waits, the function not called" "1 2" \
+  "$(http GET /queues/e2e-batch | jq .messages.available) $(http GET "/functions/$batch_fn/invocations?limit=10" | jq '[.invocations[] | select(.source == "sqs")] | length')"
+http DELETE "/event-sources/$mapping_id" >/dev/null
+check "  ... and deleted: the message stays" "204 1 []" "$(status) $(http GET /queues/e2e-batch | jq .messages.available) $(http GET "/functions/$batch_fn/event-sources" | jq -c .)"
+check "the audit log names each change of the mapping" "event_source.create|event_source.update|event_source.delete" \
+  "$(env_q "SELECT string_agg(action, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'event_source:$mapping_id'")"
+http DELETE "/functions/$batch_fn" >/dev/null
+
+echo "== buckets' notifications, as S3's: an upload runs a function with S3's event, a deletion puts S3's event in a queue"
+# The AWS CLI on buckets with the queues' key, which reaches all the account's buckets and queues.
+s3n() { AWS_KEY="$queue_key_id" AWS_SECRET="$queue_key_secret" aws_ff "$@"; }
+http POST /buckets '{"name": "e2e-notify"}' >/dev/null
+# As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
+upload_code='export const handler = async (event) => ({ keys: event.Records.map((record) => decodeURIComponent(record.s3.object.key.replace(/\+/g, " "))), name: event.Records[0].eventName });'
+upload_fn="$(http POST /functions "$(jq -n --arg code "$upload_code" '{name: "e2e-on-upload", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+aws_sqs create-queue --queue-name e2e-removals >/dev/null
+removals_url="$sqs_endpoint/$tenant/e2e-removals"
+s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn \
+  --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-on-upload" --arg queue "arn:aws:sqs:tn-tunis-1:$tenant:e2e-removals" \
+  '{LambdaFunctionConfigurations: [{Id: "uploads", LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"], Filter: {Key: {FilterRules: [{Name: "prefix", Value: "uploads/"}]}}}],
+    QueueConfigurations: [{Id: "removals", QueueArn: $queue, Events: ["s3:ObjectRemoved:*"]}]}')"
+check "the AWS CLI sets a bucket's notifications, as S3's, and reads them back; FF's API reads the same" "uploads removals uploads removals" \
+  "$(s3n s3api get-bucket-notification-configuration --bucket e2e-notify | jq -r '"\(.LambdaFunctionConfigurations[0].Id) \(.QueueConfigurations[0].Id)"') \
+$(http GET /buckets/e2e-notify/notifications | jq -r '"\(.lambdaFunctionConfigurations[0].id) \(.queueConfigurations[0].id)"')"
+aws_sqs receive-message --queue-url "$removals_url" --wait-time-seconds 5 >"$work/s3-test.json"
+check "  ... and the queue it names gets S3's test event" "s3:TestEvent e2e-notify" "$(jq -r '.Messages[0].Body | fromjson | "\(.Event) \(.Bucket)"' "$work/s3-test.json")"
+aws_sqs delete-message --queue-url "$removals_url" --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' "$work/s3-test.json")"
+printf 'not an upload' >"$work/other.txt"
+printf 'a red cat' >"$work/cat.jpg"
+s3n s3 cp "$work/other.txt" s3://e2e-notify/other/x.txt --only-show-errors
+s3n s3 cp "$work/cat.jpg" "s3://e2e-notify/uploads/red cat.jpg" --only-show-errors
+for _ in $(seq 1 30); do
+  [ "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq '[.invocations[] | select(.source == "async" and .status == "COMPLETED")] | length')" -ge 1 ] && break
+  sleep 1
+done
+check "an upload its rule names runs the function without waiting, S3's event its input, the key decoded as Lambda's functions decode it; another, nothing" \
+  '1 ["uploads/red cat.jpg"] ObjectCreated:Put 9 e2e-notify' \
+  "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq -r '[.invocations[] | select(.source == "async")] | "\(length) \(.[0].output.keys | tojson) \(.[0].output.name) \(.[0].input.Records[0].s3.object.size) \(.[0].input.Records[0].s3.bucket.name)"')"
+s3n s3 rm "s3://e2e-notify/uploads/red cat.jpg" --only-show-errors
+aws_sqs receive-message --queue-url "$removals_url" --wait-time-seconds 10 --attribute-names SenderId >"$work/s3-removed.json"
+check "a deletion puts S3's event in the queue, as S3 sends it to SQS, from the bucket" "ObjectRemoved:Delete uploads%2Fred+cat.jpg removals arn:aws:s3:::e2e-notify" \
+  "$(jq -r '.Messages[0].Body | fromjson | .Records[0] | "\(.eventName) \(.s3.object.key) \(.s3.configurationId)"' "$work/s3-removed.json") $(jq -r '.Messages[0].Attributes.SenderId' "$work/s3-removed.json")"
+check "  ... a destination the account doesn't have refused, as S3 refuses one it can't validate" "refused InvalidArgument" \
+  "$(outcome s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:nowhere" '{LambdaFunctionConfigurations: [{LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"]}]}')")"
+check "the audit log names the change, under the CLI's key" "bucket.notifications access_key:$queue_key_id" \
+  "$(env_q "SELECT action || ' ' || actor FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-notify' AND action = 'bucket.notifications' ORDER BY at DESC LIMIT 1")"
+http DELETE "/functions/$upload_fn" >/dev/null
+http DELETE "/buckets/e2e-notify?force=true" >/dev/null
+for _ in $(seq 150); do [ "$(http GET "/alarms/$waiting_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
+check "the alarm fires once a minute has sampled the two messages waiting, naming the queue" "ALARM e2e-waiting true" \
+  "$(http GET "/alarms/$waiting_alarm" | jq -r '"\(.state) \(.queueName) \(.stateReason | test("breaching ApproximateNumberOfMessagesVisible Maximum > 1"))"')"
+since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
+for _ in $(seq 90); do [ "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq '[.metrics.NumberOfMessagesSent.Sum[]] | add')" = 2 ] && break; sleep 1; done
+check "its metrics, as CloudWatch names SQS's: the two messages sampled waiting, the two sent as counted, three bytes each at most" "2 2 3" \
+  "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq -r '"\([.metrics.ApproximateNumberOfMessagesVisible.Maximum[]] | max) \([.metrics.NumberOfMessagesSent.Sum[]] | add) \([.metrics.SentMessageSize.Maximum[] | select(. != null)] | max)"')"
+for queue in e2e-removals e2e-batch e2e-batch-dlq e2e-cli-orders e2e-fn-orders e2e-fn-records e2e-waiting; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
+check "  ... the alarm gone with its queue" 404 "$(http GET "/alarms/$waiting_alarm" >/dev/null; status)"
+as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
+check "the queues deleted, their messages with them" "0 0" \
+  "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"
+http DELETE "/storage-keys/$queue_key_id" >/dev/null
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account
@@ -1050,6 +1408,11 @@ check "the capacity report shows the account's day: capacity reserved, and capac
 echo "== usage API (P-22)"
 month="$(date -u +%Y-%m)"
 billed="status IN ('success', 'error', 'timeout')"
+# Queues' requests are written a minute at a time: the queues sections' are by now, minutes after; waited for all the same.
+for _ in $(seq 75); do
+  [ "$(env_q "SELECT coalesce(sum(received), 0) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")" = 7 ] && break
+  sleep 1
+done
 usage="$(http GET /usage)"
 check "GET /usage answers this month, by the UTC calendar" "200 $month" "$(status) $(jq -r .month <<<"$usage")"
 check "the meter function: requests billed, the lost call apart, billed duration and GB-s, exactly as its records" \
@@ -1080,6 +1443,15 @@ csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$mont
 check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
   "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,throttled,platform_errors,lost,cost|true|true|true" \
   "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,0\.000$" && echo true || echo false)"
+cli_queue_id="$(env_q "SELECT DISTINCT queue_id FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-cli-orders'")"
+cli_counted="$(env_q "SELECT sum(requests) || ' ' || sum(sent) || ' ' || sum(received) FROM queue_request_counts WHERE queue_id = '$cli_queue_id'")"
+check "the AWS CLI's queue, deleted earlier, keeps its month: its requests as SQS bills them, its messages sent and received, as counted, at nothing before the book that prices queues" \
+  "true e2e-cli-orders $cli_counted 0.000" \
+  "$(jq -r --arg id "$cli_queue_id" '.queues[] | select(.queueId == $id) | "\(.deleted) \(.name) \(.requests) \(.messagesSent) \(.messagesReceived) \(.cost)"' <<<"$usage")"
+check "  ... in the CSV, its requests in the requests column" true \
+  "$(tr -d '\r' <<<"$csv" | grep -qE "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,0\.000$" && echo true || echo false)"
+check "a function's batches counted as received: the five, then the two again; the three handled deleted" "7 3" \
+  "$(env_q "SELECT sum(received) || ' ' || sum(deleted) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")"
 empty="$(http GET '/usage?month=2001-01')"
 check "a month without calls is empty, and before the first price book, unpriced" "200 0 0 null" \
   "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"

@@ -98,8 +98,14 @@ export function eventFormatText(func: Pick<Function, 'eventFormat'>): string {
 export const TRUNCATED_NOTE = 'Truncated: the history keeps the first 64 KiB.';
 
 /** What brought a call, as the history says it. */
-export const sourceText = (source: InvocationSource): string =>
-  ({ api: 'through the API', url: 'through its URL', schedule: 'by a schedule' })[source] ?? source;
+export const sourceText = (source: InvocationSource, attempt = 1): string =>
+  source === 'async'
+    ? `asynchronously, attempt ${attempt}`
+    : (({ api: 'through the API', url: 'through its URL', schedule: 'by a schedule', sqs: 'with a batch of a queue it reads' })[source] ?? source);
+
+/** What the console says of an asynchronous call, kept: its request ID, and what happens next. */
+export const keptCallText = (requestId: string): string =>
+  `Kept: request ${requestId}. It runs within seconds, without anyone waiting, and is retried twice if it fails, a minute then two minutes later; each attempt joins the history.`;
 
 /**
  * An input or output as the history shows it: its JSON, indented; or, when

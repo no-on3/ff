@@ -76,7 +76,7 @@ export class DatabasesService {
   async create(accountId: string, dto: CreateDatabaseDto): Promise<DatabaseWithPassword> {
     const server = this.serverOrRefuse();
     const account = await this.databases.manager.findOneBy(Account, { id: accountId });
-    if (account?.storageDisabledAt) throw new ForbiddenException(`FF turned this account's databases and buckets off: ${account.storageDisabledReason}`);
+    if (account?.storageDisabledAt) throw new ForbiddenException(`FF turned this account's databases, buckets and queues off: ${account.storageDisabledReason}`);
     const plan = await this.plans.forAccount(accountId);
     let row: Database;
     try {

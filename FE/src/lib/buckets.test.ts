@@ -25,22 +25,29 @@ describe('an access key', () => {
   const key: CreatedStorageKey = {
     id: 'AKFF7Q2MLKX4RTZB3W5N',
     buckets: ['photos'],
+    queues: null,
     readOnly: true,
     createdAt: '2026-10-23T06:36:00.000Z',
     lastUsedAt: null,
     secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
     endpoint: 'https://s3.ffunc.tn',
+    sqsEndpoint: 'https://sqs.ffunc.tn',
     region: 'tn-tunis-1',
   };
 
-  it('says what it reaches', () => {
-    expect([keyReach(key), keyReach({ buckets: null, readOnly: false })]).toEqual(['photos, read-only', 'Every bucket']);
+  it('says what it reaches: every bucket and queue when it names neither, else those it names', () => {
+    expect([
+      keyReach(key),
+      keyReach({ buckets: null, queues: null, readOnly: false }),
+      keyReach({ buckets: null, queues: ['orders'], readOnly: false }),
+      keyReach({ buckets: ['photos'], queues: ['orders', 'invoices'], readOnly: true }),
+    ]).toEqual(['Buckets photos, read-only', 'Every bucket and queue', 'Queues orders', 'Buckets photos; queues orders, invoices, read-only']);
   });
 
-  it("gives the four variables AWS's SDKs and CLI read, as shell lines too", () => {
-    expect(awsVariables(key).map(([name]) => name)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'AWS_ENDPOINT_URL_S3']);
+  it("gives the five variables AWS's SDKs and CLI read, the S3 and SQS endpoints among them, as shell lines too", () => {
+    expect(awsVariables(key).map(([name]) => name)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL_SQS']);
     expect(exportLines(key)).toBe(
-      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.tn',
+      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.tn\nexport AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.tn',
     );
   });
 });

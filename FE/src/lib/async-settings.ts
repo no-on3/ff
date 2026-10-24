@@ -1,0 +1,93 @@
+import type { EventInvokeConfig, Metrics } from '../services/api';
+
+/** Lambda's defaults for a function's calls that don't wait: two retries after a failure, each call kept 6 hours. */
+export const DEFAULT_RETRIES = 2;
+export const DEFAULT_KEPT_MINUTES = 360;
+/** The API's bounds: 60 seconds to 6 hours, which the form says in minutes. */
+export const KEPT_MINUTES = { min: 1, max: 360 } as const;
+
+/** The form for a function's settings: its retries, how long a call is kept, and its destinations by name, '' for none. */
+export interface AsyncSettingsForm {
+  retries: number;
+  keptMinutes: string;
+  onSuccess: string;
+  onFailure: string;
+}
+
+/** The function name a Lambda ARN ends with: arn:aws:lambda:<region>:<account>:function:<name>, $LATEST or not; any other ARN, a queue's, as it is. */
+export const nameOfArn = (arn: string | undefined): string => (arn ? (/:function:([^:]+)/.exec(arn)?.[1] ?? arn) : '');
+
+/** A destination as people read it: a function by its name, a queue's ARN (arn:aws:sqs:<region>:<account>:<name>) as "the queue <name>". */
+export function destinationText(destination: string): string {
+  const queue = /^arn:aws:sqs:[^:]+:\d{12}:(.+)$/.exec(destination);
+  return queue ? `the queue ${queue[1]}` : nameOfArn(destination);
+}
+
+/** The form for the settings there are, or for Lambda's defaults when there are none. */
+export function asyncSettingsForm(config: EventInvokeConfig | null): AsyncSettingsForm {
+  return {
+    retries: config?.maximumRetryAttempts ?? DEFAULT_RETRIES,
+    keptMinutes: String(Math.round((config?.maximumEventAgeInSeconds ?? DEFAULT_KEPT_MINUTES * 60) / 60)),
+    onSuccess: nameOfArn(config?.destinationConfig.onSuccess.destination),
+    onFailure: nameOfArn(config?.destinationConfig.onFailure.destination),
+  };
+}
+
+/** The body of PUT /functions/:id/event-invoke-config, the destinations by their functions' names, which the API takes as their ARNs, a queue by its ARN; or what is wrong in the form. */
+export function asyncSettingsBody(form: AsyncSettingsForm): { body: Record<string, unknown> } | { problem: string } {
+  const minutes = Number(form.keptMinutes);
+  if (!Number.isInteger(minutes) || minutes < KEPT_MINUTES.min || minutes > KEPT_MINUTES.max) {
+    return { problem: `A call is kept from ${KEPT_MINUTES.min} minute to ${KEPT_MINUTES.max} minutes (6 hours), in whole minutes` };
+  }
+  const destinationConfig: Record<string, { destination: string }> = {};
+  if (form.onSuccess) destinationConfig.onSuccess = { destination: form.onSuccess };
+  if (form.onFailure) destinationConfig.onFailure = { destination: form.onFailure };
+  return {
+    body: {
+      maximumRetryAttempts: form.retries,
+      maximumEventAgeInSeconds: minutes * 60,
+      ...(Object.keys(destinationConfig).length > 0 ? { destinationConfig } : {}),
+    },
+  };
+}
+
+/** How long a call is kept, in words: hours when it is whole hours, else minutes. */
+export function keptText(seconds: number): string {
+  if (seconds % 3600 === 0) return seconds === 3600 ? '1 hour' : `${seconds / 3600} hours`;
+  const minutes = Math.round(seconds / 60);
+  return minutes === 1 ? '1 minute' : `${minutes} minutes`;
+}
+
+const retriesText = (retries: number) => (retries === 0 ? 'not retried' : retries === 1 ? 'retried once' : 'retried twice');
+
+/** The settings in one sentence, as the panel says them. */
+export function asyncSettingsText(config: EventInvokeConfig | null): string {
+  const retries = config?.maximumRetryAttempts ?? DEFAULT_RETRIES;
+  const kept = keptText(config?.maximumEventAgeInSeconds ?? DEFAULT_KEPT_MINUTES * 60);
+  const destinations = [
+    config?.destinationConfig.onSuccess.destination && `a call that succeeds goes on to ${destinationText(config.destinationConfig.onSuccess.destination)}`,
+    config?.destinationConfig.onFailure.destination && `one that fails for good to ${destinationText(config.destinationConfig.onFailure.destination)}`,
+  ].filter(Boolean);
+  const sentence = `A call that fails is ${retriesText(retries)}, and kept ${kept} at most`;
+  const ending = destinations.length ? `; ${destinations.join(', ')}.` : ', going nowhere once it ends.';
+  return config ? `${sentence}${ending}` : `AWS Lambda's defaults: ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}${ending}`;
+}
+
+const count = (n: number, one: string, many: string) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
+
+/**
+ * A function's calls that don't wait over its metrics' window, in words, as Lambda's metrics count them: those kept,
+ * those dropped, the records a destination didn't take, and the longest a call waited for an attempt. null when there
+ * was none.
+ */
+export function asyncCallsText(metrics: Pick<Metrics, 'metrics'>): string | null {
+  const m = metrics.metrics;
+  const sum = (series: number[]) => series.reduce((total, value) => total + value, 0);
+  const [received, dropped, failures] = [sum(m.AsyncEventsReceived), sum(m.AsyncEventsDropped), sum(m.DestinationDeliveryFailures)];
+  const waits = m.AsyncEventAge.Maximum.filter((age): age is number => age !== null);
+  if (!received && !dropped && !failures && waits.length === 0) return null;
+  const parts = [count(received, 'call kept', 'calls kept'), `${dropped.toLocaleString('en-US')} dropped`];
+  if (failures) parts.push(count(failures, "record its destination didn't take", "records their destination didn't take"));
+  const longest = waits.length ? Math.max(...waits) : null;
+  return `${parts.join(', ')}${longest === null ? '' : `; the longest wait for an attempt ${longest < 2000 ? `${Math.round(longest)} ms` : `${Math.round(longest / 1000)} s`}`}.`;
+}

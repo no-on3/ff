@@ -12,7 +12,9 @@ fn me(egress: bool) -> Value {
             "accounts": [{ "id": "123456789012", "name": "Acme", "status": "active", "role": "developer",
                            "plan": { "id": "beta", "name": "Beta", "limits": { "functions": 25, "memoryMb": 1024, "invokesPerSecond": 100,
                                                                              "databases": 1, "databaseStorageMb": 1024, "databaseConnections": 10,
-                                                                             "buckets": 5, "bucketStorageMb": 5120, "storageRequestsPerSecond": 100, "maxObjectMb": 5120 } },
+                                                                             "buckets": 5, "bucketStorageMb": 5120, "storageRequestsPerSecond": 100, "maxObjectMb": 5120,
+                                                                             "queues": 10, "eventSourceMappingsPerFunction": 5, "queueRequestsPerSecond": 100,
+                                                                             "queueStorageMb": 100 } },
                            "internetEgress": egress, "dataDeletionDueAt": null, "dataDeletedAt": null }] })
 }
 
@@ -35,7 +37,8 @@ fn account_says_its_plan_and_whether_its_functions_reach_the_internet() {
     ff(&dir).arg("account").assert().success().stdout(
         "account      123456789012 \"Acme\"\nstatus       active\nrole         developer\n\
          plan         Beta: 25 functions, 1024 MB of memory a function at most, 100 invocations a second, 1 database, 1024 MB a database, \
-         10 sessions a database, 5 buckets, 5120 MB in the buckets, 100 requests to the buckets a second, 5120 MB a file in one upload\n\
+         10 sessions a database, 5 buckets, 5120 MB in the buckets, 100 requests to the buckets a second, 5120 MB a file in one upload, \
+         10 queues, 5 queues read by a function, 100 requests to the queues a second, 100 MB of messages waiting\n\
          internet     off: its functions reach FF's services only, and a call out fails; FF's operator turns it on\n",
     );
     ff(&dir)
@@ -117,6 +120,27 @@ fn usage_shows_each_bucket_after_the_databases_its_requests_by_s3s_classes_and_w
 }
 
 #[test]
+fn usage_shows_each_queue_after_the_buckets_its_requests_as_sqs_bills_them_and_its_messages() {
+    let mut month = usage();
+    month["queues"] = json!([
+        { "queueId": "q1", "name": "orders", "deleted": false, "requests": 18_420, "messagesSent": 6_140, "messagesReceived": 6_152, "cost": "0.022" },
+        { "queueId": "q2", "name": "old", "deleted": true, "requests": 3, "messagesSent": 1, "messagesReceived": 0, "cost": "0.000" }
+    ]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "total          15        3.14375     1           0.852\nQUEUE          REQUESTS  SENT  RECEIVED  COST\n\
+             orders         18420     6140  6152      0.022\nold (deleted)  3         1     0         0.000\nestimated cost:"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
 fn usage_as_csv_is_the_apis_own_and_a_wrong_month_is_refused_before_calling() {
     let csv = "functionId,functionName,requests\r\nf1,hello,12\r\n";
     let api = Server::start(vec![Reply::text(200, "text/csv; charset=utf-8", csv)]);
@@ -180,6 +204,26 @@ fn metrics_of_a_function_show_a_row_per_period_and_the_totals() {
     );
     let path = &api.requests()[1].path;
     assert!(path.starts_with("/functions/f1/metrics?period=60&start=20"), "{path}");
+}
+
+#[test]
+fn metrics_say_the_calls_that_didnt_wait_as_lambdas_metrics_count_them_when_there_were_any() {
+    let mut answer = metrics();
+    answer["metrics"]["AsyncEventsReceived"] = json!([4, 1]);
+    answer["metrics"]["AsyncEventAge"] = json!({ "Average": [120.0, null], "Maximum": [200.0, null] });
+    answer["metrics"]["AsyncEventsDropped"] = json!([0, 3]);
+    answer["metrics"]["DestinationDeliveryFailures"] = json!([1, 0]);
+    let api = Server::start(vec![Reply::json(200, answer)]);
+
+    let output = ff(&with_key(&api.url)).args(["metrics", "--since", "2m"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.ends_with(
+            "cold starts 1; calls without waiting: 5 kept, 3 dropped, 1 record its destination didn't take\n"
+        ),
+        "{text}"
+    );
 }
 
 #[test]

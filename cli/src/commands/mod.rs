@@ -1,18 +1,22 @@
 //! One file per command.
 
 mod account;
+mod async_config;
+mod bucket_notifications;
 mod buckets;
 mod completion;
 mod config;
 mod db;
 mod deploy;
 mod env;
+mod event_sources;
 mod functions;
 mod init;
 mod invoke;
 mod local;
 mod logs;
 mod package;
+mod queues;
 mod schedule;
 mod secrets;
 mod url;
@@ -20,8 +24,8 @@ mod version;
 mod whoami;
 
 use crate::cli::{
-    BucketKeysCommand, BucketsCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand, LocalCommand,
-    ScheduleCommand, SecretsCommand, UrlCommand,
+    BucketKeysCommand, BucketsCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand,
+    EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, UrlCommand,
 };
 use crate::config::Settings;
 use crate::error::Error;
@@ -50,6 +54,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Deploy(args) => deploy::run(args, context),
         Command::Package(args) => package::run(args, context),
         Command::Invoke(args) => invoke::run(args, context),
+        Command::AsyncConfig(args) => async_config::run(args, context),
         Command::List => functions::list(context),
         Command::Get { name } => functions::get(&name, context),
         Command::Logs(args) => logs::run(args, context),
@@ -114,12 +119,95 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Buckets(BucketsCommand::Get { name }) => buckets::get(&name, context),
         Command::Buckets(BucketsCommand::Delete { name, force, yes }) => buckets::delete(&name, force, yes, context),
         Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::List)) => buckets::keys_list(context),
-        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Create { buckets, read_only })) => {
-            buckets::keys_create(&buckets, read_only, context)
+        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Create { buckets, queues, read_only })) => {
+            buckets::keys_create(&buckets, &queues, read_only, context)
         }
         Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Revoke { id, yes })) => {
             buckets::keys_revoke(&id, yes, context)
         }
+        Command::Buckets(BucketsCommand::Notify { bucket, function, queue, events, prefix, suffix, id }) => {
+            let destination = match (&function, &queue) {
+                (_, Some(queue)) => bucket_notifications::Destination::Queue(queue),
+                (Some(function), None) => bucket_notifications::Destination::Function(function),
+                (None, None) => unreachable!("clap requires a function or --queue"),
+            };
+            let new = bucket_notifications::NewConfiguration {
+                destination,
+                events: &events,
+                prefix: prefix.as_deref(),
+                suffix: suffix.as_deref(),
+                id: id.as_deref(),
+            };
+            bucket_notifications::notify(&bucket, &new, context)
+        }
+        Command::Buckets(BucketsCommand::Notifications { bucket, remove, clear, yes }) => match (remove, clear) {
+            (Some(id), _) => bucket_notifications::remove(&bucket, &id, context),
+            (None, true) => bucket_notifications::clear(&bucket, yes, context),
+            (None, false) => bucket_notifications::list(&bucket, context),
+        },
+        Command::Queues(QueuesCommand::Create { name, attributes }) => queues::create(&name, &attributes, context),
+        Command::Queues(QueuesCommand::List) => queues::list(context),
+        Command::Queues(QueuesCommand::Get { name }) => queues::get(&name, context),
+        Command::Queues(QueuesCommand::Metrics { name, period, since }) => {
+            queues::metrics(&name, period, &since, context)
+        }
+        Command::Queues(QueuesCommand::Set { name, attributes, no_dead_letter_queue }) => {
+            queues::set(&name, &attributes, no_dead_letter_queue, context)
+        }
+        Command::Queues(QueuesCommand::Send { name, body, delay, attributes }) => {
+            queues::send(&name, &body, delay.as_deref(), &attributes, context)
+        }
+        Command::Queues(QueuesCommand::Receive { name, max, wait, visibility_timeout, delete }) => {
+            queues::receive(&name, max, wait.as_deref(), visibility_timeout.as_deref(), delete, context)
+        }
+        Command::Queues(QueuesCommand::DeleteMessage { name, receipt_handle }) => {
+            queues::delete_message(&name, &receipt_handle, context)
+        }
+        Command::Queues(QueuesCommand::Purge { name, yes }) => queues::purge(&name, yes, context),
+        Command::Queues(QueuesCommand::Delete { name, yes }) => queues::delete(&name, yes, context),
+        Command::EventSources(EventSourcesCommand::Add {
+            queue,
+            function,
+            batches,
+            report_batch_item_failures,
+            disabled,
+        }) => {
+            let settings = event_sources::Settings {
+                batch_size: batches.batch_size,
+                batching_window: batches.batching_window.as_deref(),
+                report_batch_item_failures: report_batch_item_failures.then_some(true),
+                max_concurrency: batches.max_concurrency.map(Some),
+                enabled: disabled.then_some(false),
+            };
+            event_sources::add(&queue, &function, &settings, context)
+        }
+        Command::EventSources(EventSourcesCommand::List { function, queue }) => {
+            event_sources::list(function.as_deref(), queue.as_deref(), context)
+        }
+        Command::EventSources(EventSourcesCommand::Get { uuid }) => event_sources::get(&uuid, context),
+        Command::EventSources(EventSourcesCommand::Update {
+            uuid,
+            batches,
+            report_batch_item_failures,
+            no_report_batch_item_failures,
+            no_max_concurrency,
+            enable,
+            disable,
+        }) => {
+            let settings = event_sources::Settings {
+                batch_size: batches.batch_size,
+                batching_window: batches.batching_window.as_deref(),
+                report_batch_item_failures: if report_batch_item_failures {
+                    Some(true)
+                } else {
+                    no_report_batch_item_failures.then_some(false)
+                },
+                max_concurrency: if no_max_concurrency { Some(None) } else { batches.max_concurrency.map(Some) },
+                enabled: if enable { Some(true) } else { disable.then_some(false) },
+            };
+            event_sources::update(&uuid, &settings, context)
+        }
+        Command::EventSources(EventSourcesCommand::Remove { uuid, yes }) => event_sources::remove(&uuid, yes, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),

@@ -34,27 +34,30 @@ export interface FunctionUsage {
 }
 
 /**
- * One customer's database's or bucket's usage in the part of a month that one
- * book prices (ADR 0008, ADR 0009): its size summed over the hours sampled,
- * which over the month's hours make its GB-months, as AWS bills storage; and,
- * for a bucket, its requests by S3's two classes.
+ * One customer's database's, bucket's or queue's usage in the part of a month
+ * that one book prices (ADR 0008, ADR 0009, ADR 0010): a database's or a
+ * bucket's size summed over the hours sampled, which over the month's hours
+ * make its GB-months, as AWS bills storage; a bucket's requests by S3's two
+ * classes; a queue's requests, as SQS bills them.
  */
 export interface ResourceUsage {
   resourceId: string;
-  kind: 'database' | 'bucket';
+  kind: 'database' | 'bucket' | 'queue';
   /** Bytes held, summed over the hours sampled. */
   byteHours: bigint;
   /** The hours it was sampled in: a database's monthly fee is prorated by them. */
   hours: bigint;
   tier1Requests: bigint;
   tier2Requests: bigint;
+  /** A queue's requests, each 64 KB of a request's messages one; 0 for a database or a bucket. */
+  requests: bigint;
 }
 
 /** The part of a month that one book prices, in time order. */
 export interface BookSegment {
   book: BookPrices;
   functions: FunctionUsage[];
-  /** Customers' databases and buckets, if the account has any. */
+  /** Customers' databases, buckets and queues, if the account has any. */
   resources?: ResourceUsage[];
 }
 
@@ -69,9 +72,9 @@ export interface FunctionCost {
   total: Decimal;
 }
 
-/** A database's or a bucket's cost, before the free tier: storage at the first tier's price, requests, a database's fee. */
+/** A database's, a bucket's or a queue's cost, before the free tier: storage and SQS's requests at their first tier's price, S3's requests, a database's fee. */
 export interface ResourceCost {
-  kind: 'database' | 'bucket';
+  kind: 'database' | 'bucket' | 'queue';
   /** Its GB-months: byte-hours over the month's hours. */
   gbMonths: Decimal;
   storage: Decimal;
@@ -84,13 +87,13 @@ export interface ResourceCost {
 export interface MonthEstimate {
   /** Each function's cost, at the first duration tier's price, before the free tier. */
   functions: Map<string, FunctionCost>;
-  /** Each database's and bucket's cost, before the free tier. */
+  /** Each database's, bucket's and queue's cost, before the free tier. */
   resources: Map<string, ResourceCost>;
-  /** All the functions, databases and buckets together. */
+  /** All the functions, databases, buckets and queues together. */
   usage: Decimal;
-  /** What the free tier takes off, zero or less: requests and GB-s of calls without provisioned concurrency, databases' and buckets' GB-months, S3's requests. */
+  /** What the free tier takes off, zero or less: requests and GB-s of calls without provisioned concurrency, databases' and buckets' GB-months, S3's requests, SQS's. */
   freeTier: Decimal;
-  /** What the duration tiers above the first take off, and S3 Standard's storage tiers above its first, zero or less. */
+  /** What the duration tiers above the first take off, and those of S3 Standard's storage and SQS's requests above their first, zero or less. */
   volumeTiers: Decimal;
   /** D8's knob: the monthly fee, from the book valid when the month starts, else the month's first. */
   monthlyFee: Decimal;
@@ -123,12 +126,13 @@ function aboveFirstTier(from: Decimal, to: Decimal, tiers: Array<{ upTo: Decimal
 /**
  * An account's month, priced as AWS prices Lambda (D8): requests, on-demand
  * duration in tiers, provisioned concurrency and its duration, and D8's
- * knobs; and, as RDS and S3 price them, its databases' and buckets' storage by
- * the GB-month, over `hoursInMonth`, S3's requests by its two classes, and a
- * database's monthly fee by the hours it existed. The free tier and the tiers
- * count the account's usage from the month's start, through every book's
- * part of the month: a book that starts mid-month prices what follows with
- * the counts reached so far.
+ * knobs; and, as RDS, S3 and SQS price them, its databases' and buckets'
+ * storage by the GB-month, over `hoursInMonth`, S3's requests by its two
+ * classes, a database's monthly fee by the hours it existed, and its queues'
+ * requests by the million, in tiers. The free tier and the tiers count the
+ * account's usage from the month's start, through every book's part of the
+ * month: a book that starts mid-month prices what follows with the counts
+ * reached so far.
  */
 export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, hoursInMonth = 0): MonthEstimate {
   const functions = new Map<string, FunctionCost>();
@@ -141,6 +145,7 @@ export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, h
   let bucketGbMonthsSoFar = Decimal.ZERO;
   let tier1SoFar = Decimal.ZERO;
   let tier2SoFar = Decimal.ZERO;
+  let queueRequestsSoFar = Decimal.ZERO;
 
   for (const { book, functions: usage, resources: held = [] } of segments) {
     const firstTier = book.gbSecondTiers[0].price;
@@ -173,18 +178,23 @@ export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, h
     gbSecondsSoFar = gbSecondsEnd;
 
     // Databases and buckets: storage by the GB-month, at the first tier's price; S3's requests; a database's fee by its hours.
+    // Queues: SQS's requests, at the first tier's price.
     if (held.length > 0 && hoursInMonth <= 0) throw new Error("A month's hours are needed to price storage by the GB-month");
     let databaseGbMonths = Decimal.ZERO;
     let bucketGbMonths = Decimal.ZERO;
     let tier1 = 0n;
     let tier2 = 0n;
+    let queueRequests = 0n;
     for (const resource of held) {
       const stored = gbMonths(resource.byteHours, hoursInMonth);
       const database = resource.kind === 'database';
       const cost = {
         gbMonths: stored,
         storage: stored.times(database ? book.databaseStorageGbMonth : book.bucketStorageTiers[0].price),
-        requests: Decimal.of(resource.tier1Requests).times(book.perTier1Request).plus(Decimal.of(resource.tier2Requests).times(book.perTier2Request)),
+        requests: Decimal.of(resource.tier1Requests)
+          .times(book.perTier1Request)
+          .plus(Decimal.of(resource.tier2Requests).times(book.perTier2Request))
+          .plus(Decimal.of(resource.requests).times(book.queueRequestTiers[0].price)),
         fee: database ? Decimal.quotient(resource.hours, BigInt(hoursInMonth), GB_MONTH_PLACES).times(book.databaseMonthlyFee) : Decimal.ZERO,
       };
       const before = resources.get(resource.resourceId);
@@ -195,6 +205,7 @@ export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, h
       else bucketGbMonths = bucketGbMonths.plus(stored);
       tier1 += resource.tier1Requests;
       tier2 += resource.tier2Requests;
+      queueRequests += resource.requests;
     }
     const databaseEnd = databaseGbMonthsSoFar.plus(databaseGbMonths);
     freeTier = freeTier.minus(overlap(databaseGbMonthsSoFar, databaseEnd, Decimal.ZERO, book.freeDatabaseGbMonths).times(book.databaseStorageGbMonth));
@@ -205,10 +216,14 @@ export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, h
     freeTier = freeTier.minus(overlap(tier1SoFar, tier1End, Decimal.ZERO, book.freeTier1Requests).times(book.perTier1Request));
     const tier2End = tier2SoFar.plus(Decimal.of(tier2));
     freeTier = freeTier.minus(overlap(tier2SoFar, tier2End, Decimal.ZERO, book.freeTier2Requests).times(book.perTier2Request));
+    const queueEnd = queueRequestsSoFar.plus(Decimal.of(queueRequests));
+    freeTier = freeTier.minus(overlap(queueRequestsSoFar, queueEnd, Decimal.ZERO, book.freeQueueRequests).times(book.queueRequestTiers[0].price));
+    volumeTiers = volumeTiers.plus(aboveFirstTier(queueRequestsSoFar, queueEnd, book.queueRequestTiers, book.freeQueueRequests));
     databaseGbMonthsSoFar = databaseEnd;
     bucketGbMonthsSoFar = bucketEnd;
     tier1SoFar = tier1End;
     tier2SoFar = tier2End;
+    queueRequestsSoFar = queueEnd;
   }
 
   const usage = [...functions.values(), ...resources.values()].reduce((sum, cost) => sum.plus(cost.total), Decimal.ZERO);

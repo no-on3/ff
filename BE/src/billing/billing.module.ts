@@ -3,7 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { PlatformSettingsModule } from '../admin/platform-settings.module';
 import { AuditModule } from '../audit/audit.module';
 import { MailModule } from '../mail/mail.module';
-import { MinioClientModule } from '../minio-client/minio-client.module';
+import { ObjectStoreModule } from '../object-store/object-store.module';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
 import { CreditService } from './credit.service';
@@ -27,7 +27,7 @@ import { PricingService } from './pricing.service';
  * pro-formas (P-35); and the monthly invoices and usage statements (P-36).
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([PriceBook, Currency]), PlatformSettingsModule, AuditModule, MailModule, MinioClientModule],
+  imports: [TypeOrmModule.forFeature([PriceBook, Currency]), PlatformSettingsModule, AuditModule, MailModule, ObjectStoreModule],
   controllers: [BillingController, ProFormasController, InvoicesController],
   providers: [PricingService, LedgerService, HourlyRatingService, BillingService, LedgerEvents, CreditService, LowBalanceService, PaymentsService, InvoicesService, InvoiceNoticesService],
   exports: [PricingService, LedgerService, HourlyRatingService, CreditService, PaymentsService, InvoicesService, BillingService],

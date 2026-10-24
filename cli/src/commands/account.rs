@@ -92,6 +92,10 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("bucketStorageMb", &|n| format!("{n} MB in the buckets"));
     add("storageRequestsPerSecond", &|n| format!("{n} requests to the buckets a second"));
     add("maxObjectMb", &|n| format!("{n} MB a file in one upload"));
+    add("queues", &|n| if n == 1 { "1 queue".to_string() } else { format!("{n} queues") });
+    add("eventSourceMappingsPerFunction", &|n| format!("{n} queues read by a function"));
+    add("queueRequestsPerSecond", &|n| format!("{n} requests to the queues a second"));
+    add("queueStorageMb", &|n| format!("{n} MB of messages waiting"));
     lines
 }
 
@@ -147,6 +151,9 @@ struct Usage {
     /// Absent from an API before customers' buckets.
     #[serde(default)]
     buckets: Vec<BucketUsage>,
+    /// Absent from an API before customers' queues.
+    #[serde(default)]
+    queues: Vec<QueueUsage>,
     totals: Amounts,
     estimate: Option<Estimate>,
 }
@@ -174,6 +181,18 @@ struct BucketUsage {
     /// What its requests sent out, counted and not billed. Absent from an API before it was shown.
     #[serde(default)]
     bytes_downloaded: u64,
+    cost: Option<String>,
+}
+
+/// A queue's month, as its requests were counted: SQS's requests, and its messages.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueueUsage {
+    name: String,
+    deleted: bool,
+    requests: u64,
+    messages_sent: u64,
+    messages_received: u64,
     cost: Option<String>,
 }
 
@@ -291,8 +310,28 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
                 .collect();
             format!("\n{}", table(&["BUCKET", "GB-MONTHS", "PUT, LIST…", "GET…", "SENT OUT", "COST"], &rows))
         };
+        // As SQS bills them: each 64 KB of a request's messages a request, a function's batch as the request that would
+        // have received it.
+        let queues = if usage.queues.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .queues
+                .iter()
+                .map(|queue| {
+                    vec![
+                        if queue.deleted { format!("{} (deleted)", queue.name) } else { queue.name.clone() },
+                        queue.requests.to_string(),
+                        queue.messages_sent.to_string(),
+                        queue.messages_received.to_string(),
+                        queue.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["QUEUE", "REQUESTS", "SENT", "RECEIVED", "COST"], &rows))
+        };
         format!(
-            "{}\n{}{databases}{buckets}\n{estimate}",
+            "{}\n{}{databases}{buckets}{queues}\n{estimate}",
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )
@@ -350,6 +389,13 @@ struct Series {
     cold_starts: Vec<u64>,
     duration: Durations,
     instances: Instances,
+    /// Lambda's metrics of calls that don't wait; absent from an API before them.
+    #[serde(default)]
+    async_events_received: Vec<u64>,
+    #[serde(default)]
+    async_events_dropped: Vec<u64>,
+    #[serde(default)]
+    destination_delivery_failures: Vec<u64>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -413,8 +459,24 @@ pub fn metrics(name: Option<&str>, period: u32, since: &str, context: &Context) 
         })
         .collect();
     let total = |values: &[u64]| values.iter().sum::<u64>();
+    // Its calls that don't wait, as Lambda's metrics count them, when there were any.
+    let (kept, dropped, refused) = (
+        total(&series.async_events_received),
+        total(&series.async_events_dropped),
+        total(&series.destination_delivery_failures),
+    );
+    let without_waiting = match (kept, dropped, refused) {
+        (0, 0, 0) => String::new(),
+        (_, _, 0) => format!("; calls without waiting: {kept} kept, {dropped} dropped"),
+        (_, _, 1) => {
+            format!("; calls without waiting: {kept} kept, {dropped} dropped, 1 record its destination didn't take")
+        }
+        _ => format!(
+            "; calls without waiting: {kept} kept, {dropped} dropped, {refused} records their destination didn't take"
+        ),
+    };
     let summary = format!(
-        "{} for {}, a point each {}: invocations {}, errors {}, throttles {}, cold starts {}",
+        "{} for {}, a point each {}: invocations {}, errors {}, throttles {}, cold starts {}{without_waiting}",
         name.map(|name| format!("\"{name}\"")).unwrap_or_else(|| "the account".to_owned()),
         humantime::format_duration(Duration::from_secs(u64::from(period) * metrics.timestamps.len() as u64)),
         humantime::format_duration(Duration::from_secs(metrics.period)),

@@ -26,6 +26,10 @@
 #     operator turns an account's databases off, its user kept out and its
 #     members told why, and on again; a closed account's user is kept out,
 #     then its database dropped with its data.
+#   - Buckets and queues, through the S3 front door and the SQS endpoint: each
+#     account's key reaches its own account's alone; another's bucket is
+#     AccessDenied, another's queue one that doesn't exist, by its URL or its
+#     name, and its messages stay.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -71,6 +75,9 @@ url_port_oidc="$(free_port)"
 # And buckets' S3 front door on another, reached path-style at http://127.0.0.1:<port>.
 storage_port="$(free_port)"
 storage_port_oidc="$(free_port)"
+# And queues' SQS endpoint on a third, at http://127.0.0.1:<port>.
+sqs_port="$(free_port)"
+sqs_port_oidc="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
@@ -84,6 +91,8 @@ with_token() {
   http_at "$api_oidc" "$method" "$path" "$body" -H "Authorization: Bearer $token" "$@"
 }
 message() { jq -r .message "$work/body"; }
+# What waits in a function's queue: its asynchronous calls.
+waiting_for() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "SELECT count(*) FROM queue_messages WHERE function_id = '$1'"; }
 # Its messages joined, for an answer that lists them.
 messages() { jq -r '.message | if type == "array" then join("; ") else . end' "$work/body"; }
 # upload_package <base URL> <zip> [curl arguments]: POST /packages, the zip as the body; its answer, its status in $work/status.
@@ -95,6 +104,16 @@ upload_package() {
 }
 sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
 uri() { jq -rn --arg s "$1" '$s | @uri'; }
+# patiently <call…>: a change past the plan's 60 a minute answers 429, and is sent again once the wait it gives is over,
+# as a client does: each loop below makes more changes than that in a minute.
+patiently() {
+  "$@" >/dev/null
+  [ "$(status)" = 429 ] || return 0
+  local wait
+  wait="$(message | sed -nE 's/.*Retry after ([0-9]+) s\..*/\1/p')"
+  sleep "${wait:-60}"
+  "$@" >/dev/null
+}
 # Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer.
 public_routes=("GET /healthz" "GET /readyz")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
@@ -227,14 +246,16 @@ notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
 e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api##*:}" \
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
-  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
+  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
   FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
   FF_FUNCTION_URL_PORT="$url_port_oidc" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port_oidc" \
-  FF_STORAGE_PORT="$storage_port_oidc" FF_STORAGE_BASE="http://s3.localhost:$storage_port_oidc"
+  FF_STORAGE_PORT="$storage_port_oidc" FF_STORAGE_BASE="http://s3.localhost:$storage_port_oidc" \
+  FF_SQS_PORT="$sqs_port_oidc" FF_SQS_BASE="http://127.0.0.1:$sqs_port_oidc"
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 # call_url <function URL> [curl option...]: a GET of the URL; prints the status, and the body goes to $work/url-body.
 # --resolve takes the URL's host to this machine, whatever the system's resolver does with *.localhost.
@@ -280,6 +301,28 @@ check "  ... which its connection string reaches, over TLS, as its own user" "$(
   "$(data_db_psql "$conn_a" 'select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()')"
 as_a POST /buckets '{"name": "l5-photos-a"}' >/dev/null
 check "A makes a bucket" 201 "$(status)"
+as_a POST /queues '{"name": "l5-orders-a"}' >/dev/null
+check "A makes a queue" 201 "$(status)"
+as_a POST /queues/l5-orders-a/messages '{"body": "A'"'"'s own"}' >/dev/null
+check "  ... and sends it a message" 201 "$(status)"
+mapping_a="$(as_a POST "/functions/$id/event-sources" "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a\", \"enabled\": false}" | jq -r .uuid)"
+check "  ... which A's function is mapped to, disabled: nothing reads the message" 201 "$(status)"
+as_a POST /queues '{"name": "l5-events-a"}' >/dev/null
+as_a PUT /buckets/l5-photos-a/notifications "{\"queueConfigurations\": [{\"id\": \"l5\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
+check "  ... and A's bucket sends its deletions' events to a queue of A's" "200 l5" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
+# notified_by <as_…> <bucket>: the IDs of the bucket's notification configurations, as its own account reads them.
+notified_by() { "$1" GET "/buckets/$2/notifications" | jq -r '[.queueConfigurations[].id] | join(",")'; }
+# kept_by <as_…> <queue>: the queue's name and its messages that can be received, as its own account reads them.
+kept_by() { "$1" GET "/queues/$2" | jq -r '"\(.name) \(.messages.available)"'; }
+# queue_body <route>: a body each queue route takes, so that only the queue's owner decides its answer.
+queue_body() {
+  case "$1" in
+    "PATCH /queues/{name}") echo '{"delaySeconds": 5}' ;;
+    "POST /queues/{name}/messages") echo '{"body": "not mine"}' ;;
+    POST*) echo '{}' ;;
+    *) echo '' ;;
+  esac
+}
 key_a="$(as_a POST /storage-keys '{}')"
 check "  ... and an access key to it, its secret in the answer" "201 true" "$(status) $(jq -r '.secretAccessKey | test("^[A-Za-z0-9+/]{40}$")' <<<"$key_a")"
 key_a_id="$(jq -r .id <<<"$key_a")"
@@ -311,7 +354,9 @@ path_for() {
   path="${path//\{domain\}/l5.example.tn}"
   path="${path//\{scheduleId\}/$missing}"
   path="${path//\{month\}/$(date -u +%Y-%m)}"
-  path="${path//\{name\}/l5-photos-a}" # a bucket's
+  path="${path//\{name\}/l5-photos-a}" # a bucket's, or a queue's
+  path="${path//\{receiptHandle\}/bm90LWEtaGFuZGxl}"
+  path="${path//\{uuid\}/$missing}" # an event source mapping's, which each loop names itself
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
   while read -r name; do
     case $name in
@@ -338,6 +383,8 @@ body_for() {
     "PUT /functions/{id}") echo '{"name": "l5-taken-over"}' ;;
     "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}}' ;;
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
+    "PUT /functions/{id}/event-invoke-config") echo '{"maximumRetryAttempts": 0}' ;;
+    "POST /functions/{id}/event-sources") echo "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a\"}" ;;
     "PATCH /functions/{id}/secrets") echo '{"secrets": {"L5_SECRET": "l5"}}' ;;
     "POST /functions/{id}/url" | "PUT /functions/{id}/url") echo '{"authType": "NONE"}' ;;
     "POST /functions/{id}/url/domains") echo '{"domain": "l5.example.tn"}' ;;
@@ -519,10 +566,49 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B gets 404 for A's bucket" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
       check "  ... which A still has" "l5-photos-a 200" "$(as_a GET /buckets/l5-photos-a | jq -r .name) $(status)"
       ;;
+    "GET /buckets/{name}/notifications" | "PUT /buckets/{name}/notifications")
+      as_b "$method" /buckets/l5-photos-a/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
+      check "$route: B gets 404 for A's bucket's notifications" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
+      check "  ... which A still has, as it set them" "l5 200" "$(notified_by as_a l5-photos-a) $(status)"
+      ;;
     "GET /buckets/{name}/metrics")
       as_b GET /buckets/l5-photos-a/metrics >/dev/null
       check "$route: B gets 404 for A's bucket's metrics" '404 The account has no bucket l5-photos-a' "$(status) $(message)"
       check "  ... which A reads" "true 200" "$(as_a GET /buckets/l5-photos-a/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
+      ;;
+    "GET /queues")
+      listed="$(as_b GET /queues | jq 'map(select(.name == "l5-orders-a")) | length')"
+      check "$route: B's list doesn't show A's queue" "200 0" "$(status) $listed"
+      ;;
+    "POST /queues")
+      as_b POST /queues '{"name": "l5-orders-b"}' >/dev/null
+      check "$route: B makes a queue of its own, which A's list doesn't show" "201 0" "$(status) $(as_a GET /queues | jq 'map(select(.name == "l5-orders-b")) | length')"
+      ;;
+    "GET /queues/{name}" | "PATCH /queues/{name}" | "DELETE /queues/{name}" | "POST /queues/{name}/purge" | "POST /queues/{name}/messages" | "POST /queues/{name}/receive")
+      as_b "$method" "${template/\{name\}/l5-orders-a}" "$(queue_body "$route")" >/dev/null
+      check "$route: B gets 404 for A's queue" '404 The account has no queue named "l5-orders-a"' "$(status) $(message)"
+      check "  ... which A still has, its message still there and not received" "l5-orders-a 1 200" "$(kept_by as_a l5-orders-a) $(status)"
+      ;;
+    "DELETE /queues/{name}/messages/{receiptHandle}")
+      as_b DELETE /queues/l5-orders-a/messages/bm90LWEtaGFuZGxl >/dev/null
+      check "$route: B gets 404 for A's queue's message" '404 The account has no queue named "l5-orders-a"' "$(status) $(message)"
+      check "  ... whose message A still has" "l5-orders-a 1 200" "$(kept_by as_a l5-orders-a) $(status)"
+      ;;
+    "GET /queues/{name}/metrics")
+      as_b GET /queues/l5-orders-a/metrics >/dev/null
+      check "$route: B gets 404 for A's queue's metrics" '404 The account has no queue l5-orders-a' "$(status) $(message)"
+      check "  ... which A reads" "true 200" "$(as_a GET /queues/l5-orders-a/metrics | jq '.metrics.NumberOfMessagesSent.Sum | type == "array"') $(status)"
+      ;;
+    "GET /event-sources")
+      listed="$(as_b GET /event-sources | jq --arg uuid "$mapping_a" 'map(select(.uuid == $uuid)) | length')"
+      check "$route: B's list doesn't show A's function reading A's queue" "200 0" "$(status) $listed"
+      check "  ... nor does B find one reading A's queue by its ARN" "0 200" \
+        "$(as_b GET "/event-sources?eventSourceArn=$(uri "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a")" | jq length) $(status)"
+      ;;
+    "GET /event-sources/{uuid}" | "PATCH /event-sources/{uuid}" | "DELETE /event-sources/{uuid}")
+      as_b "$method" "/event-sources/$mapping_a" "$([ "$method" = PATCH ] && echo '{"enabled": true}' || true)" >/dev/null
+      check "$route: B gets 404 for A's mapping" "404 The account has no event source mapping $mapping_a" "$(status) $(message)"
+      check "  ... which A still has, disabled" "Disabled 10 200" "$(as_a GET "/event-sources/$mapping_a" | jq -r '"\(.state) \(.batchSize)"') $(status)"
       ;;
     "GET /storage-keys")
       listed="$(as_b GET /storage-keys | jq --arg id "$key_a_id" 'map(select(.id == $id)) | length')"
@@ -593,6 +679,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B can't watch A's function" "404 Function with ID $id not found" "$(status) $(message)"
       as_b POST /alarms '{"name": "l5", "bucketName": "l5-photos-a", "metric": "5xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
       check "  ... nor A's bucket" "404 The account has no bucket l5-photos-a" "$(status) $(message)"
+      as_b POST /alarms '{"name": "l5", "queueName": "l5-orders-a", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor A's queue" "404 The account has no queue l5-orders-a" "$(status) $(message)"
       as_b POST /alarms "$(alarm_body)" >/dev/null
       check "  ... but makes its own account's alarm" 201 "$(status)"
       ;;
@@ -612,10 +700,36 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
 done
+for type in Event DryRun; do
+  http_at "$api" POST "/functions/$id/invoke" '{"input": {"name": "B"}}' -H "X-FF-Dev-Account: $account_b" -H "X-Amz-Invocation-Type: $type" >/dev/null
+  check "POST /functions/{id}/invoke as $type: B's call of A's function answers as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
+done
+check "  ... and nothing of B's waits in A's function's queue" 0 "$(waiting_for "$id")"
+patiently as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a" '{destinationConfig: {onFailure: {destination: $arn}}}')"
+check "B can't name A's function as the destination of its own function's calls" \
+  "400 destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_b:function:l5-a" "$(status) $(message)"
+# A's queue, as the SQS endpoint makes one: a row of FF's database.
+"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "INSERT INTO queues (account_id, name, kind) VALUES ('$account_a', 'l5-records', 'customer')" >/dev/null
+patiently as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')"
+check "  ... nor A's queue" \
+  "400 destinationConfig.onFailure.destination must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_b:l5-records" "$(status) $(message)"
+patiently as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')"
+check "  ... which, under its own account's ARN, is no queue of B's" \
+  '400 destinationConfig.onFailure.destination: the account has no queue named "l5-records"' "$(status) $(message)"
+"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "DELETE FROM queues WHERE account_id = '$account_a' AND name = 'l5-records'" >/dev/null
+patiently as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a" '{eventSourceArn: $arn}')"
+check "B can't have its own function read A's queue" \
+  "400 eventSourceArn must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_b:l5-orders-a" "$(status) $(message)"
+patiently as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-orders-a" '{eventSourceArn: $arn}')"
+check "  ... which, under its own account's ARN, is no queue of B's" '400 eventSourceArn: the account has no queue named "l5-orders-a"' "$(status) $(message)"
+check "  ... and A's message is still there, not received" "l5-orders-a 1 200" "$(kept_by as_a l5-orders-a) $(status)"
+patiently as_b PUT /buckets/l5-photos-b/notifications "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" '{queueConfigurations: [{queueArn: $arn, events: ["s3:ObjectCreated:*"]}]}')"
+check "B's bucket can't send its events to A's queue" \
+  "400 InvalidArgument: A destination must be a queue of the bucket's account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" "$(status) $(message)"
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
-as_b DELETE "/functions/$own" >/dev/null
+patiently as_b DELETE "/functions/$own"
 check "B deletes its own function" 200 "$(status)"
-as_b DELETE "/databases/$db_b" >/dev/null
+patiently as_b DELETE "/databases/$db_b"
 check "B deletes its own database" 204 "$(status)"
 
 echo "== buckets through the S3 front door: each account's key reaches its own account's buckets alone"
@@ -640,8 +754,43 @@ check "  ... and a copy from the other's bucket too" "refused AccessDenied" \
   "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api copy-object --bucket l5-photos-b --key stolen.txt --copy-source l5-photos-a/anything.txt)"
 check "ListBuckets lists each key's own account's buckets alone" "l5-photos-a" \
   "$(AWS_ACCESS_KEY_ID="$key_a_id" AWS_SECRET_ACCESS_KEY="$key_a_secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$storage_port" s3api list-buckets --query 'Buckets[].Name' --output text)"
+check "B's key can neither read nor set A's bucket's notifications, which A still has" "refused AccessDenied refused AccessDenied l5" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-notification-configuration --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-notification-configuration --bucket l5-photos-a --notification-configuration '{}') \
+$(notified_by as_a l5-photos-a)"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
+
+echo "== queues through the SQS endpoint: each account's key reaches its own account's queues alone"
+# sqs_with <key ID> <secret> <aws sqs arguments…>: the answer's text, or refused with the error's query code, as the CLI prints it.
+sqs_with() {
+  local id=$1 secret=$2
+  shift 2
+  AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+    "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$sqs_port" sqs "$@" --output text 2>"$work/sqs.err" ||
+    echo "refused $(grep -oE '\((AWS\.SimpleQueueService\.[A-Za-z]+|SignatureDoesNotMatch|InvalidClientTokenId|AccessDenied)\)' "$work/sqs.err" | head -1 | tr -d '()')"
+}
+queue_a="$(sqs_with "$key_a_id" "$key_a_secret" create-queue --queue-name l5-orders --query QueueUrl)"
+queue_b="$(sqs_with "$key_b_id" "$key_b_secret" create-queue --queue-name l5-orders --query QueueUrl)"
+check "each account makes a queue of the same name, its own, under its account" "http://127.0.0.1:$sqs_port/$account_a/l5-orders http://127.0.0.1:$sqs_port/$account_b/l5-orders" \
+  "$queue_a $queue_b"
+sqs_with "$key_a_id" "$key_a_secret" send-message --queue-url "$queue_a" --message-body "A's own" --query MessageId >/dev/null
+check "A's key on B's queue, and B's on A's, a queue that doesn't exist, both ways" \
+  "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$(sqs_with "$key_a_id" "$key_a_secret" send-message --queue-url "$queue_b" --message-body 'not mine' --query MessageId) $(sqs_with "$key_b_id" "$key_b_secret" receive-message --queue-url "$queue_a" --query 'Messages[].Body')"
+check "  ... nor by its name, naming its owner" "refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$(sqs_with "$key_b_id" "$key_b_secret" get-queue-url --queue-name l5-orders --queue-owner-aws-account-id "$account_a" --query QueueUrl)"
+check "  ... nor purged, nor deleted: A's message is there still" "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue A's own" \
+  "$(sqs_with "$key_b_id" "$key_b_secret" purge-queue --queue-url "$queue_a") $(sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_a") $(sqs_with "$key_a_id" "$key_a_secret" receive-message --queue-url "$queue_a" --query 'Messages[].Body')"
+# Each lists its own: this queue, and the one its account made through FF's API above.
+listed_by() { sqs_with "$1" "$2" list-queues --query QueueUrls | tr '\t' ' '; }
+check "ListQueues lists each key's own account's queues alone" \
+  "http://127.0.0.1:$sqs_port/$account_a/l5-events-a $queue_a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a $queue_b http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
+  "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
+sqs_with "$key_a_id" "$key_a_secret" delete-queue --queue-url "$queue_a" >/dev/null
+sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_b" >/dev/null
+check "each deletes its own queue" "http://127.0.0.1:$sqs_port/$account_a/l5-events-a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
+  "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
 
 echo "== nobody authenticated, through the guard, on every route (${#routes[@]})"
 for route in "${routes[@]}"; do
@@ -740,6 +889,15 @@ db_1="$(jq -r .id <<<"$database_1")"
 conn_1="$(jq -r .connectionString <<<"$database_1")"
 as_user_1 POST /buckets '{"name": "l5-photos-1"}' >/dev/null
 check "account 1's owner makes a bucket" 201 "$(status)"
+as_user_1 POST /queues '{"name": "l5-orders-1"}' >/dev/null
+check "account 1's owner makes a queue" 201 "$(status)"
+as_user_1 POST /queues/l5-orders-1/messages '{"body": "account 1'"'"'s own"}' >/dev/null
+check "  ... and sends it a message" 201 "$(status)"
+mapping_1="$(as_user_1 POST "/functions/$fn_1/event-sources" "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_1:l5-orders-1\", \"enabled\": false}" | jq -r .uuid)"
+check "  ... which its function is mapped to, disabled" 201 "$(status)"
+as_user_1 POST /queues '{"name": "l5-events-1"}' >/dev/null
+as_user_1 PUT /buckets/l5-photos-1/notifications "{\"queueConfigurations\": [{\"id\": \"l5-one\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_1:l5-events-1\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
+check "  ... and its bucket sends its deletions' events to a queue of its own" "200 l5-one" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
 key_1_s3="$(as_user_1 POST /storage-keys '{}')"
 check "  ... and an access key to it" 201 "$(status)"
 key_1_s3_id="$(jq -r .id <<<"$key_1_s3")"
@@ -895,10 +1053,49 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2 gets 404 for account 1's bucket" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
       check "  ... which account 1 still has" "l5-photos-1 200" "$(as_user_1 GET /buckets/l5-photos-1 | jq -r .name) $(status)"
       ;;
+    "GET /buckets/{name}/notifications" | "PUT /buckets/{name}/notifications")
+      as_user_2 "$method" /buckets/l5-photos-1/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
+      check "$route: account 2 gets 404 for account 1's bucket's notifications" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
+      check "  ... which account 1 still has, as it set them" "l5-one 200" "$(notified_by as_user_1 l5-photos-1) $(status)"
+      ;;
     "GET /buckets/{name}/metrics")
       as_user_2 GET /buckets/l5-photos-1/metrics >/dev/null
       check "$route: account 2 gets 404 for account 1's bucket's metrics" '404 The account has no bucket l5-photos-1' "$(status) $(message)"
       check "  ... which account 1 reads" "true 200" "$(as_user_1 GET /buckets/l5-photos-1/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
+      ;;
+    "GET /queues")
+      listed="$(as_user_2 GET /queues | jq 'map(select(.name == "l5-orders-1")) | length')"
+      check "$route: account 2's list doesn't show account 1's queue" "200 0" "$(status) $listed"
+      ;;
+    "POST /queues")
+      as_user_2 POST /queues '{"name": "l5-orders-2"}' >/dev/null
+      check "$route: account 2 makes a queue of its own, which account 1's list doesn't show" "201 0" "$(status) $(as_user_1 GET /queues | jq 'map(select(.name == "l5-orders-2")) | length')"
+      ;;
+    "GET /queues/{name}" | "PATCH /queues/{name}" | "DELETE /queues/{name}" | "POST /queues/{name}/purge" | "POST /queues/{name}/messages" | "POST /queues/{name}/receive")
+      as_user_2 "$method" "${template/\{name\}/l5-orders-1}" "$(queue_body "$route")" >/dev/null
+      check "$route: account 2 gets 404 for account 1's queue" '404 The account has no queue named "l5-orders-1"' "$(status) $(message)"
+      check "  ... which account 1 still has, its message still there and not received" "l5-orders-1 1 200" "$(kept_by as_user_1 l5-orders-1) $(status)"
+      ;;
+    "DELETE /queues/{name}/messages/{receiptHandle}")
+      as_user_2 DELETE /queues/l5-orders-1/messages/bm90LWEtaGFuZGxl >/dev/null
+      check "$route: account 2 gets 404 for account 1's queue's message" '404 The account has no queue named "l5-orders-1"' "$(status) $(message)"
+      check "  ... whose message account 1 still has" "l5-orders-1 1 200" "$(kept_by as_user_1 l5-orders-1) $(status)"
+      ;;
+    "GET /queues/{name}/metrics")
+      as_user_2 GET /queues/l5-orders-1/metrics >/dev/null
+      check "$route: account 2 gets 404 for account 1's queue's metrics" '404 The account has no queue l5-orders-1' "$(status) $(message)"
+      check "  ... which account 1 reads" "true 200" "$(as_user_1 GET /queues/l5-orders-1/metrics | jq '.metrics.NumberOfMessagesSent.Sum | type == "array"') $(status)"
+      ;;
+    "GET /event-sources")
+      listed="$(as_user_2 GET /event-sources | jq --arg uuid "$mapping_1" 'map(select(.uuid == $uuid)) | length')"
+      check "$route: account 2's list doesn't show account 1's function reading its queue" "200 0" "$(status) $listed"
+      check "  ... nor does account 2 find one reading account 1's queue by its ARN" "0 200" \
+        "$(as_user_2 GET "/event-sources?eventSourceArn=$(uri "arn:aws:sqs:tn-tunis-1:$account_1:l5-orders-1")" | jq length) $(status)"
+      ;;
+    "GET /event-sources/{uuid}" | "PATCH /event-sources/{uuid}" | "DELETE /event-sources/{uuid}")
+      as_user_2 "$method" "/event-sources/$mapping_1" "$([ "$method" = PATCH ] && echo '{"enabled": true}' || true)" >/dev/null
+      check "$route: account 2 gets 404 for account 1's mapping" "404 The account has no event source mapping $mapping_1" "$(status) $(message)"
+      check "  ... which account 1 still has, disabled" "Disabled 10 200" "$(as_user_1 GET "/event-sources/$mapping_1" | jq -r '"\(.state) \(.batchSize)"') $(status)"
       ;;
     "GET /storage-keys")
       listed="$(as_user_2 GET /storage-keys | jq --arg id "$key_1_s3_id" 'map(select(.id == $id)) | length')"
@@ -971,6 +1168,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2 can't watch account 1's function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
       as_user_2 POST /alarms '{"name": "l5", "bucketName": "l5-photos-1", "metric": "5xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
       check "  ... nor account 1's bucket" "404 The account has no bucket l5-photos-1" "$(status) $(message)"
+      as_user_2 POST /alarms '{"name": "l5", "queueName": "l5-orders-1", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor account 1's queue" "404 The account has no queue l5-orders-1" "$(status) $(message)"
       ;;
     "POST /packages")
       upload_package "$api_oidc" "$work/package-b.zip" -H "Authorization: Bearer $token_2" -H "X-FF-Account: ${account_2:-}" >/dev/null
@@ -988,6 +1187,14 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     *) fail "$route: the L5 suite has no rule for this route" ;;
   esac
 done
+for type in Event DryRun; do
+  with_token "$token_2" POST "/functions/$fn_1/invoke" '{"input": {"name": "two"}}' -H "X-FF-Account: ${account_2:-}" -H "X-Amz-Invocation-Type: $type" >/dev/null
+  check "POST /functions/{id}/invoke as $type: account 2's call of account 1's function answers as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
+done
+check "  ... and nothing of account 2's waits in account 1's function's queue" 0 "$(waiting_for "$fn_1")"
+patiently as_user_2 PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_1:function:l5-one" '{destinationConfig: {onSuccess: {destination: $arn}}}')"
+check "account 2 can't name account 1's function as the destination of its own function's calls" \
+  "400 destinationConfig.onSuccess.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_2:function:l5-one" "$(status) $(message)"
 check "account 1's function, history and limits are unchanged" "$before_1" "$(snapshot as_user_1 "$fn_1")"
 check "and so is its name" "$name_1" "$(as_user_1 GET "/accounts/$account_1" | jq -r .name)"
 check "and so are its members and invitations" "$members_1" \
@@ -1040,6 +1247,10 @@ with_token "$key_1" GET /buckets >/dev/null
 check "a key without storage:read can't list the account's buckets" "403 This API key lacks the scope storage:read" "$(status) $(message)"
 with_token "$key_1" POST /buckets '{"name": "l5-by-key"}' >/dev/null
 check "nor make one without storage:write" "403 This API key lacks the scope storage:write" "$(status) $(message)"
+with_token "$key_1" GET /queues >/dev/null
+check "a key without queues:read can't list the account's queues" "403 This API key lacks the scope queues:read" "$(status) $(message)"
+with_token "$key_1" POST /queues/l5-orders-1/messages '{"body": "by key"}' >/dev/null
+check "nor send to one without queues:write" "403 This API key lacks the scope queues:write" "$(status) $(message)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 me_key="$(with_token "$key_1" GET /me)"
@@ -1056,11 +1267,13 @@ for route in "${routes[@]}"; do
   with_token "$key_1" "${route%% *}" "${route#* }" "$(body_for "${route%% *}" "${route#* }")" >/dev/null
   check "a key can't call $route (P-70)" "403 API keys can't call the admin routes" "$(status) $(message)"
 done
+# Account 2's changes in its user's loop above count against its plan's 60 a minute: its key's past them are sent
+# patiently.
 for route in "${routes[@]}"; do
   method="${route%% *}"
   template="${route#* }"
   case $template in /functions/*) ;; *) continue ;; esac
-  with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
+  patiently with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")"
   check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
 echo "== a function URL that takes the account's credentials"
@@ -1134,7 +1347,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create queue.create event_source.create queue.create bucket.notifications storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
@@ -1287,11 +1500,13 @@ check "internet egress is turned on for account 1, in its NetworkPolicy at once,
   "$(status) $(jq -r .account.internetEgress <<<"$egress") $(internet_rule "$account_1")"
 check "and account 2's functions still reach nothing beyond DNS" none "$(internet_rule "$account_2")"
 storage="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": false, "reason": "l5: files shared against the terms"}')"
-check "the operator turns account 1's databases and buckets off: its database's user can't log in, and its members read why in GET /me" \
+check "the operator turns account 1's databases, buckets and queues off: its database's user can't log in, and its members read why in GET /me" \
   "200 suspended true l5: files shared against the terms" \
   "$(status) $(jq -r --arg id "$db_1" '.databases[] | select(.id == $id) | .status' <<<"$storage") $( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false) $(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .storageDisabledReason')"
 as_user_1 POST /databases '{"name": "l5-while-off"}' >/dev/null
-check "  ... and no database is made meanwhile" "403 FF turned this account's databases and buckets off: l5: files shared against the terms" "$(status) $(message)"
+check "  ... and no database is made meanwhile" "403 FF turned this account's databases, buckets and queues off: l5: files shared against the terms" "$(status) $(message)"
+check "  ... nor a queue, and no message is sent" "403 403 FF turned this account's databases, buckets and queues off: l5: files shared against the terms" \
+  "$(as_user_1 POST /queues '{"name": "l5-while-off"}' >/dev/null; status) $(as_user_1 POST /queues/l5-orders-1/messages '{"body": "while off"}' >/dev/null; status) $(message)"
 check "  ... nor a bucket, and its keys answer AccountProblem, saying why" "403 refused AccountProblem true" \
   "$(as_user_1 POST /buckets '{"name": "l5-while-off"}' >/dev/null; status) $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1) $(grep -q 'files shared against the terms' "$work/s3.err" && echo true || echo false)"
 with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": true, "reason": "l5: cleared with the owner"}' >/dev/null
@@ -1389,8 +1604,8 @@ first_book="$(jq -c '.[0].document' <<<"$books")"
 latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
 with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
-check "a book after one with databases' and buckets' prices is refused without them, each named" \
-  "400 9 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+check "a book after one with databases', buckets' and queues' prices is refused without them, each named" \
+  "400 11 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
 created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
 check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"

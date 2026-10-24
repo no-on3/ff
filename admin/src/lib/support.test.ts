@@ -52,7 +52,8 @@ describe('a call, to read', () => {
 
 describe("a function's configuration, to read", () => {
   it('says what brought each call', () => {
-    expect([sourceText('api'), sourceText('url'), sourceText('schedule')]).toEqual(['API', 'URL', 'Schedule']);
+    expect([sourceText('api'), sourceText('url'), sourceText('schedule'), sourceText('sqs')]).toEqual(['API', 'URL', 'Schedule', 'A queue it reads']);
+    expect([sourceText('async'), sourceText('async', 2)]).toEqual(['Asynchronous, attempt 1', 'Asynchronous, attempt 2']);
   });
 
   it('says who may call its URL, and whether it has CORS', () => {

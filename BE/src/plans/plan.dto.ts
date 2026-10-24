@@ -29,6 +29,11 @@ export class PlanLimitsView implements PlanLimits {
   @ApiProperty({ example: 5120, description: "What the account's buckets may hold together, in MB" }) bucketStorageMb: number;
   @ApiProperty({ example: 100, description: 'S3 requests per second, all the keys together' }) storageRequestsPerSecond: number;
   @ApiProperty({ example: 5120, description: 'The largest object one PutObject may send, in MB' }) maxObjectMb: number;
+  @ApiProperty({ example: 10, description: "Customers' queues, all together" }) queues: number;
+  @ApiProperty({ example: 5, description: 'The queues one function may read in batches' }) eventSourceMappingsPerFunction: number;
+  @ApiProperty({ example: 100, description: 'SQS requests per second, all the keys together' }) queueRequestsPerSecond: number;
+  @ApiProperty({ example: 100, description: "What the account's messages may hold together, in MB, its functions' waiting asynchronous calls among them" })
+  queueStorageMb: number;
 }
 
 /** An account's plan. */

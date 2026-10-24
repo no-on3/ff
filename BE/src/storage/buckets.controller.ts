@@ -1,8 +1,10 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
+import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketsService } from './buckets.service';
+import { NotificationConfigurationDto, NotificationConfigurationView } from './dto/notifications.dto';
 import { BucketView, CreateBucketDto } from './dto/storage.dto';
 
 /**
@@ -14,7 +16,10 @@ import { BucketView, CreateBucketDto } from './dto/storage.dto';
 @ApiTags('buckets')
 @Controller('buckets')
 export class BucketsController {
-  constructor(private readonly buckets: BucketsService) {}
+  constructor(
+    private readonly buckets: BucketsService,
+    private readonly notifications: BucketNotificationsService,
+  ) {}
 
   @Get()
   @RequireScope('storage:read')
@@ -48,6 +53,33 @@ export class BucketsController {
   @ApiResponse({ status: 404, description: 'No such bucket in the account' })
   get(@Param('name') name: string, @Principal() principal: Principal): Promise<BucketView> {
     return this.buckets.get(principal.accountId, name);
+  }
+
+  @Get(':name/notifications')
+  @RequireScope('storage:read')
+  @ApiOperation({ summary: "A bucket's notification configuration, as S3's GetBucketNotificationConfiguration in its JSON names" })
+  @ApiResponse({ status: 200, type: NotificationConfigurationView })
+  @ApiResponse({ status: 404, description: 'No such bucket in the account' })
+  getNotifications(@Param('name') name: string, @Principal() principal: Principal): Promise<NotificationConfigurationView> {
+    return this.notifications.get(principal.accountId, name);
+  }
+
+  @Put(':name/notifications')
+  @RequireScope('storage:write')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
+  @ApiOperation({
+    summary: "Set a bucket's notification configuration, as S3's PutBucketNotificationConfiguration: replaced whole",
+    description:
+      "Each configuration sends the events it names (s3:ObjectCreated:* and its kinds, s3:ObjectRemoved:* and its), for the keys its filter's prefix and suffix name, " +
+      "to a function of the account, called with S3's event without waiting, or to a queue of it, a message each; S3's test event goes to each queue named. " +
+      'Two configurations that could take one event are refused, as S3 refuses them. An empty body removes them all.',
+  })
+  @ApiResponse({ status: 200, type: NotificationConfigurationView })
+  @ApiResponse({ status: 400, description: "An event S3's buckets don't send, a filter or an ID refused, two configurations that overlap, or a destination that is no function or queue of the account" })
+  @ApiResponse({ status: 404, description: 'No such bucket in the account' })
+  putNotifications(@Param('name') name: string, @Body() dto: NotificationConfigurationDto, @Principal() principal: Principal): Promise<NotificationConfigurationView> {
+    return this.notifications.put(principal.accountId, name, dto);
   }
 
   @Delete(':name')

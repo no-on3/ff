@@ -129,8 +129,8 @@ export function limitRangeManifest(namespace: string): K8sObject {
  * setting allows it (the operator turns it on) and the platform's K8S_EGRESS_INTERNET doesn't forbid it for
  * every account. Never FF's own network, nor the cloud's metadata addresses (BLOCKED_EGRESS_CIDRS), but for the
  * platform's services that functions use, each at its addresses on its one port, whatever the account's internet
- * access: customers' database server. NetworkPolicy rules add up, so the ranges the internet rule leaves out don't
- * cancel them.
+ * access: customers' database server, buckets' S3 front door and queues' SQS endpoint. NetworkPolicy rules add up, so
+ * the ranges the internet rule leaves out don't cancel them.
  */
 /** The backend's pods, in ff-system, as a NetworkPolicy's peer. */
 const BACKEND_PODS = {
@@ -160,8 +160,8 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
       ],
     },
   ];
-  // Customers' database server and buckets' S3 front door: at their addresses, or the backend's own pods for the front
-  // door of a backend in the cluster, which its NetworkPolicy lets functions reach on that port.
+  // Customers' database server, buckets' S3 front door and queues' SQS endpoint: at their addresses, or the backend's
+  // own pods for an endpoint of a backend in the cluster, which its NetworkPolicy lets functions reach on that port.
   for (const service of settings.platformEgress) {
     const to = service.cidrs.length > 0 ? service.cidrs.map((cidr) => ({ ipBlock: { cidr } })) : [BACKEND_PODS];
     egress.push({ to, ports: [{ protocol: 'TCP', port: service.port }] });

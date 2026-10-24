@@ -14,6 +14,9 @@ import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { countStorageRequest } from '../plans/rate-limits';
 import { ChunkedBodyReader, ExpectedChecksum, PlainBodyChecker, STREAMING_SIGNED, STREAMING_SIGNED_TRAILER, STREAMING_UNSIGNED_TRAILER, isStreaming } from './aws-chunked';
+import { BucketEvents } from './bucket-events';
+import { nextSequencer, ruleFor, rulesFromXml, rulesXml, s3EventRecord } from './bucket-notifications';
+import { BucketNotificationsService } from './bucket-notifications.service';
 import { Bucket } from './bucket.entity';
 import { CHECKSUM_ALGORITHMS, isChecksumAlgorithm } from './checksums';
 import { fullBuckets } from './bucket-storage';
@@ -21,9 +24,11 @@ import { S3Error, accessDenied, accountProblem, errorDocument, internalError, in
 import { S3Address, S3Operation, addressOf, operationOf } from './s3-requests';
 import { RequestSignature, SigningChain, UNSIGNED_PAYLOAD, checkSignature, decodeEscapes, readSignature } from './sigv4';
 import { StoreClient } from './store-client';
+import { reachesBucket } from './key-reach';
 import { ActiveKey, StorageDirectory } from './storage-directory.service';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { listBucketsDocument, locationDocument, replacing } from './xml';
+import { MalformedXml, childText, childrenNamed, readXml } from './xml-reader';
 
 /** S3's limit on an object sent in one PUT, and on a part of a multipart upload: 5 GiB. */
 export const MAX_UPLOAD_BYTES = 5 * 1024 ** 3;
@@ -51,7 +56,7 @@ const single = (value: string | string[] | undefined): string | undefined => (Ar
 type Stage = NodeJS.ReadableStream | NodeJS.WritableStream | NodeJS.ReadWriteStream;
 
 /** The request's path and query: an absolute target, as a proxy may send one, without its scheme and host. */
-function originForm(target: string | undefined): string {
+export function originForm(target: string | undefined): string {
   if (target?.startsWith('/')) return target;
   try {
     const url = new URL(target ?? '');
@@ -118,6 +123,25 @@ interface Exchange {
   bytesOut: number;
   /** The client waits for "100 Continue" before it sends its body: sent only once the request is let in. */
   expectsContinue: boolean;
+  /** The keys a DeleteObjects deleted, as the store's answer names them, for the bucket's notifications. */
+  deletedKeys?: string[];
+}
+
+/** S3's event for each write that creates an object, by the operation, without its s3: prefix. */
+const CREATED_EVENTS: Record<string, string> = {
+  PutObject: 'ObjectCreated:Put',
+  CopyObject: 'ObjectCreated:Copy',
+  CompleteMultipartUpload: 'ObjectCreated:CompleteMultipartUpload',
+};
+
+/** The keys DeleteObjects' answer says it deleted; none when the answer can't be read. */
+function deletedKeysOf(document: string): string[] {
+  try {
+    return childrenNamed(readXml(document), 'Deleted').map((deleted) => childText(deleted, 'Key') ?? '');
+  } catch (error) {
+    if (error instanceof MalformedXml) return [];
+    throw error;
+  }
 }
 
 /** The checksum an upload carries in a header, at most one, or announces for its trailer. */
@@ -156,6 +180,8 @@ function expectedChecksum(request: IncomingMessage): { checksum?: ExpectedChecks
 @Injectable()
 export class S3FrontDoor implements OnModuleDestroy {
   private readonly logger = new Logger(S3FrontDoor.name);
+  /** The events of answered writes still being sent. */
+  private readonly notifying = new Set<Promise<void>>();
   /** The host customers reach it at: path-style there, and virtual-hosted under it. */
   private readonly host: string;
   private readonly protocol: string;
@@ -170,16 +196,18 @@ export class S3FrontDoor implements OnModuleDestroy {
     private readonly plans: PlansService,
     private readonly credit: CreditService,
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
+    private readonly notifications: BucketNotificationsService,
+    private readonly bucketEvents: BucketEvents,
   ) {
     const base = new URL(config.getOrThrow<string>('storage.base'));
     this.host = base.hostname;
     this.protocol = base.protocol;
     this.region = config.getOrThrow<string>('storage.region');
-    const minio = config.getOrThrow<{ endPoint: string; port: number; useSSL: boolean; accessKey: string; secretKey: string }>('minio');
+    const objectStore = config.getOrThrow<{ endPoint: string; port: number; useSSL: boolean; accessKey: string; secretKey: string }>('objectStore');
     this.store = new StoreClient({
-      endpoint: `${minio.useSSL ? 'https' : 'http'}://${minio.endPoint}:${minio.port}`,
-      accessKeyId: minio.accessKey,
-      secretAccessKey: minio.secretKey,
+      endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
+      accessKeyId: objectStore.accessKey,
+      secretAccessKey: objectStore.secretKey,
     });
   }
 
@@ -207,7 +235,14 @@ export class S3FrontDoor implements OnModuleDestroy {
     const server = this.server;
     this.server = undefined;
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    // Events of writes the store took, still being sent: a stop waits for them rather than lose them.
+    await this.notified();
     this.store.close();
+  }
+
+  /** Waits for the events being sent of the writes answered so far. */
+  async notified(): Promise<void> {
+    while (this.notifying.size > 0) await Promise.all([...this.notifying]);
   }
 
   /** Answers one request; never throws, as nothing would catch it. */
@@ -287,13 +322,16 @@ export class S3FrontDoor implements OnModuleDestroy {
     const operation = operationOf(method, address, query, request.headers);
     if (operation.name === 'NotImplemented') throw notImplemented();
     if (operation.name === 'ListBuckets') {
-      const buckets = (await this.directory.bucketsOf(key.accountId)).filter((bucket) => !key.buckets || key.buckets.includes(bucket.name));
+      const buckets = (await this.directory.bucketsOf(key.accountId)).filter((bucket) => reachesBucket(key, bucket.name));
       return this.document(exchange, 200, listBucketsDocument(key.accountId, buckets, this.region));
     }
     const bucket = await this.bucketFor(address.bucket, key);
     exchange.bucket = bucket;
     exchange.operation = operation;
     if (operation.writes && key.readOnly) throw accessDenied();
+    // A bucket's notifications are set whatever its room or the account's credit, as other settings are.
+    if (operation.name === 'GetBucketNotificationConfiguration') return this.document(exchange, 200, rulesXml(bucket.notifications ?? []));
+    if (operation.name === 'PutBucketNotificationConfiguration') return this.putNotifications(exchange, signature, chain, key, bucket, operation, plan);
     // Full buckets, or no credit, and uploads wait for room or for credit; reads, and deletes that make room and lower the bill, go on.
     if (operation.writes && operation.class === 'tier1') {
       if (bucketsFull) throw accountProblem(fullBuckets(plan.limits.bucketStorageMb, plan.name));
@@ -316,7 +354,7 @@ export class S3FrontDoor implements OnModuleDestroy {
   private async admitAccount(accountId: string): Promise<{ plan: PlanView; bucketsFull: boolean }> {
     const account = await this.directory.account(accountId);
     if (!account || account.status !== AccountStatus.ACTIVE) throw accountProblem(`it is ${account?.status ?? 'gone'}`);
-    if (account.storageDisabledAt) throw accountProblem(`FF turned its databases and buckets off: ${account.storageDisabledReason}`);
+    if (account.storageDisabledAt) throw accountProblem(`FF turned its databases, buckets and queues off: ${account.storageDisabledReason}`);
     const plan = await this.plans.get(account.planId);
     if ((await countStorageRequest(this.throttler, account.id, plan.limits.storageRequestsPerSecond)) !== undefined) {
       throw new S3Error(503, 'SlowDown', `Please reduce your request rate: the ${plan.name} plan allows ${plan.limits.storageRequestsPerSecond} requests a second.`);
@@ -333,11 +371,11 @@ export class S3FrontDoor implements OnModuleDestroy {
     }
   }
 
-  /** The bucket of that name, if the key reaches it: none answers NoSuchBucket; another account's, or one the key doesn't name, AccessDenied, as S3 answers. */
+  /** The bucket of that name, if the key reaches it: none answers NoSuchBucket; another account's, or one the key doesn't reach, AccessDenied, as S3 answers. */
   private async bucketFor(name: string, key: ActiveKey): Promise<Bucket> {
     const bucket = name ? await this.directory.bucket(name) : null;
     if (!bucket) throw noSuchBucket();
-    if (bucket.accountId !== key.accountId || (key.buckets && !key.buckets.includes(bucket.name))) throw accessDenied();
+    if (bucket.accountId !== key.accountId || !reachesBucket(key, bucket.name)) throw accessDenied();
     return bucket;
   }
 
@@ -392,7 +430,76 @@ export class S3FrontDoor implements OnModuleDestroy {
     if (answered.status === 'rejected') {
       throw new Error(`The store did not answer: ${describeError(delivered.status === 'rejected' ? delivered.reason : answered.reason)}`);
     }
-    return this.relay(exchange, answered.value, bucket, operation);
+    const status = await this.relay(exchange, answered.value, bucket, operation);
+    if (status >= 200 && status < 300 && bucket.notifications?.length) {
+      // The client has its answer already: the event follows, as S3's do.
+      const sending = this.notify(exchange, key, bucket, operation, storePath).finally(() => this.notifying.delete(sending));
+      this.notifying.add(sending);
+      await sending;
+    }
+    return status;
+  }
+
+  /** PutBucketNotificationConfiguration: its document read whole, the body's checks on the way, and kept as S3 keeps one, under the key. */
+  private async putNotifications(exchange: Exchange, signature: RequestSignature, chain: SigningChain, key: ActiveKey, bucket: Bucket, operation: S3Operation, plan: PlanView): Promise<number> {
+    const stages = this.body(exchange, signature, chain, operation, {}, plan);
+    if (exchange.expectsContinue) exchange.response.writeContinue();
+    const document = await readWhole(stages, MAX_DOCUMENT_BYTES);
+    await this.notifications.keep(bucket, rulesFromXml(document.toString('utf8')), {
+      skipDestinationValidation: single(exchange.request.headers['x-amz-skip-destination-validation'])?.toLowerCase() === 'true',
+      changedBy: { actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` }, ip: exchange.request.socket.remoteAddress, requestId: exchange.id },
+    });
+    exchange.response.writeHead(200, { 'x-amz-request-id': exchange.id, 'content-length': 0 });
+    exchange.response.end();
+    return 200;
+  }
+
+  /**
+   * The event S3 sends for a write that ended well, to the destination of the
+   * bucket's rule for it, if one names it: a created object's with its size
+   * and ETag, as the store has them now. It is sent after the store answered,
+   * so a backend that stops between the two loses it.
+   */
+  private async notify(exchange: Exchange, key: ActiveKey, bucket: Bucket, operation: S3Operation, storePath: string): Promise<void> {
+    const created = CREATED_EVENTS[operation.name];
+    const removed = operation.name === 'DeleteObject' || operation.name === 'DeleteObjects';
+    if (!created && !removed) return;
+    const eventName = created ?? 'ObjectRemoved:Delete';
+    const keys = operation.name === 'DeleteObjects' ? (exchange.deletedKeys ?? []) : [decodeEscapes(exchange.address.rawKey)];
+    for (const objectKey of keys) {
+      const rule = ruleFor(bucket.notifications ?? [], eventName, objectKey);
+      if (!rule) continue;
+      try {
+        const object = created ? { key: objectKey, ...(await this.measure(storePath)) } : { key: objectKey };
+        const record = s3EventRecord({
+          region: this.region,
+          eventName,
+          time: new Date(),
+          principalId: key.id,
+          sourceIp: exchange.request.socket.remoteAddress ?? '',
+          requestId: exchange.id,
+          bucket: { name: bucket.name, accountId: bucket.accountId },
+          object,
+          configurationId: rule.id,
+          sequencer: nextSequencer(),
+        });
+        await this.bucketEvents.publish({ kind: 'record', accountId: bucket.accountId, bucket: bucket.name, rule, record });
+      } catch (error) {
+        this.logger.error(`The event ${eventName} of ${bucket.name}/${objectKey} was not sent: ${describeError(error)}`);
+      }
+    }
+  }
+
+  /** A created object's size and ETag, without its quotes, as the store has them now; nothing it can't say. */
+  private async measure(storePath: string): Promise<{ size?: number; eTag?: string }> {
+    const head = this.store.send('HEAD', storePath, '', {});
+    head.request.end();
+    const answer = await head.response;
+    answer.resume();
+    if (answer.statusCode !== 200) return {};
+    const size = Number(single(answer.headers['content-length']));
+    const eTag = single(answer.headers.etag)?.replace(/"/g, '');
+    return { ...(Number.isSafeInteger(size) ? { size } : {}), ...(eTag ? { eTag } : {}) };
   }
 
   /**
@@ -458,6 +565,16 @@ export class S3FrontDoor implements OnModuleDestroy {
       response.writeHead(status, headers);
       response.end();
       answer.resume();
+      return status;
+    }
+    if (xml && operation.name === 'DeleteObjects' && bucket.notifications?.length) {
+      // Read whole, for the keys it deleted, which the bucket's notifications name.
+      const document = (await readWhole([answer], MAX_DOCUMENT_BYTES)).toString('utf8').split(bucket.storeName).join(bucket.name);
+      exchange.deletedKeys = deletedKeysOf(document);
+      headers['content-length'] = String(Buffer.byteLength(document));
+      response.writeHead(status, headers);
+      response.end(document);
+      exchange.bytesOut = Buffer.byteLength(document);
       return status;
     }
     if (xml && operation.name === 'CompleteMultipartUpload') {

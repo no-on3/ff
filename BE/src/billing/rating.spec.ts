@@ -6,10 +6,11 @@
  * book that starts in the middle of a month. The minimum billed duration
  * applies to each call, in the aggregation's SQL: pricing.db.spec.ts. Then
  * customers' databases and buckets, with the book of their SKUs, likewise
- * against AWS's RDS and S3 prices by hand.
+ * against AWS's RDS and S3 prices by hand; and their queues, against SQS's.
  */
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { STORAGE_FREE_TIER, STORAGE_USD_PRICES, withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
+import { QUEUE_FREE_TIER, QUEUE_USD_PRICES, withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { Decimal } from './decimal';
 import { BookPrices, PriceDocument, awsPriceProblems, bookPrices, priceDocumentSchema } from './price-book';
 import { FunctionUsage, ResourceUsage, hoursIn, rateMonth } from './rating';
@@ -40,8 +41,14 @@ const stored = (resourceId: string, gb: number, hours: number, kind: ResourceUsa
   hours: BigInt(hours),
   tier1Requests: requests.tier1 ?? 0n,
   tier2Requests: requests.tier2 ?? 0n,
+  requests: 0n,
 });
 const STORAGE_DOCUMENT = priceDocumentSchema.parse(withStoragePrices(FIRST_PRICE_BOOK));
+/** The book with SQS's SKU too, as its migration makes it from the book before. */
+const QUEUE_DOCUMENT = priceDocumentSchema.parse(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)));
+const WITH_QUEUES = bookPrices({ id: 'with-queues', validFrom: new Date('2026-11-01T00:00:00Z'), prices: QUEUE_DOCUMENT });
+/** A queue asked `requests` requests, as SQS bills them. */
+const queued = (resourceId: string, requests: bigint): ResourceUsage => ({ resourceId, kind: 'queue', byteHours: 0n, hours: 0n, tier1Requests: 0n, tier2Requests: 0n, requests });
 const OCTOBER = hoursIn('2026-10');
 const NOVEMBER = hoursIn('2026-11');
 
@@ -269,6 +276,95 @@ describe("the book of customers' databases' and buckets' SKUs (ADR 0008, ADR 000
   it('reads every book from before, without the new SKUs, as pricing them at nothing', () => {
     expect(priceDocumentSchema.safeParse(FIRST_PRICE_BOOK).success).toBe(true);
     expect([FIRST.databaseStorageGbMonth, FIRST.perTier1Request, FIRST.freeDatabaseGbMonths, FIRST.bucketStorageTiers[0].price].map(String)).toEqual(['0', '0', '0', '0']);
+    expect([FIRST.queueRequestTiers[0].price, FIRST.freeQueueRequests].map(String)).toEqual(['0', '0']);
+  });
+});
+
+describe("rating a month of customers' queues (L1, ADR 0010)", () => {
+  it("prices a queue's requests as SQS does: 3 million in the month, less the free million, at $0.40 a million times the book's rate", () => {
+    const month = rateMonth([{ book: WITH_QUEUES, functions: [], resources: [queued('orders', 3_000_000n)] }], WITH_QUEUES, OCTOBER);
+
+    // SQS: (3,000,000 − 1,000,000 free) / 1,000,000 × $0.40 = $0.80.
+    const byHand = d('2').times(d('0.40'));
+    expect(month.total.toString()).toBe(byHand.times(RATE).toString());
+    expect(month.total.toString()).toBe('2.4064');
+    const cost = month.resources.get('orders');
+    expect([cost?.kind, cost?.gbMonths, cost?.storage, cost?.requests, cost?.fee, cost?.total].map(String)).toEqual(['queue', '0', '0', '3.6096', '0', '3.6096']);
+    expect(month.freeTier.toString()).toBe('-1.2032');
+  });
+
+  it("shares the account's free million among its queues", () => {
+    const month = rateMonth([{ book: WITH_QUEUES, functions: [], resources: [queued('orders', 600_000n), queued('receipts', 600_000n)] }], WITH_QUEUES, OCTOBER);
+
+    expect([month.resources.get('orders')?.total.toString(), month.resources.get('receipts')?.total.toString()]).toEqual(['0.72192', '0.72192']);
+    expect(month.total.toString()).toBe(d('0.2').times(d('1.2032')).toString());
+  });
+
+  it('prices the requests past 100 billion in the month at the second tier, and past 200 billion at the third', () => {
+    const month = rateMonth([{ book: WITH_QUEUES, functions: [], resources: [queued('firehose', 250_000_000_000n)] }], WITH_QUEUES, OCTOBER);
+
+    // SQS: (100,000 − 1 free) million × $0.40 + 100,000 million × $0.30 + 50,000 million × $0.24 = $81,999.60.
+    const byHand = d('99999').times(d('0.40')).plus(d('100000').times(d('0.30'))).plus(d('50000').times(d('0.24')));
+    expect(byHand.toString()).toBe('81999.6');
+    expect(month.total.toString()).toBe(byHand.times(RATE).toString());
+    expect(month.volumeTiers.toString()).toBe(d('-18000').times(RATE).toString());
+  });
+
+  it("counts the free million from the month's start through a book that starts mid-month", () => {
+    // 800,000 at the book before, which prices queues at nothing; then 800,000 more, of which 200,000 are still free.
+    const half = queued('orders', 800_000n);
+
+    const month = rateMonth([{ book: FIRST, functions: [], resources: [half] }, { book: WITH_QUEUES, functions: [], resources: [half] }], FIRST, OCTOBER);
+
+    expect(month.total.toString()).toBe(d('0.6').times(d('1.2032')).toString());
+  });
+
+  it('prices queues at nothing, with no free tier, in a book from before their SKU', () => {
+    const month = rateMonth([{ book: WITH_STORAGE, functions: [], resources: [queued('orders', 5_000_000n)] }], WITH_STORAGE, OCTOBER);
+
+    expect([month.total.toString(), month.freeTier.toString()]).toEqual(['0', '0']);
+  });
+});
+
+describe("the book of customers' queues' SKU (ADR 0010)", () => {
+  it("is AWS's US$ prices for SQS's standard queues, in their tiers, times the book's own rate, exactly, with SQS's free million, and its checks find nothing", () => {
+    const times = (usd: string) => Decimal.parse(usd).times(Decimal.parse(FIRST_PRICE_BOOK.source.usdRate)).toString();
+
+    expect(QUEUE_DOCUMENT.prices.queueRequestsPerMillion?.map((tier) => [tier.upToRequests, tier.price])).toEqual(
+      QUEUE_USD_PRICES.queueRequestsPerMillion.map((tier) => [tier.upToRequests, times(tier.price)]),
+    );
+    expect(QUEUE_DOCUMENT.prices.queueRequestsPerMillion?.map((tier) => tier.price)).toEqual(['1.2032', '0.9024', '0.72192']);
+    expect(QUEUE_DOCUMENT.freeTier).toEqual({ ...FIRST_PRICE_BOOK.freeTier, ...STORAGE_FREE_TIER, ...QUEUE_FREE_TIER });
+    expect(QUEUE_FREE_TIER).toEqual({ queueRequests: 1_000_000 });
+    // The storage SKUs of the book it copies stay.
+    expect(QUEUE_DOCUMENT.prices.bucketStorageGbMonth).toEqual(STORAGE_DOCUMENT.prices.bucketStorageGbMonth);
+    expect(awsPriceProblems(QUEUE_DOCUMENT)).toEqual([]);
+  });
+
+  it("finds queue tiers that differ from AWS's, a price that isn't AWS's times the rate, and the SKU in one place only", () => {
+    const changed = (tiers: unknown, usd?: unknown): PriceDocument => ({
+      ...QUEUE_DOCUMENT,
+      source: { ...QUEUE_DOCUMENT.source, usdPrices: { ...(QUEUE_DOCUMENT.source.usdPrices as object), queueRequestsPerMillion: usd } },
+      prices: { ...QUEUE_DOCUMENT.prices, queueRequestsPerMillion: tiers as PriceDocument['prices']['queueRequestsPerMillion'] },
+    });
+
+    expect(awsPriceProblems(changed([{ upToRequests: null, price: '1.2032' }], QUEUE_USD_PRICES.queueRequestsPerMillion))).toEqual([
+      'prices.queueRequestsPerMillion: must have the tiers of source.usdPrices.queueRequestsPerMillion',
+    ]);
+    const tiers = QUEUE_DOCUMENT.prices.queueRequestsPerMillion ?? [];
+    expect(awsPriceProblems(changed([{ ...tiers[0], price: '1.5' }, tiers[1], tiers[2]], QUEUE_USD_PRICES.queueRequestsPerMillion))).toEqual([
+      'prices.queueRequestsPerMillion.0.price: must be 0.40 × 3.0080 = 1.2032',
+    ]);
+    expect(awsPriceProblems(changed(tiers, undefined))).toEqual(['prices.queueRequestsPerMillion: must be in both prices and source.usdPrices, or in neither']);
+  });
+
+  it('refuses tiers that go down, or whose last has an end', () => {
+    const problems = (tiers: unknown) => priceDocumentSchema.safeParse({ ...QUEUE_DOCUMENT, prices: { ...QUEUE_DOCUMENT.prices, queueRequestsPerMillion: tiers } }).error?.issues.map((issue) => issue.message);
+
+    expect(problems([{ upToRequests: 10, price: '1' }])).toEqual(['must go up, tier by tier, and the last tier has no end (upToRequests null)']);
+    expect(problems([{ upToRequests: 10, price: '1' }, { upToRequests: 5, price: '1' }, { upToRequests: null, price: '1' }])).toEqual([
+      'must go up, tier by tier, and the last tier has no end (upToRequests null)',
+    ]);
   });
 });
 

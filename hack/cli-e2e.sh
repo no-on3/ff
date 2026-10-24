@@ -4,8 +4,9 @@
 #   + the backend (built, started on a free port in development mode, which acts as the account
 #   a profile names, as hack/e2e.sh's requests do).
 # For examples/hello.ts and examples/hello.py: deploy, invoke, the handler's line in ff logs and
-# in ff logs --follow, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
-# exit 5 with the call's ID, which the history shows; code that fails to load exits 4, and the
+# in ff logs --follow, an asynchronous call and a dry run, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
+# exit 5 with the call's ID, which the history shows, the Python one's calls that don't wait set
+# by ff async-config to go on to another function; code that fails to load exits 4, and the
 # function is kept, in ERROR, with its error. A second account finds none of the first's. Then
 # ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
@@ -19,10 +20,15 @@
 # in ff usage, then deleted; ff buckets: one made, a key whose secret ff prints once as the
 # variables AWS's tools read, the AWS CLI uploading with them alone, what the bucket held at its
 # measure and its month in ff usage, the export kit's s3-sync.sh copying it out to a folder and on
-# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; the getting-started
+# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; ff queues: a queue made
+# with its attributes and a dead-letter queue by name, a message sent by ff and received by the AWS CLI
+# with a key naming that queue alone, received again by ff until the third receive moves it to the
+# dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
+# CLI, its metrics, the queue deleted and the other account seeing none, its month in ff usage; the getting-started
 # guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
-# each one's receipt written to a bucket with the function's own key, read back by a GET and by the
-# AWS CLI, both gone after the night 90 days on; and ff local, in
+# each one put in a queue with the function's own key, read by a function that writes its receipt to a
+# bucket, read back by a GET and by the AWS CLI, both gone after the night 90 days on, called without
+# waiting as its schedule calls it; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -58,10 +64,15 @@ e2e_build
 url_port="$(free_port)"
 # Buckets' S3 front door on another, at http://s3.localhost:<port>.
 storage_port="$(free_port)"
+# Queues' SQS endpoint on a third, at http://localhost:<port>, which the AWS CLI reaches with a key of the account's,
+# and functions with their own at the cluster's gateway.
+sqs_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
-  FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32" "${e2e_data_db_env[@]}")
+  FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
+  FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32" "${e2e_data_db_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -127,6 +138,20 @@ for example in hello.ts hello.py; do
   check "ff logs --follow prints a new call's line as it comes, within 20 s" true "$followed"
   ff invoke "$name" --data '{"name": "raw"}' --raw
   check "--raw prints the answer only, for a pipe" "0 Hello raw" "$(code) $(out | jq -r .message)"
+  ff invoke "$name" --async --data '{"name": "Later"}' --raw
+  async_code="$(code)"
+  async_id="$(out)"
+  ran=""
+  for _ in $(seq 1 30); do
+    ff history "$name" --limit 5 --output json
+    ran="$(out | jq -r --arg r "$async_id" '[.invocations[] | select(.requestId == $r and .status == "COMPLETED")][0] | select(. != null) | "\(.source) \(.attempt) \(.output.message) \(.output.requestId == $r)"')"
+    [ -n "$ran" ] && break
+    sleep 1
+  done
+  check "ff invoke --async prints the request ID at once, and the call runs without waiting, its first attempt under that ID" \
+    "0 async 1 Hello Later true" "$async_code $ran"
+  ff invoke "$name" --dry-run
+  check "--dry-run only checks: nothing runs" "0 $name would take the call: nothing ran" "$(code) $(out)"
   ff deploy "$FF_REPO_ROOT/examples/$example" --name "$name"
   check "deploy again, unchanged, sends nothing" "0 $name: no changes ($runtime, 128 MB, 5 s, ACTIVE)" "$(code) $(out)"
   ff scale "$name" --max 2
@@ -139,7 +164,7 @@ for example in hello.ts hello.py; do
   check "the new code answers" "0 Ahlan Sfax" "$(code) $(out | sed '$d' | jq -r .message)"
   last_id="$(out | tail -1 | cut -d' ' -f2)"
   ff history "$name" --limit 2 --output json
-  check "history lists its calls, newest first, by the IDs invoke printed" "0 4 $last_id COMPLETED" \
+  check "history lists its calls, newest first, by the IDs invoke printed" "0 5 $last_id COMPLETED" \
     "$(code) $(out | jq -r '"\(.total) \(.invocations[0].id) \(.invocations[0].status)"')"
   ff get "$name" --output json
   check "get shows it: its handler, and its code's package, SHA-256 and size rather than its code" \
@@ -163,6 +188,25 @@ check "a function that raises exits 5, with its error and the call's ID" "5 erro
   "$(code) $(err | head -1) $([ -n "$raised_id" ] && echo true || echo false)"
 ff history cli-raises --output json
 check "which the history shows, as ERROR" "$raised_id ERROR" "$(out | jq -r '"\(.invocations[0].id) \(.invocations[0].status)"')"
+# Its calls that don't wait: no retry, and another function, by name, gets the record of each that fails.
+ff deploy "$FF_REPO_ROOT/examples/hello.ts" --name cli-records
+ff async-config cli-raises --retries 0 --on-failure cli-records
+check "ff async-config sets no retry, and another function, by its name, as the destination of the calls that fail" \
+  "0 cli-raises: a call that fails is not retried, and kept 6 hours at most; one that fails for good to cli-records" "$(code) $(out)"
+ff invoke cli-raises --async --data '{"name": "error"}' --raw
+failed_id="$(out)"
+record=""
+for _ in $(seq 1 30); do
+  ff history cli-records --limit 5 --output json
+  record="$(out | jq -r --arg r "$failed_id" '[.invocations[] | select(.status == "COMPLETED" and .input.requestContext.requestId == $r)][0] | select(. != null) | .input | "\(.requestContext.condition) \(.responseContext.functionError) \(.responsePayload.errorType)"')"
+  [ -n "$record" ] && break
+  sleep 1
+done
+check "the call that failed goes on to cli-records at once, Lambda's record of it its event" "RetriesExhausted Unhandled ValueError" "$record"
+ff async-config cli-raises --reset
+check "--reset goes back to AWS Lambda's defaults" \
+  "0 cli-raises: a call that fails is retried twice, and kept 6 hours at most, going nowhere once it ends (AWS Lambda's defaults)" "$(code) $(out)"
+ff delete cli-records --yes
 ff deploy "$FF_REPO_ROOT/examples/slow.py" --name cli-slow --timeout 2
 ff invoke cli-slow --data '{"seconds": 5}'
 slow_id="$(err | sed -n 's/^request ID: //p')"
@@ -527,7 +571,7 @@ check "ff buckets create makes it, and says where AWS's tools reach it" "0 cli-p
 ff buckets list
 check "ff buckets list shows it" "0 cli-photos active" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
 ff buckets keys create --bucket cli-photos
-check "ff buckets keys create prints its secret once, as the four variables AWS's tools read" "0 4" "$(code) $(out | grep -c '^export AWS_')"
+check "ff buckets keys create prints its secret once, as the five variables AWS's tools read" "0 5" "$(code) $(out | grep -c '^export AWS_')"
 out | grep '^export AWS_' >"$work/s3.env"
 key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
 printf 'Ahlan from the CLI' >"$work/hello.txt"
@@ -535,7 +579,7 @@ printf 'Ahlan from the CLI' >"$work/hello.txt"
 # Without one here, AWS's image: as this user, so that the files it writes are this user's, s3.localhost this machine.
 if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
   aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
-    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_ENDPOINT_URL_SQS -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
     -e AWS_PROFILE amazon/aws-cli:2.34.32)
 fi
 aws_with_key() { (set -a; . "$work/s3.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
@@ -582,42 +626,218 @@ ff buckets keys revoke "$key_id" --yes
 refused="$(aws_with_key s3 ls 2>&1 || true)"
 check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
 
-echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt in a bucket"
-# In account A, whose functions don't reach the internet: FF's database and the S3 front door, they do.
+echo "== queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
+ff queues create cli-orders.fifo
+check "ff queues create refuses a FIFO queue's name before calling" "2 true" "$(code) $(err | grep -q 'FIFO queues come later' && echo true || echo false)"
+ff queues create cli-orders-dlq
+ff queues create cli-orders --visibility-timeout 2s --retention 1d --dead-letter-queue cli-orders-dlq --max-receive-count 2
+check "ff queues create makes it, and says where AWS's tools reach it" "0 cli-orders made http://localhost:$sqs_port/$account_a/cli-orders" \
+  "$(code) $(out | head -1) $(out | sed -n 's/^url  *//p')"
+ff queues get cli-orders --output json
+check "  ... with its attributes, its dead-letter queue by the ARN of the queue named" "0 2 86400 2 cli-orders-dlq" \
+  "$(code) $(out | jq -r '"\(.visibilityTimeout) \(.messageRetentionPeriod) \(.redrivePolicy.maxReceiveCount) \(.redrivePolicy.deadLetterTargetArn | split(":")[5])"')"
+ff queues send cli-orders '{"order": 1}' --attribute item=bsissa
+check "ff queues send sends a message, an attribute with it" "0 true" "$(code) $(out | grep -qE '^sent [0-9a-f-]{36} to cli-orders$' && echo true || echo false)"
+ff buckets keys create --queue cli-orders
+check "a key for that queue alone gives the SQS endpoint among its five variables" "0 5 http://localhost:$sqs_port" \
+  "$(code) $(out | grep -c '^export AWS_') $(out | sed -n 's/^export AWS_ENDPOINT_URL_SQS=//p')"
+out | grep '^export AWS_' >"$work/sqs.env"
+queue_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/sqs.env")"
+aws_sqs() { (set -a; . "$work/sqs.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" sqs "$@"); }
+queue_url="http://localhost:$sqs_port/$account_a/cli-orders"
+check "the AWS CLI receives ff's message with that key, AWS_ENDPOINT_URL_SQS its only change" '{"order": 1} bsissa 1' \
+  "$(aws_sqs receive-message --queue-url "$queue_url" --message-attribute-names All --attribute-names ApproximateReceiveCount 2>/dev/null |
+    jq -r '.Messages[0] | "\(.Body) \(.MessageAttributes.item.StringValue) \(.Attributes.ApproximateReceiveCount)"')"
+# The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
+denied="$(aws_sqs get-queue-url --queue-name cli-orders-dlq 2>&1 || true)"
+check "  ... and reaches no other queue of the account" "true" "$(grep -q AccessDenied <<<"$denied" && echo true || echo false)"
+# Hidden for its visibility timeout of 2 s, it comes back to the next receive that waits long enough.
+ff queues receive cli-orders --wait 10s --output json
+check "ff queues receive gets it again once its visibility timeout ends, its second receive" '0 {"order": 1} 2 bsissa' \
+  "$(code) $(out | jq -r '.[0] | "\(.body) \(.receiveCount) \(.attributes.item.stringValue)"')"
+ff queues receive cli-orders --wait 5s --output json
+check "  ... and the third moves it to the dead-letter queue, as its redrive policy says" "0 0" "$(code) $(out | jq length)"
+ff queues receive cli-orders-dlq --delete --output json
+check "ff queues receive --delete gets it from the dead-letter queue, and deletes it" '0 {"order": 1} true' \
+  "$(code) $(out | jq -r '.[0] | "\(.body) \(.deleted)"')"
+ff queues get cli-orders-dlq --output json
+check "  ... which then holds nothing" "0 0 0 0" "$(code) $(out | jq -r '"\(.messages.available) \(.messages.inFlight) \(.sizeBytes)"')"
+ff queues send cli-orders one
+ff queues send cli-orders two --delay 1m
+ff queues list --output json
+check "ff queues list counts a queue's messages, one delayed" "0 1 1" "$(code) $(out | jq -r '.[] | select(.name == "cli-orders") | "\(.messages.available) \(.messages.delayed)"')"
+ff queues purge cli-orders
+check "ff queues purge asks first, and a script must say --yes" "2 true" "$(code) $(err | grep -q 'say --yes' && echo true || echo false)"
+ff queues purge cli-orders --yes
+check "  ... and deletes every message" "0 deleted every message of cli-orders 0" \
+  "$(code) $(out) $("$ff_bin" queues get cli-orders --output json | jq '.messages.available + .messages.delayed')"
+ff queues set cli-orders --retention 1h --no-dead-letter-queue
+check "ff queues set changes what it is given, and removes the dead-letter queue" "0 cli-orders changed true" \
+  "$(code) $(out | head -1) $(out | grep -q '^dead letters  *none' && echo true || echo false)"
+check "  ... as the AWS CLI sees it" "3600" \
+  "$(aws_sqs get-queue-attributes --queue-url "$queue_url" --attribute-names MessageRetentionPeriod 2>/dev/null | jq -r .Attributes.MessageRetentionPeriod)"
+ff queues list --profile b
+check "the other account has none of them" "0 The account has no queue: \`ff queues create <name>\` makes one" "$(code) $(out)"
+# Its requests are counted a minute at a time: in its metrics within two.
+for _ in $(seq 150); do "$ff_bin" queues metrics cli-orders --output json 2>/dev/null | jq -e '[.metrics.NumberOfMessagesSent.Sum[]] | add >= 3' >/dev/null && break; sleep 1; done
+ff queues metrics cli-orders --period 300
+check "ff queues metrics shows a row each five minutes, SQS's metrics as CloudWatch names them: the messages sent, received and deleted" "0 true true" \
+  "$(code) $(out | head -1 | grep -qE '^TIME \(UTC\) +WAITING +IN FLIGHT +OLDEST +SENT +RECEIVED +DELETED +EMPTY$' && echo true || echo false) $(out | tail -1 | grep -qE '^cli-orders for [0-9hm ]+, a point each 5m: sent ([3-9]|[1-9][0-9]+), received [1-9][0-9]*, deleted [0-9]+, empty receives [1-9][0-9]*; at most [0-9]+ waiting$' && echo true || echo false)"
+ff queues delete cli-orders --yes
+check "ff queues delete deletes it" "0 deleted the queue cli-orders" "$(code) $(out)"
+ff queues get cli-orders
+check "  ... which then isn't there, in the API's words, exit 3" '3 true' "$(code) $(err | grep -q 'no queue named "cli-orders"' && echo true || echo false)"
+ff queues delete cli-orders-dlq --yes
+# Its requests are counted a minute at a time: in ff usage within two, deleted and all.
+for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.queues[] | select(.name == "cli-orders" and .deleted and .messagesSent >= 3)' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists the queue's month after the buckets, deleted since: its requests as SQS bills them, the messages sent and received" "0 true" \
+  "$(code) $(out | grep -qE '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' && echo true || echo false)"
+ff buckets keys revoke "$queue_key" --yes
+
+echo "== functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"
+# As a function written for Lambda answers: the messages it couldn't handle, by their IDs.
+cat >"$work/reader.ts" <<'TS'
+export const handler = async (event: { Records: Array<{ messageId: string; body: string }> }) => ({
+  batchItemFailures: event.Records.filter((record) => record.body === "fail").map((record) => ({ itemIdentifier: record.messageId })),
+});
+TS
+ff deploy "$work/reader.ts" --name cli-reader --timeout 3
+ff queues create cli-work --visibility-timeout 5
+ff event-sources add cli-work cli-reader --batching-window 1s --report-batch-item-failures
+check "ff event-sources add has the function read the queue, and says how" "0 true" \
+  "$(code) $(out | grep -q '^cli-reader reads the queue cli-work: batches of 10 at most, a window of 1 second, the answer naming the messages that failed' && echo true || echo false)"
+mapping_id="$(out | grep -oE '\([0-9a-f-]{36}\)$' | tr -d '()')"
+ff event-sources add cli-work cli-reader
+check "  ... once: again, the API's words name the mapping there is, exit 3" "3 true" "$(code) $(err | grep -q "UUID $mapping_id" && echo true || echo false)"
+ff queues send cli-work done
+ff queues send cli-work fail
+reader_calls() { "$ff_bin" history cli-reader --output json | jq '[.invocations[] | select(.source == "sqs")] | length'; }
+for _ in $(seq 1 30); do
+  [ "$("$ff_bin" queues get cli-work --output json | jq '.messages.available + .messages.inFlight')" = 1 ] && [ "$(reader_calls)" -ge 1 ] && break
+  sleep 1
+done
+check "the function called with the queue's batches, its history's source sqs, the message it handled deleted" "true 1" \
+  "$([ "$(reader_calls)" -ge 1 ] && echo true || echo false) $("$ff_bin" queues get cli-work --output json | jq '.messages.available + .messages.inFlight')"
+ff event-sources list --queue cli-work
+check "ff event-sources list shows it, by the queue's and the function's names" "0 $mapping_id cli-work cli-reader Enabled" \
+  "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $8 }')"
+ff event-sources update "$mapping_id" --disable
+check "ff event-sources update --disable stops its reads" "0 true" "$(code) $(out | grep -q 'disabled: nothing read' && echo true || echo false)"
+ff queues receive cli-work --wait 15s --output json
+check "  ... the message the function failed still there, received again once its visibility timeout ended" '0 fail true' \
+  "$(code) $(out | jq -r '.[0] | "\(.body) \(.receiveCount >= 2)"')"
+ff event-sources remove "$mapping_id" --yes
+check "ff event-sources remove removes it, the queue's messages staying" "0 removed the mapping $mapping_id: the queue's messages stay 1 0" \
+  "$(code) $(out) $("$ff_bin" queues get cli-work --output json | jq '.messages.available + .messages.inFlight') $("$ff_bin" event-sources list --function cli-reader --output json | jq length)"
+ff delete cli-reader --yes
+ff queues delete cli-work --yes
+
+echo "== a bucket's notifications, with ff buckets notify: an upload with the AWS CLI runs a function with S3's event, a deletion goes to a queue"
+# As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
+cat >"$work/on-upload.ts" <<'TS'
+export const handler = async (event: { Records: Array<{ s3: { object: { key: string } } }> }) => ({
+  keys: event.Records.map((record) => decodeURIComponent(record.s3.object.key.replace(/\+/g, " "))),
+});
+TS
+ff deploy "$work/on-upload.ts" --name cli-on-upload
+ff buckets create cli-drop
+ff queues create cli-drop-events
+ff buckets notify cli-drop cli-on-upload --prefix in/ --id uploads
+check "ff buckets notify has the bucket run a function for its uploads, by its name, and says what it sends" "0 true" \
+  "$(code) $(out | grep -qE '^uploads +s3:ObjectCreated:\* +prefix in/ +function cli-on-upload$' && echo true || echo false)"
+ff buckets notify cli-drop --queue cli-drop-events --event 's3:ObjectRemoved:*' --id removals
+check "  ... and its deletions go to a queue, both now listed" "0 uploads,removals" \
+  "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
+ff buckets notify cli-drop cli-on-upload --id again
+check "  ... a configuration one event could match twice refused, in S3's words, exit 3" "3 true" "$(code) $(err | grep -q 'Configuration is ambiguously defined' && echo true || echo false)"
+ff buckets keys create --bucket cli-drop
+out | grep '^export AWS_' >"$work/drop.env"
+drop_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/drop.env")"
+aws_drop() { (set -a; . "$work/drop.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+printf 'dropped in' >"$work/drop.txt"
+aws_drop s3 cp "$work/drop.txt" "s3://cli-drop/in/a b.txt" --only-show-errors
+upload_calls() { "$ff_bin" history cli-on-upload --output json | jq -c '[.invocations[] | select(.source == "async" and .status == "COMPLETED") | .output.keys]'; }
+for _ in $(seq 1 30); do [ "$(upload_calls)" != "[]" ] && break; sleep 1; done
+check "the AWS CLI's upload runs the function without waiting, S3's event its input, the key decoded as Lambda's functions decode it" '[["in/a b.txt"]]' "$(upload_calls)"
+aws_drop s3 rm "s3://cli-drop/in/a b.txt" --only-show-errors
+ff queues receive cli-drop-events --max 10 --wait 10s --delete --output json
+check "  ... and its deletion puts S3's event in the queue, after S3's test event" "s3:TestEvent ObjectRemoved:Delete in%2Fa+b.txt" \
+  "$(out | jq -r '[.[].body | fromjson | (.Event // .Records[0].eventName)] | join(" ")') $(out | jq -r '[.[].body | fromjson | .Records[0].s3.object.key // empty] | join(" ")')"
+ff buckets notifications cli-drop --remove uploads
+check "ff buckets notifications --remove takes one away by its ID" "0 removals" \
+  "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
+ff buckets notifications cli-drop --clear --yes
+check "  ... and --clear all of them" "0 cli-drop sends no event any more" "$(code) $(out)"
+ff buckets keys revoke "$drop_key" --yes
+ff buckets delete cli-drop --force --yes
+ff queues delete cli-drop-events --yes
+ff delete cli-on-upload --yes
+
+echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt made through a queue"
+# In account A, whose functions don't reach the internet: FF's database, the S3 front door and the SQS endpoint, they do.
 ff deploy "$app" --name shop-api --handler index.http
-check "examples/orders-app, the S3 client among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
+check "examples/orders-app, the S3 and SQS clients among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
   "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
+ff deploy "$app" --name shop-receipts --handler index.receipts
 ff deploy "$app" --name shop-nightly --handler index.nightly
 ff db create shop --secret-for shop-api --secret-for shop-nightly --output json
-check "ff db create: FF's database, its connection string both functions' DATABASE_URL" "0 active shop-api,shop-nightly" \
+check "ff db create: FF's database, its connection string the API's and the night's DATABASE_URL" "0 active shop-api,shop-nightly" \
   "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
 ff buckets create cli-receipts
-ff env set shop-api RECEIPTS_BUCKET=cli-receipts
+ff queues create cli-new-orders
+ff env set shop-api RECEIPTS_QUEUE=cli-new-orders RECEIPTS_BUCKET=cli-receipts
+ff env set shop-receipts RECEIPTS_BUCKET=cli-receipts
 ff env set shop-nightly RECEIPTS_BUCKET=cli-receipts
-ff env list shop-nightly
-check "a bucket for the receipts, its name each function's RECEIPTS_BUCKET" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
+ff env list shop-receipts
+check "a bucket for the receipts and a queue of new orders, named in the functions' variables" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
+ff event-sources add cli-new-orders shop-receipts --report-batch-item-failures
+check "shop-receipts reads the queue, naming the messages it fails" "0 true" \
+  "$(code) $(out | grep -q '^shop-receipts reads the queue cli-new-orders: .*the answer naming the messages that failed' && echo true || echo false)"
 ff url enable shop-api --auth none
 ff invoke shop-api --http POST /orders --data '{"item": "bsissa", "quantity": 4}'
-check "a POST writes the order to FF's database, then its receipt to the bucket with the function's own key" \
-  "0 HTTP 201 bsissa 4 s3://cli-receipts/receipts/1.txt" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
+check "a POST writes the order to FF's database, then puts it in the queue with the function's own key" \
+  "0 HTTP 201 bsissa 4 queued" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
 order_day="$(out | tail -1 | jq -r '.created_at[0:10]')"
+# shop-receipts gets it from the queue within seconds, and writes the receipt.
+for _ in $(seq 30); do [ "$("$ff_bin" invoke shop-api --http GET /orders/1/receipt 2>/dev/null | head -1)" = "HTTP 200" ] && break; sleep 1; done
 ff invoke shop-api --http GET /orders/1/receipt
-check "  ... and a GET reads the receipt back from the bucket" "0 HTTP 200 Order 1|4 × bsissa" "$(code) $(out | head -1) $(out | sed -n '3,4p' | paste -sd'|')"
+check "  ... which shop-receipts reads, writing its receipt to the bucket: a GET reads it back" "0 HTTP 200 Order 1|4 × bsissa" \
+  "$(code) $(out | head -1) $(out | sed -n '3,4p' | paste -sd'|')"
+# The receipt is written during the call, its message deleted once the call has ended.
+held() { "$ff_bin" queues get cli-new-orders --output json | jq '.messages.available + .messages.inFlight'; }
+for _ in $(seq 30); do
+  [ "$("$ff_bin" history shop-receipts --output json | jq -r '.invocations[0].status')" = COMPLETED ] && [ "$(held)" = 0 ] && break
+  sleep 1
+done
+ff history shop-receipts --output json
+check "  ... as a call of SQS's event, the queue then empty" "sqs COMPLETED 0" "$(out | jq -r '.invocations[0] | "\(.source) \(.status)"') $(held)"
 # The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
 ff buckets keys create --bucket cli-receipts --read-only
 out | grep '^export AWS_' >"$work/receipts.env"
 receipts_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/receipts.env")"
 aws_receipts() { (set -a; . "$work/receipts.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
 check "the AWS CLI reads that receipt in the account's bucket, as the function wrote it" "Order 1" "$(aws_receipts s3 cp s3://cli-receipts/receipts/1.txt - 2>/dev/null | head -1)"
-# The night 91 days after the order's day: the order is older than 90 days, so it goes, its receipt with it.
+# The night 91 days after the order's day, called without waiting as its schedule calls it: the order is older than
+# 90 days, so it goes, its receipt with it.
 jq --arg time "$(date -u -d "$order_day + 91 days" +%Y-%m-%dT02:00:00Z)" '.time = $time' "$app/events/scheduled.json" >"$work/night.json"
-ff invoke shop-nightly --data "@$work/night.json"
-check "the night 91 days on removes the order and its receipt, which the bucket no longer has" "0 1 1 0" \
-  "$(code) $(out | sed '$d' | jq -r '"\(.removed) \(.receipts)"') $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
+ff invoke shop-nightly --async --data "@$work/night.json" --raw
+night_id="$(out)"
+night=""
+for _ in $(seq 30); do
+  night="$("$ff_bin" history shop-nightly --output json | jq -r --arg r "$night_id" '[.invocations[] | select(.requestId == $r and .status == "COMPLETED")][0] | select(. != null) | "\(.source) \(.output.removed) \(.output.receipts)"')"
+  [ -n "$night" ] && break
+  sleep 1
+done
+check "the night 91 days on, called without waiting, removes the order and its receipt, which the bucket no longer has" "async 1 1 0" \
+  "$night $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
 ff buckets keys revoke "$receipts_key" --yes
+ff queues delete cli-new-orders --yes
+check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
 ff buckets delete cli-receipts --force --yes
 ff db delete shop --yes
 ff delete shop-nightly --yes
+ff delete shop-receipts --yes
 ff delete shop-api --yes
 
 echo "== the account: who, its plan, what it used and owes, how its functions ran"
@@ -627,7 +847,7 @@ ff account
 check "ff account says its plan, and that its functions don't reach the internet, as beta's" "0 Beta true" \
   "$(code) $(out | sed -n 's/^plan *\([A-Za-z]*\):.*/\1/p') $(out | grep -q '^internet     off' && echo true || echo false)"
 ff usage --output json
-check "ff usage counts this month's calls of the functions deleted since, by name" "0 4 true" \
+check "ff usage counts this month's calls of the functions deleted since, by name, the asynchronous one among them" "0 5 true" \
   "$(code) $(out | jq -r '.functions[] | select(.functionName == "cli-hello-ts") | .requests') $(out | jq -r '[.functions[] | select(.functionName == "cli-hello-ts") | .deleted] | first')"
 ff usage --csv
 check "and gives the API's CSV" "0 true" "$(code) $(out | head -1 | grep -q 'requests' && echo true || echo false)"
@@ -635,6 +855,11 @@ ff balance --output json
 check "ff balance says the balance, in dinars" "0 TND" "$(code) $(out | jq -r .currency)"
 ff metrics --since 2h --output json
 check "ff metrics counts the account's invocations of the last two hours" "0 true" "$(code) $(out | jq '[.metrics.Invocations[]] | add > 10')"
+# Its calls that don't wait are counted a minute at a time too: in its metrics within two.
+for _ in $(seq 150); do "$ff_bin" metrics --since 2h --output json 2>/dev/null | jq -e '([.metrics.AsyncEventsReceived[]] | add >= 2) and ([.metrics.AsyncEventsDropped[]] | add >= 1)' >/dev/null && break; sleep 1; done
+ff metrics --since 2h --period 3600
+check "  ... and its calls that didn't wait, as Lambda's metrics count them, cli-raises's dropped among them" "0 true" \
+  "$(code) $(out | tail -1 | grep -qE '; calls without waiting: ([2-9]|[1-9][0-9]+) kept, [1-9][0-9]* dropped' && echo true || echo false)"
 
 echo "== ff local: on this machine, in Docker, as production runs it"
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }

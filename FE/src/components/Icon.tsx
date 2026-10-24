@@ -15,6 +15,7 @@ const PATHS = {
       <path d="M3.5 5 5 16c.2 1 2.4 1.5 5 1.5s4.8-.5 5-1.5L16.5 5" />
     </>
   ),
+  queues: <path d="M3 5.5h10M3 10h10M3 14.5h6M15 8l2.5 2-2.5 2" />,
   alarms: <path d="M5 13V9a5 5 0 0 1 10 0v4l1.5 2h-13L5 13ZM8.5 17.5a1.5 1.5 0 0 0 3 0" />,
   usage: <path d="M4 16V9M8.5 16V4M13 16v-5M17 16V7" />,
   billing: <path d="M5 3h10v14l-2.5-1.5L10 17l-2.5-1.5L5 17V3ZM8 7h4M8 10h4" />,

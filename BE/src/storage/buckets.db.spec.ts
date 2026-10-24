@@ -22,20 +22,20 @@ const ACCOUNT = '710000000001';
 const OTHER = '710000000002';
 
 run("buckets and access keys, in FF's database and the store (L2)", () => {
-  // The store's settings as the backend reads them, MINIO_*, alone: BE/.env's development SeaweedFS, or the CI's own.
-  const minio = {
-    endPoint: process.env.MINIO_ENDPOINT ?? 'localhost',
-    port: Number(process.env.MINIO_PORT ?? 9003),
-    useSSL: process.env.MINIO_USE_SSL === 'true',
-    accessKey: process.env.MINIO_ACCESS_KEY ?? 'minioadmin',
-    secretKey: process.env.MINIO_SECRET_KEY ?? 'minioadmin',
+  // The store's settings as the backend reads them, FF_OBJECT_STORE_*, alone: BE/.env's development SeaweedFS, or the CI's own.
+  const objectStore = {
+    endPoint: process.env.FF_OBJECT_STORE_ENDPOINT ?? 'localhost',
+    port: Number(process.env.FF_OBJECT_STORE_PORT ?? 9003),
+    useSSL: process.env.FF_OBJECT_STORE_USE_SSL === 'true',
+    accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
+    secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
   };
-  const config = new ConfigService({ minio, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } });
+  const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1' } });
   const store = new S3Client({
-    endpoint: `${minio.useSSL ? 'https' : 'http'}://${minio.endPoint}:${minio.port}`,
+    endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
     region: 'us-east-1',
     forcePathStyle: true,
-    credentials: { accessKeyId: minio.accessKey, secretAccessKey: minio.secretKey },
+    credentials: { accessKeyId: objectStore.accessKey, secretAccessKey: objectStore.secretKey },
     requestChecksumCalculation: 'WHEN_REQUIRED',
   });
   const exists = (storeName: string) => store.send(new HeadBucketCommand({ Bucket: storeName })).then(() => true, () => false);
@@ -128,7 +128,7 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
   it("refuses an account whose storage FF turned off, saying why", async () => {
     await db.dataSource.getRepository(Account).update({ id: OTHER }, { storageDisabledAt: new Date(), storageDisabledReason: 'Abuse' });
     try {
-      await expect(service().create(OTHER, { name: unique('off') })).rejects.toThrow(new ForbiddenException("FF turned this account's databases and buckets off: Abuse"));
+      await expect(service().create(OTHER, { name: unique('off') })).rejects.toThrow(new ForbiddenException("FF turned this account's databases, buckets and queues off: Abuse"));
     } finally {
       await db.dataSource.getRepository(Account).update({ id: OTHER }, { storageDisabledAt: null, storageDisabledReason: null });
     }
@@ -158,17 +158,24 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
 
   it('gives an account two access keys at most, each secret shown once and sealed, opening for the front door alone, and revokes them', async () => {
     const first = await keys().create(ACCOUNT, {});
-    const second = await keys().create(ACCOUNT, { buckets: ['photos'], readOnly: true });
+    const second = await keys().create(ACCOUNT, { buckets: ['photos'], queues: ['orders'], readOnly: true });
 
     await expect(keys().create(ACCOUNT, {})).rejects.toThrow(ConflictException);
-    expect(first).toMatchObject({ id: expect.stringMatching(/^AKFF[A-Z2-7]{16}$/), secretAccessKey: expect.stringMatching(/^[A-Za-z0-9+/]{40}$/), endpoint: 'https://s3.example.tn', region: 'tn-tunis-1' });
+    expect(first).toMatchObject({
+      id: expect.stringMatching(/^AKFF[A-Z2-7]{16}$/),
+      secretAccessKey: expect.stringMatching(/^[A-Za-z0-9+/]{40}$/),
+      endpoint: 'https://s3.example.tn',
+      sqsEndpoint: 'https://sqs.example.tn',
+      region: 'tn-tunis-1',
+    });
     expect(await keys().list(ACCOUNT)).toEqual([
-      { id: first.id, buckets: null, readOnly: false, createdAt: expect.any(Date), lastUsedAt: null },
-      { id: second.id, buckets: ['photos'], readOnly: true, createdAt: expect.any(Date), lastUsedAt: null },
+      { id: first.id, buckets: null, queues: null, readOnly: false, createdAt: expect.any(Date), lastUsedAt: null },
+      { id: second.id, buckets: ['photos'], queues: ['orders'], readOnly: true, createdAt: expect.any(Date), lastUsedAt: null },
     ]);
     const row = await db.dataSource.getRepository(StorageKey).findOneByOrFail({ id: first.id });
     expect(JSON.stringify(row.secret)).not.toContain(first.secretAccessKey);
-    expect(await directory.key(first.id)).toMatchObject({ accountId: ACCOUNT, secret: first.secretAccessKey, buckets: null, readOnly: false });
+    expect(await directory.key(first.id)).toMatchObject({ accountId: ACCOUNT, secret: first.secretAccessKey, buckets: null, queues: null, readOnly: false });
+    expect(await directory.key(second.id)).toMatchObject({ buckets: ['photos'], queues: ['orders'] });
 
     await expect(keys().revoke(OTHER, first.id)).rejects.toThrow(NotFoundException);
     await keys().revoke(ACCOUNT, first.id);

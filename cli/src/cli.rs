@@ -181,13 +181,26 @@ pub enum Command {
     #[command(subcommand)]
     Schedule(ScheduleCommand),
 
+    /// A function's settings for its calls that don't wait: their retries, how long one is kept, and where each one's
+    /// record goes, as AWS Lambda's asynchronous invocation settings
+    AsyncConfig(AsyncConfigArgs),
+
     /// The account's PostgreSQL databases, as AWS RDS gives them
     #[command(subcommand)]
     Db(DbCommand),
 
-    /// The account's buckets, as AWS S3 gives them, and its access keys to them
+    /// The account's buckets, as AWS S3 gives them, and its access keys to them and to its queues
     #[command(subcommand)]
     Buckets(BucketsCommand),
+
+    /// The account's queues, as Amazon SQS's standard queues, which AWS's SDKs and CLI reach with a key of
+    /// `ff buckets keys create`
+    #[command(subcommand)]
+    Queues(QueuesCommand),
+
+    /// Functions reading queues of the account in batches, as AWS Lambda's event source mappings for SQS
+    #[command(subcommand)]
+    EventSources(EventSourcesCommand),
 
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
@@ -348,12 +361,55 @@ pub struct InvokeArgs {
     pub raw: bool,
 
     /// Call it through its URL instead, as a browser or a webhook does: a method and a path, such as GET /orders?status=new
-    #[arg(long, num_args = 2, value_names = ["METHOD", "PATH"])]
+    #[arg(long, num_args = 2, value_names = ["METHOD", "PATH"], conflicts_with_all = ["asynchronous", "dry_run"])]
     pub http: Option<Vec<String>>,
+
+    /// Run it without waiting, as AWS Lambda's invocation type Event: its request ID at once, and the call retried on
+    /// failure; ff history shows its attempts
+    #[arg(long = "async", id = "asynchronous", conflicts_with = "dry_run")]
+    pub asynchronous: bool,
+
+    /// Only check that the call could be made, as Lambda's invocation type DryRun: nothing runs
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// With --http, a header of the request, "name: value", repeated
     #[arg(long = "header", short = 'H', requires = "http")]
     pub headers: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct AsyncConfigArgs {
+    /// The function's name
+    pub name: String,
+
+    /// How many times a call that fails is retried: 0, 1 or 2
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=2))]
+    pub retries: Option<u8>,
+
+    /// How long a call is kept at most, from 1m to 6h, such as 30m
+    #[arg(long)]
+    pub max_age: Option<String>,
+
+    /// Another function of the account, by name or ARN, or a queue of it, by ARN, which gets the record of each call that succeeds
+    #[arg(long, conflicts_with = "no_on_success")]
+    pub on_success: Option<String>,
+
+    /// No destination for the calls that succeed
+    #[arg(long)]
+    pub no_on_success: bool,
+
+    /// Another function of the account, by name or ARN, or a queue of it, by ARN, which gets the record of each call that fails for good
+    #[arg(long, conflicts_with = "no_on_failure")]
+    pub on_failure: Option<String>,
+
+    /// No destination for the calls that fail for good
+    #[arg(long)]
+    pub no_on_failure: bool,
+
+    /// Back to AWS Lambda's defaults: retried twice, kept 6 hours, no destination
+    #[arg(long, conflicts_with_all = ["retries", "max_age", "on_success", "no_on_success", "on_failure", "no_on_failure"])]
+    pub reset: bool,
 }
 
 #[derive(Args)]
@@ -563,9 +619,59 @@ pub enum BucketsCommand {
         yes: bool,
     },
 
-    /// The account's access keys to its buckets, for AWS's SDKs and CLI
+    /// The account's access keys to its buckets and queues, for AWS's SDKs and CLI
     #[command(subcommand)]
     Keys(BucketKeysCommand),
+
+    /// Send a bucket's events to a function of the account, called without waiting with S3's event, or to a queue,
+    /// as S3's notifications
+    Notify {
+        /// The bucket's name
+        bucket: String,
+
+        /// The function its events run, by name
+        #[arg(required_unless_present = "queue", conflicts_with = "queue")]
+        function: Option<String>,
+
+        /// A queue of the account its events go to, as messages, by name
+        #[arg(long, value_name = "NAME")]
+        queue: Option<String>,
+
+        /// One of S3's event types, s3:ObjectCreated:* and its kinds, s3:ObjectRemoved:* and its; again for each
+        /// [default: s3:ObjectCreated:*]
+        #[arg(long = "event", value_name = "EVENT")]
+        events: Vec<String>,
+
+        /// Only the objects whose key begins with it
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Only the objects whose key ends with it
+        #[arg(long)]
+        suffix: Option<String>,
+
+        /// The configuration's ID [default: one the API makes]
+        #[arg(long)]
+        id: Option<String>,
+    },
+
+    /// List a bucket's notifications, or remove one by its ID, or all of them
+    Notifications {
+        /// The bucket's name
+        bucket: String,
+
+        /// Remove the configuration of this ID
+        #[arg(long, value_name = "ID", conflicts_with = "clear")]
+        remove: Option<String>,
+
+        /// Remove them all, after asking
+        #[arg(long)]
+        clear: bool,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -575,11 +681,16 @@ pub enum BucketKeysCommand {
 
     /// Make an access key: its secret printed this once, as the variables AWS's tools read
     Create {
-        /// A bucket it reaches, by name; again for each; all the account's without it
+        /// A bucket it reaches, by name; again for each. Naming neither buckets nor queues, it reaches all the
+        /// account's; naming some, those alone
         #[arg(long = "bucket", value_name = "NAME")]
         buckets: Vec<String>,
 
-        /// Reads and lists only: no upload, copy or delete
+        /// A queue it reaches, by name; again for each
+        #[arg(long = "queue", value_name = "NAME")]
+        queues: Vec<String>,
+
+        /// Reads and lists only: no upload, copy or delete, no message sent, received or deleted
         #[arg(long)]
         read_only: bool,
     },
@@ -593,6 +704,253 @@ pub enum BucketKeysCommand {
         #[arg(long, short)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum QueuesCommand {
+    /// Make a queue: SQS's defaults for the attributes not given
+    Create {
+        /// Its name: 1 to 80 letters, digits, hyphens and underscores, as SQS names standard queues
+        name: String,
+
+        #[command(flatten)]
+        attributes: QueueAttributeArgs,
+    },
+
+    /// List the account's queues, with their messages
+    List,
+
+    /// Show a queue: its URL, ARN and endpoint, its messages and its attributes
+    Get {
+        /// The queue's name
+        name: String,
+    },
+
+    /// Show a queue's metrics, as CloudWatch names SQS's: what it held and its oldest message, its messages sent,
+    /// received and deleted, a row per period
+    Metrics {
+        /// The queue's name
+        name: String,
+
+        /// Seconds per row
+        #[arg(long, default_value_t = 60, value_parser = period)]
+        period: u32,
+
+        /// How far back: 30m, 6h, 2d
+        #[arg(long, default_value = "1h")]
+        since: String,
+    },
+
+    /// Change a queue's attributes, as SQS's SetQueueAttributes: those given change, the others stay
+    Set {
+        /// The queue's name
+        name: String,
+
+        #[command(flatten)]
+        attributes: QueueAttributeArgs,
+
+        /// No dead-letter queue: a message is received again and again until it is deleted or its retention ends
+        #[arg(long, conflicts_with = "dead_letter_queue")]
+        no_dead_letter_queue: bool,
+    },
+
+    /// Send a message, as SQS's SendMessage, to debug a queue
+    Send {
+        /// The queue's name
+        name: String,
+
+        /// Its body: text, such as JSON; @file for a file's, - for stdin's
+        body: String,
+
+        /// How long it waits before it can be received, from 0s to 15m, such as 30s; the queue's delay without it
+        #[arg(long)]
+        delay: Option<String>,
+
+        /// A message attribute, NAME=VALUE, a string; again for each
+        #[arg(long = "attribute", value_name = "NAME=VALUE")]
+        attributes: Vec<String>,
+    },
+
+    /// Receive messages, as SQS's ReceiveMessage: each hidden from other receives for the visibility timeout, then
+    /// received again unless deleted
+    Receive {
+        /// The queue's name
+        name: String,
+
+        /// How many at most
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=10))]
+        max: u8,
+
+        /// How long to wait for a message, from 0s to 20s: a long poll; the queue's receive wait without it
+        #[arg(long)]
+        wait: Option<String>,
+
+        /// How long each one is hidden, from 0s to 12h; the queue's visibility timeout without it
+        #[arg(long)]
+        visibility_timeout: Option<String>,
+
+        /// Delete each message received, which is then not received again
+        #[arg(long)]
+        delete: bool,
+    },
+
+    /// Delete a message by the receipt handle its last receive gave; an older receive's handle deletes nothing
+    DeleteMessage {
+        /// The queue's name
+        name: String,
+
+        /// The receipt handle, as `ff queues receive` prints it
+        receipt_handle: String,
+    },
+
+    /// Delete every message of a queue, as SQS's PurgeQueue
+    Purge {
+        /// The queue's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Delete a queue, with its messages
+    Delete {
+        /// The queue's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EventSourcesCommand {
+    /// Have a function read a queue of the account, as Lambda's CreateEventSourceMapping
+    Add {
+        /// The queue's name
+        queue: String,
+
+        /// The function's name
+        function: String,
+
+        #[command(flatten)]
+        batches: BatchArgs,
+
+        /// The answer names the messages that failed, {"batchItemFailures": [{"itemIdentifier": "<messageId>"}]}, and the
+        /// others are deleted (ReportBatchItemFailures)
+        #[arg(long)]
+        report_batch_item_failures: bool,
+
+        /// Made disabled: nothing is read until `ff event-sources update <uuid> --enable`
+        #[arg(long)]
+        disabled: bool,
+    },
+
+    /// List the account's mappings: which function reads which queue, and how
+    List {
+        /// Those of this function
+        #[arg(long, value_name = "NAME")]
+        function: Option<String>,
+
+        /// Those reading this queue
+        #[arg(long, value_name = "NAME")]
+        queue: Option<String>,
+    },
+
+    /// Show a mapping
+    Get {
+        /// The mapping's UUID, as `ff event-sources list` shows it
+        uuid: String,
+    },
+
+    /// Change a mapping, as Lambda's UpdateEventSourceMapping: what is given changes, the rest stays
+    Update {
+        /// The mapping's UUID
+        uuid: String,
+
+        #[command(flatten)]
+        batches: BatchArgs,
+
+        /// The answer names the messages that failed (ReportBatchItemFailures)
+        #[arg(long, conflicts_with = "no_report_batch_item_failures")]
+        report_batch_item_failures: bool,
+
+        /// A call that fails keeps its whole batch
+        #[arg(long)]
+        no_report_batch_item_failures: bool,
+
+        /// As many batches at once as the function's instances
+        #[arg(long, conflicts_with = "max_concurrency")]
+        no_max_concurrency: bool,
+
+        /// Read the queue again
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+
+        /// Read nothing: the messages wait in the queue
+        #[arg(long)]
+        disable: bool,
+    },
+
+    /// Stop a function reading a queue: its messages stay in the queue
+    Remove {
+        /// The mapping's UUID
+        uuid: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// How a function's batches of a queue are made, by Lambda's settings.
+#[derive(Args)]
+pub struct BatchArgs {
+    /// The most messages in one call, from 1 to 10000; over 10, with a batching window [default at first: 10]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+    pub batch_size: Option<u32>,
+
+    /// How long to wait to fill a batch, from 0s to 5m, such as 2s [default at first: 0s]
+    #[arg(long)]
+    pub batching_window: Option<String>,
+
+    /// The most batches in calls at once, from 2 to 1000, within the function's instances [default: as many as them]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=1000))]
+    pub max_concurrency: Option<u32>,
+}
+
+/// SQS's attributes of a queue, each by its own flag; durations such as 30s, 15m or 4d.
+#[derive(Args)]
+pub struct QueueAttributeArgs {
+    /// How long a message received is hidden from other receives, from 0s to 12h (SQS's VisibilityTimeout; 30s)
+    #[arg(long)]
+    pub visibility_timeout: Option<String>,
+
+    /// How long a message is kept, received or not, from 1m to 14d (MessageRetentionPeriod; 4d)
+    #[arg(long)]
+    pub retention: Option<String>,
+
+    /// How long a new message waits before it can be received, from 0s to 15m (DelaySeconds; 0s)
+    #[arg(long)]
+    pub delay: Option<String>,
+
+    /// How long a receive that names no wait waits for a message, from 0s to 20s (ReceiveMessageWaitTimeSeconds; 0s)
+    #[arg(long)]
+    pub receive_wait: Option<String>,
+
+    /// The largest message, its body and attributes together, from 1024 to 1048576 bytes (MaximumMessageSize; 1048576)
+    #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u32).range(1024..=1_048_576))]
+    pub max_message_size: Option<u32>,
+
+    /// Another queue of the account, by name, which gets each message received more than --max-receive-count times
+    /// (RedrivePolicy)
+    #[arg(long, value_name = "QUEUE")]
+    pub dead_letter_queue: Option<String>,
+
+    /// The receives a message may have before it goes to the dead-letter queue, from 1 to 1000 [default: 5]
+    #[arg(long, value_name = "COUNT", requires = "dead_letter_queue", value_parser = clap::value_parser!(u16).range(1..=1000))]
+    pub max_receive_count: Option<u16>,
 }
 
 /// Where the connection string goes besides the terminal: functions' secrets.

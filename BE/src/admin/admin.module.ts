@@ -32,6 +32,7 @@ import { AdminSupportController } from './admin-support.controller';
 import { AdminSupportService } from './admin-support.service';
 import { PlatformSettingsModule } from './platform-settings.module';
 import { StorageModule } from '../storage/storage.module';
+import { QueuesModule } from '../queues/queues.module';
 
 /** The admin dashboard's routes, under /admin, for FF's operators only (P-70, D12). */
 @Module({
@@ -49,6 +50,8 @@ import { StorageModule } from '../storage/storage.module';
     UsageModule,
     // An account's buckets, and what each holds.
     StorageModule,
+    // Its queues, their messages counted.
+    QueuesModule,
   ],
   controllers: [
     AdminSettingsController,

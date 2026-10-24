@@ -2,8 +2,8 @@
  * L2: an account's usage in a month (client-readiness plan, P-22) against a
  * real PostgreSQL server, in a scratch database that is dropped after: the
  * totals are the raw records' own sums, exactly, the month is the UTC
- * calendar's, and only the account's records count; its databases from their
- * hourly samples.
+ * calendar's, and only the account's records count; its databases and buckets
+ * from their hourly samples, its buckets' and queues' requests from their counts.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -251,6 +251,31 @@ run("an account's usage in a month (L2, P-22)", () => {
       },
     ]);
     expect(await usage.monthlyBuckets(A, '2026-12')).toEqual([]);
+  });
+
+  it("counts each of the account's queues in the month: its requests as SQS bills them, the messages sent and received, the most requests first, a deleted one's by its name then", async () => {
+    const counted = (accountId: string, queueId: string, name: string, minute: string, requests: number, sent: number, received: number, deleted = 0) =>
+      query(
+        `INSERT INTO queue_request_counts (queue_id, minute, writer, account_id, name, requests, sent, received, deleted, empty_receives, sent_bytes, sent_max_bytes)
+         VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6, $7, $8, 0, 0, 0)`,
+        [queueId, minute, accountId, name, requests, sent, received, deleted],
+      );
+    const [{ id: orders }] = await query<Array<{ id: string }>>(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [A]);
+    const old = '8b9c0d1e-2f3a-4b4c-9d5e-7f8a9b0c1d2e'; // deleted since
+    const drained = '9c0d1e2f-3a4b-4c5d-8e6f-8a9b0c1d2e3f'; // deleted too: only FF's deletes after a function's batch, not billed
+    await counted(A, orders, 'orders', '2026-10-01T00:05:00Z', 1_000, 400, 380, 380);
+    await counted(A, orders, 'orders', '2026-10-31T23:59:00Z', 2_500, 0, 1_000);
+    await counted(A, orders, 'orders', '2026-11-01T00:00:00Z', 9_999, 9, 9); // November's
+    await counted(A, old, 'old', '2026-10-15T12:00:00Z', 3_000, 1_500, 0);
+    await counted(A, drained, 'drained', '2026-10-16T12:00:00Z', 0, 0, 0, 5);
+    await counted(B, '0d1e2f3a-4b5c-4d6e-9f7a-9b0c1d2e3f4a', 'b-queue', '2026-10-05T00:01:00Z', 50, 50, 50); // account B's
+
+    expect(await usage.monthlyQueues(A, '2026-10')).toEqual([
+      { queueId: orders, name: 'orders', deleted: false, requests: 3_500, messagesSent: 400, messagesReceived: 1_380 },
+      { queueId: old, name: 'old', deleted: true, requests: 3_000, messagesSent: 1_500, messagesReceived: 0 },
+      { queueId: drained, name: 'drained', deleted: true, requests: 0, messagesSent: 0, messagesReceived: 0 },
+    ]);
+    expect(await usage.monthlyQueues(A, '2026-12')).toEqual([]);
   });
 
   it("counts only the account's own records, and each month by the UTC calendar", async () => {

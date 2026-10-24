@@ -14,6 +14,9 @@ import { ApiKeysService } from './api-keys/api-keys.service';
 import { apiDocument } from './api-document';
 import { Principal } from './auth/principal';
 import { FunctionsController } from './functions/functions.controller';
+import { AsyncInvocationsService } from './functions/async-invocations.service';
+import { EventInvokeConfigController } from './functions/event-invoke-config.controller';
+import { EventInvokeConfigService } from './functions/event-invoke-config.service';
 import { FunctionsService } from './functions/functions.service';
 import { FunctionUrlsController } from './function-urls/function-urls.controller';
 import { FunctionUrlsService } from './function-urls/function-urls.service';
@@ -56,6 +59,10 @@ import { AlarmsService } from './alarms/alarms.service';
 import { ReadinessController } from './monitoring/readiness.controller';
 import { AdminStatsController } from './admin/admin-stats.controller';
 import { AdminStatsService } from './admin/admin-stats.service';
+import { QueuesController } from './queues/queues.controller';
+import { EventSourcesController } from './event-sources/event-sources.controller';
+import { EventSourcesService } from './event-sources/event-sources.service';
+import { QueuesService } from './queues/queues.service';
 import { ORCHESTRATOR } from './orchestrator/orchestrator.types';
 import { DataSource } from 'typeorm';
 import { of } from 'rxjs';
@@ -79,6 +86,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [
         FunctionsController,
+        EventInvokeConfigController,
         FunctionUrlsController,
         CustomDomainsController,
         SchedulesController,
@@ -103,6 +111,8 @@ describe('the OpenAPI document (L1, P-08)', () => {
         AlarmsController,
         ReadinessController,
         AdminStatsController,
+        QueuesController,
+        EventSourcesController,
       ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
@@ -111,6 +121,10 @@ describe('the OpenAPI document (L1, P-08)', () => {
           // The live tail answers with an event stream, which ends here at once (P-43).
           useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }), liveLogs: async () => of({ data: {} }) }),
         },
+        { provide: AsyncInvocationsService, useValue: succeeding(AsyncInvocationsService, { queue: async () => ({ requestId: ID }), dryRun: async () => undefined }) },
+        { provide: QueuesService, useValue: succeeding(QueuesService, { list: async () => [], receive: async () => [], remove: async () => undefined, purge: async () => undefined, deleteMessage: async () => undefined }) },
+        { provide: EventInvokeConfigService, useValue: succeeding(EventInvokeConfigService, { remove: async () => undefined }) },
+        { provide: EventSourcesService, useValue: succeeding(EventSourcesService, { list: async () => [], listForFunction: async () => [], remove: async () => undefined }) },
         { provide: FunctionUrlsService, useValue: succeeding(FunctionUrlsService) },
         { provide: CustomDomainsService, useValue: succeeding(CustomDomainsService, { list: async () => [] }) },
         { provide: SchedulesService, useValue: succeeding(SchedulesService, { list: async () => [], previewRuns: () => [] }) },
@@ -124,6 +138,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
             monthly: async () => ({ month: '2026-10', functions: [], totals: { requests: 0, billedMs: 0, gbSeconds: '0', throttled: 0, platformErrors: 0, lost: 0 } }),
             monthlyDatabases: async () => [],
             monthlyBuckets: async () => [],
+            monthlyQueues: async () => [],
           }),
         },
         { provide: PricingService, useValue: succeeding(PricingService, { estimate: async () => null }) },
@@ -188,10 +203,11 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/url/domains', 'POST /functions/{id}/url/domains', 'POST /functions/{id}/url/domains/{domain}/verify', 'DELETE /functions/{id}/url/domains/{domain}', 'GET /functions/{id}/schedules', 'POST /functions/{id}/schedules', 'GET /functions/{id}/schedules/{scheduleId}', 'PUT /functions/{id}/schedules/{scheduleId}', 'DELETE /functions/{id}/schedules/{scheduleId}', 'GET /schedules/next-runs', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /functions/{id}/event-invoke-config', 'PUT /functions/{id}/event-invoke-config', 'DELETE /functions/{id}/event-invoke-config', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/url/domains', 'POST /functions/{id}/url/domains', 'POST /functions/{id}/url/domains/{domain}/verify', 'DELETE /functions/{id}/url/domains/{domain}', 'GET /functions/{id}/schedules', 'POST /functions/{id}/schedules', 'GET /functions/{id}/schedules/{scheduleId}', 'PUT /functions/{id}/schedules/{scheduleId}', 'DELETE /functions/{id}/schedules/{scheduleId}', 'GET /schedules/next-runs', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview', 'GET /queues', 'POST /queues', 'GET /queues/{name}', 'PATCH /queues/{name}', 'DELETE /queues/{name}', 'POST /queues/{name}/purge', 'POST /queues/{name}/messages', 'POST /queues/{name}/receive', 'DELETE /queues/{name}/messages/{receiptHandle}', 'GET /functions/{id}/event-sources', 'POST /functions/{id}/event-sources', 'GET /event-sources', 'GET /event-sources/{uuid}', 'PATCH /event-sources/{uuid}', 'DELETE /event-sources/{uuid}']));
     // The scaler's per-minute table answered GET /metrics/:functionId; the metrics now come from the usage records.
     expect(checked.map((r) => r.route)).not.toContain('GET /metrics/{functionId}');
-    expect(checked.filter((r) => r.documented.join() !== String(r.answered))).toEqual([]);
+    // Invoke answers each of its invocation types with its own status, which the next test checks.
+    expect(checked.filter((r) => r.route !== 'POST /functions/{id}/invoke' && r.documented.join() !== String(r.answered))).toEqual([]);
   });
 
   it('serves the document at /api-json, and its viewer at /api', async () => {
@@ -204,7 +220,17 @@ describe('the OpenAPI document (L1, P-08)', () => {
     expect(await viewer.text()).toContain('swagger-ui');
   });
 
-  it("documents invoke as 201 Created, which hack/e2e.sh checks too, and 413 for an input over AWS Lambda's 6 MB", () => {
-    expect(Object.keys(document.paths['/functions/{id}/invoke'].post!.responses)).toEqual(['201', '413']);
+  it("documents invoke as 201 Created, which hack/e2e.sh checks too, 202 for an Event and 204 for a DryRun, as each answers, and 413 and 429", async () => {
+    const answered = async (type?: string) =>
+      (
+        await fetch(`${baseUrl}/functions/${ID}/invoke`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(type ? { 'x-amz-invocation-type': type } : {}) },
+          body: '{}',
+        })
+      ).status;
+
+    expect(Object.keys(document.paths['/functions/{id}/invoke'].post!.responses)).toEqual(['201', '202', '204', '413', '429']);
+    expect([await answered(), await answered('RequestResponse'), await answered('Event'), await answered('DryRun')]).toEqual([201, 201, 202, 204]);
   });
 });

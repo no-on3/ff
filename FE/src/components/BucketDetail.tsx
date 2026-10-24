@@ -13,6 +13,7 @@ import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { Page, PageHeader } from './Page';
 import { Callout, Panel } from './Panel';
 import StatusPill from './StatusPill';
+import { BucketNotifications } from './BucketNotifications';
 
 /** The hours the page reads: the last day's, a point an hour. */
 const HOURS = 24;
@@ -226,30 +227,34 @@ const BucketDetail: React.FC = () => {
             {hours.length === 0 ? (
               <p className="px-5 py-4 text-[13px] text-gray-600">No hour measured yet: the first measure comes within a minute of its creation.</p>
             ) : (
-              <table className="w-full text-left text-[13px]">
-                <thead className="bg-gray-50/70 text-xs text-gray-500">
-                  <tr className="border-b border-line">
-                    <th scope="col" className="px-5 py-2 font-medium">Hour</th>
-                    <th scope="col" className="px-5 py-2 text-right font-medium">Storage</th>
-                    <th scope="col" className="px-5 py-2 text-right font-medium">Objects</th>
-                    <th scope="col" className="px-5 py-2 text-right font-medium">Requests</th>
-                    <th scope="col" className="px-5 py-2 text-right font-medium">Failed</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {hours.map((hour) => (
-                    <tr key={hour.at}>
-                      <td className="px-5 py-2 whitespace-nowrap">{formatWhen(hour.at)}</td>
-                      <td className="px-5 py-2 text-right tabular-nums">{formatSize(hour.sizeBytes)}</td>
-                      <td className="px-5 py-2 text-right tabular-nums">{hour.objects.toLocaleString('en-US')}</td>
-                      <td className="px-5 py-2 text-right tabular-nums">{hour.requests.toLocaleString('en-US')}</td>
-                      <td className="px-5 py-2 text-right tabular-nums">{hour.errors.toLocaleString('en-US')}</td>
+              <div className="overflow-x-auto">
+                {/* On a phone the table is wider than the panel: it scrolls, rather than lose its last columns. */}
+                <table className="w-full text-left text-[13px]">
+                  <thead className="bg-gray-50/70 text-xs text-gray-500">
+                    <tr className="border-b border-line">
+                      <th scope="col" className="px-5 py-2 font-medium">Hour</th>
+                      <th scope="col" className="px-5 py-2 text-right font-medium">Storage</th>
+                      <th scope="col" className="px-5 py-2 text-right font-medium">Objects</th>
+                      <th scope="col" className="px-5 py-2 text-right font-medium">Requests</th>
+                      <th scope="col" className="px-5 py-2 text-right font-medium">Failed</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {hours.map((hour) => (
+                      <tr key={hour.at}>
+                        <td className="px-5 py-2 whitespace-nowrap">{formatWhen(hour.at)}</td>
+                        <td className="px-5 py-2 text-right tabular-nums">{formatSize(hour.sizeBytes)}</td>
+                        <td className="px-5 py-2 text-right tabular-nums">{hour.objects.toLocaleString('en-US')}</td>
+                        <td className="px-5 py-2 text-right tabular-nums">{hour.requests.toLocaleString('en-US')}</td>
+                        <td className="px-5 py-2 text-right tabular-nums">{hour.errors.toLocaleString('en-US')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </Panel>
+          <BucketNotifications bucketName={bucket.name} mayChange={writer && account.status === 'active'} />
         </div>
         <BucketAlarms bucketName={bucket.name} mayChange={writer && account.status === 'active'} />
       </div>

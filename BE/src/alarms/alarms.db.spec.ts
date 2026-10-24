@@ -93,13 +93,22 @@ run('alarms (L2)', () => {
     await query(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, $2, $3)`, [accountId, unique, `ff-${String(buckets).padStart(24, '0')}`]);
     return unique;
   };
+  let queues = 0;
+  /** A customer's queue of the account, as its row. Answers its ID and name. */
+  const queue = async (accountId: string, name: string) => {
+    const unique = `${name}-${++queues}`;
+    const [{ id }] = await query<Array<{ id: string }>>(`INSERT INTO queues (account_id, name, kind) VALUES ($1, $2, 'customer') RETURNING id`, [accountId, unique]);
+    return { id, name: unique };
+  };
   /** Only the deliveries of the alarm a test makes: each test clears those before it. */
   const clearDeliveries = () => query(`DELETE FROM notification_deliveries`);
 
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts']) await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
+    for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_samples', 'async_event_counts']) {
+      await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
+    }
     for (const [id, name] of [[A, 'Alarmed'], [B, 'Other']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
     const owner = await db.dataSource.getRepository(User).save({ oidcSub: 'kc-alarm-owner', email: 'owner@ff.test', name: null, locale: 'fr-TN' }); // the e-mails in the owner's language
     await db.dataSource.getRepository(Membership).save({ accountId: A, userId: owner.id, role: 'owner' });
@@ -185,6 +194,21 @@ run('alarms (L2)', () => {
       await expect(alarms.create(A, { ...errors, metric: 'Errors' })).rejects.toThrow(BadRequestException);
       expect(await alarms.update(A, watching.id, { ...errors, metric: 'BucketSizeBytes', statistic: 'Average', threshold: 1e9 })).toMatchObject({ bucketName: mine, metric: 'BucketSizeBytes' });
       await query(`DELETE FROM buckets WHERE name = $1`, [mine]);
+      await expect(alarms.get(A, watching.id)).rejects.toThrow(NotFoundException);
+    });
+
+    it("watch the account's own queue, by its name, and go with it", async () => {
+      const mine = await queue(A, 'orders-dlq');
+      const theirs = await queue(B, 'orders-dlq');
+      const waiting = alarm({ functionId: null, queueName: mine.name, metric: 'ApproximateNumberOfMessagesVisible', statistic: 'Maximum', period: 60 });
+
+      const watching = await alarms.create(A, waiting);
+      expect(watching).toMatchObject({ functionId: null, databaseId: null, bucketName: null, queueName: mine.name, metric: 'ApproximateNumberOfMessagesVisible' });
+      expect((await alarms.list(A)).map((listed) => listed.queueName)).toEqual([mine.name]);
+      await expect(alarms.create(A, { ...waiting, queueName: theirs.name })).rejects.toThrow(new NotFoundException(`The account has no queue ${theirs.name}`));
+      await expect(alarms.create(A, { ...waiting, metric: 'Errors', statistic: 'Sum' })).rejects.toThrow(BadRequestException);
+      expect(await alarms.update(A, watching.id, { ...waiting, metric: 'ApproximateAgeOfOldestMessage', threshold: 600 })).toMatchObject({ queueName: mine.name, metric: 'ApproximateAgeOfOldestMessage' });
+      await query(`DELETE FROM queues WHERE id = $1`, [mine.id]);
       await expect(alarms.get(A, watching.id)).rejects.toThrow(NotFoundException);
     });
   });
@@ -336,6 +360,42 @@ run('alarms (L2)', () => {
 
       await evaluator.tick(new Date('2026-10-20T15:02:05Z'));
       expect((await stateOf(failing.id)).state).toBe('OK');
+    });
+
+    it("fires on a queue's messages from its minute samples, the e-mail naming the queue, and recovers once a minute finds it empty", async () => {
+      const dead = await queue(A, 'orders-dlq');
+      const waiting = await alarms.create(
+        A,
+        alarm({ name: 'Dead letters', functionId: null, queueName: dead.name, metric: 'ApproximateNumberOfMessagesVisible', statistic: 'Maximum', period: 60, actions: { email: true, webhookUrls: [] } }),
+      );
+      await query(`INSERT INTO queue_samples (queue_id, minute, account_id, visible, not_visible, delayed, oldest_age_seconds) VALUES ($1, '2026-10-20T15:00:00Z', $2, 2, 0, 0, 40)`, [
+        dead.id,
+        A,
+      ]);
+
+      await evaluator.tick(new Date('2026-10-20T15:01:05Z'));
+      expect([(await stateOf(waiting.id)).state, (await stateOf(waiting.id)).stateReason]).toEqual([
+        'ALARM',
+        '1 of the last 1 period(s) of 60 s breaching ApproximateNumberOfMessagesVisible Maximum > 0 (1 needed); latest 2',
+      ]);
+      const [told] = await db.dataSource.getRepository(NotificationDelivery).find({ where: { kind: 'alarm', channel: DeliveryChannel.EMAIL } });
+      expect((told.payload as { text: string }).text).toMatch(/sur la file d'attente « orders-dlq-\d+ » du compte « Alarmed »/);
+
+      // No sample the next minute: the queue was empty.
+      await evaluator.tick(new Date('2026-10-20T15:02:05Z'));
+      expect((await stateOf(waiting.id)).state).toBe('OK');
+    });
+
+    it("fires on a function's asynchronous calls dropped, as Lambda's AsyncEventsDropped counts them", async () => {
+      const dropping = await alarms.create(A, alarm({ name: 'Dropped', metric: 'AsyncEventsDropped', statistic: 'Sum', period: 60, actions: { email: false, webhookUrls: [] } }));
+      await query(
+        `INSERT INTO async_event_counts (function_id, minute, writer, account_id, received, dropped, destination_failures, attempts, age_ms_sum, age_ms_max)
+         VALUES ($1, '2026-10-20T16:00:00Z', gen_random_uuid(), $2, 1, 1, 0, 3, 183000, 121000)`,
+        [f.id, A],
+      );
+
+      await evaluator.tick(new Date('2026-10-20T16:01:05Z'));
+      expect((await stateOf(dropping.id)).stateReason).toBe('1 of the last 1 period(s) of 60 s breaching AsyncEventsDropped Sum > 0 (1 needed); latest 1');
     });
 
     it('evaluates each alarm once a round when two backends work at once, and an alarm replaced again at once', async () => {
