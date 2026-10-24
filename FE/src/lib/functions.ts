@@ -99,7 +99,9 @@ export const TRUNCATED_NOTE = 'Truncated: the history keeps the first 64 KiB.';
 
 /** What brought a call, as the history says it. */
 export const sourceText = (source: InvocationSource, attempt = 1): string =>
-  source === 'async' ? `asynchronously, attempt ${attempt}` : (({ api: 'through the API', url: 'through its URL', schedule: 'by a schedule' })[source] ?? source);
+  source === 'async'
+    ? `asynchronously, attempt ${attempt}`
+    : (({ api: 'through the API', url: 'through its URL', schedule: 'by a schedule', sqs: 'with a batch of a queue it reads' })[source] ?? source);
 
 /** What the console says of an asynchronous call, kept: its request ID, and what happens next. */
 export const keptCallText = (requestId: string): string =>

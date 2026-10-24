@@ -1159,7 +1159,54 @@ check "FF's API purges a queue, and deletes it, which the CLI then doesn't find"
 check "the audit log names each change of a queue, whichever way it came: the CLI's under its access key, the API's as its caller" \
   "queue.create access_key:$queue_key_id|queue.create dev|queue.purge dev|queue.delete dev" \
   "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
-for queue in e2e-cli-orders e2e-fn-orders e2e-fn-records; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
+
+echo "== functions reading queues, as Lambda's event source mappings: a batch, a partial batch failure, the dead-letter queue"
+aws_sqs create-queue --queue-name e2e-batch-dlq >/dev/null
+aws_sqs create-queue --queue-name e2e-batch --attributes "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$tenant:e2e-batch-dlq" \
+  '{VisibilityTimeout: "5", RedrivePolicy: ({deadLetterTargetArn: $arn, maxReceiveCount: 2} | tojson)}')" >/dev/null
+batch_arn="arn:aws:sqs:tn-tunis-1:$tenant:e2e-batch"
+# As a function written for Lambda answers: the messages it couldn't handle, by their IDs, in batchItemFailures.
+batch_code='export const handler = async (event) => ({ batchItemFailures: event.Records.filter((record) => JSON.parse(record.body).fail).map((record) => ({ itemIdentifier: record.messageId })) });'
+batch_fn="$(http POST /functions "$(jq -n --arg code "$batch_code" '{name: "e2e-batch-reader", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')" | jq -r .id)"
+# Warm, so that its first batch isn't held past the queue's visibility timeout by a cold start.
+http POST "/functions/$batch_fn/invoke" '{"input": {"Records": []}}' >/dev/null
+mapping="$(http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn, maximumBatchingWindowInSeconds: 2, functionResponseTypes: ["ReportBatchItemFailures"]}')")"
+check "a function made to read a queue, as Lambda's CreateEventSourceMapping: 10 a batch, a window of 2 s, partial batch responses" \
+  "201 Enabled 10 2 ReportBatchItemFailures $batch_arn" \
+  "$(status) $(jq -r '"\(.state) \(.batchSize) \(.maximumBatchingWindowInSeconds) \(.functionResponseTypes[0]) \(.eventSourceArn)"' <<<"$mapping")"
+mapping_id="$(jq -r .uuid <<<"$mapping")"
+http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn}')" >/dev/null
+check "  ... once: another for the same queue names the first, in Lambda's words" "409 Please update or delete the existing mapping with UUID $mapping_id" \
+  "$(status) $(jq -r .message "$work/body" | grep -oE 'Please update or delete the existing mapping with UUID [0-9a-f-]+$')"
+check "  ... which the function's list and the queue's show" "$mapping_id $mapping_id" \
+  "$(http GET "/functions/$batch_fn/event-sources" | jq -r '.[0].uuid') $(http GET "/event-sources?eventSourceArn=$(jq -rn --arg arn "$batch_arn" '$arn | @uri')" | jq -r '.[0].uuid')"
+aws_sqs send-message-batch --queue-url "$sqs_endpoint/$tenant/e2e-batch" \
+  --entries "$(jq -cn '[range(1; 6) | {Id: "m\(.)", MessageBody: ({order: ., fail: (. == 2 or . == 4)} | tojson)}]')" >/dev/null
+# The batch at once, PostgreSQL telling FF; the two that failed back after the 5 s of their visibility timeout, then a
+# second time, and moved by the receive after to the dead-letter queue.
+for _ in $(seq 1 60); do
+  [ "$(http GET /queues/e2e-batch-dlq | jq .messages.available)" = 2 ] && [ "$(http GET /queues/e2e-batch | jq '.messages.available + .messages.inFlight')" = 0 ] && break
+  sleep 1
+done
+check "the AWS CLI's five messages in one call of the function, SQS's event; the two its answer names called again, then in the dead-letter queue" \
+  "5 aws:sqs $batch_arn 1,3,5 2,4 0 2" \
+  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | last | .input.Records | "\(length) \(.[0].eventSource) \(.[0].eventSourceARN) \([.[].body | fromjson | select(.fail | not) | .order] | map(tostring) | join(","))"') \
+$(aws_sqs receive-message --queue-url "$sqs_endpoint/$tenant/e2e-batch-dlq" --max-number-of-messages 10 | jq -r '[.Messages[].Body | fromjson | .order] | sort | map(tostring) | join(",")') \
+$(http GET /queues/e2e-batch | jq '.messages.available + .messages.inFlight') $(http GET /queues/e2e-batch-dlq | jq '.messages.available + .messages.inFlight')"
+check "  ... each call in the function's history as the queue's: the batch, then the two again" "2 sqs" \
+  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | "\(length) \(.[0].source)"')"
+http PATCH "/event-sources/$mapping_id" '{"enabled": false}' >/dev/null
+check "a mapping disabled, as Lambda's UpdateEventSourceMapping: nothing read" "200 Disabled" "$(status) $(jq -r .state "$work/body")"
+aws_sqs send-message --queue-url "$sqs_endpoint/$tenant/e2e-batch" --message-body '{"order": 6}' >/dev/null
+sleep 4
+check "  ... the message waits, the function not called" "1 2" \
+  "$(http GET /queues/e2e-batch | jq .messages.available) $(http GET "/functions/$batch_fn/invocations?limit=10" | jq '[.invocations[] | select(.source == "sqs")] | length')"
+http DELETE "/event-sources/$mapping_id" >/dev/null
+check "  ... and deleted: the message stays" "204 1 []" "$(status) $(http GET /queues/e2e-batch | jq .messages.available) $(http GET "/functions/$batch_fn/event-sources" | jq -c .)"
+check "the audit log names each change of the mapping" "event_source.create|event_source.update|event_source.delete" \
+  "$(env_q "SELECT string_agg(action, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'event_source:$mapping_id'")"
+http DELETE "/functions/$batch_fn" >/dev/null
+for queue in e2e-batch e2e-batch-dlq e2e-cli-orders e2e-fn-orders e2e-fn-records; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
 as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
 check "the queues deleted, their messages with them" "0 0" \
   "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"

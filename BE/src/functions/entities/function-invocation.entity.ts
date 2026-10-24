@@ -29,6 +29,8 @@ export enum InvocationSource {
   SCHEDULE = 'schedule',
   /** The API's invoke with the invocation type Event, run from the function's queue, as AWS Lambda runs it (ADR 0010). */
   ASYNC = 'async',
+  /** A batch of a queue the function reads, as Lambda's event source mapping calls it with SQS's event. */
+  SQS = 'sqs',
 }
 
 @Entity('function_invocations')

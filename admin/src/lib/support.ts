@@ -36,7 +36,7 @@ export interface SearchResults {
 
 export const CALL_FIELDS = ['id', 'requestId', 'attempt', 'status', 'source', 'duration', 'memoryUsed', 'createdAt', 'errorType'] as const;
 /** What brought a call: the API, the function's URL, a schedule, or an asynchronous call. */
-export type CallSource = 'api' | 'url' | 'schedule' | 'async';
+export type CallSource = 'api' | 'url' | 'schedule' | 'async' | 'sqs';
 /** A call, without what went in or out. */
 export interface Call {
   /** The invocation's ID: its request's, but for an asynchronous call's retries. */
@@ -167,7 +167,7 @@ export const foundIn = (call: Pick<CallHit, 'inHistory'>): string => (call.inHis
 
 /** What brought a call, to read; an asynchronous call's attempt with its number. */
 export const sourceText = (source: CallSource, attempt = 1): string =>
-  source === 'async' ? `Asynchronous, attempt ${attempt}` : (({ api: 'API', url: 'URL', schedule: 'Schedule' })[source] ?? source);
+  source === 'async' ? `Asynchronous, attempt ${attempt}` : (({ api: 'API', url: 'URL', schedule: 'Schedule', sqs: 'A queue it reads' })[source] ?? source);
 
 /** The event a function takes, to read. */
 export const eventFormatText = (format: FunctionPage['function']['eventFormat']): string =>

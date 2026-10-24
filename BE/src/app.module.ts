@@ -14,6 +14,7 @@ import { RequestIdInterceptor } from './common/request-context';
 import configuration, { DatabaseSettings, LogFormat } from './config/configuration';
 import { backendDataSourceOptions } from './database/database.options';
 import { DatabasesModule } from './databases/databases.module';
+import { EventSourcesModule } from './event-sources/event-sources.module';
 import { FunctionsModule } from './functions/functions.module';
 import { FunctionUrlsModule } from './function-urls/function-urls.module';
 import { HealthController } from './health/health.controller';
@@ -53,6 +54,7 @@ import { StorageModule } from './storage/storage.module';
     ApiKeysModule,
     AuditModule,
     DatabasesModule,
+    EventSourcesModule,
     FunctionsModule,
     FunctionUrlsModule,
     MetricsModule,

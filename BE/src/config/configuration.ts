@@ -398,6 +398,8 @@ const appShape = {
   // (0: never, a backend that runs none): a call kept is told at once. And how many it runs at once.
   FF_ASYNC_INTERVAL_SECONDS: integer(5, 0, 60),
   FF_ASYNC_CONCURRENCY: integer(10, 1, 1000),
+  // How often the event source mappings are loaded again, a mapping changed on this backend loaded at once (0: none read).
+  FF_EVENT_SOURCE_REFRESH_SECONDS: integer(10, 0, 3600),
   FF_SCALE_TO_ZERO_IDLE_SECONDS: optionalText(),
 
   K8S_API_URL: optionalText(httpUrl),
@@ -845,6 +847,10 @@ export default function configuration(env: Env = process.env) {
     asyncInvoke: {
       intervalSeconds: parsed.FF_ASYNC_INTERVAL_SECONDS,
       concurrency: parsed.FF_ASYNC_CONCURRENCY,
+    },
+    // Functions reading queues: how often their mappings are loaded again.
+    eventSources: {
+      refreshSeconds: parsed.FF_EVENT_SOURCE_REFRESH_SECONDS,
     },
     mail: {
       // Empty: e-mails are written to the log instead of being sent.

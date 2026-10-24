@@ -231,16 +231,19 @@ export class CustomerQueues {
     );
   }
 
-  /** Deletes the messages these receipts name, each only if its receipt is its last receive's: an older one deletes nothing, and isn't refused, as SQS's. */
+  /**
+   * Deletes the messages these receipts name, in one statement, each only if
+   * its receipt is its last receive's: an older one deletes nothing, and isn't
+   * refused, as SQS's.
+   */
   async deleteMessages(queue: Queue, receipts: Receipt[]): Promise<void> {
-    for (const receipt of receipts) {
-      await this.dataSource.query(`DELETE FROM "queue_messages" WHERE "id" = $1 AND "queue_id" = $2 AND "receive_count" = $3 AND "message_id" = $4`, [
-        receipt.id,
-        queue.id,
-        receipt.receiveCount,
-        receipt.messageId,
-      ]);
-    }
+    if (receipts.length === 0) return;
+    await this.dataSource.query(
+      `DELETE FROM "queue_messages" m
+        USING unnest($2::bigint[], $3::integer[], $4::uuid[]) AS r("id", "receive_count", "message_id")
+        WHERE m."id" = r."id" AND m."queue_id" = $1 AND m."receive_count" = r."receive_count" AND m."message_id" = r."message_id"`,
+      [queue.id, receipts.map((receipt) => receipt.id), receipts.map((receipt) => receipt.receiveCount), receipts.map((receipt) => receipt.messageId)],
+    );
   }
 
   /** Hides a message received for `timeout` seconds from now; false when it is not received any more, or another receive has it. */

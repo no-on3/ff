@@ -63,6 +63,7 @@ const QUEUE_LIMITS = migrationNames.find((name) => name.startsWith('QueueLimits'
 const EVENT_INVOKE_CONFIGS = migrationNames.find((name) => name.startsWith('EventInvokeConfigs')) as string;
 const CUSTOMER_QUEUES = migrationNames.find((name) => name.startsWith('CustomerQueues')) as string;
 const ASYNC_NOTIFY = migrationNames.find((name) => name.startsWith('AsyncNotify')) as string;
+const KEY_QUEUES = migrationNames.find((name) => name.startsWith('KeyQueues')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -505,6 +506,47 @@ run('database schema (L2, real PostgreSQL)', () => {
       ]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the event-source-mappings migration maps a function to a queue once, the pair going with either, gives the history its source sqs, and reverts with both, a queue's call becoming an asynchronous one", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: fn }] = await dataSource.query(
+        `INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status) VALUES ('reader', $1, 'nodejs', 'x', 128, 5, 'ACTIVE') RETURNING id`,
+        [ACCOUNT],
+      );
+      const queue = async (name: string) =>
+        (await dataSource.query<Array<{ id: string }>>(`INSERT INTO queues (account_id, name, kind) VALUES ($1, $2, 'customer') RETURNING id`, [ACCOUNT, name]))[0].id;
+      const [orders, invoices] = [await queue('orders'), await queue('invoices')];
+      const map = (queueId: string, batch = 10, window = 0) =>
+        dataSource.query(`INSERT INTO event_source_mappings (account_id, function_id, queue_id, batch_size, maximum_batching_window_in_seconds) VALUES ($1, $2, $3, $4, $5)`, [
+          ACCOUNT,
+          fn,
+          queueId,
+          batch,
+          window,
+        ]);
+      await map(orders);
+      await map(invoices, 100, 5);
+      await expect(map(orders)).rejects.toThrow(/duplicate key/);
+      await expect(map(await queue('more'), 11)).rejects.toThrow(/violates check constraint/);
+      await dataSource.query(`INSERT INTO function_invocations (function_id, input, status, source) VALUES ($1, '{}', 'COMPLETED', 'sqs')`, [fn]);
+
+      await dataSource.query(`DELETE FROM queues WHERE id = $1`, [invoices]);
+      expect(await dataSource.query(`SELECT queue_id FROM event_source_mappings`)).toEqual([{ queue_id: orders }]);
+
+      await migrateDownTo(dataSource, KEY_QUEUES);
+      expect(await dataSource.query(`SELECT to_regclass('event_source_mappings') AS mappings, (SELECT source FROM function_invocations) AS source`)).toEqual([
+        { mappings: null, source: 'async' },
+      ]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+      await map(orders);
+      await dataSource.query(`DELETE FROM functions WHERE id = $1`, [fn]);
+      expect(await dataSource.query(`SELECT count(*)::int AS mappings FROM event_source_mappings`)).toEqual([{ mappings: 0 }]);
     });
   });
 
@@ -1001,6 +1043,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'custom_domains',
         'database_samples',
         'databases',
+        'event_source_mappings',
         'function_environments',
         'function_event_invoke_configs',
         'function_invocations',

@@ -10,6 +10,7 @@ import { Function } from '../functions/entities/function.entity';
 import { FunctionEnvironment } from '../functions/entities/function-environment.entity';
 import { FunctionUrl } from '../functions/entities/function-url.entity';
 import { FunctionEventInvokeConfig } from '../functions/entities/function-event-invoke-config.entity';
+import { EventSourceMapping } from '../event-sources/event-source-mapping.entity';
 import { CustomDomain } from '../function-urls/custom-domain.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { FunctionMetrics } from '../metrics/entities/function-metrics.entity';
@@ -50,4 +51,4 @@ import { QueueMessage } from '../queues/queue-message.entity';
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping];

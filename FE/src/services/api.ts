@@ -120,7 +120,7 @@ export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'C
 export type InvocationStatus = (typeof INVOCATION_STATUSES)[number];
 
 /** What brought an invocation: the API's invoke, the function's URL, one of its schedules, or an asynchronous call's attempt. contract.test.ts checks them. */
-export const INVOCATION_SOURCES = ['api', 'url', 'schedule', 'async'] as const;
+export const INVOCATION_SOURCES = ['api', 'url', 'schedule', 'async', 'sqs'] as const;
 export type InvocationSource = (typeof INVOCATION_SOURCES)[number];
 
 /** An invocation's fields, as the API's entity names them: contract.test.ts checks them against it. */

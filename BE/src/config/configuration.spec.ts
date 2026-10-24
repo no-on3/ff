@@ -538,6 +538,14 @@ describe('configuration', () => {
     });
   });
 
+  describe('event source mappings', () => {
+    it('are loaded again every 10 s by default, and never with 0, on a backend that reads no queue for functions', () => {
+      expect(configuration(dev).eventSources).toEqual({ refreshSeconds: 10 });
+      expect(configuration({ ...dev, FF_EVENT_SOURCE_REFRESH_SECONDS: '0' }).eventSources).toEqual({ refreshSeconds: 0 });
+      expect(problems({ ...dev, FF_EVENT_SOURCE_REFRESH_SECONDS: '3601' })).toEqual([expect.stringMatching(/^FF_EVENT_SOURCE_REFRESH_SECONDS/)]);
+    });
+  });
+
   describe('the runtime images', () => {
     it('run protocol 3 by default, which hands a function the payload as its event', () => {
       expect(configuration(dev).kubernetes.runtimeImages).toEqual({ nodejs: 'ff-runtime-nodejs:24-v3', python: 'ff-runtime-python:3.13-v3' });

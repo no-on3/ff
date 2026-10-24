@@ -210,7 +210,7 @@ describe('an asynchronous call, kept', () => {
 
 describe('what brought a call', () => {
   it('is said as the history says it', () => {
-    expect((['api', 'url', 'schedule'] as const).map((source) => sourceText(source))).toEqual(['through the API', 'through its URL', 'by a schedule']);
+    expect((['api', 'url', 'schedule', 'sqs'] as const).map((source) => sourceText(source))).toEqual(['through the API', 'through its URL', 'by a schedule', 'with a batch of a queue it reads']);
     expect([sourceText('async'), sourceText('async', 3)]).toEqual(['asynchronously, attempt 1', 'asynchronously, attempt 3']);
   });
 });

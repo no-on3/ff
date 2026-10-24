@@ -23,7 +23,7 @@ export type AuditAction =
   | 'support.view_invocation'
   | 'support.view_logs'
   | 'account.egress'
-  // An operator turned the account's databases and buckets off, or on again.
+  // An operator turned the account's databases, buckets and queues off, or on again.
   | 'account.storage'
   | 'function.create'
   | 'function.update'
@@ -32,6 +32,10 @@ export type AuditAction =
   // A function's settings for its asynchronous calls, as Lambda's EventInvokeConfig: set, deleted.
   | 'event_invoke_config.put'
   | 'event_invoke_config.delete'
+  // A function reading a queue, as Lambda's event source mapping: made, changed (its batches, enabled or not), deleted.
+  | 'event_source.create'
+  | 'event_source.update'
+  | 'event_source.delete'
   // A function's package, uploaded: its SHA-256 and its sizes, once per account and package.
   | 'package.upload'
   // A function's URL, its public address: given, changed, taken away.
