@@ -40,7 +40,7 @@ import { Schedule } from '../schedules/schedule.entity';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
-import { memoryEnvironments, noFunctionKeys, noPackages } from './test-fixtures';
+import { eventually, memoryEnvironments, noFunctionKeys, noPackages } from './test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '400000000051';
@@ -182,14 +182,26 @@ run('asynchronous calls, in the database (L2)', () => {
       return { ok: true, output: null, invocation: {} };
     };
     const [a, b] = [worker({ call } as never), worker({ call } as never)];
+    // Every claim counted, the workers' own too: a worker whose claim took all its room claims again by itself as its
+    // attempts end, so that what the test's ticks return needn't add up to all of the events.
+    const claimed: number[] = [];
+    const claimEvents = queues.claimEvents.bind(queues);
+    const claims = jest.spyOn(queues, 'claimEvents').mockImplementation(async (...args) => {
+      const events = await claimEvents(...args);
+      claimed.push(events.length);
+      return events;
+    });
 
     const now = new Date(Date.now() + 1000);
-    const taken = await Promise.all([a.tick(now), b.tick(now)]);
+    await Promise.all([a.tick(now), b.tick(now)]);
     await Promise.all([a.settled(), b.settled()]);
-    taken.push(await a.tick(now), await b.tick(now));
+    await a.tick(now);
+    await b.tick(now);
+    await eventually(async () => ran.length >= 20, 10_000);
     await Promise.all([a.settled(), b.settled()]);
+    claims.mockRestore();
 
-    expect(taken.reduce((sum, k) => sum + k, 0)).toBe(20);
+    expect(claimed.reduce((sum, k) => sum + k, 0)).toBe(20);
     expect(new Set(ran).size).toBe(20);
     expect(ran).toHaveLength(20);
     expect(await db.dataSource.query('SELECT count(*)::int AS n FROM queue_messages')).toEqual([{ n: 0 }]);
