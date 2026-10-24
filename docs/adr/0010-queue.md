@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-3 plan](../step-3-plan.md)'s D1, and its choices (its §9), confirmed by you on 2026-10-23; where its messages live, measured by Q-01's spike the same day |
 | **Date** | 2026-10-23 |
-| **Implementation** | Step-3 plan: decisions D1 to D9 and D11; tasks Q-02 to Q-08. As built so far: Q-02 to Q-07, and Q-08's first part (below) |
+| **Implementation** | Step-3 plan: decisions D1 to D9 and D11; tasks Q-02 to Q-08. As built so far: Q-02 to Q-07, and Q-08's first two parts (below) |
 | **Related** | [Parent plan](../local-markets-and-aws-portability-plan.md): ADR-003 (the queue's backend), E-03, E-05, E-04's notifications, §4.6, §6.7; [What to build next](../what-to-build-next.md) §6; the spike, [`hack/spikes/queue`](../../hack/spikes/queue/README.md) |
 
 ## Context
@@ -129,6 +129,13 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 - **In the minute it was answered:** a long poll of 20 s answered after its first minute was written would otherwise write that minute twice, which the row's key refuses. Buckets' counts filed a request under the minute it began: one answered after that minute was written, such as a long upload, made every later write of its backend fail, and was found here; such a request counts in the first minute not written now.
 - **Rated with the rest:** each hour of a queue is a row of `resource_usage_hourly`, of the kind `queue`, its requests in a column of their own; priced by the book's SQS tiers and free tier, counted from the month's start, as S3 Standard's storage tiers are; the reconciliation compares the requests rated with those counted.
 - **What this leaves:** a backend that dies loses the counts of the minutes it hadn't written yet, two at most, as with buckets': those requests aren't billed; the messages they sent are in the queue all the same.
+
+### As built (Q-08, part 2): metrics and alarms
+
+- **A queue sampled each minute** (the migration `QueueMetrics`): every backend writes, 5 s into each minute, a row for each customer's queue holding a message, its messages counted as SQS's attributes count them and its oldest message's age, in one statement over the messages; a minute sampled twice keeps its first row. A queue with none has no row, so its metrics read a minute without one as an empty queue's, a minute no backend sampled too. Partitioned by month and append-only, as capacity samples are.
+- **CloudWatch's names for SQS's metrics:** `GET /queues/:name/metrics` gives the messages visible, in flight and delayed (each period's Maximum and Average over its minutes) and the oldest's age from the samples; the messages sent, received and deleted, the empty receives and the size of what was sent from the requests' counts.
+- **Lambda's for asynchronous calls:** each event kept counts once its transaction committed (the scheduler's runs after its own), each attempt its age as the function is called, each event that ends without success as dropped, each record a destination didn't take as a failure, counted a minute at a time per function as queues' requests are (`async_event_counts`); `GET /functions/:id/metrics` and `GET /metrics` give them.
+- **Alarms** on all of them: a queue's by its name, going with the queue; the asynchronous calls' as a function's or the account's. Reverting the migration deletes the alarms on what it added, which the code before it can't judge.
 
 ## Consequences
 

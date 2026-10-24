@@ -59,6 +59,16 @@ export class AlarmDto {
   @MaxLength(63)
   bucketName?: string | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'orders',
+    description: "The queue watched, by its name, as CloudWatch's QueueName: for its messages, their age and size, and its requests; none otherwise",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  queueName?: string | null;
+
   @ApiProperty({ enum: METRICS })
   @IsIn(METRICS, { message: `metric must be one of ${METRICS.join(', ')}` })
   metric: Metric;
@@ -66,7 +76,7 @@ export class AlarmDto {
   @ApiProperty({
     enum: ALL_STATISTICS,
     description:
-      "Sum for the counts, a bucket's requests among them; Average, Maximum, p50, p95 or p99 for Duration; Maximum or Average for Instances and a database's metrics; Average for a bucket's storage; Latest for the money",
+      "Sum for the counts, a bucket's and a queue's requests among them; Average, Maximum, p50, p95 or p99 for Duration; Maximum or Average for Instances, a database's metrics, a queue's messages and an asynchronous call's age; Average for a bucket's storage; Average or Maximum for a queue's message size, Maximum for its oldest message's age; Latest for the money",
   })
   @IsIn(ALL_STATISTICS, { message: `statistic must be one of ${ALL_STATISTICS.join(', ')}` })
   statistic: Statistic;
@@ -80,7 +90,7 @@ export class AlarmDto {
   @IsIn(COMPARISONS, { message: `comparison must be one of ${COMPARISONS.join(', ')}` })
   comparison: Comparison;
 
-  @ApiProperty({ example: 5, description: "The metric's unit: calls, milliseconds, instances, sessions, bytes, objects, requests, or the prices' currency" })
+  @ApiProperty({ example: 5, description: "The metric's unit: calls, milliseconds, instances, sessions, bytes, objects, requests, messages, seconds, or the prices' currency" })
   @IsNumber({ allowNaN: false, allowInfinity: false })
   threshold: number;
 
@@ -117,6 +127,7 @@ export class AlarmView {
   @ApiProperty({ nullable: true, type: String }) functionId: string | null;
   @ApiProperty({ nullable: true, type: String }) databaseId: string | null;
   @ApiProperty({ nullable: true, type: String }) bucketName: string | null;
+  @ApiProperty({ nullable: true, type: String }) queueName: string | null;
   @ApiProperty({ enum: METRICS }) metric: Metric;
   @ApiProperty({ enum: ALL_STATISTICS }) statistic: Statistic;
   @ApiProperty({ enum: ALARM_PERIODS }) period: number;

@@ -4,7 +4,7 @@ import { Principal } from '../auth/principal';
 import { RequireScope } from '../auth/route-rules';
 import { CustomerMetricsService } from './customer-metrics.service';
 import { DATABASE_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
-import { BucketMetricsView, DatabaseMetricsView, MetricsQuery, MetricsView } from './dto/metrics-query.dto';
+import { BucketMetricsView, DatabaseMetricsView, MetricsQuery, MetricsView, QueueMetricsView } from './dto/metrics-query.dto';
 
 /** A window the request names, or 400 saying why it can't be. */
 function windowOf(query: MetricsQuery): MetricsWindow {
@@ -16,8 +16,9 @@ function windowOf(query: MetricsQuery): MetricsWindow {
 /**
  * The account's metrics, as CloudWatch names Lambda's, from its usage records
  * and capacity samples: a function's, or all its functions' together; a
- * database's, as CloudWatch names RDS's, from its hourly samples; and a
- * bucket's, as CloudWatch names S3's, from its hourly samples and its requests.
+ * database's, as CloudWatch names RDS's, from its hourly samples; a bucket's,
+ * as CloudWatch names S3's, from its hourly samples and its requests; and a
+ * queue's, as CloudWatch names SQS's, from its minute samples and its requests.
  */
 @ApiTags('metrics')
 @Controller()
@@ -64,5 +65,18 @@ export class MetricsController {
   @ApiResponse({ status: 404, description: 'No such bucket in the account' })
   forBucket(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
     return this.metrics.forBucket(principal.accountId, name, windowOf(query));
+  }
+
+  @Get('queues/:name/metrics')
+  @RequireScope('metrics:read')
+  @ApiOperation({
+    summary: "A queue's messages and requests, as CloudWatch names SQS's: a point per period",
+    description:
+      "Its messages that can be received, in flight and delayed, and its oldest message's age, sampled each minute: each period's Maximum and Average, a minute without a sample an empty queue's. From its requests' counts by the minute, each period's Sum: NumberOfMessagesSent, NumberOfMessagesReceived (a function's batches among them), NumberOfMessagesDeleted and NumberOfEmptyReceives; and SentMessageSize's Average and Maximum, null in a period without a message sent.",
+  })
+  @ApiResponse({ status: 200, type: QueueMetricsView })
+  @ApiResponse({ status: 404, description: 'No such queue in the account' })
+  forQueue(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
+    return this.metrics.forQueue(principal.accountId, name, windowOf(query));
   }
 }

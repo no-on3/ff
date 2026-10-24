@@ -18,6 +18,7 @@ import { ScratchDatabase, createScratchDatabase } from '../database/scratch-data
 import { EventFormat, Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { parsePlanLimits } from '../plans/plan-limits';
 import { plan } from '../plans/test-fixtures';
+import { AsyncEventCounts, AsyncEventUse } from '../queues/async-event-counts.service';
 import { QueueStore } from '../queues/queue-store';
 import { Schedule } from './schedule.entity';
 import { SchedulerService } from './scheduler.service';
@@ -29,8 +30,11 @@ const NOW = new Date('2026-10-21T08:00:03Z');
 run('the scheduler, in the database (L2)', () => {
   let db: ScratchDatabase;
   let fn: Function;
+  /** The events counted as received, as Lambda's metrics count them. */
+  let counted: AsyncEventUse[] = [];
+  const counts = { count: (use: AsyncEventUse) => void counted.push(use) } as unknown as AsyncEventCounts;
 
-  const scheduler = (queues: QueueStore = new QueueStore(db.dataSource)) =>
+  const scheduler = (queues: QueueStore = new QueueStore(db.dataSource, counts)) =>
     new SchedulerService(
       { getOrThrow: (key: string) => ({ 'schedules.intervalSeconds': 0, 'schedules.region': 'tn-tunis-1' })[key] } as unknown as ConfigService,
       db.dataSource,
@@ -109,18 +113,20 @@ run('the scheduler, in the database (L2)', () => {
     expect(runs.every((r) => r.attributes.origin === 'schedule' && JSON.parse(r.body)['detail-type'] === 'Scheduled Event')).toBe(true);
   });
 
-  it('moves a schedule on only with its run queued: a run that could not be kept leaves its schedule due', async () => {
+  it('moves a schedule on only with its run queued: a run that could not be kept leaves its schedule due, and counts no event received', async () => {
     await due('kept-together');
-    const failing = new QueueStore(db.dataSource);
+    const failing = new QueueStore(db.dataSource, counts);
     jest.spyOn(failing, 'sendEvent').mockRejectedValueOnce(new Error('the database refused the write'));
+    counted = [];
 
     expect(await scheduler(failing).tick(NOW)).toBe(0);
 
     const row = await db.dataSource.getRepository(Schedule).findOneByOrFail({ name: 'kept-together' });
-    expect([row.nextRunAt?.toISOString(), row.lastRequestId, (await queued()).length]).toEqual(['2026-10-21T08:00:00.000Z', null, 0]);
-    // The next tick takes it.
+    expect([row.nextRunAt?.toISOString(), row.lastRequestId, (await queued()).length, counted.length]).toEqual(['2026-10-21T08:00:00.000Z', null, 0, 0]);
+    // The next tick takes it, its run counted once its transaction committed.
     expect(await scheduler().tick(NOW)).toBe(1);
     expect(await queued()).toHaveLength(1);
+    expect(counted).toEqual([{ functionId: fn.id, accountId: ACCOUNT, received: 1 }]);
   });
 
   it('never runs a disabled schedule, nor one not due', async () => {
@@ -151,7 +157,7 @@ run('the scheduler, in the database (L2)', () => {
       status: FunctionStatus.ACTIVE,
     });
     await db.dataSource.getRepository(Schedule).save({ accountId: ACCOUNT, functionId: other.id, name: 'gone', expression: 'rate(1 hour)' });
-    await new QueueStore(db.dataSource).sendEvent(other, '00000000-0000-4000-8000-000000000041', '{}', new Date(Date.now() + 3600_000), {
+    await new QueueStore(db.dataSource, counts).sendEvent(other, '00000000-0000-4000-8000-000000000041', '{}', new Date(Date.now() + 3600_000), {
       attributes: { origin: 'schedule' },
     });
 

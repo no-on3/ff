@@ -2,6 +2,7 @@ import { Check, Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, 
 import { Account } from '../accounts/entities/account.entity';
 import { Database } from '../databases/database.entity';
 import { Function } from '../functions/entities/function.entity';
+import { Queue } from '../queues/queue.entity';
 import { Bucket } from '../storage/bucket.entity';
 import type { AlarmState, Comparison, Evaluation, Metric, MissingData, Statistic } from './alarm-rules';
 
@@ -13,9 +14,9 @@ export interface AlarmActions {
 
 /**
  * An alarm on a metric, as CloudWatch's: a function's, a database's, a
- * bucket's, or the account's when it names none; evaluated every minute,
- * telling its actions when it goes into ALARM and when it leaves it. It goes
- * with its function, database or bucket.
+ * bucket's, a queue's, or the account's when it names none; evaluated every
+ * minute, telling its actions when it goes into ALARM and when it leaves it.
+ * It goes with its function, database, bucket or queue.
  */
 @Entity('alarms')
 @Check(`"state" IN ('OK', 'ALARM', 'INSUFFICIENT_DATA')`)
@@ -60,6 +61,15 @@ export class Alarm {
   @ManyToOne(() => Bucket, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({ name: 'bucket_id' })
   bucket?: Bucket;
+
+  /** A customer's queue, for its messages and its requests; null otherwise. */
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  queueId: string | null;
+
+  @ManyToOne(() => Queue, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'queue_id' })
+  queue?: Queue;
 
   @Column({ type: 'text' })
   name: string;

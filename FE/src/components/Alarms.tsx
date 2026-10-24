@@ -25,7 +25,7 @@ import {
 } from '../lib/alarms';
 import { apiErrorMessage } from '../lib/functions';
 import { can } from '../lib/session';
-import { Alarm, AlarmState, Bucket, Database, Function, alarmsApi, bucketsApi, databasesApi, functionsApi } from '../services/api';
+import { Alarm, AlarmState, Bucket, Database, Function, Queue, alarmsApi, bucketsApi, databasesApi, functionsApi, queuesApi } from '../services/api';
 import StatusPill from './StatusPill';
 import { useSession } from '../session/session';
 
@@ -48,14 +48,15 @@ const Field: React.FC<{ id: string; label: string; hint?: string; children: Reac
 );
 
 /** The form that creates an alarm, or replaces one. */
-const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functions: Function[]; databases: Database[]; buckets: Bucket[]; onDone(saved: boolean): void }> = ({
-  editing,
-  initial,
-  functions,
-  databases,
-  buckets,
-  onDone,
-}) => {
+const AlarmEditor: React.FC<{
+  editing: Alarm | null;
+  initial: AlarmForm;
+  functions: Function[];
+  databases: Database[];
+  buckets: Bucket[];
+  queues: Queue[];
+  onDone(saved: boolean): void;
+}> = ({ editing, initial, functions, databases, buckets, queues, onDone }) => {
   const [form, setForm] = useState<AlarmForm>(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -105,11 +106,16 @@ const AlarmEditor: React.FC<{ editing: Alarm | null; initial: AlarmForm; functio
                 The bucket {bucket.name}
               </option>
             ))}
+            {queues.map((queue) => (
+              <option key={queue.name} value={`queue:${queue.name}`}>
+                The queue {queue.name}
+              </option>
+            ))}
           </select>
         </Field>
         <Field id="alarm-metric" label="Metric">
           <select id="alarm-metric" className="input" value={form.metric} onChange={(e) => setForm(withMetric(form, e.target.value as Metric))}>
-            {metricsFor(form.functionId, form.databaseId, form.bucketName).map((metric) => (
+            {metricsFor(form.functionId, form.databaseId, form.bucketName, form.queueName).map((metric) => (
               <option key={metric} value={metric}>
                 {metric}
               </option>
@@ -213,6 +219,7 @@ const Alarms: React.FC = () => {
   const [functions, setFunctions] = useState<Function[]>([]);
   const [databases, setDatabases] = useState<Database[]>([]);
   const [buckets, setBuckets] = useState<Bucket[]>([]);
+  const [queues, setQueues] = useState<Queue[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ alarm: Alarm | null; form: AlarmForm } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -240,19 +247,25 @@ const Alarms: React.FC = () => {
       .list()
       .then(({ data }) => setBuckets(data))
       .catch(() => setBuckets([]));
+    queuesApi
+      .list()
+      .then(({ data }) => setQueues(data))
+      .catch(() => setQueues([]));
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
   }, [load, account?.id]);
 
-  // A function's page, a database's and a bucket's link here to make an alarm on it.
+  // A function's page, a database's, a bucket's and a queue's link here to make an alarm on it.
   const forFunction = params.get('function');
   const forDatabase = params.get('database');
   const forBucket = params.get('bucket');
+  const forQueue = params.get('queue');
   useEffect(() => {
     if (forFunction) setEditing({ alarm: null, form: emptyForm(forFunction) });
     else if (forDatabase) setEditing({ alarm: null, form: emptyForm('', forDatabase) });
     else if (forBucket) setEditing({ alarm: null, form: emptyForm('', '', forBucket) });
-  }, [forFunction, forDatabase, forBucket]);
+    else if (forQueue) setEditing({ alarm: null, form: emptyForm('', '', '', forQueue) });
+  }, [forFunction, forDatabase, forBucket, forQueue]);
 
   if (!account) return null;
   const writer = account.status === 'active' && can(account.role, 'change functions');
@@ -261,7 +274,7 @@ const Alarms: React.FC = () => {
 
   const done = async (saved: boolean) => {
     setEditing(null);
-    if (forFunction || forDatabase || forBucket) setParams({});
+    if (forFunction || forDatabase || forBucket || forQueue) setParams({});
     if (saved) await load();
   };
   const remove = async (id: string) => {
@@ -285,11 +298,21 @@ const Alarms: React.FC = () => {
         )}
       </div>
       <p className="mb-6 text-gray-600">
-        Each alarm watches a metric of a function, of a database, of a bucket or of the account, or its money, and is judged every minute, a database's hour by hour.
+        Each alarm watches a metric of a function, of a database, of a bucket, of a queue or of the account, or its money, and is judged every minute, a database's
+        hour by hour.
         Going into alarm, and out of it, it tells the account's owners and its webhooks.
       </p>
       {editing && (
-        <AlarmEditor key={editing.alarm?.id ?? 'new'} editing={editing.alarm} initial={editing.form} functions={functions} databases={databases} buckets={buckets} onDone={done} />
+        <AlarmEditor
+          key={editing.alarm?.id ?? 'new'}
+          editing={editing.alarm}
+          initial={editing.form}
+          functions={functions}
+          databases={databases}
+          buckets={buckets}
+          queues={queues}
+          onDone={done}
+        />
       )}
       {error && (
         <div role="alert" className="mb-4 text-red-600">
@@ -318,6 +341,10 @@ const Alarms: React.FC = () => {
                   ) : alarm.bucketName ? (
                     <>
                       on the bucket <Link to={`/buckets/${alarm.bucketName}`}>{alarm.bucketName}</Link>
+                    </>
+                  ) : alarm.queueName ? (
+                    <>
+                      on the queue <Link to={`/queues/${alarm.queueName}`}>{alarm.queueName}</Link>
                     </>
                   ) : (
                     'on the account'

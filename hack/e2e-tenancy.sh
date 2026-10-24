@@ -594,6 +594,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B gets 404 for A's queue's message" '404 The account has no queue named "l5-orders-a"' "$(status) $(message)"
       check "  ... whose message A still has" "l5-orders-a 1 200" "$(kept_by as_a l5-orders-a) $(status)"
       ;;
+    "GET /queues/{name}/metrics")
+      as_b GET /queues/l5-orders-a/metrics >/dev/null
+      check "$route: B gets 404 for A's queue's metrics" '404 The account has no queue l5-orders-a' "$(status) $(message)"
+      check "  ... which A reads" "true 200" "$(as_a GET /queues/l5-orders-a/metrics | jq '.metrics.NumberOfMessagesSent.Sum | type == "array"') $(status)"
+      ;;
     "GET /event-sources")
       listed="$(as_b GET /event-sources | jq --arg uuid "$mapping_a" 'map(select(.uuid == $uuid)) | length')"
       check "$route: B's list doesn't show A's function reading A's queue" "200 0" "$(status) $listed"
@@ -674,6 +679,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B can't watch A's function" "404 Function with ID $id not found" "$(status) $(message)"
       as_b POST /alarms '{"name": "l5", "bucketName": "l5-photos-a", "metric": "5xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
       check "  ... nor A's bucket" "404 The account has no bucket l5-photos-a" "$(status) $(message)"
+      as_b POST /alarms '{"name": "l5", "queueName": "l5-orders-a", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor A's queue" "404 The account has no queue l5-orders-a" "$(status) $(message)"
       as_b POST /alarms "$(alarm_body)" >/dev/null
       check "  ... but makes its own account's alarm" 201 "$(status)"
       ;;
@@ -1074,6 +1081,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2 gets 404 for account 1's queue's message" '404 The account has no queue named "l5-orders-1"' "$(status) $(message)"
       check "  ... whose message account 1 still has" "l5-orders-1 1 200" "$(kept_by as_user_1 l5-orders-1) $(status)"
       ;;
+    "GET /queues/{name}/metrics")
+      as_user_2 GET /queues/l5-orders-1/metrics >/dev/null
+      check "$route: account 2 gets 404 for account 1's queue's metrics" '404 The account has no queue l5-orders-1' "$(status) $(message)"
+      check "  ... which account 1 reads" "true 200" "$(as_user_1 GET /queues/l5-orders-1/metrics | jq '.metrics.NumberOfMessagesSent.Sum | type == "array"') $(status)"
+      ;;
     "GET /event-sources")
       listed="$(as_user_2 GET /event-sources | jq --arg uuid "$mapping_1" 'map(select(.uuid == $uuid)) | length')"
       check "$route: account 2's list doesn't show account 1's function reading its queue" "200 0" "$(status) $listed"
@@ -1156,6 +1168,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2 can't watch account 1's function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
       as_user_2 POST /alarms '{"name": "l5", "bucketName": "l5-photos-1", "metric": "5xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
       check "  ... nor account 1's bucket" "404 The account has no bucket l5-photos-1" "$(status) $(message)"
+      as_user_2 POST /alarms '{"name": "l5", "queueName": "l5-orders-1", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor account 1's queue" "404 The account has no queue l5-orders-1" "$(status) $(message)"
       ;;
     "POST /packages")
       upload_package "$api_oidc" "$work/package-b.zip" -H "Authorization: Bearer $token_2" -H "X-FF-Account: ${account_2:-}" >/dev/null
@@ -1590,8 +1604,8 @@ first_book="$(jq -c '.[0].document' <<<"$books")"
 latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
 with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
-check "a book after one with databases' and buckets' prices is refused without them, each named" \
-  "400 9 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+check "a book after one with databases', buckets' and queues' prices is refused without them, each named" \
+  "400 11 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
 created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
 check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"

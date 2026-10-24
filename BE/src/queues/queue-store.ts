@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
+import { AsyncEventCounts } from './async-event-counts.service';
 
 /** An asynchronous call's event, claimed from its function's queue: what its attempt needs. */
 export interface ClaimedEvent {
@@ -39,11 +40,15 @@ const LONGEST_TIMEOUT_SECONDS = 900;
  * never hold one at once and one that stops leaves it to come back when its
  * lease ends. What a claim does with a message afterwards names the claim, by
  * its receive count: a consumer whose lease ended, and whose message another
- * has claimed since, changes nothing.
+ * has claimed since, changes nothing. Each event kept for a function counts
+ * as Lambda's AsyncEventsReceived, once its transaction committed.
  */
 @Injectable()
 export class QueueStore {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly counts: AsyncEventCounts,
+  ) {}
 
   /** What the account's messages hold together, in bytes: the sum of its queues', which a trigger keeps. */
   async accountBytes(accountId: string, manager: EntityManager = this.dataSource.manager): Promise<number> {
@@ -57,7 +62,8 @@ export class QueueStore {
    * Keeps an asynchronous call of the function: its event, under its request
    * ID, in the function's own queue, made at its first call, with what its
    * origin keeps beside it. Due at once; deleted unhandled at `expiresAt`.
-   * In the transaction given, else in one of its own.
+   * In the transaction given, else in one of its own, counted once it is
+   * kept; the caller who gave the transaction says `kept()` once it committed.
    */
   async sendEvent(
     fn: { id: string; accountId: string },
@@ -78,8 +84,14 @@ export class QueueStore {
         [fn.id, requestId, body, options.attributes ?? null, Buffer.byteLength(body), expiresAt],
       );
     };
-    if (options.manager) await write(options.manager);
-    else await this.dataSource.transaction(write);
+    if (options.manager) return write(options.manager);
+    await this.dataSource.transaction(write);
+    this.kept(fn);
+  }
+
+  /** An event kept for the function, as Lambda's AsyncEventsReceived counts it: once the transaction that kept it committed. */
+  kept(fn: { id: string; accountId: string }): void {
+    this.counts.count({ functionId: fn.id, accountId: fn.accountId, received: 1 });
   }
 
   /**
@@ -104,14 +116,16 @@ export class QueueStore {
    * asynchronous call, in one transaction: the record is kept exactly when the
    * event goes. False, and nothing sent, when another claim has the event since.
    */
-  deleteEventAndSend(
+  async deleteEventAndSend(
     event: Pick<ClaimedEvent, 'id' | 'receiveCount'>,
     target: { id: string; accountId: string },
     requestId: string,
     body: string,
     expiresAt: Date,
   ): Promise<boolean> {
-    return this.deleteEventAnd(event, (manager) => this.sendEvent(target, requestId, body, expiresAt, { manager }));
+    const sent = await this.deleteEventAnd(event, (manager) => this.sendEvent(target, requestId, body, expiresAt, { manager }));
+    if (sent) this.kept(target);
+    return sent;
   }
 
   /**

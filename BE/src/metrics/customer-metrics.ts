@@ -3,8 +3,9 @@
  * Invocations, Errors, Throttles and Duration, with FF's ColdStarts and
  * Instances. They come from the usage records, so that they are exact,
  * outlive restarts and deleted functions, and agree with the bill; the
- * instances from the capacity samples. A period is one series point; quiet
- * periods are zeros, and a period without a call has no duration.
+ * instances from the capacity samples; its asynchronous calls' from their
+ * counts by the minute. A period is one series point; quiet periods are
+ * zeros, and a period without a call has no duration.
  */
 
 /** The periods a point can cover, in seconds: a minute, five, an hour. */
@@ -39,6 +40,18 @@ export interface PeriodRow {
   durationP99: number | null;
 }
 
+/** A period's asynchronous calls, as the query adds their counts up; a quiet period has no row. */
+export interface AsyncRow {
+  bucket: number;
+  received: number;
+  dropped: number;
+  destinationFailures: number;
+  /** The attempts made, their ages added up, and the oldest, in milliseconds. */
+  attempts: number;
+  ageMsSum: number;
+  ageMsMax: number;
+}
+
 /** A period's instances: the most ready at once in one of its minutes, and the mean over its minutes. */
 export interface InstancesRow {
   bucket: number;
@@ -60,6 +73,11 @@ export interface MetricsView {
     ColdStarts: number[];
     Duration: { Average: Array<number | null>; Maximum: Array<number | null>; p50: Array<number | null>; p95: Array<number | null>; p99: Array<number | null> };
     Instances: { Maximum: number[]; Average: number[] };
+    /** Lambda's metrics of asynchronous calls: events kept, their age at each attempt (null without one), events dropped, records a destination didn't take. */
+    AsyncEventsReceived: number[];
+    AsyncEventAge: { Average: Array<number | null>; Maximum: Array<number | null> };
+    AsyncEventsDropped: number[];
+    DestinationDeliveryFailures: number[];
   };
 }
 
@@ -86,11 +104,12 @@ export function metricsWindow(request: { start?: string; end?: string; period?: 
 
 const round3 = (value: number | null): number | null => (value === null ? null : Math.round(value * 1000) / 1000);
 
-/** The series of the window, a point per period, quiet periods at zero, and no duration where nothing was measured. */
-export function metricsView(window: MetricsWindow, rows: PeriodRow[], instances: InstancesRow[]): MetricsView {
+/** The series of the window, a point per period, quiet periods at zero, and no duration or age where nothing was measured. */
+export function metricsView(window: MetricsWindow, rows: PeriodRow[], instances: InstancesRow[], calls: AsyncRow[] = []): MetricsView {
   const seconds = window.period;
   const byBucket = new Map(rows.map((row) => [row.bucket, row]));
   const instancesByBucket = new Map(instances.map((row) => [row.bucket, row]));
+  const callsByBucket = new Map(calls.map((row) => [row.bucket, row]));
   const view: MetricsView = {
     period: window.period,
     start: window.start,
@@ -103,6 +122,10 @@ export function metricsView(window: MetricsWindow, rows: PeriodRow[], instances:
       ColdStarts: [],
       Duration: { Average: [], Maximum: [], p50: [], p95: [], p99: [] },
       Instances: { Maximum: [], Average: [] },
+      AsyncEventsReceived: [],
+      AsyncEventAge: { Average: [], Maximum: [] },
+      AsyncEventsDropped: [],
+      DestinationDeliveryFailures: [],
     },
   };
   const m = view.metrics;
@@ -121,6 +144,13 @@ export function metricsView(window: MetricsWindow, rows: PeriodRow[], instances:
     m.Duration.p99.push(round3(row?.durationP99 ?? null));
     m.Instances.Maximum.push(ready?.maximum ?? 0);
     m.Instances.Average.push(ready ? round3(ready.minuteSum / (seconds / 60)) ?? 0 : 0);
+    const call = callsByBucket.get(bucket);
+    const attempted = call !== undefined && call.attempts > 0;
+    m.AsyncEventsReceived.push(call?.received ?? 0);
+    m.AsyncEventAge.Average.push(attempted ? round3(call.ageMsSum / call.attempts) : null);
+    m.AsyncEventAge.Maximum.push(attempted ? call.ageMsMax : null);
+    m.AsyncEventsDropped.push(call?.dropped ?? 0);
+    m.DestinationDeliveryFailures.push(call?.destinationFailures ?? 0);
   }
   return view;
 }
@@ -225,6 +255,70 @@ export function bucketMetricsView(window: MetricsWindow, hours: BucketHourRow[],
     view.metrics.BucketSizeBytes.Average.push(measure ? measure.sizeBytes : null);
     view.metrics.NumberOfObjects.Average.push(measure ? measure.objects : null);
     for (const metric of BUCKET_REQUEST_METRICS) view.metrics[metric].Sum.push(period?.[metric] ?? 0);
+  }
+  return view;
+}
+
+/** A queue's approximate counts, sampled each minute: each period's most and its mean over its minutes, as CloudWatch's Maximum and Average. */
+export const QUEUE_GAUGES = ['ApproximateNumberOfMessagesVisible', 'ApproximateNumberOfMessagesNotVisible', 'ApproximateNumberOfMessagesDelayed'] as const;
+export type QueueGauge = (typeof QUEUE_GAUGES)[number];
+/** A queue's counts of messages and receives, each period's Sum. */
+export const QUEUE_COUNTS = ['NumberOfMessagesSent', 'NumberOfMessagesReceived', 'NumberOfMessagesDeleted', 'NumberOfEmptyReceives'] as const;
+export type QueueCount = (typeof QUEUE_COUNTS)[number];
+
+/**
+ * A customer's queue's metrics, as CloudWatch names SQS's (ADR 0010): its
+ * messages that can be received, in flight and delayed, sampled each minute,
+ * a minute without a sample an empty queue's; its oldest message's age, the
+ * most of the period's minutes; and from its requests' counts by the minute,
+ * the messages sent, received and deleted, the receives that found none, and
+ * the size of the messages sent, null in a period without one.
+ */
+export interface QueueMetricsView {
+  period: Period;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: Record<QueueGauge, { Maximum: number[]; Average: number[] }> &
+    Record<QueueCount, { Sum: number[] }> & {
+      ApproximateAgeOfOldestMessage: { Maximum: number[] };
+      SentMessageSize: { Average: Array<number | null>; Maximum: Array<number | null> };
+    };
+}
+
+/** A period's samples of a queue, as the query adds them up; a period without one has no row. */
+export type QueueSampleRow = { bucket: number; oldestAgeSeconds: number } & Record<QueueGauge, { maximum: number; minuteSum: number }>;
+
+/** A period's counts of a queue, as the query adds them up; a quiet period has no row. */
+export type QueueCountRow = { bucket: number; sentBytes: number; sentMaxBytes: number } & Record<QueueCount, number>;
+
+/** The series of the window, a point per period: zeros where the queue was empty or quiet, no message size where none was sent. */
+export function queueMetricsView(window: MetricsWindow, samples: QueueSampleRow[], counts: QueueCountRow[]): QueueMetricsView {
+  const bySample = new Map(samples.map((row) => [row.bucket, row]));
+  const byCount = new Map(counts.map((row) => [row.bucket, row]));
+  const minutes = window.period / 60;
+  const gauges = Object.fromEntries(QUEUE_GAUGES.map((metric) => [metric, { Maximum: [] as number[], Average: [] as number[] }])) as Record<QueueGauge, { Maximum: number[]; Average: number[] }>;
+  const sums = Object.fromEntries(QUEUE_COUNTS.map((metric) => [metric, { Sum: [] as number[] }])) as Record<QueueCount, { Sum: number[] }>;
+  const view: QueueMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: { ...gauges, ...sums, ApproximateAgeOfOldestMessage: { Maximum: [] }, SentMessageSize: { Average: [], Maximum: [] } },
+  };
+  for (let start = window.start.getTime() / 1000; start < window.end.getTime() / 1000; start += window.period) {
+    const sample = bySample.get(start);
+    const count = byCount.get(start);
+    view.timestamps.push(new Date(start * 1000));
+    for (const metric of QUEUE_GAUGES) {
+      view.metrics[metric].Maximum.push(sample?.[metric].maximum ?? 0);
+      view.metrics[metric].Average.push(round3((sample?.[metric].minuteSum ?? 0) / minutes) as number);
+    }
+    view.metrics.ApproximateAgeOfOldestMessage.Maximum.push(sample?.oldestAgeSeconds ?? 0);
+    for (const metric of QUEUE_COUNTS) view.metrics[metric].Sum.push(count?.[metric] ?? 0);
+    const sent = count?.NumberOfMessagesSent ?? 0;
+    view.metrics.SentMessageSize.Average.push(sent > 0 ? round3((count as QueueCountRow).sentBytes / sent) : null);
+    view.metrics.SentMessageSize.Maximum.push(sent > 0 ? (count as QueueCountRow).sentMaxBytes : null);
   }
   return view;
 }

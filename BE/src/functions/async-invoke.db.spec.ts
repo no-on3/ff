@@ -11,8 +11,8 @@
  * call that ended handed to its destination function in the transaction that
  * deletes it, which then runs it, or to a queue of the account, its body
  * Lambda's record; a call kept, which PostgreSQL's NOTIFY has the worker claim
- * at once; a schedule's run, the schedule's call. Each run works in a scratch
- * database, dropped afterwards.
+ * at once; a schedule's run, the schedule's call; the counts of Lambda's
+ * metrics of them. Each run works in a scratch database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -24,6 +24,8 @@ import { ScratchDatabase, createScratchDatabase } from '../database/scratch-data
 import { FunctionRuntimeError } from '../orchestrator/orchestrator.errors';
 import { InvokeResult, Orchestrator } from '../orchestrator/orchestrator.types';
 import { onePlan } from '../plans/test-fixtures';
+import { AsyncEventCount } from '../queues/async-event-count.entity';
+import { AsyncEventCounts } from '../queues/async-event-counts.service';
 import { CustomerQueues } from '../queues/customer-queues';
 import { QueueEvents } from '../queues/queue-events';
 import { QueueStore } from '../queues/queue-store';
@@ -47,6 +49,7 @@ const HOUR = 3600_000;
 run('asynchronous calls, in the database (L2)', () => {
   let db: ScratchDatabase;
   let queues: QueueStore;
+  let asyncCounts: AsyncEventCounts;
   let functions: FunctionsService;
   let usage: UsageService;
   let configs: EventInvokeConfigService;
@@ -75,8 +78,20 @@ run('asynchronous calls, in the database (L2)', () => {
       customerQueues,
       onePlan(),
       { count: () => undefined } as never,
+      asyncCounts,
     );
   const send = (fn: Function, requestId: string, body = '{"order":1}', expiresAt = new Date(Date.now() + 7 * HOUR)) => queues.sendEvent(fn, requestId, body, expiresAt);
+  /** A function's asynchronous calls as counted for Lambda's metrics, once the counts are written: an attempt's age past three minutes the oldest. */
+  const asyncCountsOf = async (functionId: string) => {
+    await asyncCounts.flush();
+    const [row] = await db.dataSource.query<Array<{ received: number; attempts: number; dropped: number; failures: number; oldest: boolean }>>(
+      `SELECT sum("received")::int AS "received", sum("attempts")::int AS "attempts", sum("dropped")::int AS "dropped",
+              sum("destination_failures")::int AS "failures", coalesce(max("age_ms_max"), 0) > 180000 AS "oldest"
+         FROM "async_event_counts" WHERE "function_id" = $1`,
+      [functionId],
+    );
+    return row;
+  };
   const message = async (requestId: string) =>
     (
       await db.dataSource.query<Array<{ visible_at: Date; receive_count: number; attributes: Record<string, unknown> | null }>>(
@@ -102,7 +117,8 @@ run('asynchronous calls, in the database (L2)', () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
     await db.dataSource.getRepository(Account).save({ id: ACCOUNT, name: 'Async', planId: 'beta', status: AccountStatus.ACTIVE });
-    queues = new QueueStore(db.dataSource);
+    asyncCounts = new AsyncEventCounts(db.dataSource.getRepository(AsyncEventCount));
+    queues = new QueueStore(db.dataSource, asyncCounts);
     usage = new UsageService(db.dataSource.getRepository(UsageRecord), db.dataSource, config);
     await usage.ensurePartitions();
     functions = new FunctionsService(
@@ -251,6 +267,9 @@ run('asynchronous calls, in the database (L2)', () => {
       { status: 'error', billed_ms: 12 },
       { status: 'error', billed_ms: 12 },
     ]);
+    // As Lambda's metrics count it: the event received once, its three attempts each with its age, the last past three
+    // minutes on the claims' clock, and the event dropped.
+    expect(await asyncCountsOf(fn.id)).toEqual({ received: 1, attempts: 3, dropped: 1, failures: 0, oldest: true });
   });
 
   it('runs an event that succeeds once, its attempt the history of its request ID, and deletes it', async () => {
@@ -284,6 +303,8 @@ run('asynchronous calls, in the database (L2)', () => {
     await w.settled();
 
     expect([invoke.mock.calls.length, await message(uuid(500))]).toEqual([0, undefined]);
+    // Dropped without an attempt: no age.
+    expect(await asyncCountsOf(fn.id)).toEqual({ received: 1, attempts: 0, dropped: 1, failures: 0, oldest: false });
   });
 
   it('keeps the size with the messages: deleted with their function, its queue going too, or past their expiry', async () => {

@@ -67,6 +67,7 @@ const ASYNC_NOTIFY = migrationNames.find((name) => name.startsWith('AsyncNotify'
 const KEY_QUEUES = migrationNames.find((name) => name.startsWith('KeyQueues')) as string;
 const EVENT_SOURCE_MAPPINGS = migrationNames.find((name) => name.startsWith('EventSourceMappings')) as string;
 const BUCKET_NOTIFICATIONS = migrationNames.find((name) => name.startsWith('BucketNotifications')) as string;
+const QUEUE_BILLING = migrationNames.find((name) => name.startsWith('QueueBilling')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -617,7 +618,50 @@ run('database schema (L2, real PostgreSQL)', () => {
          VALUES ($1, date_trunc('hour', now()), gen_random_uuid(), 'queue', 'orders', (SELECT id FROM price_books LIMIT 1), 0, 0, 0, 0, 3)`,
         [ACCOUNT],
       );
-      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow("1 hour(s) of queues were rated: they are billed records, and reverting would drop them");
+      await expect(migrateDownTo(dataSource, BUCKET_NOTIFICATIONS)).rejects.toThrow('1 hour(s) of queues were rated: they are billed records, and reverting would drop them');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the queue-metrics migration samples queues and counts asynchronous calls by month, append-only, lets an alarm watch a queue and go with it, and reverts dropping the alarms on what it adds", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const queue = async (name: string) => (await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, $2, 'customer') RETURNING id`, [ACCOUNT, name]))[0].id as string;
+      const alarm = (queueId: string | null, metric: string, statistic: string) =>
+        dataSource.query(
+          `INSERT INTO alarms (account_id, queue_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+           VALUES ($1, $2, $3, $3, $4, 60, 'GreaterThanThreshold', 0, 1, 1, '{"email": true, "webhookUrls": []}')`,
+          [ACCOUNT, queueId, metric, statistic],
+        );
+      const gone = await queue('gone');
+      await alarm(gone, 'ApproximateNumberOfMessagesVisible', 'Maximum');
+      await dataSource.query(`DELETE FROM queues WHERE id = $1`, [gone]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM alarms`)).toEqual([{ n: 0 }]); // it went with its queue
+      const minute = `date_trunc('minute', now())`;
+      const kept = await queue('kept');
+      await dataSource.query(`INSERT INTO queue_samples (queue_id, minute, account_id, visible, not_visible, delayed, oldest_age_seconds) VALUES ($1, ${minute}, $2, 1, 0, 0, 5)`, [kept, ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO async_event_counts (function_id, minute, writer, account_id, received, dropped, destination_failures, attempts, age_ms_sum, age_ms_max)
+         VALUES (gen_random_uuid(), ${minute}, gen_random_uuid(), $1, 1, 0, 0, 1, 10, 10)`,
+        [ACCOUNT],
+      );
+      for (const table of ['queue_samples', 'async_event_counts']) {
+        await expect(dataSource.query(`UPDATE ${table} SET account_id = account_id`)).rejects.toThrow(/is append-only: UPDATE refused/);
+        await expect(dataSource.query(`DELETE FROM ${table}`)).rejects.toThrow(/is append-only: DELETE refused/);
+        expect(await partitionsOf(dataSource, table)).toEqual([{ relname: monthPartition(table, 0) }, { relname: monthPartition(table, 1) }]);
+      }
+      await alarm(kept, 'NumberOfMessagesSent', 'Sum');
+      await alarm(null, 'AsyncEventsDropped', 'Sum');
+      await alarm(null, 'Errors', 'Sum');
+
+      await migrateDownTo(dataSource, QUEUE_BILLING);
+
+      // The alarms the code before it doesn't know go; the others stay.
+      expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Errors' }]);
+      expect(await dataSource.query(`SELECT to_regclass('queue_samples') AS s, to_regclass('async_event_counts') AS c`)).toEqual([{ s: null, c: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });
@@ -1102,12 +1146,13 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts)_\d{4}_\d{2}$/; // their partitions, one per month
+      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts|queue_samples|async_event_counts)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
         'alarms',
         'api_keys',
+        'async_event_counts',
         'audit_log',
         'bucket_samples',
         'buckets',
@@ -1142,6 +1187,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'price_books',
         'queue_messages',
         'queue_request_counts',
+        'queue_samples',
         'queues',
         'rate_limited_invocations',
         'rating_runs',
@@ -1157,6 +1203,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         'webhook_secrets',
       ]);
       expect(tables.filter((table) => monthly.test(table))).toEqual([
+        monthPartition('async_event_counts', 0),
+        monthPartition('async_event_counts', 1),
         monthPartition('bucket_samples', 0),
         monthPartition('bucket_samples', 1),
         monthPartition('capacity_samples', 0),
@@ -1165,6 +1213,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         monthPartition('database_samples', 1),
         monthPartition('queue_request_counts', 0),
         monthPartition('queue_request_counts', 1),
+        monthPartition('queue_samples', 0),
+        monthPartition('queue_samples', 1),
         monthPartition('storage_request_counts', 0),
         monthPartition('storage_request_counts', 1),
         usagePartition(0),

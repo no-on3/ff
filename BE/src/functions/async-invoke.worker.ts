@@ -10,6 +10,7 @@ import { describeError } from '../common/describe-error';
 import { withRequestContext } from '../common/request-context';
 import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/orchestrator.errors';
 import { PlansService } from '../plans/plans.service';
+import { AsyncEventCounts } from '../queues/async-event-counts.service';
 import { CustomerQueues } from '../queues/customer-queues';
 import { QueueEvents } from '../queues/queue-events';
 import { QueueRequestCounts } from '../queues/queue-request-counts.service';
@@ -76,7 +77,9 @@ const MB = 1024 * 1024;
  * schedule's run is the schedule's call, its source `schedule`, and each
  * attempt's outcome goes on the schedule, unless a later run has replaced it.
  * A backend that stops during an attempt leaves its event to come back when
- * its lease ends, the attempt counted as failed.
+ * its lease ends, the attempt counted as failed. Each call's age, each event
+ * dropped and each record a destination didn't take are counted for Lambda's
+ * metrics of them.
  */
 @Injectable()
 export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
@@ -107,6 +110,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     private readonly customerQueues: CustomerQueues,
     private readonly plans: PlansService,
     private readonly counts: QueueRequestCounts,
+    private readonly asyncCounts: AsyncEventCounts,
   ) {
     const settings = config.getOrThrow<{ intervalSeconds: number; concurrency: number }>('asyncInvoke');
     this.intervalSeconds = settings.intervalSeconds;
@@ -179,7 +183,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
         const settings = await this.configs.settingsFor(fn.id);
         const claim = onClaim(attemptsOf(event.attributes), event.receiveCount, event.sentAt, claimedAt, settings.policy);
         if (!('run' in claim)) return this.settle(event, claim, { fn, settings, response: lastResponseOf(event.attributes), at: now() });
-        const attempted = await this.run(fn, event);
+        const attempted = await this.run(fn, event, now);
         await this.tellSchedule(event, attempted.word);
         const settlement = afterAttempt(claim.run, attempted.outcome, event.sentAt, now(), settings.policy);
         await this.settle(event, settlement, { fn, settings, response: attempted.response, at: now() });
@@ -201,8 +205,11 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** The call, as the API's invoke makes one; FF's own failure when the function or the account can't take one now. */
-  private async run(fn: Function, event: ClaimedEvent): Promise<Attempted> {
+  /**
+   * The call, as the API's invoke makes one, its event's age then counted as Lambda's AsyncEventAge; FF's own failure
+   * when the function or the account can't take one now, which calls nothing and counts no age.
+   */
+  private async run(fn: Function, event: ClaimedEvent, now: () => Date): Promise<Attempted> {
     const waits = (why: string): Attempted => {
       this.logger.log(`Asynchronous call ${event.requestId} of function ${event.functionId} waits: ${why}`);
       return {
@@ -220,6 +227,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       if (error instanceof InsufficientCreditException) return waits("the account's credit has run out");
       throw error;
     }
+    this.asyncCounts.count({ functionId: fn.id, accountId: event.accountId, ageMs: Math.max(0, now().getTime() - event.sentAt.getTime()) });
     const outcome = await this.functions.call(fn, JSON.parse(event.body) as unknown, {
       source: scheduleOf(event.attributes) ? InvocationSource.SCHEDULE : InvocationSource.ASYNC,
       requestId: event.requestId,
@@ -282,6 +290,8 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     }
     if ('end' in settlement && settlement.end !== EventEnd.SUCCEEDED) {
       this.logger.warn(`Asynchronous call ${event.requestId} of function ${event.functionId} was dropped: ${ENDS[settlement.end]}`);
+      // As Lambda's AsyncEventsDropped: whether its record went to a destination or not.
+      this.asyncCounts.count({ functionId: event.functionId, accountId: event.accountId, dropped: 1 });
     }
   }
 
@@ -313,6 +323,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     const size = Buffer.byteLength(body);
     const undelivered = (reason: string) => {
       this.logger.warn(`The record of asynchronous call ${event.requestId} of function ${event.functionId} was not delivered: ${reason}`);
+      this.asyncCounts.count({ functionId: event.functionId, accountId: event.accountId, destinationFailures: 1 });
       return this.queues.deleteEvent(event);
     };
     const room = await this.roomFor(event.accountId, size);

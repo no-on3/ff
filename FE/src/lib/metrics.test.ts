@@ -14,6 +14,10 @@ const VIEW: Metrics = {
     ColdStarts: [2, 0, 0],
     Duration: { Average: [30, null, 7.5], Maximum: [50, null, 7.5], p50: [30, null, 7.5], p95: [48, null, 7.5], p99: [49.6, null, 7.5] },
     Instances: { Maximum: [3, 0, 1], Average: [1, 0, 0.2] },
+    AsyncEventsReceived: [0, 0, 0],
+    AsyncEventAge: { Average: [null, null, null], Maximum: [null, null, null] },
+    AsyncEventsDropped: [0, 0, 0],
+    DestinationDeliveryFailures: [0, 0, 0],
   },
 };
 

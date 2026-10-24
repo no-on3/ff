@@ -54,7 +54,9 @@
 # another account's, a wrong secret, an unknown key); two functions with no
 # setting at all, the SDK's own queue URL inside the cluster and boto3 with one
 # from outside, which the SDK for JavaScript sends to its host; a queue as a
-# function's destination, receiving Lambda's record of a call that failed. Then plans:
+# function's destination, receiving Lambda's record of a call that failed; an
+# alarm on a queue's messages waiting, firing once a minute sampled them, and the
+# queue's metrics. Then plans:
 # an account on a small plan, its limits, its namespace's quota and its rate
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
@@ -769,6 +771,14 @@ check "one that fails, with no retry, hands it at once its record: RetriesExhaus
 check "  ... after its one attempt" 1 "$(attempts_of "$failed" | jq length)"
 http DELETE "/functions/$async_fn/event-invoke-config" >/dev/null
 check "its settings deleted, it follows Lambda's defaults again" "204 404" "$(status) $(http GET "/functions/$async_fn/event-invoke-config" >/dev/null; status)"
+# Its calls as Lambda's metrics count them, each backend's counts written a minute at a time: within one.
+async_metrics() {
+  http GET "/functions/$async_fn/metrics?period=3600&start=$(date -u -d '-2 hour' +%Y-%m-%dT%H:00:00Z)" |
+    jq -r '"\([.metrics.AsyncEventsReceived[]] | add) \([.metrics.AsyncEventsDropped[]] | add) \([.metrics.DestinationDeliveryFailures[]] | add) \([.metrics.AsyncEventAge.Maximum[] | select(. != null)] | max > 0)"'
+}
+for _ in $(seq 90); do [ "$(async_metrics)" = "5 3 0 true" ] && break; sleep 1; done
+check "its metrics, as Lambda's: the five events kept, the three that ended without success dropped, records to its destination all taken, each attempt's age" \
+  "5 3 0 true" "$(async_metrics)"
 http DELETE "/functions/$records_fn" >/dev/null
 http DELETE "/functions/$async_fn" >/dev/null
 check "deleting the function deletes its queue" 0 "$(env_q "SELECT count(*) FROM queues WHERE function_id = '$async_fn'")"
@@ -1089,6 +1099,12 @@ client_checks "$work/sqs-sdk.jsonl" 13
 ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
   "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/sqs-clients/boto3_checks.py" >"$work/sqs-boto3.jsonl" 2>"$work/sqs-boto3.log" || true
 client_checks "$work/sqs-boto3.jsonl" 8
+# Two messages left waiting in a queue, and an alarm on them, as a dead-letter queue is watched: judged at the end of
+# the queues' sections, by when a minute has sampled them.
+aws_sqs create-queue --queue-name e2e-waiting >/dev/null
+for body in one two; do aws_sqs send-message --queue-url "$sqs_endpoint/$tenant/e2e-waiting" --message-body "$body" >/dev/null; done
+waiting_alarm="$(http POST /alarms '{"name": "e2e-waiting", "queueName": "e2e-waiting", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 1, "evaluationPeriods": 3, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' | jq -r .id)"
+check "an alarm on a queue's messages, naming the queue as CloudWatch's QueueName" "201 e2e-waiting" "$(status) $(http GET "/alarms/$waiting_alarm" | jq -r .queueName)"
 # Functions as on AWS Lambda with a role: AWS's SDK for JavaScript v3 and boto3 with no setting at all, in packages
 # as npm and pip install them; FF gives their pods the function's own key, the region and the endpoint.
 aws_sqs create-queue --queue-name e2e-fn-orders >/dev/null
@@ -1247,7 +1263,15 @@ check "the audit log names the change, under the CLI's key" "bucket.notification
   "$(env_q "SELECT action || ' ' || actor FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-notify' AND action = 'bucket.notifications' ORDER BY at DESC LIMIT 1")"
 http DELETE "/functions/$upload_fn" >/dev/null
 http DELETE "/buckets/e2e-notify?force=true" >/dev/null
-for queue in e2e-removals e2e-batch e2e-batch-dlq e2e-cli-orders e2e-fn-orders e2e-fn-records; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
+for _ in $(seq 150); do [ "$(http GET "/alarms/$waiting_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
+check "the alarm fires once a minute has sampled the two messages waiting, naming the queue" "ALARM e2e-waiting true" \
+  "$(http GET "/alarms/$waiting_alarm" | jq -r '"\(.state) \(.queueName) \(.stateReason | test("breaching ApproximateNumberOfMessagesVisible Maximum > 1"))"')"
+since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
+for _ in $(seq 90); do [ "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq '[.metrics.NumberOfMessagesSent.Sum[]] | add')" = 2 ] && break; sleep 1; done
+check "its metrics, as CloudWatch names SQS's: the two messages sampled waiting, the two sent as counted, three bytes each at most" "2 2 3" \
+  "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq -r '"\([.metrics.ApproximateNumberOfMessagesVisible.Maximum[]] | max) \([.metrics.NumberOfMessagesSent.Sum[]] | add) \([.metrics.SentMessageSize.Maximum[] | select(. != null)] | max)"')"
+for queue in e2e-removals e2e-batch e2e-batch-dlq e2e-cli-orders e2e-fn-orders e2e-fn-records e2e-waiting; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
+check "  ... the alarm gone with its queue" 404 "$(http GET "/alarms/$waiting_alarm" >/dev/null; status)"
 as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
 check "the queues deleted, their messages with them" "0 0" \
   "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"

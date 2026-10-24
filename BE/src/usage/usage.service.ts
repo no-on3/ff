@@ -44,8 +44,11 @@ const amounts = (row: UsageRow): UsageAmountsView => ({
   lost: Number(row.lost),
 });
 
-/** The tables partitioned by month, written once and never changed: usage records, capacity samples, customers' databases' and buckets' samples, and buckets' and queues' request counts. */
-const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts'];
+/**
+ * The tables partitioned by month, written once and never changed: usage records, capacity samples, customers'
+ * databases', buckets' and queues' samples, buckets' and queues' request counts, and functions' asynchronous calls'.
+ */
+const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'queue_samples', 'async_event_counts'];
 
 /**
  * Usage records (client-readiness plan, P-20, D6): written once per

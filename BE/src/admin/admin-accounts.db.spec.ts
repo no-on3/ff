@@ -160,7 +160,7 @@ run('accounts, for operators (L2, P-71)', () => {
       // Its buckets' rows and samples are read from the database itself; nothing here makes or empties a bucket in the store.
       new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } })),
       new CustomerQueues(ds, ds.getRepository(Queue)),
-      new QueueStore(ds),
+      new QueueStore(ds, { count: () => undefined } as never),
     );
   });
 

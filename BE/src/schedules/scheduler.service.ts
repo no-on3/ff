@@ -95,9 +95,13 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Takes the due schedules, each moved to its next run with its run queued or skipped, in one transaction: once committed, no other backend takes them. */
-  private takeDue(now: Date): Promise<number> {
-    return this.dataSource.transaction(async (manager) => {
+  /**
+   * Takes the due schedules, each moved to its next run with its run queued or skipped, in one transaction: once
+   * committed, no other backend takes them, and each run queued counts as its function's event received.
+   */
+  private async takeDue(now: Date): Promise<number> {
+    const queued: Function[] = [];
+    const taken = await this.dataSource.transaction(async (manager) => {
       const rows = await manager
         .getRepository(Schedule)
         .createQueryBuilder('schedule')
@@ -107,13 +111,18 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
         .setLock('pessimistic_write')
         .setOnLocked('skip_locked')
         .getMany();
-      for (const schedule of rows) await this.take(manager, schedule, now);
+      for (const schedule of rows) {
+        const fn = await this.take(manager, schedule, now);
+        if (fn) queued.push(fn);
+      }
       return rows.length;
     });
+    for (const fn of queued) this.queues.kept(fn);
+    return taken;
   }
 
-  /** A due schedule: moved to its next run, its run queued in its function's queue, or skipped with the reason on it. */
-  private async take(manager: EntityManager, schedule: Schedule, now: Date): Promise<void> {
+  /** A due schedule: moved to its next run, its run queued in its function's queue, or skipped with the reason on it; the function whose run is queued. */
+  private async take(manager: EntityManager, schedule: Schedule, now: Date): Promise<Function | undefined> {
     const dueAt = schedule.nextRunAt as Date;
     const requestId = randomUUID();
     let next: Date | null;
@@ -123,7 +132,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.error(`Schedule ${schedule.id} has an expression it can't run, and is disabled: ${describeError(error)}`);
       await manager.update(Schedule, { id: schedule.id }, { enabled: false, nextRunAt: null, lastOutcome: 'skipped: its expression is not valid' });
-      return;
+      return undefined;
     }
     let admitted: Admitted | string;
     try {
@@ -137,12 +146,13 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       { id: schedule.id },
       { nextRunAt: next, lastRunAt: dueAt, lastRequestId: requestId, lastOutcome: typeof admitted === 'string' ? admitted : 'running' },
     );
-    if (typeof admitted === 'string') return;
+    if (typeof admitted === 'string') return undefined;
     const expiresAt = new Date(now.getTime() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
     await this.queues.sendEvent(admitted.fn, requestId, JSON.stringify(admitted.event), expiresAt, {
       manager,
       attributes: { origin: SCHEDULE_ORIGIN, scheduleId: schedule.id },
     });
+    return admitted.fn;
   }
 
   /** The run, checked as the API's invoke checks a call: its function and event, or why it is skipped. */

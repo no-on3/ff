@@ -7,12 +7,15 @@ import { BillingModule } from '../billing/billing.module';
 import { PlansModule } from '../plans/plans.module';
 import { Function } from '../functions/entities/function.entity';
 import { StorageModule } from '../storage/storage.module';
+import { AsyncEventCount } from './async-event-count.entity';
+import { AsyncEventCounts } from './async-event-counts.service';
 import { BucketEventDelivery } from './bucket-event-delivery';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueMessage } from './queue-message.entity';
 import { QueueRequestCount } from './queue-request-count.entity';
 import { QueueRequestCounts } from './queue-request-counts.service';
+import { QueueSamples } from './queue-samples.service';
 import { QueueStore } from './queue-store';
 import { Queue } from './queue.entity';
 import { QueuesController } from './queues.controller';
@@ -26,16 +29,20 @@ import { SqsOperations } from './sqs-operations';
  * endpoint that answers AWS's SDKs and CLI on a port of its own, with the keys
  * that reach the account's buckets, and FF's API, both running SQS's
  * operations; and the delivery of buckets' events to functions and queues.
+ * Queues' requests are counted for the bill and the metrics, and queues are
+ * sampled each minute; functions' asynchronous calls are counted for theirs.
  */
 @Module({
   // Buckets' events go to the account's functions and queues: a function by its row.
-  imports: [TypeOrmModule.forFeature([Queue, QueueMessage, QueueRequestCount, Function]), StorageModule, PlansModule, BillingModule, AuditModule],
+  imports: [TypeOrmModule.forFeature([Queue, QueueMessage, QueueRequestCount, AsyncEventCount, Function]), StorageModule, PlansModule, BillingModule, AuditModule],
   controllers: [QueuesController],
   providers: [
     QueueStore,
     QueueEvents,
     CustomerQueues,
     QueueRequestCounts,
+    QueueSamples,
+    AsyncEventCounts,
     {
       provide: SqsOperations,
       inject: [CustomerQueues, QueueStore, QueueEvents, AuditService, QueueRequestCounts, ConfigService],
@@ -48,6 +55,6 @@ import { SqsOperations } from './sqs-operations';
     QueuesService,
     BucketEventDelivery,
   ],
-  exports: [QueueStore, QueueEvents, CustomerQueues, QueueRequestCounts, SqsFrontDoor],
+  exports: [QueueStore, QueueEvents, CustomerQueues, QueueRequestCounts, AsyncEventCounts, SqsFrontDoor],
 })
 export class QueuesModule {}

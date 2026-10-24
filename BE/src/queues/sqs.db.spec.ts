@@ -126,7 +126,7 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
     ]);
     events = new QueueEvents(db.dataSource);
     await events.onModuleInit();
-    store = new QueueStore(db.dataSource);
+    store = new QueueStore(db.dataSource, { count: () => undefined } as never);
     const customerQueues = new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue));
     counts = new QueueRequestCounts(db.dataSource.getRepository(QueueRequestCount));
     const operations = new SqsOperations(customerQueues, store, events, new AuditService(db.dataSource.getRepository(AuditEntry)), counts, BASE, REGION);

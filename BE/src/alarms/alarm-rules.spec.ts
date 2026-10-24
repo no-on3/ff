@@ -5,13 +5,14 @@
  * evaluator runs against PostgreSQL in alarms.db.spec.ts.
  */
 import { alarmMail } from './alarm-mail';
-import { AlarmRule, alarmProblem, bucketDatapointsOf, databaseDatapointsOf, datapointsOf, evaluate, evaluationWindow, notifies, stateReason } from './alarm-rules';
-import { bucketMetricsView, databaseMetricsView, type MetricsView } from '../metrics/customer-metrics';
+import { AlarmRule, alarmProblem, bucketDatapointsOf, databaseDatapointsOf, datapointsOf, evaluate, evaluationWindow, notifies, queueDatapointsOf, stateReason } from './alarm-rules';
+import { bucketMetricsView, databaseMetricsView, queueMetricsView, type MetricsView } from '../metrics/customer-metrics';
 
 const RULE: AlarmRule = {
   functionId: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
   databaseId: null,
   bucketId: null,
+  queueId: null,
   metric: 'Errors',
   statistic: 'Sum',
   period: 60,
@@ -130,6 +131,62 @@ describe("an alarm on a customer's bucket", () => {
   });
 });
 
+describe("an alarm on a customer's queue", () => {
+  const queueId = '3f1c9a2e-5b7d-4e8f-9a0b-1c2d3e4f5a6b';
+  const waiting = { ...RULE, functionId: null, queueId, metric: 'ApproximateNumberOfMessagesVisible' as const, statistic: 'Maximum' as const };
+
+  it("names the queue, takes the Maximum or Average of its messages, the Maximum of its oldest's age, the Sum of its counts, and the size of what was sent", () => {
+    expect([
+      alarmProblem(waiting),
+      alarmProblem({ ...waiting, metric: 'ApproximateNumberOfMessagesNotVisible', statistic: 'Average', period: 300 }),
+      alarmProblem({ ...waiting, metric: 'ApproximateAgeOfOldestMessage' }),
+      alarmProblem({ ...waiting, metric: 'NumberOfEmptyReceives', statistic: 'Sum', period: 3600, evaluationPeriods: 24, datapointsToAlarm: 1 }),
+      alarmProblem({ ...waiting, metric: 'SentMessageSize', statistic: 'Average' }),
+    ]).toEqual([null, null, null, null, null]);
+    expect([
+      alarmProblem({ ...waiting, queueId: null }),
+      alarmProblem({ ...waiting, functionId: RULE.functionId }),
+      alarmProblem({ ...waiting, bucketId: '0b6f3a1c-2d4e-4f5a-8b9c-1d2e3f4a5b6c' }),
+      alarmProblem({ ...waiting, metric: 'ApproximateAgeOfOldestMessage', statistic: 'Average' }),
+      alarmProblem({ ...waiting, metric: 'NumberOfMessagesSent' }),
+      alarmProblem({ ...RULE, queueId }),
+    ]).toEqual([
+      "ApproximateNumberOfMessagesVisible is a queue's: the alarm names a queueName, and no function, database or bucket",
+      "ApproximateNumberOfMessagesVisible is a queue's: the alarm names a queueName, and no function, database or bucket",
+      "A bucketName goes with a bucket's metrics only: BucketSizeBytes, NumberOfObjects, AllRequests, GetRequests, PutRequests, 4xxErrors, 5xxErrors, BytesDownloaded, BytesUploaded",
+      'ApproximateAgeOfOldestMessage has the statistic Maximum, not Average',
+      'NumberOfMessagesSent has the statistic Sum, not Maximum',
+      "A queueName goes with a queue's metrics only: ApproximateNumberOfMessagesVisible, ApproximateNumberOfMessagesNotVisible, ApproximateNumberOfMessagesDelayed, ApproximateAgeOfOldestMessage, NumberOfMessagesSent, NumberOfMessagesReceived, NumberOfMessagesDeleted, NumberOfEmptyReceives, SentMessageSize",
+    ]);
+  });
+
+  it("reads its datapoints from the queue's metrics: an empty queue's messages and age 0, its counts every period, no size where nothing was sent", () => {
+    const window = { start: new Date('2026-10-24T08:55:00Z'), end: new Date('2026-10-24T09:10:00Z'), period: 300 as const };
+    const nine = Date.parse('2026-10-24T09:00:00Z') / 1000;
+    const gauge = { maximum: 4, minuteSum: 10 };
+    const view = queueMetricsView(
+      window,
+      [{ bucket: nine, ApproximateNumberOfMessagesVisible: gauge, ApproximateNumberOfMessagesNotVisible: gauge, ApproximateNumberOfMessagesDelayed: gauge, oldestAgeSeconds: 90 }],
+      [{ bucket: nine + 300, NumberOfMessagesSent: 2, NumberOfMessagesReceived: 1, NumberOfMessagesDeleted: 1, NumberOfEmptyReceives: 0, sentBytes: 300, sentMaxBytes: 200 }],
+    );
+
+    expect([
+      queueDatapointsOf(view, 'ApproximateNumberOfMessagesVisible', 'Maximum'),
+      queueDatapointsOf(view, 'ApproximateNumberOfMessagesVisible', 'Average'),
+      queueDatapointsOf(view, 'ApproximateAgeOfOldestMessage', 'Maximum'),
+      queueDatapointsOf(view, 'NumberOfMessagesSent', 'Sum'),
+      queueDatapointsOf(view, 'SentMessageSize', 'Maximum'),
+    ]).toEqual([
+      [0, 4, 0],
+      [0, 2, 0],
+      [0, 90, 0],
+      [0, 0, 2],
+      [null, null, 200],
+    ]);
+    expect(() => queueDatapointsOf(view, 'Errors', 'Sum')).toThrow("Errors isn't a queue's metric");
+  });
+});
+
 describe('the periods an alarm judges', () => {
   it('are the last N whole periods over for at least the settling time, by UTC', () => {
     const now = new Date('2026-10-20T10:07:30Z');
@@ -200,6 +257,10 @@ describe('the datapoints read from the metrics', () => {
       ColdStarts: [1, 0],
       Duration: { Average: [12, null], Maximum: [20, null], p50: [10, null], p95: [19, null], p99: [19.8, null] },
       Instances: { Maximum: [2, 1], Average: [1.5, 1] },
+      AsyncEventsReceived: [4, 1],
+      AsyncEventAge: { Average: [null, 1500], Maximum: [null, 2000] },
+      AsyncEventsDropped: [0, 1],
+      DestinationDeliveryFailures: [0, 0],
     },
   } as unknown as MetricsView;
 
@@ -209,6 +270,16 @@ describe('the datapoints read from the metrics', () => {
       [19, null],
       [1.5, 1],
     ]);
+  });
+
+  it("are Lambda's counts of asynchronous calls every period, and an event's age with its gaps", () => {
+    expect([datapointsOf(view, 'AsyncEventsReceived', 'Sum'), datapointsOf(view, 'AsyncEventsDropped', 'Sum'), datapointsOf(view, 'AsyncEventAge', 'Maximum')]).toEqual([
+      [4, 1],
+      [0, 1],
+      [null, 2000],
+    ]);
+    expect(alarmProblem({ ...RULE, metric: 'AsyncEventAge', statistic: 'Maximum' })).toBeNull();
+    expect(alarmProblem({ ...RULE, functionId: null, metric: 'DestinationDeliveryFailures' })).toBeNull();
   });
 });
 
@@ -263,6 +334,15 @@ describe("an alarm's e-mail", () => {
     expect(alarmMail(held, 'en').text.split('\n')[0]).toBe('Your alarm "Photos size" on the bucket "photos" of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
     expect(alarmMail(held, 'fr').text.split('\n')[0]).toBe(
       'Votre alarme « Photos size » sur le bucket « photos » du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.',
+    );
+  });
+
+  it("names a queue's alarm by the queue, in both languages", () => {
+    const waiting = { ...change, alarm: { ...RULE, metric: 'ApproximateNumberOfMessagesVisible' as const, statistic: 'Maximum' as const, name: 'Dead letters' }, functionName: null, queueName: 'orders-dlq' };
+
+    expect(alarmMail(waiting, 'en').text.split('\n')[0]).toBe('Your alarm "Dead letters" on the queue "orders-dlq" of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
+    expect(alarmMail(waiting, 'fr').text.split('\n')[0]).toBe(
+      "Votre alarme « Dead letters » sur la file d'attente « orders-dlq » du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.",
     );
   });
 

@@ -648,7 +648,18 @@ export const billingApi = {
 };
 
 /** A metrics answer's series names, as the API's DTO names them, after CloudWatch's: contract.test.ts checks them. */
-export const METRIC_NAMES = ['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances'] as const;
+export const METRIC_NAMES = [
+  'Invocations',
+  'Errors',
+  'Throttles',
+  'ColdStarts',
+  'Duration',
+  'Instances',
+  'AsyncEventsReceived',
+  'AsyncEventAge',
+  'AsyncEventsDropped',
+  'DestinationDeliveryFailures',
+] as const;
 
 /** GET /functions/:id/metrics and GET /metrics: a point per period of the window, oldest first. */
 export interface Metrics {
@@ -670,6 +681,11 @@ export interface Metrics {
     /** Milliseconds; null for a period without a measured call. */
     Duration: { Average: Array<number | null>; Maximum: Array<number | null>; p50: Array<number | null>; p95: Array<number | null>; p99: Array<number | null> };
     Instances: { Maximum: number[]; Average: number[] };
+    /** Lambda's metrics of calls that don't wait: events kept, their age at each attempt in ms (null without one), events dropped, records a destination didn't take. */
+    AsyncEventsReceived: number[];
+    AsyncEventAge: { Average: Array<number | null>; Maximum: Array<number | null> };
+    AsyncEventsDropped: number[];
+    DestinationDeliveryFailures: number[];
   };
 }
 
@@ -992,6 +1008,8 @@ export interface AlarmBody {
   databaseId?: string | null;
   /** The bucket watched, by its name, for its storage and its requests; null otherwise. */
   bucketName?: string | null;
+  /** The queue watched, by its name, for its messages and its requests; null otherwise. */
+  queueName?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -1012,6 +1030,7 @@ export const ALARM_FIELDS = [
   'functionId',
   'databaseId',
   'bucketName',
+  'queueName',
   'metric',
   'statistic',
   'period',

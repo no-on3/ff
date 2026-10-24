@@ -108,7 +108,7 @@ run('what FF keeps only for a while (L2)', () => {
     );
     const packages = new PackagesService(db.dataSource.getRepository(Package), objectStore as never, audit, { deleteImage: async () => undefined } as never);
     // An account without databases or buckets: deleting them asks no server, nor the store.
-    retention = new RetentionService(db.dataSource, functions, packages, { deleteAll: async () => 0 } as never, { deleteAll: async () => 0 } as never, orchestrator as unknown as Orchestrator, audit, config, new QueueStore(db.dataSource));
+    retention = new RetentionService(db.dataSource, functions, packages, { deleteAll: async () => 0 } as never, { deleteAll: async () => 0 } as never, orchestrator as unknown as Orchestrator, audit, config, new QueueStore(db.dataSource, { count: () => undefined } as never));
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
 

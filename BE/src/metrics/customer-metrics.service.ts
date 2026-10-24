@@ -1,15 +1,18 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import {
+  AsyncRow,
   BucketMetricsView,
   DatabaseMetricsView,
   InstancesRow,
   MetricsView,
   MetricsWindow,
   PeriodRow,
+  QueueMetricsView,
   bucketMetricsView,
   databaseMetricsView,
   metricsView,
+  queueMetricsView,
 } from './customer-metrics';
 
 /** A call that ran: measured by the runtime, and so in the duration's statistics. */
@@ -25,9 +28,11 @@ interface Scope {
 
 /**
  * The metrics of a function, or of a whole account, from its usage records,
- * its rate-limited invocations and its capacity samples; of a customer's
- * database, from its hourly samples; and of a customer's bucket, from its
- * hourly samples and the front door's request counts (customer-metrics.ts).
+ * its rate-limited invocations, its capacity samples and its asynchronous
+ * calls' counts; of a customer's database, from its hourly samples; of a
+ * customer's bucket, from its hourly samples and the front door's request
+ * counts; and of a customer's queue, from its minute samples and its
+ * requests' counts (customer-metrics.ts).
  */
 @Injectable()
 export class CustomerMetricsService {
@@ -113,13 +118,90 @@ export class CustomerMetricsService {
     );
   }
 
+  /** A queue's, by its name, for its own account only: another account's queue, or one deleted, is not found. */
+  async forQueue(accountId: string, name: string, window: MetricsWindow): Promise<QueueMetricsView> {
+    const [found] = await this.dataSource.query<Array<{ id: string }>>(`SELECT "id" FROM "queues" WHERE "name" = $1 AND "account_id" = $2 AND "kind" = 'customer'`, [name, accountId]);
+    if (!found) throw new NotFoundException(`The account has no queue ${name}`);
+    return this.queueMetrics(accountId, found.id, window);
+  }
+
+  /** A queue's, by its ID, as an alarm names it: none found answers an empty, quiet queue. */
+  async queueMetrics(accountId: string, queueId: string, window: MetricsWindow): Promise<QueueMetricsView> {
+    const [samples, counts] = await Promise.all([
+      this.dataSource.query<Array<Record<string, string>>>(
+        `SELECT floor(extract(epoch FROM "minute") / $3)::bigint * $3 AS "bucket",
+                max("visible") AS "visible_max", sum("visible") AS "visible_sum", max("not_visible") AS "not_visible_max", sum("not_visible") AS "not_visible_sum",
+                max("delayed") AS "delayed_max", sum("delayed") AS "delayed_sum", max("oldest_age_seconds") AS "oldest_age"
+           FROM "queue_samples"
+          WHERE "minute" >= $1 AND "minute" < $2 AND "account_id" = $4 AND "queue_id" = $5
+          GROUP BY 1`,
+        [window.start, window.end, window.period, accountId, queueId],
+      ),
+      this.dataSource.query<Array<Record<string, string>>>(
+        `SELECT floor(extract(epoch FROM "minute") / $3)::bigint * $3 AS "bucket", sum("sent")::text AS "sent", sum("received")::text AS "received",
+                sum("deleted")::text AS "deleted", sum("empty_receives")::text AS "empty_receives", sum("sent_bytes")::text AS "sent_bytes", max("sent_max_bytes") AS "sent_max_bytes"
+           FROM "queue_request_counts"
+          WHERE "minute" >= $1 AND "minute" < $2 AND "account_id" = $4 AND "queue_id" = $5
+          GROUP BY 1`,
+        [window.start, window.end, window.period, accountId, queueId],
+      ),
+    ]);
+    const gauge = (row: Record<string, string>, column: string) => ({ maximum: Number(row[`${column}_max`]), minuteSum: Number(row[`${column}_sum`]) });
+    return queueMetricsView(
+      window,
+      samples.map((row) => ({
+        bucket: Number(row.bucket),
+        ApproximateNumberOfMessagesVisible: gauge(row, 'visible'),
+        ApproximateNumberOfMessagesNotVisible: gauge(row, 'not_visible'),
+        ApproximateNumberOfMessagesDelayed: gauge(row, 'delayed'),
+        oldestAgeSeconds: Number(row.oldest_age),
+      })),
+      counts.map((row) => ({
+        bucket: Number(row.bucket),
+        NumberOfMessagesSent: Number(row.sent),
+        NumberOfMessagesReceived: Number(row.received),
+        NumberOfMessagesDeleted: Number(row.deleted),
+        NumberOfEmptyReceives: Number(row.empty_receives),
+        sentBytes: Number(row.sent_bytes),
+        sentMaxBytes: Number(row.sent_max_bytes),
+      })),
+    );
+  }
+
   private async metrics(window: MetricsWindow, scope: Scope): Promise<MetricsView> {
-    const [rows, refused, instances] = await Promise.all([this.calls(window, scope), this.refused(window, scope), this.instances(window, scope)]);
+    const [rows, refused, instances, calls] = await Promise.all([
+      this.calls(window, scope),
+      this.refused(window, scope),
+      this.instances(window, scope),
+      this.asynchronous(window, scope),
+    ]);
     const throttled = new Map(refused.map((row) => [row.bucket, row.count]));
     const seen = new Set(rows.map((row) => row.bucket));
     const merged = rows.map((row) => ({ ...row, throttles: row.throttles + (throttled.get(row.bucket) ?? 0) }));
     for (const [bucket, count] of throttled) if (!seen.has(bucket)) merged.push(emptyRow(bucket, count));
-    return metricsView(window, merged, instances);
+    return metricsView(window, merged, instances, calls);
+  }
+
+  /** The scope's functions' asynchronous calls, per period, from their counts by the minute. */
+  private async asynchronous(window: MetricsWindow, scope: Scope): Promise<AsyncRow[]> {
+    const rows = await this.dataSource.query<Array<Record<string, string>>>(
+      `SELECT floor(extract(epoch FROM t."minute") / $3)::bigint * $3 AS "bucket", sum(t."received")::text AS "received", sum(t."dropped")::text AS "dropped",
+              sum(t."destination_failures")::text AS "destination_failures", sum(t."attempts")::text AS "attempts", sum(t."age_ms_sum")::text AS "age_ms_sum",
+              max(t."age_ms_max") AS "age_ms_max"
+         FROM "async_event_counts" t
+        WHERE t."minute" >= $1 AND t."minute" < $2 AND ${scope.where}
+        GROUP BY 1`,
+      [window.start, window.end, window.period, ...scope.parameters],
+    );
+    return rows.map((row) => ({
+      bucket: Number(row.bucket),
+      received: Number(row.received),
+      dropped: Number(row.dropped),
+      destinationFailures: Number(row.destination_failures),
+      attempts: Number(row.attempts),
+      ageMsSum: Number(row.age_ms_sum),
+      ageMsMax: Number(row.age_ms_max),
+    }));
   }
 
   private async calls(window: MetricsWindow, scope: Scope): Promise<PeriodRow[]> {

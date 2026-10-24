@@ -14,12 +14,14 @@ import {
   BUCKET_METRICS,
   DATABASE_METRICS,
   Evaluation,
+  QUEUE_METRICS,
   bucketDatapointsOf,
   databaseDatapointsOf,
   datapointsOf,
   evaluate,
   evaluationWindow,
   notifies,
+  queueDatapointsOf,
   stateReason,
 } from './alarm-rules';
 import { alarmChanges, alarmEvaluations } from '../monitoring/operator-metrics';
@@ -101,10 +103,12 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
       [now, Math.max(intervalSeconds - 5, 0), CLAIM_BATCH],
     );
     if (rows.length === 0) return [];
-    return this.dataSource.getRepository(Alarm).find({ where: { id: In(rows.map((row) => row.id)) }, relations: { account: true, function: true, database: true, bucket: true } });
+    return this.dataSource
+      .getRepository(Alarm)
+      .find({ where: { id: In(rows.map((row) => row.id)) }, relations: { account: true, function: true, database: true, bucket: true, queue: true } });
   }
 
-  /** The alarm's datapoints, oldest first: its periods' values, a database's hours, a bucket's periods, or the account's money as it is. */
+  /** The alarm's datapoints, oldest first: its periods' values, a database's hours, a bucket's or a queue's periods, or the account's money as it is. */
   private async datapoints(alarm: Alarm, now: Date): Promise<Array<number | null>> {
     if (BILLING_METRICS.includes(alarm.metric)) {
       const view = await this.billing.balance(alarm.accountId, now);
@@ -117,6 +121,9 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
     }
     if (BUCKET_METRICS.includes(alarm.metric)) {
       return bucketDatapointsOf(await this.metrics.bucketMetrics(alarm.accountId, alarm.bucketId as string, window), alarm.metric, alarm.statistic);
+    }
+    if (QUEUE_METRICS.includes(alarm.metric)) {
+      return queueDatapointsOf(await this.metrics.queueMetrics(alarm.accountId, alarm.queueId as string, window), alarm.metric, alarm.statistic);
     }
     const view = alarm.functionId ? await this.metrics.forFunction(alarm.accountId, alarm.functionId, window) : await this.metrics.forAccount(alarm.accountId, window);
     return datapointsOf(view, alarm.metric, alarm.statistic);
@@ -154,6 +161,7 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
       functionName: alarm.function?.name ?? null,
       databaseName: alarm.database?.name ?? null,
       bucketName: alarm.bucket?.name ?? null,
+      queueName: alarm.queue?.name ?? null,
       from,
       to: evaluation.state,
       evaluation,
@@ -171,6 +179,7 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
             functionId: alarm.functionId,
             databaseId: alarm.databaseId,
             bucketName: alarm.bucket?.name ?? null,
+            queueName: alarm.queue?.name ?? null,
             metric: alarm.metric,
             statistic: alarm.statistic,
             period: alarm.period,

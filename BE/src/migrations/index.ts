@@ -47,6 +47,7 @@ import { KeyQueues1792792790340 } from './1792792790340-KeyQueues';
 import { EventSourceMappings1792803225587 } from './1792803225587-EventSourceMappings';
 import { BucketNotifications1792810703773 } from './1792810703773-BucketNotifications';
 import { QueueBilling1792816013937 } from './1792816013937-QueueBilling';
+import { QueueMetrics1792820562033 } from './1792820562033-QueueMetrics';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -103,4 +104,5 @@ export const MIGRATIONS: Array<new () => object> = [
   EventSourceMappings1792803225587,
   BucketNotifications1792810703773,
   QueueBilling1792816013937,
+  QueueMetrics1792820562033,
 ];

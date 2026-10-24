@@ -12,6 +12,7 @@ describe('the alarm form', () => {
       functionId: FN,
       databaseId: null,
       bucketName: null,
+      queueName: null,
       metric: 'Errors',
       statistic: 'Sum',
       period: 60,
@@ -27,8 +28,19 @@ describe('the alarm form', () => {
     expect(toBody({ ...emptyForm(), name: 'Calls' }).functionId).toBeNull();
   });
 
-  it("offers a function's calls, durations and instances, and the account its money too", () => {
-    expect(metricsFor(FN)).toEqual(['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances']);
+  it("offers a function's calls, durations and instances, and its calls that don't wait as Lambda counts them, and the account its money too", () => {
+    expect(metricsFor(FN)).toEqual([
+      'Invocations',
+      'Errors',
+      'Throttles',
+      'ColdStarts',
+      'Duration',
+      'Instances',
+      'AsyncEventsReceived',
+      'AsyncEventAge',
+      'AsyncEventsDropped',
+      'DestinationDeliveryFailures',
+    ]);
     expect(metricsFor('')).toContain('Balance');
     expect(metricsFor('')).not.toContain('DatabaseConnections');
   });
@@ -57,6 +69,32 @@ describe('the alarm form', () => {
     expect(withScope({ ...emptyForm(FN), name: 'Errors' }, 'bucket:photos')).toMatchObject({ functionId: '', bucketName: 'photos', metric: '5xxErrors' });
     expect(scopeOf(errors)).toBe('bucket:photos');
     expect(formFromAlarm({ ...toBody(errors), id: 'a', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm).bucketName).toBe('photos');
+  });
+
+  it("watches a queue's messages, their age and size, or its requests, by its name, and sends its name alone", () => {
+    const deadLetters = { ...emptyForm('', '', '', 'orders-dlq'), name: 'Dead letters' };
+
+    expect(deadLetters).toMatchObject({ functionId: '', databaseId: '', bucketName: '', queueName: 'orders-dlq', metric: 'ApproximateNumberOfMessagesVisible', statistic: 'Maximum', period: 60 });
+    expect(metricsFor('', '', '', 'orders-dlq')).toEqual([
+      'ApproximateNumberOfMessagesVisible',
+      'ApproximateNumberOfMessagesNotVisible',
+      'ApproximateNumberOfMessagesDelayed',
+      'ApproximateAgeOfOldestMessage',
+      'NumberOfMessagesSent',
+      'NumberOfMessagesReceived',
+      'NumberOfMessagesDeleted',
+      'NumberOfEmptyReceives',
+      'SentMessageSize',
+    ]);
+    expect([metricsFor(''), metricsFor(FN)].some((metrics) => metrics.includes('NumberOfMessagesSent'))).toBe(false);
+    expect(toBody(deadLetters)).toMatchObject({ functionId: null, databaseId: null, bucketName: null, queueName: 'orders-dlq', metric: 'ApproximateNumberOfMessagesVisible' });
+    expect(withMetric(deadLetters, 'NumberOfMessagesSent')).toMatchObject({ queueName: 'orders-dlq', statistic: 'Sum' });
+    expect([formProblem(deadLetters), formProblem({ ...deadLetters, queueName: '' })]).toEqual([null, "ApproximateNumberOfMessagesVisible is a queue's: choose the queue it watches"]);
+    expect(withScope(deadLetters, 'bucket:photos')).toMatchObject({ queueName: '', bucketName: 'photos', metric: '5xxErrors' });
+    expect(withScope({ ...emptyForm(FN), name: 'Waiting' }, 'queue:orders')).toMatchObject({ functionId: '', queueName: 'orders', metric: 'ApproximateNumberOfMessagesVisible' });
+    expect(scopeOf(deadLetters)).toBe('queue:orders-dlq');
+    expect(conditionText({ ...toBody(deadLetters), threshold: 0 })).toBe('ApproximateNumberOfMessagesVisible Maximum > 0 messages, in the last period of 1 minute');
+    expect(formFromAlarm({ ...toBody(deadLetters), id: 'a', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm).queueName).toBe('orders-dlq');
   });
 
   it('changes scope with a metric the scope has: a database to the account, a function to a database', () => {

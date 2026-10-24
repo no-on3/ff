@@ -35,6 +35,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
   let customerQueues: { send: jest.Mock };
   let plans: { forAccount: jest.Mock };
   let counts: { count: jest.Mock };
+  let asyncCounts: { count: jest.Mock };
   let functions: { findOne: jest.Mock; call: jest.Mock };
   let credit: { admit: jest.Mock };
   let accounts: { findOne: jest.Mock };
@@ -76,6 +77,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       customerQueues as never,
       plans as never,
       counts as never,
+      asyncCounts as never,
     );
   /** The record the worker handed its destination, as the destination's event. */
   const handed = () => JSON.parse(queues.deleteEventAndSend.mock.calls[0][3] as string) as Record<string, unknown>;
@@ -109,6 +111,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     customerQueues = { send: jest.fn(async () => undefined) };
     plans = { forAccount: jest.fn(async () => plan()) };
     counts = { count: jest.fn() };
+    asyncCounts = { count: jest.fn() };
     functions = { findOne: jest.fn(async () => fn), call: jest.fn(async () => ({ ok: true, output: 1, invocation: {} })) };
     credit = { admit: jest.fn(async () => undefined) };
     accounts = { findOne: jest.fn(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE })) };
@@ -169,11 +172,15 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
   it("drops an event after its third failure, Lambda's two retries used, and says so", async () => {
     functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'boom'), invocation: {} });
 
-    await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 } }));
+    await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 }, sentAt: later(-90) }));
 
     expect(functions.call).toHaveBeenCalledWith(fn, { order: 42 }, expect.objectContaining({ attempt: 3 }));
     expect(queues.deleteEvent).toHaveBeenCalled();
     expect(warnings).toHaveBeenCalledWith('Asynchronous call req-1 of function fn-1 was dropped: its retries are used up');
+    // As Lambda's metrics count it: the attempt's age, 90 s since the event was kept, then the event dropped.
+    const [[age], [dropped]] = asyncCounts.count.mock.calls as Array<[{ ageMs: number }]>;
+    expect([Math.round(age.ageMs / 1000), dropped]).toEqual([90, { functionId: 'fn-1', accountId: ACCOUNT, dropped: 1 }]);
+    expect(age).toEqual({ functionId: 'fn-1', accountId: ACCOUNT, ageMs: expect.any(Number) });
   });
 
   it('backs off a throttled call from a second, and a call that failed on FF\'s side the same way, neither a retry', async () => {
@@ -218,6 +225,8 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event({ id: '3' }));
 
     expect(functions.call).not.toHaveBeenCalled();
+    // No call, so no age: Lambda's AsyncEventAge is measured as the function is called.
+    expect(asyncCounts.count).not.toHaveBeenCalled();
     expect(queues.retryEvent.mock.calls.map(([claimed, , kept]) => [claimed.id, kept.throttles, kept.lastResponse.payload.errorMessage])).toEqual([
       ['1', 1, "FF couldn't make the call: the function is not ACTIVE"],
       ['2', 1, "FF couldn't make the call: the account is not active"],
@@ -251,6 +260,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
 
     expect([functions.call.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 1]);
     expect(warnings).toHaveBeenCalledWith('Asynchronous call req-1 of function fn-1 was dropped: it reached its maximum age');
+    expect(asyncCounts.count.mock.calls).toEqual([[{ functionId: 'fn-1', accountId: ACCOUNT, dropped: 1 }]]);
   });
 
   it("leaves an event another claim took when this attempt's lease ended: it stands", async () => {
@@ -363,6 +373,11 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     expect([queues.deleteEventAndSend.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 2]);
     expect(warnings).toHaveBeenCalledWith(`The record of asynchronous call req-1 of function fn-1 was not delivered: its destination ${RECORDS_ARN} is no function of the account any more`);
     expect(warnings).toHaveBeenCalledWith(expect.stringMatching(/^The record of asynchronous call req-2 of function fn-1 was not delivered: its record is \d+ bytes, over an asynchronous call's 1048576$/));
+    // As Lambda's DestinationDeliveryFailures: each record its destination didn't take.
+    expect(asyncCounts.count.mock.calls.filter(([use]) => use.destinationFailures)).toEqual([
+      [{ functionId: 'fn-1', accountId: ACCOUNT, destinationFailures: 1 }],
+      [{ functionId: 'fn-1', accountId: ACCOUNT, destinationFailures: 1 }],
+    ]);
   });
 
   it('claims only what it has room for, nothing while full, and again as an attempt ends after a claim that took all the room', async () => {
