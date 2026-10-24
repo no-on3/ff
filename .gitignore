@@ -144,6 +144,8 @@ dist
 ### react ###
 .DS_*
 **/*.backup.*
+# The WAL-G image's PostgreSQL settings (deploy/backup), which the line above would keep out of git.
+!deploy/backup/postgres-walg/postgresql.backup.conf
 **/*.back.*
 
 node_modules
