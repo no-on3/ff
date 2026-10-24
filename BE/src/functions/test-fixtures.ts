@@ -47,6 +47,17 @@ export class MemoryRepository<T extends { id?: string }> {
     return entity;
   }
 
+  /**
+   * A new row, as Repository.insert writes it, without save()'s lookup first: the ID and the creation's time, which
+   * the database makes, set on the entity as TypeORM sets them.
+   */
+  async insert(entity: T): Promise<void> {
+    entity.id ??= randomUUID();
+    const now = new Date();
+    Object.assign(entity, { createdAt: (entity as { createdAt?: Date }).createdAt ?? now, updatedAt: now });
+    this.rows.set(entity.id, { ...entity });
+  }
+
   /** The first row whose fields equal every value of `where`, as the account-scoped queries need (P-10). */
   async findOne(options: { where: Partial<T> }): Promise<T | null> {
     const [row] = await this.find(options);
