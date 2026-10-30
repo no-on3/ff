@@ -7,8 +7,8 @@ FF's own install on its development server, the one in Canada ([decision log](..
 The server has its own rules ([`/data/proxy/README.md`](#its-files) on the server). One Caddy at `/data/proxy` owns ports 80 and 443 for every project. Each project has its directory, `/data/<project>`, owned by the user `deploy`, and one route file, `/data/proxy/sites/<project>.caddy`. FF follows them:
 - **k3s** without its ingress (Traefik) or its load balancer (ServiceLB), and node ports on the loopback alone: nothing of the cluster's listens on the public address. Its data is on the data disk, `/data/kubernetes/k3s`; gVisor runs every function, as in production.
 - **The edge** has a fixed address in the cluster, `10.43.0.252`, and the route file `ff.caddy` sends FF's hostnames there. The server's proxy terminates the internet's TLS; the edge does everything else as in production, and believes the caller's address only from that proxy (`FF_EDGE_TRUSTED_PROXIES`).
-- **Beside the cluster,** in the Compose project `ff` (`/data/ff`): PostgreSQL for the backend and Keycloak, S3 (SeaweedFS), Mailpit, and the server of customers' databases ([`deploy/data-db`](../data-db/README.md)). Each listens on the Docker bridge's address (docker0's), which the cluster's pods reach and the internet doesn't.
-- **The firewall:** pods may reach the node's API server (6443) and its kubelet (10250), and, at docker0's address, PostgreSQL, S3 and mail beside the cluster (5433, 8333, 1025), which their Services send to the host itself; nothing else of the node. Functions' NetworkPolicy opens none of those three: customers' databases alone, on their port.
+- **Beside the cluster,** in the Compose project `ff` (`/data/ff`): PostgreSQL for the backend and Keycloak, S3 (SeaweedFS), Mailpit, and the servers of customers' databases ([`deploy/data-db`](../data-db/README.md)), caches ([`deploy/cache`](../cache/README.md)) and mail ([`deploy/mail`](../mail/README.md)). Each listens on the Docker bridge's address (docker0's), which the cluster's pods reach and the internet doesn't. Customers' three servers are on a network of their own, `10.199.0.0/24`, each at a fixed address there, with Mailpit, to which the mail server hands every message. The cluster's DNS answers their names, `db`, `cache` and `mail`, with docker0's address.
+- **The firewall:** pods may reach the node's API server (6443) and its kubelet (10250), and, at docker0's address, PostgreSQL, S3 and mail beside the cluster (5433, 8333, 1025), which their Services send to the host itself; nothing else of the node. Functions' NetworkPolicy opens none of those three: customers' database and cache servers alone, on their ports, at their fixed addresses. A function connects to docker0's address, and Docker sends the connection on to the server's own address, which is the one the cluster's firewall checks the policy against.
 
 | | Production ([`deploy/k8s`](../k8s/README.md)) | This server |
 |---|---|---|
@@ -18,6 +18,7 @@ The server has its own rules ([`/data/proxy/README.md`](#its-files) on the serve
 | Customers' own domains | Certificates on demand, at the edge | Not routed: the proxy sends FF's names alone |
 | PostgreSQL and S3 | Servers of their own, backed up to a second site | Containers beside the cluster, no backup |
 | Mail | A mail server | Mailpit: every e-mail kept on the server, none sent |
+| Customers' databases, caches and mail | Servers of their own ([`deploy/data-db`](../data-db/README.md), [`deploy/cache`](../cache/README.md), [`deploy/mail`](../mail/README.md)), their certificates a public CA's | Containers beside the cluster, their certificates from CAs of their own; 20 caches' ports; customers' mail handed to Mailpit, none sent |
 | Invoices | The seller's and the bank's details | Placeholders that say what they are |
 | Nodes | Several | One |
 
@@ -31,15 +32,15 @@ deploy/dev-server/install.sh next      # the first time, about 20 minutes; an up
 
 The same command installs and updates. It copies the checkout's files to `/data/ff/src` (those git tracks and those it doesn't ignore: never a `.env`, a key or `node_modules`), then runs [`server.sh`](server.sh) there as root. Each step of it does nothing when already done:
 1. FF's passwords and keys, made once in `/data/ff/secrets`.
-2. The Compose project, and the backend's and Keycloak's databases.
-3. k3s and gVisor, at the versions the development cluster runs (`hack/k8s/env.sh`, `hack/k8s/gvisor-up.sh`), each checked against its release's checksum; the firewall's rules for pods; customers' databases' name in the cluster's DNS.
+2. The Compose project, and the backend's and Keycloak's databases; the agents of customers' caches and mail checked with the backend's tokens.
+3. k3s and gVisor, at the versions the development cluster runs (`hack/k8s/env.sh`, `hack/k8s/gvisor-up.sh`), each checked against its release's checksum; the firewall's rules for pods; the names of customers' database, cache and mail servers in the cluster's DNS.
 4. The images, built on the server and given to k3s, tagged with the commit (with `-dirty-<time>` when the checkout has changes).
 5. `deploy/k8s`: base, the Secrets, logging, monitoring, gVisor's RuntimeClass; then the platform with `deploy/k8s/platform/deploy.sh` and this folder's overlay (`k8s/`), with what is the server's own added on the server (`/data/ff/overlay`).
 6. The first operator, `operator@dev.ffunc.cloud`, once: FF's realm makes each user's e-mail address its username.
 7. The route file, installed and the proxy reloaded. The proxy checks a configuration as it loads it; a route it refuses is put back as it was, so that no other project's next reload meets it.
 8. Every hostname, through the proxy, as from the internet, once Let's Encrypt has given the seven fixed names their certificates (a minute or so the first time).
 
-Then [`smoke.sh`](smoke.sh) takes a customer's path through the proxy: an operator and a customer of its own, each signed in as a browser signs in; an account asked for, the operator told by e-mail, the account approved; a function in gVisor, invoked and called at its URL; a bucket at its own host; a queue sent to and read. Then it deletes all of it, closes the account and removes both users, whether its checks passed or not. `--no-smoke` skips it.
+Then [`smoke.sh`](smoke.sh) takes a customer's path through the proxy: an operator and a customer of its own, each signed in as a browser signs in; an account asked for, the operator told by e-mail, the account approved; a function in gVisor, invoked and called at its URL; a bucket at its own host, and its site; a queue sent to and read; a database and a cache, which a function reaches at the addresses FF gave it; an address proved by the link FF e-mails it, and an e-mail from it, which the server of customers' mail hands to Mailpit. Then it deletes all of it, closes the account and removes both users, whether its checks passed or not. `--no-smoke` skips it.
 
 The admin app and Keycloak's administration answer only the address the server sees you connect from; `FF_ADMIN_ALLOW='<address>/32 …' deploy/dev-server/install.sh next` gives others.
 
@@ -65,11 +66,11 @@ They come from the proxy's own authority: one certificate for `*.fn.dev.ffunc.cl
 | `server.sh` | On the server, as root: everything above, step by step |
 | `smoke.sh` | On the server, as root: a customer's path through the proxy, then nothing of it left |
 | `docker-compose.yml` | What runs beside the cluster, installed as `/data/ff/docker-compose.yml`; `server.sh` writes its `.env` |
-| `k8s/` | The overlay of `deploy/k8s/platform` with FF's names under `dev.ffunc.cloud`, the edge's Service at its fixed address, the services beside the cluster, and the CA of customers' databases mounted for the backend |
+| `k8s/` | The overlay of `deploy/k8s/platform` with FF's names under `dev.ffunc.cloud`, the edge's Service at its fixed address, the services beside the cluster, and the CAs of customers' database, cache and mail servers mounted for the backend |
 | `ff.caddy` | The route, which `server.sh` fills in with the edge's root and installs as `/data/proxy/sites/ff.caddy` |
 | `alertmanager.yaml` | The operator's alerts, to Mailpit |
 
-On the server: `/data/ff/secrets` (the passwords and keys, readable by root and `deploy` alone, but `s3.json`, which SeaweedFS's own user reads too), `/data/ff/overlay` (made on each run), `/data/kubernetes/k3s` (the cluster), `/etc/rancher/k3s` (its settings, and the nodes' login to the code registry), and the Docker volumes `ff_postgres`, `ff_s3`, `ff_mail` and `ff_data_db`. The server's own rules are in `/data/proxy/README.md` there.
+On the server: `/data/ff/secrets` (the passwords and keys, readable by root and `deploy` alone, but `s3.json`, which SeaweedFS's own user reads too), `/data/ff/overlay` (made on each run), `/data/kubernetes/k3s` (the cluster), `/etc/rancher/k3s` (its settings, and the nodes' login to the code registry), and the Docker volumes `ff_postgres`, `ff_s3`, `ff_mail`, `ff_data_db`, `ff_cache` and `ff_customer_mail`. The server's own rules are in `/data/proxy/README.md` there.
 
 ## Removing it
 
