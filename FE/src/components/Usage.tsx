@@ -276,6 +276,44 @@ const Usage: React.FC = () => {
             </div>
           )}
 
+          {usage.caches.length > 0 && (
+            <div className="card overflow-x-auto mb-4" aria-label="Caches">
+              <table className="data-table">
+                <thead className="text-gray-500">
+                  <tr>
+                    <th className="py-2 pr-4 font-medium">Cache</th>
+                    <th className="py-2 pr-4 font-medium text-right">Memory</th>
+                    <th className="py-2 pr-4 font-medium text-right">Hours</th>
+                    <th className="py-2 pr-4 font-medium text-right">GB-hours</th>
+                    <th className="py-2 font-medium text-right">Cost (estimated)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.caches.map((cache) => (
+                    <tr key={cache.cacheId} data-cache-id={cache.cacheId} className="border-t border-gray-200">
+                      <td className="py-2 pr-4">
+                        {cache.deleted ? (
+                          <>
+                            {cache.name} <span className="text-gray-500">(deleted)</span>
+                          </>
+                        ) : (
+                          <Link to="/caches" className="text-blue-700 hover:underline">
+                            {cache.name}
+                          </Link>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{cache.memoryMb.toLocaleString('en-US')} MB</td>
+                      <td className="py-2 pr-4 text-right">{cache.hours.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right">{Number(cache.gbHours).toLocaleString('en-US', { maximumFractionDigits: 3 })}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{cache.cost !== null && usage.estimate ? formatMoney(cache.cost, usage.estimate.currency) : '–'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-500 mt-3">As AWS ElastiCache bills a node: its memory by the hour, whatever its keys use, measured once an hour.</p>
+            </div>
+          )}
+
           <button type="button" className="btn btn-secondary" onClick={downloadCsv} disabled={downloading}>
             {downloading ? 'Preparing…' : `Download ${monthLabel(usage.month)} as CSV`}
           </button>

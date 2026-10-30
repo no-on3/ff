@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+import { CacheStatus } from '../caches/cache.entity';
 import { DatabaseStatus } from '../databases/database.entity';
 import { BucketStatus } from '../storage/bucket.entity';
 import { QueueMessagesView } from '../queues/dto/queue.dto';
@@ -149,6 +150,18 @@ export class AdminDatabaseView {
   @ApiProperty() createdAt: Date;
 }
 
+/** One of the account's caches (ADR 0013): its memory used and connections now, as its server counts them. */
+export class AdminCacheView {
+  @ApiProperty({ example: 'sessions' }) name: string;
+  @ApiProperty({ example: 'fc-3f9c2a1e8b7d4c6a9e5f1a2b', description: "Its name on the server of customers' caches, which says nothing of whose it is: what FF's own tools name" }) serverName: string;
+  @ApiProperty({ enum: CacheStatus }) status: CacheStatus;
+  @ApiProperty({ example: 6400, description: 'Its port on the server' }) port: number;
+  @ApiProperty({ example: 64, description: "Its memory, the plan's when it was made, in MB" }) memoryMb: number;
+  @ApiProperty({ nullable: true, type: Number, example: 1_258_291, description: 'The bytes its keys use now; null when the server could not be asked' }) bytesUsedForCache: number | null;
+  @ApiProperty({ nullable: true, type: Number, example: 2, description: 'Its connections now; null when the server could not be asked' }) currConnections: number | null;
+  @ApiProperty() createdAt: Date;
+}
+
 /** One of the account's buckets (ADR 0009): what it held at its last hourly measure, and its name in the store. */
 export class AdminBucketView {
   @ApiProperty({ example: 'photos' }) name: string;
@@ -216,6 +229,7 @@ export class AdminAccountView {
   @ApiProperty({ type: [AdminMemberView] }) members: AdminMemberView[];
   @ApiProperty({ type: [AdminFunctionView] }) functions: AdminFunctionView[];
   @ApiProperty({ type: [AdminDatabaseView], description: 'Its databases, by name' }) databases: AdminDatabaseView[];
+  @ApiProperty({ type: [AdminCacheView], description: 'Its caches, by name' }) caches: AdminCacheView[];
   @ApiProperty({ type: [AdminBucketView], description: 'Its buckets, by name' }) buckets: AdminBucketView[];
   @ApiProperty({ type: [AdminQueueView], description: 'Its queues, by name' }) queues: AdminQueueView[];
   @ApiProperty({ type: AdminQueueStorageView }) queueStorage: AdminQueueStorageView;

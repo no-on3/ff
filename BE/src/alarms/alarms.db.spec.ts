@@ -3,8 +3,8 @@
  * after: an account's alarms and their audit entries, what they refuse, and
  * the evaluator, from usage records written here, through the notifications'
  * queue: an error alarm that fires and recovers, telling each change once;
- * missing data; an account's alarm; the money; a database's, from its hourly
- * samples; two backends at once.
+ * missing data; an account's alarm; the money; a database's and a cache's,
+ * from their hourly samples; two backends at once.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -100,13 +100,23 @@ run('alarms (L2)', () => {
     const [{ id }] = await query<Array<{ id: string }>>(`INSERT INTO queues (account_id, name, kind) VALUES ($1, $2, 'customer') RETURNING id`, [accountId, unique]);
     return { id, name: unique };
   };
+  let caches = 0;
+  /** A customer's cache of the account, as its row: the server isn't asked here. Answers its ID and name. */
+  const cache = async (accountId: string, name: string) => {
+    const unique = `${name}-${++caches}`;
+    const [{ id }] = await query<Array<{ id: string }>>(
+      `INSERT INTO caches (account_id, name, server_name, port, memory_mb, status, password_sha256) VALUES ($1, $2, $3, $4, 64, 'active', repeat('0', 64)) RETURNING id`,
+      [accountId, unique, `ffc-${String(caches).padStart(12, '0')}`, 6400 + caches],
+    );
+    return { id, name: unique };
+  };
   /** Only the deliveries of the alarm a test makes: each test clears those before it. */
   const clearDeliveries = () => query(`DELETE FROM notification_deliveries`);
 
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_samples', 'async_event_counts']) {
+    for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_samples', 'async_event_counts', 'cache_samples']) {
       await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
     }
     for (const [id, name] of [[A, 'Alarmed'], [B, 'Other']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
@@ -209,6 +219,21 @@ run('alarms (L2)', () => {
       await expect(alarms.create(A, { ...waiting, metric: 'Errors', statistic: 'Sum' })).rejects.toThrow(BadRequestException);
       expect(await alarms.update(A, watching.id, { ...waiting, metric: 'ApproximateAgeOfOldestMessage', threshold: 600 })).toMatchObject({ queueName: mine.name, metric: 'ApproximateAgeOfOldestMessage' });
       await query(`DELETE FROM queues WHERE id = $1`, [mine.id]);
+      await expect(alarms.get(A, watching.id)).rejects.toThrow(NotFoundException);
+    });
+
+    it("watch the account's own cache, by its name, an hour at a time, and go with it", async () => {
+      const mine = await cache(A, 'sessions');
+      const theirs = await cache(B, 'sessions');
+      const full = alarm({ functionId: null, cacheName: mine.name, metric: 'BytesUsedForCache', statistic: 'Maximum', period: 3600 });
+
+      const watching = await alarms.create(A, full);
+      expect(watching).toMatchObject({ functionId: null, databaseId: null, bucketName: null, queueName: null, cacheName: mine.name, metric: 'BytesUsedForCache' });
+      expect((await alarms.list(A)).map((listed) => listed.cacheName)).toEqual([mine.name]);
+      await expect(alarms.create(A, { ...full, cacheName: theirs.name })).rejects.toThrow(new NotFoundException(`The account has no cache ${theirs.name}`));
+      await expect(alarms.create(A, { ...full, period: 60 })).rejects.toThrow(new BadRequestException("A cache's metrics have a point an hour: period must be 3600"));
+      expect(await alarms.update(A, watching.id, { ...full, metric: 'Evictions', statistic: 'Sum' })).toMatchObject({ cacheName: mine.name, metric: 'Evictions' });
+      await query(`DELETE FROM caches WHERE id = $1`, [mine.id]);
       await expect(alarms.get(A, watching.id)).rejects.toThrow(NotFoundException);
     });
   });
@@ -335,6 +360,34 @@ run('alarms (L2)', () => {
       await query(`INSERT INTO database_samples (database_id, hour, account_id, name, size_bytes, connections) VALUES ($1, '2026-10-20T16:00:00Z', $2, 'orders', 700000000, 3)`, [orders, A]);
       await evaluator.tick(new Date('2026-10-20T17:00:05Z'));
       expect((await stateOf(big.id)).state).toBe('OK');
+    });
+
+    it("fires on a cache's memory from its hourly samples, the e-mail naming the cache, and recovers once its keys use less", async () => {
+      const sessions = await cache(A, 'sessions');
+      const full = await alarms.create(
+        A,
+        alarm({ name: 'Memory', functionId: null, cacheName: sessions.name, metric: 'BytesUsedForCache', statistic: 'Maximum', period: 3600, threshold: 60_000_000, actions: { email: true, webhookUrls: [] } }),
+      );
+      const sample = (hour: string, bytesUsed: number) =>
+        query(
+          `INSERT INTO cache_samples (cache_id, hour, account_id, name, memory_mb, bytes_used, connections, hits, misses, evictions, process_started_at)
+           VALUES ($1, $2, $3, 'sessions', 64, $4, 2, 0, 0, 0, '2026-10-20T00:00:00Z')`,
+          [sessions.id, hour, A, bytesUsed],
+        );
+      await sample('2026-10-20T15:00:00Z', 63_000_000);
+
+      // The hour 15:00 is judged once it is over, as a database's.
+      await evaluator.tick(new Date('2026-10-20T16:00:05Z'));
+      expect([(await stateOf(full.id)).state, (await stateOf(full.id)).stateReason]).toEqual([
+        'ALARM',
+        '1 of the last 1 period(s) of 3600 s breaching BytesUsedForCache Maximum > 60000000 (1 needed); latest 63000000',
+      ]);
+      const [told] = await db.dataSource.getRepository(NotificationDelivery).find({ where: { kind: 'alarm', channel: DeliveryChannel.EMAIL } });
+      expect((told.payload as { text: string }).text).toMatch(/sur le cache « sessions-\d+ » du compte « Alarmed »/);
+
+      await sample('2026-10-20T16:00:00Z', 2_000_000);
+      await evaluator.tick(new Date('2026-10-20T17:00:05Z'));
+      expect((await stateOf(full.id)).state).toBe('OK');
     });
 
     it("fires on a bucket's errors from the front door's counts, the e-mail naming the bucket, and recovers on a quiet period", async () => {

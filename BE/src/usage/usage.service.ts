@@ -7,8 +7,9 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { PLATFORM_LIMITS } from '../plans/plan-limits';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
-import { BucketMonth, DatabaseMonth, QueueMonth, UsageAmountsView, UsageMonth } from './usage.dto';
-import { gbMonths, hoursIn } from '../billing/rating';
+import { BucketMonth, CacheMonth, DatabaseMonth, QueueMonth, UsageAmountsView, UsageMonth } from './usage.dto';
+import { Decimal } from '../billing/decimal';
+import { BYTES_PER_GB, gbMonths, hoursIn } from '../billing/rating';
 import { coldStartSeconds, invocationSeconds, invocations } from '../monitoring/operator-metrics';
 
 /** The outcomes of a call that ran, measured by the runtime. */
@@ -46,9 +47,19 @@ const amounts = (row: UsageRow): UsageAmountsView => ({
 
 /**
  * The tables partitioned by month, written once and never changed: usage records, capacity samples, customers'
- * databases', buckets' and queues' samples, buckets' and queues' request counts, and functions' asynchronous calls'.
+ * databases', buckets', queues' and caches' samples, buckets' and queues' request counts, and functions' asynchronous calls'.
  */
-const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'queue_samples', 'async_event_counts'];
+const MONTHLY_TABLES = [
+  'usage_records',
+  'capacity_samples',
+  'database_samples',
+  'bucket_samples',
+  'storage_request_counts',
+  'queue_request_counts',
+  'queue_samples',
+  'async_event_counts',
+  'cache_samples',
+];
 
 /**
  * Usage records (client-readiness plan, P-20, D6): written once per
@@ -315,6 +326,37 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
       requests: Number(row.requests),
       messagesSent: Number(row.sent),
       messagesReceived: Number(row.received),
+    }));
+  }
+
+  /**
+   * An account's caches in a month by the UTC calendar (ADR 0013), from their
+   * hourly samples: each one's hours measured, its memory at its latest
+   * sample, and its memory times its hours, as it is billed. The most
+   * GB-hours first.
+   */
+  async monthlyCaches(accountId: string, month: string): Promise<CacheMonth[]> {
+    const [year, number] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(year, number - 1, 1));
+    const to = new Date(Date.UTC(year, number, 1));
+    const rows = await this.records.manager.query<Array<{ id: string; name: string; deleted: boolean; hours: number; byte_hours: string; memory_mb: number }>>(
+      `SELECT s."cache_id" AS "id", (array_agg(s."name" ORDER BY s."hour" DESC))[1] AS "name", bool_and(c."id" IS NULL) AS "deleted",
+              count(*)::int AS "hours", sum(s."memory_mb"::bigint * 1048576)::text AS "byte_hours", (array_agg(s."memory_mb" ORDER BY s."hour" DESC))[1] AS "memory_mb"
+         FROM "cache_samples" s
+         LEFT JOIN "caches" c ON c."id" = s."cache_id"
+        WHERE s."account_id" = $1 AND s."hour" >= $2 AND s."hour" < $3
+        GROUP BY s."cache_id"
+        ORDER BY sum(s."memory_mb") DESC, 2, 1`,
+      [accountId, from, to],
+    );
+    return rows.map((row) => ({
+      cacheId: row.id,
+      name: row.name,
+      deleted: row.deleted,
+      hours: row.hours,
+      memoryMb: row.memory_mb,
+      gbHours: Decimal.ratio(BigInt(row.byte_hours), BYTES_PER_GB).round(6).toString(),
+      gbMonths: gbMonths(BigInt(row.byte_hours), hoursIn(month)).round(6).toString(),
     }));
   }
 

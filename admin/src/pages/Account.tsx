@@ -405,6 +405,28 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
       </section>
 
       <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Caches</h2>
+        {view.caches.length === 0 ? (
+          <EmptyState>No cache.</EmptyState>
+        ) : (
+          <Table
+            head={['Name', 'On the server', 'Status', 'Memory used', 'Connections', 'Plan memory', 'Created']}
+            rows={view.caches.map((c) => [
+              c.name,
+              <span className="font-mono text-xs">
+                {c.serverName}:{c.port}
+              </span>,
+              c.status,
+              formatMegabytes(c.bytesUsedForCache),
+              c.currConnections ?? '–',
+              `${c.memoryMb.toLocaleString('en-US')} MB`,
+              whenUtc(c.createdAt),
+            ])}
+          />
+        )}
+      </section>
+
+      <section className="space-y-3">
         <h2 className="text-lg font-semibold">Buckets</h2>
         <p className="text-sm text-slate-600">Together: {bucketStorageLabel(account)}.</p>
         {view.buckets.length === 0 ? (

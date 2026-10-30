@@ -13,13 +13,14 @@ export interface CacheSpec {
   enabled: boolean;
 }
 
-/** A cache's measures now, as ElastiCache names its metrics. */
+/** A cache's measures now, as ElastiCache names its metrics: its hits, misses and evictions since its process started, which ran so long. */
 export interface CacheUse {
   bytesUsedForCache: number;
   currConnections: number;
   cacheHits: number;
   cacheMisses: number;
   evictions: number;
+  uptimeSeconds: number;
 }
 
 /**
@@ -39,7 +40,7 @@ export interface CacheServer {
 interface AgentView {
   name: string;
   running: boolean;
-  measures: (CacheUse & { uptimeSeconds: number }) | null;
+  measures: CacheUse | null;
 }
 
 /** A name the backend made, checked before it goes into a path. */
@@ -66,8 +67,8 @@ export class AgentCacheServer implements CacheServer {
     const use = new Map<string, CacheUse>();
     for (const view of views) {
       if (!wanted.has(view.name) || !view.measures) continue;
-      const { bytesUsedForCache, currConnections, cacheHits, cacheMisses, evictions } = view.measures;
-      use.set(view.name, { bytesUsedForCache, currConnections, cacheHits, cacheMisses, evictions });
+      const { bytesUsedForCache, currConnections, cacheHits, cacheMisses, evictions, uptimeSeconds } = view.measures;
+      use.set(view.name, { bytesUsedForCache, currConnections, cacheHits, cacheMisses, evictions, uptimeSeconds });
     }
     return use;
   }

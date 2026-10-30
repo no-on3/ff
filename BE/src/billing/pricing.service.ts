@@ -168,10 +168,11 @@ export class PricingService {
   }
 
   /**
-   * The account's databases, buckets and queues in [start, end), as the
-   * rater takes them: from their hourly samples, each one's byte-hours and
-   * the hours it was sampled in; a bucket's requests by S3's two classes,
-   * from the front door's counts; a queue's requests as SQS bills them.
+   * The account's databases, buckets, queues and caches in [start, end), as
+   * the rater takes them: from their hourly samples, each one's byte-hours and
+   * the hours it was sampled in, a cache's memory its plan's; a bucket's
+   * requests by S3's two classes, from the front door's counts; a queue's
+   * requests as SQS bills them.
    */
   private async resourceUsage(accountId: string, start: Date, end: Date): Promise<ResourceUsage[]> {
     const databases = await this.books.manager.query<SampleRow[]>(
@@ -200,6 +201,13 @@ export class PricingService {
         GROUP BY "queue_id" HAVING sum("requests") > 0`,
       [accountId, start, end],
     );
+    const caches = await this.books.manager.query<SampleRow[]>(
+      `SELECT "cache_id" AS "resourceId", sum("memory_mb"::bigint * 1048576)::text AS "byteHours", count(*)::text AS "hours", '0' AS "tier1", '0' AS "tier2", '0' AS "requests"
+         FROM "cache_samples"
+        WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3
+        GROUP BY "cache_id"`,
+      [accountId, start, end],
+    );
     const usage = (kind: ResourceUsage['kind']) => (row: SampleRow): ResourceUsage => ({
       resourceId: row.resourceId,
       kind,
@@ -209,6 +217,6 @@ export class PricingService {
       tier2Requests: BigInt(row.tier2),
       requests: BigInt(row.requests),
     });
-    return [...databases.map(usage('database')), ...buckets.map(usage('bucket')), ...queues.map(usage('queue'))];
+    return [...databases.map(usage('database')), ...buckets.map(usage('bucket')), ...queues.map(usage('queue')), ...caches.map(usage('cache'))];
   }
 }

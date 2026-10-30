@@ -142,6 +142,26 @@ fn usage_shows_each_queue_after_the_buckets_its_requests_as_sqs_bills_them_and_i
 }
 
 #[test]
+fn usage_shows_each_cache_after_the_queues_its_memory_by_the_hour_as_elasticache_bills_a_node() {
+    let mut month = usage();
+    month["caches"] = json!([
+        { "cacheId": "c1", "name": "sessions", "deleted": false, "hours": 312, "memoryMb": 64, "gbHours": "19.5", "gbMonths": "0.02621", "cost": "1.502" }
+    ]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "total          15        3.14375     1           0.852\nCACHE     MEMORY  HOURS  GB-HOURS  COST\n\
+             sessions  64 MB   312    19.5      1.502\nestimated cost:"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
 fn usage_as_csv_is_the_apis_own_and_a_wrong_month_is_refused_before_calling() {
     let csv = "functionId,functionName,requests\r\nf1,hello,12\r\n";
     let api = Server::start(vec![Reply::text(200, "text/csv; charset=utf-8", csv)]);

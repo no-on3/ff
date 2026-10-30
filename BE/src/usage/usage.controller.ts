@@ -27,7 +27,7 @@ export class UsageController {
   @ApiOperation({
     summary: "The account's usage in a month, per function and in total: JSON, or CSV with Accept: text/csv",
     description:
-      "Requests billed and billed duration, as AWS Lambda bills them, GB-seconds, and the calls not billed; each database's GB-months, from its size each hour; each bucket's GB-months, from what it held each hour, and its requests by S3's two classes; each queue's requests as SQS bills them, and its messages; each function's, database's, bucket's and queue's estimated cost, and the month's, at FF's prices. A month is a month of the UTC calendar.",
+      "Requests billed and billed duration, as AWS Lambda bills them, GB-seconds, and the calls not billed; each database's GB-months, from its size each hour; each bucket's GB-months, from what it held each hour, and its requests by S3's two classes; each queue's requests as SQS bills them, and its messages; each cache's hours and GB-hours, from its memory each hour, as ElastiCache bills a node; each function's, database's, bucket's, queue's and cache's estimated cost, and the month's, at FF's prices. A month is a month of the UTC calendar.",
   })
   @ApiProduces('application/json', 'text/csv')
   @ApiResponse({ status: 200, type: MonthlyUsageView })
@@ -38,15 +38,16 @@ export class UsageController {
     @Res({ passthrough: true }) response: Response,
   ): Promise<MonthlyUsageView | string> {
     const month = query.month ?? monthOf(new Date());
-    const [records, databases, buckets, queues, estimate] = await Promise.all([
+    const [records, databases, buckets, queues, caches, estimate] = await Promise.all([
       this.usage.monthly(principal.accountId, month),
       this.usage.monthlyDatabases(principal.accountId, month),
       this.usage.monthlyBuckets(principal.accountId, month),
       this.usage.monthlyQueues(principal.accountId, month),
+      this.usage.monthlyCaches(principal.accountId, month),
       this.pricing.estimate(principal.accountId, month),
     ]);
     const names = await this.usage.functionNames(principal.accountId, unlisted(records, estimate));
-    const view = withEstimate(records, estimate, names, databases, buckets, queues);
+    const view = withEstimate(records, estimate, names, databases, buckets, queues, caches);
     if (!wantsCsv(accept)) return view;
     response.setHeader('content-type', 'text/csv; charset=utf-8');
     response.setHeader('content-disposition', `attachment; filename="ff-usage-${principal.accountId}-${view.month}.csv"`);

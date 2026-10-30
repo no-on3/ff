@@ -4,8 +4,9 @@
  * the counts, the duration's statistics (percentiles interpolated), the
  * throttles of both kinds, the cold starts and the instances, a function's
  * and its account's, its asynchronous calls', quiet periods and the window's
- * edges; a customer's database's, from its hourly samples; a bucket's; and a
- * queue's, sampled each minute from its messages, with its requests' counts.
+ * edges; a customer's database's, from its hourly samples; a bucket's; a
+ * queue's, sampled each minute from its messages, with its requests' counts;
+ * and a cache's, from its hourly samples, its counts from one to the next.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -54,7 +55,7 @@ run('metrics (L2)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'queue_samples', 'async_event_counts']) {
+    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'queue_samples', 'async_event_counts', 'cache_samples']) {
       await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
     }
     for (const [id, name] of [[A, 'A'], [B, 'B']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
@@ -294,6 +295,49 @@ run('metrics (L2)', () => {
     const quiet = (await metrics.forQueue(A, 'm-empty', window)).metrics;
     expect([quiet.ApproximateNumberOfMessagesVisible, quiet.SentMessageSize]).toEqual([{ Maximum: [0], Average: [0] }, { Average: [null], Maximum: [null] }]);
     await expect(metrics.forQueue(A, 'm-theirs', window)).rejects.toThrow(new NotFoundException('The account has no queue m-theirs'));
+  });
+
+  it("gives a cache's memory and connections from each hour's sample, and the hour's hits, misses and evictions from the next hour's, by its name, and no other account's", async () => {
+    const cacheOf = async (accountId: string, name: string, port: number) =>
+      (
+        await query<Array<{ id: string }>>(
+          `INSERT INTO caches (account_id, name, server_name, port, memory_mb, status, password_sha256) VALUES ($1, $2, $3, $4, 64, 'active', repeat('0', 64)) RETURNING id`,
+          [accountId, name, `ffc-${port}`, port],
+        )
+      )[0].id;
+    const sessions = await cacheOf(A, 'm-sessions', 6401);
+    const theirs = await cacheOf(B, 'm-theirs', 6402);
+    const sampleOf = (cacheId: string, accountId: string, hour: string, bytesUsed: number, connections: number, hits: number, misses: number, evictions: number, startedAt: string) =>
+      query(
+        `INSERT INTO cache_samples (cache_id, hour, account_id, name, memory_mb, bytes_used, connections, hits, misses, evictions, process_started_at)
+         VALUES ($1, $2, $3, 'm-sessions', 64, $4, $5, $6, $7, $8, $9)`,
+        [cacheId, hour, accountId, bytesUsed, connections, hits, misses, evictions, startedAt],
+      );
+    await sampleOf(sessions, A, '2026-10-01T08:00:00Z', 1_000_000, 2, 100, 10, 0, '2026-10-01T07:30:00Z');
+    // The same process, its start read 2 s apart from its uptime.
+    await sampleOf(sessions, A, '2026-10-01T09:00:00Z', 3_000_000, 4, 400, 30, 5, '2026-10-01T07:30:02Z');
+    // Started again at 09:40: its counts from zero.
+    await sampleOf(sessions, A, '2026-10-01T10:00:00Z', 500_000, 1, 20, 2, 0, '2026-10-01T09:40:00Z');
+    await sampleOf(sessions, A, '2026-10-01T11:00:00Z', 600_000, 1, 50, 4, 0, '2026-10-01T09:40:01Z');
+    await sampleOf(theirs, B, '2026-10-01T09:00:00Z', 1, 1, 1, 1, 1, '2026-10-01T07:00:00Z');
+    const hours = (start: string, end: string): MetricsWindow => ({ start: new Date(start), end: new Date(end), period: 3600 });
+
+    expect((await metrics.forCache(A, 'm-sessions', hours('2026-10-01T08:00:00Z', '2026-10-01T11:00:00Z'))).metrics).toEqual({
+      BytesUsedForCache: { Maximum: [1_000_000, 3_000_000, 500_000], Average: [1_000_000, 3_000_000, 500_000] },
+      CurrConnections: { Maximum: [2, 4, 1], Average: [2, 4, 1] },
+      // 08:00 to 09:00, from one process; 09:00, the new process's own; 10:00, the 11:00 sample less the 10:00 one.
+      CacheHits: { Sum: [300, 20, 30] },
+      CacheMisses: { Sum: [20, 2, 2] },
+      Evictions: { Sum: [5, 0, 0] },
+    });
+    // The hour 11:00 has no next sample yet, and 12:00 none of its own.
+    const later = (await metrics.forCache(A, 'm-sessions', hours('2026-10-01T10:00:00Z', '2026-10-01T13:00:00Z'))).metrics;
+    expect([later.BytesUsedForCache.Maximum, later.CacheHits.Sum, later.Evictions.Sum]).toEqual([
+      [500_000, 600_000, null],
+      [30, null, null],
+      [0, null, null],
+    ]);
+    await expect(metrics.forCache(A, 'm-theirs', hours('2026-10-01T08:00:00Z', '2026-10-01T11:00:00Z'))).rejects.toThrow(new NotFoundException('The account has no cache m-theirs'));
   });
 
   it("answers another account's function, and one that doesn't exist, with 404", async () => {

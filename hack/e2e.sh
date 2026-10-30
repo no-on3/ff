@@ -897,11 +897,31 @@ probe_fn="$(http POST /functions "$(jq -n --arg code "$probe" '{name: "e2e-cache
 check "a function reaches it, the account's internet access off, trusts its certificate and logs in with the address" '"trusted, logged in: two croissants"' \
   "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg url "$new_cache_url" '{input: {url: $url}}')" | jq -c .output)"
 http DELETE "/functions/$probe_fn" >/dev/null
+# Every minute, each cache not measured yet in the hour is: a new one within a minute.
+cache_id="$(env_q "SELECT id FROM caches WHERE name = 'e2e-sessions'")"
+for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM cache_samples WHERE cache_id = '$cache_id'")" -ge 1 ] && break; sleep 1; done
+check "its hourly sample, within a minute: by its name, its memory the plan's, what its keys use as its server counts it" "e2e-sessions|64|t" \
+  "$(env_q "SELECT max(name), max(memory_mb), bool_and(bytes_used > 0) FROM cache_samples WHERE cache_id = '$cache_id'")"
+# Its metrics, as CloudWatch names ElastiCache's, a point an hour: this hour and the one before.
+cache_metrics="$(http GET "/caches/e2e-sessions/metrics?start=$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)")"
+check "its metrics, as CloudWatch names ElastiCache's: the memory its keys use as its latest sample says" \
+  "200 3600 $(env_q "SELECT bytes_used FROM cache_samples WHERE cache_id = '$cache_id' ORDER BY hour DESC LIMIT 1")" \
+  "$(status) $(jq -r '"\(.period) \([.metrics.BytesUsedForCache.Maximum[] | select(. != null)] | last)"' <<<"$cache_metrics")"
+check "  ... and none at all for another account's cache, or none" "404 The account has no cache e2e-none" \
+  "$(http GET /caches/e2e-none/metrics >/dev/null; status) $(jq -r .message "$work/body")"
+cache_alarm="$(http POST /alarms '{"name": "e2e-sessions memory", "cacheName": "e2e-sessions", "metric": "BytesUsedForCache", "statistic": "Maximum", "period": 3600, "comparison": "GreaterThanThreshold", "threshold": 60000000, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}')"
+check "an alarm watches its memory, an hour at a time, by its name" "201 e2e-sessions BytesUsedForCache 3600" "$(status) $(jq -r '"\(.cacheName) \(.metric) \(.period)"' <<<"$cache_alarm")"
+# Billed by the hour of its memory, as ElastiCache bills a node: each hour sampled, 64 MB.
+cache_month="$(http GET /usage | jq -c '.caches[] | select(.name == "e2e-sessions")')"
+check "GET /usage has its hours this month, its memory and its GB-hours, 64 MB an hour" "$(env_q "SELECT count(*) FROM cache_samples WHERE cache_id = '$cache_id'") 64 true false" \
+  "$(jq -r '"\(.hours) \(.memoryMb) \((.gbHours | tonumber) == .hours * 0.0625) \(.deleted)"' <<<"$cache_month")"
 http DELETE /caches/e2e-sessions >/dev/null
 check "a cache deleted: 204, then 404, gone from the server with its keys, its address answering no more" "204 404 404 true" \
   "$(status) $(http GET /caches/e2e-sessions >/dev/null; status) \
 $(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/cache-ca.crt" -H 'Authorization: Bearer ff-cache-dev' "https://$cache_address:6390/caches/$cache_server_name") \
 $(cache_cli "$new_cache_url" PING | grep -q 'Could not connect' && echo true || echo false)"
+check "  ... its alarm with it; its month's usage kept, as a deleted cache's" "404 true" \
+  "$(http GET "/alarms/$(jq -r .id <<<"$cache_alarm")" >/dev/null; status) $(http GET /usage | jq -r '.caches[] | select(.name == "e2e-sessions") | .deleted')"
 
 echo "== customers' buckets (ADR 0009): the API, then AWS's own clients through the S3 front door"
 s3_endpoint="http://s3.localhost:$storage_port"

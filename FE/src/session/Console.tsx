@@ -7,6 +7,7 @@ import BalanceProvider from '../components/BalanceProvider';
 import Billing from '../components/Billing';
 import CreateFunction from '../components/CreateFunction';
 import CreditBanner from '../components/CreditBanner';
+import Caches from '../components/Caches';
 import DatabaseDetail from '../components/DatabaseDetail';
 import BucketDetail from '../components/BucketDetail';
 import Buckets from '../components/Buckets';
@@ -58,6 +59,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
               <Route path="/functions/:id" element={<FunctionDetail />} />
               <Route path="/databases" element={<Databases />} />
               <Route path="/databases/:id" element={<DatabaseDetail />} />
+              <Route path="/caches" element={<Caches />} />
               <Route path="/buckets" element={<Buckets />} />
               <Route path="/buckets/:name" element={<BucketDetail />} />
               <Route path="/queues" element={<Queues />} />

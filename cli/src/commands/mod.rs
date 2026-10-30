@@ -4,6 +4,7 @@ mod account;
 mod async_config;
 mod bucket_notifications;
 mod buckets;
+mod caches;
 mod completion;
 mod config;
 mod db;
@@ -25,7 +26,7 @@ mod version;
 mod whoami;
 
 use crate::cli::{
-    BucketKeysCommand, BucketsCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand,
+    BucketKeysCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand,
     EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, SiteDomainsCommand,
     SitesCommand, UrlCommand,
 };
@@ -116,6 +117,15 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             db::password(&name, &secret.functions, &secret.secret_name, context)
         }
         Command::Db(DbCommand::Delete { name, yes }) => db::delete(&name, yes, context),
+        Command::Caches(CachesCommand::Create { name, secret }) => {
+            caches::create(&name, &secret.functions, &secret.secret_name, context)
+        }
+        Command::Caches(CachesCommand::List) => caches::list(context),
+        Command::Caches(CachesCommand::Get { name }) => caches::get(&name, context),
+        Command::Caches(CachesCommand::Password { name, secret }) => {
+            caches::password(&name, &secret.functions, &secret.secret_name, context)
+        }
+        Command::Caches(CachesCommand::Delete { name, yes }) => caches::delete(&name, yes, context),
         Command::Sites(SitesCommand::Deploy { bucket, folder, spa, no_spa, index_document, error_document, keep }) => {
             let options = sites::DeployOptions {
                 single_page_app: if spa {

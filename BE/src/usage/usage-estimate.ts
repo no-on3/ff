@@ -1,5 +1,5 @@
 import { AccountEstimate } from '../billing/pricing.service';
-import { BucketMonth, DatabaseMonth, MonthlyUsageView, QueueMonth, UsageMonth } from './usage.dto';
+import { BucketMonth, CacheMonth, DatabaseMonth, MonthlyUsageView, QueueMonth, UsageMonth } from './usage.dto';
 
 const NO_CALLS = { requests: 0, billedMs: 0, gbSeconds: '0', throttled: 0, platformErrors: 0, lost: 0 };
 
@@ -12,7 +12,7 @@ export function unlisted(month: UsageMonth, estimate: AccountEstimate | null): s
 
 /**
  * The month's usage with its estimated cost (P-30): each function's, each
- * database's, each bucket's and each queue's, before the free tier, and the
+ * database's, each bucket's, each queue's and each cache's, before the free tier, and the
  * account's estimate, each amount rounded once to the currency's minor unit.
  * `names` names the unlisted functions that still exist; the others were
  * deleted.
@@ -24,6 +24,7 @@ export function withEstimate(
   databases: DatabaseMonth[] = [],
   buckets: BucketMonth[] = [],
   queues: QueueMonth[] = [],
+  caches: CacheMonth[] = [],
 ): MonthlyUsageView {
   if (!estimate) {
     return {
@@ -32,6 +33,7 @@ export function withEstimate(
       databases: databases.map((database) => ({ ...database, cost: null })),
       buckets: buckets.map((bucket) => ({ ...bucket, cost: null })),
       queues: queues.map((queue) => ({ ...queue, cost: null })),
+      caches: caches.map((cache) => ({ ...cache, cost: null })),
       estimate: null,
     };
   }
@@ -53,6 +55,7 @@ export function withEstimate(
     databases: databases.map((database) => ({ ...database, cost: stored(database.databaseId) })),
     buckets: buckets.map((bucket) => ({ ...bucket, cost: stored(bucket.bucketId) })),
     queues: queues.map((queue) => ({ ...queue, cost: stored(queue.queueId) })),
+    caches: caches.map((cache) => ({ ...cache, cost: stored(cache.cacheId) })),
     estimate: {
       currency: estimate.currency,
       usage: estimate.usage.toFixed(places),

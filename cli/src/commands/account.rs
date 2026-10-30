@@ -157,6 +157,9 @@ struct Usage {
     /// Absent from an API before customers' queues.
     #[serde(default)]
     queues: Vec<QueueUsage>,
+    /// Absent from an API before customers' caches.
+    #[serde(default)]
+    caches: Vec<CacheUsage>,
     totals: Amounts,
     estimate: Option<Estimate>,
 }
@@ -196,6 +199,18 @@ struct QueueUsage {
     requests: u64,
     messages_sent: u64,
     messages_received: u64,
+    cost: Option<String>,
+}
+
+/// A cache's month, as its hourly measures counted it: its memory by the hour, as ElastiCache bills a node.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheUsage {
+    name: String,
+    deleted: bool,
+    hours: u32,
+    memory_mb: u32,
+    gb_hours: String,
     cost: Option<String>,
 }
 
@@ -333,8 +348,27 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
                 .collect();
             format!("\n{}", table(&["QUEUE", "REQUESTS", "SENT", "RECEIVED", "COST"], &rows))
         };
+        // As ElastiCache bills a node: its memory by the hour, whatever its keys use.
+        let caches = if usage.caches.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .caches
+                .iter()
+                .map(|cache| {
+                    vec![
+                        if cache.deleted { format!("{} (deleted)", cache.name) } else { cache.name.clone() },
+                        format!("{} MB", cache.memory_mb),
+                        cache.hours.to_string(),
+                        cache.gb_hours.clone(),
+                        cache.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["CACHE", "MEMORY", "HOURS", "GB-HOURS", "COST"], &rows))
+        };
         format!(
-            "{}\n{}{databases}{buckets}{queues}\n{estimate}",
+            "{}\n{}{databases}{buckets}{queues}{caches}\n{estimate}",
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )

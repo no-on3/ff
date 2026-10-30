@@ -189,6 +189,10 @@ pub enum Command {
     #[command(subcommand)]
     Db(DbCommand),
 
+    /// The account's caches, Valkey as AWS ElastiCache gives it
+    #[command(subcommand)]
+    Caches(CachesCommand),
+
     /// The account's buckets, as AWS S3 gives them, and its access keys to them and to its queues
     #[command(subcommand)]
     Buckets(BucketsCommand),
@@ -584,6 +588,46 @@ pub enum DbCommand {
     /// Delete a database and its user, with its data
     Delete {
         /// The database's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CachesCommand {
+    /// Make a cache: its address, with its password, printed this once
+    Create {
+        /// Its name: lower-case letters, digits and hyphens, as AWS ElastiCache names its clusters
+        name: String,
+
+        #[command(flatten)]
+        secret: CacheSecretFor,
+    },
+
+    /// List the account's caches: their status, memory and connections now
+    List,
+
+    /// Show a cache: how to reach it, its memory and connections now
+    Get {
+        /// The cache's name
+        name: String,
+    },
+
+    /// Give a cache a new password: its address printed this once; the old one logs no new connection in
+    Password {
+        /// The cache's name
+        name: String,
+
+        #[command(flatten)]
+        secret: CacheSecretFor,
+    },
+
+    /// Delete a cache, with its keys
+    Delete {
+        /// The cache's name
         name: String,
 
         /// Don't ask first: a script must say it
@@ -1074,6 +1118,18 @@ pub struct SecretFor {
 
     /// The secret's name, which the function reads from its environment
     #[arg(long, default_value = "DATABASE_URL", value_name = "NAME")]
+    pub secret_name: String,
+}
+
+/// Where a cache's address goes besides the terminal: functions' secrets.
+#[derive(Args)]
+pub struct CacheSecretFor {
+    /// Set the address as a secret of this function too, which rolls it out; again for each function
+    #[arg(long = "secret-for", value_name = "FUNCTION")]
+    pub functions: Vec<String>,
+
+    /// The secret's name, which the function reads from its environment
+    #[arg(long, default_value = "REDIS_URL", value_name = "NAME")]
     pub secret_name: String,
 }
 

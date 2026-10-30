@@ -4,6 +4,7 @@ import { formatWhen } from '../lib/accounts';
 import {
   AlarmForm,
   BILLING_METRICS,
+  CACHE_METRICS,
   COMPARISONS,
   DATABASE_METRICS,
   MAX_EVALUATION_PERIODS,
@@ -25,7 +26,7 @@ import {
 } from '../lib/alarms';
 import { apiErrorMessage } from '../lib/functions';
 import { can } from '../lib/session';
-import { Alarm, AlarmState, Bucket, Database, Function, Queue, alarmsApi, bucketsApi, databasesApi, functionsApi, queuesApi } from '../services/api';
+import { Alarm, AlarmState, Bucket, Cache, Database, Function, Queue, alarmsApi, bucketsApi, cachesApi, databasesApi, functionsApi, queuesApi } from '../services/api';
 import StatusPill from './StatusPill';
 import { useSession } from '../session/session';
 
@@ -55,14 +56,16 @@ const AlarmEditor: React.FC<{
   databases: Database[];
   buckets: Bucket[];
   queues: Queue[];
+  caches: Cache[];
   onDone(saved: boolean): void;
-}> = ({ editing, initial, functions, databases, buckets, queues, onDone }) => {
+}> = ({ editing, initial, functions, databases, buckets, queues, caches, onDone }) => {
   const [form, setForm] = useState<AlarmForm>(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const problem = formProblem(form);
   const billing = BILLING_METRICS.includes(form.metric);
-  const hourly = DATABASE_METRICS.includes(form.metric);
+  // A database's metrics and a cache's have a point an hour.
+  const hourly = DATABASE_METRICS.includes(form.metric) ? 'database' : CACHE_METRICS.includes(form.metric) ? 'cache' : null;
   const set = (change: Partial<AlarmForm>) => setForm({ ...form, ...change });
 
   const save = async (event: React.FormEvent) => {
@@ -111,11 +114,16 @@ const AlarmEditor: React.FC<{
                 The queue {queue.name}
               </option>
             ))}
+            {caches.map((cache) => (
+              <option key={cache.name} value={`cache:${cache.name}`}>
+                The cache {cache.name}
+              </option>
+            ))}
           </select>
         </Field>
         <Field id="alarm-metric" label="Metric">
           <select id="alarm-metric" className="input" value={form.metric} onChange={(e) => setForm(withMetric(form, e.target.value as Metric))}>
-            {metricsFor(form.functionId, form.databaseId, form.bucketName, form.queueName).map((metric) => (
+            {metricsFor(form.functionId, form.databaseId, form.bucketName, form.queueName, form.cacheName).map((metric) => (
               <option key={metric} value={metric}>
                 {metric}
               </option>
@@ -146,8 +154,8 @@ const AlarmEditor: React.FC<{
         </Field>
         {!billing && (
           <>
-            <Field id="alarm-period" label="Period" hint={hourly ? "A database's metrics have a point an hour" : undefined}>
-              <select id="alarm-period" className="input" value={form.period} disabled={hourly} onChange={(e) => set({ period: Number(e.target.value) })}>
+            <Field id="alarm-period" label="Period" hint={hourly ? `A ${hourly}'s metrics have a point an hour` : undefined}>
+              <select id="alarm-period" className="input" value={form.period} disabled={hourly !== null} onChange={(e) => set({ period: Number(e.target.value) })}>
                 {PERIODS.map((p) => (
                   <option key={p.value} value={p.value}>
                     {p.label}
@@ -220,6 +228,7 @@ const Alarms: React.FC = () => {
   const [databases, setDatabases] = useState<Database[]>([]);
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [queues, setQueues] = useState<Queue[]>([]);
+  const [caches, setCaches] = useState<Cache[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ alarm: Alarm | null; form: AlarmForm } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -251,21 +260,27 @@ const Alarms: React.FC = () => {
       .list()
       .then(({ data }) => setQueues(data))
       .catch(() => setQueues([]));
+    cachesApi
+      .list()
+      .then(({ data }) => setCaches(data))
+      .catch(() => setCaches([]));
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
   }, [load, account?.id]);
 
-  // A function's page, a database's, a bucket's and a queue's link here to make an alarm on it.
+  // A function's page, a database's, a bucket's, a queue's and the caches' link here to make an alarm on it.
   const forFunction = params.get('function');
   const forDatabase = params.get('database');
   const forBucket = params.get('bucket');
   const forQueue = params.get('queue');
+  const forCache = params.get('cache');
   useEffect(() => {
     if (forFunction) setEditing({ alarm: null, form: emptyForm(forFunction) });
     else if (forDatabase) setEditing({ alarm: null, form: emptyForm('', forDatabase) });
     else if (forBucket) setEditing({ alarm: null, form: emptyForm('', '', forBucket) });
     else if (forQueue) setEditing({ alarm: null, form: emptyForm('', '', '', forQueue) });
-  }, [forFunction, forDatabase, forBucket, forQueue]);
+    else if (forCache) setEditing({ alarm: null, form: emptyForm('', '', '', '', forCache) });
+  }, [forFunction, forDatabase, forBucket, forQueue, forCache]);
 
   if (!account) return null;
   const writer = account.status === 'active' && can(account.role, 'change functions');
@@ -274,7 +289,7 @@ const Alarms: React.FC = () => {
 
   const done = async (saved: boolean) => {
     setEditing(null);
-    if (forFunction || forDatabase || forBucket || forQueue) setParams({});
+    if (forFunction || forDatabase || forBucket || forQueue || forCache) setParams({});
     if (saved) await load();
   };
   const remove = async (id: string) => {
@@ -298,8 +313,8 @@ const Alarms: React.FC = () => {
         )}
       </div>
       <p className="mb-6 text-gray-600">
-        Each alarm watches a metric of a function, of a database, of a bucket, of a queue or of the account, or its money, and is judged every minute, a database's
-        hour by hour.
+        Each alarm watches a metric of a function, of a database, of a bucket, of a queue, of a cache or of the account, or its money, and is judged every minute, a
+        database's and a cache's hour by hour.
         Going into alarm, and out of it, it tells the account's owners and its webhooks.
       </p>
       {editing && (
@@ -311,6 +326,7 @@ const Alarms: React.FC = () => {
           databases={databases}
           buckets={buckets}
           queues={queues}
+          caches={caches}
           onDone={done}
         />
       )}
@@ -345,6 +361,10 @@ const Alarms: React.FC = () => {
                   ) : alarm.queueName ? (
                     <>
                       on the queue <Link to={`/queues/${alarm.queueName}`}>{alarm.queueName}</Link>
+                    </>
+                  ) : alarm.cacheName ? (
+                    <>
+                      on the cache <Link to="/caches">{alarm.cacheName}</Link>
                     </>
                   ) : (
                     'on the account'

@@ -5,14 +5,28 @@
  * evaluator runs against PostgreSQL in alarms.db.spec.ts.
  */
 import { alarmMail } from './alarm-mail';
-import { AlarmRule, alarmProblem, bucketDatapointsOf, databaseDatapointsOf, datapointsOf, evaluate, evaluationWindow, notifies, queueDatapointsOf, siteDatapointsOf, stateReason } from './alarm-rules';
-import { bucketMetricsView, databaseMetricsView, queueMetricsView, siteMetricsView, type MetricsView } from '../metrics/customer-metrics';
+import {
+  AlarmRule,
+  alarmProblem,
+  bucketDatapointsOf,
+  cacheDatapointsOf,
+  databaseDatapointsOf,
+  datapointsOf,
+  evaluate,
+  evaluationWindow,
+  notifies,
+  queueDatapointsOf,
+  siteDatapointsOf,
+  stateReason,
+} from './alarm-rules';
+import { bucketMetricsView, cacheMetricsView, databaseMetricsView, queueMetricsView, siteMetricsView, type MetricsView } from '../metrics/customer-metrics';
 
 const RULE: AlarmRule = {
   functionId: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
   databaseId: null,
   bucketId: null,
   queueId: null,
+  cacheId: null,
   metric: 'Errors',
   statistic: 'Sum',
   period: 60,
@@ -211,6 +225,57 @@ describe("an alarm on a customer's queue", () => {
   });
 });
 
+describe("an alarm on a customer's cache", () => {
+  const cacheId = '9b2e4c1a-7d3f-4a6b-8c5e-0f1a2b3c4d5e';
+  const memory = { ...RULE, functionId: null, cacheId, metric: 'BytesUsedForCache' as const, statistic: 'Maximum' as const, period: 3600, evaluationPeriods: 1, datapointsToAlarm: 1 };
+
+  it('names the cache, judges hours, a day at most, and takes the Maximum or Average of its memory and connections, the Sum of its counts', () => {
+    expect([
+      alarmProblem(memory),
+      alarmProblem({ ...memory, metric: 'CurrConnections', statistic: 'Average' }),
+      alarmProblem({ ...memory, metric: 'Evictions', statistic: 'Sum', evaluationPeriods: 24 }),
+    ]).toEqual([null, null, null]);
+    expect([
+      alarmProblem({ ...memory, cacheId: null }),
+      alarmProblem({ ...memory, functionId: RULE.functionId }),
+      alarmProblem({ ...memory, period: 300 }),
+      alarmProblem({ ...memory, metric: 'CacheHits' }),
+      alarmProblem({ ...memory, evaluationPeriods: 25 }),
+      alarmProblem({ ...RULE, cacheId }),
+    ]).toEqual([
+      "BytesUsedForCache is a cache's: the alarm names a cacheName, and no function, database, bucket or queue",
+      "BytesUsedForCache is a cache's: the alarm names a cacheName, and no function, database, bucket or queue",
+      "A cache's metrics have a point an hour: period must be 3600",
+      'CacheHits has the statistic Sum, not Maximum',
+      '25 periods of 3600 s look back more than a day: take fewer periods, or shorter ones',
+      "A cacheName goes with a cache's metrics only: BytesUsedForCache, CurrConnections, CacheHits, CacheMisses, Evictions",
+    ]);
+  });
+
+  it("reads its datapoints from the cache's hourly metrics, none for an hour it wasn't sampled in", () => {
+    const window = { start: new Date('2026-10-30T07:00:00Z'), end: new Date('2026-10-30T10:00:00Z'), period: 3600 as const };
+    const eight = Date.parse('2026-10-30T08:00:00Z') / 1000;
+    const view = cacheMetricsView(window, [
+      { bucket: eight, bytesMaximum: 1_258_291, bytesAverage: 1_000_000.4, connectionsMaximum: 3, connectionsAverage: 2.5, hits: 900, misses: 100, evictions: 0 },
+    ]);
+
+    expect([
+      cacheDatapointsOf(view, 'BytesUsedForCache', 'Maximum'),
+      cacheDatapointsOf(view, 'BytesUsedForCache', 'Average'),
+      cacheDatapointsOf(view, 'CurrConnections', 'Average'),
+      cacheDatapointsOf(view, 'CacheHits', 'Sum'),
+      cacheDatapointsOf(view, 'Evictions', 'Sum'),
+    ]).toEqual([
+      [null, 1_258_291, null],
+      [null, 1_000_000, null],
+      [null, 2.5, null],
+      [null, 900, null],
+      [null, 0, null],
+    ]);
+    expect(() => cacheDatapointsOf(view, 'Errors', 'Sum')).toThrow("Errors isn't a cache's metric");
+  });
+});
+
 describe('the periods an alarm judges', () => {
   it('are the last N whole periods over for at least the settling time, by UTC', () => {
     const now = new Date('2026-10-20T10:07:30Z');
@@ -367,6 +432,15 @@ describe("an alarm's e-mail", () => {
     expect(alarmMail(waiting, 'en').text.split('\n')[0]).toBe('Your alarm "Dead letters" on the queue "orders-dlq" of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
     expect(alarmMail(waiting, 'fr').text.split('\n')[0]).toBe(
       "Votre alarme « Dead letters » sur la file d'attente « orders-dlq » du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.",
+    );
+  });
+
+  it("names a cache's alarm by the cache, in both languages", () => {
+    const full = { ...change, alarm: { ...RULE, metric: 'BytesUsedForCache' as const, statistic: 'Maximum' as const, period: 3600, name: 'Sessions memory' }, functionName: null, cacheName: 'sessions' };
+
+    expect(alarmMail(full, 'en').text.split('\n')[0]).toBe('Your alarm "Sessions memory" on the cache "sessions" of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
+    expect(alarmMail(full, 'fr').text.split('\n')[0]).toBe(
+      'Votre alarme « Sessions memory » sur le cache « sessions » du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.',
     );
   });
 

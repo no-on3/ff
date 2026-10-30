@@ -3,16 +3,16 @@ import { bigintColumn } from '../database/bigint-column';
 import { PriceBook } from './price-book.entity';
 
 /**
- * An hour of one customer's database, bucket or queue, as the rater takes it
- * (ADR 0008, ADR 0009, ADR 0010), beside usage_hourly's functions: its size
- * sampled in the hour, in byte-hours, a bucket's requests by S3's two
- * classes, a queue's as SQS bills them; with its name then, which the
- * statement shows. Written once, never changed; it outlives its database,
- * bucket or queue.
+ * An hour of one customer's database, bucket, queue or cache, as the rater
+ * takes it (ADR 0008, ADR 0009, ADR 0010, ADR 0013), beside usage_hourly's
+ * functions: its size sampled in the hour, in byte-hours, a cache's its
+ * memory; a bucket's requests by S3's two classes, a queue's as SQS bills
+ * them; with its name then, which the statement shows. Written once, never
+ * changed; it outlives its database, bucket, queue or cache.
  */
 @Entity('resource_usage_hourly')
 @Index(['hour'])
-@Check(`"kind" IN ('database', 'bucket', 'queue')`)
+@Check(`"kind" IN ('database', 'bucket', 'queue', 'cache')`)
 export class ResourceUsageHourly {
   @PrimaryColumn({ type: 'char', length: 12 })
   accountId: string;
@@ -25,7 +25,7 @@ export class ResourceUsageHourly {
   resourceId: string;
 
   @Column({ type: 'text' })
-  kind: 'database' | 'bucket' | 'queue';
+  kind: 'database' | 'bucket' | 'queue' | 'cache';
 
   /** Its name in the account when it was sampled. */
   @Column({ type: 'text' })

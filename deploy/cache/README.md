@@ -7,7 +7,7 @@ Customers' caches, Valkey as ElastiCache runs it, live on a server of their own,
 `docker build -t ff-cache deploy/cache`:
 - **Valkey 9.1.2** (`valkey/valkey:9.1.2-alpine3.24`), the version step 4's spike measured (ADR 0013).
 - **FF's agent,** `agent.mjs`, Node.js's standard library alone: it keeps each cache's description in `/var/lib/ff-cache/caches/<name>/`, writes its settings and its ACL file, starts its process as the cache's own user (`su-exec`), starts it again when it stops, and answers the backend's API on port 6390, over HTTPS with the server's certificate, to a bearer token whose SHA-256 alone it has:
-  - `GET /caches`, `GET /caches/<name>`: each cache's port, memory and switch, and its measures now (its memory used, connections, hits, misses, evictions), never its password's hash;
+  - `GET /caches`, `GET /caches/<name>`: each cache's port, memory and switch, and its measures now (its memory used, connections, hits, misses, evictions, and how long its process has run), never its password's hash; the backend reads them once an hour, which bills each cache's memory and gives its metrics;
   - `PUT /caches/<name>` with `{"port", "memoryMb", "passwordSha256", "enabled"}`: made, or changed; a new port or memory starts its process again, its keys gone, as a node's change does; a new password, or the switch, applies at once, the switch ending the customer's connections;
   - `DELETE /caches/<name>`: its process stopped, its folder deleted;
   - `GET /health`.

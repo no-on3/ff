@@ -20,6 +20,7 @@ import { ScratchDatabase, createScratchDatabase } from '../database/scratch-data
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
+import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
 import { Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
 import { BETA_LIMITS } from '../plans/test-fixtures';
@@ -30,8 +31,8 @@ const OPERATOR = { id: 'kc-op-1', email: 'operator@ff.test' };
 /** Next year: whatever day the tests run, its months are in the future. */
 const Y = new Date().getUTCFullYear() + 1;
 const NOW = new Date(`${Y}-02-10T10:15:00Z`);
-/** The migrations' last book, the first one with customers' databases', buckets' and queues' prices. */
-const LATEST = withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)) as unknown as typeof FIRST_PRICE_BOOK;
+/** The migrations' last book, the first one with customers' databases', buckets', queues' and caches' prices. */
+const LATEST = withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))) as unknown as typeof FIRST_PRICE_BOOK;
 /** That book, its on-demand duration price doubled: a draft. */
 const DOUBLED = {
   ...LATEST,
@@ -120,7 +121,7 @@ run('price books and plans, for operators (L2, P-73)', () => {
       );
     });
 
-    it("is refused when it lacks prices of customers' databases, buckets and queues that the book before it has, each named", async () => {
+    it("is refused when it lacks prices of customers' databases, buckets, queues and caches that the book before it has, each named", async () => {
       const refused = await prices.create(new Date(`${Y + 1}-05-01T00:00:00Z`), { ...FIRST_PRICE_BOOK, source: { kind: 'manual' } }, OPERATOR, 'x y z', NOW).catch((error) => error);
 
       expect((refused as BadRequestException).getResponse()).toMatchObject({
@@ -131,6 +132,7 @@ run('price books and plans, for operators (L2, P-73)', () => {
           'prices.requestsTier1PerThousand: the book before this one has it, so this one must too',
           'prices.requestsTier2PerThousand: the book before this one has it, so this one must too',
           'prices.queueRequestsPerMillion: the book before this one has it, so this one must too',
+          'prices.cacheGbHour: the book before this one has it, so this one must too',
           'freeTier.databaseStorageGbMonths: the book before this one has it, so this one must too',
           'freeTier.bucketStorageGbMonths: the book before this one has it, so this one must too',
           'freeTier.requestsTier1: the book before this one has it, so this one must too',

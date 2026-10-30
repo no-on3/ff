@@ -2,8 +2,9 @@
  * L2: an account's usage in a month (client-readiness plan, P-22) against a
  * real PostgreSQL server, in a scratch database that is dropped after: the
  * totals are the raw records' own sums, exactly, the month is the UTC
- * calendar's, and only the account's records count; its databases and buckets
- * from their hourly samples, its buckets' and queues' requests from their counts.
+ * calendar's, and only the account's records count; its databases, buckets
+ * and caches from their hourly samples, its buckets' and queues' requests from
+ * their counts.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -46,7 +47,7 @@ run("an account's usage in a month (L2, P-22)", () => {
       await db.dataSource.getRepository(Account).save({ id, name: `Account ${id}`, planId: 'beta', status: AccountStatus.ACTIVE });
     }
     for (const month of ['2026-09-01', '2026-10-01', '2026-11-01']) {
-      for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts']) await query(`SELECT ff_ensure_month_partition($1, $2)`, [table, month]);
+      for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts', 'cache_samples']) await query(`SELECT ff_ensure_month_partition($1, $2)`, [table, month]);
     }
     kept = await db.dataSource.getRepository(Function).save({ name: 'new', accountId: A, runtime: Runtime.NODEJS, code: 'x', memory: 256, timeout: 5 });
     const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
@@ -276,6 +277,34 @@ run("an account's usage in a month (L2, P-22)", () => {
       { queueId: drained, name: 'drained', deleted: true, requests: 0, messagesSent: 0, messagesReceived: 0 },
     ]);
     expect(await usage.monthlyQueues(A, '2026-12')).toEqual([]);
+  });
+
+  it("measures each of the account's caches in the month: its hours, its memory at its latest sample, its GB-hours as ElastiCache bills a node, the most first, a deleted one's by its name then", async () => {
+    const sampled = (accountId: string, cacheId: string, name: string, hour: string, memoryMb: number) =>
+      query(
+        `INSERT INTO cache_samples (cache_id, hour, account_id, name, memory_mb, bytes_used, connections, hits, misses, evictions, process_started_at)
+         VALUES ($1, $2, $3, $4, $5, 1000, 1, 0, 0, 0, $2)`,
+        [cacheId, hour, accountId, name, memoryMb],
+      );
+    const [{ id: sessions }] = await query<Array<{ id: string }>>(
+      `INSERT INTO caches (account_id, name, server_name, port, memory_mb, status, password_sha256) VALUES ($1, 'sessions', 'fc-000000000000000000000001', 6400, 128, 'active', repeat('0', 64)) RETURNING id`,
+      [A],
+    );
+    const old = '1e2f3a4b-5c6d-4e7f-8a9b-0c1d2e3f4a5b'; // deleted since
+    // sessions: 64 MB the month's first two hours, 128 MB its last, its plan's memory raised; November's hour isn't October's.
+    await sampled(A, sessions, 'sessions', '2026-10-01T00:00:00Z', 64);
+    await sampled(A, sessions, 'sessions', '2026-10-01T01:00:00Z', 64);
+    await sampled(A, sessions, 'sessions', '2026-10-31T23:00:00Z', 128);
+    await sampled(A, sessions, 'sessions', '2026-11-01T00:00:00Z', 128);
+    await sampled(A, old, 'rates', '2026-10-15T12:00:00Z', 64);
+    await sampled(B, '2f3a4b5c-6d7e-4f8a-9b0c-1d2e3f4a5b6c', 'b-cache', '2026-10-05T00:00:00Z', 64); // account B's
+
+    expect(await usage.monthlyCaches(A, '2026-10')).toEqual([
+      // 64 + 64 + 128 MB for an hour each: 0.25 GB-hours, over October's 744 hours 0.000336 GB-months.
+      { cacheId: sessions, name: 'sessions', deleted: false, hours: 3, memoryMb: 128, gbHours: '0.25', gbMonths: '0.000336' },
+      { cacheId: old, name: 'rates', deleted: true, hours: 1, memoryMb: 64, gbHours: '0.0625', gbMonths: '0.000084' },
+    ]);
+    expect(await usage.monthlyCaches(A, '2026-12')).toEqual([]);
   });
 
   it("counts only the account's own records, and each month by the UTC calendar", async () => {

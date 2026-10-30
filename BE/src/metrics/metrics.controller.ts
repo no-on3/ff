@@ -3,8 +3,8 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireScope } from '../auth/route-rules';
 import { CustomerMetricsService } from './customer-metrics.service';
-import { DATABASE_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
-import { BucketMetricsView, DatabaseMetricsView, MetricsQuery, MetricsView, QueueMetricsView, SiteMetricsView } from './dto/metrics-query.dto';
+import { CACHE_PERIOD, DATABASE_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
+import { BucketMetricsView, CacheMetricsView, DatabaseMetricsView, MetricsQuery, MetricsView, QueueMetricsView, SiteMetricsView } from './dto/metrics-query.dto';
 
 /** A window the request names, or 400 saying why it can't be. */
 function windowOf(query: MetricsQuery): MetricsWindow {
@@ -17,8 +17,10 @@ function windowOf(query: MetricsQuery): MetricsWindow {
  * The account's metrics, as CloudWatch names Lambda's, from its usage records
  * and capacity samples: a function's, or all its functions' together; a
  * database's, as CloudWatch names RDS's, from its hourly samples; a bucket's,
- * as CloudWatch names S3's, from its hourly samples and its requests; and a
- * queue's, as CloudWatch names SQS's, from its minute samples and its requests.
+ * as CloudWatch names S3's, from its hourly samples and its requests; a
+ * queue's, as CloudWatch names SQS's, from its minute samples and its
+ * requests; and a cache's, as CloudWatch names ElastiCache's, from its hourly
+ * samples.
  */
 @ApiTags('metrics')
 @Controller()
@@ -52,6 +54,19 @@ export class MetricsController {
   forDatabase(@Param('id', ParseUUIDPipe) id: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
     if (query.period !== undefined && query.period !== DATABASE_PERIOD) throw new BadRequestException(`A database's metrics have a point an hour: period must be ${DATABASE_PERIOD}`);
     return this.metrics.forDatabase(principal.accountId, id, windowOf({ ...query, period: DATABASE_PERIOD }));
+  }
+
+  @Get('caches/:name/metrics')
+  @RequireScope('metrics:read')
+  @ApiOperation({
+    summary: "A cache's BytesUsedForCache, CurrConnections, CacheHits, CacheMisses and Evictions, as CloudWatch names ElastiCache's: a point an hour",
+    description: "From its hourly samples: what its keys use and its connections, each hour; its hits, misses and evictions in the hour; null for an hour it was not sampled in. The period is an hour, 3600 s, its default here.",
+  })
+  @ApiResponse({ status: 200, type: CacheMetricsView })
+  @ApiResponse({ status: 404, description: 'No such cache in the account' })
+  forCache(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
+    if (query.period !== undefined && query.period !== CACHE_PERIOD) throw new BadRequestException(`A cache's metrics have a point an hour: period must be ${CACHE_PERIOD}`);
+    return this.metrics.forCache(principal.accountId, name, windowOf({ ...query, period: CACHE_PERIOD }));
   }
 
   @Get('buckets/:name/metrics')

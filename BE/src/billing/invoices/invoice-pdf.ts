@@ -195,6 +195,7 @@ function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller
   const databases = statement.resources.filter((resource) => resource.kind === 'database');
   const buckets = statement.resources.filter((resource) => resource.kind === 'bucket');
   const queues = statement.resources.filter((resource) => resource.kind === 'queue');
+  const caches = statement.resources.filter((resource) => resource.kind === 'cache');
   if (statement.functions.length > 0 || statement.resources.length === 0) {
     table(
       pages,
@@ -244,6 +245,16 @@ function statementPages(pages: Pages, statement: Statement, buyer: Buyer, seller
       pages,
       [{ title: "File d'attente", x: PAGE.margin, width: 300 }, { title: 'Requêtes', x: 360, width: 95, right: true }, amount],
       queues.map((queue) => [queue.name, groupDigits(queue.requests.toString()), money(queue.amountMinor)]),
+    );
+  }
+  if (caches.length > 0) {
+    if (statement.functions.length > 0 || databases.length > 0 || buckets.length > 0 || queues.length > 0) pages.y += 10;
+    pages.room(50);
+    // As ElastiCache bills a node: its memory by the hour, whatever its keys use.
+    table(
+      pages,
+      [{ title: 'Cache', x: PAGE.margin, width: 220 }, { title: 'Heures', x: 275, width: 80, right: true }, { title: 'Go-heures', x: 360, width: 95, right: true }, amount],
+      caches.map((cache) => [cache.name, groupDigits(cache.hours.toString()), frenchDecimal(cache.gbHours), money(cache.amountMinor)]),
     );
   }
   pages.room(110);

@@ -695,7 +695,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b DELETE /caches/l5-sessions >/dev/null
       check "  ... and which B deletes, A's own untouched" "204 a" "$(status) $(cache_cli "$cache_url_a" GET l5)"
       ;;
-    "GET /caches/{name}" | "DELETE /caches/{name}" | "POST /caches/{name}/password")
+    "GET /caches/{name}" | "DELETE /caches/{name}" | "POST /caches/{name}/password" | "GET /caches/{name}/metrics")
       as_b "$method" "${template//\{name\}/l5-sessions}" >/dev/null
       check "$route: B gets 404 for A's cache" "404 The account has no cache l5-sessions" "$(status) $(message)"
       cache_now="$(as_a GET /caches/l5-sessions)"
@@ -744,6 +744,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... nor A's bucket" "404 The account has no bucket l5-photos-a" "$(status) $(message)"
       as_b POST /alarms '{"name": "l5", "queueName": "l5-orders-a", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
       check "  ... nor A's queue" "404 The account has no queue l5-orders-a" "$(status) $(message)"
+      as_b POST /alarms '{"name": "l5", "cacheName": "l5-sessions", "metric": "BytesUsedForCache", "statistic": "Maximum", "period": 3600, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor A's cache" "404 The account has no cache l5-sessions" "$(status) $(message)"
       as_b POST /alarms "$(alarm_body)" >/dev/null
       check "  ... but makes its own account's alarm" 201 "$(status)"
       ;;
@@ -1236,7 +1238,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 DELETE /caches/l5-one >/dev/null
       check "  ... and which account 2 deletes, account 1's own untouched" "204 one" "$(status) $(cache_cli "$cache_conn_1" GET l5)"
       ;;
-    "GET /caches/{name}" | "DELETE /caches/{name}" | "POST /caches/{name}/password")
+    "GET /caches/{name}" | "DELETE /caches/{name}" | "POST /caches/{name}/password" | "GET /caches/{name}/metrics")
       as_user_2 "$method" "${template//\{name\}/l5-one}" >/dev/null
       check "$route: account 2 gets 404 for account 1's cache" "404 The account has no cache l5-one" "$(status) $(message)"
       cache_now="$(as_user_1 GET /caches/l5-one)"
@@ -1287,6 +1289,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... nor account 1's bucket" "404 The account has no bucket l5-photos-1" "$(status) $(message)"
       as_user_2 POST /alarms '{"name": "l5", "queueName": "l5-orders-1", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
       check "  ... nor account 1's queue" "404 The account has no queue l5-orders-1" "$(status) $(message)"
+      as_user_2 POST /alarms '{"name": "l5", "cacheName": "l5-one", "metric": "BytesUsedForCache", "statistic": "Maximum", "period": 3600, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor account 1's cache" "404 The account has no cache l5-one" "$(status) $(message)"
       ;;
     "POST /packages")
       upload_package "$api_oidc" "$work/package-b.zip" -H "Authorization: Bearer $token_2" -H "X-FF-Account: ${account_2:-}" >/dev/null
@@ -1730,8 +1734,8 @@ first_book="$(jq -c '.[0].document' <<<"$books")"
 latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
 with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
-check "a book after one with databases', buckets' and queues' prices is refused without them, each named" \
-  "400 11 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+check "a book after one with databases', buckets', queues' and caches' prices is refused without them, each named" \
+  "400 12 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
 created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
 check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"

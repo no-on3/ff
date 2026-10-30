@@ -19,6 +19,7 @@ import { MIGRATIONS } from '../migrations';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
+import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
@@ -70,6 +71,7 @@ const BUCKET_NOTIFICATIONS = migrationNames.find((name) => name.startsWith('Buck
 const QUEUE_BILLING = migrationNames.find((name) => name.startsWith('QueueBilling')) as string;
 const BUCKET_WEBSITES = migrationNames.find((name) => name.startsWith('BucketWebsites')) as string;
 const DEPLOY_KEYS = migrationNames.find((name) => name.startsWith('DeployKeys')) as string;
+const CACHES = migrationNames.find((name) => name.startsWith('Caches1')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -591,9 +593,10 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
 
+      // The caches' migration after it gives both ElastiCache's SKU too.
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        { valid_from: next, prices: withQueuePrices(current), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'test' },
+        { valid_from: next, prices: withCachePrices(withQueuePrices(current)), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))), created_by: 'test' },
       ]);
       const minute = `date_trunc('minute', now())`;
       await dataSource.query(
@@ -716,6 +719,78 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(await dataSource.query(`SELECT to_regclass('caches') AS t`)).toEqual([{ t: null }]);
       const [{ limits }] = await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`);
       expect([limits.caches, limits.cacheMb]).toEqual([undefined, undefined]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the cache-measures migration samples caches by month, append-only, rates their hours beside the others', lets an alarm watch a cache and go with it, gives books not started yet ElastiCache's SKU, adds its own from next month's first hour, and reverts unless a cache's hour is rated", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CACHES);
+      // As after the queue-billing migration, in a month later than its own: no book starts next month yet.
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      await dataSource.query(`DELETE FROM price_books WHERE valid_from > now()`);
+      const queued = withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK));
+      const [{ id: future }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T00:00:00Z', $1, 'test') RETURNING id`, [
+        JSON.stringify(queued),
+      ]);
+      const [{ prices: current }] = await dataSource.query(`SELECT prices FROM price_books WHERE valid_from <= now() ORDER BY valid_from DESC LIMIT 1`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
+        { valid_from: next, prices: withCachePrices(current), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withCachePrices(queued), created_by: 'test' },
+      ]);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const cache = async (name: string, port: number) =>
+        (
+          await dataSource.query(
+            `INSERT INTO caches (account_id, name, server_name, port, memory_mb, password_sha256, status) VALUES ($1, $2, $3, $4, 64, repeat('0', 64), 'active') RETURNING id`,
+            [ACCOUNT, name, `fc-${String(port).padStart(24, '0')}`, port],
+          )
+        )[0].id as string;
+      const alarm = (cacheId: string | null, metric: string, statistic: string) =>
+        dataSource.query(
+          `INSERT INTO alarms (account_id, cache_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+           VALUES ($1, $2, $3, $3, $4, 3600, 'GreaterThanThreshold', 0, 1, 1, '{"email": true, "webhookUrls": []}')`,
+          [ACCOUNT, cacheId, metric, statistic],
+        );
+      const gone = await cache('gone', 6400);
+      await alarm(gone, 'Evictions', 'Sum');
+      await dataSource.query(`DELETE FROM caches WHERE id = $1`, [gone]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM alarms`)).toEqual([{ n: 0 }]); // it went with its cache
+      const sessions = await cache('sessions', 6401);
+      await dataSource.query(
+        `INSERT INTO cache_samples (cache_id, hour, account_id, name, memory_mb, bytes_used, connections, hits, misses, evictions, process_started_at)
+         VALUES ($1, date_trunc('hour', now()), $2, 'sessions', 64, 1000, 1, 0, 0, 0, now())`,
+        [sessions, ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE cache_samples SET bytes_used = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM cache_samples`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'cache_samples')).toEqual([{ relname: monthPartition('cache_samples', 0) }, { relname: monthPartition('cache_samples', 1) }]);
+      await alarm(sessions, 'BytesUsedForCache', 'Maximum');
+      await alarm(null, 'Errors', 'Sum');
+
+      // Reverted with samples present: the alarms the code before it doesn't know go, the book it made goes, the other loses ElastiCache's SKU.
+      await migrateDownTo(dataSource, CACHES);
+
+      expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Errors' }]);
+      expect(await dataSource.query(`SELECT to_regclass('cache_samples') AS s, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'alarms' AND column_name = 'cache_id') AS a`)).toEqual([
+        { s: null, a: 0 },
+      ]);
+      expect(await dataSource.query(`SELECT id, prices FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([{ id: future, prices: queued }]);
+
+      // Once a cache's hour is rated, it refuses: those are billed records.
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(
+        `INSERT INTO resource_usage_hourly (account_id, hour, resource_id, kind, name, price_book_id, byte_hours, hours, tier1_requests, tier2_requests, requests)
+         VALUES ($1, date_trunc('hour', now()), $2, 'cache', 'sessions', (SELECT id FROM price_books LIMIT 1), 67108864, 1, 0, 0, 0)`,
+        [ACCOUNT, sessions],
+      );
+      await expect(migrateDownTo(dataSource, CACHES)).rejects.toThrow('1 hour(s) of caches were rated: they are billed records, and reverting would drop them');
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -1079,9 +1154,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
       const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
       expect(books).toEqual([
-        // The queues' migration after it gives both SQS's SKU too.
-        { id: expect.any(String), valid_from: next, prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'system' },
-        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'test' },
+        // The queues' and the caches' migrations after it give both SQS's SKU and ElastiCache's too.
+        { id: expect.any(String), valid_from: next, prices: withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))), created_by: 'test' },
       ]);
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -1201,7 +1276,7 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts|queue_samples|async_event_counts)_\d{4}_\d{2}$/; // their partitions, one per month
+      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts|queue_samples|async_event_counts|cache_samples)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
@@ -1211,6 +1286,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'audit_log',
         'bucket_samples',
         'buckets',
+        'cache_samples',
         'caches',
         'capacity_samples',
         'currencies',
@@ -1263,6 +1339,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         monthPartition('async_event_counts', 1),
         monthPartition('bucket_samples', 0),
         monthPartition('bucket_samples', 1),
+        monthPartition('cache_samples', 0),
+        monthPartition('cache_samples', 1),
         monthPartition('capacity_samples', 0),
         monthPartition('capacity_samples', 1),
         monthPartition('database_samples', 0),

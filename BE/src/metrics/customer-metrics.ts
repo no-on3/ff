@@ -206,6 +206,75 @@ export function databaseMetricsView(window: MetricsWindow, rows: DatabaseHourRow
   return view;
 }
 
+/** A cache's metrics have a point an hour: its samples' (ADR 0013). */
+export const CACHE_PERIOD = 3600;
+
+/**
+ * A customer's cache's metrics, as CloudWatch names ElastiCache's: what its
+ * keys use (BytesUsedForCache) and its connections (CurrConnections), from
+ * its hour's sample; and its hits, misses and evictions in the hour
+ * (CacheHits, CacheMisses, Evictions), from its sample to the next hour's,
+ * all of the next one's own when its process started again between them. An
+ * hour without a sample has none: null; its counts are null too without the
+ * next hour's, as in the hour now.
+ */
+export interface CacheMetricsView {
+  period: number;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: {
+    BytesUsedForCache: { Maximum: Array<number | null>; Average: Array<number | null> };
+    CurrConnections: { Maximum: Array<number | null>; Average: Array<number | null> };
+    CacheHits: { Sum: Array<number | null> };
+    CacheMisses: { Sum: Array<number | null> };
+    Evictions: { Sum: Array<number | null> };
+  };
+}
+
+/** An hour's samples of a cache, as the query gives them: their most and their mean, and the hour's counts, null without the next hour's sample. */
+export interface CacheHourRow {
+  bucket: number;
+  bytesMaximum: number;
+  bytesAverage: number;
+  connectionsMaximum: number;
+  connectionsAverage: number;
+  hits: number | null;
+  misses: number | null;
+  evictions: number | null;
+}
+
+/** The series of the window, a point an hour, null where the cache wasn't sampled. */
+export function cacheMetricsView(window: MetricsWindow, rows: CacheHourRow[]): CacheMetricsView {
+  const byBucket = new Map(rows.map((row) => [row.bucket, row]));
+  const view: CacheMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: {
+      BytesUsedForCache: { Maximum: [], Average: [] },
+      CurrConnections: { Maximum: [], Average: [] },
+      CacheHits: { Sum: [] },
+      CacheMisses: { Sum: [] },
+      Evictions: { Sum: [] },
+    },
+  };
+  const m = view.metrics;
+  for (let bucket = window.start.getTime() / 1000; bucket < window.end.getTime() / 1000; bucket += window.period) {
+    const row = byBucket.get(bucket);
+    view.timestamps.push(new Date(bucket * 1000));
+    m.BytesUsedForCache.Maximum.push(row ? row.bytesMaximum : null);
+    m.BytesUsedForCache.Average.push(row ? Math.round(row.bytesAverage) : null);
+    m.CurrConnections.Maximum.push(row ? row.connectionsMaximum : null);
+    m.CurrConnections.Average.push(row ? round3(row.connectionsAverage) : null);
+    m.CacheHits.Sum.push(row ? row.hits : null);
+    m.CacheMisses.Sum.push(row ? row.misses : null);
+    m.Evictions.Sum.push(row ? row.evictions : null);
+  }
+  return view;
+}
+
 /** The request metrics a bucket has, each period's Sum, as CloudWatch names S3's. */
 export const BUCKET_REQUEST_METRICS = ['AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'] as const;
 export type BucketRequestMetric = (typeof BUCKET_REQUEST_METRICS)[number];

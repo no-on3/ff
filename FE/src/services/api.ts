@@ -475,6 +475,26 @@ export interface QueueUsage {
   cost: string | null;
 }
 
+/** A cache's fields in GET /usage, as the API's CacheUsageView names them: contract.test.ts checks them. */
+export const CACHE_USAGE_FIELDS = ['cacheId', 'name', 'deleted', 'hours', 'memoryMb', 'gbHours', 'gbMonths', 'cost'] as const satisfies ReadonlyArray<keyof CacheUsage>;
+/** A customer's cache in the month, as its hours were measured. */
+export interface CacheUsage {
+  cacheId: string;
+  name: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+  /** The hours it was measured in, each billed as ElastiCache bills a node-hour. */
+  hours: number;
+  /** Its memory at its latest measure, in MB. */
+  memoryMb: number;
+  /** Its memory times its hours, as it is billed: "19.5". */
+  gbHours: string;
+  /** The same in GB-months, as the CSV gives it. */
+  gbMonths: string;
+  /** null without a price book. */
+  cost: string | null;
+}
+
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
@@ -487,6 +507,8 @@ export interface MonthlyUsage {
   buckets: BucketUsage[];
   /** Each of its queues asked anything in the month, the most requests first. */
   queues: QueueUsage[];
+  /** Each of its caches measured in the month, the most GB-hours first. */
+  caches: CacheUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */
   estimate: UsageEstimate | null;
@@ -1018,6 +1040,8 @@ export interface AlarmBody {
   bucketName?: string | null;
   /** The queue watched, by its name, for its messages and its requests; null otherwise. */
   queueName?: string | null;
+  /** The cache watched, by its name, for its memory, connections, hits, misses and evictions, an hour at a time; null otherwise. */
+  cacheName?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -1039,6 +1063,7 @@ export const ALARM_FIELDS = [
   'databaseId',
   'bucketName',
   'queueName',
+  'cacheName',
   'metric',
   'statistic',
   'period',
@@ -1153,6 +1178,85 @@ export const databasesApi = {
   /** Its sessions and size, a point an hour; the last 60 hours by default. */
   metrics: (id: string, params: { start?: string; end?: string } = {}) => api.get<DatabaseMetrics>(`/databases/${id}/metrics`, { params }),
 };
+
+/** A customer's cache's status, as the API's CacheStatus names them: contract.test.ts checks them. */
+export const CACHE_STATUSES = ['creating', 'active', 'suspended', 'deleting'] as const;
+export type CacheStatus = (typeof CACHE_STATUSES)[number];
+
+/** A cache's fields, as the API's CacheView names them: contract.test.ts checks them. */
+export const CACHE_FIELDS = [
+  'name',
+  'status',
+  'host',
+  'port',
+  'address',
+  'memoryMb',
+  'bytesUsedForCache',
+  'currConnections',
+  'engine',
+  'passwordSetAt',
+  'createdAt',
+] as const satisfies ReadonlyArray<keyof Cache>;
+
+/** A customer's cache, Valkey as AWS ElastiCache gives it (ADR 0013): never its password, which FF doesn't keep. */
+export interface Cache {
+  /** Its name in the account. */
+  name: string;
+  status: CacheStatus;
+  /** The server, as functions and developers reach it. */
+  host: string;
+  /** Its own port on the server. */
+  port: number;
+  /** How to connect, over TLS, without the password. */
+  address: string;
+  /** The plan's memory for it, in MB: past it, the least recently used keys go. */
+  memoryMb: number;
+  /** The bytes its keys use now; null when the server could not be asked. */
+  bytesUsedForCache: number | null;
+  /** Its connections now; null when the server could not be asked. */
+  currConnections: number | null;
+  /** What answers it: Valkey, which speaks Redis OSS's protocol. */
+  engine: string;
+  passwordSetAt: string | null;
+  createdAt: string;
+}
+// A field missing from CACHE_FIELDS stops the build.
+type UnlistedCacheField = Exclude<keyof Cache, (typeof CACHE_FIELDS)[number]>;
+const everyCacheFieldListed: [UnlistedCacheField] extends [never] ? true : never = true;
+void everyCacheFieldListed;
+
+/** A cache just made, or given a new password: the password, and the address with it, in this answer only. */
+export interface CacheWithPassword extends Cache {
+  password: string;
+  url: string;
+}
+
+/** The account's caches: every member reads them; owners and developers make, change and delete them. */
+export const cachesApi = {
+  list: () => api.get<Cache[]>('/caches'),
+  get: (name: string) => api.get<Cache>(`/caches/${name}`),
+  create: (name: string) => api.post<CacheWithPassword>('/caches', { name }),
+  /** A new password: the old one logs no new connection in; those under way keep theirs. */
+  resetPassword: (name: string) => api.post<CacheWithPassword>(`/caches/${name}/password`),
+  remove: (name: string) => api.delete(`/caches/${name}`),
+  /** Its memory used, connections, hits, misses and evictions, a point an hour; the last 60 hours by default. */
+  metrics: (name: string, params: { start?: string; end?: string } = {}) => api.get<CacheMetrics>(`/caches/${name}/metrics`, { params }),
+};
+
+/** GET /caches/:name/metrics: a point an hour, oldest first, as CloudWatch names ElastiCache's; null for an hour it wasn't sampled in. */
+export interface CacheMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: {
+    BytesUsedForCache: { Maximum: Array<number | null>; Average: Array<number | null> };
+    CurrConnections: { Maximum: Array<number | null>; Average: Array<number | null> };
+    CacheHits: { Sum: Array<number | null> };
+    CacheMisses: { Sum: Array<number | null> };
+    Evictions: { Sum: Array<number | null> };
+  };
+}
 
 /** A bucket's fields, as the API's BucketView names them: contract.test.ts checks them. */
 export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;

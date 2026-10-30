@@ -39,9 +39,9 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 - [x] **W-04** The server of customers' caches, and the API:
   - [x] part 1: `deploy/cache`: Valkey, a process for each cache, and the small agent that starts them, for development and the platform;
   - [x] part 2: `/caches` (create, list, get, a new password, delete), the address shown once, the plan's limits, functions' way to it, suspension.
-- [ ] **W-05** Caches in the console, `ff`, the admin app, and the bill:
-  - [ ] part 1: the Caches page, `ff caches`, the admin app's account page;
-  - [ ] part 2: hourly measures, the bill (the kind `cache`, its price), metrics as ElastiCache names them, alarms.
+- [x] **W-05** Caches in the console, `ff`, the admin app, and the bill:
+  - [x] part 1: the Caches page, `ff caches`, the admin app's account page;
+  - [x] part 2: hourly measures, the bill (the kind `cache`, its price), metrics as ElastiCache names them, alarms.
 
 ### Phase 3: e-mail
 - [ ] **W-06** Identities and the SES endpoint:

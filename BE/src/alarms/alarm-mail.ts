@@ -14,6 +14,8 @@ export interface AlarmChange {
   bucketName?: string | null;
   /** The alarm's queue's name, for a queue's metric; null otherwise. */
   queueName?: string | null;
+  /** The alarm's cache's name, for a cache's metric; null otherwise. */
+  cacheName?: string | null;
   from: AlarmState;
   to: AlarmState;
   evaluation: Evaluation;
@@ -40,7 +42,9 @@ export function alarmMail(change: AlarmChange, language: Language): Omit<Mail, '
           ? `le bucket « ${change.bucketName} » ${account}`
           : change.queueName
             ? `la file d'attente « ${change.queueName} » ${account}`
-            : `le compte « ${change.account.name} » (${change.account.id})`;
+            : change.cacheName
+              ? `le cache « ${change.cacheName} » ${account}`
+              : `le compte « ${change.account.name} » (${change.account.id})`;
     const reason = allMissing
       ? `Aucune donnée pour ${what} dans les ${e.datapoints.length} dernière(s) période(s) de ${alarm.period} s.`
       : billing
@@ -64,7 +68,9 @@ export function alarmMail(change: AlarmChange, language: Language): Omit<Mail, '
         ? `the bucket "${change.bucketName}" of the account "${change.account.name}" (${change.account.id})`
         : change.queueName
           ? `the queue "${change.queueName}" of the account "${change.account.name}" (${change.account.id})`
-          : `the account "${change.account.name}" (${change.account.id})`;
+          : change.cacheName
+            ? `the cache "${change.cacheName}" of the account "${change.account.name}" (${change.account.id})`
+            : `the account "${change.account.name}" (${change.account.id})`;
   const breach = `${what} ${SYMBOL[alarm.comparison]} ${alarm.threshold}`;
   const reason = allMissing
     ? `No datapoint for ${what} in the last ${e.datapoints.length} period(s) of ${alarm.period} s.`

@@ -84,6 +84,32 @@ export class DatabaseMetricsView {
   @ApiProperty({ type: DatabaseMetricSeries }) metrics: DatabaseMetricSeries;
 }
 
+class CacheStatisticSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "The most of the hour's samples; null for an hour without one" }) Maximum: Array<number | null>;
+  @ApiProperty({ type: [Number], nullable: true, description: "The mean of the hour's samples; null for an hour without one" }) Average: Array<number | null>;
+}
+
+class CacheCountSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "The hour's, from the next hour's sample less its own; null without both, as in the hour now" }) Sum: Array<number | null>;
+}
+
+class CacheMetricSeries {
+  @ApiProperty({ type: CacheStatisticSeries, description: "What its keys and their overhead use: INFO's used_memory" }) BytesUsedForCache: CacheStatisticSeries;
+  @ApiProperty({ type: CacheStatisticSeries, description: "Its connections, FF's own left out" }) CurrConnections: CacheStatisticSeries;
+  @ApiProperty({ type: CacheCountSeries, description: 'Reads that found their key' }) CacheHits: CacheCountSeries;
+  @ApiProperty({ type: CacheCountSeries, description: "Reads that didn't" }) CacheMisses: CacheCountSeries;
+  @ApiProperty({ type: CacheCountSeries, description: 'Keys it let go past its memory, the least recently used first' }) Evictions: CacheCountSeries;
+}
+
+/** A cache's metrics: a point an hour of the window, oldest first. */
+export class CacheMetricsView {
+  @ApiProperty({ example: 3600 }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each hour's start" }) timestamps: Date[];
+  @ApiProperty({ type: CacheMetricSeries }) metrics: CacheMetricSeries;
+}
+
 class BucketStorageSeries {
   @ApiProperty({ type: [Number], nullable: true, description: "Its hour's measure, in each period of the hour; null in an hour it wasn't measured in" }) Average: Array<number | null>;
 }

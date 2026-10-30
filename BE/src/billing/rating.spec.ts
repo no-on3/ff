@@ -6,11 +6,13 @@
  * book that starts in the middle of a month. The minimum billed duration
  * applies to each call, in the aggregation's SQL: pricing.db.spec.ts. Then
  * customers' databases and buckets, with the book of their SKUs, likewise
- * against AWS's RDS and S3 prices by hand; and their queues, against SQS's.
+ * against AWS's RDS and S3 prices by hand; their queues, against SQS's; and
+ * their caches, against ElastiCache's.
  */
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { STORAGE_FREE_TIER, STORAGE_USD_PRICES, withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { QUEUE_FREE_TIER, QUEUE_USD_PRICES, withQueuePrices } from '../migrations/1792816013937-QueueBilling';
+import { CACHE_USD_PRICES, withCachePrices } from '../migrations/1793333328301-CacheMeasures';
 import { Decimal } from './decimal';
 import { BookPrices, PriceDocument, awsPriceProblems, bookPrices, priceDocumentSchema } from './price-book';
 import { FunctionUsage, ResourceUsage, hoursIn, rateMonth } from './rating';
@@ -49,6 +51,19 @@ const QUEUE_DOCUMENT = priceDocumentSchema.parse(withQueuePrices(withStoragePric
 const WITH_QUEUES = bookPrices({ id: 'with-queues', validFrom: new Date('2026-11-01T00:00:00Z'), prices: QUEUE_DOCUMENT });
 /** A queue asked `requests` requests, as SQS bills them. */
 const queued = (resourceId: string, requests: bigint): ResourceUsage => ({ resourceId, kind: 'queue', byteHours: 0n, hours: 0n, tier1Requests: 0n, tier2Requests: 0n, requests });
+/** The book with ElastiCache's SKU too, as its migration makes it from the book before. */
+const CACHE_DOCUMENT = priceDocumentSchema.parse(withCachePrices(QUEUE_DOCUMENT));
+const WITH_CACHES = bookPrices({ id: 'with-caches', validFrom: new Date('2026-11-01T00:00:00Z'), prices: CACHE_DOCUMENT });
+/** A cache of `mb` MB through `hours` hours, sampled each hour: its memory, the plan's, whatever its keys use. */
+const cached = (resourceId: string, mb: number, hours: number): ResourceUsage => ({
+  resourceId,
+  kind: 'cache',
+  byteHours: BigInt(mb) * 1_048_576n * BigInt(hours),
+  hours: BigInt(hours),
+  tier1Requests: 0n,
+  tier2Requests: 0n,
+  requests: 0n,
+});
 const OCTOBER = hoursIn('2026-10');
 const NOVEMBER = hoursIn('2026-11');
 
@@ -323,6 +338,57 @@ describe("rating a month of customers' queues (L1, ADR 0010)", () => {
     const month = rateMonth([{ book: WITH_STORAGE, functions: [], resources: [queued('orders', 5_000_000n)] }], WITH_STORAGE, OCTOBER);
 
     expect([month.total.toString(), month.freeTier.toString()]).toEqual(['0', '0']);
+  });
+});
+
+describe("rating a month of customers' caches (L1, ADR 0013)", () => {
+  it("prices a cache's memory by the GB-hour, as ElastiCache bills a node: 64 MB through October's 744 hours, at $0.0256 a GB-hour times the book's rate", () => {
+    const month = rateMonth([{ book: WITH_CACHES, functions: [], resources: [cached('sessions', 64, 744)] }], WITH_CACHES, OCTOBER);
+
+    // ElastiCache: 64 MB is 0.0625 GB; through 744 hours, 46.5 GB-hours × $0.0256 = $1.1904, with no free tier.
+    const byHand = d('46.5').times(d('0.0256'));
+    expect(byHand.toString()).toBe('1.1904');
+    expect(month.total.toString()).toBe(byHand.times(RATE).toString());
+    const cost = month.resources.get('sessions');
+    expect([cost?.kind, cost?.storage, cost?.requests, cost?.fee, cost?.total].map(String)).toEqual(['cache', '3.5807232', '0', '0', '3.5807232']);
+    expect([month.freeTier.toString(), cost?.gbMonths.toString()]).toEqual(['0', '0.0625']);
+  });
+
+  it("takes nothing from the databases' and buckets' free GB-months, nor they from it", () => {
+    // The bucket's 1 GB-month is within S3's free 5; the cache's 0.0625 GB-months are a cache's, not storage.
+    const month = rateMonth([{ book: WITH_CACHES, functions: [], resources: [cached('sessions', 64, 744), stored('photos', 1, 744, 'bucket')] }], WITH_CACHES, OCTOBER);
+
+    expect(month.total.toString()).toBe('3.5807232');
+  });
+
+  it('bills the hours sampled only, at the price of the book each hour was rated with', () => {
+    // 100 hours at the book before, which prices caches at nothing; then 200 at ElastiCache's price.
+    const month = rateMonth([{ book: WITH_QUEUES, functions: [], resources: [cached('sessions', 64, 100)] }, { book: WITH_CACHES, functions: [], resources: [cached('sessions', 64, 200)] }], WITH_QUEUES, OCTOBER);
+
+    expect(month.total.toString()).toBe(d('12.5').times(d('0.0256')).times(RATE).toString());
+  });
+});
+
+describe("the book of customers' caches' SKU (ADR 0013)", () => {
+  it("is AWS's US$ price for ElastiCache for Valkey's cache.t4g.micro, by the GB-hour of its memory, times the book's own rate, exactly, with no free tier, and its checks find nothing", () => {
+    expect(CACHE_USD_PRICES).toEqual({ cacheGbHour: '0.0256' });
+    expect(CACHE_DOCUMENT.prices.cacheGbHour).toBe(Decimal.parse('0.0256').times(RATE).toString());
+    expect(CACHE_DOCUMENT.prices.cacheGbHour).toBe('0.0770048');
+    expect(CACHE_DOCUMENT.freeTier).toEqual(QUEUE_DOCUMENT.freeTier);
+    // The SKUs of the book it copies stay.
+    expect(CACHE_DOCUMENT.prices.queueRequestsPerMillion).toEqual(QUEUE_DOCUMENT.prices.queueRequestsPerMillion);
+    expect(awsPriceProblems(CACHE_DOCUMENT)).toEqual([]);
+  });
+
+  it("finds a price that isn't AWS's times the rate, and the SKU in one place only", () => {
+    const changed = (price: string | undefined, usd: string | undefined): PriceDocument => ({
+      ...CACHE_DOCUMENT,
+      source: { ...CACHE_DOCUMENT.source, usdPrices: { ...(CACHE_DOCUMENT.source.usdPrices as object), cacheGbHour: usd } },
+      prices: { ...CACHE_DOCUMENT.prices, cacheGbHour: price },
+    });
+
+    expect(awsPriceProblems(changed('0.08', '0.0256'))).toEqual(['prices.cacheGbHour: must be 0.0256 × 3.0080 = 0.0770048']);
+    expect(awsPriceProblems(changed('0.0770048', undefined))).toEqual(['prices.cacheGbHour: must be in both prices and source.usdPrices, or in neither']);
   });
 });
 

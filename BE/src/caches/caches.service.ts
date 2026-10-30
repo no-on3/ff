@@ -53,6 +53,13 @@ export class CachesService {
     return rows.map((row) => this.view(row, use.get(row.serverName)));
   }
 
+  /** The account's caches as the operator's page shows them: each one's name on the server too, which FF's own tools name. */
+  async forOperator(accountId: string): Promise<Array<CacheView & { serverName: string }>> {
+    const rows = await this.caches.find({ where: { accountId, status: Not(CacheStatus.DELETING) }, order: { name: 'ASC' } });
+    const use = await this.useOf(rows);
+    return rows.map((row) => ({ ...this.view(row, use.get(row.serverName)), serverName: row.serverName }));
+  }
+
   async get(accountId: string, name: string): Promise<CacheView> {
     const row = await this.cacheOf(accountId, name);
     return this.view(row, (await this.useOf([row])).get(row.serverName));

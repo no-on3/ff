@@ -1,12 +1,12 @@
-import type { BucketMetricsView, BucketRequestMetric, DatabaseMetricsView, MetricsView, QueueMetricsView, SiteMetricsView } from '../metrics/customer-metrics';
-import { DATABASE_PERIOD } from '../metrics/customer-metrics';
+import type { BucketMetricsView, BucketRequestMetric, CacheMetricsView, DatabaseMetricsView, MetricsView, QueueMetricsView, SiteMetricsView } from '../metrics/customer-metrics';
+import { CACHE_PERIOD, DATABASE_PERIOD } from '../metrics/customer-metrics';
 
 /**
  * An alarm's rules, as CloudWatch's: a metric and its statistic over a
  * period, compared with a threshold, "M out of N" periods breaching, and what
  * a period without a datapoint counts as. The metrics are those of the
- * metrics API, a database's, a bucket's and a queue's among them, and two of
- * the account's money, read as they are.
+ * metrics API, a database's, a bucket's, a queue's and a cache's among them,
+ * and two of the account's money, read as they are.
  */
 
 /** The metrics an alarm watches, and the statistics each has. */
@@ -50,6 +50,12 @@ export const STATISTICS = {
   NumberOfMessagesDeleted: ['Sum'],
   NumberOfEmptyReceives: ['Sum'],
   SentMessageSize: ['Average', 'Maximum'],
+  // A customer's cache's, a point an hour, as CloudWatch names ElastiCache's: what its keys use, its connections, and its hour's hits, misses and evictions.
+  BytesUsedForCache: ['Maximum', 'Average'],
+  CurrConnections: ['Maximum', 'Average'],
+  CacheHits: ['Sum'],
+  CacheMisses: ['Sum'],
+  Evictions: ['Sum'],
   // The account's money, in the prices' currency, read as it is at each evaluation.
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
@@ -90,6 +96,9 @@ export const QUEUE_METRICS: readonly Metric[] = [
   'SentMessageSize',
 ];
 
+/** A cache's: the alarm names it, and judges hours. */
+export const CACHE_METRICS: readonly Metric[] = ['BytesUsedForCache', 'CurrConnections', 'CacheHits', 'CacheMisses', 'Evictions'];
+
 export const COMPARISONS = ['GreaterThanThreshold', 'GreaterThanOrEqualToThreshold', 'LessThanThreshold', 'LessThanOrEqualToThreshold'] as const;
 export type Comparison = (typeof COMPARISONS)[number];
 
@@ -114,6 +123,8 @@ export interface AlarmRule {
   bucketId: string | null;
   /** The queue it names, if any. */
   queueId: string | null;
+  /** The cache it names, if any. */
+  cacheId: string | null;
   metric: Metric;
   statistic: Statistic;
   period: number;
@@ -144,6 +155,14 @@ export function alarmProblem(rule: AlarmRule): string | null {
     if (!rule.queueId || rule.functionId || rule.databaseId || rule.bucketId) return `${rule.metric} is a queue's: the alarm names a queueName, and no function, database or bucket`;
   } else if (rule.queueId) {
     return `A queueName goes with a queue's metrics only: ${QUEUE_METRICS.join(', ')}`;
+  }
+  if (CACHE_METRICS.includes(rule.metric)) {
+    if (!rule.cacheId || rule.functionId || rule.databaseId || rule.bucketId || rule.queueId) {
+      return `${rule.metric} is a cache's: the alarm names a cacheName, and no function, database, bucket or queue`;
+    }
+    if (rule.period !== CACHE_PERIOD) return `A cache's metrics have a point an hour: period must be ${CACHE_PERIOD}`;
+  } else if (rule.cacheId) {
+    return `A cacheName goes with a cache's metrics only: ${CACHE_METRICS.join(', ')}`;
   }
   if (BILLING_METRICS.includes(rule.metric)) {
     if (rule.functionId) return `${rule.metric} is the account's: a billing alarm names no function`;
@@ -255,6 +274,22 @@ export function queueDatapointsOf(view: QueueMetricsView, metric: Metric, statis
       return m.SentMessageSize[statistic as 'Average' | 'Maximum'];
     default:
       throw new Error(`${metric} isn't a queue's metric`);
+  }
+}
+
+/** A cache's metric's datapoints, oldest first: null for an hour it wasn't sampled in. */
+export function cacheDatapointsOf(view: CacheMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
+  const m = view.metrics;
+  switch (metric) {
+    case 'BytesUsedForCache':
+    case 'CurrConnections':
+      return m[metric][statistic as 'Maximum' | 'Average'];
+    case 'CacheHits':
+    case 'CacheMisses':
+    case 'Evictions':
+      return m[metric].Sum;
+    default:
+      throw new Error(`${metric} isn't a cache's metric`);
   }
 }
 

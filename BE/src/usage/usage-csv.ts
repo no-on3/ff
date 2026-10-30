@@ -24,10 +24,10 @@ const COLUMNS = [
 
 /**
  * GET /usage as CSV (P-22): a header, then one line per function, then one
- * per database, one per bucket and one per queue, each with its cost, and the
- * columns that aren't its kind's left empty: a queue's requests are SQS's, in
- * the requests column. No total line, which a spreadsheet's sum would count
- * twice.
+ * per database, one per bucket, one per queue and one per cache, each with its
+ * cost, and the columns that aren't its kind's left empty: a queue's requests
+ * are SQS's, in the requests column; a cache's memory held is in the GB-months
+ * column. No total line, which a spreadsheet's sum would count twice.
  */
 export function usageCsv(view: MonthlyUsageView): string {
   const functions = view.functions.map((usage) => [
@@ -102,5 +102,23 @@ export function usageCsv(view: MonthlyUsageView): string {
     '',
     csvField(usage.cost),
   ]);
-  return csvLines([COLUMNS, ...functions, ...databases, ...buckets, ...queues]);
+  const caches = view.caches.map((usage) => [
+    'cache',
+    csvField(usage.cacheId),
+    csvField(usage.name, true),
+    csvField(usage.deleted),
+    '',
+    '',
+    '',
+    csvField(usage.gbMonths),
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    csvField(usage.cost),
+  ]);
+  return csvLines([COLUMNS, ...functions, ...databases, ...buckets, ...queues, ...caches]);
 }

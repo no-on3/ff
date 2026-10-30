@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import {
   AsyncRow,
   BucketMetricsView,
+  CacheMetricsView,
   DatabaseMetricsView,
   InstancesRow,
   MetricsView,
@@ -11,6 +12,7 @@ import {
   QueueMetricsView,
   SiteMetricsView,
   bucketMetricsView,
+  cacheMetricsView,
   databaseMetricsView,
   metricsView,
   queueMetricsView,
@@ -33,8 +35,9 @@ interface Scope {
  * its rate-limited invocations, its capacity samples and its asynchronous
  * calls' counts; of a customer's database, from its hourly samples; of a
  * customer's bucket, from its hourly samples and the front door's request
- * counts; and of a customer's queue, from its minute samples and its
- * requests' counts (customer-metrics.ts).
+ * counts; of a customer's queue, from its minute samples and its requests'
+ * counts; and of a customer's cache, from its hourly samples
+ * (customer-metrics.ts).
  */
 @Injectable()
 export class CustomerMetricsService {
@@ -154,6 +157,62 @@ export class CustomerMetricsService {
     const [found] = await this.dataSource.query<Array<{ id: string }>>(`SELECT "id" FROM "queues" WHERE "name" = $1 AND "account_id" = $2 AND "kind" = 'customer'`, [name, accountId]);
     if (!found) throw new NotFoundException(`The account has no queue ${name}`);
     return this.queueMetrics(accountId, found.id, window);
+  }
+
+  /** A cache's, by its name, for its own account only: another account's cache, or one deleted, is not found. */
+  async forCache(accountId: string, name: string, window: MetricsWindow): Promise<CacheMetricsView> {
+    const [found] = await this.dataSource.query<Array<{ id: string }>>(`SELECT "id" FROM "caches" WHERE "name" = $1 AND "account_id" = $2 AND "status" <> 'deleting'`, [
+      name,
+      accountId,
+    ]);
+    if (!found) throw new NotFoundException(`The account has no cache ${name}`);
+    return this.cacheMetrics(accountId, found.id, window);
+  }
+
+  /**
+   * A cache's, by its ID, as an alarm names it: each hour's sample, and the
+   * hits, misses and evictions in the hour, which the next hour's sample says
+   * (the window's last hour's too): the difference between the two when they
+   * come from the same process, all of the next one's when its process
+   * started between them. None without the next hour's sample: the hour now,
+   * or one the samples skipped. None found answers hours without a sample.
+   */
+  async cacheMetrics(accountId: string, cacheId: string, window: MetricsWindow): Promise<CacheMetricsView> {
+    const rows = await this.dataSource.query<Array<Record<string, string | null>>>(
+      `WITH s AS (
+         SELECT "hour", "bytes_used", "connections", "hits", "misses", "evictions",
+                lead("hour") OVER w = "hour" + interval '1 hour' AS "followed",
+                -- The same process as the next sample's: its start the same, to a few seconds, its counts not gone down.
+                abs(extract(epoch FROM lead("process_started_at") OVER w - "process_started_at")) < 5
+                  AND lead("hits") OVER w >= "hits" AND lead("misses") OVER w >= "misses" AND lead("evictions") OVER w >= "evictions" AS "continues",
+                lead("hits") OVER w AS "hits_after", lead("misses") OVER w AS "misses_after", lead("evictions") OVER w AS "evictions_after"
+           FROM "cache_samples"
+          WHERE "hour" >= $1 AND "hour" < $2::timestamptz + interval '1 hour' AND "account_id" = $4 AND "cache_id" = $5
+         WINDOW w AS (ORDER BY "hour"))
+       SELECT floor(extract(epoch FROM "hour") / $3)::bigint * $3 AS "bucket",
+              max("bytes_used") AS "bytes_max", avg("bytes_used") AS "bytes_avg", max("connections") AS "connections_max", avg("connections") AS "connections_avg",
+              sum(CASE WHEN NOT "followed" THEN NULL WHEN "continues" THEN "hits_after" - "hits" ELSE "hits_after" END) AS "hits",
+              sum(CASE WHEN NOT "followed" THEN NULL WHEN "continues" THEN "misses_after" - "misses" ELSE "misses_after" END) AS "misses",
+              sum(CASE WHEN NOT "followed" THEN NULL WHEN "continues" THEN "evictions_after" - "evictions" ELSE "evictions_after" END) AS "evictions"
+         FROM s
+        WHERE "hour" < $2
+        GROUP BY 1`,
+      [window.start, window.end, window.period, accountId, cacheId],
+    );
+    const count = (value: string | null) => (value === null ? null : Number(value));
+    return cacheMetricsView(
+      window,
+      rows.map((row) => ({
+        bucket: Number(row.bucket),
+        bytesMaximum: Number(row.bytes_max),
+        bytesAverage: Number(row.bytes_avg),
+        connectionsMaximum: Number(row.connections_max),
+        connectionsAverage: Number(row.connections_avg),
+        hits: count(row.hits),
+        misses: count(row.misses),
+        evictions: count(row.evictions),
+      })),
+    );
   }
 
   /** A queue's, by its ID, as an alarm names it: none found answers an empty, quiet queue. */

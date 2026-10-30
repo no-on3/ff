@@ -13,6 +13,7 @@ describe('the alarm form', () => {
       databaseId: null,
       bucketName: null,
       queueName: null,
+      cacheName: null,
       metric: 'Errors',
       statistic: 'Sum',
       period: 60,
@@ -111,6 +112,29 @@ describe('the alarm form', () => {
     expect(scopeOf(deadLetters)).toBe('queue:orders-dlq');
     expect(conditionText({ ...toBody(deadLetters), threshold: 0 })).toBe('ApproximateNumberOfMessagesVisible Maximum > 0 messages, in the last period of 1 minute');
     expect(formFromAlarm({ ...toBody(deadLetters), id: 'a', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm).queueName).toBe('orders-dlq');
+  });
+
+  it("watches a cache's memory, connections, hits, misses or evictions, an hour at a time, by its name alone", () => {
+    const memory = { ...emptyForm('', '', '', '', 'sessions'), name: 'Memory', threshold: '60000000' };
+
+    expect(memory).toMatchObject({ functionId: '', databaseId: '', bucketName: '', queueName: '', cacheName: 'sessions', metric: 'BytesUsedForCache', statistic: 'Maximum', period: 3600 });
+    expect(metricsFor('', '', '', '', 'sessions')).toEqual(['BytesUsedForCache', 'CurrConnections', 'CacheHits', 'CacheMisses', 'Evictions']);
+    expect([metricsFor(''), metricsFor(FN)].some((metrics) => metrics.includes('Evictions'))).toBe(false);
+    expect(toBody(memory)).toMatchObject({ functionId: null, queueName: null, cacheName: 'sessions', metric: 'BytesUsedForCache', period: 3600 });
+    expect(withMetric(memory, 'Evictions')).toMatchObject({ cacheName: 'sessions', statistic: 'Sum', period: 3600 });
+    expect(conditionText({ ...toBody(memory), threshold: 60000000 })).toBe('BytesUsedForCache Maximum > 60000000 bytes, in the last period of 1 hour');
+    // The API's own refusals, said first: a cache named, its hour, a day at most.
+    expect([formProblem(memory), formProblem({ ...memory, cacheName: '' }), formProblem({ ...memory, period: 300 }), formProblem({ ...memory, evaluationPeriods: '25', datapointsToAlarm: '1' })]).toEqual([
+      null,
+      "BytesUsedForCache is a cache's: choose the cache it watches",
+      "A cache's metrics have a point an hour: the period is an hour",
+      'The periods judged look back more than a day: take fewer',
+    ]);
+    // Its scope goes as the select names it, to the cache and away from it.
+    expect(withScope({ ...emptyForm(FN), name: 'Hits' }, 'cache:sessions')).toMatchObject({ functionId: '', cacheName: 'sessions', metric: 'BytesUsedForCache', period: 3600 });
+    expect(withScope(memory, 'queue:orders')).toMatchObject({ cacheName: '', queueName: 'orders', metric: 'ApproximateNumberOfMessagesVisible' });
+    expect(scopeOf(memory)).toBe('cache:sessions');
+    expect(formFromAlarm({ ...toBody(memory), id: 'a', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm).cacheName).toBe('sessions');
   });
 
   it('changes scope with a metric the scope has: a database to the account, a function to a database', () => {

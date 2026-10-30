@@ -120,6 +120,23 @@ export interface AccountDatabase {
 /** The fields the API gives for each of them. */
 export const DATABASE_FIELDS = ['id', 'name', 'database', 'status', 'sizeBytes', 'connections', 'storageLimitMb', 'createdAt'] as const;
 
+/** One of the account's caches: its memory used and connections now, as its server counts them; null when it couldn't be asked. */
+export interface AccountCache {
+  name: string;
+  /** Its name on the server of customers' caches (fc- and 24 hexadecimal characters), which says nothing of whose it is. */
+  serverName: string;
+  status: 'creating' | 'active' | 'suspended' | 'deleting';
+  port: number;
+  /** Its memory, the plan's when it was made, in MB. */
+  memoryMb: number;
+  bytesUsedForCache: number | null;
+  currConnections: number | null;
+  createdAt: string;
+}
+
+/** The fields the API gives for each of them. */
+export const CACHE_FIELDS = ['name', 'serverName', 'status', 'port', 'memoryMb', 'bytesUsedForCache', 'currConnections', 'createdAt'] as const;
+
 /** One of the account's buckets: what it held at its last hourly measure, null before the first, and its name in the store. */
 export interface AccountBucket {
   name: string;
@@ -221,6 +238,8 @@ export interface AccountView {
   functions: Array<{ id: string; name: string; runtime: string; memory: number; status: string; minInstances: number; lastInvokedAt: string | null }>;
   /** Its databases, by name. */
   databases: AccountDatabase[];
+  /** Its caches, by name. */
+  caches: AccountCache[];
   /** Its buckets, by name. */
   buckets: AccountBucket[];
   /** Its queues, by name. */

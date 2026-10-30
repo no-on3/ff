@@ -49,9 +49,9 @@ struct WithPassword {
 /// A secret set from the connection string: the function, and the secret's name.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SecretSet {
-    function: String,
-    secret: String,
+pub(super) struct SecretSet {
+    pub(super) function: String,
+    pub(super) secret: String,
 }
 
 #[derive(Serialize)]
@@ -181,8 +181,8 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
     context.out.result(&database, || format!("{}\n{}", database.name, details(&database)))
 }
 
-/// The connection string as a secret of each function named, each rolled out before the next.
-fn set_secrets(
+/// The connection string, or a cache's address, as a secret of each function named, each rolled out before the next.
+pub(super) fn set_secrets(
     client: &Client,
     connection_string: &str,
     functions: &[String],
@@ -211,7 +211,7 @@ fn set_secrets(
     Ok(set)
 }
 
-fn secret_name(secret: &str) -> Result<&str, Error> {
+pub(super) fn secret_name(secret: &str) -> Result<&str, Error> {
     if is_variable_name(secret) {
         Ok(secret)
     } else {

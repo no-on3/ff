@@ -1,7 +1,7 @@
 import { Decimal } from '../decimal';
 import { toMinor } from '../money';
 import { BookPrices } from '../price-book';
-import { FunctionUsage, ResourceUsage, hoursIn, rateMonth } from '../rating';
+import { BYTES_PER_GB, FunctionUsage, ResourceUsage, hoursIn, rateMonth } from '../rating';
 
 /** MB-ms per GB-second (D7). */
 const MB_MS_PER_GB_SECOND = 1_024_000n;
@@ -18,14 +18,18 @@ export interface StatementFunction {
   amountMinor: bigint;
 }
 
-/** One customer's database's, bucket's or queue's month, as the statement lists it. */
+/** One customer's database's, bucket's, queue's or cache's month, as the statement lists it. */
 export interface StatementResource {
   resourceId: string;
-  kind: 'database' | 'bucket' | 'queue';
+  kind: 'database' | 'bucket' | 'queue' | 'cache';
   /** Its name when it was last sampled or asked something in the month. */
   name: string;
-  /** Its storage, in GB-months, to six decimals at most: "0.007118"; 0 for a queue. */
+  /** Its storage, in GB-months, to six decimals at most: "0.007118"; 0 for a queue; a cache's memory held. */
   gbMonths: string;
+  /** The hours it was sampled in; a cache's, as ElastiCache counts a node's hours. */
+  hours: bigint;
+  /** A cache's memory, in GB-hours, to six decimals at most, as it is billed: "46.5"; for the others, their size the same way. */
+  gbHours: string;
   /** A bucket's requests by S3's two classes; 0 for a database or a queue. */
   tier1Requests: bigint;
   tier2Requests: bigint;
@@ -48,7 +52,7 @@ export interface Statement {
   currency: string;
   exponent: number;
   functions: StatementFunction[];
-  /** Its buckets, its databases and its queues, each by name. */
+  /** Its buckets, its caches, its databases and its queues, each by name. */
   resources: StatementResource[];
   usageMinor: bigint;
   freeTierMinor: bigint;
@@ -75,7 +79,7 @@ export interface StatementInput {
   rows: Array<FunctionUsage & { priceBookId: string }>;
   /** Each function's name, as last invoked. */
   names: Map<string, string>;
-  /** The month's resource_usage_hourly, summed per database, bucket or queue and book, with its name when last sampled. */
+  /** The month's resource_usage_hourly, summed per database, bucket, queue or cache and book, with its name when last sampled. */
   resources: Array<ResourceUsage & { priceBookId: string; name: string }>;
   charges: { debitedMinor: bigint; shadowMinor: bigint; ratedUntil: Date | null };
   /** The month's end, to say whether it is rated to it. */
@@ -107,19 +111,28 @@ export function buildStatement(input: StatementInput): Statement {
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name) || a.functionId.localeCompare(b.functionId));
-  const usage = new Map<string, { name: string; tier1: bigint; tier2: bigint; requests: bigint }>();
+  const usage = new Map<string, { name: string; tier1: bigint; tier2: bigint; requests: bigint; hours: bigint; byteHours: bigint }>();
   for (const row of input.resources) {
-    const sum = usage.get(row.resourceId) ?? { name: row.name, tier1: 0n, tier2: 0n, requests: 0n };
-    usage.set(row.resourceId, { name: sum.name, tier1: sum.tier1 + row.tier1Requests, tier2: sum.tier2 + row.tier2Requests, requests: sum.requests + row.requests });
+    const sum = usage.get(row.resourceId) ?? { name: row.name, tier1: 0n, tier2: 0n, requests: 0n, hours: 0n, byteHours: 0n };
+    usage.set(row.resourceId, {
+      name: sum.name,
+      tier1: sum.tier1 + row.tier1Requests,
+      tier2: sum.tier2 + row.tier2Requests,
+      requests: sum.requests + row.requests,
+      hours: sum.hours + row.hours,
+      byteHours: sum.byteHours + row.byteHours,
+    });
   }
   const resources = [...estimate.resources.entries()]
     .map(([resourceId, cost]) => {
-      const sum = usage.get(resourceId) ?? { name: resourceId, tier1: 0n, tier2: 0n, requests: 0n };
+      const sum = usage.get(resourceId) ?? { name: resourceId, tier1: 0n, tier2: 0n, requests: 0n, hours: 0n, byteHours: 0n };
       return {
         resourceId,
         kind: cost.kind,
         name: sum.name,
         gbMonths: cost.gbMonths.round(6).toString(),
+        hours: sum.hours,
+        gbHours: Decimal.ratio(sum.byteHours, BYTES_PER_GB).round(6).toString(),
         tier1Requests: sum.tier1,
         tier2Requests: sum.tier2,
         requests: sum.requests,

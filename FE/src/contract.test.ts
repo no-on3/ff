@@ -32,6 +32,9 @@ import functionUrlEntitySource from '../../BE/src/functions/entities/function-ur
 import customDomainDtoSource from '../../BE/src/function-urls/dto/custom-domain.dto.ts?raw';
 import customDomainEntitySource from '../../BE/src/function-urls/custom-domain.entity.ts?raw';
 import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
+import cacheDtoSource from '../../BE/src/caches/dto/cache.dto.ts?raw';
+import cacheEntitySource from '../../BE/src/caches/cache.entity.ts?raw';
+import cacheNamesSource from '../../BE/src/caches/cache-names.ts?raw';
 import databaseDtoSource from '../../BE/src/databases/dto/database.dto.ts?raw';
 import databaseEntitySource from '../../BE/src/databases/database.entity.ts?raw';
 import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
@@ -46,11 +49,12 @@ import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
-import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
+import { CACHE_METRICS, COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
 import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
+import { CACHE_NAME } from './lib/caches';
 import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
@@ -68,7 +72,10 @@ import {
   BUCKET_REQUEST_METRICS,
   BUCKET_USAGE_FIELDS,
   QUEUE_USAGE_FIELDS,
+  CACHE_USAGE_FIELDS,
   STORAGE_KEY_FIELDS,
+  CACHE_FIELDS,
+  CACHE_STATUSES,
   DATABASE_FIELDS,
   DATABASE_STATUSES,
   DATABASE_USAGE_FIELDS,
@@ -465,6 +472,23 @@ describe("a bucket's site (ADR 0011)", () => {
   });
 });
 
+describe("a customer's cache (ADR 0013)", () => {
+  it("has the API's fields, statuses and name rule, so its page reads each one there is and the form refuses what the API would", () => {
+    const statuses = cacheEntitySource.slice(cacheEntitySource.indexOf('export enum CacheStatus'));
+
+    expect(dtoFields(cacheDtoSource, 'export class CacheView {')).toEqual([...CACHE_FIELDS]);
+    expect(dtoFields(cacheDtoSource, 'export class CacheWithPassword extends CacheView {')).toEqual(['password', 'url']);
+    expect([...statuses.slice(0, statuses.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...CACHE_STATUSES]);
+    expect(/export const CACHE_NAME = \/(.+)\/;/.exec(cacheNamesSource)?.[1]).toBe(CACHE_NAME.source);
+  });
+
+  it("has the API's metrics, as CloudWatch names ElastiCache's, which its alarms watch", () => {
+    expect(dtoFields(metricsDtoSource, 'class CacheMetricSeries {')).toEqual([...CACHE_METRICS]);
+    expect(dtoFields(metricsDtoSource, 'class CacheStatisticSeries {')).toEqual(['Maximum', 'Average']);
+    expect(dtoFields(metricsDtoSource, 'class CacheCountSeries {')).toEqual(['Sum']);
+  });
+});
+
 describe("a customer's database (ADR 0008)", () => {
   it("has the API's fields, statuses and name rule, so its pages read each one there is and the form refuses what the API would", () => {
     const statuses = databaseEntitySource.slice(databaseEntitySource.indexOf('export enum DatabaseStatus'));
@@ -557,6 +581,11 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
   it("have the API's fields of a queue's month on the Usage page", () => {
     expect(dtoFields(usageDtoSource, 'export class QueueUsageView {')).toEqual([...QUEUE_USAGE_FIELDS]);
     expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('queues');
+  });
+
+  it("have the API's fields of a cache's month on the Usage page", () => {
+    expect(dtoFields(usageDtoSource, 'export class CacheUsageView {')).toEqual([...CACHE_USAGE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('caches');
   });
 });
 

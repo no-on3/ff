@@ -48,7 +48,7 @@ export const reconciled = (account: ReconciledAccount): boolean =>
  * A month's charges against its raw usage (P-32): per account, what the
  * hourly rating charged, against the month to the end of the last hour rated
  * as P-30's estimate prices it from the usage records and samples, the
- * databases' and buckets' hourly samples and the buckets' and queues' request
+ * databases', buckets' and caches' hourly samples and the buckets' and queues' request
  * counts too. They differ only if usage reached the database after its hour
  * was rated: a call's record later than its hour's settle time.
  */
@@ -85,7 +85,8 @@ export async function reconcile(dataSource: DataSource, pricing: PricingService,
                        FROM "resource_usage_hourly" WHERE "hour" >= $1 AND "hour" < $2 GROUP BY "account_id"),
           measured AS (SELECT "account_id", sum("size_bytes") AS "byte_hours" FROM
                          (SELECT "account_id", "size_bytes" FROM "database_samples" WHERE "hour" >= $1 AND "hour" < $2
-                          UNION ALL SELECT "account_id", "size_bytes" FROM "bucket_samples" WHERE "hour" >= $1 AND "hour" < $2) samples
+                          UNION ALL SELECT "account_id", "size_bytes" FROM "bucket_samples" WHERE "hour" >= $1 AND "hour" < $2
+                          UNION ALL SELECT "account_id", "memory_mb"::bigint * 1048576 FROM "cache_samples" WHERE "hour" >= $1 AND "hour" < $2) samples
                         GROUP BY "account_id"),
           counted AS (SELECT "account_id", sum("requests") AS "s3" FROM "storage_request_counts"
                        WHERE "minute" >= $1 AND "minute" < $2 AND "class" <> 'free' GROUP BY "account_id"),

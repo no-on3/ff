@@ -33,8 +33,8 @@ interface HourlyRow {
 
 /**
  * The hourly rating (P-32, D9). Once an hour has settled, its usage is summed
- * into usage_hourly, its databases' and buckets' samples and its buckets' and
- * queues' requests into resource_usage_hourly, and each account that used
+ * into usage_hourly, its databases', buckets' and caches' samples and its
+ * buckets' and queues' requests into resource_usage_hourly, and each account that used
  * something in it is charged:
  * its month so far, rated with the books of P-30 and rounded once, less what
  * the month's earlier hours were charged. The free tier and the duration
@@ -171,6 +171,13 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
         WHERE s."bucket_id" IS NOT NULL OR r."tier1" > 0 OR r."tier2" > 0
        ON CONFLICT DO NOTHING`,
       [hour, book.id, new Date(hour.getTime() + HOUR_MS)],
+    );
+    // Each cache sampled in the hour: its memory, the plan's, for one hour, as ElastiCache bills a node, and its name then.
+    await this.dataSource.query(
+      `INSERT INTO "resource_usage_hourly" ("account_id", "hour", "resource_id", "kind", "name", "price_book_id", "byte_hours", "hours", "tier1_requests", "tier2_requests")
+       SELECT "account_id", $1, "cache_id", 'cache', "name", $2, "memory_mb"::bigint * 1048576, 1, 0, 0 FROM "cache_samples" WHERE "hour" = $1
+       ON CONFLICT DO NOTHING`,
+      [hour, book.id],
     );
     // Each queue asked something billed in the hour: its requests as SQS bills them, and its name then. One that only
     // had FF's deletes after a function's batch costs nothing, and has no row.

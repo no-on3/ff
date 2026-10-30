@@ -9,8 +9,8 @@ export function requestHeaders(token: string | undefined, accountId: string | un
   return headers;
 }
 
-/** What a role may do in its account (D4): change functions, databases, buckets and queues, or also manage the account, its keys among it. */
-export type Permission = 'change functions' | 'change databases' | 'change buckets' | 'change queues' | 'manage the account';
+/** What a role may do in its account (D4): change functions, databases, caches, buckets and queues, or also manage the account, its keys among it. */
+export type Permission = 'change functions' | 'change databases' | 'change caches' | 'change buckets' | 'change queues' | 'manage the account';
 
 /** Whether a role may do it, as the API decides (P-12): the console hides what it would refuse. */
 export function can(role: Role, permission: Permission): boolean {

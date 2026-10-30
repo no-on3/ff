@@ -27,10 +27,10 @@ export const SAMPLE_SUMS = [
   `sum(GREATEST("instances" - "min_instances", 0)::bigint * "memory_mb" * 60000) AS "reservedMbMs"`,
 ].join(', ');
 
-/** A database's, bucket's or queue's rated hours with one book, summed, as RESOURCE_SUMS selects them. */
+/** A database's, bucket's, queue's or cache's rated hours with one book, summed, as RESOURCE_SUMS selects them. */
 export interface ResourceRow {
   resourceId: string;
-  kind: 'database' | 'bucket' | 'queue';
+  kind: 'database' | 'bucket' | 'queue' | 'cache';
   priceBookId: string;
   byteHours: string;
   hours: string;

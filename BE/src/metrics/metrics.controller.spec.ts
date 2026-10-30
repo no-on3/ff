@@ -1,6 +1,6 @@
 /**
  * L1: GET /functions/:id/metrics, GET /metrics, GET /databases/:id/metrics, GET /buckets/:name/metrics,
- * GET /buckets/:name/website/metrics and GET /queues/:name/metrics
+ * GET /buckets/:name/website/metrics, GET /queues/:name/metrics and GET /caches/:name/metrics
  * through HTTP, with the validation main.ts sets up: who may read them, the
  * account and the window they pass on, and what they refuse before asking the
  * database. Their SQL runs against PostgreSQL in customer-metrics.db.spec.ts.
@@ -28,6 +28,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   const forBucket = jest.fn(async (_accountId: string, _name: string, _window: MetricsWindow) => ({ metrics: {} }));
   const forQueue = jest.fn(async (_accountId: string, _name: string, _window: MetricsWindow) => ({ metrics: {} }));
   const forSite = jest.fn(async (_accountId: string, _name: string, _window: MetricsWindow) => ({ metrics: {} }));
+  const forCache = jest.fn(async (_accountId: string, _name: string, _window: MetricsWindow) => ({ metrics: {} }));
 
   const get = (path: string) => fetch(`${baseUrl}${path}`);
   const refusal = async (path: string) => {
@@ -38,7 +39,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [MetricsController],
-      providers: [{ provide: CustomerMetricsService, useValue: { forFunction, forAccount, forDatabase, forBucket, forQueue, forSite } }],
+      providers: [{ provide: CustomerMetricsService, useValue: { forFunction, forAccount, forDatabase, forBucket, forQueue, forSite, forCache } }],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
@@ -62,6 +63,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
       MetricsController.prototype.forBucket,
       MetricsController.prototype.forSite,
       MetricsController.prototype.forQueue,
+      MetricsController.prototype.forCache,
     ]) {
       expect([reflector.get(ROLES, handler), reflector.get(ACTIVE_ACCOUNT, handler), reflector.get(SCOPE, handler)]).toEqual([undefined, undefined, 'metrics:read']);
     }
@@ -117,6 +119,17 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
     expect(await refusal(`/databases/${DB}/metrics?period=60`)).toEqual([400, "A database's metrics have a point an hour: period must be 3600"]);
     expect(await refusal('/databases/orders/metrics')).toEqual([400, 'Validation failed (uuid is expected)']);
     expect(forDatabase).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks for the caller's account's cache by its name, a point an hour, over the last 60 hours by default, and refuses another period", async () => {
+    expect((await get('/caches/sessions/metrics?start=2026-10-19T09:30:00Z&end=2026-10-19T12:10:00Z')).status).toBe(200);
+    expect(forCache).toHaveBeenCalledWith(ACCOUNT, 'sessions', { start: new Date('2026-10-19T09:00:00Z'), end: new Date('2026-10-19T13:00:00Z'), period: 3600 });
+
+    expect((await get('/caches/sessions/metrics')).status).toBe(200);
+    const [, , window] = forCache.mock.calls[1];
+    expect([60, 61]).toContain((window.end.getTime() - window.start.getTime()) / 3_600_000);
+    expect(await refusal('/caches/sessions/metrics?period=300')).toEqual([400, "A cache's metrics have a point an hour: period must be 3600"]);
+    expect(forCache).toHaveBeenCalledTimes(2);
   });
 
   it("asks for the caller's account's bucket by its name, in any of the periods, over the window named", async () => {
