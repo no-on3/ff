@@ -96,6 +96,19 @@ if [ "$sqs_base_host" != "$sqs_host" ]; then
 fi
 echo "queues at $sqs_host, with a certificate of its own"
 
+echo "== customers' mail's SES endpoint"
+# The edge's SES host must be the host of the backend's FF_SES_BASE, which customers give AWS's SDKs and CLI and an
+# address's link begins with, or their requests would reach nothing.
+ses_base="$(setting FF_SES_BASE)"
+ses_host="$(setting FF_SES_HOST)"
+ses_base_host="${ses_base#*://}"
+ses_base_host="${ses_base_host%%[:/]*}"
+if [ "$ses_base_host" != "$ses_host" ]; then
+  echo "the edge's FF_SES_HOST ($ses_host) must be the host of the backend's FF_SES_BASE ($ses_base)" >&2
+  exit 1
+fi
+echo "mail's SES endpoint at $ses_host, with a certificate of its own"
+
 echo "== buckets' sites"
 # The edge's sites' domain must be the host of the backend's FF_WEBSITE_BASE, which each site's address is under, or
 # visitors would reach nothing; a wildcard certificate needs the same TSIG key as function URLs'.

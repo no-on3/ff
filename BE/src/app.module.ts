@@ -14,6 +14,7 @@ import { RequestIdInterceptor } from './common/request-context';
 import configuration, { DatabaseSettings, LogFormat } from './config/configuration';
 import { backendDataSourceOptions } from './database/database.options';
 import { CachesModule } from './caches/caches.module';
+import { EmailModule } from './email/email.module';
 import { DatabasesModule } from './databases/databases.module';
 import { EventSourcesModule } from './event-sources/event-sources.module';
 import { FunctionsModule } from './functions/functions.module';
@@ -56,6 +57,7 @@ import { StorageModule } from './storage/storage.module';
     AuditModule,
     CachesModule,
     DatabasesModule,
+    EmailModule,
     EventSourcesModule,
     FunctionsModule,
     FunctionUrlsModule,

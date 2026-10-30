@@ -132,6 +132,8 @@ storage_port="$(free_port)"
 sqs_port="$(free_port)"
 # Buckets' sites on a fourth, each at http://<bucket>.site.localhost:<port>, which curl takes to this machine.
 website_port="$(free_port)"
+# Customers' mail's SES endpoint on a fifth, at http://localhost:<port>; functions reach it at the cluster's gateway.
+ses_port="$(free_port)"
 # Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
 dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
@@ -142,6 +144,8 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
   FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port"
+  FF_SES_PORT="$ses_port" FF_SES_BASE="http://localhost:$ses_port"
+  FF_SES_FUNCTION_ENDPOINT="http://$cluster_gateway:$ses_port" FF_SES_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
@@ -935,7 +939,7 @@ store_s3() { AWS_ACCESS_KEY_ID=ffdevaccesskey AWS_SECRET_ACCESS_KEY=ffdevsecretk
   "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$FF_S3_PORT" "$@"; }
 if command -v aws >/dev/null; then aws_cli=(aws); else
   aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
-    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS amazon/aws-cli:2.34.32)
+    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS -e AWS_ENDPOINT_URL_SESV2 amazon/aws-cli:2.34.32)
 fi
 # held <command…>: whether the store has the bucket, as head-bucket answers.
 held() { "$@" >/dev/null 2>&1 && echo held || echo gone; }
@@ -1216,6 +1220,7 @@ check "a Python function, boto3.client(\"sqs\") as on Lambda: the URL from outsi
 check "their pods get the SQS endpoint inside the cluster with their own key, through the Secret" \
   "http://$cluster_gateway:$sqs_port $(function_secret "$node_sqs" AWS_ACCESS_KEY_ID)" \
   "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SQS) $(env_q "SELECT id FROM storage_keys WHERE function_id = '$node_sqs' AND revoked_at IS NULL")"
+check "  ... and the SES endpoint for the account's mail, as AWS_ENDPOINT_URL_SESV2" "http://$cluster_gateway:$ses_port" "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SESV2)"
 http PUT "/functions/$python_sqs" '{"environment": {"AWS_ENDPOINT_URL_SQS": "https://sqs.us-east-1.amazonaws.com"}}' >/dev/null
 check "a function can't point it elsewhere: AWS_ENDPOINT_URL_SQS is FF's" "400 AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues" \
   "$(status) $(jq -r '.message | join("; ")' "$work/body")"
@@ -1420,7 +1425,8 @@ for _ in $(seq 150); do [ "$(http GET "/alarms/$waiting_alarm" | jq -r .state)" 
 check "the alarm fires once a minute has sampled the two messages waiting, naming the queue" "ALARM e2e-waiting true" \
   "$(http GET "/alarms/$waiting_alarm" | jq -r '"\(.state) \(.queueName) \(.stateReason | test("breaching ApproximateNumberOfMessagesVisible Maximum > 1"))"')"
 site_visits() { env_q "SELECT coalesce(sum(requests), 0) || ' ' || coalesce(sum(gets), 0) || ' ' || coalesce(sum(bytes_out), 0) FROM storage_request_counts WHERE name = 'e2e-site' AND class = 'website'"; }
-for _ in $(seq 70); do [ "$(site_visits | cut -d' ' -f1)" -ge 12 ] && break; sleep 1; done
+# Each minute, the website server writes the minutes that are over, as the front door does: the visits within two.
+for _ in $(seq 150); do [ "$(site_visits | cut -d' ' -f1)" -ge 12 ] && break; sleep 1; done
 check "the site's visits counted in its minutes once written, apart from S3's requests, with what they sent" "true true" \
   "$(site_visits | awk '{ print ($1 >= 12 && $2 >= 10) ? "true" : "false", ($3 > 0) ? "true" : "false" }')"
 since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
@@ -1439,6 +1445,69 @@ as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
 check "the queues deleted, their messages with them" "0 0" \
   "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"
 http DELETE "/storage-keys/$queue_key_id" >/dev/null
+
+echo "== customers' mail (ADR 0012): identities and the suppression list, with AWS's CLI through the SES endpoint"
+ses_endpoint="http://localhost:$ses_port"
+mail_key="$(http POST /storage-keys '{}')"
+check "a new key's answer names the SES endpoint, AWS_ENDPOINT_URL_SESV2" "$ses_endpoint" "$(jq -r .sesEndpoint <<<"$mail_key")"
+mail_key_id="$(jq -r .id <<<"$mail_key")"
+mail_key_secret="$(jq -r .secretAccessKey <<<"$mail_key")"
+# The AWS CLI, its endpoint from AWS_ENDPOINT_URL_SESV2 alone, as a function's environment gives it, and no setting of
+# this machine's; as the other account with AWS_KEY and AWS_SECRET.
+aws_ses() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$mail_key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$mail_key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 \
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_SESV2="$ses_endpoint" "${aws_cli[@]}" sesv2 "$@" --output json; }
+as_other_ses() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
+# outcome_ses <command…>: accepted, or refused with the error's name, as the CLI prints it.
+outcome_ses() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE 'An error occurred \([A-Za-z]+\)' "$work/aws.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"; }
+check "the AWS CLI makes a domain an identity, with a DKIM key of FF's, as SES's own DKIM brought in: pending, its one token the selector" \
+  "DOMAIN false PENDING EXTERNAL 1" \
+  "$(aws_ses create-email-identity --email-identity Shop.E2E-Customer.tn | jq -r '"\(.IdentityType) \(.VerifiedForSendingStatus) \(.DkimAttributes.Status) \(.DkimAttributes.SigningAttributesOrigin) \(.DkimAttributes.Tokens | length)"')"
+http GET /email/identities/shop.e2e-customer.tn >/dev/null
+selector="$(jq -r .dkimSelector "$work/body")"
+check "FF's API gives the records to publish: its DKIM key's, and its return path's MX, to the mail server" \
+  "200 $selector._domainkey.shop.e2e-customer.tn bounces.mail.shop.e2e-customer.tn 10 mail.localhost" \
+  "$(status) $(jq -r '"\(.records[] | select(.purpose == "DKIM") | .name) \(.records[] | select(.purpose == "MAIL_FROM") | "\(.name) \(.value)")"' "$work/body")"
+# A TXT record's strings are 255 characters at most: the key's record split in a few, as DNS providers store it.
+dkim_strings="$(jq -r '.records[] | select(.purpose == "DKIM") | .value' "$work/body" | fold -w 200 | sed 's/.*/"&"/' | tr '\n' ' ')"
+zone 5 "docs IN CNAME e2e-site.site.localhost." "$selector._domainkey.shop IN TXT $dkim_strings" "bounces.mail.shop IN MX 10 mail.localhost."
+for _ in $(seq 1 30); do
+  http POST /email/identities/shop.e2e-customer.tn/verify >/dev/null
+  [ "$(jq -r .status "$work/body")" = SUCCESS ] && break
+  sleep 1
+done
+check "once its records are published, a check proves it, its return path too" "SUCCESS true true" \
+  "$(jq -r '"\(.status) \(.sendingEnabled) \(.mailFromVerified)"' "$work/body")"
+check "  ... as the AWS CLI reads it back" "true SUCCESS SUCCESS" \
+  "$(aws_ses get-email-identity --email-identity shop.e2e-customer.tn | jq -r '"\(.VerifiedForSendingStatus) \(.DkimAttributes.Status) \(.MailFromAttributes.MailFromDomainStatus)"')"
+check "  ... the same domain again, refused as SES does" "refused AlreadyExistsException" "$(outcome_ses aws_ses create-email-identity --email-identity shop.e2e-customer.tn)"
+check "an address is made an identity, pending until its link is followed" "EMAIL_ADDRESS false" \
+  "$(aws_ses create-email-identity --email-identity Orders@E2E-Customer.tn | jq -r '"\(.IdentityType) \(.VerifiedForSendingStatus)"')"
+# No SMTP server here: FF's own mail is written to the backend's log, the link with it.
+for _ in $(seq 1 10); do
+  token="$(grep -oE '/verify\?token=[A-Za-z0-9_-]{32}' "$work/backend.log" | tail -1 | cut -d= -f2)"
+  [ -n "$token" ] && break
+  sleep 1
+done
+check "  ... the link FF e-mails it proves it, once: a second visit finds nothing" "200 true 404" \
+  "$(curl -s -o "$work/verify.html" -w '%{http_code}' "$ses_endpoint/verify?token=$token") $(grep -q 'orders@e2e-customer.tn' "$work/verify.html" && echo true || echo false) \
+$(curl -s -o /dev/null -w '%{http_code}' "$ses_endpoint/verify?token=$token")"
+check "  ... and the CLI lists both, proved" "orders@e2e-customer.tn:true shop.e2e-customer.tn:true" \
+  "$(aws_ses list-email-identities | jq -r '[.EmailIdentities[] | "\(.IdentityName):\(.SendingEnabled)"] | join(" ")')"
+check "another account's key finds none of them" "refused NotFoundException 0" \
+  "$(outcome_ses as_other_ses aws_ses get-email-identity --email-identity shop.e2e-customer.tn) $(as_other_ses aws_ses list-email-identities | jq '.EmailIdentities | length')"
+check "the account's sending as GetAccount says it: the plan's quotas, SES's doubles as the AWS CLI prints them, in the sandbox" "200.0 1.0 false true" \
+  "$(aws_ses get-account | jq -r '"\(.SendQuota.Max24HourSend) \(.SendQuota.MaxSendRate) \(.ProductionAccessEnabled) \(.SendingEnabled)"')"
+aws_ses put-suppressed-destination --email-address Gone@E2E-Customer.tn --reason BOUNCE >/dev/null
+check "an address put on the suppression list, read back by the CLI and FF's API" "gone@e2e-customer.tn BOUNCE gone@e2e-customer.tn" \
+  "$(aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn | jq -r '"\(.SuppressedDestination.EmailAddress) \(.SuppressedDestination.Reason)"') $(http GET /email/suppressions | jq -r '.suppressions[0].address')"
+aws_ses delete-suppressed-destination --email-address gone@e2e-customer.tn >/dev/null
+check "  ... and taken off" "refused NotFoundException" "$(outcome_ses aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn)"
+check "the audit log names each change to the domain, the CLI's under its key" "email.identity.create access_key:$mail_key_id email.identity.verify" \
+  "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'email-identity:shop.e2e-customer.tn'")"
+aws_ses delete-email-identity --email-identity orders@e2e-customer.tn >/dev/null
+http DELETE /email/identities/shop.e2e-customer.tn >/dev/null
+check "both deleted, one through the CLI, one through FF's API, their keys with them" "204 0" "$(status) $(env_q "SELECT count(*) FROM email_identities WHERE account_id = '$tenant'")"
+http DELETE "/storage-keys/$mail_key_id" >/dev/null
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account

@@ -99,6 +99,11 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("queueStorageMb", &|n| format!("{n} MB of messages waiting"));
     add("caches", &|n| if n == 1 { "1 cache".to_string() } else { format!("{n} caches") });
     add("cacheMb", &|n| format!("{n} MB a cache"));
+    add("emailIdentities", &|n| {
+        if n == 1 { "1 domain to send mail from".to_string() } else { format!("{n} domains to send mail from") }
+    });
+    add("emailsPerDay", &|n| format!("{n} e-mails a day"));
+    add("emailsPerSecond", &|n| format!("{n} e-mails a second"));
     lines
 }
 

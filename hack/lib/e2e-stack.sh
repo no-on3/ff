@@ -46,6 +46,8 @@ e2e_base_env=(
   FF_STORAGE_PORT=0
   # Nor queues' SQS endpoint, for the same reason.
   FF_SQS_PORT=0
+  # Nor mail's SES endpoint, for the same reason.
+  FF_SES_PORT=0
   # Nor buckets' sites: a test that visits them gives a free port, and the base to match.
   FF_WEBSITE_PORT=0
   # Nor functions' own keys to buckets, nor customers' databases and caches, whichever a developer's BE/.env names: a

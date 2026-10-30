@@ -30,6 +30,9 @@ export interface PlanLimits {
   queueStorageMb: number;
   caches: number;
   cacheMb: number;
+  emailIdentities: number;
+  emailsPerDay: number;
+  emailsPerSecond: number;
 }
 
 export interface Plan {
@@ -71,6 +74,9 @@ export const LIMIT_FIELDS: Array<{ path: [keyof PlanLimits] | ['quota', keyof Pl
   { path: ['queueStorageMb'], label: 'Messages waiting', unit: 'MB, all together, asynchronous calls included', kind: 'whole' },
   { path: ['caches'], label: 'Caches', unit: 'all together', kind: 'whole' },
   { path: ['cacheMb'], label: 'Memory of a cache', unit: 'MB, each', kind: 'whole' },
+  { path: ['emailIdentities'], label: 'Domains to send mail from', unit: 'all together, proved addresses apart', kind: 'whole' },
+  { path: ['emailsPerDay'], label: 'E-mails a day', unit: 'each recipient one', kind: 'whole' },
+  { path: ['emailsPerSecond'], label: 'E-mails a second', unit: 'at most', kind: 'whole' },
 ];
 
 const QUANTITY = /^\d+(\.\d+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$/;

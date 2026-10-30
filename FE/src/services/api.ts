@@ -768,6 +768,12 @@ export interface PlanLimits {
   caches: number;
   /** One cache's memory, in MB: past it, its least recently used keys go. */
   cacheMb: number;
+  /** The domains the account may send mail from, its proved addresses apart. */
+  emailIdentities: number;
+  /** Messages a day, each recipient one, as SES's Max24HourSend. */
+  emailsPerDay: number;
+  /** Messages a second, as SES's MaxSendRate. */
+  emailsPerSecond: number;
 }
 
 export interface Plan {
@@ -877,6 +883,8 @@ export const SCOPES = [
   'queues:write',
   'caches:read',
   'caches:write',
+  'email:read',
+  'email:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 
@@ -1316,6 +1324,8 @@ export interface CreatedStorageKey extends StorageKey {
   endpoint: string;
   /** The SQS endpoint, AWS_ENDPOINT_URL_SQS, for the account's queues. */
   sqsEndpoint: string;
+  /** The SES endpoint, AWS_ENDPOINT_URL_SESV2, for the account's mail. */
+  sesEndpoint: string;
   region: string;
 }
 

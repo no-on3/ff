@@ -72,6 +72,7 @@ const QUEUE_BILLING = migrationNames.find((name) => name.startsWith('QueueBillin
 const BUCKET_WEBSITES = migrationNames.find((name) => name.startsWith('BucketWebsites')) as string;
 const DEPLOY_KEYS = migrationNames.find((name) => name.startsWith('DeployKeys')) as string;
 const CACHES = migrationNames.find((name) => name.startsWith('Caches1')) as string;
+const CACHE_MEASURES = migrationNames.find((name) => name.startsWith('CacheMeasures')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -796,6 +797,31 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the mail migration gives every plan the sandbox's limits, keeps an identity its account's once and an address once on its list, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const identity = (accountId: string, name: string, type = 'DOMAIN') =>
+        dataSource.query(`INSERT INTO email_identities (account_id, identity, type) VALUES ($1, $2, $3)`, [accountId, name, type]);
+      const suppressed = (address: string, reason: string) => dataSource.query(`INSERT INTO email_suppressions (account_id, address, reason) VALUES ($1, $2, $3)`, [ACCOUNT, address, reason]);
+      await identity(ACCOUNT, 'shop.example.tn');
+      await identity('000000000002', 'shop.example.tn'); // another account's, of the same name
+      await expect(identity(ACCOUNT, 'shop.example.tn')).rejects.toThrow(/duplicate key/);
+      await expect(identity(ACCOUNT, '192.0.2.1', 'IP_ADDRESS')).rejects.toThrow(/violates check constraint/);
+      await suppressed('gone@example.tn', 'BOUNCE');
+      await expect(suppressed('gone@example.tn', 'COMPLAINT')).rejects.toThrow(/duplicate key/);
+      await expect(suppressed('angry@example.tn', 'SPAM')).rejects.toThrow(/violates check constraint/);
+      expect((await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`))[0].limits).toMatchObject({ emailIdentities: 2, emailsPerDay: 200, emailsPerSecond: 1 });
+
+      await migrateDownTo(dataSource, CACHE_MEASURES);
+
+      expect(await dataSource.query(`SELECT to_regclass('email_identities') AS i, to_regclass('email_suppressions') AS s`)).toEqual([{ i: null, s: null }]);
+      const [{ limits }] = await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`);
+      expect([limits.emailIdentities, limits.emailsPerDay, limits.emailsPerSecond]).toEqual([undefined, undefined, undefined]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it('the closed-account-deletion migration gives an account closed before it the whole default notice from now, one not closed none, and reverts with a deletion recorded', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -1293,6 +1319,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         'custom_domains',
         'database_samples',
         'databases',
+        'email_identities',
+        'email_suppressions',
         'event_source_mappings',
         'function_environments',
         'function_event_invoke_configs',
@@ -1355,7 +1383,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets', 'queues']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets', 'queues', 'email_identities']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

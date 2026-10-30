@@ -13,8 +13,9 @@
 #     mounted from their Secret where its settings look;
 #   - the production realm up to date with the development realm;
 #   - function URLs: the edge's function domain the backend's, the backend's port for them reached by the edge alone;
-#   - buckets' S3 front door and queues' SQS endpoint: the edge's host for each the backend's, the backend's port for
-#     each reached by the edge and tenants' functions alone, functions' fixed address for it, each host sent there;
+#   - buckets' S3 front door, queues' SQS endpoint and mail's SES endpoint: the edge's host for each the backend's,
+#     the backend's port for each reached by the edge and tenants' functions alone, functions' fixed address for it,
+#     each host sent there; the mail server's names public ones;
 #   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image, both ways to function URLs' and
 #     buckets' certificates; behind a proxy, its allowlist believing X-Forwarded-For from FF_EDGE_TRUSTED_PROXIES
 #     alone, the edge run and asked on a Docker network of its own;
@@ -220,15 +221,16 @@ check "the edge's storage host is the host of the backend's FF_STORAGE_BASE" "s3
   "$(sed -n 's/^FF_STORAGE_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_STORAGE_BASE=https://##p' "$platform/backend.env")"
 storage_port="$(sed -n 's/^FF_STORAGE_PORT=//p' "$platform/backend.env")"
 sqs_port="$(sed -n 's/^FF_SQS_PORT=//p' "$platform/backend.env")"
+ses_port="$(sed -n 's/^FF_SES_PORT=//p' "$platform/backend.env")"
 # reached_by <port>: the backend's Service port and container port for it, and who its NetworkPolicy lets in there,
-# the edge's pods or tenants' functions; "functions reach more" when functions reach a port other than buckets' and
-# queues'.
+# the edge's pods or tenants' functions; "functions reach more" when functions reach a port other than buckets',
+# queues' and mail's.
 reached_by() {
-  python3 - "$work/platform.yaml" "$1" "$storage_port" "$sqs_port" <<'PY'
+  python3 - "$work/platform.yaml" "$1" "$storage_port" "$sqs_port" "$ses_port" <<'PY'
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
 port = int(sys.argv[2])
-theirs = {int(sys.argv[3]), int(sys.argv[4])}
+theirs = {int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])}
 named = lambda kind, name: next(d for d in docs if d['kind'] == kind and d['metadata']['name'] == name)
 container = next(p for p in named('Deployment', 'ff-backend')['spec']['template']['spec']['containers'][0]['ports'] if p['containerPort'] == port)
 service = next(p for p in named('Service', 'ff-backend')['spec']['ports'] if p['targetPort'] == container['name'])
@@ -276,6 +278,21 @@ check "functions' address for it: the Service ff-storage's fixed one, on that po
   "$(ff_storage "$sqs_port") $(sed -n 's/^FF_SQS_FUNCTION_ENDPOINT=//p' "$platform/backend.env") $(grep -q '^FF_SQS_FUNCTION_CIDRS=.' "$platform/backend.env" && echo some || echo none)"
 check "the edge sends its host there" "1 1" \
   "$(grep -c '^{\$FF_SQS_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$sqs_port$" "$platform/edge/Caddyfile")"
+
+echo "== customers' mail's SES endpoint"
+# The edge serves the backend's SES endpoint, one host, on the backend's port for it; functions reach that port at
+# ff-storage's address too. The mail server's names are public ones, as production requires.
+check "the edge's SES host is the host of the backend's FF_SES_BASE" "email.example.tn email.example.tn" \
+  "$(sed -n 's/^FF_SES_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_SES_BASE=https://##p' "$platform/backend.env")"
+check "the backend's port for mail in its Service, reached by the edge and tenants' functions alone" "$ses_port ses edge,functions" \
+  "$(reached_by "$ses_port")"
+check "functions' address for it: the Service ff-storage's fixed one, on that port, which the backend names to their pods" \
+  "10.43.0.251:$ses_port ses http://10.43.0.251:$ses_port none" \
+  "$(ff_storage "$ses_port") $(sed -n 's/^FF_SES_FUNCTION_ENDPOINT=//p' "$platform/backend.env") $(grep -q '^FF_SES_FUNCTION_CIDRS=.' "$platform/backend.env" && echo some || echo none)"
+check "the edge sends its host there" "1 1" \
+  "$(grep -c '^{\$FF_SES_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$ses_port$" "$platform/edge/Caddyfile")"
+check "the mail server and FF's own return path by public names" "mail.example.tn bounces.mail.example.tn" \
+  "$(sed -n 's/^FF_EMAIL_MAIL_HOST=//p' "$platform/backend.env") $(sed -n 's/^FF_EMAIL_BOUNCE_DOMAIN=//p' "$platform/backend.env")"
 
 echo "== buckets' sites"
 # The edge serves every host under the sites' domain on the backend's port for sites, which nothing else reaches; a

@@ -18,6 +18,8 @@ export const SCOPE_INFO: Record<Scope, string> = {
   'queues:write': 'Create, change, purge and delete queues, and send and receive their messages',
   'caches:read': 'List and read caches, with their memory used and connections',
   'caches:write': 'Create and delete caches, and give them new passwords',
+  'email:read': "List and read the domains and addresses mail goes from, the account's quotas and its suppression list",
+  'email:write': 'Add, prove and delete domains and addresses, change the suppression list, and send mail',
 };
 
 export type KeyState = 'active' | 'revoked' | 'expired';

@@ -563,7 +563,7 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
   it("have the API's fields and name rule, so the page reads each one there is and the form refuses what the API would", () => {
     expect(dtoFields(storageDtoSource, 'export class BucketView {')).toEqual([...BUCKET_FIELDS]);
     expect(dtoFields(storageDtoSource, 'export class StorageKeyView {')).toEqual([...STORAGE_KEY_FIELDS]);
-    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'region']);
+    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'sesEndpoint', 'region']);
     expect(/export const BUCKET_NAME = \/(.+)\/;/.exec(storageNamesSource)?.[1]).toBe(BUCKET_NAME.source);
   });
 

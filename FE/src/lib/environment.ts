@@ -36,10 +36,11 @@ export const LAMBDA_RESERVED = [
 /** The names FF's runtimes read or start with, which the API refuses too; and every name starting with FF_. */
 export const FF_RESERVED = ['FUNCTION_NAME', 'FUNCTION_VERSION', 'FUNCTION_MEMORY_LIMIT', 'FUNCTION_TIMEOUT', 'PORT', 'PATH'];
 
-/** The names FF sets with a function's own key to its account's buckets and queues, and why, which the API refuses too. */
+/** The names FF sets with a function's own key to its account's buckets, queues and mail, and why, which the API refuses too. */
 export const ENDPOINTS_RESERVED = new Map([
   ['AWS_ENDPOINT_URL_S3', "FF sets it, with the function's own key to its account's buckets"],
   ['AWS_ENDPOINT_URL_SQS', "FF sets it, with the function's own key to its account's queues"],
+  ['AWS_ENDPOINT_URL_SESV2', "FF sets it, with the function's own key to its account's mail"],
 ]);
 
 const RESERVED = new Set([...LAMBDA_RESERVED, ...FF_RESERVED]);

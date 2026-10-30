@@ -12,7 +12,7 @@ The server has its own rules ([`/data/proxy/README.md`](#its-files) on the serve
 
 | | Production ([`deploy/k8s`](../k8s/README.md)) | This server |
 |---|---|---|
-| The internet's TLS | The edge's, from Let's Encrypt | The server's proxy's: Let's Encrypt's for the six fixed names, its own authority's for function URLs, buckets and sites |
+| The internet's TLS | The edge's, from Let's Encrypt | The server's proxy's: Let's Encrypt's for the seven fixed names, its own authority's for function URLs, buckets and sites |
 | The edge's certificates | Let's Encrypt | Its own authority (`local_certs`), which the proxy checks it against |
 | Function URLs, buckets and sites | A wildcard certificate each, by DNS | A wildcard each, from the proxy's own authority, whose root your browser must trust |
 | Customers' own domains | Certificates on demand, at the edge | Not routed: the proxy sends FF's names alone |
@@ -37,7 +37,7 @@ The same command installs and updates. It copies the checkout's files to `/data/
 5. `deploy/k8s`: base, the Secrets, logging, monitoring, gVisor's RuntimeClass; then the platform with `deploy/k8s/platform/deploy.sh` and this folder's overlay (`k8s/`), with what is the server's own added on the server (`/data/ff/overlay`).
 6. The first operator, `operator@dev.ffunc.cloud`, once: FF's realm makes each user's e-mail address its username.
 7. The route file, installed and the proxy reloaded. The proxy checks a configuration as it loads it; a route it refuses is put back as it was, so that no other project's next reload meets it.
-8. Every hostname, through the proxy, as from the internet, once Let's Encrypt has given the six fixed names their certificates (a minute or so the first time).
+8. Every hostname, through the proxy, as from the internet, once Let's Encrypt has given the seven fixed names their certificates (a minute or so the first time).
 
 Then [`smoke.sh`](smoke.sh) takes a customer's path through the proxy: an operator and a customer of its own, each signed in as a browser signs in; an account asked for, the operator told by e-mail, the account approved; a function in gVisor, invoked and called at its URL; a bucket at its own host; a queue sent to and read. Then it deletes all of it, closes the account and removes both users, whether its checks passed or not. `--no-smoke` skips it.
 
@@ -45,9 +45,9 @@ The admin app and Keycloak's administration answer only the address the server s
 
 ## Reaching it
 
-FF's names are under `dev.ffunc.cloud`, in OVH's DNS: `api`, `console`, `admin`, `login`, `s3` and `sqs`, and the wildcards `*.fn`, `*.s3` and `*.site`, each an A record to the server's address. None has an AAAA record: the proxy gets IPv6 callers through Docker's relay, which hides their address, and the admin app answers by address. The domain is `k8s/edge.env`'s, from which `server.sh` and `smoke.sh` take it.
+FF's names are under `dev.ffunc.cloud`, in OVH's DNS: `api`, `console`, `admin`, `login`, `s3`, `sqs` and `email`, and the wildcards `*.fn`, `*.s3` and `*.site`, each an A record to the server's address. None has an AAAA record: the proxy gets IPv6 callers through Docker's relay, which hides their address, and the admin app answers by address. The domain is `k8s/edge.env`'s, from which `server.sh` and `smoke.sh` take it.
 
-1. **The proxy's root,** for function URLs and buckets, which your browser and your system must trust: `ssh next 'sudo docker compose --project-directory /data/proxy exec -T caddy cat /data/caddy/pki/authorities/local/root.crt' > ff-dev-root.crt`. It is the one that already signs the other projects' certificates for the server's address. The six fixed names need nothing: their certificates are Let's Encrypt's.
+1. **The proxy's root,** for function URLs and buckets, which your browser and your system must trust: `ssh next 'sudo docker compose --project-directory /data/proxy exec -T caddy cat /data/caddy/pki/authorities/local/root.crt' > ff-dev-root.crt`. It is the one that already signs the other projects' certificates for the server's address. The seven fixed names need nothing: their certificates are Let's Encrypt's.
 2. **The console,** `https://console.dev.ffunc.cloud`: sign up, confirm the address from the e-mail in Mailpit, and ask for an account.
 3. **The admin app,** `https://admin.dev.ffunc.cloud`, as `operator@dev.ffunc.cloud`: its password is `ssh next sudo cat /data/ff/secrets/operator-password`, and it sets up its one-time password at its first login. Approve the account there.
 4. **Mail:** `ssh -L 8026:127.0.0.1:8026 next`, then `http://localhost:8026`.

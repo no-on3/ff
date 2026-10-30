@@ -39,6 +39,9 @@ const production: Env = {
   FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
   FF_STORAGE_BASE: 'https://s3.ff.example',
   FF_SQS_BASE: 'https://sqs.ff.example',
+  FF_SES_BASE: 'https://email.ff.example',
+  FF_EMAIL_MAIL_HOST: 'mail.ff.example',
+  FF_EMAIL_BOUNCE_DOMAIN: 'bounces.mail.ff.example',
   FF_WEBSITE_BASE: 'https://site.ff.example',
   FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
@@ -570,6 +573,49 @@ describe('configuration', () => {
       ]);
       expect(problems({ ...dev, FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003/sqs' })).toEqual([
         expect.stringMatching(/^FF_SQS_FUNCTION_ENDPOINT must be an origin, such as http:\/\/10.43.0.251:3003, at which functions reach queues' SQS endpoint/),
+      ]);
+    });
+  });
+
+  describe("customers' mail's SES endpoint, and the server that sends it", () => {
+    it("is served on port 3005, apart from the API, at localhost in development, naming FF's region; the mail server is mail.localhost", () => {
+      const config = configuration(dev);
+
+      expect(config.ses).toEqual({ port: 3005, base: 'http://localhost:3005', region: 'tn-tunis-1', functionEndpoint: '' });
+      expect(config.email).toEqual({ mailHost: 'mail.localhost', bounceDomain: 'bounces.mail.localhost', domainResolvers: [] });
+    });
+
+    it('takes an origin, a trailing slash dropped, port 0 for none, and the mail server by its name in lower case', () => {
+      const config = configuration({ ...production, FF_SES_BASE: 'https://email.example.tn/', FF_SES_PORT: '0', FF_EMAIL_MAIL_HOST: 'Mail.Example.TN' });
+
+      expect([config.ses.port, config.ses.base, config.email.mailHost]).toEqual([0, 'https://email.example.tn', 'mail.example.tn']);
+      expect(problems({ ...dev, FF_SES_BASE: 'https://email.example.tn/v2' })).toEqual([expect.stringMatching(/^FF_SES_BASE must be an origin, such as https:\/\/email.example.tn/)]);
+    });
+
+    it("is reached over TLS in production, and its mail server by a public name, which customers' domains' records name", () => {
+      expect(problems({ ...production, FF_SES_BASE: 'http://email.example.tn' })).toEqual([expect.stringMatching(/^FF_SES_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
+      expect(problems({ ...production, FF_EMAIL_MAIL_HOST: 'mail.localhost', FF_EMAIL_BOUNCE_DOMAIN: 'localhost' })).toEqual([
+        "FF_EMAIL_MAIL_HOST must be a public name when NODE_ENV=production, such as mail.example.tn: customers' domains' records name it",
+        "FF_EMAIL_BOUNCE_DOMAIN must be a public name when NODE_ENV=production, such as bounces.mail.example.tn: customers' domains' records name it",
+      ]);
+    });
+
+    it("is reached by functions at a Service's fixed address, on the endpoint's port, beside the SQS endpoint", () => {
+      const config = configuration({ ...production, FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003', FF_SES_FUNCTION_ENDPOINT: 'http://10.43.0.251:3005/' });
+
+      expect(config.ses.functionEndpoint).toBe('http://10.43.0.251:3005');
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: [], port: 3003 },
+        { cidrs: [], port: 3005 },
+      ]);
+    });
+
+    it("refuses functions' endpoint without the SES endpoint, and their addresses without functions' endpoint", () => {
+      expect(problems({ ...dev, FF_SES_PORT: '0', FF_SES_FUNCTION_ENDPOINT: 'http://10.43.0.251:3005' })).toEqual([
+        "FF_SES_FUNCTION_ENDPOINT is set, but FF_SES_PORT is 0: functions' keys send mail through the SES endpoint, which isn't running",
+      ]);
+      expect(problems({ ...dev, FF_SES_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
+        'FF_SES_FUNCTION_CIDRS is set, but FF_SES_FUNCTION_ENDPOINT is not: it names where functions reach the SES endpoint',
       ]);
     });
   });

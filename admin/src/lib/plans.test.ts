@@ -29,6 +29,9 @@ const BETA: PlanLimits = {
   queueStorageMb: 100,
   caches: 1,
   cacheMb: 64,
+  emailIdentities: 2,
+  emailsPerDay: 200,
+  emailsPerSecond: 1,
 };
 
 describe("a plan's limits, in a form (P-73)", () => {

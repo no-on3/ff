@@ -37,6 +37,9 @@ export class PlanLimitsView implements PlanLimits {
   queueStorageMb: number;
   @ApiProperty({ example: 1, description: "Customers' caches, all together" }) caches: number;
   @ApiProperty({ example: 64, description: "One cache's memory, in MB: past it, its least recently used keys go" }) cacheMb: number;
+  @ApiProperty({ example: 2, description: 'The domains the account may send mail from, its proved addresses apart' }) emailIdentities: number;
+  @ApiProperty({ example: 200, description: "Messages a day, each recipient one, as SES's Max24HourSend" }) emailsPerDay: number;
+  @ApiProperty({ example: 1, description: "Messages a second, as SES's MaxSendRate" }) emailsPerSecond: number;
 }
 
 /** An account's plan. */

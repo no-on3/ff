@@ -59,6 +59,13 @@ export type AuditAction =
   | 'cache.create'
   | 'cache.password'
   | 'cache.delete'
+  // Customers' mail (ADR 0012): a domain or an address to send from, made, proved and deleted. An address put on the
+  // account's suppression list by it, or taken off.
+  | 'email.identity.create'
+  | 'email.identity.verify'
+  | 'email.identity.delete'
+  | 'email.suppression.put'
+  | 'email.suppression.delete'
   // A customer's bucket, made and deleted, and an access key to the account's buckets, made and revoked (ADR 0009).
   | 'bucket.create'
   | 'bucket.delete'

@@ -40,10 +40,11 @@ docker run -d --name "$prefix-db" -e POSTGRES_PASSWORD=images-test-password -e P
 for _ in $(seq 1 60); do docker exec "$prefix-db" pg_isready -U postgres -d ff >/dev/null 2>&1 && break; sleep 1; done
 port="$(free_port)"
 metrics_port="$(free_port)"
-# Function URLs', buckets' and queues' ports too: with host networking, a development backend here may hold the defaults.
+# Function URLs', buckets', queues' and mail's ports too: with host networking, a development backend here may hold the defaults.
 url_port="$(free_port)"
 storage_port="$(free_port)"
 sqs_port="$(free_port)"
+ses_port="$(free_port)"
 # The backend's cluster credentials, readable by the container's user: copies in the test's own directory, which
 # only this user may enter.
 install -m 644 "$FF_SA_TOKEN_FILE" "$work/token"
@@ -66,8 +67,9 @@ env=(
   -v "$work/token:/etc/ff/kube/token:ro" -v "$work/ca.crt:/etc/ff/kube/ca.crt:ro"
   # Production's addresses are https, and every function's code comes from the code registry, never reached here.
   -e FF_FUNCTION_URL_BASE=https://fn.ff.test -e FF_STORAGE_BASE=https://s3.ff.test -e FF_SQS_BASE=https://sqs.ff.test -e FF_WEBSITE_BASE=https://site.ff.test
+  -e FF_SES_BASE=https://email.ff.test -e FF_EMAIL_MAIL_HOST=mail.ff.test -e FF_EMAIL_BOUNCE_DOMAIN=bounces.mail.ff.test
   -e FF_CODE_REGISTRY=http://127.0.0.1:1
-  -e FF_FUNCTION_URL_PORT="$url_port" -e FF_STORAGE_PORT="$storage_port" -e FF_SQS_PORT="$sqs_port" -e FF_WEBSITE_PORT=0
+  -e FF_FUNCTION_URL_PORT="$url_port" -e FF_STORAGE_PORT="$storage_port" -e FF_SQS_PORT="$sqs_port" -e FF_SES_PORT="$ses_port" -e FF_WEBSITE_PORT=0
   -e FF_ENCRYPTION_KEYS_FILE=/etc/ff/keys/keys -v "$work/encryption-keys:/etc/ff/keys/keys:ro"
 )
 # Host networking: the database's and the cluster's ports are this machine's.
@@ -103,6 +105,8 @@ check "its metrics, on their own port" true \
   "$(curl -s "http://127.0.0.1:$metrics_port/metrics" | grep -q '^ff_backend_process_resident_memory_bytes ' && echo true || echo false)"
 check "queues' SQS endpoint, on its own port, refuses a request with no signature as SQS does" "403 com.amazonaws.sqs#MissingAuthenticationToken" \
   "$(curl -s -o "$work/sqs" -w '%{http_code}' -X POST -H 'Content-Type: application/x-amz-json-1.0' -H 'X-Amz-Target: AmazonSQS.ListQueues' -d '{}' "http://127.0.0.1:$sqs_port/") $(jq -r .__type "$work/sqs")"
+check "mail's SES endpoint, on its own port, refuses a request with no signature as SES does" "403 MissingAuthenticationTokenException" \
+  "$(curl -s -o /dev/null -D "$work/ses" -w '%{http_code}' "http://127.0.0.1:$ses_port/v2/email/account") $(tr -d '\r' <"$work/ses" | awk -F': ' 'tolower($1) == "x-amzn-errortype" {print $2}' | cut -d: -f1)"
 check "every line of its log is one JSON object" true \
   "$(docker logs "$prefix-backend" 2>&1 | python3 -c '
 import json, sys

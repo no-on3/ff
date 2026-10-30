@@ -30,7 +30,7 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
     accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
     secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
   };
-  const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' }, sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1' } });
+  const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' }, sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1' }, ses: { base: 'https://email.example.tn' } });
   const store = new S3Client({
     endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
     region: 'us-east-1',
@@ -167,6 +167,7 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
       secretAccessKey: expect.stringMatching(/^[A-Za-z0-9+/]{40}$/),
       endpoint: 'https://s3.example.tn',
       sqsEndpoint: 'https://sqs.example.tn',
+      sesEndpoint: 'https://email.example.tn',
       region: 'tn-tunis-1',
     });
     expect(await keys().list(ACCOUNT)).toEqual([

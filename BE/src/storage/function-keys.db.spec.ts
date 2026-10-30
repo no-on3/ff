@@ -17,12 +17,14 @@ const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '720000000001';
 const ENDPOINT = 'http://10.43.0.251:3002';
 const SQS_ENDPOINT = 'http://10.43.0.251:3003';
+const SES_ENDPOINT = 'http://10.43.0.251:3005';
 
-run("functions' own keys to their account's buckets and queues, in FF's database (L2)", () => {
-  const config = (functionEndpoint = ENDPOINT, sqsEndpoint = SQS_ENDPOINT) =>
+run("functions' own keys to their account's buckets, queues and mail, in FF's database (L2)", () => {
+  const config = (functionEndpoint = ENDPOINT, sqsEndpoint = SQS_ENDPOINT, sesEndpoint = SES_ENDPOINT) =>
     new ConfigService({
       storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1', functionEndpoint },
       sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1', functionEndpoint: sqsEndpoint },
+      ses: { base: 'https://email.example.tn', region: 'tn-tunis-1', functionEndpoint: sesEndpoint },
     });
   let db: ScratchDatabase;
   let directory: StorageDirectory;
@@ -58,6 +60,7 @@ run("functions' own keys to their account's buckets and queues, in FF's database
         AWS_DEFAULT_REGION: 'tn-tunis-1',
         AWS_ENDPOINT_URL_S3: ENDPOINT,
         AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT,
+        AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT,
       },
     });
     expect(again).toEqual(first);
@@ -108,20 +111,24 @@ run("functions' own keys to their account's buckets and queues, in FF's database
     expect(await db.dataSource.getRepository(AuditEntry).countBy({ accountId: ACCOUNT, action: 'storage_key.create' })).toBe(2);
   });
 
-  it('makes none where FF gives functions neither endpoint: neither has an address for them', async () => {
+  it('makes none where FF gives functions no endpoint: none has an address for them', async () => {
     const function_ = fn();
-    const none = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', ''));
+    const none = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', '', ''));
 
     expect(await none.credentialsFor(function_)).toBeUndefined();
     expect(await rowsOf(function_.id)).toEqual([]);
   });
 
-  it('gives the endpoints there are an address for, each alone: buckets without queues, queues without buckets', async () => {
-    const buckets = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config(ENDPOINT, '')).credentialsFor(fn());
-    const queues = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', SQS_ENDPOINT)).credentialsFor(fn());
+  it('gives the endpoints there are an address for, each alone: buckets, queues or mail without the others', async () => {
+    const buckets = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config(ENDPOINT, '', '')).credentialsFor(fn());
+    const queues = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', SQS_ENDPOINT, '')).credentialsFor(fn());
+    const mail = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', '', SES_ENDPOINT)).credentialsFor(fn());
+    const endpoints = (variables: Record<string, string>) => Object.keys(variables).filter((name) => name.startsWith('AWS_ENDPOINT_URL'));
 
-    expect(Object.keys(buckets!.variables).filter((name) => name.startsWith('AWS_ENDPOINT_URL'))).toEqual(['AWS_ENDPOINT_URL_S3']);
+    expect(endpoints(buckets!.variables)).toEqual(['AWS_ENDPOINT_URL_S3']);
     expect(queues!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: queues!.keyId, AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT });
-    expect(queues!.variables).not.toHaveProperty('AWS_ENDPOINT_URL_S3');
+    expect(endpoints(queues!.variables)).toEqual(['AWS_ENDPOINT_URL_SQS']);
+    expect(mail!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: mail!.keyId, AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT });
+    expect(endpoints(mail!.variables)).toEqual(['AWS_ENDPOINT_URL_SESV2']);
   });
 });

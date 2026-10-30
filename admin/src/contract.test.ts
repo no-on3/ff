@@ -109,14 +109,14 @@ describe("the development realm's ff-admin client and ff-operator role", () => {
 describe('the operator actions the audit log page names (P-76)', () => {
   it("are actions the API records", () => {
     const union = auditSource.slice(auditSource.indexOf('export type AuditAction ='), auditSource.indexOf(';', auditSource.indexOf('export type AuditAction =')));
-    const backendActions = [...union.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map((match) => match[1]);
+    const backendActions = [...union.matchAll(/'([a-z_]+(?:\.[a-z_]+)+)'/g)].map((match) => match[1]);
 
     expect(backendActions).toEqual(expect.arrayContaining(OPERATOR_ACTIONS.map((action) => action.value)));
   });
 
   it("and what FF does on its own, which an account's audit log shows, are actions the API records too", () => {
     const union = auditSource.slice(auditSource.indexOf('export type AuditAction ='), auditSource.indexOf(';', auditSource.indexOf('export type AuditAction =')));
-    const backendActions = [...union.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map((match) => match[1]);
+    const backendActions = [...union.matchAll(/'([a-z_]+(?:\.[a-z_]+)+)'/g)].map((match) => match[1]);
 
     expect(backendActions).toEqual(expect.arrayContaining(FF_ACTIONS.map((action) => action.value)));
   });
