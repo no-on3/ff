@@ -42,6 +42,8 @@ export const DEVELOPMENT_CREDENTIALS = {
   FF_DATA_DB_ADMIN_PASSWORD: ['ff-data-admin-dev'],
   // The development server of customers' caches (docker-compose.yml's cache).
   FF_CACHE_AGENT_TOKEN: ['ff-cache-dev'],
+  // The development server of customers' mail (docker-compose.yml's mail).
+  FF_EMAIL_AGENT_TOKEN: ['ff-mail-dev'],
 } as const;
 
 const DEV_CORS_ORIGIN = 'http://localhost:5199';
@@ -541,6 +543,14 @@ const appShape = {
   // isn't proved yet.
   FF_EMAIL_MAIL_HOST: text('mail.localhost', serverHost),
   FF_EMAIL_BOUNCE_DOMAIN: text('bounces.mail.localhost', serverHost),
+  // The server of customers' mail (ADR 0012, deploy/mail), as the backend reaches it: the host and port it hands their
+  // messages to, by SMTP over TLS, and its agent, which gives their bounces back (unset: the SES endpoint sends
+  // nothing); the CA of its certificate, when it isn't a public one.
+  FF_EMAIL_SMTP_HOST: optionalText(serverHost),
+  FF_EMAIL_SMTP_PORT: integer(25, 1, 65535),
+  FF_EMAIL_AGENT_URL: optionalText(httpsUrl),
+  FF_EMAIL_AGENT_TOKEN: optionalSecret(),
+  FF_EMAIL_CA_FILE: optionalText(),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -614,6 +624,16 @@ function appRules(env: AppEnv): string[] {
     const without = (['FF_CACHE_AGENT_URL', 'FF_CACHE_AGENT_TOKEN', 'FF_CACHE_CA_FILE'] as const).filter((name) => env[name] !== undefined);
     if (env.FF_CACHE_CIDRS.length > 0) without.push('FF_CACHE_CIDRS' as (typeof without)[number]);
     for (const name of without) problems.push(`${name} is set, but FF_CACHE_HOST is not: it names customers' cache server`);
+  }
+
+  if (env.FF_EMAIL_SMTP_HOST) {
+    for (const name of ['FF_EMAIL_AGENT_URL', 'FF_EMAIL_AGENT_TOKEN'] as const) {
+      if (!env[name]) problems.push(`${name} is required when FF_EMAIL_SMTP_HOST is set: customers' bounces come back through the agent of their mail's server`);
+    }
+  } else {
+    for (const name of (['FF_EMAIL_AGENT_URL', 'FF_EMAIL_AGENT_TOKEN', 'FF_EMAIL_CA_FILE'] as const).filter((name) => env[name] !== undefined)) {
+      problems.push(`${name} is set, but FF_EMAIL_SMTP_HOST is not: it names the server of customers' mail`);
+    }
   }
 
   if (env.FF_STORAGE_FUNCTION_ENDPOINT) {
@@ -735,6 +755,9 @@ function appRules(env: AppEnv): string[] {
     }
     if (env.FF_CACHE_AGENT_TOKEN && (DEVELOPMENT_CREDENTIALS.FF_CACHE_AGENT_TOKEN as readonly string[]).includes(env.FF_CACHE_AGENT_TOKEN)) {
       problems.push('FF_CACHE_AGENT_TOKEN must not be the development default when NODE_ENV=production');
+    }
+    if (env.FF_EMAIL_AGENT_TOKEN && (DEVELOPMENT_CREDENTIALS.FF_EMAIL_AGENT_TOKEN as readonly string[]).includes(env.FF_EMAIL_AGENT_TOKEN)) {
+      problems.push('FF_EMAIL_AGENT_TOKEN must not be the development default when NODE_ENV=production');
     }
     for (const name of Object.keys(DEV_SELLER) as Array<keyof typeof DEV_SELLER>) {
       if (env[name] === DEV_SELLER[name]) problems.push(`${name} must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)`);
@@ -863,6 +886,33 @@ export interface EmailSettings {
   /** FF's own return-path domain, for a domain whose own isn't proved. */
   bounceDomain: string;
   domainResolvers: string[];
+  /** Where the backend hands it messages and takes their bounces back; null: nothing is sent. */
+  server: MailServerSettings | null;
+}
+
+/** The server of customers' mail (deploy/mail), as the backend reaches it. */
+export interface MailServerSettings {
+  smtpHost: string;
+  smtpPort: number;
+  /** Its agent's API, which gives the bounces back. */
+  agentUrl: string;
+  agentToken: string;
+  /** The CA of its certificate (PEM), when it isn't a public one: the backend checks the server against it. */
+  ca?: string;
+  /** Mail goes to it over TLS alone: always, but for the tests' stand-in server, which speaks plain SMTP. */
+  requireTls: boolean;
+}
+
+function mailServerSettings(env: AppEnv): MailServerSettings | null {
+  if (!env.FF_EMAIL_SMTP_HOST) return null;
+  return {
+    smtpHost: env.FF_EMAIL_SMTP_HOST,
+    smtpPort: env.FF_EMAIL_SMTP_PORT,
+    agentUrl: (env.FF_EMAIL_AGENT_URL as string).replace(/\/$/, ''),
+    agentToken: env.FF_EMAIL_AGENT_TOKEN as string,
+    ...(env.FF_EMAIL_CA_FILE ? { ca: readCertificate('FF_EMAIL_CA_FILE', env.FF_EMAIL_CA_FILE) } : {}),
+    requireTls: true,
+  };
 }
 
 /** The `database` block: the same for the backend, the TypeORM CLI and the drift check. */
@@ -1019,6 +1069,7 @@ export default function configuration(env: Env = process.env) {
       mailHost: parsed.FF_EMAIL_MAIL_HOST.toLowerCase(),
       bounceDomain: parsed.FF_EMAIL_BOUNCE_DOMAIN.toLowerCase(),
       domainResolvers: parsed.FF_DOMAIN_RESOLVERS,
+      server: mailServerSettings(parsed),
     },
     // Customers' mail's SES v2 endpoint (ADR 0012): its server, the endpoint customers use, and the region it signs for.
     ses: {

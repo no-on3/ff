@@ -4,11 +4,12 @@ import { decodeEscapes } from '../storage/sigv4';
 import { EmailAccountService } from './email-account.service';
 import { EmailIdentitiesService, IdentityRefusal } from './email-identities.service';
 import { EmailIdentity, EmailIdentityStatus, EmailIdentityType } from './email-identity.entity';
+import { EmailMessagesService, SendRefusal, SendRefusalKind, SendRequest } from './email-messages.service';
 import { addressProblem, identityKey } from './email-names';
 import { EmailSuppression, SuppressionReason } from './email-suppression.entity';
 import { EmailSuppressionsService } from './email-suppressions.service';
 import { mailFromDomain } from './mail-domain';
-import { accessDenied, alreadyExists, badRequest, limitExceeded, notFound, notImplemented } from './ses-error';
+import { SesError, accessDenied, accountSuspended, alreadyExists, badRequest, limitExceeded, messageRejected, notFound, notImplemented, sendingPaused, tooManyRequests } from './ses-error';
 
 /** Who calls, as the front door admitted them: an access key of the account's, a read-only one only reading. */
 export interface SesCaller {
@@ -58,6 +59,68 @@ export function routeOf(method: string, rawPath: string): { operation: string; w
 const epochSeconds = (date: Date | null): number | undefined => (date ? Math.floor(date.getTime() / 1000) : undefined);
 const SUPPRESSION_REASONS = Object.values(SuppressionReason) as string[];
 
+/** A refusal of SendEmail's, as SES's error. */
+const SEND_REFUSALS: Record<SendRefusalKind, (message: string) => SesError> = {
+  invalid: badRequest,
+  rejected: messageRejected,
+  paused: sendingPaused,
+  suspended: accountSuspended,
+  daily: limitExceeded,
+  rate: tooManyRequests,
+  unavailable: sendingPaused,
+};
+
+/** A list of strings of the request's, or none; anything else refused, naming the field. */
+function strings(value: unknown, name: string): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((one) => typeof one !== 'string')) throw badRequest(`${name} must be a list of strings`);
+  return value as string[];
+}
+
+/** A field of the request's that is an object, or none. */
+function objectOf(value: unknown, name: string): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) throw badRequest(`${name} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+/** A Content's text, SES's { Data, Charset }; its Charset taken as UTF-8, the only one FF writes. */
+function dataOf(value: unknown, name: string): string | undefined {
+  const content = objectOf(value, name);
+  if (content === undefined) return undefined;
+  if (typeof content.Data !== 'string') throw badRequest(`${name}.Data is required: a string`);
+  return content.Data;
+}
+
+/** SendEmail's content, as FF sends it: Simple, or Raw; a template comes later. */
+function contentOf(input: Record<string, unknown>): SendRequest['content'] {
+  const content = objectOf(input.Content, 'Content');
+  if (!content) throw badRequest('Content is required: Simple or Raw');
+  if (content.Template !== undefined) throw notImplemented("FF's SES endpoint doesn't send templates: send Simple or Raw content");
+  const simple = objectOf(content.Simple, 'Content.Simple');
+  if (simple) {
+    const subject = dataOf(simple.Subject, 'Content.Simple.Subject');
+    if (subject === undefined) throw badRequest('Content.Simple.Subject is required');
+    const body = objectOf(simple.Body, 'Content.Simple.Body') ?? {};
+    const text = dataOf(body.Text, 'Content.Simple.Body.Text');
+    const html = dataOf(body.Html, 'Content.Simple.Body.Html');
+    if (text === undefined && html === undefined) throw badRequest('Content.Simple.Body needs Text, Html or both');
+    const headers = (Array.isArray(simple.Headers) ? simple.Headers : simple.Headers === undefined ? [] : null)?.map((header: unknown) => {
+      const { Name, Value } = (objectOf(header, 'Content.Simple.Headers[]') ?? {}) as { Name?: unknown; Value?: unknown };
+      if (typeof Name !== 'string' || typeof Value !== 'string') throw badRequest('Content.Simple.Headers are each a Name and a Value');
+      return { name: Name, value: Value };
+    });
+    if (!headers) throw badRequest('Content.Simple.Headers must be a list');
+    return { simple: { subject, ...(text !== undefined ? { text } : {}), ...(html !== undefined ? { html } : {}), headers } };
+  }
+  const raw = objectOf(content.Raw, 'Content.Raw');
+  if (raw) {
+    if (typeof raw.Data !== 'string' || !/^[A-Za-z0-9+/=\s]*$/.test(raw.Data)) throw badRequest('Content.Raw.Data is required: the whole message, in base64');
+    return { raw: Buffer.from(raw.Data, 'base64') };
+  }
+  throw badRequest('Content is Simple or Raw');
+}
+
 /** A page's size, as SES takes one: 1 to 1,000. */
 function pageSize(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
@@ -94,6 +157,7 @@ export class SesOperations {
     private readonly identities: EmailIdentitiesService,
     private readonly suppressions: EmailSuppressionsService,
     private readonly account: EmailAccountService,
+    private readonly messages: EmailMessagesService,
   ) {}
 
   async run(request: SesRequest, caller: SesCaller): Promise<unknown> {
@@ -114,7 +178,7 @@ export class SesOperations {
         if (!(await this.identities.remove(caller, name))) throw notFound(`Email identity ${name} does not exist.`);
         return {};
       case 'SendEmail':
-        throw notImplemented("FF's SES endpoint doesn't send yet: identities, GetAccount and the suppression list answer");
+        return this.sendEmail(request.input, caller);
       case 'GetAccount':
         return this.accountView(caller.accountId);
       case 'PutSuppressedDestination':
@@ -145,6 +209,26 @@ export class SesOperations {
     }
     const { IdentityType, VerifiedForSendingStatus, DkimAttributes } = this.identityView(made);
     return { IdentityType, VerifiedForSendingStatus, ...(DkimAttributes ? { DkimAttributes } : {}) };
+  }
+
+  private async sendEmail(input: Record<string, unknown>, caller: SesCaller): Promise<unknown> {
+    if (input.ConfigurationSetName !== undefined) throw notFound(`Configuration set ${JSON.stringify(input.ConfigurationSetName)} does not exist.`);
+    if (input.FromEmailAddress !== undefined && typeof input.FromEmailAddress !== 'string') throw badRequest('FromEmailAddress must be a string');
+    const destination = objectOf(input.Destination, 'Destination') ?? {};
+    try {
+      const MessageId = await this.messages.send(caller.accountId, {
+        ...(typeof input.FromEmailAddress === 'string' ? { from: input.FromEmailAddress } : {}),
+        to: strings(destination.ToAddresses, 'Destination.ToAddresses'),
+        cc: strings(destination.CcAddresses, 'Destination.CcAddresses'),
+        bcc: strings(destination.BccAddresses, 'Destination.BccAddresses'),
+        replyTo: strings(input.ReplyToAddresses, 'ReplyToAddresses'),
+        content: contentOf(input),
+      });
+      return { MessageId };
+    } catch (error) {
+      if (error instanceof SendRefusal) throw SEND_REFUSALS[error.kind](error.message);
+      throw error;
+    }
   }
 
   private async listIdentities(accountId: string, size: unknown, token: unknown): Promise<unknown> {

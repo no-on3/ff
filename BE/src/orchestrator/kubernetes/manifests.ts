@@ -38,6 +38,16 @@ export const BLOCKED_EGRESS_CIDRS = [
   '100.64.0.0/10',
   '127.0.0.0/8',
 ];
+/**
+ * The internet's ports a function reaches, when its account's egress is on: all of them but SMTP's, 25, so that no code
+ * sends mail around the SES endpoint's checks and quotas (ADR 0012). Submission's ports, 465 and 587, stay open, as on
+ * AWS: a provider's own server checks who sends there.
+ */
+export const INTERNET_PORTS = [
+  { protocol: 'TCP', port: 1, endPort: 24 },
+  { protocol: 'TCP', port: 26, endPort: 65535 },
+  { protocol: 'UDP', port: 1, endPort: 65535 },
+];
 const RUNTIME_UID = 10001;
 
 /**
@@ -127,7 +137,7 @@ export function limitRangeManifest(namespace: string): K8sObject {
 /**
  * The account's NetworkPolicy. Its functions resolve names, and reach the internet only when the account's own
  * setting allows it (the operator turns it on) and the platform's K8S_EGRESS_INTERNET doesn't forbid it for
- * every account. Never FF's own network, nor the cloud's metadata addresses (BLOCKED_EGRESS_CIDRS), but for the
+ * every account, never on port 25 (INTERNET_PORTS). Never FF's own network, nor the cloud's metadata addresses (BLOCKED_EGRESS_CIDRS), but for the
  * platform's services that functions use, each at its addresses on its port or ports, whatever the account's internet
  * access: customers' database server, customers' cache server, buckets' S3 front door and queues' SQS endpoint. NetworkPolicy rules add up, so
  * the ranges the internet rule leaves out don't cancel them.
@@ -168,7 +178,7 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
     egress.push({ to, ports: [{ protocol: 'TCP', port: service.port, ...(service.endPort ? { endPort: service.endPort } : {}) }] });
   }
   if (settings.egressInternet && internetEgress) {
-    egress.push({ to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }] });
+    egress.push({ to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }], ports: INTERNET_PORTS });
   }
   return {
     apiVersion: 'networking.k8s.io/v1',

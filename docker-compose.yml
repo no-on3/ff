@@ -122,6 +122,54 @@ services:
       timeout: 3s
       retries: 30
 
+  # The server of customers' mail (ADR 0012, deploy/mail): Postfix, which sends what the backend hands it, and FF's
+  # agent, which gives back what bounced; on the data network beside the database and cache servers, and on the default
+  # one, where in development it hands every message to Mailpit instead of its recipients' servers.
+  # hack/k8s/mail-up.sh starts it and prints the backend's settings.
+  mail:
+    build: deploy/mail
+    image: ff-mail:dev
+    profiles: [mail]
+    environment:
+      FF_MAIL_AGENT_TOKEN: ff-mail-dev
+      FF_MAIL_HOSTNAME: mail.localhost
+      # The backend's address as the server sees it: this machine's on the data network.
+      FF_MAIL_RELAY_FROM: ${FF_MAIL_RELAY_FROM:-10.199.0.1/32}
+      FF_MAIL_RELAYHOST: ${FF_MAIL_RELAYHOST:-mailpit:1025}
+      FF_MAIL_TLS_NAMES: "DNS:localhost,DNS:mail.localhost,IP:127.0.0.1,IP:${FF_MAIL_ADDRESS:-10.199.0.12}"
+    networks:
+      default:
+      data:
+        ipv4_address: ${FF_MAIL_ADDRESS:-10.199.0.12}
+    volumes:
+      - mail:/var/lib/ff-mail
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('node:https').get({host: '127.0.0.1', port: 6391, path: '/health', rejectUnauthorized: false, headers: {authorization: 'Bearer ff-mail-dev'}}, (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # The tests' stand-in for recipients' servers (hack/lib/mail-receiver.mjs), with the mail server's own Node.js:
+  # it keeps every message, and refuses bounce-me@ addresses as mailboxes that don't exist, so that a bounce comes back.
+  mail-receiver:
+    image: ff-mail:dev
+    pull_policy: never
+    profiles: [mail-test]
+    entrypoint: ["node", "/opt/receiver.mjs"]
+    environment:
+      PORT: "2525"
+      OUT: /tmp
+    networks:
+      data:
+        ipv4_address: ${FF_MAIL_RECEIVER_ADDRESS:-10.199.0.13}
+    volumes:
+      - ./hack/lib/mail-receiver.mjs:/opt/receiver.mjs:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('node:net').connect(2525, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Catches every e-mail Keycloak (and later the backend) sends: http://localhost:58025.
   mailpit:
     image: axllent/mailpit:v1.31.4
@@ -136,7 +184,7 @@ services:
       retries: 20
 
 networks:
-  # Customers' database and cache servers' own (FF_DATA_DB_SUBNET), a private range as production's would be.
+  # Customers' database, cache and mail servers' own (FF_DATA_DB_SUBNET), a private range as production's would be.
   data:
     ipam:
       config:
@@ -148,3 +196,4 @@ volumes:
   keycloak_data:
   data_db:
   cache:
+  mail:

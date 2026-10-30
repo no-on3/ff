@@ -1,7 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 import { EmailIdentityStatus, EmailIdentityType } from '../email-identity.entity';
+import { EmailMessageStatus, RecipientStatus } from '../email-message.entity';
 import { SuppressionReason } from '../email-suppression.entity';
 
 export class CreateEmailIdentityDto {
@@ -131,4 +132,122 @@ export class SuppressionPageView {
 
   @ApiPropertyOptional({ type: String, nullable: true, description: "The next page's token; null after the last" })
   next: string | null;
+}
+
+/** A message to send, as SES v2's SendEmail takes a simple one. */
+export class SendEmailDto {
+  @ApiProperty({ example: 'Shop <orders@shop.example.tn>', description: 'From an address the account proved, or an address at a domain it proved' })
+  @IsString()
+  @MaxLength(640)
+  from: string;
+
+  @ApiProperty({ type: [String], example: ['ana@example.tn'], description: 'With cc and bcc, 50 recipients at most; in the sandbox, addresses the account proved' })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(640, { each: true })
+  to: string[];
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(640, { each: true })
+  cc?: string[];
+
+  @ApiPropertyOptional({ type: [String], description: "Recipients the others don't see" })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(640, { each: true })
+  bcc?: string[];
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  @MaxLength(640, { each: true })
+  replyTo?: string[];
+
+  @ApiProperty({ example: 'Your order' })
+  @IsString()
+  @MaxLength(998)
+  subject: string;
+
+  @ApiPropertyOptional({ description: 'The text body; text, html or both' })
+  @IsOptional()
+  @IsString()
+  text?: string;
+
+  @ApiPropertyOptional({ description: 'The HTML body' })
+  @IsOptional()
+  @IsString()
+  html?: string;
+}
+
+/** A message taken: SES's MessageId. */
+export class SentEmailView {
+  @ApiProperty({ example: '0f8e4c1a-6b1d-4d55-9a3e-2b7c9d1e5f00' })
+  messageId: string;
+}
+
+export class EmailMessageQuery {
+  @ApiPropertyOptional({ example: 50, description: 'The latest messages: 1 to 100, 50 by default' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number;
+}
+
+/** What became of one recipient of a message. */
+export class MessageRecipientView {
+  @ApiProperty({ example: 'ana@example.tn' })
+  address: string;
+
+  @ApiProperty({
+    enum: ['QUEUED', 'SENT', 'SUPPRESSED', 'BOUNCED', 'COMPLAINED', 'FAILED'],
+    description: "SENT: FF's mail server took it, to deliver; SUPPRESSED: kept off by the suppression list; BOUNCED and COMPLAINED: as it came back",
+  })
+  status: RecipientStatus;
+
+  @ApiPropertyOptional({ type: String, nullable: true, description: 'What the receiving server said, for a bounce or a failure' })
+  diagnostic: string | null;
+}
+
+/** A message the account sent, through the SES endpoint or FF's API. */
+export class EmailMessageView {
+  @ApiProperty({ description: "SES's MessageId" })
+  messageId: string;
+
+  @ApiProperty({ example: 'orders@shop.example.tn' })
+  from: string;
+
+  @ApiProperty({ example: 'shop.example.tn', description: 'The identity it went from, whose DKIM key signed it' })
+  identity: string;
+
+  @ApiProperty({ enum: EmailMessageStatus, description: "QUEUED until FF's mail server takes it; FAILED when it refused it for good, or took none of it for a day" })
+  status: EmailMessageStatus;
+
+  @ApiProperty({ type: [MessageRecipientView] })
+  recipients: MessageRecipientView[];
+
+  @ApiProperty({ example: 2048 })
+  sizeBytes: number;
+
+  @ApiProperty({ type: String, format: 'date-time' })
+  createdAt: Date;
+
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
+  sentAt: Date | null;
+}
+
+export class EmailMessageListView {
+  @ApiProperty({ type: [EmailMessageView], description: 'The latest first' })
+  messages: EmailMessageView[];
 }

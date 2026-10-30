@@ -13,7 +13,7 @@ import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { PackagesService } from '../packages/packages.service';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { QueueStore } from '../queues/queue-store';
-import { DELIVERY_DAYS, RetentionService } from './retention.service';
+import { DELIVERY_DAYS, EMAIL_DAYS, RetentionService } from './retention.service';
 
 const HOUR_MS = 3_600_000;
 
@@ -63,10 +63,12 @@ describe('RetentionService', () => {
       steps.push(`mark ${criteria.id}`);
       return { affected: marked };
     });
-    // The account's notification deliveries, webhook secret, alarms and queues, deleted in the transaction that marks it.
+    // The account's notification deliveries, webhook secret, alarms, mail and queues, deleted in the transaction that marks it.
     const managerQuery = jest.fn(
       async (sql: string, [accountId]: string[]) =>
-        void steps.push(`${/webhook_secrets/.test(sql) ? 'secret' : /alarms/.test(sql) ? 'alarms' : /queues/.test(sql) ? 'queues' : 'deliveries'} ${accountId}`),
+        void steps.push(
+          `${/"(email_[a-z]+)"/.exec(sql)?.[1] ?? (/webhook_secrets/.test(sql) ? 'secret' : /alarms/.test(sql) ? 'alarms' : /queues/.test(sql) ? 'queues' : 'deliveries')} ${accountId}`,
+        ),
     );
     const manager = { update, query: managerQuery };
     const dataSource = {
@@ -187,6 +189,23 @@ describe('RetentionService', () => {
     });
   });
 
+  describe("customers' messages", () => {
+    it(`deletes those sent more than ${EMAIL_DAYS} days ago, before the database's now or the one given, a batch at a time`, async () => {
+      for (const count of [2, 2, 0]) query.mockResolvedValueOnce([[], count]);
+
+      await expect(service.purgeEmails(undefined, 2)).resolves.toBe(4);
+      const now = new Date('2026-10-30T10:00:00Z');
+      await expect(service.purgeEmails(now)).resolves.toBe(0);
+
+      expect(query.mock.calls.map(([sql, parameters]: [string, unknown[]]) => [/DELETE FROM "email_messages"/.test(sql) && sql.includes('make_interval(days => $2)'), parameters])).toEqual([
+        [true, [null, 30, 2]],
+        [true, [null, 30, 2]],
+        [true, [null, 30, 2]],
+        [true, [now, 30, 1_000]],
+      ]);
+    });
+  });
+
   describe("closed accounts' data", () => {
     it('deletes each function, then its packages, its databases, the namespace, the logs, then marks the account and records it once', async () => {
       dueAccounts = [{ id: '300000000001' }];
@@ -206,6 +225,10 @@ describe('RetentionService', () => {
         'deliveries 300000000001',
         'secret 300000000001',
         'alarms 300000000001',
+        'email_messages 300000000001',
+        'email_sending 300000000001',
+        'email_identities 300000000001',
+        'email_suppressions 300000000001',
         'queues 300000000001',
         'mark 300000000001',
         'audit account.data_delete 300000000001',
@@ -240,6 +263,10 @@ describe('RetentionService', () => {
         'deliveries 300000000002',
         'secret 300000000002',
         'alarms 300000000002',
+        'email_messages 300000000002',
+        'email_sending 300000000002',
+        'email_identities 300000000002',
+        'email_suppressions 300000000002',
         'queues 300000000002',
         'mark 300000000002',
         'audit account.data_delete 300000000002',
@@ -264,6 +291,10 @@ describe('RetentionService', () => {
         'deliveries 300000000001',
         'secret 300000000001',
         'alarms 300000000001',
+        'email_messages 300000000001',
+        'email_sending 300000000001',
+        'email_identities 300000000001',
+        'email_suppressions 300000000001',
         'queues 300000000001',
         'mark 300000000001',
       ]);
@@ -291,20 +322,21 @@ describe('RetentionService', () => {
       const runs = () => [
         purges('function_invocations'),
         purges('notification_deliveries'),
+        purges('email_messages'),
         packages.purgeUnused.mock.calls.length,
         findAccounts.mock.calls.length,
         functions.restoreCodeImages.mock.calls.length,
       ];
       service.onModuleInit();
       await jest.advanceTimersByTimeAsync(0);
-      expect(runs()).toEqual([1, 1, 1, 1, 1]);
+      expect(runs()).toEqual([1, 1, 1, 1, 1, 1]);
 
       await jest.advanceTimersByTimeAsync(3 * HOUR_MS);
-      expect(runs()).toEqual([4, 4, 4, 4, 4]);
+      expect(runs()).toEqual([4, 4, 4, 4, 4, 4]);
 
       service.onModuleDestroy();
       await jest.advanceTimersByTimeAsync(5 * HOUR_MS);
-      expect(runs()).toEqual([4, 4, 4, 4, 4]);
+      expect(runs()).toEqual([4, 4, 4, 4, 4, 4]);
     });
 
     it('restores the lost code images last, and logs a restore that fails', async () => {

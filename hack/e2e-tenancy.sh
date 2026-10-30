@@ -226,6 +226,7 @@ e2e_cluster
 e2e_data_db 10.199.2.0/24 10.199.2.10
 # Customers' caches (ADR 0013): the suite's own server, beside it.
 e2e_cache 10.199.2.11
+e2e_mail 10.199.2.12 10.199.2.13
 
 echo "== a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
 receiver_port="$(free_port)"
@@ -256,14 +257,14 @@ e2e_migrate "${e2e_base_env[@]}"
 # Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
 # Both send notifications every second, and may reach the receiver on this machine.
 notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
-e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" PORT="${api##*:}" \
+e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api##*:}" \
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port" \
   FF_SES_PORT="$ses_port" FF_SES_BASE="http://127.0.0.1:$ses_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
-e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" PORT="${api_oidc##*:}" \
+e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
   FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
@@ -325,6 +326,12 @@ check "A adds a domain to send mail from, pending, with its DKIM record to publi
 selector_a="$(jq -r .dkimSelector <<<"$identity_a")"
 suppression_a="$(as_a PUT /email/suppressions/gone@l5.example.tn '{"reason": "BOUNCE"}')"
 check "  ... and an address to its suppression list" "200 BOUNCE" "$(status) $(jq -r .reason <<<"$suppression_a")"
+# Its domain proved, as its DKIM record found would prove it (L4 publishes one): then a message from it.
+proved_domain() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc \
+  "UPDATE email_identities SET status = 'SUCCESS', verified_at = now() WHERE account_id = '$1' AND identity = '$2'" >/dev/null; }
+proved_domain "$account_a" shop.l5.example.tn
+message_a="$(as_a POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "A'"'"'s"}' | jq -r .messageId)"
+check "  ... and sends a message from it, once it is proved" 201 "$(status)"
 as_a POST /buckets '{"name": "l5-photos-a"}' >/dev/null
 check "A makes a bucket" 201 "$(status)"
 as_a POST /queues '{"name": "l5-orders-a"}' >/dev/null
@@ -427,6 +434,7 @@ body_for() {
     "POST /functions/{id}/schedules" | "PUT /functions/{id}/schedules/{scheduleId}") echo '{"name": "l5", "expression": "rate(1 hour)"}' ;;
     "POST /email/identities") echo '{"identity": "shop.l5.example.tn"}' ;;
     "PUT /email/suppressions/{address}") echo '{"reason": "BOUNCE"}' ;;
+    "POST /email/messages") echo '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "l5"}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;
@@ -729,6 +737,16 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       sending="$(as_b GET /email/account | jq -r .sentLast24Hours)"
       check "$route: B reads its own sending, nothing of A's in it" "200 0" "$(status) $sending"
       ;;
+    "GET /email/messages")
+      listed="$(as_b GET /email/messages | jq '.messages | length')"
+      check "$route: B's messages don't show A's" "200 0" "$(status) $listed"
+      ;;
+    "POST /email/messages")
+      patiently as_b POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "B'"'"'s"}'
+      check "$route: B can't send from A's domain, which isn't B's" \
+        "400 Email address is not verified. The following identities failed the check in region TN-TUNIS-1: orders@shop.l5.example.tn" "$(status) $(message)"
+      check "  ... A's message still A's alone" "$message_a 1" "$(as_a GET /email/messages | jq -r '"\(.messages[0].messageId) \(.messages | length)"')"
+      ;;
     "GET /email/suppressions")
       listed="$(as_b GET /email/suppressions | jq '.suppressions | length')"
       check "$route: B's list doesn't show A's address" "200 0" "$(status) $listed"
@@ -912,7 +930,7 @@ sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_b" >/dev/n
 check "each deletes its own queue" "http://127.0.0.1:$sqs_port/$account_a/l5-events-a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
   "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
 
-echo "== mail through the SES endpoint: each account's key reaches its own account's identities alone"
+echo "== mail through the SES endpoint: each account's key reaches its own account's identities and sends from them alone"
 # ses_with <key ID> <secret> <aws sesv2 arguments…>: the answer's text, or refused with the error's name, as the CLI prints it.
 ses_with() {
   local id=$1 secret=$2
@@ -931,6 +949,11 @@ $(ses_with "$key_b_id" "$key_b_secret" delete-suppressed-destination --email-add
 $(ses_with "$key_a_id" "$key_a_secret" get-suppressed-destination --email-address gone@l5.example.tn --query SuppressedDestination.Reason)"
 check "ListEmailIdentities lists each key's own account's identities alone" "shop.l5.example.tn 0" \
   "$(ses_with "$key_a_id" "$key_a_secret" list-email-identities --query 'EmailIdentities[].IdentityName') $(ses_with "$key_b_id" "$key_b_secret" list-email-identities --query 'length(EmailIdentities)')"
+ses_message='{"Simple": {"Subject": {"Data": "l5"}, "Body": {"Text": {"Data": "l5"}}}}'
+check "SendEmail: B's key can't send from A's domain, which isn't B's; A's key can, the message A's alone" "refused MessageRejected true 0" \
+  "$(ses_with "$key_b_id" "$key_b_secret" send-email --from-email-address orders@shop.l5.example.tn --destination ToAddresses=team@shop.l5.example.tn --content "$ses_message") \
+$([[ "$(ses_with "$key_a_id" "$key_a_secret" send-email --from-email-address orders@shop.l5.example.tn --destination ToAddresses=team@shop.l5.example.tn --content "$ses_message" --query MessageId)" =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false) \
+$(as_b GET /email/messages | jq '.messages | length')"
 
 echo "== nobody authenticated, through the guard, on every route (${#routes[@]})"
 for route in "${routes[@]}"; do
@@ -1038,6 +1061,9 @@ check "account 1's owner adds a domain to send mail from" "201 PENDING" "$(statu
 selector_1="$(jq -r .dkimSelector <<<"$identity_1")"
 as_user_1 PUT /email/suppressions/gone@l5.example.tn '{"reason": "BOUNCE"}' >/dev/null
 check "  ... and an address to its suppression list" 200 "$(status)"
+proved_domain "$account_1" shop.l5.example.tn
+message_1="$(as_user_1 POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "account 1'"'"'s"}' | jq -r .messageId)"
+check "  ... and sends a message from it, once it is proved" 201 "$(status)"
 as_user_1 POST /buckets '{"name": "l5-photos-1"}' >/dev/null
 check "account 1's owner makes a bucket" 201 "$(status)"
 as_user_1 POST /queues '{"name": "l5-orders-1"}' >/dev/null
@@ -1333,6 +1359,16 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /email/account")
       sending="$(as_user_2 GET /email/account | jq -r .sentLast24Hours)"
       check "$route: account 2 reads its own sending, nothing of account 1's in it" "200 0" "$(status) $sending"
+      ;;
+    "GET /email/messages")
+      listed="$(as_user_2 GET /email/messages | jq '.messages | length')"
+      check "$route: account 2's messages don't show account 1's" "200 0" "$(status) $listed"
+      ;;
+    "POST /email/messages")
+      patiently as_user_2 POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "account 2'"'"'s"}'
+      check "$route: account 2 can't send from account 1's domain, which isn't its own" \
+        "400 Email address is not verified. The following identities failed the check in region TN-TUNIS-1: orders@shop.l5.example.tn" "$(status) $(message)"
+      check "  ... account 1's message still its alone" "$message_1 1" "$(as_user_1 GET /email/messages | jq -r '"\(.messages[0].messageId) \(.messages | length)"')"
       ;;
     "GET /email/suppressions")
       listed="$(as_user_2 GET /email/suppressions | jq '.suppressions | length')"
@@ -1730,19 +1766,22 @@ check "a plan that doesn't exist is refused" "404 Plan imaginary not found" "$(s
 # and how many ranges it keeps out (FF's own network, the cloud's metadata addresses); "none" when nowhere.
 internet_rule() { # <account>
   kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
-    jq -r '[.spec.egress[] | select(.ports == null) | .to[]?.ipBlock | select(.) | "\(.cidr) except \(.except | length)"] | if length == 0 then "none" else join(",") end'
+    jq -r '[.spec.egress[] | select(any(.to[]?; .ipBlock.cidr == "0.0.0.0/0")) |
+      "\(.to[0].ipBlock.cidr) except \(.to[0].ipBlock.except | length) on \([.ports[] | "\(.protocol) \(.port)-\(.endPort)"] | join(", "))"] |
+      if length == 0 then "none" else join(",") end'
 }
 # FF's services the account's functions reach whatever its internet access, each address and its port, or its ports.
 service_rules() { # <account>
   kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
-    jq -r '[.spec.egress[] | select(.ports != null and (.to | any(.ipBlock != null))) |
+    jq -r '[.spec.egress[] | select(.ports != null and (.to | any(.ipBlock != null)) and all(.to[]; .ipBlock.cidr != "0.0.0.0/0")) |
       "\(.to[].ipBlock.cidr):\(.ports[0].port)\(if .ports[0].endPort then "-\(.ports[0].endPort)" else "" end)"] | join(",")'
 }
 check "account 1's functions reach nothing beyond DNS on any port, as every account starts" none "$(internet_rule "$account_1")"
 check "but customers' database server and cache server, on their ports only, whatever the account's internet access (ADR 0008, ADR 0013)" \
   "10.199.2.10/32:5432,10.199.2.11/32:6400-6999" "$(service_rules "$account_1")"
 egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '{"internetEgress": true, "reason": "l5: calls a payment API"}')"
-check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out" "200 true 0.0.0.0/0 except 6" \
+check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out, and SMTP's port 25" \
+  "200 true 0.0.0.0/0 except 6 on TCP 1-24, TCP 26-65535, UDP 1-65535" \
   "$(status) $(jq -r .account.internetEgress <<<"$egress") $(internet_rule "$account_1")"
 check "and account 2's functions still reach nothing beyond DNS" none "$(internet_rule "$account_2")"
 storage="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": false, "reason": "l5: files shared against the terms"}')"

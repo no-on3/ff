@@ -73,6 +73,7 @@ const BUCKET_WEBSITES = migrationNames.find((name) => name.startsWith('BucketWeb
 const DEPLOY_KEYS = migrationNames.find((name) => name.startsWith('DeployKeys')) as string;
 const CACHES = migrationNames.find((name) => name.startsWith('Caches1')) as string;
 const CACHE_MEASURES = migrationNames.find((name) => name.startsWith('CacheMeasures')) as string;
+const EMAIL_IDENTITIES = migrationNames.find((name) => name.startsWith('EmailIdentities')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -822,6 +823,33 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the mail-sending migration keeps a message once by its ID, in one of its three states, an account's sending once, a new one's SES's defaults, and reverts with both present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const message = (id: string, status = 'QUEUED') =>
+        dataSource.query(
+          `INSERT INTO email_messages (id, account_id, identity, from_address, return_path, recipients, recipient_count, size_bytes, status)
+           VALUES ($1, $2, 'shop.example.tn', 'orders@shop.example.tn', 'b-x@bounces.mail.localhost', '[]', 1, 10, $3)`,
+          [id, ACCOUNT, status],
+        );
+      await message('3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b');
+      await expect(message('3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b')).rejects.toThrow(/duplicate key/);
+      await expect(message('4f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b', 'DELIVERED')).rejects.toThrow(/violates check constraint/);
+      await dataSource.query(`INSERT INTO email_sending (account_id) VALUES ($1)`, [ACCOUNT]);
+      await expect(dataSource.query(`INSERT INTO email_sending (account_id) VALUES ($1)`, [ACCOUNT])).rejects.toThrow(/duplicate key/);
+      await expect(dataSource.query(`UPDATE email_sending SET enforcement_status = 'BANNED'`)).rejects.toThrow(/violates check constraint/);
+      expect(await dataSource.query(`SELECT production_access, sending_enabled, enforcement_status FROM email_sending`)).toEqual([
+        { production_access: false, sending_enabled: true, enforcement_status: 'HEALTHY' },
+      ]);
+
+      await migrateDownTo(dataSource, EMAIL_IDENTITIES);
+
+      expect(await dataSource.query(`SELECT to_regclass('email_messages') AS m, to_regclass('email_sending') AS s`)).toEqual([{ m: null, s: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it('the closed-account-deletion migration gives an account closed before it the whole default notice from now, one not closed none, and reverts with a deletion recorded', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -1320,6 +1348,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         'database_samples',
         'databases',
         'email_identities',
+        'email_messages',
+        'email_sending',
         'email_suppressions',
         'event_source_mappings',
         'function_environments',

@@ -2,7 +2,8 @@
  * L1: the routes of customers' mail in FF's API (ADR 0012): who may call each,
  * what the bodies and queries may hold, and how the services' answers and
  * refusals come back, through HTTP. The identities themselves, in FF's
- * database and through the SES endpoint, are ses.db.spec.ts's.
+ * database and through the SES endpoint, are ses.db.spec.ts's; the messages
+ * sent, email-sending.db.spec.ts's.
  */
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -13,6 +14,8 @@ import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { EmailAccountService } from './email-account.service';
 import { EmailIdentitiesService, IdentityRefusal } from './email-identities.service';
 import { EmailIdentity, EmailIdentityStatus, EmailIdentityType } from './email-identity.entity';
+import { EmailMessage, EmailMessageStatus } from './email-message.entity';
+import { EmailMessagesService, SendRefusal, SendRefusalKind } from './email-messages.service';
 import { EmailSuppression, SuppressionReason } from './email-suppression.entity';
 import { EmailSuppressionsService } from './email-suppressions.service';
 import { EmailController } from './email.controller';
@@ -57,6 +60,26 @@ describe('/email (L1)', () => {
     remove: jest.fn(async () => true),
   };
   const account = { state: jest.fn(async () => ({ sandbox: true, sendingEnabled: true, enforcementStatus: 'HEALTHY', max24HourSend: 200, maxSendRate: 1, sentLast24Hours: 0 })) };
+  const MESSAGE = {
+    id: '0f8e4c1a-6b1d-4d55-9a3e-2b7c9d1e5f00',
+    accountId: ACCOUNT,
+    identity: 'shop.example.tn',
+    fromAddress: 'orders@shop.example.tn',
+    returnPath: 'b-0f8e4c1a-6b1d-4d55-9a3e-2b7c9d1e5f00@bounces.mail.localhost',
+    recipients: [
+      { address: 'ana@shop.example.tn', status: 'SENT' },
+      { address: 'gone@shop.example.tn', status: 'BOUNCED', permanent: true, diagnostic: 'smtp; 550 5.1.1 User unknown' },
+    ],
+    recipientCount: 2,
+    sizeBytes: 812,
+    status: EmailMessageStatus.SENT,
+    attempts: 1,
+    nextAttemptAt: AT,
+    lastError: null,
+    createdAt: AT,
+    sentAt: AT,
+  } as EmailMessage;
+  const messages = { send: jest.fn(async () => MESSAGE.id), latest: jest.fn(async () => [MESSAGE]) };
   const principal: Principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'developer' };
   let app: INestApplication;
   let baseUrl: string;
@@ -73,6 +96,7 @@ describe('/email (L1)', () => {
         { provide: EmailIdentitiesService, useValue: identities },
         { provide: EmailSuppressionsService, useValue: suppressions },
         { provide: EmailAccountService, useValue: account },
+        { provide: EmailMessagesService, useValue: messages },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -89,8 +113,8 @@ describe('/email (L1)', () => {
   beforeEach(() => jest.clearAllMocks());
 
   it('lets every member read them; writers add, prove and change them in an active account, and delete them in any', () => {
-    for (const handler of ['list', 'get', 'accountView', 'listSuppressions'] as const) expect(rules(handler)).toEqual({ roles: 'anyone', activeAccount: false, scope: 'email:read' });
-    for (const handler of ['create', 'verify', 'putSuppression'] as const) expect(rules(handler)).toEqual({ roles: ['owner', 'developer'], activeAccount: true, scope: 'email:write' });
+    for (const handler of ['list', 'get', 'accountView', 'listSuppressions', 'listMessages'] as const) expect(rules(handler)).toEqual({ roles: 'anyone', activeAccount: false, scope: 'email:read' });
+    for (const handler of ['create', 'verify', 'putSuppression', 'send'] as const) expect(rules(handler)).toEqual({ roles: ['owner', 'developer'], activeAccount: true, scope: 'email:write' });
     for (const handler of ['remove', 'removeSuppression'] as const) expect(rules(handler)).toEqual({ roles: ['owner', 'developer'], activeAccount: false, scope: 'email:write' });
   });
 
@@ -152,5 +176,68 @@ describe('/email (L1)', () => {
 
     suppressions.remove.mockResolvedValueOnce(false);
     expect(await call('DELETE', '/email/suppressions/Gone@Example.TN')).toMatchObject({ status: 404, body: { message: "gone@example.tn is not on the account's suppression list" } });
+  });
+
+  it("sends a simple message for the caller's account, answering its ID", async () => {
+    const sent = await call('POST', '/email/messages', { from: 'Shop <orders@shop.example.tn>', to: ['ana@shop.example.tn'], bcc: ['audit@shop.example.tn'], subject: 'Your order', text: 'Thanks' });
+
+    expect(sent).toEqual({ status: 201, body: { messageId: MESSAGE.id } });
+    expect(messages.send).toHaveBeenCalledWith(ACCOUNT, {
+      from: 'Shop <orders@shop.example.tn>',
+      to: ['ana@shop.example.tn'],
+      cc: [],
+      bcc: ['audit@shop.example.tn'],
+      replyTo: [],
+      content: { simple: { subject: 'Your order', text: 'Thanks', html: undefined, headers: [] } },
+    });
+  });
+
+  it('refuses a body SendEmail would not take, before the service sees it', async () => {
+    const message = { from: 'orders@shop.example.tn', to: ['ana@shop.example.tn'], subject: 'Hi', text: 'x' };
+
+    expect((await call('POST', '/email/messages', { ...message, to: [] })).status).toBe(400);
+    expect((await call('POST', '/email/messages', { ...message, to: Array.from({ length: 51 }, (_, n) => `a${n}@shop.example.tn`) })).status).toBe(400);
+    expect((await call('POST', '/email/messages', { ...message, subject: undefined })).status).toBe(400);
+    expect(await call('POST', '/email/messages', { ...message, headers: [{ name: 'X-Ff', value: '1' }] })).toMatchObject({ status: 400, body: { message: ['property headers should not exist'] } });
+    expect(messages.send).not.toHaveBeenCalled();
+  });
+
+  it("answers the service's refusals each with its status, in SES's words", async () => {
+    const message = { from: 'orders@shop.example.tn', to: ['ana@shop.example.tn'], subject: 'Hi', text: 'x' };
+    const statuses: Record<SendRefusalKind, number> = { invalid: 400, rejected: 400, paused: 403, suspended: 403, daily: 429, rate: 429, unavailable: 503 };
+
+    for (const [kind, status] of Object.entries(statuses) as Array<[SendRefusalKind, number]>) {
+      messages.send.mockRejectedValueOnce(new SendRefusal(kind, `refused: ${kind}`));
+      expect(await call('POST', '/email/messages', message)).toMatchObject({ status, body: { message: `refused: ${kind}` } });
+    }
+  });
+
+  it("lists the account's latest messages, each recipient's fate, never the message's copy nor its return path", async () => {
+    const listed = await call('GET', '/email/messages?limit=10');
+
+    expect(listed).toEqual({
+      status: 200,
+      body: {
+        messages: [
+          {
+            messageId: MESSAGE.id,
+            from: 'orders@shop.example.tn',
+            identity: 'shop.example.tn',
+            status: 'SENT',
+            recipients: [
+              { address: 'ana@shop.example.tn', status: 'SENT', diagnostic: null },
+              { address: 'gone@shop.example.tn', status: 'BOUNCED', diagnostic: 'smtp; 550 5.1.1 User unknown' },
+            ],
+            sizeBytes: 812,
+            createdAt: AT.toISOString(),
+            sentAt: AT.toISOString(),
+          },
+        ],
+      },
+    });
+    expect(messages.latest).toHaveBeenCalledWith(ACCOUNT, 10);
+    await call('GET', '/email/messages');
+    expect(messages.latest).toHaveBeenLastCalledWith(ACCOUNT, 50);
+    expect((await call('GET', '/email/messages?limit=101')).status).toBe(400);
   });
 });

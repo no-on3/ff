@@ -31,6 +31,10 @@ import { newAccessKeyId, newSecretAccessKey } from '../storage/storage-names';
 import { EmailAccountService } from './email-account.service';
 import { EmailIdentitiesService } from './email-identities.service';
 import { EmailIdentity } from './email-identity.entity';
+import { EmailMessage } from './email-message.entity';
+import { EmailMessagesService } from './email-messages.service';
+import { EmailSender } from './email-sender.service';
+import { EmailSending } from './email-sending.entity';
 import { EmailSuppression } from './email-suppression.entity';
 import { EmailSuppressionsService } from './email-suppressions.service';
 import { MailResolver } from './mail-domain';
@@ -147,10 +151,16 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
     ]);
     const plans = onePlan(plan({ emailIdentities: 2, emailsPerDay: 200, emailsPerSecond: 1 }));
     const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
-    const config = new ConfigService({ email: { mailHost: MAIL_HOST, bounceDomain: `bounces.${MAIL_HOST}`, domainResolvers: [] }, ses: { base: 'http://email.localhost:3005' } });
+    // No server of customers' mail: sending is email-sending.db.spec.ts's.
+    const config = new ConfigService({
+      email: { mailHost: MAIL_HOST, bounceDomain: `bounces.${MAIL_HOST}`, domainResolvers: [], server: null },
+      ses: { base: 'http://email.localhost:3005', region: REGION },
+    });
     identities = new EmailIdentitiesService(db.dataSource.getRepository(EmailIdentity), plans, encryption, mail, audit, resolver, config);
     const suppressions = new EmailSuppressionsService(db.dataSource.getRepository(EmailSuppression), audit);
-    frontDoor = new SesFrontDoor(directory, new SesOperations(identities, suppressions, new EmailAccountService(plans)), identities);
+    const account = new EmailAccountService(plans, db.dataSource.getRepository(EmailSending));
+    const messages = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick: () => undefined } as unknown as EmailSender, config);
+    frontDoor = new SesFrontDoor(directory, new SesOperations(identities, suppressions, account, messages), identities);
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
   });
 
@@ -285,10 +295,12 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
       expect(await ses('GET', '/v2/email/account', { as: suspended })).toMatchObject({ status: 403, error: 'AccessDeniedException', body: { message: 'The account is suspended: its mail answers no key.' } });
     });
 
-    it("refuses a request that isn't signed, a key FF doesn't know, and answers NotImplemented for what it doesn't do", async () => {
+    it("refuses a request that isn't signed and a key FF doesn't know; without a mail server, sends nothing; and answers NotImplemented for what it doesn't do", async () => {
       expect(await send('GET', '/v2/email/account', { host: `127.0.0.1:${port}` })).toMatchObject({ status: 403, error: 'MissingAuthenticationTokenException' });
       expect((await ses('GET', '/v2/email/account', { as: { id: newAccessKeyId(), secret: newSecretAccessKey() } })).error).toBe('UnrecognizedClientException');
-      expect((await ses('POST', '/v2/email/outbound-emails', { input: {} })).status).toBe(501);
+      expect(await ses('POST', '/v2/email/outbound-emails', { input: {} })).toMatchObject({ status: 400, error: 'BadRequestException', body: { message: 'Content is required: Simple or Raw' } });
+      const message = { FromEmailAddress: 'orders@shop.example.tn', Destination: { ToAddresses: ['orders@shop.example.tn'] }, Content: { Simple: { Subject: { Data: 'Hi' }, Body: { Text: { Data: 'Hello' } } } } };
+      expect(await ses('POST', '/v2/email/outbound-emails', { input: message })).toMatchObject({ status: 400, error: 'SendingPausedException' });
       expect(await ses('GET', '/v2/email/configuration-sets')).toMatchObject({ status: 501, error: 'NotImplemented' });
     });
   });

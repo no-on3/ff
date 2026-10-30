@@ -40,6 +40,8 @@ import { Package } from '../packages/package.entity';
 import { CacheSample } from '../caches/cache-sample.entity';
 import { Cache } from '../caches/cache.entity';
 import { EmailIdentity } from '../email/email-identity.entity';
+import { EmailMessage } from '../email/email-message.entity';
+import { EmailSending } from '../email/email-sending.entity';
 import { EmailSuppression } from '../email/email-suppression.entity';
 import { Database } from '../databases/database.entity';
 import { DatabaseSample } from '../databases/database-sample.entity';
@@ -58,4 +60,4 @@ import { AsyncEventCount } from '../queues/async-event-count.entity';
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping, QueueRequestCount, QueueSample, AsyncEventCount, Cache, CacheSample, EmailIdentity, EmailSuppression];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping, QueueRequestCount, QueueSample, AsyncEventCount, Cache, CacheSample, EmailIdentity, EmailSuppression, EmailMessage, EmailSending];

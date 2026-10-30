@@ -7,8 +7,8 @@
 #             tables and npm audit's checker, how-it-works.html's script, every shell script parsed, and the CI
 #             workflow linted
 #   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the cache
-#             server's agent's, the ff command's and its binary's (L1, L2), the alert rules' and the log
-#             collector's filter (these two in their own images)
+#             and mail servers' agents', the ff command's and its binary's (L1, L2), the alert rules' and the
+#             log collector's filter (these two in their own images)
 #   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own,
 #             with servers of customers' databases and caches, and a store for buckets
 #   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit, but those
@@ -128,6 +128,7 @@ stage_unit() {
   step "Node.js runtime: protocol tests" in_dir runtimes/nodejs npm test
   step "Python runtime: protocol tests" in_dir runtimes/python python3 -m unittest discover -s tests
   step "the cache server's agent: unit tests" node --test deploy/cache/agent.test.mjs
+  step "the mail server's agent: unit tests" node --test deploy/mail/agent.test.mjs
   step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked
   step "alert rules and dashboards" hack/k8s/test-monitoring-rules.sh
   step "log collector: configuration and filter" hack/k8s/test-logging-filter.sh
@@ -184,8 +185,8 @@ stage_db() {
   trap - EXIT
 }
 
-# Every image FF builds: the platform's, the runtimes', the edge's, the backup's, and customers' database and cache
-# servers', each with its build arguments. The apps bake their addresses in: any will do for a scan.
+# Every image FF builds: the platform's, the runtimes', the edge's, the backup's, and customers' database, cache and
+# mail servers', each with its build arguments. The apps bake their addresses in: any will do for a scan.
 apps=(--build-arg VITE_API_URL=https://api.ff.test --build-arg VITE_OIDC_AUTHORITY=https://login.ff.test/realms/ff)
 IMAGES=(
   "ff-backend:ci BE"
@@ -197,6 +198,7 @@ IMAGES=(
   "ff-postgres-walg:ci deploy/backup/postgres-walg"
   "ff-data-db:ci deploy/data-db"
   "ff-cache:ci deploy/cache"
+  "ff-mail:ci deploy/mail"
 )
 
 # The scanners run as this user: what they write here stays this user's.

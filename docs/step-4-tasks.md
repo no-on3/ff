@@ -47,9 +47,9 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 - [x] **W-06** Identities and the SES endpoint:
   - [x] part 1: SES v2's API on a port of its own, signed for `ses` with the account's keys: identities (a domain with its DKIM keys and records, its proof; addresses, for the sandbox), the account, the suppression list;
   - [x] part 2: the same in FF's API (`/email/...`), each route's isolation checks.
-- [ ] **W-07** Sending:
-  - [ ] part 1: `SendEmail` (simple and raw), queued, signed with the domain's key, handed to the customers' own Postfix; the sandbox and the quotas;
-  - [ ] part 2: bounces and complaints, the suppression list filled by them, the reputation rates and the pause; port 25 closed to every function.
+- [x] **W-07** Sending:
+  - [x] part 1: `SendEmail` (simple and raw), queued, signed with the domain's key, handed to the customers' own Postfix; the sandbox and the quotas;
+  - [x] part 2: bounces and complaints, the suppression list filled by them, the reputation rates and the pause; port 25 closed to every function.
 - [ ] **W-08** E-mail in the console, `ff`, the admin app, and the bill:
   - [ ] part 1: the E-mail page, `ff email`, the admin app's switch and sandbox;
   - [ ] part 2: the bill (the kind `email`, its price), metrics as SES names them, alarms.

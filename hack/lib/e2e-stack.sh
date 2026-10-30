@@ -12,9 +12,10 @@
 # compose project with its volumes; the cluster too if e2e_teardown is true.
 
 work="$FF_REPO_ROOT/hack/.$E2E_NAME"
-# With the "auth", "data" and "cache" profiles, so that cleaning up also removes Keycloak, Mailpit and the data and
-# cache servers when they ran.
-compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth --profile data --profile cache)
+# With the "auth", "data", "cache", "mail" and "mail-test" profiles, so that cleaning up also removes Keycloak, Mailpit,
+# the data, cache and mail servers and the mail's receiver when they ran.
+compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth --profile data --profile cache
+  --profile mail --profile mail-test)
 e2e_pids=()
 e2e_namespaces=()
 # Containers a test starts beside the compose project, such as a DNS server: removed on exit.
@@ -50,11 +51,12 @@ e2e_base_env=(
   FF_SES_PORT=0
   # Nor buckets' sites: a test that visits them gives a free port, and the base to match.
   FF_WEBSITE_PORT=0
-  # Nor functions' own keys to buckets, nor customers' databases and caches, whichever a developer's BE/.env names: a
-  # test that uses them gives its own after these (the cluster's gateway; e2e_data_db's and e2e_cache's servers).
+  # Nor functions' own keys to buckets, nor customers' databases, caches and mail, whichever a developer's BE/.env names:
+  # a test that uses them gives its own after these (the cluster's gateway; e2e_data_db's, e2e_cache's and e2e_mail's).
   FF_STORAGE_FUNCTION_ENDPOINT= FF_STORAGE_FUNCTION_CIDRS=
   FF_DATA_DB_HOST= FF_DATA_DB_ADMIN_HOST= FF_DATA_DB_ADMIN_PASSWORD= FF_DATA_DB_CIDRS= FF_DATA_DB_CA_FILE=
   FF_CACHE_HOST= FF_CACHE_AGENT_URL= FF_CACHE_AGENT_TOKEN= FF_CACHE_CIDRS= FF_CACHE_CA_FILE=
+  FF_EMAIL_SMTP_HOST= FF_EMAIL_AGENT_URL= FF_EMAIL_AGENT_TOKEN= FF_EMAIL_CA_FILE=
   # Every function's code runs as a code image (ADR 0003), pushed to the cluster's registry (hack/k8s/registry-up.sh), pulled by its node.
   FF_CODE_REGISTRY="http://127.0.0.1:$FF_REGISTRY_PORT" FF_CODE_REGISTRY_PULL="$FF_REGISTRY_NAME:5000"
 )
@@ -91,6 +93,31 @@ e2e_cache() {
     FF_CACHE_CIDRS="$address/32" FF_CACHE_CA_FILE="$work/cache-ca.crt")
   echo "  customers' cache server at $address"
 }
+
+# e2e_mail <address> <receiver's address>: the server of customers' mail (ADR 0012), the compose project's own, at an
+# address of the network e2e_data_db made, handing every message to the tests' stand-in for recipients' servers beside
+# it (hack/lib/mail-receiver.mjs), which keeps them and refuses bounce-me@ addresses; the backend, on this machine, its
+# only sender; its CA copied to the work directory. Sets e2e_mail_env, the backend's FF_EMAIL_* settings, and
+# e2e_mail_container and e2e_mail_receiver. Call it after e2e_data_db.
+e2e_mail() {
+  local address=$1 receiver=$2
+  "${compose[@]}" build -q mail >/dev/null 2>&1 || fail "the mail server's image did not build"
+  FF_DATA_DB_SUBNET="$e2e_data_subnet" FF_MAIL_ADDRESS="$address" FF_MAIL_RECEIVER_ADDRESS="$receiver" \
+    FF_MAIL_RELAY_FROM="${e2e_data_subnet%.*}.1/32" FF_MAIL_RELAYHOST="$receiver:2525" \
+    "${compose[@]}" up -d --wait mail-receiver mail >/dev/null 2>&1 || fail "the mail server did not become healthy"
+  e2e_mail_container="$("${compose[@]}" ps -q mail)"
+  e2e_mail_receiver="$("${compose[@]}" ps -q mail-receiver)"
+  docker cp -q "$e2e_mail_container:/var/lib/ff-mail/tls/ca.crt" "$work/mail-ca.crt"
+  e2e_mail_env=(FF_EMAIL_SMTP_HOST="$address" FF_EMAIL_AGENT_URL="https://$address:6391" FF_EMAIL_AGENT_TOKEN=ff-mail-dev
+    FF_EMAIL_CA_FILE="$work/mail-ca.crt")
+  echo "  customers' mail server at $address, its recipients' stand-in at $receiver"
+}
+
+# received <n>: the n-th message the stand-in receiver took, whole; received_envelope <n>, its envelope as JSON;
+# received_count, how many it took.
+received() { docker exec "$e2e_mail_receiver" cat "/tmp/received-$1.eml"; }
+received_envelope() { docker exec "$e2e_mail_receiver" cat "/tmp/received-$1.json"; }
+received_count() { docker exec "$e2e_mail_receiver" sh -c 'ls /tmp | grep -c "^received-.*\.eml$" || true'; }
 
 # cache_cli <address> <command…>: valkey-cli as a customer's app connects, with the address FF gave, over TLS, the
 # server's CA named; inside the server's own container, which reaches its own address. Prints the reply, or the error,

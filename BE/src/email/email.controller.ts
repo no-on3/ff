@@ -1,4 +1,21 @@
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, HttpCode, NotFoundException, Param, Post, Put, Query } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  ConflictException,
+  Controller,
+  Delete,
+  ForbiddenException,
+  Get,
+  HttpCode,
+  HttpException,
+  HttpStatus,
+  NotFoundException,
+  Param,
+  Post,
+  Put,
+  Query,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
@@ -6,7 +23,12 @@ import {
   CreateEmailIdentityDto,
   EmailAccountView,
   EmailIdentityView,
+  EmailMessageListView,
+  EmailMessageQuery,
+  EmailMessageView,
   PutSuppressionDto,
+  SendEmailDto,
+  SentEmailView,
   SuppressionPageView,
   SuppressionQuery,
   SuppressionView,
@@ -14,6 +36,8 @@ import {
 import { EmailAccountService } from './email-account.service';
 import { EmailIdentitiesService, IdentityRefusal } from './email-identities.service';
 import { EmailIdentity, EmailIdentityStatus, EmailIdentityType } from './email-identity.entity';
+import { EmailMessage } from './email-message.entity';
+import { EmailMessagesService, SendRefusal, SendRefusalKind } from './email-messages.service';
 import { addressProblem, identityKey } from './email-names';
 import { EmailSuppression } from './email-suppression.entity';
 import { EmailSuppressionsService } from './email-suppressions.service';
@@ -22,10 +46,22 @@ import { mailFromDomain } from './mail-domain';
 /**
  * Customers' mail (ADR 0012) in FF's API, beside the SES endpoint: the
  * domains and addresses the account sends from, with the records a domain
- * publishes; its quotas and its sandbox; its suppression list. Every member
- * reads them; owners and developers of an active account add, prove and
- * change them, and delete them, a suspended account too.
+ * publishes; its quotas and its sandbox; its suppression list; the messages
+ * it sent, and one to send, as SendEmail takes it. Every member reads them;
+ * owners and developers of an active account add, prove and change them, and
+ * send, and delete them, a suspended account too.
  */
+/** A refusal of a message's, as FF's API answers it. */
+const REFUSALS: Record<SendRefusalKind, (message: string) => HttpException> = {
+  invalid: (message) => new BadRequestException(message),
+  rejected: (message) => new BadRequestException(message),
+  paused: (message) => new ForbiddenException(message),
+  suspended: (message) => new ForbiddenException(message),
+  daily: (message) => new HttpException(message, HttpStatus.TOO_MANY_REQUESTS),
+  rate: (message) => new HttpException(message, HttpStatus.TOO_MANY_REQUESTS),
+  unavailable: (message) => new ServiceUnavailableException(message),
+};
+
 @ApiTags('email')
 @Controller('email')
 export class EmailController {
@@ -33,6 +69,7 @@ export class EmailController {
     private readonly identities: EmailIdentitiesService,
     private readonly suppressions: EmailSuppressionsService,
     private readonly account: EmailAccountService,
+    private readonly messages: EmailMessagesService,
   ) {}
 
   @Get('identities')
@@ -141,6 +178,46 @@ export class EmailController {
     if (!(await this.suppressions.remove({ accountId: principal.accountId }, address))) throw new NotFoundException(`${identityKey(address)} is not on the account's suppression list`);
   }
 
+  @Get('messages')
+  @RequireScope('email:read')
+  @ApiOperation({ summary: "The account's latest messages, through the SES endpoint or FF's API, and what became of each recipient" })
+  @ApiResponse({ status: 200, type: EmailMessageListView })
+  async listMessages(@Query() query: EmailMessageQuery, @Principal() principal: Principal): Promise<EmailMessageListView> {
+    return { messages: (await this.messages.latest(principal.accountId, query.limit ?? 50)).map((row) => this.messageView(row)) };
+  }
+
+  @Post('messages')
+  @RequireScope('email:write')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
+  @ApiOperation({
+    summary: 'Send a message, as SES v2\'s SendEmail sends a simple one: to try a domain or an address',
+    description:
+      'From an address the account proved, or one at a domain it proved, whose DKIM key signs it; in the sandbox, to the addresses and domains it proved alone. ' +
+      "Each recipient counts against the plan's quotas, one on the suppression list too, which it never reaches. The message is queued, and the answer names it at once.",
+  })
+  @ApiResponse({ status: 201, type: SentEmailView })
+  @ApiResponse({ status: 400, description: 'Not a message SES takes, or from or to an identity the account has not proved' })
+  @ApiResponse({ status: 403, description: "The account's sending is paused or stopped" })
+  @ApiResponse({ status: 429, description: "Past the plan's quota a day, or its rate a second" })
+  @ApiResponse({ status: 503, description: "FF has no server of customers' mail here" })
+  async send(@Body() dto: SendEmailDto, @Principal() principal: Principal): Promise<SentEmailView> {
+    try {
+      const messageId = await this.messages.send(principal.accountId, {
+        from: dto.from,
+        to: dto.to,
+        cc: dto.cc ?? [],
+        bcc: dto.bcc ?? [],
+        replyTo: dto.replyTo ?? [],
+        content: { simple: { subject: dto.subject, text: dto.text, html: dto.html, headers: [] } },
+      });
+      return { messageId };
+    } catch (error) {
+      if (!(error instanceof SendRefusal)) throw error;
+      throw REFUSALS[error.kind](error.message);
+    }
+  }
+
   private async identityOf(accountId: string, name: string): Promise<EmailIdentity> {
     const found = await this.identities.find(accountId, name);
     if (!found) throw new NotFoundException(`The account has no identity ${identityKey(name)}`);
@@ -160,6 +237,19 @@ export class EmailController {
       records: this.identities.recordsOf(row),
       verifiedAt: row.verifiedAt,
       createdAt: row.createdAt,
+    };
+  }
+
+  private messageView(row: EmailMessage): EmailMessageView {
+    return {
+      messageId: row.id,
+      from: row.fromAddress,
+      identity: row.identity,
+      status: row.status,
+      recipients: row.recipients.map((recipient) => ({ address: recipient.address, status: recipient.status, diagnostic: recipient.diagnostic ?? null })),
+      sizeBytes: row.sizeBytes,
+      createdAt: row.createdAt,
+      sentAt: row.sentAt,
     };
   }
 

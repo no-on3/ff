@@ -117,6 +117,8 @@ e2e_data_db 10.199.1.0/24 "$data_db_address"
 # Customers' caches (ADR 0013): the run's own server, beside it.
 cache_address=10.199.1.11
 e2e_cache "$cache_address"
+# Customers' mail (ADR 0012): the run's own server, beside them, handing what it sends to a stand-in for recipients'.
+e2e_mail 10.199.1.12 10.199.1.13
 
 echo "== backend"
 e2e_build
@@ -146,7 +148,7 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port"
   FF_SES_PORT="$ses_port" FF_SES_BASE="http://localhost:$ses_port"
   FF_SES_FUNCTION_ENDPOINT="http://$cluster_gateway:$ses_port" FF_SES_FUNCTION_CIDRS="$cluster_gateway/32"
-  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}")
+  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -1504,6 +1506,50 @@ aws_ses delete-suppressed-destination --email-address gone@e2e-customer.tn >/dev
 check "  ... and taken off" "refused NotFoundException" "$(outcome_ses aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn)"
 check "the audit log names each change to the domain, the CLI's under its key" "email.identity.create access_key:$mail_key_id email.identity.verify" \
   "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'email-identity:shop.e2e-customer.tn'")"
+
+echo "== customers' mail sent (ADR 0012): through the run's mail server, signed with the domain's key, its bounces back"
+simple_content='{"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}'
+sent_id="$(aws_ses send-email --from-email-address 'Shop <news@shop.e2e-customer.tn>' \
+  --destination 'ToAddresses=orders@e2e-customer.tn,bounce-me@shop.e2e-customer.tn' --content "$simple_content" | jq -r .MessageId)"
+check "the AWS CLI sends a message from the proved domain, to the proved address and to one at the domain: SES's MessageId" true \
+  "$([[ $sent_id =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false)"
+for _ in $(seq 1 30); do [ "$(received_count)" -ge 1 ] && break; sleep 1; done
+received 1 >"$work/received-1.eml"
+check "  ... the mail server, taking it over TLS, hands it on, its envelope's sender its return path, which names it" \
+  "b-$sent_id@bounces.mail.shop.e2e-customer.tn orders@e2e-customer.tn true" \
+  "$(received_envelope 1 | jq -r '"\(.from) \(.to | join(","))"') $(grep -q 'with ESMTPS' "$work/received-1.eml" && echo true || echo false)"
+# mailauth, at a release at least two weeks old (7.3.0, 2026-10-10), checks the signature as a mailbox provider would.
+[ -d "$work/js/node_modules/mailauth" ] || npm install --prefix "$work/js" --no-audit --no-fund --silent mailauth@7.3.0 >/dev/null
+# dkim_of <message>: its signature's result, domain and selector; then the same, its subject changed on the way.
+dkim_of() { MODULES="$work/js" DNS="127.0.0.1:$dns_port" node "$FF_REPO_ROOT/hack/lib/dkim-verify.mjs" "$1" | paste -sd' '; }
+check "  ... signed with the domain's DKIM key, its record found in the DNS as a provider looks it up; changed on the way, it fails" \
+  "pass shop.e2e-customer.tn $selector fail shop.e2e-customer.tn $selector" "$(dkim_of "$work/received-1.eml")"
+# The stand-in refused bounce-me as a mailbox that doesn't exist: the mail server's bounce goes to the return path, its
+# own mailbox, whence its agent gives it to the backend within 10 s.
+fates() { http GET /email/messages | jq -r --arg id "$1" '[.messages[] | select(.messageId == $id) | .recipients[].status] | join(" ")'; }
+for _ in $(seq 1 60); do [ "$(fates "$sent_id")" = "SENT BOUNCED" ] && break; sleep 1; done
+check "  ... the refused address's bounce comes back through the server's agent: that recipient bounced, the other sent" "SENT BOUNCED" "$(fates "$sent_id")"
+check "  ... its address on the suppression list, as SES puts it, naming the message" "BOUNCE $sent_id" \
+  "$(aws_ses get-suppressed-destination --email-address bounce-me@shop.e2e-customer.tn | jq -r '"\(.SuppressedDestination.Reason) \(.SuppressedDestination.Attributes.MessageId)"')"
+http POST /email/messages '{"from": "news@shop.e2e-customer.tn", "to": ["bounce-me@shop.e2e-customer.tn"], "subject": "Again", "text": "Hello again"}' >/dev/null
+again_id="$(jq -r .messageId "$work/body")"
+check "FF's API sends one too: to an address on the list, it is kept off, done at once, never handed on" "201 SENT SUPPRESSED 1" \
+  "$(status) $(http GET /email/messages | jq -r --arg id "$again_id" '.messages[] | select(.messageId == $id) | "\(.status) \(.recipients[0].status)"') $(received_count)"
+sleep 1 # the Beta plan's rate: a message a second
+raw="$(printf 'From: Shop <news@shop.e2e-customer.tn>\r\nTo: orders@e2e-customer.tn\r\nSubject: Raw\r\nMessage-ID: <raw-e2e@shop.e2e-customer.tn>\r\n\r\nHello from a raw message.\r\n' | base64 -w0)"
+aws_ses send-email --content "{\"Raw\": {\"Data\": \"$raw\"}}" >/dev/null
+for _ in $(seq 1 30); do [ "$(received_count)" -ge 2 ] && break; sleep 1; done
+received 2 >"$work/received-2.eml"
+check "a raw message, its sender and recipient from its header as the AWS CLI sends it: handed on, its own Message-ID, signed" \
+  "orders@e2e-customer.tn true pass shop.e2e-customer.tn $selector fail shop.e2e-customer.tn $selector" \
+  "$(received_envelope 2 | jq -r '.to | join(",")') $(grep -q '^Message-ID: <raw-e2e@shop.e2e-customer.tn>' "$work/received-2.eml" && echo true || echo false) $(dkim_of "$work/received-2.eml")"
+sleep 1
+check "a message from an address the account hasn't proved is refused, as SES refuses it" "refused MessageRejected" \
+  "$(outcome_ses aws_ses send-email --from-email-address someone@unproved.tn --destination ToAddresses=orders@e2e-customer.tn --content "$simple_content")"
+check "  ... and in the sandbox, one to an address it hasn't proved" "refused MessageRejected" \
+  "$(outcome_ses aws_ses send-email --from-email-address news@shop.e2e-customer.tn --destination ToAddresses=stranger@example.org --content "$simple_content")"
+check "GetAccount counts what the account sent in the last day, each recipient once, the one kept off too" 4.0 \
+  "$(aws_ses get-account | jq -r .SendQuota.SentLast24Hours)"
 aws_ses delete-email-identity --email-identity orders@e2e-customer.tn >/dev/null
 http DELETE /email/identities/shop.e2e-customer.tn >/dev/null
 check "both deleted, one through the CLI, one through FF's API, their keys with them" "204 0" "$(status) $(env_q "SELECT count(*) FROM email_identities WHERE account_id = '$tenant'")"

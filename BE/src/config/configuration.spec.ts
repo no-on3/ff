@@ -582,7 +582,7 @@ describe('configuration', () => {
       const config = configuration(dev);
 
       expect(config.ses).toEqual({ port: 3005, base: 'http://localhost:3005', region: 'tn-tunis-1', functionEndpoint: '' });
-      expect(config.email).toEqual({ mailHost: 'mail.localhost', bounceDomain: 'bounces.mail.localhost', domainResolvers: [] });
+      expect(config.email).toEqual({ mailHost: 'mail.localhost', bounceDomain: 'bounces.mail.localhost', domainResolvers: [], server: null });
     });
 
     it('takes an origin, a trailing slash dropped, port 0 for none, and the mail server by its name in lower case', () => {
@@ -617,6 +617,56 @@ describe('configuration', () => {
       expect(problems({ ...dev, FF_SES_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
         'FF_SES_FUNCTION_CIDRS is set, but FF_SES_FUNCTION_ENDPOINT is not: it names where functions reach the SES endpoint',
       ]);
+    });
+  });
+
+  describe("the server of customers' mail (ADR 0012)", () => {
+    const server: Env = { ...dev, FF_EMAIL_SMTP_HOST: '10.199.0.12', FF_EMAIL_AGENT_URL: 'https://10.199.0.12:6391/', FF_EMAIL_AGENT_TOKEN: 'ff-mail-dev' };
+    let dir: string;
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-mail-'));
+      fs.writeFileSync(path.join(dir, 'mail.crt'), '-----BEGIN CERTIFICATE-----\nMIID\n-----END CERTIFICATE-----\n');
+    });
+
+    afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    it('has none unless FF_EMAIL_SMTP_HOST names it: then nothing is sent', () => {
+      expect(configuration(dev).email.server).toBeNull();
+    });
+
+    it('takes mail on port 25 over TLS alone, its agent as named, its CA read', () => {
+      const config = configuration({ ...server, FF_EMAIL_CA_FILE: path.join(dir, 'mail.crt') });
+
+      expect(config.email.server).toEqual({
+        smtpHost: '10.199.0.12',
+        smtpPort: 25,
+        agentUrl: 'https://10.199.0.12:6391',
+        agentToken: 'ff-mail-dev',
+        ca: '-----BEGIN CERTIFICATE-----\nMIID\n-----END CERTIFICATE-----\n',
+        requireTls: true,
+      });
+      expect(configuration({ ...server, FF_EMAIL_SMTP_PORT: '2525' }).email.server?.smtpPort).toBe(2525);
+    });
+
+    it('needs its agent, which gives the bounces back, and refuses its other settings without it', () => {
+      expect(problems({ ...dev, FF_EMAIL_SMTP_HOST: '10.199.0.12' })).toEqual([
+        "FF_EMAIL_AGENT_URL is required when FF_EMAIL_SMTP_HOST is set: customers' bounces come back through the agent of their mail's server",
+        "FF_EMAIL_AGENT_TOKEN is required when FF_EMAIL_SMTP_HOST is set: customers' bounces come back through the agent of their mail's server",
+      ]);
+      expect(problems({ ...dev, FF_EMAIL_AGENT_TOKEN: 'x', FF_EMAIL_CA_FILE: '/nowhere.crt' })).toEqual([
+        "FF_EMAIL_AGENT_TOKEN is set, but FF_EMAIL_SMTP_HOST is not: it names the server of customers' mail",
+        "FF_EMAIL_CA_FILE is set, but FF_EMAIL_SMTP_HOST is not: it names the server of customers' mail",
+      ]);
+      expect(problems({ ...server, FF_EMAIL_AGENT_URL: 'http://10.199.0.12:6391' })).toEqual([expect.stringContaining('FF_EMAIL_AGENT_URL must be an https:// URL')]);
+      expect(problems({ ...server, FF_EMAIL_SMTP_PORT: '0' })).toEqual([expect.stringContaining('FF_EMAIL_SMTP_PORT')]);
+    });
+
+    it('refuses the development token in production, and never repeats a token', () => {
+      const found = problems({ ...production, ...server, NODE_ENV: 'production', FF_AUTH_MODE: 'oidc', FF_DEV_ACCOUNT_ID: undefined });
+
+      expect(found).toEqual(['FF_EMAIL_AGENT_TOKEN must not be the development default when NODE_ENV=production']);
+      expect(problems({ ...dev, FF_EMAIL_AGENT_TOKEN: 'hunter2' }).join(' ')).not.toContain('hunter2');
     });
   });
 

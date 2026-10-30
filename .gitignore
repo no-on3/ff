@@ -165,6 +165,8 @@ hack/.kube/
 hack/.data-db/
 # hack/k8s/cache-up.sh: the development cache server's CA, for the backend and functions' pods
 hack/.cache-server/
+# hack/k8s/mail-up.sh: the development mail server's CA, for the backend
+hack/.mail-server/
 # hack/install-tools.sh: Rust, where the machine has none recent enough
 hack/.rust/
 *.kubeconfig
