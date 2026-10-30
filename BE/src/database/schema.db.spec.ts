@@ -69,6 +69,7 @@ const EVENT_SOURCE_MAPPINGS = migrationNames.find((name) => name.startsWith('Eve
 const BUCKET_NOTIFICATIONS = migrationNames.find((name) => name.startsWith('BucketNotifications')) as string;
 const QUEUE_BILLING = migrationNames.find((name) => name.startsWith('QueueBilling')) as string;
 const BUCKET_WEBSITES = migrationNames.find((name) => name.startsWith('BucketWebsites')) as string;
+const DEPLOY_KEYS = migrationNames.find((name) => name.startsWith('DeployKeys')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -694,6 +695,32 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the caches' migration gives every plan one cache of 64 MB, keeps a cache's name its account's once, its port and its name on the server the server's once, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const cache = (accountId: string, name: string, serverName: string, port: number, status = 'active') =>
+        dataSource.query(
+          `INSERT INTO caches (account_id, name, server_name, port, memory_mb, password_sha256, status) VALUES ($1, $2, $3, $4, 64, repeat('0', 64), $5)`,
+          [accountId, name, serverName, port, status],
+        );
+      await cache(ACCOUNT, 'sessions', 'fc-000000000000000000000001', 6400);
+      await cache('000000000002', 'sessions', 'fc-000000000000000000000002', 6401); // another account's, of the same name
+      await expect(cache(ACCOUNT, 'sessions', 'fc-000000000000000000000003', 6402)).rejects.toThrow(/duplicate key/);
+      await expect(cache(ACCOUNT, 'rates', 'fc-000000000000000000000003', 6400)).rejects.toThrow(/duplicate key/);
+      await expect(cache(ACCOUNT, 'rates', 'fc-000000000000000000000001', 6402)).rejects.toThrow(/duplicate key/);
+      await expect(cache(ACCOUNT, 'rates', 'fc-000000000000000000000003', 6402, 'read_only')).rejects.toThrow(/violates check constraint/);
+      expect((await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`))[0].limits).toMatchObject({ caches: 1, cacheMb: 64 });
+
+      await migrateDownTo(dataSource, DEPLOY_KEYS);
+
+      expect(await dataSource.query(`SELECT to_regclass('caches') AS t`)).toEqual([{ t: null }]);
+      const [{ limits }] = await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`);
+      expect([limits.caches, limits.cacheMb]).toEqual([undefined, undefined]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it('the closed-account-deletion migration gives an account closed before it the whole default notice from now, one not closed none, and reverts with a deletion recorded', async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -1184,6 +1211,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'audit_log',
         'bucket_samples',
         'buckets',
+        'caches',
         'capacity_samples',
         'currencies',
         'custom_domains',

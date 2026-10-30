@@ -18,14 +18,21 @@ export interface KubernetesSettings {
   logStoreDeleteKeyFile: string;
   /** What functions reach of the platform whatever their account's internet access: customers' database server, buckets' S3 front door, queues' SQS endpoint. */
   platformEgress: PlatformEgress[];
-  /** The CA of customers' database server's certificate (PEM) when it isn't a public one, which functions' pods get; '' for none. */
+  /**
+   * The CAs of customers' database and cache servers' certificates (PEM, one after the other) when they aren't public
+   * ones, which functions' pods get; '' for none.
+   */
   dataDbCa: string;
 }
 
-/** A platform service functions reach, on one TCP port: at its addresses, or, with none, at the backend's own pods in ff-system. */
+/**
+ * A platform service functions reach, on one TCP port, or a range of them up to `endPort`: at its addresses, or, with
+ * none, at the backend's own pods in ff-system.
+ */
 export interface PlatformEgress {
   cidrs: string[];
   port: number;
+  endPort?: number;
 }
 
 /**

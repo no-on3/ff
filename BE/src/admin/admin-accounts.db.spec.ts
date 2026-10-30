@@ -161,6 +161,10 @@ run('accounts, for operators (L2, P-71)', () => {
       new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' } })),
       new CustomerQueues(ds, ds.getRepository(Queue)),
       new QueueStore(ds, { count: () => undefined } as never),
+      {
+        suspendAccount: async (accountId: string) => void databaseChanges.push(`caches suspend ${accountId}`),
+        reactivateAccount: async (accountId: string) => void databaseChanges.push(`caches reactivate ${accountId}`),
+      } as never,
     );
   });
 
@@ -359,7 +363,8 @@ run('accounts, for operators (L2, P-71)', () => {
       scaled.length = 0;
       await service.changeStatus(id, 'reactivate', 'Owner removed the miner');
       expect([await statusOf(id), scaled]).toEqual(['active', [[warm.id, 2]]]);
-      expect(databaseChanges).toEqual([`suspend ${id}`, `reactivate ${id}`]);
+      // Its databases' and caches' users kept out, then let in again.
+      expect(databaseChanges).toEqual([`suspend ${id}`, `caches suspend ${id}`, `reactivate ${id}`, `caches reactivate ${id}`]);
     });
 
     it("keep the change when a function can't be scaled: the others are, and the minute's hold catches up", async () => {
@@ -395,7 +400,7 @@ run('accounts, for operators (L2, P-71)', () => {
 
       const page = await service.changeStatus(id, 'close', 'Owner asked');
 
-      expect([await statusOf(id), scaled, databaseChanges]).toEqual(['closed', [[left.id, 0]], [`suspend ${id}`]]);
+      expect([await statusOf(id), scaled, databaseChanges]).toEqual(['closed', [[left.id, 0]], [`suspend ${id}`, `caches suspend ${id}`]]);
       const due = page.account.dataDeletionDueAt as Date;
       expect(due.getTime() - before).toBeGreaterThanOrEqual(30 * DAY_MS);
       expect(due.getTime() - before).toBeLessThan(30 * DAY_MS + 60_000);

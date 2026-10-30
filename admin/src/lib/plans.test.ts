@@ -27,6 +27,8 @@ const BETA: PlanLimits = {
   eventSourceMappingsPerFunction: 5,
   queueRequestsPerSecond: 100,
   queueStorageMb: 100,
+  caches: 1,
+  cacheMb: 64,
 };
 
 describe("a plan's limits, in a form (P-73)", () => {

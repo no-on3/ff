@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { Plan } from '../accounts/entities/plan.entity';
 import { AuditService } from '../audit/audit.service';
+import { CachesService } from '../caches/caches.service';
 import { DatabasesService } from '../databases/databases.service';
 import { BucketsService } from '../storage/buckets.service';
 import { Function } from '../functions/entities/function.entity';
@@ -33,6 +34,7 @@ describe('RetentionService', () => {
   let functions: { remove: jest.Mock; restoreCodeImages: jest.Mock };
   let packages: { purgeUnused: jest.Mock; deleteAll: jest.Mock };
   let databases: { deleteAll: jest.Mock };
+  let caches: { deleteAll: jest.Mock };
   let buckets: { deleteAll: jest.Mock };
   let orchestrator: { removeTenant: jest.Mock; deleteLogs: jest.Mock };
   let audit: { record: jest.Mock };
@@ -89,6 +91,12 @@ describe('RetentionService', () => {
         return 2;
       }),
     };
+    caches = {
+      deleteAll: jest.fn(async (accountId: string) => {
+        steps.push(`caches ${accountId}`);
+        return 1;
+      }),
+    };
     databases = {
       deleteAll: jest.fn(async (accountId: string) => {
         steps.push(`databases ${accountId}`);
@@ -111,6 +119,7 @@ describe('RetentionService', () => {
       audit as unknown as AuditService,
       config,
       queues as unknown as QueueStore,
+      caches as unknown as CachesService,
     );
     errors = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     logs = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
@@ -190,6 +199,7 @@ describe('RetentionService', () => {
         'function 300000000001/f-2',
         'packages 300000000001',
         'databases 300000000001',
+        'caches 300000000001',
         'buckets 300000000001',
         'namespace 300000000001',
         'logs 300000000001',
@@ -201,7 +211,7 @@ describe('RetentionService', () => {
         'audit account.data_delete 300000000001',
       ]);
       expect(audit.record).toHaveBeenCalledWith(
-        { accountId: '300000000001', action: 'account.data_delete', resource: 'account:300000000001', details: { functions: 2, packages: 1, databases: 1, buckets: 2 } },
+        { accountId: '300000000001', action: 'account.data_delete', resource: 'account:300000000001', details: { functions: 2, packages: 1, databases: 1, caches: 1, buckets: 2 } },
         expect.anything(),
       );
       // Marked only while not marked yet: of two runs at once, one records it.
@@ -218,10 +228,12 @@ describe('RetentionService', () => {
       expect(steps).toEqual([
         'packages 300000000001',
         'databases 300000000001',
+        'caches 300000000001',
         'buckets 300000000001',
         'namespace 300000000001',
         'packages 300000000002',
         'databases 300000000002',
+        'caches 300000000002',
         'buckets 300000000002',
         'namespace 300000000002',
         'logs 300000000002',
@@ -245,6 +257,7 @@ describe('RetentionService', () => {
       expect(steps).toEqual([
         'packages 300000000001',
         'databases 300000000001',
+        'caches 300000000001',
         'buckets 300000000001',
         'namespace 300000000001',
         'logs 300000000001',
@@ -388,6 +401,7 @@ describe('RetentionService', () => {
         audit as unknown as AuditService,
         config,
         queues as unknown as QueueStore,
+        caches as unknown as CachesService,
       );
       try {
         fast.onModuleInit();

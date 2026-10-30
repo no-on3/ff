@@ -26,6 +26,11 @@
 #     operator turns an account's databases off, its user kept out and its
 #     members told why, and on again; a closed account's user is kept out,
 #     then its database dropped with its data.
+#   - Customers' caches (ADR 0013), on the suite's own server: each account's
+#     own, their names each account's; another account gets 404 on every
+#     route, and the owner's password still works; a key needs caches:read and
+#     caches:write; a suspended account's cache refuses its user, then lets it
+#     in again, its keys kept; a closed account's is kept out, then deleted.
 #   - Buckets and queues, through the S3 front door and the SQS endpoint: each
 #     account's key reaches its own account's alone; another's bucket is
 #     AccessDenied, another's queue one that doesn't exist, by its URL or its
@@ -81,7 +86,8 @@ sqs_port_oidc="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
-as_b() { http_at "$api" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_b"; }
+# B's calls are patient (below): its loop over every route makes more changes than its plan's 60 a minute.
+as_b() { patient http_at "$api" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_b"; }
 # The development header, which OIDC mode must ignore.
 anonymous() { http_at "$api_oidc" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_a"; }
 # with_token <token> <method> <path> [body] [curl option...]: through the guard.
@@ -104,16 +110,19 @@ upload_package() {
 }
 sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
 uri() { jq -rn --arg s "$1" '$s | @uri'; }
-# patiently <call…>: a change past the plan's 60 a minute answers 429, and is sent again once the wait it gives is over,
-# as a client does: each loop below makes more changes than that in a minute.
-patiently() {
-  "$@" >/dev/null
-  [ "$(status)" = 429 ] || return 0
-  local wait
-  wait="$(message | sed -nE 's/.*Retry after ([0-9]+) s\..*/\1/p')"
-  sleep "${wait:-60}"
-  "$@" >/dev/null
+# patient <call…>: a change past the plan's 60 a minute answers 429, and is sent again once the wait it gives is over,
+# as a client does: each loop below makes more changes than that in a minute. Prints the last answer's body.
+patient() {
+  local body wait
+  body="$("$@")"
+  if [ "$(status)" = 429 ]; then
+    wait="$(message | sed -nE 's/.*Retry after ([0-9]+) s\..*/\1/p')"
+    sleep "${wait:-60}"
+    body="$("$@")"
+  fi
+  printf '%s' "$body"
 }
+patiently() { patient "$@" >/dev/null; }
 # Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer.
 public_routes=("GET /healthz" "GET /readyz")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
@@ -213,6 +222,8 @@ e2e_dependencies keycloak mailpit
 e2e_cluster
 # Customers' databases (ADR 0008): the suite's own server, on 10.199.2.0/24, which no other run uses.
 e2e_data_db 10.199.2.0/24 10.199.2.10
+# Customers' caches (ADR 0013): the suite's own server, beside it.
+e2e_cache 10.199.2.11
 
 echo "== a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
 receiver_port="$(free_port)"
@@ -243,13 +254,13 @@ e2e_migrate "${e2e_base_env[@]}"
 # Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
 # Both send notifications every second, and may reach the receiver on this machine.
 notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
-e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api##*:}" \
+e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" PORT="${api##*:}" \
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
-e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api_oidc##*:}" \
+e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
   FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
@@ -299,6 +310,12 @@ db_a="$(jq -r .id <<<"$database_a")"
 conn_a="$(jq -r .connectionString <<<"$database_a")"
 check "  ... which its connection string reaches, over TLS, as its own user" "$(jq -r .user <<<"$database_a")|t" \
   "$(data_db_psql "$conn_a" 'select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()')"
+cache_a="$(as_a POST /caches '{"name": "l5-sessions"}')"
+check "A makes a cache, its address with its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.url | startswith("rediss://default:"))"' <<<"$cache_a")"
+cache_url_a="$(jq -r .url <<<"$cache_a")"
+cache_port_a="$(jq -r .port <<<"$cache_a")"
+cache_cli "$cache_url_a" SET l5 a >/dev/null
+check "  ... which its address reaches, over TLS" a "$(cache_cli "$cache_url_a" GET l5)"
 as_a POST /buckets '{"name": "l5-photos-a"}' >/dev/null
 check "A makes a bucket" 201 "$(status)"
 as_a POST /queues '{"name": "l5-orders-a"}' >/dev/null
@@ -666,6 +683,24 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       database_now="$(as_a GET "/databases/$db_a")"
       check "  ... which A still has, its password unchanged" "200 active 1" "$(status) $(jq -r .status <<<"$database_now") $(data_db_psql "$conn_a" 'select 1')"
       ;;
+    "GET /caches")
+      listed="$(as_b GET /caches | jq --argjson port "$cache_port_a" 'map(select(.port == $port)) | length')"
+      check "$route: B's list doesn't show A's cache" "200 0" "$(status) $listed"
+      ;;
+    "POST /caches")
+      cache_b="$(as_b POST /caches '{"name": "l5-sessions"}')"
+      check "$route: B makes a cache of its own, of the name A's has: names are each account's" "201 true" \
+        "$(status) $([ "$(jq -r .port <<<"$cache_b")" != "$cache_port_a" ] && echo true || echo false)"
+      check "  ... which A's list doesn't show" 0 "$(as_a GET /caches | jq --argjson port "$(jq -r .port <<<"$cache_b")" 'map(select(.port == $port)) | length')"
+      as_b DELETE /caches/l5-sessions >/dev/null
+      check "  ... and which B deletes, A's own untouched" "204 a" "$(status) $(cache_cli "$cache_url_a" GET l5)"
+      ;;
+    "GET /caches/{name}" | "DELETE /caches/{name}" | "POST /caches/{name}/password")
+      as_b "$method" "${template//\{name\}/l5-sessions}" >/dev/null
+      check "$route: B gets 404 for A's cache" "404 The account has no cache l5-sessions" "$(status) $(message)"
+      cache_now="$(as_a GET /caches/l5-sessions)"
+      check "  ... which A still has, its password unchanged" "200 active a" "$(status) $(jq -r .status <<<"$cache_now") $(cache_cli "$cache_url_a" GET l5)"
+      ;;
     "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
       as_b "$method" "/alarms/$alarm_a" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
       check "$route: B gets 404 for A's alarm" "404 Alarm $alarm_a not found" "$(status) $(message)"
@@ -848,7 +883,8 @@ token_2="$(keycloak_token ff-e2e "$user_2")"
 [ -n "$token_1" ] && [ "$token_1" != null ] && [ -n "$token_2" ] && [ "$token_2" != null ] ||
   fail "the users could not log in through ff-e2e"
 as_user_1() { with_token "$token_1" "$@"; }
-as_user_2() { with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${account_2:-}"; }
+# Account 2's calls are patient, as B's: its loop over every route makes more changes than its plan's 60 a minute.
+as_user_2() { patient with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${account_2:-}"; }
 
 me_1="$(as_user_1 GET /me)"
 check "the backend creates user 1 on the first call, with no account" "200 $user_1 []" \
@@ -920,6 +956,11 @@ database_1="$(as_user_1 POST /databases '{"name": "l5-one"}')"
 check "account 1's owner makes a database" "201 active" "$(status) $(jq -r .status <<<"$database_1")"
 db_1="$(jq -r .id <<<"$database_1")"
 conn_1="$(jq -r .connectionString <<<"$database_1")"
+cache_1="$(as_user_1 POST /caches '{"name": "l5-one"}')"
+check "account 1's owner makes a cache" "201 active" "$(status) $(jq -r .status <<<"$cache_1")"
+cache_conn_1="$(jq -r .url <<<"$cache_1")"
+cache_port_1="$(jq -r .port <<<"$cache_1")"
+cache_cli "$cache_conn_1" SET l5 one >/dev/null
 as_user_1 POST /buckets '{"name": "l5-photos-1"}' >/dev/null
 check "account 1's owner makes a bucket" 201 "$(status)"
 as_user_1 POST /queues '{"name": "l5-orders-1"}' >/dev/null
@@ -1184,6 +1225,23 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       database_now="$(as_user_1 GET "/databases/$db_1")"
       check "  ... which account 1 still has, its password unchanged" "200 active 1" "$(status) $(jq -r .status <<<"$database_now") $(data_db_psql "$conn_1" 'select 1')"
       ;;
+    "GET /caches")
+      listed="$(as_user_2 GET /caches | jq --argjson port "$cache_port_1" 'map(select(.port == $port)) | length')"
+      check "$route: account 2's list doesn't show account 1's cache" "200 0" "$(status) $listed"
+      ;;
+    "POST /caches")
+      cache_2="$(as_user_2 POST /caches '{"name": "l5-one"}')"
+      check "$route: account 2 makes a cache of its own, of the name account 1's has" 201 "$(status)"
+      check "  ... which account 1's list doesn't show" 0 "$(as_user_1 GET /caches | jq --argjson port "$(jq -r .port <<<"$cache_2")" 'map(select(.port == $port)) | length')"
+      as_user_2 DELETE /caches/l5-one >/dev/null
+      check "  ... and which account 2 deletes, account 1's own untouched" "204 one" "$(status) $(cache_cli "$cache_conn_1" GET l5)"
+      ;;
+    "GET /caches/{name}" | "DELETE /caches/{name}" | "POST /caches/{name}/password")
+      as_user_2 "$method" "${template//\{name\}/l5-one}" >/dev/null
+      check "$route: account 2 gets 404 for account 1's cache" "404 The account has no cache l5-one" "$(status) $(message)"
+      cache_now="$(as_user_1 GET /caches/l5-one)"
+      check "  ... which account 1 still has, its password unchanged" "200 active one" "$(status) $(jq -r .status <<<"$cache_now") $(cache_cli "$cache_conn_1" GET l5)"
+      ;;
     "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
       as_user_2 "$method" "/alarms/$alarm_1" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
       check "$route: account 2 gets 404 for account 1's alarm" "404 Alarm $alarm_1 not found" "$(status) $(message)"
@@ -1302,6 +1360,10 @@ with_token "$key_1" GET /databases >/dev/null
 check "a key without databases:read can't list the account's databases" "403 This API key lacks the scope databases:read" "$(status) $(message)"
 with_token "$key_1" POST /databases '{"name": "by-key"}' >/dev/null
 check "nor make one without databases:write" "403 This API key lacks the scope databases:write" "$(status) $(message)"
+with_token "$key_1" GET /caches >/dev/null
+check "a key without caches:read can't list the account's caches" "403 This API key lacks the scope caches:read" "$(status) $(message)"
+with_token "$key_1" POST /caches '{"name": "by-key"}' >/dev/null
+check "nor make one without caches:write" "403 This API key lacks the scope caches:write" "$(status) $(message)"
 with_token "$key_1" GET /buckets >/dev/null
 check "a key without storage:read can't list the account's buckets" "403 This API key lacks the scope storage:read" "$(status) $(message)"
 with_token "$key_1" POST /buckets '{"name": "l5-by-key"}' >/dev/null
@@ -1406,7 +1468,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
@@ -1459,6 +1521,8 @@ with_token "$operator_token" POST "/admin/accounts/$account_1/suspend" '{"reason
 check "the operator suspends account 1" 200 "$(status)"
 check "its function is scaled to zero at once" 0 \
   "$(kubectl -n "$(tenant_namespace "$account_1")" get deployment "fn-$fn_1" -o jsonpath='{.spec.replicas}')"
+check "its cache's user can't log in, the cache suspended with it (ADR 0013)" "true suspended" \
+  "$(cache_cli "$cache_conn_1" GET l5 | grep -q WRONGPASS && echo true || echo false) $(as_user_1 GET /caches/l5-one | jq -r .status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"one"}}' >/dev/null
 check "its owner can't invoke" "403 Your account is suspended" "$(status) $(message)"
 as_user_1 POST /functions "$(function_body l5-suspended)" >/dev/null
@@ -1476,6 +1540,7 @@ with_token "$operator_token" POST "/admin/accounts/$account_1/reactivate" '{"rea
 check "the operator reactivates it" 200 "$(status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"again"}}' >/dev/null
 check "and its function answers again, from a cold start" 201 "$(status)"
+check "and its cache lets its user in again, its keys kept" "one active" "$(cache_cli "$cache_conn_1" GET l5) $(as_user_1 GET /caches/l5-one | jq -r .status)"
 echo "== the function's logs (P-40; from the log store, P-43)"
 logged="$(as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"logs"}}')"
 logged_id="$(jq -r .id <<<"$logged")"
@@ -1547,13 +1612,15 @@ internet_rule() { # <account>
   kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
     jq -r '[.spec.egress[] | select(.ports == null) | .to[]?.ipBlock | select(.) | "\(.cidr) except \(.except | length)"] | if length == 0 then "none" else join(",") end'
 }
-# FF's services the account's functions reach whatever its internet access, each address and its one port.
+# FF's services the account's functions reach whatever its internet access, each address and its port, or its ports.
 service_rules() { # <account>
   kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
-    jq -r '[.spec.egress[] | select(.ports != null and (.to | any(.ipBlock != null))) | "\(.to[].ipBlock.cidr):\(.ports[0].port)"] | join(",")'
+    jq -r '[.spec.egress[] | select(.ports != null and (.to | any(.ipBlock != null))) |
+      "\(.to[].ipBlock.cidr):\(.ports[0].port)\(if .ports[0].endPort then "-\(.ports[0].endPort)" else "" end)"] | join(",")'
 }
 check "account 1's functions reach nothing beyond DNS on any port, as every account starts" none "$(internet_rule "$account_1")"
-check "but customers' database server, on its port only, whatever the account's internet access (ADR 0008)" "10.199.2.10/32:5432" "$(service_rules "$account_1")"
+check "but customers' database server and cache server, on their ports only, whatever the account's internet access (ADR 0008, ADR 0013)" \
+  "10.199.2.10/32:5432,10.199.2.11/32:6400-6999" "$(service_rules "$account_1")"
 egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '{"internetEgress": true, "reason": "l5: calls a payment API"}')"
 check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out" "200 true 0.0.0.0/0 except 6" \
   "$(status) $(jq -r .account.internetEgress <<<"$egress") $(internet_rule "$account_1")"
@@ -1918,6 +1985,7 @@ as_user_1 GET "/functions/$fn_1" >/dev/null
 check "until then, its members still read its functions" 200 "$(status)"
 check "but its database's user can't log in any more (ADR 0008)" true \
   "$( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false)"
+check "nor its cache's (ADR 0013)" true "$(cache_cli "$cache_conn_1" GET l5 | grep -q WRONGPASS && echo true || echo false)"
 # The notice period passes.
 sql "UPDATE accounts SET data_deletion_due_at = now() WHERE id = '$account_1'" >/dev/null
 deleted=""
@@ -1936,6 +2004,8 @@ check "its namespace is gone from the cluster, its code from object storage, and
   "$(kubectl get namespace "$ns_1" >/dev/null 2>&1 && echo true || echo false) $([ -z "$(archived "$fn_1/code.ts")" ] && echo empty || echo kept) $(store_lines "$ns_1")"
 check "its database is gone from the server, with its user" "0 0" \
   "$(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$(jq -r .database <<<"$database_1")') || ' ' || (select count(*) from pg_roles where rolname = '$(jq -r .user <<<"$database_1")')")"
+check "its cache is gone from the server, with its keys: its address answers no more" "0 true" \
+  "$(sql "SELECT count(*) FROM caches WHERE account_id = '$account_1'") $(cache_cli "$cache_conn_1" PING | grep -q 'Could not connect' && echo true || echo false)"
 check "its bucket is gone, with its files, from FF's records and the store, and its key opens nothing" "0 0 refused InvalidAccessKeyId" \
   "$(sql "SELECT count(*) FROM buckets WHERE account_id = '$account_1'") $(sql "SELECT count(*) FROM storage_keys WHERE account_id = '$account_1' AND revoked_at IS NULL") $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1)"
 check "its usage records, payments and invoices are kept, as the law requires" "$kept_1" \

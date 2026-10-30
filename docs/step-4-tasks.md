@@ -36,9 +36,9 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 - [ ] **Deploy 1:** sites on the development server, at `*.site.dev.ffunc.cloud` (one DNS record more).
 
 ### Phase 2: caches
-- [ ] **W-04** The server of customers' caches, and the API:
-  - [ ] part 1: `deploy/cache`: Valkey, a process for each cache, and the small agent that starts them, for development and the platform;
-  - [ ] part 2: `/caches` (create, list, get, a new password, delete), the address shown once, the plan's limits, functions' way to it, suspension.
+- [x] **W-04** The server of customers' caches, and the API:
+  - [x] part 1: `deploy/cache`: Valkey, a process for each cache, and the small agent that starts them, for development and the platform;
+  - [x] part 2: `/caches` (create, list, get, a new password, delete), the address shown once, the plan's limits, functions' way to it, suspension.
 - [ ] **W-05** Caches in the console, `ff`, the admin app, and the bill:
   - [ ] part 1: the Caches page, `ff caches`, the admin app's account page;
   - [ ] part 2: hourly measures, the bill (the kind `cache`, its price), metrics as ElastiCache names them, alarms.

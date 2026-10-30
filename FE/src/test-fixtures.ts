@@ -31,5 +31,7 @@ export const BETA_PLAN: Plan = {
     eventSourceMappingsPerFunction: 5,
     queueRequestsPerSecond: 100,
     queueStorageMb: 100,
+    caches: 1,
+    cacheMb: 64,
   },
 };

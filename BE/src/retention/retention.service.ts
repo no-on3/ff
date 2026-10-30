@@ -9,6 +9,7 @@ import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PackagesService } from '../packages/packages.service';
+import { CachesService } from '../caches/caches.service';
 import { DatabasesService } from '../databases/databases.service';
 import { BucketsService } from '../storage/buckets.service';
 import { parsePlanLimits } from '../plans/plan-limits';
@@ -31,8 +32,8 @@ export const DELIVERY_DAYS = 30;
  *   the longest age a function may give it, which its worker hasn't seen;
  * - packages that no function names, an hour after their upload;
  * - a closed account's functions, their history and logs, its packages, its
- *   databases, its queues, its alarms, notification deliveries and webhook
- *   secret, once the notice period its closure set has passed.
+ *   databases, its caches, its queues, its alarms, notification deliveries and
+ *   webhook secret, once the notice period its closure set has passed.
  * Usage records, the ledger, invoices and the audit log are not touched: the
  * law requires keeping them for years. Last, the same job makes again the code
  * images the registry has lost (FunctionsService.restoreCodeImages): hourly,
@@ -55,6 +56,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     private readonly audit: AuditService,
     private readonly config: ConfigService,
     private readonly queues: QueueStore,
+    private readonly caches: CachesService,
   ) {}
 
   onModuleInit(): void {
@@ -172,7 +174,8 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
    * A closed account's data: each function, with its objects, its code in
    * object storage, its row and its history (FunctionsService.remove(), which
    * records each in the audit log); then its packages; then its databases, from
-   * customers' database server; then its buckets, emptied, and its access keys,
+   * customers' database server, and its caches, from customers' cache server;
+   * then its buckets, emptied, and its access keys,
    * revoked; then its namespace, so
    * that nothing writes more of its lines; then its lines in the log store. Then, at once, its
    * queues with their messages, its alarms, notification deliveries and webhook secret go, and the account is marked,
@@ -185,6 +188,8 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
     const packages = await this.packages.deleteAll(accountId);
     // Its databases, with their data, from customers' database server (ADR 0008).
     const databases = await this.databases.deleteAll(accountId);
+    // Its caches, with their keys, from customers' cache server (ADR 0013).
+    const caches = await this.caches.deleteAll(accountId);
     // Its buckets, with their files, from the store, and its keys to them (ADR 0009).
     const buckets = await this.buckets.deleteAll(accountId);
     await this.orchestrator.removeTenant(accountId);
@@ -198,7 +203,7 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       const marked = await manager.update(Account, { id: accountId, dataDeletedAt: IsNull() }, { dataDeletedAt: new Date() });
       if (!marked.affected) return;
       await this.audit.record(
-        { accountId, action: 'account.data_delete', resource: `account:${accountId}`, details: { functions: functions.length, packages, databases, buckets } },
+        { accountId, action: 'account.data_delete', resource: `account:${accountId}`, details: { functions: functions.length, packages, databases, caches, buckets } },
         manager,
       );
     });

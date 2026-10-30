@@ -6,6 +6,7 @@ import { Currency } from '../billing/currency.entity';
 import { PriceBook } from '../billing/price-book.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { AuditModule } from '../audit/audit.module';
+import { CachesModule } from '../caches/caches.module';
 import { DatabasesModule } from '../databases/databases.module';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
@@ -39,6 +40,7 @@ import { QueuesModule } from '../queues/queues.module';
   imports: [
     TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, PriceBook, Currency, Schedule]),
     AuditModule,
+    CachesModule,
     DatabasesModule,
     BillingModule,
     FunctionsModule,

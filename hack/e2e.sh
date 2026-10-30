@@ -35,8 +35,14 @@
 # connection string over TLS as its own user, the plan's one database, a new
 # password, a function reaching it with its account's internet access off and
 # trusting its certificate, its hourly sample within a minute, then deleted
-# from the server. Then customers' buckets: made through the API, a name once
-# across FF, the plan's five; access keys, two at most, the secret once; then
+# from the server. Then a customer's cache on the run's own server of
+# customers' caches: made, its address over TLS as its own user, the plan's
+# memory with the least recently used keys going past it, the server's settings
+# refused, its process under a user of its own, the plan's one cache, a new
+# password, a function reaching it with its account's internet access off and
+# logging in, then deleted from the server. Then customers' buckets: made
+# through the API, a name once across FF, the plan's five; access keys, two at
+# most, the secret once; then
 # AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door,
 # only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in
 # parts, presigned URLs, a wrong signature, an expired URL, another account's
@@ -108,6 +114,9 @@ cluster_gateway="$(docker network inspect "k3d-$FF_CLUSTER_NAME" --format '{{ran
 # Customers' databases (ADR 0008): the run's own server, on 10.199.1.0/24, which no other run uses.
 data_db_address=10.199.1.10
 e2e_data_db 10.199.1.0/24 "$data_db_address"
+# Customers' caches (ADR 0013): the run's own server, beside it.
+cache_address=10.199.1.11
+e2e_cache "$cache_address"
 
 echo "== backend"
 e2e_build
@@ -133,7 +142,7 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
   FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port"
-  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}")
+  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -836,6 +845,63 @@ check "its hourly sample, within a minute: once in the hour, by its name, its si
 http DELETE "/databases/$db_id" >/dev/null
 check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
   "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
+
+echo "== customers' caches (ADR 0013)"
+made="$(http POST /caches '{"name": "e2e-sessions"}')"
+check "a cache is made: active, Valkey, the plan's 64 MB, its address with its password in the answer, TLS asked" "201 active Valkey 9.1 64 true true" \
+  "$(status) $(jq -r '. as $c | "\($c.status) \($c.engine) \($c.memoryMb) \($c.url == "rediss://default:\($c.password)@\($c.host):\($c.port)") \($c.address == "rediss://default@\($c.host):\($c.port)")"' <<<"$made")"
+cache_url="$(jq -r .url <<<"$made")"
+cache_server_name="$(env_q "SELECT server_name FROM caches WHERE name = 'e2e-sessions'")"
+check "the address reaches it over TLS, the server's certificate checked, as the customer's user" "OK two croissants default" \
+  "$(cache_cli "$cache_url" SET cart:42 'two croissants') $(cache_cli "$cache_url" GET cart:42) $(cache_cli "$cache_url" ACL WHOAMI)"
+memory="$(cache_cli "$cache_url" INFO memory | tr -d '\r')"
+check "its memory the plan's, the least recently used keys going past it; the server's settings none of the customer's" "67108864 allkeys-lru true" \
+  "$(sed -n 's/^maxmemory://p' <<<"$memory") $(sed -n 's/^maxmemory_policy://p' <<<"$memory") $(cache_cli "$cache_url" CONFIG SET maxmemory 1gb | grep -q NOPERM && echo true || echo false)"
+check "its process runs as a user of its own, never root" true \
+  "$([ "$(docker exec "$e2e_cache_container" sh -c 'for p in $(pgrep valkey-server); do stat -c %u /proc/$p; done')" -gt 20000 ] && echo true || echo false)"
+shown="$(http GET /caches/e2e-sessions)"
+check "GET shows the memory its keys use and its connections, never its password" "200 true true false false" \
+  "$(status) $(jq -r '"\(.bytesUsedForCache > 0) \(.currConnections | type == "number") \(has("password")) \(has("url"))"' <<<"$shown")"
+http POST /caches '{"name": "e2e-second"}' >/dev/null
+check "a second cache, past the beta plan's one, is refused" "400 The Beta plan allows 1 cache, and the account has 1: delete one first" "$(status) $(jq -r .message "$work/body")"
+http POST /caches '{"name": "Not_A_Name"}' >/dev/null
+check "a name ElastiCache wouldn't take is refused, saying what a name is" "400 name must be 1 to 40 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last, as AWS ElastiCache names its clusters" \
+  "$(status) $(jq -r '.message | if type == "array" then join("; ") else . end' "$work/body")"
+reset="$(http POST /caches/e2e-sessions/password)"
+new_cache_url="$(jq -r .url <<<"$reset")"
+check "a new password: the old one refused, the new one logs in, the keys kept" "200 true two croissants" \
+  "$(status) $(cache_cli "$cache_url" PING | grep -q WRONGPASS && echo true || echo false) $(cache_cli "$new_cache_url" GET cart:42)"
+probe='import * as tls from "node:tls";
+// The server of customers'"'"' caches, as a function reaches it: TLS to the cache'"'"'s port, its certificate checked, then AUTH and GET.
+export async function handler(event: { url: string }) {
+  const { hostname, port, password } = new URL(event.url);
+  const secret = decodeURIComponent(password);
+  return new Promise((resolve) => {
+    const socket = tls.connect({ host: hostname, port: Number(port) });
+    socket.setTimeout(3000, () => { socket.destroy(); resolve("timeout"); });
+    socket.once("error", (error) => resolve(error.message));
+    socket.once("secureConnect", () => {
+      if (!socket.authorized) { resolve(String(socket.authorizationError)); socket.destroy(); return; }
+      socket.write(`*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$${secret.length}\r\n${secret}\r\n*2\r\n$3\r\nGET\r\n$7\r\ncart:42\r\n`);
+    });
+    let answer = "";
+    socket.on("data", (chunk) => {
+      answer += chunk.toString();
+      const got = /^\+OK\r\n\$\d+\r\n(.*)\r\n$/s.exec(answer);
+      if (got) { resolve(`trusted, logged in: ${got[1]}`); socket.destroy(); }
+      else if (answer.startsWith("-")) { resolve(answer.trim()); socket.destroy(); }
+    });
+  });
+}'
+probe_fn="$(http POST /functions "$(jq -n --arg code "$probe" '{name: "e2e-cache-probe", runtime: "nodejs", code: $code, memory: 128, timeout: 10}')" | jq -r .id)"
+check "a function reaches it, the account's internet access off, trusts its certificate and logs in with the address" '"trusted, logged in: two croissants"' \
+  "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg url "$new_cache_url" '{input: {url: $url}}')" | jq -c .output)"
+http DELETE "/functions/$probe_fn" >/dev/null
+http DELETE /caches/e2e-sessions >/dev/null
+check "a cache deleted: 204, then 404, gone from the server with its keys, its address answering no more" "204 404 404 true" \
+  "$(status) $(http GET /caches/e2e-sessions >/dev/null; status) \
+$(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/cache-ca.crt" -H 'Authorization: Bearer ff-cache-dev' "https://$cache_address:6390/caches/$cache_server_name") \
+$(cache_cli "$new_cache_url" PING | grep -q 'Could not connect' && echo true || echo false)"
 
 echo "== customers' buckets (ADR 0009): the API, then AWS's own clients through the S3 front door"
 s3_endpoint="http://s3.localhost:$storage_port"

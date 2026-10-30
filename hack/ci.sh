@@ -6,10 +6,11 @@
 #   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
 #             tables and npm audit's checker, how-it-works.html's script, every shell script parsed, and the CI
 #             workflow linted
-#   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the ff
-#             command's and its binary's (L1, L2), the alert rules' and the log collector's filter (these two
-#             in their own images)
-#   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own
+#   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the cache
+#             server's agent's, the ff command's and its binary's (L1, L2), the alert rules' and the log
+#             collector's filter (these two in their own images)
+#   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own,
+#             with servers of customers' databases and caches, and a store for buckets
 #   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit, but those
 #             .npmauditignore accepts until a date), and every image built, scanned (Trivy, but what
 #             .trivyignore.yaml accepts) and listed as an SBOM (CycloneDX), into hack/.ci/sbom
@@ -58,6 +59,20 @@ step() { # <name> <command...>: runs one step, timed; stops the stage when it fa
   fi
 }
 in_dir() { (cd "$1" && shift && "$@"); } # <directory> <command...>
+# The first of <n> ports in a row that nothing on this machine answers on.
+free_ports() {
+  local n=$1 first port
+  for _ in $(seq 1 50); do
+    first=$((40000 + RANDOM % 20000))
+    for port in $(seq "$first" $((first + n - 1))); do
+      (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && continue 2
+    done
+    echo "$first"
+    return
+  done
+  echo "no $n free ports in a row on this machine" >&2
+  return 1
+}
 
 stage_deps() {
   for dir in BE FE admin runtimes/nodejs; do
@@ -112,6 +127,7 @@ stage_unit() {
   step "admin app: unit tests" in_dir admin npm test "${vitest_jobs[@]}"
   step "Node.js runtime: protocol tests" in_dir runtimes/nodejs npm test
   step "Python runtime: protocol tests" in_dir runtimes/python python3 -m unittest discover -s tests
+  step "the cache server's agent: unit tests" node --test deploy/cache/agent.test.mjs
   step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked
   step "alert rules and dashboards" hack/k8s/test-monitoring-rules.sh
   step "log collector: configuration and filter" hack/k8s/test-logging-filter.sh
@@ -119,12 +135,13 @@ stage_unit() {
 
 stage_db() {
   "$repo/hack/check-resources.sh"
-  local name="ff-ci-postgres-$$" data="ff-ci-data-db-$$" s3="ff-ci-s3-$$" password port admin data_port s3_key s3_port
+  local name="ff-ci-postgres-$$" data="ff-ci-data-db-$$" s3="ff-ci-s3-$$" cache="ff-ci-cache-$$" password port admin data_port s3_key s3_port \
+    cache_port first caches
   password="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   admin="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   s3_key="ci$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   # shellcheck disable=SC2064 # the names are fixed now
-  trap "docker rm -f -v $name $data $s3 >/dev/null 2>&1 || true" EXIT
+  trap "docker rm -f -v $name $data $s3 $cache >/dev/null 2>&1 || true" EXIT
   docker run -d --name "$name" -e POSTGRES_PASSWORD="$password" -p 127.0.0.1::5432 "$POSTGRES_IMAGE" >/dev/null
   port="$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')"
   # Customers' database server (ADR 0008), its certificate from a CA of its own, for the suites that make databases.
@@ -132,6 +149,14 @@ stage_db() {
   docker run -d --name "$data" -e POSTGRES_PASSWORD="$password" -e FF_DATA_DB_ADMIN_PASSWORD="$admin" \
     -e FF_DATA_DB_TLS_NAMES=DNS:localhost,IP:127.0.0.1 -p 127.0.0.1::5432 ff-data-db:ci >/dev/null
   data_port="$(docker port "$data" 5432/tcp | head -1 | sed 's/.*://')"
+  # Customers' cache server (ADR 0013), its certificate from a CA of its own: its agent on a port of this machine's,
+  # its caches on ten more, the same here as in the container, as the caches' addresses name them.
+  docker build -q -t ff-cache:ci "$repo/deploy/cache" >/dev/null
+  first="$(free_ports 10)"
+  caches="$first-$((first + 9))"
+  docker run -d --name "$cache" -e FF_CACHE_AGENT_TOKEN="$admin" -e FF_CACHE_PORTS="$caches" -e FF_CACHE_TLS_NAMES=DNS:localhost,IP:127.0.0.1 \
+    -p 127.0.0.1::6390 -p "127.0.0.1:$caches:$caches" ff-cache:ci >/dev/null
+  cache_port="$(docker port "$cache" 6390/tcp | head -1 | sed 's/.*://')"
   # The store behind buckets' S3 front door, as development's, with keys of its own, for the suites that send it requests.
   mkdir -p "$ci_dir"
   printf '{"identities": [{"name": "ci", "credentials": [{"accessKey": "%s", "secretKey": "%s"}], "actions": ["Admin", "Read", "List", "Tagging", "Write"]}]}\n' \
@@ -145,18 +170,22 @@ stage_db() {
   # SeaweedFS answers S3 once its volume server has joined: an anonymous request is refused then, with a status.
   for _ in $(seq 1 60); do [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$s3_port/")" != 000 ] && break; sleep 1; done
   docker cp -q "$data:/var/lib/postgresql/tls/ca.crt" "$ci_dir/data-db-ca.crt"
+  for _ in $(seq 1 60); do curl -sfk -o /dev/null -H "authorization: Bearer $admin" "https://127.0.0.1:$cache_port/health" && break; sleep 1; done
+  docker cp -q "$cache:/var/lib/ff-cache/tls/ca.crt" "$ci_dir/cache-ca.crt"
   # The variables win over BE/.env, which dotenv never overrides.
   export DB_HOST=127.0.0.1 DB_PORT="$port" DB_USERNAME=postgres DB_PASSWORD="$password" DB_NAME=postgres DB_SSL=false
   export FF_DATA_DB_HOST=127.0.0.1 FF_DATA_DB_PORT="$data_port" FF_DATA_DB_ADMIN_PASSWORD="$admin" FF_DATA_DB_CA_FILE="$ci_dir/data-db-ca.crt"
+  export FF_CACHE_HOST=127.0.0.1 FF_CACHE_PORTS="$caches" FF_CACHE_AGENT_URL="https://127.0.0.1:$cache_port" FF_CACHE_AGENT_TOKEN="$admin" \
+    FF_CACHE_CA_FILE="$ci_dir/cache-ca.crt"
   export FF_OBJECT_STORE_ENDPOINT=127.0.0.1 FF_OBJECT_STORE_PORT="$s3_port" FF_OBJECT_STORE_USE_SSL=false FF_OBJECT_STORE_ACCESS_KEY="$s3_key" FF_OBJECT_STORE_SECRET_KEY="$password"
   step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" in_dir BE npm run test:db
   step "migrations: exactly the entities' schema" in_dir BE npm run migration:check
-  docker rm -f -v "$name" "$data" "$s3" >/dev/null
+  docker rm -f -v "$name" "$data" "$s3" "$cache" >/dev/null
   trap - EXIT
 }
 
-# Every image FF builds: the platform's, the runtimes', the edge's, the backup's and customers' database server's, each with its build
-# arguments. The apps bake their addresses in: any will do for a scan.
+# Every image FF builds: the platform's, the runtimes', the edge's, the backup's, and customers' database and cache
+# servers', each with its build arguments. The apps bake their addresses in: any will do for a scan.
 apps=(--build-arg VITE_API_URL=https://api.ff.test --build-arg VITE_OIDC_AUTHORITY=https://login.ff.test/realms/ff)
 IMAGES=(
   "ff-backend:ci BE"
@@ -167,6 +196,7 @@ IMAGES=(
   "ff-runtime-python:ci runtimes/python"
   "ff-postgres-walg:ci deploy/backup/postgres-walg"
   "ff-data-db:ci deploy/data-db"
+  "ff-cache:ci deploy/cache"
 )
 
 # The scanners run as this user: what they write here stays this user's.

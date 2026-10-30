@@ -252,6 +252,69 @@ describe('configuration', () => {
     });
   });
 
+  describe("customers' cache server (ADR 0013)", () => {
+    const server: Env = { ...dev, FF_CACHE_HOST: '10.199.0.11', FF_CACHE_AGENT_URL: 'https://10.199.0.11:6390/', FF_CACHE_AGENT_TOKEN: 'ff-cache-dev', FF_CACHE_CIDRS: '10.199.0.11/32' };
+    let dir: string;
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cache-'));
+      fs.writeFileSync(path.join(dir, 'data-db.crt'), '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n');
+      fs.writeFileSync(path.join(dir, 'cache.crt'), '-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----');
+    });
+
+    afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    it('has none unless FF_CACHE_HOST names it', () => {
+      expect(configuration(dev).cache).toBeNull();
+    });
+
+    it("reaches its agent as named; functions reach its caches' ports at its addresses, its CA after the database server's", () => {
+      const config = configuration({
+        ...server,
+        FF_DATA_DB_HOST: '10.199.0.10',
+        FF_DATA_DB_ADMIN_PASSWORD: 'ff-data-admin-dev',
+        FF_DATA_DB_CIDRS: '10.199.0.10/32',
+        FF_DATA_DB_CA_FILE: path.join(dir, 'data-db.crt'),
+        FF_CACHE_CA_FILE: path.join(dir, 'cache.crt'),
+      });
+
+      expect(config.cache).toEqual({
+        host: '10.199.0.11',
+        ports: { first: 6400, last: 6999 },
+        agentUrl: 'https://10.199.0.11:6390',
+        agentToken: 'ff-cache-dev',
+        cidrs: ['10.199.0.11/32'],
+        ca: '-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----',
+      });
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: ['10.199.0.10/32'], port: 5432 },
+        { cidrs: ['10.199.0.11/32'], port: 6400, endPort: 6999 },
+      ]);
+      expect(config.kubernetes.dataDbCa).toBe('-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----');
+    });
+
+    it('needs its agent and the addresses functions reach it at, and refuses its other settings without it', () => {
+      expect(problems({ ...dev, FF_CACHE_HOST: '10.199.0.11' })).toEqual([
+        "FF_CACHE_AGENT_URL is required when FF_CACHE_HOST is set: the backend tells the agent of customers' cache server what each cache is",
+        "FF_CACHE_AGENT_TOKEN is required when FF_CACHE_HOST is set: the backend tells the agent of customers' cache server what each cache is",
+        "FF_CACHE_CIDRS is required when FF_CACHE_HOST is set: functions reach customers' cache server only at these addresses, through their NetworkPolicy",
+      ]);
+      expect(problems({ ...dev, FF_CACHE_AGENT_TOKEN: 'x', FF_CACHE_CIDRS: '10.199.0.11/32' })).toEqual([
+        "FF_CACHE_AGENT_TOKEN is set, but FF_CACHE_HOST is not: it names customers' cache server",
+        "FF_CACHE_CIDRS is set, but FF_CACHE_HOST is not: it names customers' cache server",
+      ]);
+      expect(problems({ ...server, FF_CACHE_PORTS: '80-90' })).toEqual([expect.stringContaining('FF_CACHE_PORTS must be a range of ports from 1024 up')]);
+      expect(problems({ ...server, FF_CACHE_AGENT_URL: 'http://10.199.0.11:6390' })).toEqual([expect.stringContaining('FF_CACHE_AGENT_URL must be an https:// URL')]);
+    });
+
+    it('refuses the development token in production, and never repeats a token', () => {
+      const found = problems({ ...production, ...server, NODE_ENV: 'production', FF_AUTH_MODE: 'oidc', FF_DEV_ACCOUNT_ID: undefined });
+
+      expect(found).toEqual(['FF_CACHE_AGENT_TOKEN must not be the development default when NODE_ENV=production']);
+      expect(problems({ ...dev, FF_CACHE_AGENT_TOKEN: 'hunter2' }).join(' ')).not.toContain('hunter2');
+    });
+  });
+
   it('has no schema synchronization switch: the schema comes only from migrations', () => {
     expect(configuration(dev).database).not.toHaveProperty('synchronize');
   });

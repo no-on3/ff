@@ -35,6 +35,8 @@ export class PlanLimitsView implements PlanLimits {
   @ApiProperty({ example: 100, description: 'SQS requests per second, all the keys together' }) queueRequestsPerSecond: number;
   @ApiProperty({ example: 100, description: "What the account's messages may hold together, in MB, its functions' waiting asynchronous calls among them" })
   queueStorageMb: number;
+  @ApiProperty({ example: 1, description: "Customers' caches, all together" }) caches: number;
+  @ApiProperty({ example: 64, description: "One cache's memory, in MB: past it, its least recently used keys go" }) cacheMb: number;
 }
 
 /** An account's plan. */

@@ -28,6 +28,8 @@ export interface PlanLimits {
   eventSourceMappingsPerFunction: number;
   queueRequestsPerSecond: number;
   queueStorageMb: number;
+  caches: number;
+  cacheMb: number;
 }
 
 export interface Plan {
@@ -67,6 +69,8 @@ export const LIMIT_FIELDS: Array<{ path: [keyof PlanLimits] | ['quota', keyof Pl
   { path: ['eventSourceMappingsPerFunction'], label: 'Queues one function reads', unit: 'per function', kind: 'whole' },
   { path: ['queueRequestsPerSecond'], label: 'Requests to the queues', unit: 'per second, all keys together', kind: 'whole' },
   { path: ['queueStorageMb'], label: 'Messages waiting', unit: 'MB, all together, asynchronous calls included', kind: 'whole' },
+  { path: ['caches'], label: 'Caches', unit: 'all together', kind: 'whole' },
+  { path: ['cacheMb'], label: 'Memory of a cache', unit: 'MB, each', kind: 'whole' },
 ];
 
 const QUANTITY = /^\d+(\.\d+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$/;

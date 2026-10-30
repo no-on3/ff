@@ -742,6 +742,10 @@ export interface PlanLimits {
   queueRequestsPerSecond: number;
   /** What the account's messages may hold together, in MB, its functions' waiting asynchronous calls among them. */
   queueStorageMb: number;
+  /** Customers' caches, all together. */
+  caches: number;
+  /** One cache's memory, in MB: past it, its least recently used keys go. */
+  cacheMb: number;
 }
 
 export interface Plan {
@@ -849,6 +853,8 @@ export const SCOPES = [
   'storage:write',
   'queues:read',
   'queues:write',
+  'caches:read',
+  'caches:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 

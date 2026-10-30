@@ -19,6 +19,8 @@ export const SCOPES = [
   'storage:write',
   'queues:read',
   'queues:write',
+  'caches:read',
+  'caches:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 

@@ -128,8 +128,8 @@ export function limitRangeManifest(namespace: string): K8sObject {
  * The account's NetworkPolicy. Its functions resolve names, and reach the internet only when the account's own
  * setting allows it (the operator turns it on) and the platform's K8S_EGRESS_INTERNET doesn't forbid it for
  * every account. Never FF's own network, nor the cloud's metadata addresses (BLOCKED_EGRESS_CIDRS), but for the
- * platform's services that functions use, each at its addresses on its one port, whatever the account's internet
- * access: customers' database server, buckets' S3 front door and queues' SQS endpoint. NetworkPolicy rules add up, so
+ * platform's services that functions use, each at its addresses on its port or ports, whatever the account's internet
+ * access: customers' database server, customers' cache server, buckets' S3 front door and queues' SQS endpoint. NetworkPolicy rules add up, so
  * the ranges the internet rule leaves out don't cancel them.
  */
 /** The backend's pods, in ff-system, as a NetworkPolicy's peer. */
@@ -160,11 +160,12 @@ export function networkPolicyManifest(namespace: string, settings: KubernetesSet
       ],
     },
   ];
-  // Customers' database server, buckets' S3 front door and queues' SQS endpoint: at their addresses, or the backend's
-  // own pods for an endpoint of a backend in the cluster, which its NetworkPolicy lets functions reach on that port.
+  // Customers' database server, the caches' ports of customers' cache server, buckets' S3 front door and queues' SQS
+  // endpoint: at their addresses, or the backend's own pods for an endpoint of a backend in the cluster, which its
+  // NetworkPolicy lets functions reach on that port.
   for (const service of settings.platformEgress) {
     const to = service.cidrs.length > 0 ? service.cidrs.map((cidr) => ({ ipBlock: { cidr } })) : [BACKEND_PODS];
-    egress.push({ to, ports: [{ protocol: 'TCP', port: service.port }] });
+    egress.push({ to, ports: [{ protocol: 'TCP', port: service.port, ...(service.endPort ? { endPort: service.endPort } : {}) }] });
   }
   if (settings.egressInternet && internetEgress) {
     egress.push({ to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }] });
@@ -209,8 +210,8 @@ export function environmentSecretManifest(fn: FunctionWorkload & { environment: 
 }
 
 /**
- * The CA of customers' database server's certificate, in the tenant namespace, for the functions' pods to mount: the
- * server's certificate comes from it when it isn't a public one, as in development (ADR 0008).
+ * The CAs of customers' database and cache servers' certificates, in the tenant namespace, for the functions' pods to
+ * mount: each server's certificate comes from its own when it isn't a public one, as in development (ADR 0008, 0013).
  */
 export function dataDbCaSecretManifest(namespace: string, ca: string): K8sObject {
   return {

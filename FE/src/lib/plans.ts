@@ -27,6 +27,8 @@ export const PLAN_LIMIT_KEYS = [
   'eventSourceMappingsPerFunction',
   'queueRequestsPerSecond',
   'queueStorageMb',
+  'caches',
+  'cacheMb',
 ] as const satisfies ReadonlyArray<keyof PlanLimits>;
 
 // A limit missing from the list above stops the build.
@@ -77,5 +79,7 @@ export function planLimitRows({ limits }: Pick<Plan, 'limits'>): Array<[label: s
     ['Queues one function reads', String(limits.eventSourceMappingsPerFunction)],
     ['Requests to the queues', `${limits.queueRequestsPerSecond} per second`],
     ['Messages waiting', `${formatMegabytes(limits.queueStorageMb)} together, asynchronous calls included`],
+    ['Caches', String(limits.caches)],
+    ['Memory of a cache', `${formatMegabytes(limits.cacheMb)}; past it, the least recently used keys go`],
   ];
 }

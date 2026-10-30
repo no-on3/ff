@@ -30,6 +30,8 @@ describe('planLimitRows', () => {
       ['Queues one function reads', '5'],
       ['Requests to the queues', '100 per second'],
       ['Messages waiting', '100 MB together, asynchronous calls included'],
+      ['Caches', '1'],
+      ['Memory of a cache', '64 MB; past it, the least recently used keys go'],
     ]);
   });
 

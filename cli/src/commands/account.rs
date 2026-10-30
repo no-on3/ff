@@ -97,6 +97,8 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("eventSourceMappingsPerFunction", &|n| format!("{n} queues read by a function"));
     add("queueRequestsPerSecond", &|n| format!("{n} requests to the queues a second"));
     add("queueStorageMb", &|n| format!("{n} MB of messages waiting"));
+    add("caches", &|n| if n == 1 { "1 cache".to_string() } else { format!("{n} caches") });
+    add("cacheMb", &|n| format!("{n} MB a cache"));
     lines
 }
 

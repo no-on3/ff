@@ -40,6 +40,8 @@ export const DEVELOPMENT_CREDENTIALS = {
   FF_OBJECT_STORE_SECRET_KEY: ['minioadmin', 'ffdevsecretkey-local-only'],
   // The development server of customers' databases (docker-compose.yml's data-db).
   FF_DATA_DB_ADMIN_PASSWORD: ['ff-data-admin-dev'],
+  // The development server of customers' caches (docker-compose.yml's cache).
+  FF_CACHE_AGENT_TOKEN: ['ff-cache-dev'],
 } as const;
 
 const DEV_CORS_ORIGIN = 'http://localhost:5199';
@@ -324,6 +326,15 @@ const serverHost = {
   test: (v: string) => isIP(v) !== 0 || (v.length <= 253 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(v)),
   expected: 'a host name or an IP address, such as db.example.tn or 10.199.0.10',
 };
+/** A range of ports, as the server of customers' caches gives its caches theirs. */
+const portRange = {
+  test: (v: string) => {
+    const match = /^(\d+)-(\d+)$/.exec(v);
+    return match !== null && Number(match[1]) >= 1024 && Number(match[2]) <= 65535 && Number(match[1]) <= Number(match[2]);
+  },
+  expected: 'a range of ports from 1024 up, such as 6400-6999',
+};
+const httpsUrl = { test: (v: string) => isUrl(v, ['https:']), expected: 'an https:// URL' };
 /** A PostgreSQL role's name, as the backend's role is named. */
 const roleName = { test: (v: string) => /^[a-z_][a-z0-9_]{0,62}$/.test(v), expected: 'a PostgreSQL role name: lower-case letters, digits and underscores' };
 const emailAddress = { test: (v: string) => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(v), expected: 'an e-mail address' };
@@ -496,6 +507,15 @@ const appShape = {
   FF_DATA_DB_ADMIN_PASSWORD: optionalSecret(),
   FF_DATA_DB_CIDRS: list(cidr),
   FF_DATA_DB_CA_FILE: optionalText(),
+  // Customers' caches (ADR 0013): their server as customers and functions reach it (unset: no caches, the API answers
+  // 503), the ports its caches take, its agent's API and the backend's token there; the addresses functions reach it
+  // at, for their NetworkPolicy; and the CA of its certificate when it isn't a public one, which functions' pods get too.
+  FF_CACHE_HOST: optionalText(serverHost),
+  FF_CACHE_PORTS: text('6400-6999', portRange),
+  FF_CACHE_AGENT_URL: optionalText(httpsUrl),
+  FF_CACHE_AGENT_TOKEN: optionalSecret(),
+  FF_CACHE_CIDRS: list(cidr),
+  FF_CACHE_CA_FILE: optionalText(),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -556,6 +576,19 @@ function appRules(env: AppEnv): string[] {
     const without = (['FF_DATA_DB_ADMIN_HOST', 'FF_DATA_DB_ADMIN_PASSWORD', 'FF_DATA_DB_CA_FILE'] as const).filter((name) => env[name] !== undefined);
     if (env.FF_DATA_DB_CIDRS.length > 0) without.push('FF_DATA_DB_CIDRS' as (typeof without)[number]);
     for (const name of without) problems.push(`${name} is set, but FF_DATA_DB_HOST is not: it names customers' database server`);
+  }
+
+  if (env.FF_CACHE_HOST) {
+    for (const name of ['FF_CACHE_AGENT_URL', 'FF_CACHE_AGENT_TOKEN'] as const) {
+      if (!env[name]) problems.push(`${name} is required when FF_CACHE_HOST is set: the backend tells the agent of customers' cache server what each cache is`);
+    }
+    if (env.FF_CACHE_CIDRS.length === 0) {
+      problems.push("FF_CACHE_CIDRS is required when FF_CACHE_HOST is set: functions reach customers' cache server only at these addresses, through their NetworkPolicy");
+    }
+  } else {
+    const without = (['FF_CACHE_AGENT_URL', 'FF_CACHE_AGENT_TOKEN', 'FF_CACHE_CA_FILE'] as const).filter((name) => env[name] !== undefined);
+    if (env.FF_CACHE_CIDRS.length > 0) without.push('FF_CACHE_CIDRS' as (typeof without)[number]);
+    for (const name of without) problems.push(`${name} is set, but FF_CACHE_HOST is not: it names customers' cache server`);
   }
 
   if (env.FF_STORAGE_FUNCTION_ENDPOINT) {
@@ -659,6 +692,9 @@ function appRules(env: AppEnv): string[] {
     if (env.FF_DATA_DB_ADMIN_PASSWORD && (DEVELOPMENT_CREDENTIALS.FF_DATA_DB_ADMIN_PASSWORD as readonly string[]).includes(env.FF_DATA_DB_ADMIN_PASSWORD)) {
       problems.push('FF_DATA_DB_ADMIN_PASSWORD must not be the development default when NODE_ENV=production');
     }
+    if (env.FF_CACHE_AGENT_TOKEN && (DEVELOPMENT_CREDENTIALS.FF_CACHE_AGENT_TOKEN as readonly string[]).includes(env.FF_CACHE_AGENT_TOKEN)) {
+      problems.push('FF_CACHE_AGENT_TOKEN must not be the development default when NODE_ENV=production');
+    }
     for (const name of Object.keys(DEV_SELLER) as Array<keyof typeof DEV_SELLER>) {
       if (env[name] === DEV_SELLER[name]) problems.push(`${name} must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)`);
     }
@@ -752,6 +788,33 @@ function dataDbSettings(env: AppEnv): DataDbSettings | null {
   };
 }
 
+export interface CacheSettings {
+  /** In caches' addresses: as customers and functions reach the server. */
+  host: string;
+  /** The ports its caches take, one each. */
+  ports: { first: number; last: number };
+  /** Its agent's API, which the backend tells what each cache is. */
+  agentUrl: string;
+  agentToken: string;
+  /** The addresses functions reach it at: their NetworkPolicy's rule. */
+  cidrs: string[];
+  /** The CA of its certificate (PEM), when it isn't a public one: the backend checks the agent against it, and functions get it. */
+  ca?: string;
+}
+
+function cacheSettings(env: AppEnv): CacheSettings | null {
+  if (!env.FF_CACHE_HOST) return null;
+  const [first, last] = env.FF_CACHE_PORTS.split('-').map(Number);
+  return {
+    host: env.FF_CACHE_HOST,
+    ports: { first, last },
+    agentUrl: (env.FF_CACHE_AGENT_URL as string).replace(/\/$/, ''),
+    agentToken: env.FF_CACHE_AGENT_TOKEN as string,
+    cidrs: env.FF_CACHE_CIDRS,
+    ...(env.FF_CACHE_CA_FILE ? { ca: readCertificate('FF_CACHE_CA_FILE', env.FF_CACHE_CA_FILE) } : {}),
+  };
+}
+
 /** The `database` block: the same for the backend, the TypeORM CLI and the drift check. */
 export interface DatabaseSettings {
   host: string;
@@ -791,6 +854,7 @@ export default function configuration(env: Env = process.env) {
   if (problems.length > 0) throw new ConfigurationError(problems);
   const production = parsed.NODE_ENV === 'production';
   const dataDb = dataDbSettings(parsed);
+  const cache = cacheSettings(parsed);
   return {
     nodeEnv: parsed.NODE_ENV,
     port: parsed.PORT,
@@ -913,6 +977,8 @@ export default function configuration(env: Env = process.env) {
     },
     // Customers' databases (ADR 0008): their server, the backend's role there, and how functions reach it; null without one.
     dataDb,
+    // Customers' caches (ADR 0013): their server, its agent, and how functions reach it; null without one.
+    cache,
     // What FF keeps encrypted at rest (functions' environments) is sealed with these keys, the first sealing.
     encryption: {
       keys: encryptionKeys(parsed.FF_ENCRYPTION_KEYS_FILE, production),
@@ -946,15 +1012,19 @@ export default function configuration(env: Env = process.env) {
       egressInternet: parsed.K8S_EGRESS_INTERNET,
       ingressAllowCidrs: parsed.K8S_INGRESS_ALLOW_CIDRS,
       logStoreDeleteKeyFile: parsed.K8S_LOG_STORE_DELETE_KEY_FILE,
-      // What functions reach of the platform whatever their account's internet access: customers' database server, and
-      // buckets' S3 front door.
+      // What functions reach of the platform whatever their account's internet access: customers' database server, the
+      // caches' ports of customers' cache server, buckets' S3 front door and queues' SQS endpoint.
       platformEgress: [
         ...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []),
+        ...(cache ? [{ cidrs: cache.cidrs, port: cache.ports.first, endPort: cache.ports.last }] : []),
         ...functionEgress(parsed.FF_STORAGE_FUNCTION_ENDPOINT, parsed.FF_STORAGE_FUNCTION_CIDRS, parsed.FF_STORAGE_PORT),
         ...functionEgress(parsed.FF_SQS_FUNCTION_ENDPOINT, parsed.FF_SQS_FUNCTION_CIDRS, parsed.FF_SQS_PORT),
       ],
-      // The CA of that server's certificate when it isn't a public one: functions' pods get it (none: '').
-      dataDbCa: dataDb?.ca ?? '',
+      // The CAs of those servers' certificates when they aren't public ones, the database server's and the cache
+      // server's together: functions' pods get them (none: '').
+      dataDbCa: [dataDb?.ca, cache?.ca]
+        .filter((ca): ca is string => !!ca)
+        .reduce((bundle, ca) => (bundle === '' || bundle.endsWith('\n') ? bundle + ca : `${bundle}\n${ca}`), ''),
     },
   };
 }

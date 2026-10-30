@@ -12,8 +12,9 @@
 # compose project with its volumes; the cluster too if e2e_teardown is true.
 
 work="$FF_REPO_ROOT/hack/.$E2E_NAME"
-# With the "auth" and "data" profiles, so that cleaning up also removes Keycloak, Mailpit and the data server when they ran.
-compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth --profile data)
+# With the "auth", "data" and "cache" profiles, so that cleaning up also removes Keycloak, Mailpit and the data and
+# cache servers when they ran.
+compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth --profile data --profile cache)
 e2e_pids=()
 e2e_namespaces=()
 # Containers a test starts beside the compose project, such as a DNS server: removed on exit.
@@ -47,10 +48,11 @@ e2e_base_env=(
   FF_SQS_PORT=0
   # Nor buckets' sites: a test that visits them gives a free port, and the base to match.
   FF_WEBSITE_PORT=0
-  # Nor functions' own keys to buckets, nor customers' databases, whichever a developer's BE/.env names: a test that
-  # uses them gives its own after these (the cluster's gateway; e2e_data_db's server).
+  # Nor functions' own keys to buckets, nor customers' databases and caches, whichever a developer's BE/.env names: a
+  # test that uses them gives its own after these (the cluster's gateway; e2e_data_db's and e2e_cache's servers).
   FF_STORAGE_FUNCTION_ENDPOINT= FF_STORAGE_FUNCTION_CIDRS=
   FF_DATA_DB_HOST= FF_DATA_DB_ADMIN_HOST= FF_DATA_DB_ADMIN_PASSWORD= FF_DATA_DB_CIDRS= FF_DATA_DB_CA_FILE=
+  FF_CACHE_HOST= FF_CACHE_AGENT_URL= FF_CACHE_AGENT_TOKEN= FF_CACHE_CIDRS= FF_CACHE_CA_FILE=
   # Every function's code runs as a code image (ADR 0003), pushed to the cluster's registry (hack/k8s/registry-up.sh), pulled by its node.
   FF_CODE_REGISTRY="http://127.0.0.1:$FF_REGISTRY_PORT" FF_CODE_REGISTRY_PULL="$FF_REGISTRY_NAME:5000"
 )
@@ -58,9 +60,10 @@ e2e_base_env=(
 # e2e_data_db <subnet> <address>: the server of customers' databases (ADR 0008), the compose project's own, on a Docker
 # network of its own (a /24 no other run uses), which the cluster's node joins at the lowest gateway priority, so that
 # functions reach it; its CA copied to the work directory. Sets e2e_data_db_env, the backend's FF_DATA_DB_* settings,
-# and e2e_data_db_container. The node leaves the network on exit.
+# e2e_data_db_container and e2e_data_subnet. The node leaves the network on exit.
 e2e_data_db() {
   local subnet=$1 address=$2 node="k3d-$FF_CLUSTER_NAME-server-0" network
+  e2e_data_subnet=$subnet
   FF_DATA_DB_SUBNET="$subnet" FF_DATA_DB_ADDRESS="$address" "${compose[@]}" up -d --wait data-db >/dev/null 2>&1 ||
     fail "the data server did not become healthy"
   e2e_data_db_container="$("${compose[@]}" ps -q data-db)"
@@ -71,6 +74,29 @@ e2e_data_db() {
   e2e_data_db_env=(FF_DATA_DB_HOST="$address" FF_DATA_DB_ADMIN_PASSWORD=ff-data-admin-dev FF_DATA_DB_CIDRS="$address/32"
     FF_DATA_DB_CA_FILE="$work/data-db-ca.crt")
   echo "  customers' database server at $address"
+}
+
+# e2e_cache <address>: the server of customers' caches (ADR 0013), the compose project's own, at an address of the
+# network e2e_data_db made, which the cluster's node has joined already; its CA copied to the work directory. Sets
+# e2e_cache_env, the backend's FF_CACHE_* settings, and e2e_cache_container. Call it after e2e_data_db.
+e2e_cache() {
+  local address=$1
+  FF_DATA_DB_SUBNET="$e2e_data_subnet" FF_CACHE_ADDRESS="$address" "${compose[@]}" up -d --wait cache >/dev/null 2>&1 ||
+    fail "the cache server did not become healthy"
+  e2e_cache_container="$("${compose[@]}" ps -q cache)"
+  docker cp -q "$e2e_cache_container:/var/lib/ff-cache/tls/ca.crt" "$work/cache-ca.crt"
+  e2e_cache_env=(FF_CACHE_HOST="$address" FF_CACHE_AGENT_URL="https://$address:6390" FF_CACHE_AGENT_TOKEN=ff-cache-dev
+    FF_CACHE_CIDRS="$address/32" FF_CACHE_CA_FILE="$work/cache-ca.crt")
+  echo "  customers' cache server at $address"
+}
+
+# cache_cli <address> <command…>: valkey-cli as a customer's app connects, with the address FF gave, over TLS, the
+# server's CA named; inside the server's own container, which reaches its own address. Prints the reply, or the error,
+# and never fails: valkey-cli exits 1 when it can't connect, which under pipefail would fail a check that greps it.
+cache_cli() {
+  local url=$1
+  shift
+  docker exec "$e2e_cache_container" valkey-cli --no-auth-warning --tls --cacert /var/lib/ff-cache/tls/ca.crt -u "$url" "$@" 2>&1 || true
 }
 
 # data_db_psql <connection string> <sql>: psql as a customer's app connects, with the string FF gave, the server's CA
