@@ -40,18 +40,22 @@ export interface FunctionUsage {
  * month's hours make its GB-months, as AWS bills storage; a bucket's requests
  * by S3's two classes; a queue's requests, as SQS bills them; a cache's memory
  * summed over the hours sampled, its GB-hours, as ElastiCache bills a node.
+ * And the mail one of its domains or addresses sent (ADR 0012): its messages'
+ * recipients, and their attachments, each recipient's copy, as SES bills them.
  */
 export interface ResourceUsage {
   resourceId: string;
-  kind: 'database' | 'bucket' | 'queue' | 'cache';
+  kind: 'database' | 'bucket' | 'queue' | 'cache' | 'email';
   /** Bytes held, summed over the hours sampled: a cache's memory, its plan's, whatever its keys use. */
   byteHours: bigint;
   /** The hours it was sampled in: a database's monthly fee is prorated by them. */
   hours: bigint;
   tier1Requests: bigint;
   tier2Requests: bigint;
-  /** A queue's requests, each 64 KB of a request's messages one; 0 for a database or a bucket. */
+  /** A queue's requests, each 64 KB of a request's messages one; mail's recipients, each message's; 0 for the others. */
   requests: bigint;
+  /** Mail's attachments sent, each recipient's copy; 0 for the others. */
+  bytes: bigint;
 }
 
 /** The part of a month that one book prices, in time order. */
@@ -75,10 +79,11 @@ export interface FunctionCost {
 
 /**
  * A database's, a bucket's, a queue's or a cache's cost, before the free tier: storage and SQS's requests at their
- * first tier's price, S3's requests, a database's fee; a cache's memory by the GB-hour, as its storage.
+ * first tier's price, S3's requests, a database's fee; a cache's memory by the GB-hour, as its storage. Mail's
+ * recipients, as its requests, and its attachments by the GB, as its storage.
  */
 export interface ResourceCost {
-  kind: 'database' | 'bucket' | 'queue' | 'cache';
+  kind: 'database' | 'bucket' | 'queue' | 'cache' | 'email';
   /** Its GB-months: byte-hours over the month's hours. */
   gbMonths: Decimal;
   storage: Decimal;
@@ -134,7 +139,8 @@ function aboveFirstTier(from: Decimal, to: Decimal, tiers: Array<{ upTo: Decimal
  * and buckets' storage by the GB-month, over `hoursInMonth`, S3's requests by
  * its two classes, a database's monthly fee by the hours it existed, its
  * queues' requests by the million, in tiers, and its caches' memory by the
- * GB-hour. The free tier and the tiers count the
+ * GB-hour; as SES prices it, its mail by the recipient, and its attachments
+ * by the GB, without a free tier. The free tier and the tiers count the
  * account's usage from the month's start, through every book's part of the
  * month: a book that starts mid-month prices what follows with the counts
  * reached so far.
@@ -183,7 +189,8 @@ export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, h
     gbSecondsSoFar = gbSecondsEnd;
 
     // Databases and buckets: storage by the GB-month, at the first tier's price; S3's requests; a database's fee by its hours.
-    // Queues: SQS's requests, at the first tier's price. Caches: their memory by the GB-hour, without a free tier.
+    // Queues: SQS's requests, at the first tier's price. Caches: their memory by the GB-hour, without a free tier. Mail:
+    // its recipients and its attachments' GB, without one either.
     if (held.length > 0 && hoursInMonth <= 0) throw new Error("A month's hours are needed to price storage by the GB-month");
     let databaseGbMonths = Decimal.ZERO;
     let bucketGbMonths = Decimal.ZERO;
@@ -193,15 +200,19 @@ export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, h
     for (const resource of held) {
       const stored = gbMonths(resource.byteHours, hoursInMonth);
       const database = resource.kind === 'database';
-      // A cache's memory, by the hour, as ElastiCache bills a node: its GB-hours at the book's price.
+      const mail = resource.kind === 'email';
+      // A cache's memory, by the hour, as ElastiCache bills a node: its GB-hours at the book's price. Mail's attachments by the GB.
       const memory = resource.kind === 'cache' ? Decimal.quotient(resource.byteHours, BYTES_PER_GB, GB_MONTH_PLACES).times(book.cacheGbHour) : null;
+      const attachments = mail ? Decimal.quotient(resource.bytes, BYTES_PER_GB, GB_MONTH_PLACES).times(book.emailAttachmentsGb) : null;
       const cost = {
         gbMonths: stored,
-        storage: memory ?? stored.times(database ? book.databaseStorageGbMonth : book.bucketStorageTiers[0].price),
-        requests: Decimal.of(resource.tier1Requests)
-          .times(book.perTier1Request)
-          .plus(Decimal.of(resource.tier2Requests).times(book.perTier2Request))
-          .plus(Decimal.of(resource.requests).times(book.queueRequestTiers[0].price)),
+        storage: attachments ?? memory ?? stored.times(database ? book.databaseStorageGbMonth : book.bucketStorageTiers[0].price),
+        requests: mail
+          ? Decimal.of(resource.requests).times(book.perEmailRecipient)
+          : Decimal.of(resource.tier1Requests)
+              .times(book.perTier1Request)
+              .plus(Decimal.of(resource.tier2Requests).times(book.perTier2Request))
+              .plus(Decimal.of(resource.requests).times(book.queueRequestTiers[0].price)),
         fee: database ? Decimal.quotient(resource.hours, BigInt(hoursInMonth), GB_MONTH_PLACES).times(book.databaseMonthlyFee) : Decimal.ZERO,
       };
       const before = resources.get(resource.resourceId);
@@ -212,7 +223,7 @@ export function rateMonth(segments: BookSegment[], feeBook: BookPrices | null, h
       else if (resource.kind === 'bucket') bucketGbMonths = bucketGbMonths.plus(stored);
       tier1 += resource.tier1Requests;
       tier2 += resource.tier2Requests;
-      queueRequests += resource.requests;
+      if (!mail) queueRequests += resource.requests;
     }
     const databaseEnd = databaseGbMonthsSoFar.plus(databaseGbMonths);
     freeTier = freeTier.minus(overlap(databaseGbMonthsSoFar, databaseEnd, Decimal.ZERO, book.freeDatabaseGbMonths).times(book.databaseStorageGbMonth));

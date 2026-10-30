@@ -3,8 +3,8 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireScope } from '../auth/route-rules';
 import { CustomerMetricsService } from './customer-metrics.service';
-import { CACHE_PERIOD, DATABASE_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
-import { BucketMetricsView, CacheMetricsView, DatabaseMetricsView, MetricsQuery, MetricsView, QueueMetricsView, SiteMetricsView } from './dto/metrics-query.dto';
+import { CACHE_PERIOD, DATABASE_PERIOD, EMAIL_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
+import { BucketMetricsView, CacheMetricsView, DatabaseMetricsView, EmailMetricsView, MetricsQuery, MetricsView, QueueMetricsView, SiteMetricsView } from './dto/metrics-query.dto';
 
 /** A window the request names, or 400 saying why it can't be. */
 function windowOf(query: MetricsQuery): MetricsWindow {
@@ -19,8 +19,8 @@ function windowOf(query: MetricsQuery): MetricsWindow {
  * database's, as CloudWatch names RDS's, from its hourly samples; a bucket's,
  * as CloudWatch names S3's, from its hourly samples and its requests; a
  * queue's, as CloudWatch names SQS's, from its minute samples and its
- * requests; and a cache's, as CloudWatch names ElastiCache's, from its hourly
- * samples.
+ * requests; a cache's, as CloudWatch names ElastiCache's, from its hourly
+ * samples; and its mail's, as CloudWatch names SES's, from its messages.
  */
 @ApiTags('metrics')
 @Controller()
@@ -67,6 +67,19 @@ export class MetricsController {
   forCache(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
     if (query.period !== undefined && query.period !== CACHE_PERIOD) throw new BadRequestException(`A cache's metrics have a point an hour: period must be ${CACHE_PERIOD}`);
     return this.metrics.forCache(principal.accountId, name, windowOf({ ...query, period: CACHE_PERIOD }));
+  }
+
+  @Get('email/metrics')
+  @RequireScope('metrics:read')
+  @ApiOperation({
+    summary: "The account's mail's Send, Delivery, Bounce, Complaint, Reputation.BounceRate and Reputation.ComplaintRate, as CloudWatch names SES's: a point an hour",
+    description:
+      "From its messages, each recipient one, counted in its message's hour; its reputation over the 14 days that end with each hour, as FF's enforcement judges it. Messages are kept 30 days: an hour before has none. The period is an hour, 3600 s, its default here.",
+  })
+  @ApiResponse({ status: 200, type: EmailMetricsView })
+  forEmail(@Query() query: MetricsQuery, @Principal() principal: Principal) {
+    if (query.period !== undefined && query.period !== EMAIL_PERIOD) throw new BadRequestException(`Mail's metrics have a point an hour: period must be ${EMAIL_PERIOD}`);
+    return this.metrics.emailMetrics(principal.accountId, windowOf({ ...query, period: EMAIL_PERIOD }));
   }
 
   @Get('buckets/:name/metrics')

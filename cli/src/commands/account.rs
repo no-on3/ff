@@ -165,6 +165,9 @@ struct Usage {
     /// Absent from an API before customers' caches.
     #[serde(default)]
     caches: Vec<CacheUsage>,
+    /// Absent from an API before customers' mail.
+    #[serde(default)]
+    email: Vec<EmailUsage>,
     totals: Amounts,
     estimate: Option<Estimate>,
 }
@@ -204,6 +207,17 @@ struct QueueUsage {
     requests: u64,
     messages_sent: u64,
     messages_received: u64,
+    cost: Option<String>,
+}
+
+/// A domain's or an address's mail in the month, as SES bills it: its recipients, and its attachments by the GB.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmailUsage {
+    identity: String,
+    deleted: bool,
+    recipients: u64,
+    attachment_bytes: u64,
     cost: Option<String>,
 }
 
@@ -372,8 +386,30 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
                 .collect();
             format!("\n{}", table(&["CACHE", "MEMORY", "HOURS", "GB-HOURS", "COST"], &rows))
         };
+        // As SES bills it: each recipient, a suppressed one too, and attachments by the GB, each recipient's copy.
+        let email = if usage.email.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .email
+                .iter()
+                .map(|mail| {
+                    vec![
+                        if mail.deleted { format!("{} (deleted)", mail.identity) } else { mail.identity.clone() },
+                        mail.recipients.to_string(),
+                        if mail.attachment_bytes == 0 {
+                            "-".to_owned()
+                        } else {
+                            super::db::size(Some(mail.attachment_bytes))
+                        },
+                        mail.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["SENT FROM", "RECIPIENTS", "ATTACHMENTS", "COST"], &rows))
+        };
         format!(
-            "{}\n{}{databases}{buckets}{queues}{caches}\n{estimate}",
+            "{}\n{}{databases}{buckets}{queues}{caches}{email}\n{estimate}",
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )

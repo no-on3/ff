@@ -23,6 +23,8 @@ export type AuditAction =
   | 'support.view_invocation'
   | 'support.view_logs'
   | 'account.egress'
+  // An operator's change to an account's mail: out of the sandbox, paused, its standing cleared.
+  | 'account.email'
   // An operator turned the account's databases, buckets and queues off, or on again.
   | 'account.storage'
   | 'function.create'

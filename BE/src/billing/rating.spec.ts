@@ -6,13 +6,14 @@
  * book that starts in the middle of a month. The minimum billed duration
  * applies to each call, in the aggregation's SQL: pricing.db.spec.ts. Then
  * customers' databases and buckets, with the book of their SKUs, likewise
- * against AWS's RDS and S3 prices by hand; their queues, against SQS's; and
- * their caches, against ElastiCache's.
+ * against AWS's RDS and S3 prices by hand; their queues, against SQS's;
+ * their caches, against ElastiCache's; and their mail, against SES's.
  */
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { STORAGE_FREE_TIER, STORAGE_USD_PRICES, withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { QUEUE_FREE_TIER, QUEUE_USD_PRICES, withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { CACHE_USD_PRICES, withCachePrices } from '../migrations/1793333328301-CacheMeasures';
+import { EMAIL_USD_PRICES, withEmailPrices } from '../migrations/1793345460517-EmailBilling';
 import { Decimal } from './decimal';
 import { BookPrices, PriceDocument, awsPriceProblems, bookPrices, priceDocumentSchema } from './price-book';
 import { FunctionUsage, ResourceUsage, hoursIn, rateMonth } from './rating';
@@ -44,13 +45,14 @@ const stored = (resourceId: string, gb: number, hours: number, kind: ResourceUsa
   tier1Requests: requests.tier1 ?? 0n,
   tier2Requests: requests.tier2 ?? 0n,
   requests: 0n,
+  bytes: 0n,
 });
 const STORAGE_DOCUMENT = priceDocumentSchema.parse(withStoragePrices(FIRST_PRICE_BOOK));
 /** The book with SQS's SKU too, as its migration makes it from the book before. */
 const QUEUE_DOCUMENT = priceDocumentSchema.parse(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)));
 const WITH_QUEUES = bookPrices({ id: 'with-queues', validFrom: new Date('2026-11-01T00:00:00Z'), prices: QUEUE_DOCUMENT });
 /** A queue asked `requests` requests, as SQS bills them. */
-const queued = (resourceId: string, requests: bigint): ResourceUsage => ({ resourceId, kind: 'queue', byteHours: 0n, hours: 0n, tier1Requests: 0n, tier2Requests: 0n, requests });
+const queued = (resourceId: string, requests: bigint): ResourceUsage => ({ resourceId, kind: 'queue', byteHours: 0n, hours: 0n, tier1Requests: 0n, tier2Requests: 0n, requests, bytes: 0n });
 /** The book with ElastiCache's SKU too, as its migration makes it from the book before. */
 const CACHE_DOCUMENT = priceDocumentSchema.parse(withCachePrices(QUEUE_DOCUMENT));
 const WITH_CACHES = bookPrices({ id: 'with-caches', validFrom: new Date('2026-11-01T00:00:00Z'), prices: CACHE_DOCUMENT });
@@ -63,6 +65,21 @@ const cached = (resourceId: string, mb: number, hours: number): ResourceUsage =>
   tier1Requests: 0n,
   tier2Requests: 0n,
   requests: 0n,
+  bytes: 0n,
+});
+/** The book with SES's SKUs too, as its migration makes it from the book before. */
+const EMAIL_DOCUMENT = priceDocumentSchema.parse(withEmailPrices(CACHE_DOCUMENT));
+const WITH_EMAIL = bookPrices({ id: 'with-email', validFrom: new Date('2026-11-01T00:00:00Z'), prices: EMAIL_DOCUMENT });
+/** A domain's mail: its recipients, and its attachments' bytes, each recipient's copy. */
+const mailed = (resourceId: string, recipients: bigint, bytes = 0n): ResourceUsage => ({
+  resourceId,
+  kind: 'email',
+  byteHours: 0n,
+  hours: 0n,
+  tier1Requests: 0n,
+  tier2Requests: 0n,
+  requests: recipients,
+  bytes,
 });
 const OCTOBER = hoursIn('2026-10');
 const NOVEMBER = hoursIn('2026-11');
@@ -366,6 +383,56 @@ describe("rating a month of customers' caches (L1, ADR 0013)", () => {
     const month = rateMonth([{ book: WITH_QUEUES, functions: [], resources: [cached('sessions', 64, 100)] }, { book: WITH_CACHES, functions: [], resources: [cached('sessions', 64, 200)] }], WITH_QUEUES, OCTOBER);
 
     expect(month.total.toString()).toBe(d('12.5').times(d('0.0256')).times(RATE).toString());
+  });
+});
+
+describe("rating a month of customers' mail (L1, ADR 0012)", () => {
+  it("prices mail as SES does: 12,500 recipients at $0.10 a thousand and 2 GB of attachments at $0.12 a GB, times the book's rate, with no free tier", () => {
+    const month = rateMonth([{ book: WITH_EMAIL, functions: [], resources: [mailed('shop', 12_500n, 2n * GIB)] }], WITH_EMAIL, OCTOBER);
+
+    // SES: 12.5 thousand recipients × $0.10 = $1.25; 2 GB of attachments × $0.12 = $0.24; $1.49 in all.
+    const byHand = d('12.5').times(d('0.10')).plus(d('2').times(d('0.12')));
+    expect(byHand.toString()).toBe('1.49');
+    expect(month.total.toString()).toBe(byHand.times(RATE).toString());
+    const cost = month.resources.get('shop');
+    expect([cost?.kind, cost?.storage, cost?.requests, cost?.fee, cost?.total].map(String)).toEqual(['email', '0.72192', '3.76', '0', '4.48192']);
+    expect([month.freeTier.toString(), cost?.gbMonths.toString()]).toEqual(['0', '0']);
+  });
+
+  it("takes nothing from SQS's free million, nor its tiers: its recipients are no queue's requests", () => {
+    // The queue's half million is within SQS's free million; the mail's 2 million recipients are SES's, all billed.
+    const month = rateMonth([{ book: WITH_EMAIL, functions: [], resources: [mailed('shop', 2_000_000n), queued('orders', 500_000n)] }], WITH_EMAIL, OCTOBER);
+
+    expect([month.total.toString(), month.volumeTiers.toString()]).toEqual([d('2000').times(d('0.10')).times(RATE).toString(), '0']);
+  });
+
+  it('is nothing in a book from before, which has no SES SKU', () => {
+    expect(rateMonth([{ book: WITH_CACHES, functions: [], resources: [mailed('shop', 12_500n, 2n * GIB)] }], WITH_CACHES, OCTOBER).total.toString()).toBe('0');
+  });
+});
+
+describe("the book of customers' mail's SKUs (ADR 0012)", () => {
+  it("is AWS's US$ prices for SES's recipients and attachments, times the book's own rate, exactly, with no free tier, and its checks find nothing", () => {
+    expect(EMAIL_USD_PRICES).toEqual({ emailRecipientsPerThousand: '0.10', emailAttachmentsGb: '0.12' });
+    expect([EMAIL_DOCUMENT.prices.emailRecipientsPerThousand, EMAIL_DOCUMENT.prices.emailAttachmentsGb]).toEqual(['0.3008', '0.36096']);
+    expect(EMAIL_DOCUMENT.freeTier).toEqual(CACHE_DOCUMENT.freeTier);
+    // The SKUs of the book it copies stay.
+    expect(EMAIL_DOCUMENT.prices.cacheGbHour).toBe(CACHE_DOCUMENT.prices.cacheGbHour);
+    expect(awsPriceProblems(EMAIL_DOCUMENT)).toEqual([]);
+  });
+
+  it("finds a price that isn't AWS's times the rate, and an SKU in one place only", () => {
+    const usd = EMAIL_DOCUMENT.source.usdPrices as Record<string, string>;
+    const changed: PriceDocument = {
+      ...EMAIL_DOCUMENT,
+      source: { ...EMAIL_DOCUMENT.source, usdPrices: { ...usd, emailAttachmentsGb: undefined } },
+      prices: { ...EMAIL_DOCUMENT.prices, emailRecipientsPerThousand: '0.31' },
+    };
+
+    expect(awsPriceProblems(changed)).toEqual([
+      'prices.emailRecipientsPerThousand: must be 0.10 × 3.0080 = 0.3008',
+      'prices.emailAttachmentsGb: must be in both prices and source.usdPrices, or in neither',
+    ]);
   });
 });
 

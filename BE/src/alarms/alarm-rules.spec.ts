@@ -12,6 +12,7 @@ import {
   cacheDatapointsOf,
   databaseDatapointsOf,
   datapointsOf,
+  emailDatapointsOf,
   evaluate,
   evaluationWindow,
   notifies,
@@ -19,7 +20,7 @@ import {
   siteDatapointsOf,
   stateReason,
 } from './alarm-rules';
-import { bucketMetricsView, cacheMetricsView, databaseMetricsView, queueMetricsView, siteMetricsView, type MetricsView } from '../metrics/customer-metrics';
+import { bucketMetricsView, cacheMetricsView, databaseMetricsView, emailMetricsView, queueMetricsView, siteMetricsView, type MetricsView } from '../metrics/customer-metrics';
 
 const RULE: AlarmRule = {
   functionId: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
@@ -222,6 +223,56 @@ describe("an alarm on a customer's queue", () => {
       [null, null, 200],
     ]);
     expect(() => queueDatapointsOf(view, 'Errors', 'Sum')).toThrow("Errors isn't a queue's metric");
+  });
+});
+
+describe("an alarm on the account's mail", () => {
+  const bounces = { ...RULE, functionId: null, metric: 'Reputation.BounceRate' as const, statistic: 'Average' as const, period: 3600, threshold: 0.05, evaluationPeriods: 1, datapointsToAlarm: 1 };
+
+  it("names nothing, the account's mail being one, judges hours, a day at most, and takes the Sum of its counts, the Average of its rates", () => {
+    expect([
+      alarmProblem(bounces),
+      alarmProblem({ ...bounces, metric: 'Send', statistic: 'Sum', evaluationPeriods: 24 }),
+      alarmProblem({ ...bounces, metric: 'Complaint', statistic: 'Sum' }),
+    ]).toEqual([null, null, null]);
+    expect([
+      alarmProblem({ ...bounces, functionId: RULE.functionId }),
+      alarmProblem({ ...bounces, cacheId: '9b2e4c1a-7d3f-4a6b-8c5e-0f1a2b3c4d5e' }),
+      alarmProblem({ ...bounces, period: 300 }),
+      alarmProblem({ ...bounces, metric: 'Bounce' }),
+      alarmProblem({ ...bounces, metric: 'Send', statistic: 'Sum', evaluationPeriods: 25 }),
+    ]).toEqual([
+      "Reputation.BounceRate is the account's mail's: the alarm names no function, database, bucket, queue or cache",
+      "A cacheName goes with a cache's metrics only: BytesUsedForCache, CurrConnections, CacheHits, CacheMisses, Evictions",
+      "Mail's metrics have a point an hour: period must be 3600",
+      'Bounce has the statistic Sum, not Average',
+      '25 periods of 3600 s look back more than a day: take fewer periods, or shorter ones',
+    ]);
+  });
+
+  it("reads its datapoints from the mail's hourly metrics: a count of 0 in a quiet hour, a rate over the 14 days before each hour's end, none without a recipient reached", () => {
+    const window = { start: new Date('2026-10-30T07:00:00Z'), end: new Date('2026-10-30T10:00:00Z'), period: 3600 as const };
+    const hour = (iso: string) => Date.parse(iso) / 1000;
+    const view = emailMetricsView(window, [
+      // Ten days before: 90 reached, 2 bounced for good. Then, at 08:00, 10 more, 3 of them bounced for good, 1 complained of, 1 suppressed.
+      { bucket: hour('2026-10-20T08:00:00Z'), send: 90, delivery: 88, bounce: 2, complaint: 0, reached: 90, hardBounces: 2 },
+      { bucket: hour('2026-10-30T08:00:00Z'), send: 11, delivery: 7, bounce: 4, complaint: 1, reached: 10, hardBounces: 3 },
+    ]);
+
+    expect([
+      emailDatapointsOf(view, 'Send'),
+      emailDatapointsOf(view, 'Bounce'),
+      emailDatapointsOf(view, 'Reputation.BounceRate'),
+      emailDatapointsOf(view, 'Reputation.ComplaintRate'),
+    ]).toEqual([
+      [0, 11, 0],
+      [0, 4, 0],
+      [0.022222, 0.05, 0.05],
+      [0, 0.01, 0.01],
+    ]);
+    const quiet = emailMetricsView(window, []);
+    expect(emailDatapointsOf(quiet, 'Reputation.BounceRate')).toEqual([null, null, null]);
+    expect(() => emailDatapointsOf(view, 'Errors')).toThrow("Errors isn't mail's metric");
   });
 });
 
@@ -432,6 +483,15 @@ describe("an alarm's e-mail", () => {
     expect(alarmMail(waiting, 'en').text.split('\n')[0]).toBe('Your alarm "Dead letters" on the queue "orders-dlq" of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
     expect(alarmMail(waiting, 'fr').text.split('\n')[0]).toBe(
       "Votre alarme « Dead letters » sur la file d'attente « orders-dlq » du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.",
+    );
+  });
+
+  it("names a mail alarm by the account's mail, in both languages", () => {
+    const full = { ...change, alarm: { ...RULE, functionId: null, metric: 'Bounce' as const, statistic: 'Sum' as const, period: 3600, name: 'Bounces' }, functionName: null };
+
+    expect(alarmMail(full, 'en').text.split('\n')[0]).toBe('Your alarm "Bounces" on the mail of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.');
+    expect(alarmMail(full, 'fr').text.split('\n')[0]).toBe(
+      'Votre alarme « Bounces » sur le courrier du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.',
     );
   });
 

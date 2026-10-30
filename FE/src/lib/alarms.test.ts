@@ -137,6 +137,24 @@ describe('the alarm form', () => {
     expect(formFromAlarm({ ...toBody(memory), id: 'a', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm).cacheName).toBe('sessions');
   });
 
+  it("watches the account's mail, an hour at a time, naming nothing: a function's scope doesn't offer it", () => {
+    expect(metricsFor('')).toEqual(expect.arrayContaining(['Send', 'Bounce', 'Reputation.BounceRate', 'Reputation.ComplaintRate']));
+    expect(metricsFor(FN)).not.toContain('Bounce');
+    const bounces = withMetric({ ...emptyForm('', '', '', '', 'sessions'), name: 'Bounces' }, 'Reputation.BounceRate');
+
+    expect(bounces).toMatchObject({ functionId: '', databaseId: '', bucketName: '', queueName: '', cacheName: '', metric: 'Reputation.BounceRate', statistic: 'Average', period: 3600 });
+    expect(toBody(bounces)).toMatchObject({ functionId: null, cacheName: null, metric: 'Reputation.BounceRate', period: 3600 });
+    // The API's own refusals, said first: the account alone, its hour, a day at most.
+    expect([formProblem(bounces), formProblem({ ...bounces, functionId: FN }), formProblem({ ...bounces, period: 60 }), formProblem({ ...bounces, evaluationPeriods: '25', datapointsToAlarm: '1' })]).toEqual([
+      null,
+      "Reputation.BounceRate is the account's mail's: it watches the account",
+      "Mail's metrics have a point an hour: the period is an hour",
+      'The periods judged look back more than a day: take fewer',
+    ]);
+    // A function's scope takes it to that function's own metrics.
+    expect(withScope(bounces, FN)).toMatchObject({ functionId: FN, metric: 'Errors' });
+  });
+
   it('changes scope with a metric the scope has: a database to the account, a function to a database', () => {
     const storage = { ...emptyForm('', DB), name: 'Storage' };
 

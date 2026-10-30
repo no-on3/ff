@@ -7,12 +7,15 @@ import { PriceBook } from './price-book.entity';
  * takes it (ADR 0008, ADR 0009, ADR 0010, ADR 0013), beside usage_hourly's
  * functions: its size sampled in the hour, in byte-hours, a cache's its
  * memory; a bucket's requests by S3's two classes, a queue's as SQS bills
- * them; with its name then, which the statement shows. Written once, never
- * changed; it outlives its database, bucket, queue or cache.
+ * them; with its name then, which the statement shows. Or the mail one of
+ * the account's domains or addresses sent in the hour (ADR 0012): its
+ * messages' recipients and their attachments, as SES bills them. Written
+ * once, never changed; it outlives its database, bucket, queue, cache or
+ * identity.
  */
 @Entity('resource_usage_hourly')
 @Index(['hour'])
-@Check(`"kind" IN ('database', 'bucket', 'queue', 'cache')`)
+@Check(`"kind" IN ('database', 'bucket', 'queue', 'cache', 'email')`)
 export class ResourceUsageHourly {
   @PrimaryColumn({ type: 'char', length: 12 })
   accountId: string;
@@ -25,7 +28,7 @@ export class ResourceUsageHourly {
   resourceId: string;
 
   @Column({ type: 'text' })
-  kind: 'database' | 'bucket' | 'queue' | 'cache';
+  kind: 'database' | 'bucket' | 'queue' | 'cache' | 'email';
 
   /** Its name in the account when it was sampled. */
   @Column({ type: 'text' })
@@ -54,7 +57,11 @@ export class ResourceUsageHourly {
   @Column({ type: 'bigint', transformer: bigintColumn })
   tier2Requests: bigint;
 
-  /** A queue's requests, each 64 KB of a request's messages one; 0 for a database or a bucket. */
+  /** A queue's requests, each 64 KB of a request's messages one; mail's recipients, each message's; 0 for the others. */
   @Column({ type: 'bigint', transformer: bigintColumn, default: 0 })
   requests: bigint;
+
+  /** Mail's attachments sent in the hour, each recipient's copy; 0 for the others. */
+  @Column({ type: 'bigint', transformer: bigintColumn, default: 0 })
+  bytes: bigint;
 }

@@ -1,7 +1,7 @@
 /**
  * Price books, as the admin routes give them (P-73, D8): AWS Lambda's SKUs in
- * TND, and those of customers' databases, buckets, queues and caches, as AWS
- * RDS, S3, SQS and ElastiCache price them, in the books that have them. contract.test.ts checks the
+ * TND, and those of customers' databases, buckets, queues, caches and mail, as AWS
+ * RDS, S3, SQS, ElastiCache and SES price them, in the books that have them. contract.test.ts checks the
  * SKUs against the backend's priceDocumentSchema.
  */
 export type BookStatus = 'past' | 'active' | 'scheduled';
@@ -24,8 +24,9 @@ export interface QueueTier {
 }
 
 /**
- * The SKUs of customers' databases, buckets, queues and caches: RDS's gp3 storage, S3 Standard's storage and its two
- * classes of request, SQS's requests, and a cache's memory by the GB-hour, from ElastiCache's smallest node.
+ * The SKUs of customers' databases, buckets, queues, caches and mail: RDS's gp3 storage, S3 Standard's storage and its
+ * two classes of request, SQS's requests, a cache's memory by the GB-hour, from ElastiCache's smallest node, and SES's
+ * recipients and attachments.
  */
 export interface StoragePrices {
   databaseStorageGbMonth?: string;
@@ -34,6 +35,8 @@ export interface StoragePrices {
   requestsTier2PerThousand?: string;
   queueRequestsPerMillion?: QueueTier[];
   cacheGbHour?: string;
+  emailRecipientsPerThousand?: string;
+  emailAttachmentsGb?: string;
 }
 
 /** AWS's US$ prices, as a book from them records them. */
@@ -93,6 +96,8 @@ export const SKUS = [
   'requestsTier2PerThousand',
   'queueRequestsPerMillion',
   'cacheGbHour',
+  'emailRecipientsPerThousand',
+  'emailAttachmentsGb',
 ] as const;
 
 export const STATUS_LABELS: Record<BookStatus, string> = { past: 'Past', active: 'Active', scheduled: 'Scheduled' };
@@ -118,6 +123,18 @@ export function earliestStart(now: Date): Date {
   return new Date((Math.floor(now.getTime() / hour) + 1) * hour);
 }
 
+/** The storage, request, memory and mail SKUs of the form, in one currency. */
+interface StorageSkus {
+  databaseStorageGbMonth: string;
+  bucketTiers: string[];
+  requestsTier1PerThousand: string;
+  requestsTier2PerThousand: string;
+  queueTiers: string[];
+  cacheGbHour: string;
+  emailRecipientsPerThousand: string;
+  emailAttachmentsGb: string;
+}
+
 /** What the form for a new book holds, as text. */
 export interface DraftForm {
   /** The start: a UTC day, and an hour of it. */
@@ -134,13 +151,13 @@ export interface DraftForm {
   minimumBilledMs: string;
   idleInstanceGbSecond: string;
   monthlyPlanFee: string;
-  /** Customers' databases', buckets' and queues' prices and free tier, as text; only those the book drafted from has are used. */
+  /** Customers' databases', buckets', queues', caches' and mail's prices and free tier, as text; only those the book drafted from has are used. */
   storage: StorageForm;
 }
 
 export interface StorageForm {
-  usd: { databaseStorageGbMonth: string; bucketTiers: string[]; requestsTier1PerThousand: string; requestsTier2PerThousand: string; queueTiers: string[]; cacheGbHour: string };
-  tnd: { databaseStorageGbMonth: string; bucketTiers: string[]; requestsTier1PerThousand: string; requestsTier2PerThousand: string; queueTiers: string[]; cacheGbHour: string };
+  usd: StorageSkus;
+  tnd: StorageSkus;
   databaseMonthlyFee: string;
   freeDatabaseGbMonths: string;
   freeBucketGbMonths: string;
@@ -157,6 +174,9 @@ export const pricesQueues = (book: PriceDocument): boolean => book.prices.queueR
 
 /** Whether a book prices customers' caches, as ElastiCache does: the page shows the SKU, and a book drafted from it has it too. */
 export const pricesCaches = (book: PriceDocument): boolean => book.prices.cacheGbHour !== undefined;
+
+/** Whether a book prices customers' mail, as SES does: the page shows its SKUs, and a book drafted from it has them too. */
+export const pricesEmail = (book: PriceDocument): boolean => book.prices.emailRecipientsPerThousand !== undefined;
 
 /** A form that starts from a book, the active one: its prices, its rate, and the next hour. */
 export function formFrom(book: PriceDocument, now: Date): DraftForm {
@@ -194,6 +214,8 @@ export function formFrom(book: PriceDocument, now: Date): DraftForm {
         requestsTier2PerThousand: usd?.requestsTier2PerThousand ?? '',
         queueTiers: (prices.queueRequestsPerMillion ?? []).map((_tier, index) => usd?.queueRequestsPerMillion?.[index]?.price ?? ''),
         cacheGbHour: usd?.cacheGbHour ?? '',
+        emailRecipientsPerThousand: usd?.emailRecipientsPerThousand ?? '',
+        emailAttachmentsGb: usd?.emailAttachmentsGb ?? '',
       },
       tnd: {
         databaseStorageGbMonth: prices.databaseStorageGbMonth ?? '',
@@ -202,6 +224,8 @@ export function formFrom(book: PriceDocument, now: Date): DraftForm {
         requestsTier2PerThousand: prices.requestsTier2PerThousand ?? '',
         queueTiers: (prices.queueRequestsPerMillion ?? []).map((tier) => tier.price),
         cacheGbHour: prices.cacheGbHour ?? '',
+        emailRecipientsPerThousand: prices.emailRecipientsPerThousand ?? '',
+        emailAttachmentsGb: prices.emailAttachmentsGb ?? '',
       },
       databaseMonthlyFee: prices.databaseMonthlyFee ?? '',
       freeDatabaseGbMonths: String(book.freeTier.databaseStorageGbMonths ?? ''),
@@ -216,7 +240,7 @@ export function formFrom(book: PriceDocument, now: Date): DraftForm {
 /**
  * The book a form describes, on the base book's tiers and currency, or what
  * is wrong with it, each named. In "aws" mode, each TND price is the US$
- * price times the rate, exactly. Customers' databases', buckets', queues' and caches'
+ * price times the rate, exactly. Customers' databases', buckets', queues', caches' and mail's
  * SKUs and free tier are those the base book has, each as the form sets it: a
  * book without them would price them at nothing, which the API refuses after
  * a book that has them.
@@ -256,6 +280,10 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
         })),
       }),
       ...(basePrices.cacheGbHour !== undefined && { cacheGbHour: decimal(`Cache memory, per GB-hour${unit}`, given.cacheGbHour) }),
+      ...(basePrices.emailRecipientsPerThousand !== undefined && {
+        emailRecipientsPerThousand: decimal(`E-mail, per 1,000 recipients${unit}`, given.emailRecipientsPerThousand),
+        emailAttachmentsGb: decimal(`E-mail attachments, per GB${unit}`, given.emailAttachmentsGb),
+      }),
     };
   };
   if (form.mode === 'aws') {
@@ -281,6 +309,8 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
       ...(usd.requestsTier2PerThousand !== undefined && { requestsTier2PerThousand: times(usd.requestsTier2PerThousand) }),
       ...(usd.queueRequestsPerMillion && { queueRequestsPerMillion: usd.queueRequestsPerMillion.map((tier) => ({ ...tier, price: times(tier.price) })) }),
       ...(usd.cacheGbHour !== undefined && { cacheGbHour: times(usd.cacheGbHour) }),
+      ...(usd.emailRecipientsPerThousand !== undefined && { emailRecipientsPerThousand: times(usd.emailRecipientsPerThousand) }),
+      ...(usd.emailAttachmentsGb !== undefined && { emailAttachmentsGb: times(usd.emailAttachmentsGb) }),
     };
     source = { ...base.source, kind: 'aws-lambda', readOn: today.toISOString().slice(0, 10), usdPrices: usd, usdRate: rate, usdRateDate: form.rateDate };
   } else {
@@ -370,6 +400,9 @@ export function bookRows(document: PriceDocument): Array<[string, string, string
   if (freeTier.queueRequests !== undefined) rows.push(['Free tier of queues, a month', `${freeTier.queueRequests.toLocaleString('en-US')} requests`, '']);
   // Customers' caches, as AWS ElastiCache prices a node's memory by the hour, in a book that has them.
   if (prices.cacheGbHour !== undefined) rows.push(['Cache memory, per GB-hour', prices.cacheGbHour, usd?.cacheGbHour ?? '']);
+  // Customers' mail, as AWS SES prices it: each recipient, and attachments by the GB, in a book that has them.
+  if (prices.emailRecipientsPerThousand !== undefined) rows.push(['E-mail, per 1,000 recipients', prices.emailRecipientsPerThousand, usd?.emailRecipientsPerThousand ?? '']);
+  if (prices.emailAttachmentsGb !== undefined) rows.push(['E-mail attachments, per GB', prices.emailAttachmentsGb, usd?.emailAttachmentsGb ?? '']);
   return rows;
 }
 

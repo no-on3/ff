@@ -193,6 +193,10 @@ pub enum Command {
     #[command(subcommand)]
     Caches(CachesCommand),
 
+    /// The account's mail, as AWS SES v2 sends it: its domains and addresses, its messages, its suppression list
+    #[command(subcommand)]
+    Email(EmailCommand),
+
     /// The account's buckets, as AWS S3 gives them, and its access keys to them and to its queues
     #[command(subcommand)]
     Buckets(BucketsCommand),
@@ -633,6 +637,99 @@ pub enum CachesCommand {
         /// Don't ask first: a script must say it
         #[arg(long, short)]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EmailCommand {
+    /// List the domains and addresses the account sends from, and where each one's proof is
+    Identities,
+
+    /// Add a domain to send from, with the records to publish, or an address, which gets a link to follow
+    Add {
+        /// A domain, such as shop.example.tn, or an address, such as orders@shop.example.tn
+        identity: String,
+    },
+
+    /// Show a domain or an address: where its proof is, and the records a domain publishes
+    Get {
+        /// The domain or the address
+        identity: String,
+    },
+
+    /// Look a domain's records up now, or e-mail an address its link again
+    Verify {
+        /// The domain or the address
+        identity: String,
+    },
+
+    /// Delete a domain or an address: no mail goes from it after
+    Delete {
+        /// The domain or the address
+        identity: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// The account's sending: its sandbox, its quotas and what it sent, as SES's GetAccount says it
+    Account,
+
+    /// Send a message, as SES's SendEmail sends a simple one
+    Send {
+        /// From an address the account proved, or one at a domain it proved: "Shop <orders@shop.example.tn>"
+        #[arg(long)]
+        from: String,
+
+        /// A recipient; given again for each other one
+        #[arg(long = "to", required = true)]
+        to: Vec<String>,
+
+        /// A copy's recipient
+        #[arg(long)]
+        cc: Vec<String>,
+
+        /// A recipient the others don't see
+        #[arg(long)]
+        bcc: Vec<String>,
+
+        #[arg(long)]
+        subject: String,
+
+        /// The text body
+        #[arg(long, required_unless_present = "html")]
+        text: Option<String>,
+
+        /// The HTML body
+        #[arg(long)]
+        html: Option<String>,
+    },
+
+    /// The account's latest messages, and what became of each recipient
+    Messages {
+        /// How many, the latest first: 1 to 100
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+    },
+
+    /// The account's suppression list: the addresses no mail of the account goes to
+    Suppressions,
+
+    /// Put an address on the suppression list
+    Suppress {
+        /// The address
+        address: String,
+
+        /// Why, as SES names it
+        #[arg(long, default_value = "BOUNCE", value_parser = ["BOUNCE", "COMPLAINT"])]
+        reason: String,
+    },
+
+    /// Take an address off the suppression list: the account's mail goes to it again
+    Unsuppress {
+        /// The address
+        address: String,
     },
 }
 

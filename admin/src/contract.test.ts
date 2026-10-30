@@ -15,6 +15,7 @@ import paymentsServiceSource from '../../BE/src/billing/payments/payments.servic
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import invoiceEntitySource from '../../BE/src/billing/invoices/invoice.entity.ts?raw';
 import adminAccountsDtoSource from '../../BE/src/admin/admin-accounts.dto.ts?raw';
+import adminEmailDtoSource from '../../BE/src/admin/admin-email.dto.ts?raw';
 import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
 import adminCreditsDtoSource from '../../BE/src/admin/admin-credits.dto.ts?raw';
 import adminSupportDtoSource from '../../BE/src/admin/admin-support.dto.ts?raw';
@@ -28,6 +29,7 @@ import { ACCOUNT_STATUSES, BUCKET_FIELDS, CACHE_FIELDS, DATABASE_FIELDS, QUEUE_F
 import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
 import { CALL_FIELDS, CALL_HIT_FIELDS, DOMAIN_FIELDS, FUNCTION_HIT_FIELDS, FUNCTION_PAGE_FIELDS, FUNCTION_URL_FIELDS, SCHEDULE_FIELDS } from './lib/support';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
+import { ACCOUNT_EMAIL_FIELDS, EMAIL_CHANGE_FIELDS, ENFORCEMENT } from './lib/email';
 import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
 import { OVERVIEW_FIELDS } from './lib/overview';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
@@ -227,6 +229,12 @@ describe('credit grants and the account page\'s credit (P-74)', () => {
 
   it("have the API's fields of the account's databases, their names on the server among them", () => {
     expect(fieldsOf(adminAccountsDtoSource, 'export class AdminDatabaseView {')).toEqual([...DATABASE_FIELDS]);
+  });
+
+  it("have the API's fields of the account's mail, the changes it takes and its standings", () => {
+    expect(fieldsOf(adminEmailDtoSource, 'export class AdminEmailView {')).toEqual([...ACCOUNT_EMAIL_FIELDS]);
+    expect(dtoFieldsOf(adminEmailDtoSource, 'export class AdminEmailDto extends AdminChange {')).toEqual([...EMAIL_CHANGE_FIELDS]);
+    expect(/const ENFORCEMENT: EnforcementStatus\[\] = \[([^\]]+)\];/.exec(adminEmailDtoSource)?.[1].replace(/'/g, '').split(', ')).toEqual(Object.keys(ENFORCEMENT));
   });
 
   it("have the API's fields of the account's caches, their names and ports on the server among them", () => {

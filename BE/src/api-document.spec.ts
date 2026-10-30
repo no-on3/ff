@@ -140,6 +140,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
             monthlyBuckets: async () => [],
             monthlyQueues: async () => [],
             monthlyCaches: async () => [],
+            monthlyEmail: async () => [],
           }),
         },
         { provide: PricingService, useValue: succeeding(PricingService, { estimate: async () => null }) },

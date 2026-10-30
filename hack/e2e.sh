@@ -1550,9 +1550,16 @@ check "  ... and in the sandbox, one to an address it hasn't proved" "refused Me
   "$(outcome_ses aws_ses send-email --from-email-address news@shop.e2e-customer.tn --destination ToAddresses=stranger@example.org --content "$simple_content")"
 check "GetAccount counts what the account sent in the last day, each recipient once, the one kept off too" 4.0 \
   "$(aws_ses get-account | jq -r .SendQuota.SentLast24Hours)"
+check "GET /email/metrics counts its recipients as CloudWatch names SES's metrics: sent, taken, bounced or kept off, complained of" "4 2 2 0" \
+  "$(http GET /email/metrics | jq -r '[.metrics.Send.Sum, .metrics.Delivery.Sum, .metrics.Bounce.Sum, .metrics.Complaint.Sum] | map(add | tostring) | join(" ")')"
+check "  ... and its reputation over 14 days: one of the three recipients its mail reached bounced for good, none complained" "0.333333 0" \
+  "$(http GET /email/metrics | jq -r '[.metrics."Reputation.BounceRate".Average, .metrics."Reputation.ComplaintRate".Average] | map(map(select(. != null)) | last | tostring) | join(" ")')"
+check "GET /usage bills it by its domain, as SES bills it: each recipient once, the one kept off too, no attachment" "shop.e2e-customer.tn 4 0 false" \
+  "$(http GET /usage | jq -r '.email[] | "\(.identity) \(.recipients) \(.attachmentBytes) \(.deleted)"')"
 aws_ses delete-email-identity --email-identity orders@e2e-customer.tn >/dev/null
 http DELETE /email/identities/shop.e2e-customer.tn >/dev/null
 check "both deleted, one through the CLI, one through FF's API, their keys with them" "204 0" "$(status) $(env_q "SELECT count(*) FROM email_identities WHERE account_id = '$tenant'")"
+check "  ... the domain's mail stays in GET /usage, said deleted, as billed" "true 4" "$(http GET /usage | jq -r '.email[] | "\(.deleted) \(.recipients)"')"
 http DELETE "/storage-keys/$mail_key_id" >/dev/null
 
 echo "== plans and rate limits (P-15)"
@@ -1719,15 +1726,15 @@ check "the bucket, deleted earlier, keeps its month: its hours measured, GB-mont
   "$(jq -r --arg id "$photos_id" '.buckets[] | select(.bucketId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \(.gbMonths) \(.tier1Requests) \(.tier2Requests) \(.bytesDownloaded) \(.bytesUploaded) \(.bytesDownloaded > 0 and .bytesUploaded > 0) \(.cost)"' <<<"$usage")"
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
 check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
-  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,throttled,platform_errors,lost,cost|true|true|true" \
-  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,0\.000$" && echo true || echo false)"
+  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,attachment_bytes,throttled,platform_errors,lost,cost|true|true|true" \
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,,0\.000$" && echo true || echo false)"
 cli_queue_id="$(env_q "SELECT DISTINCT queue_id FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-cli-orders'")"
 cli_counted="$(env_q "SELECT sum(requests) || ' ' || sum(sent) || ' ' || sum(received) FROM queue_request_counts WHERE queue_id = '$cli_queue_id'")"
 check "the AWS CLI's queue, deleted earlier, keeps its month: its requests as SQS bills them, its messages sent and received, as counted, at nothing before the book that prices queues" \
   "true e2e-cli-orders $cli_counted 0.000" \
   "$(jq -r --arg id "$cli_queue_id" '.queues[] | select(.queueId == $id) | "\(.deleted) \(.name) \(.requests) \(.messagesSent) \(.messagesReceived) \(.cost)"' <<<"$usage")"
 check "  ... in the CSV, its requests in the requests column" true \
-  "$(tr -d '\r' <<<"$csv" | grep -qE "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,0\.000$" && echo true || echo false)"
+  "$(tr -d '\r' <<<"$csv" | grep -qE "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,,0\.000$" && echo true || echo false)"
 check "a function's batches counted as received: the five, then the two again; the three handled deleted" "7 3" \
   "$(env_q "SELECT sum(received) || ' ' || sum(deleted) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")"
 empty="$(http GET '/usage?month=2001-01')"

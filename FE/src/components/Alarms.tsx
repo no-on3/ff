@@ -5,6 +5,7 @@ import {
   AlarmForm,
   BILLING_METRICS,
   CACHE_METRICS,
+  EMAIL_METRICS,
   COMPARISONS,
   DATABASE_METRICS,
   MAX_EVALUATION_PERIODS,
@@ -64,8 +65,14 @@ const AlarmEditor: React.FC<{
   const [error, setError] = useState<string | null>(null);
   const problem = formProblem(form);
   const billing = BILLING_METRICS.includes(form.metric);
-  // A database's metrics and a cache's have a point an hour.
-  const hourly = DATABASE_METRICS.includes(form.metric) ? 'database' : CACHE_METRICS.includes(form.metric) ? 'cache' : null;
+  // A database's metrics, a cache's and the mail's have a point an hour.
+  const hourly = DATABASE_METRICS.includes(form.metric)
+    ? "A database's metrics have a point an hour"
+    : CACHE_METRICS.includes(form.metric)
+      ? "A cache's metrics have a point an hour"
+      : EMAIL_METRICS.includes(form.metric)
+        ? "Mail's metrics have a point an hour"
+        : null;
   const set = (change: Partial<AlarmForm>) => setForm({ ...form, ...change });
 
   const save = async (event: React.FormEvent) => {
@@ -154,7 +161,7 @@ const AlarmEditor: React.FC<{
         </Field>
         {!billing && (
           <>
-            <Field id="alarm-period" label="Period" hint={hourly ? `A ${hourly}'s metrics have a point an hour` : undefined}>
+            <Field id="alarm-period" label="Period" hint={hourly ?? undefined}>
               <select id="alarm-period" className="input" value={form.period} disabled={hourly !== null} onChange={(e) => set({ period: Number(e.target.value) })}>
                 {PERIODS.map((p) => (
                   <option key={p.value} value={p.value}>
@@ -268,19 +275,21 @@ const Alarms: React.FC = () => {
     return () => clearInterval(timer);
   }, [load, account?.id]);
 
-  // A function's page, a database's, a bucket's, a queue's and the caches' link here to make an alarm on it.
+  // A function's page, a database's, a bucket's, a queue's, the caches' and the mail's link here to make an alarm on it.
   const forFunction = params.get('function');
   const forDatabase = params.get('database');
   const forBucket = params.get('bucket');
   const forQueue = params.get('queue');
   const forCache = params.get('cache');
+  const forMail = params.get('mail');
   useEffect(() => {
     if (forFunction) setEditing({ alarm: null, form: emptyForm(forFunction) });
     else if (forDatabase) setEditing({ alarm: null, form: emptyForm('', forDatabase) });
     else if (forBucket) setEditing({ alarm: null, form: emptyForm('', '', forBucket) });
     else if (forQueue) setEditing({ alarm: null, form: emptyForm('', '', '', forQueue) });
     else if (forCache) setEditing({ alarm: null, form: emptyForm('', '', '', '', forCache) });
-  }, [forFunction, forDatabase, forBucket, forQueue, forCache]);
+    else if (forMail) setEditing({ alarm: null, form: { ...withMetric(emptyForm(), 'Reputation.BounceRate'), threshold: '0.05' } });
+  }, [forFunction, forDatabase, forBucket, forQueue, forCache, forMail]);
 
   if (!account) return null;
   const writer = account.status === 'active' && can(account.role, 'change functions');
@@ -289,7 +298,7 @@ const Alarms: React.FC = () => {
 
   const done = async (saved: boolean) => {
     setEditing(null);
-    if (forFunction || forDatabase || forBucket || forQueue || forCache) setParams({});
+    if (forFunction || forDatabase || forBucket || forQueue || forCache || forMail) setParams({});
     if (saved) await load();
   };
   const remove = async (id: string) => {

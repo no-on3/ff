@@ -33,6 +33,9 @@ import customDomainDtoSource from '../../BE/src/function-urls/dto/custom-domain.
 import customDomainEntitySource from '../../BE/src/function-urls/custom-domain.entity.ts?raw';
 import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
 import cacheDtoSource from '../../BE/src/caches/dto/cache.dto.ts?raw';
+import emailDtoSource from '../../BE/src/email/dto/email.dto.ts?raw';
+import emailIdentityEntitySource from '../../BE/src/email/email-identity.entity.ts?raw';
+import emailMessageEntitySource from '../../BE/src/email/email-message.entity.ts?raw';
 import cacheEntitySource from '../../BE/src/caches/cache.entity.ts?raw';
 import cacheNamesSource from '../../BE/src/caches/cache-names.ts?raw';
 import databaseDtoSource from '../../BE/src/databases/dto/database.dto.ts?raw';
@@ -55,6 +58,7 @@ import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
 import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
 import { CACHE_NAME } from './lib/caches';
+import { EMAIL_ACCOUNT_FIELDS, IDENTITY_FIELDS, IDENTITY_STATUSES, MESSAGE_FIELDS, RECIPIENT_FIELDS, RECIPIENT_STATUSES, SEND_FIELDS, SUPPRESSION_FIELDS } from './lib/email';
 import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
@@ -73,6 +77,7 @@ import {
   BUCKET_USAGE_FIELDS,
   QUEUE_USAGE_FIELDS,
   CACHE_USAGE_FIELDS,
+  EMAIL_USAGE_FIELDS,
   STORAGE_KEY_FIELDS,
   CACHE_FIELDS,
   CACHE_STATUSES,
@@ -355,8 +360,8 @@ describe('the alarms', () => {
 
   it("offer the API's metrics, each with its statistics", () => {
     const block = alarmRulesSource.slice(alarmRulesSource.indexOf('export const STATISTICS = {'), alarmRulesSource.indexOf('} as const;'));
-    // A key may be quoted, as one starting with a digit is: '4xxErrors'.
-    const backend = Object.fromEntries([...block.matchAll(/^\s+'?(\w+)'?: \[([^\]]*)\]/gm)].map(([, metric, list]) => [metric, list.split(',').map((s) => s.trim().replace(/'/g, ''))]));
+    // A key may be quoted, as one starting with a digit is, '4xxErrors', or one with a dot, 'Reputation.BounceRate'.
+    const backend = Object.fromEntries([...block.matchAll(/^\s+'?([\w.]+)'?: \[([^\]]*)\]/gm)].map(([, metric, list]) => [metric, list.split(',').map((s) => s.trim().replace(/'/g, ''))]));
     expect(backend).toEqual(Object.fromEntries(Object.entries(STATISTICS).map(([metric, list]) => [metric, [...list]])));
   });
 
@@ -469,6 +474,27 @@ describe("a bucket's site (ADR 0011)", () => {
 
     expect([...view.slice(0, view.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1])).toEqual([...WEBSITE_FIELDS]);
     expect(dtoFields(customDomainDtoSource, 'export class SiteDomainView {')).toEqual([...SITE_DOMAIN_FIELDS]);
+  });
+});
+
+describe("customers' mail (ADR 0012)", () => {
+  it("has the API's fields, so the E-mail page reads each one there is, and sends what SendEmail takes", () => {
+    expect(dtoFields(emailDtoSource, 'export class EmailIdentityView {')).toEqual([...IDENTITY_FIELDS]);
+    expect(dtoFields(emailDtoSource, 'export class EmailAccountView {')).toEqual([...EMAIL_ACCOUNT_FIELDS]);
+    expect(dtoFields(emailDtoSource, 'export class SuppressionView {')).toEqual([...SUPPRESSION_FIELDS]);
+    expect(dtoFields(emailDtoSource, 'export class EmailMessageView {')).toEqual([...MESSAGE_FIELDS]);
+    expect(dtoFields(emailDtoSource, 'export class MessageRecipientView {')).toEqual([...RECIPIENT_FIELDS]);
+    // A request's fields, its optional ones too.
+    const body = emailDtoSource.slice(emailDtoSource.indexOf('export class SendEmailDto {'));
+    expect([...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1])).toEqual([...SEND_FIELDS]);
+  });
+
+  it("has the API's statuses, an identity's and a recipient's", () => {
+    const statuses = emailIdentityEntitySource.slice(emailIdentityEntitySource.indexOf('export enum EmailIdentityStatus'));
+    const recipient = /export type RecipientStatus = ([^;]+);/.exec(emailMessageEntitySource)?.[1] ?? '';
+
+    expect([...statuses.slice(0, statuses.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...IDENTITY_STATUSES]);
+    expect([...recipient.matchAll(/'(\w+)'/g)].map((match) => match[1])).toEqual([...RECIPIENT_STATUSES]);
   });
 });
 
@@ -586,6 +612,11 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
   it("have the API's fields of a cache's month on the Usage page", () => {
     expect(dtoFields(usageDtoSource, 'export class CacheUsageView {')).toEqual([...CACHE_USAGE_FIELDS]);
     expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('caches');
+  });
+
+  it("have the API's fields of a domain's or an address's mail's month on the Usage page", () => {
+    expect(dtoFields(usageDtoSource, 'export class EmailUsageView {')).toEqual([...EMAIL_USAGE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('email');
   });
 });
 

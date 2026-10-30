@@ -18,10 +18,10 @@ export interface StatementFunction {
   amountMinor: bigint;
 }
 
-/** One customer's database's, bucket's, queue's or cache's month, as the statement lists it. */
+/** One customer's database's, bucket's, queue's or cache's month, or one of its domains' or addresses' mail, as the statement lists it. */
 export interface StatementResource {
   resourceId: string;
-  kind: 'database' | 'bucket' | 'queue' | 'cache';
+  kind: 'database' | 'bucket' | 'queue' | 'cache' | 'email';
   /** Its name when it was last sampled or asked something in the month. */
   name: string;
   /** Its storage, in GB-months, to six decimals at most: "0.007118"; 0 for a queue; a cache's memory held. */
@@ -33,8 +33,10 @@ export interface StatementResource {
   /** A bucket's requests by S3's two classes; 0 for a database or a queue. */
   tier1Requests: bigint;
   tier2Requests: bigint;
-  /** A queue's requests, as SQS bills them; 0 for a database or a bucket. */
+  /** A queue's requests, as SQS bills them; mail's recipients, as SES bills them; 0 for the others. */
   requests: bigint;
+  /** Mail's attachments, in GB, to six decimals at most, as SES bills them, each recipient's copy: "0.0012"; 0 for the others. */
+  attachmentsGb: string;
   /** Before the free tier, at the books' prices, rounded to the minor unit for display. */
   amountMinor: bigint;
 }
@@ -52,7 +54,7 @@ export interface Statement {
   currency: string;
   exponent: number;
   functions: StatementFunction[];
-  /** Its buckets, its caches, its databases and its queues, each by name. */
+  /** Its buckets, its caches, its databases, its mail, by domain or address, and its queues, each by name. */
   resources: StatementResource[];
   usageMinor: bigint;
   freeTierMinor: bigint;
@@ -111,9 +113,9 @@ export function buildStatement(input: StatementInput): Statement {
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name) || a.functionId.localeCompare(b.functionId));
-  const usage = new Map<string, { name: string; tier1: bigint; tier2: bigint; requests: bigint; hours: bigint; byteHours: bigint }>();
+  const usage = new Map<string, { name: string; tier1: bigint; tier2: bigint; requests: bigint; hours: bigint; byteHours: bigint; bytes: bigint }>();
   for (const row of input.resources) {
-    const sum = usage.get(row.resourceId) ?? { name: row.name, tier1: 0n, tier2: 0n, requests: 0n, hours: 0n, byteHours: 0n };
+    const sum = usage.get(row.resourceId) ?? { name: row.name, tier1: 0n, tier2: 0n, requests: 0n, hours: 0n, byteHours: 0n, bytes: 0n };
     usage.set(row.resourceId, {
       name: sum.name,
       tier1: sum.tier1 + row.tier1Requests,
@@ -121,11 +123,12 @@ export function buildStatement(input: StatementInput): Statement {
       requests: sum.requests + row.requests,
       hours: sum.hours + row.hours,
       byteHours: sum.byteHours + row.byteHours,
+      bytes: sum.bytes + row.bytes,
     });
   }
   const resources = [...estimate.resources.entries()]
     .map(([resourceId, cost]) => {
-      const sum = usage.get(resourceId) ?? { name: resourceId, tier1: 0n, tier2: 0n, requests: 0n, hours: 0n, byteHours: 0n };
+      const sum = usage.get(resourceId) ?? { name: resourceId, tier1: 0n, tier2: 0n, requests: 0n, hours: 0n, byteHours: 0n, bytes: 0n };
       return {
         resourceId,
         kind: cost.kind,
@@ -136,6 +139,7 @@ export function buildStatement(input: StatementInput): Statement {
         tier1Requests: sum.tier1,
         tier2Requests: sum.tier2,
         requests: sum.requests,
+        attachmentsGb: Decimal.ratio(sum.bytes, BYTES_PER_GB).round(6).toString(),
         amountMinor: toMinor(cost.total, exponent),
       };
     })

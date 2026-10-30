@@ -4,7 +4,8 @@
  * the evaluator, from usage records written here, through the notifications'
  * queue: an error alarm that fires and recovers, telling each change once;
  * missing data; an account's alarm; the money; a database's and a cache's,
- * from their hourly samples; two backends at once.
+ * from their hourly samples; the account's mail's, from its messages; two
+ * backends at once.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -360,6 +361,33 @@ run('alarms (L2)', () => {
       await query(`INSERT INTO database_samples (database_id, hour, account_id, name, size_bytes, connections) VALUES ($1, '2026-10-20T16:00:00Z', $2, 'orders', 700000000, 3)`, [orders, A]);
       await evaluator.tick(new Date('2026-10-20T17:00:05Z'));
       expect((await stateOf(big.id)).state).toBe('OK');
+    });
+
+    it("fires on the account's mail's bounces from its messages, an hour at a time, the e-mail naming its mail, and names no resource", async () => {
+      const full = alarm({ name: 'Bounces', functionId: null, metric: 'Bounce', statistic: 'Sum', period: 3600, threshold: 1, actions: { email: true, webhookUrls: [] } });
+      await expect(alarms.create(A, { ...full, cacheName: 'sessions' })).rejects.toThrow(
+        new BadRequestException("A cacheName goes with a cache's metrics only: BytesUsedForCache, CurrConnections, CacheHits, CacheMisses, Evictions"),
+      );
+      await expect(alarms.create(A, { ...full, period: 300 })).rejects.toThrow(new BadRequestException("Mail's metrics have a point an hour: period must be 3600"));
+      const watching = await alarms.create(A, full);
+      await query(
+        `INSERT INTO email_messages (id, account_id, identity, from_address, return_path, recipients, recipient_count, size_bytes, status, created_at)
+         VALUES (gen_random_uuid(), $1, 'shop.example.tn', 'orders@shop.example.tn', 'b-0@bounces.mail.ff.test', $2, 3, 1000, 'SENT', '2026-10-20T15:10:00Z')`,
+        [A, JSON.stringify([{ address: 'a@example.tn', status: 'BOUNCED', permanent: true }, { address: 'b@example.tn', status: 'SUPPRESSED' }, { address: 'c@example.tn', status: 'SENT' }])],
+      );
+
+      // The hour 15:00 is judged once it is over: 2 bounces, past 1.
+      await evaluator.tick(new Date('2026-10-20T16:00:05Z'));
+      expect([(await stateOf(watching.id)).state, (await stateOf(watching.id)).stateReason]).toEqual([
+        'ALARM',
+        '1 of the last 1 period(s) of 3600 s breaching Bounce Sum > 1 (1 needed); latest 2',
+      ]);
+      const told = await db.dataSource.getRepository(NotificationDelivery).find({ where: { kind: 'alarm', channel: DeliveryChannel.EMAIL } });
+      expect(told.map((one) => (one.payload as { text: string }).text).find((text) => text.includes('Bounces'))).toMatch(/sur le courrier du compte « Alarmed »/);
+
+      // A quiet hour counts none: the alarm is back to OK.
+      await evaluator.tick(new Date('2026-10-20T17:00:05Z'));
+      expect((await stateOf(watching.id)).state).toBe('OK');
     });
 
     it("fires on a cache's memory from its hourly samples, the e-mail naming the cache, and recovers once its keys use less", async () => {

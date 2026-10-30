@@ -275,6 +275,80 @@ export function cacheMetricsView(window: MetricsWindow, rows: CacheHourRow[]): C
   return view;
 }
 
+/** Mail's metrics have a point an hour (ADR 0012), as caches' do. */
+export const EMAIL_PERIOD = 3600;
+/** The days a reputation rate is judged on, as FF's enforcement judges it: those of the last 14. */
+export const REPUTATION_DAYS = 14;
+
+/**
+ * An account's mail's metrics, as CloudWatch names SES's, a point an hour from
+ * its messages, each recipient one, counted in its message's hour: sent
+ * (Send), taken by the receiving side and not bounced since, complaints
+ * included (Delivery), bounced or kept off by the suppression list (Bounce),
+ * complained of (Complaint). And its reputation at each hour's end, over the
+ * 14 days before it, as FF's enforcement judges it: the share of the
+ * recipients its mail reached that bounced for good, and that complained, a
+ * fraction as SES gives it (Reputation.BounceRate, Reputation.ComplaintRate);
+ * null without a recipient reached in those days.
+ */
+export interface EmailMetricsView {
+  period: number;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: {
+    Send: { Sum: number[] };
+    Delivery: { Sum: number[] };
+    Bounce: { Sum: number[] };
+    Complaint: { Sum: number[] };
+    'Reputation.BounceRate': { Average: Array<number | null> };
+    'Reputation.ComplaintRate': { Average: Array<number | null> };
+  };
+}
+
+/** An hour's recipients, as the query counts them: what became of them, and those its reputation is judged on. */
+export interface EmailHourRow {
+  bucket: number;
+  send: number;
+  delivery: number;
+  bounce: number;
+  complaint: number;
+  /** Reached: taken, bounced or complained of, as the enforcement counts them. */
+  reached: number;
+  /** Bounced for good. */
+  hardBounces: number;
+}
+
+/** The series of the window, a point an hour; the rows reach 14 days before it, for the rates. */
+export function emailMetricsView(window: MetricsWindow, rows: EmailHourRow[]): EmailMetricsView {
+  const byBucket = new Map(rows.map((row) => [row.bucket, row]));
+  const view: EmailMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: { Send: { Sum: [] }, Delivery: { Sum: [] }, Bounce: { Sum: [] }, Complaint: { Sum: [] }, 'Reputation.BounceRate': { Average: [] }, 'Reputation.ComplaintRate': { Average: [] } },
+  };
+  const m = view.metrics;
+  const days = REPUTATION_DAYS * 86_400;
+  for (let bucket = window.start.getTime() / 1000; bucket < window.end.getTime() / 1000; bucket += window.period) {
+    const row = byBucket.get(bucket);
+    view.timestamps.push(new Date(bucket * 1000));
+    m.Send.Sum.push(row?.send ?? 0);
+    m.Delivery.Sum.push(row?.delivery ?? 0);
+    m.Bounce.Sum.push(row?.bounce ?? 0);
+    m.Complaint.Sum.push(row?.complaint ?? 0);
+    // The 14 days that end with the hour.
+    const end = bucket + window.period;
+    const judged = rows.filter((one) => one.bucket >= end - days && one.bucket < end);
+    const reached = judged.reduce((sum, one) => sum + one.reached, 0);
+    const rate = (count: (one: EmailHourRow) => number) => (reached === 0 ? null : Math.round((judged.reduce((sum, one) => sum + count(one), 0) / reached) * 1e6) / 1e6);
+    m['Reputation.BounceRate'].Average.push(rate((one) => one.hardBounces));
+    m['Reputation.ComplaintRate'].Average.push(rate((one) => one.complaint));
+  }
+  return view;
+}
+
 /** The request metrics a bucket has, each period's Sum, as CloudWatch names S3's. */
 export const BUCKET_REQUEST_METRICS = ['AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'] as const;
 export type BucketRequestMetric = (typeof BUCKET_REQUEST_METRICS)[number];

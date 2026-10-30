@@ -446,6 +446,7 @@ body_for() {
     "PUT /admin/accounts/{id}/plan") echo '{"planId": "beta", "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/egress") echo '{"internetEgress": true, "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/storage") echo '{"enabled": false, "reason": "l5 tries"}' ;;
+    "PUT /admin/accounts/{id}/email") echo '{"sendingEnabled": false, "reason": "l5 tries"}' ;;
     "POST /admin/accounts/{id}/credits") echo '{"kind": "promo", "amount": "1", "reason": "l5 tries", "idempotencyKey": "00000000-0000-4000-8000-000000000000"}' ;;
     "POST /admin/accounts/"*) echo '{"reason": "l5 tries"}' ;;
     "POST /admin/plans") echo '{"id": "l5-tries", "name": "L5 tries", "limits": {}, "reason": "l5 tries"}' ;;
@@ -740,6 +741,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /email/messages")
       listed="$(as_b GET /email/messages | jq '.messages | length')"
       check "$route: B's messages don't show A's" "200 0" "$(status) $listed"
+      ;;
+    "GET /email/metrics")
+      sent="$(as_b GET /email/metrics | jq '[.metrics.Send.Sum[]] | add')"
+      check "$route: B's mail's metrics count none of A's" "200 0" "$(status) $sent"
       ;;
     "POST /email/messages")
       patiently as_b POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "B'"'"'s"}'
@@ -1364,6 +1369,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       listed="$(as_user_2 GET /email/messages | jq '.messages | length')"
       check "$route: account 2's messages don't show account 1's" "200 0" "$(status) $listed"
       ;;
+    "GET /email/metrics")
+      sent="$(as_user_2 GET /email/metrics | jq '[.metrics.Send.Sum[]] | add')"
+      check "$route: account 2's mail's metrics count none of account 1's" "200 0" "$(status) $sent"
+      ;;
     "POST /email/messages")
       patiently as_user_2 POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "account 2'"'"'s"}'
       check "$route: account 2 can't send from account 1's domain, which isn't its own" \
@@ -1797,6 +1806,17 @@ check "  ... nor a bucket, and its keys answer AccountProblem, saying why" "403 
 with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": true, "reason": "l5: cleared with the owner"}' >/dev/null
 check "  ... on again: the user logs in, the key opens its bucket, and account 1's log names both, as FF's" "200 1 accepted account.storage,account.storage" \
   "$(status) $(data_db_psql "$conn_1" 'select 1') $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1) $(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action == "account.storage") | .action] | join(",")')"
+message_out='{"from": "orders@shop.l5.example.tn", "to": ["stranger@example.org"], "subject": "l5", "text": "to anyone"}'
+mail_out="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/email" '{"productionAccess": true, "reason": "l5: sends its receipts"}')"
+check "the operator lets account 1's mail out of the sandbox: it sends to an address it never proved" "200 false 201" \
+  "$(status) $(jq -r .sandbox <<<"$mail_out") $(as_user_1 POST /email/messages "$message_out" >/dev/null; status)"
+with_token "$operator_token" PUT "/admin/accounts/$account_1/email" '{"sendingEnabled": false, "reason": "l5: spam seen by a provider"}' >/dev/null
+sleep 1 # the Beta plan's rate: a message a second
+check "  ... pauses it: its mail refused, saying so; on again, taken; account 1's log names both, as FF's" \
+  "403 Sending is paused for this account: FF's operator stopped it, and says why. 201 account.email,account.email,account.email" \
+  "$(as_user_1 POST /email/messages "$message_out" >/dev/null; status) $(message) \
+$(with_token "$operator_token" PUT "/admin/accounts/$account_1/email" '{"sendingEnabled": true, "reason": "l5: a list cleaned"}' >/dev/null; as_user_1 POST /email/messages "$message_out" >/dev/null; status) \
+$(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action == "account.email") | .action] | join(",")')"
 plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
   "$(jq -cn --argjson limits "$beta_limits" '{limits: ($limits | .quota = {pods: 32, cpu: "16", memory: "16Gi"}), reason: "l5: pilots need more"}')")"
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
@@ -1889,8 +1909,8 @@ first_book="$(jq -c '.[0].document' <<<"$books")"
 latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
 with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
-check "a book after one with databases', buckets', queues' and caches' prices is refused without them, each named" \
-  "400 12 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+check "a book after one with databases', buckets', queues', caches' and mail's prices is refused without them, each named" \
+  "400 14 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
 created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
 check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"
@@ -2076,7 +2096,7 @@ check "and the grants, as FF's, with their reasons (P-74)" "credit.promo:FF:l5: 
   "$(jq -r '[.entries[] | select(.action | startswith("credit.")) | "\(.action):\(.actorLabel):\(.details.reason)"] | reverse | join("|")' <<<"$log_invoices")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress account.storage account.storage support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress account.storage account.storage account.email account.email account.email support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -2084,7 +2104,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 26 account.approve,account.egress,account.plan,account.reactivate,account.storage,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
+  "200 29 account.approve,account.egress,account.email,account.plan,account.reactivate,account.storage,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \

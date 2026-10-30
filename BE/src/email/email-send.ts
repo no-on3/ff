@@ -84,6 +84,53 @@ export function headerOf(raw: Buffer): { fields: Array<{ name: string; value: st
   return { fields, end };
 }
 
+/** A header field's value's parameter, such as a Content-Type's boundary or report-type. */
+export function headerParameter(value: string, name: string): string | null {
+  const match = new RegExp(`;\\s*${name}\\s*=\\s*(?:"([^"]*)"|([^;\\s]+))`, 'i').exec(value);
+  return match ? (match[1] ?? match[2]) : null;
+}
+
+/** A MIME message's or part's parts, each its header fields, its body and the whole of it, split by its boundary; none when it isn't multipart. */
+export function mimeParts(raw: Buffer): Array<{ fields: Array<{ name: string; value: string }>; body: Buffer; whole: Buffer }> {
+  const { fields, end } = headerOf(raw);
+  const boundary = headerParameter(fields.find((field) => field.name === 'content-type')?.value ?? '', 'boundary');
+  if (!boundary) return [];
+  const text = raw.subarray(end).toString('latin1');
+  const delimiter = `--${boundary}`;
+  return text
+    .split(new RegExp(`\\r?\\n?${delimiter.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?:--)?[ \\t]*\\r?\\n?`))
+    .slice(1, -1)
+    .map((part) => {
+      const buffer = Buffer.from(part, 'latin1');
+      const header = headerOf(buffer);
+      return { fields: header.fields, body: buffer.subarray(header.end), whole: buffer };
+    });
+}
+
+/** A part named as a file's: a Content-Disposition's filename, or a Content-Type's name, RFC 2231's forms too. */
+const NAMED = /;\s*(?:file)?name\*?[0-9*]*\s*=/i;
+
+/**
+ * What a message's attachments weigh as it is sent, their encoding with them:
+ * SES bills these by the GB (its AttachmentsSize). A part is one when its
+ * Content-Disposition says attachment or it is named as a file; a multipart
+ * part's parts are looked into, ten deep at most.
+ */
+export function attachmentBytesOf(raw: Buffer, depth = 0): number {
+  let bytes = 0;
+  for (const part of mimeParts(raw)) {
+    const value = (name: string) => part.fields.find((field) => field.name === name)?.value ?? '';
+    const type = value('content-type');
+    const disposition = value('content-disposition');
+    if (/^\s*multipart\//i.test(type)) {
+      if (depth < 10) bytes += attachmentBytesOf(part.whole, depth + 1);
+    } else if (/^\s*attachment\b/i.test(disposition) || NAMED.test(disposition) || NAMED.test(type)) {
+      bytes += part.body.length;
+    }
+  }
+  return bytes;
+}
+
 /** A raw message's sender and recipients, as its header names them. */
 export function rawParties(raw: Buffer): { from: string | null; to: string[]; cc: string[]; bcc: string[] } {
   const { fields } = headerOf(raw);

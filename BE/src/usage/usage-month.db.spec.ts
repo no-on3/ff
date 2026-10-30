@@ -4,7 +4,7 @@
  * totals are the raw records' own sums, exactly, the month is the UTC
  * calendar's, and only the account's records count; its databases, buckets
  * and caches from their hourly samples, its buckets' and queues' requests from
- * their counts.
+ * their counts, its mail from its messages' billing records.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -47,7 +47,7 @@ run("an account's usage in a month (L2, P-22)", () => {
       await db.dataSource.getRepository(Account).save({ id, name: `Account ${id}`, planId: 'beta', status: AccountStatus.ACTIVE });
     }
     for (const month of ['2026-09-01', '2026-10-01', '2026-11-01']) {
-      for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts', 'cache_samples']) await query(`SELECT ff_ensure_month_partition($1, $2)`, [table, month]);
+      for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts', 'cache_samples', 'email_sends']) await query(`SELECT ff_ensure_month_partition($1, $2)`, [table, month]);
     }
     kept = await db.dataSource.getRepository(Function).save({ name: 'new', accountId: A, runtime: Runtime.NODEJS, code: 'x', memory: 256, timeout: 5 });
     const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
@@ -277,6 +277,35 @@ run("an account's usage in a month (L2, P-22)", () => {
       { queueId: drained, name: 'drained', deleted: true, requests: 0, messagesSent: 0, messagesReceived: 0 },
     ]);
     expect(await usage.monthlyQueues(A, '2026-12')).toEqual([]);
+  });
+
+  it("counts the account's mail in the month by the domain or address it went from: its recipients and its attachments, each recipient's copy, the most first, a deleted one's too", async () => {
+    const sent = (accountId: string, identity: string, sentAt: string, recipients: number, attachmentBytes = 0) =>
+      query(`INSERT INTO email_sends (message_id, sent_at, account_id, identity, recipients, attachment_bytes) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)`, [
+        sentAt,
+        accountId,
+        identity,
+        recipients,
+        attachmentBytes,
+      ]);
+    await query(`INSERT INTO email_identities (account_id, identity, type) VALUES ($1, 'shop.example.tn', 'DOMAIN')`, [A]);
+    // The domain: 40 recipients, then 2 more each with 1 MB attached; an address since deleted, 3; November's message isn't October's.
+    await sent(A, 'shop.example.tn', '2026-10-01T00:10:00Z', 40);
+    await sent(A, 'shop.example.tn', '2026-10-31T23:59:00Z', 2, 1_048_576);
+    await sent(A, 'shop.example.tn', '2026-11-01T00:00:00Z', 7);
+    await sent(A, 'ana@example.tn', '2026-10-15T12:00:00Z', 3);
+    await sent(B, 'shop.example.tn', '2026-10-05T00:00:00Z', 9); // account B's
+
+    const anId = expect.stringMatching(/^[0-9a-f-]{36}$/) as unknown as string;
+    const october = await usage.monthlyEmail(A, '2026-10');
+    expect(october).toEqual([
+      { resourceId: anId, identity: 'shop.example.tn', deleted: false, recipients: 42, attachmentBytes: 2 * 1_048_576 },
+      { resourceId: anId, identity: 'ana@example.tn', deleted: true, recipients: 3, attachmentBytes: 0 },
+    ]);
+    // The bill's line for the domain is the same in every month, and not account B's.
+    const [{ id }] = await query<Array<{ id: string }>>(`SELECT md5('email:' || $1 || ':' || 'shop.example.tn')::uuid::text AS id`, [A]);
+    expect([october[0].resourceId, (await usage.monthlyEmail(A, '2026-11'))[0].resourceId, (await usage.monthlyEmail(B, '2026-10'))[0].resourceId === id]).toEqual([id, id, false]);
+    expect(await usage.monthlyEmail(A, '2026-12')).toEqual([]);
   });
 
   it("measures each of the account's caches in the month: its hours, its memory at its latest sample, its GB-hours as ElastiCache bills a node, the most first, a deleted one's by its name then", async () => {

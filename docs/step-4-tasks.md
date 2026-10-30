@@ -50,9 +50,9 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 - [x] **W-07** Sending:
   - [x] part 1: `SendEmail` (simple and raw), queued, signed with the domain's key, handed to the customers' own Postfix; the sandbox and the quotas;
   - [x] part 2: bounces and complaints, the suppression list filled by them, the reputation rates and the pause; port 25 closed to every function.
-- [ ] **W-08** E-mail in the console, `ff`, the admin app, and the bill:
-  - [ ] part 1: the E-mail page, `ff email`, the admin app's switch and sandbox;
-  - [ ] part 2: the bill (the kind `email`, its price), metrics as SES names them, alarms.
+- [x] **W-08** E-mail in the console, `ff`, the admin app, and the bill:
+  - [x] part 1: the E-mail page, `ff email`, the admin app's switch and sandbox;
+  - [x] part 2: the bill (the kind `email`, its price), metrics as SES names them, alarms.
 
 ### Phase 4: close
 - [ ] **W-09** Documentation: the guide's three sections, `how-it-works.html`'s scenarios, a page in French for each service, the export kit's three pages, ADRs 0011 to 0013 as built.

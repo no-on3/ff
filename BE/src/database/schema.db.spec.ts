@@ -20,6 +20,7 @@ import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
+import { withEmailPrices } from '../migrations/1793345460517-EmailBilling';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
@@ -74,6 +75,7 @@ const DEPLOY_KEYS = migrationNames.find((name) => name.startsWith('DeployKeys'))
 const CACHES = migrationNames.find((name) => name.startsWith('Caches1')) as string;
 const CACHE_MEASURES = migrationNames.find((name) => name.startsWith('CacheMeasures')) as string;
 const EMAIL_IDENTITIES = migrationNames.find((name) => name.startsWith('EmailIdentities')) as string;
+const EMAIL_MESSAGES = migrationNames.find((name) => name.startsWith('EmailMessages')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -595,10 +597,10 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
 
-      // The caches' migration after it gives both ElastiCache's SKU too.
+      // The caches' and mail's migrations after it give both ElastiCache's SKU and SES's too.
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        { valid_from: next, prices: withCachePrices(withQueuePrices(current)), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))), created_by: 'test' },
+        { valid_from: next, prices: withEmailPrices(withCachePrices(withQueuePrices(current))), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'test' },
       ]);
       const minute = `date_trunc('minute', now())`;
       await dataSource.query(
@@ -726,6 +728,65 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the mail-billing migration keeps each message's billing record by month, append-only, rates mail's hours beside the others', gives books not started yet SES's SKUs, adds its own from next month's first hour, and reverts unless an hour of mail is rated", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, EMAIL_MESSAGES);
+      // As after the mail-sending migration, in a month later than its own: no book starts next month yet.
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      await dataSource.query(`DELETE FROM price_books WHERE valid_from > now()`);
+      const cached = withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)));
+      const [{ id: future }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T00:00:00Z', $1, 'test') RETURNING id`, [
+        JSON.stringify(cached),
+      ]);
+      const [{ prices: current }] = await dataSource.query(`SELECT prices FROM price_books WHERE valid_from <= now() ORDER BY valid_from DESC LIMIT 1`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
+        { valid_from: next, prices: withEmailPrices(current), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(cached), created_by: 'test' },
+      ]);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO email_sends (message_id, sent_at, account_id, identity, recipients, attachment_bytes) VALUES (gen_random_uuid(), now(), $1, 'shop.example.tn', 3, 12)`,
+        [ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE email_sends SET recipients = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM email_sends`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'email_sends')).toEqual([{ relname: monthPartition('email_sends', 0) }, { relname: monthPartition('email_sends', 1) }]);
+      const alarm = (metric: string, statistic: string) =>
+        dataSource.query(
+          `INSERT INTO alarms (account_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+           VALUES ($1, $2, $2, $3, 3600, 'GreaterThanThreshold', 0, 1, 1, '{"email": true, "webhookUrls": []}')`,
+          [ACCOUNT, metric, statistic],
+        );
+      await alarm('Reputation.BounceRate', 'Average');
+      await alarm('Errors', 'Sum');
+
+      // Reverted with records present: the alarms the code before it doesn't know go, the book it made goes, the other loses SES's SKUs.
+      await migrateDownTo(dataSource, EMAIL_MESSAGES);
+
+      expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Errors' }]);
+      expect(await dataSource.query(`SELECT to_regclass('email_sends') AS s, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'resource_usage_hourly' AND column_name = 'bytes') AS b`)).toEqual([
+        { s: null, b: 0 },
+      ]);
+      expect(await dataSource.query(`SELECT id, prices FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([{ id: future, prices: cached }]);
+
+      // Once an hour of mail is rated, it refuses: those are billed records.
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(
+        `INSERT INTO resource_usage_hourly (account_id, hour, resource_id, kind, name, price_book_id, byte_hours, hours, tier1_requests, tier2_requests, requests, bytes)
+         VALUES ($1, date_trunc('hour', now()), gen_random_uuid(), 'email', 'shop.example.tn', (SELECT id FROM price_books LIMIT 1), 0, 0, 0, 0, 3, 36)`,
+        [ACCOUNT],
+      );
+      await expect(migrateDownTo(dataSource, EMAIL_MESSAGES)).rejects.toThrow('1 hour(s) of mail were rated: they are billed records, and reverting would drop them');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it("the cache-measures migration samples caches by month, append-only, rates their hours beside the others', lets an alarm watch a cache and go with it, gives books not started yet ElastiCache's SKU, adds its own from next month's first hour, and reverts unless a cache's hour is rated", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -743,8 +804,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       await dataSource.runMigrations({ transaction: 'each' });
 
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        { valid_from: next, prices: withCachePrices(current), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withCachePrices(queued), created_by: 'test' },
+        // The mail's migration after it gives both SES's SKUs too.
+        { valid_from: next, prices: withEmailPrices(withCachePrices(current)), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(queued)), created_by: 'test' },
       ]);
       await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
       const cache = async (name: string, port: number) =>
@@ -1208,9 +1270,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
       const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
       expect(books).toEqual([
-        // The queues' and the caches' migrations after it give both SQS's SKU and ElastiCache's too.
-        { id: expect.any(String), valid_from: next, prices: withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))), created_by: 'system' },
-        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))), created_by: 'test' },
+        // The queues', the caches' and mail's migrations after it give both SQS's SKU, ElastiCache's and SES's too.
+        { id: expect.any(String), valid_from: next, prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'test' },
       ]);
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -1330,7 +1392,7 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts|queue_samples|async_event_counts|cache_samples)_\d{4}_\d{2}$/; // their partitions, one per month
+      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts|queue_samples|async_event_counts|cache_samples|email_sends)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
@@ -1350,6 +1412,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'email_identities',
         'email_messages',
         'email_sending',
+        'email_sends',
         'email_suppressions',
         'event_source_mappings',
         'function_environments',
@@ -1403,6 +1466,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         monthPartition('capacity_samples', 1),
         monthPartition('database_samples', 0),
         monthPartition('database_samples', 1),
+        monthPartition('email_sends', 0),
+        monthPartition('email_sends', 1),
         monthPartition('queue_request_counts', 0),
         monthPartition('queue_request_counts', 1),
         monthPartition('queue_samples', 0),

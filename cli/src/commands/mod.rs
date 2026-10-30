@@ -9,6 +9,7 @@ mod completion;
 mod config;
 mod db;
 mod deploy;
+mod email;
 mod env;
 mod event_sources;
 mod functions;
@@ -26,8 +27,8 @@ mod version;
 mod whoami;
 
 use crate::cli::{
-    BucketKeysCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand,
-    EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, SiteDomainsCommand,
+    BucketKeysCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EmailCommand,
+    EnvCommand, EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, SiteDomainsCommand,
     SitesCommand, UrlCommand,
 };
 use crate::config::Settings;
@@ -126,6 +127,28 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             caches::password(&name, &secret.functions, &secret.secret_name, context)
         }
         Command::Caches(CachesCommand::Delete { name, yes }) => caches::delete(&name, yes, context),
+        Command::Email(EmailCommand::Identities) => email::identities(context),
+        Command::Email(EmailCommand::Add { identity }) => email::add(&identity, context),
+        Command::Email(EmailCommand::Get { identity }) => email::get(&identity, context),
+        Command::Email(EmailCommand::Verify { identity }) => email::verify(&identity, context),
+        Command::Email(EmailCommand::Delete { identity, yes }) => email::delete(&identity, yes, context),
+        Command::Email(EmailCommand::Account) => email::account(context),
+        Command::Email(EmailCommand::Send { from, to, cc, bcc, subject, text, html }) => email::send(
+            email::Send {
+                from: &from,
+                to: &to,
+                cc: &cc,
+                bcc: &bcc,
+                subject: &subject,
+                text: text.as_deref(),
+                html: html.as_deref(),
+            },
+            context,
+        ),
+        Command::Email(EmailCommand::Messages { limit }) => email::messages(limit, context),
+        Command::Email(EmailCommand::Suppressions) => email::suppressions(context),
+        Command::Email(EmailCommand::Suppress { address, reason }) => email::suppress(&address, &reason, context),
+        Command::Email(EmailCommand::Unsuppress { address }) => email::unsuppress(&address, context),
         Command::Sites(SitesCommand::Deploy { bucket, folder, spa, no_spa, index_document, error_document, keep }) => {
             let options = sites::DeployOptions {
                 single_page_app: if spa {

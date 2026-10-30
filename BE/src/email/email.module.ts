@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditModule } from '../audit/audit.module';
+import { BillingModule } from '../billing/billing.module';
 import { EncryptionModule } from '../encryption/encryption.module';
 import { MailModule } from '../mail/mail.module';
 import { PlansModule } from '../plans/plans.module';
@@ -26,7 +27,7 @@ import { SesOperations } from './ses-operations';
  * main.ts starts on its port; its messages, queued, handed to the server of customers' mail, their bounces taken back.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([EmailIdentity, EmailSuppression, EmailMessage, EmailSending]), AuditModule, EncryptionModule, MailModule, PlansModule, StorageModule],
+  imports: [TypeOrmModule.forFeature([EmailIdentity, EmailSuppression, EmailMessage, EmailSending]), AuditModule, BillingModule, EncryptionModule, MailModule, PlansModule, StorageModule],
   controllers: [EmailController],
   providers: [
     EmailIdentitiesService,

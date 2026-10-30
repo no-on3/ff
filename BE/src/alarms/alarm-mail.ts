@@ -1,7 +1,7 @@
 import { frenchDecimal, frenchTime } from '../common/french';
 import type { Language } from '../mail/language';
 import type { Mail } from '../mail/mail.service';
-import { AlarmRule, AlarmState, BILLING_METRICS, Evaluation, SYMBOL } from './alarm-rules';
+import { AlarmRule, AlarmState, BILLING_METRICS, EMAIL_METRICS, Evaluation, SYMBOL } from './alarm-rules';
 
 export interface AlarmChange {
   account: { id: string; name: string };
@@ -44,7 +44,9 @@ export function alarmMail(change: AlarmChange, language: Language): Omit<Mail, '
             ? `la file d'attente « ${change.queueName} » ${account}`
             : change.cacheName
               ? `le cache « ${change.cacheName} » ${account}`
-              : `le compte « ${change.account.name} » (${change.account.id})`;
+              : EMAIL_METRICS.includes(alarm.metric)
+                ? `le courrier ${account}`
+                : `le compte « ${change.account.name} » (${change.account.id})`;
     const reason = allMissing
       ? `Aucune donnée pour ${what} dans les ${e.datapoints.length} dernière(s) période(s) de ${alarm.period} s.`
       : billing
@@ -70,7 +72,9 @@ export function alarmMail(change: AlarmChange, language: Language): Omit<Mail, '
           ? `the queue "${change.queueName}" of the account "${change.account.name}" (${change.account.id})`
           : change.cacheName
             ? `the cache "${change.cacheName}" of the account "${change.account.name}" (${change.account.id})`
-            : `the account "${change.account.name}" (${change.account.id})`;
+            : EMAIL_METRICS.includes(alarm.metric)
+              ? `the mail of the account "${change.account.name}" (${change.account.id})`
+              : `the account "${change.account.name}" (${change.account.id})`;
   const breach = `${what} ${SYMBOL[alarm.comparison]} ${alarm.threshold}`;
   const reason = allMissing
     ? `No datapoint for ${what} in the last ${e.datapoints.length} period(s) of ${alarm.period} s.`

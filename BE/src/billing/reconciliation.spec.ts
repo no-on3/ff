@@ -19,11 +19,13 @@ const account = (fields: Partial<ReconciledAccount>): ReconciledAccount => ({
   countedStorageRequests: 0n,
   ratedQueueRequests: 0n,
   countedQueueRequests: 0n,
+  ratedEmailRecipients: 0n,
+  countedEmailRecipients: 0n,
   ...fields,
 });
 
 describe('the billing reconciliation (L1, P-32)', () => {
-  it("agrees only when the charges, the requests, the databases' and buckets' storage, and the buckets' and queues' requests all match", () => {
+  it("agrees only when the charges, the requests, the databases' and buckets' storage, the buckets' and queues' requests, and mail's recipients all match", () => {
     expect(reconciled(account({}))).toBe(true);
     expect(reconciled(account({ estimatedMinor: 1235n }))).toBe(false);
     expect(reconciled(account({ rawRequests: 1501n }))).toBe(false);
@@ -33,6 +35,8 @@ describe('the billing reconciliation (L1, P-32)', () => {
     expect(reconciled(account({ ratedStorageRequests: 2_400n, countedStorageRequests: 2_401n }))).toBe(false);
     expect(reconciled(account({ ratedQueueRequests: 3_000_000n, countedQueueRequests: 3_000_000n }))).toBe(true);
     expect(reconciled(account({ ratedQueueRequests: 3_000_000n, countedQueueRequests: 3_000_001n }))).toBe(false);
+    expect(reconciled(account({ ratedEmailRecipients: 1_200n, countedEmailRecipients: 1_200n }))).toBe(true);
+    expect(reconciled(account({ ratedEmailRecipients: 1_200n, countedEmailRecipients: 1_201n }))).toBe(false);
   });
 
   it('writes one line per account, money to the millime, and marks each that differs', () => {
@@ -57,9 +61,9 @@ describe('the billing reconciliation (L1, P-32)', () => {
     expect(table.split('\n')).toEqual([
       '2026-10 until 2026-10-17T10:00:00.000Z (the end of the last hour rated):',
       '',
-      'Account         Charged  From usage  Requests rated  Requests used  GB-h rated  GB-h sampled  S3 requests rated  S3 requests counted  SQS requests rated  SQS requests counted',
-      '000000000001  1.234 TND   1.234 TND           1,500          1,500   1,500.000     1,500.000                  0                    0                   0                     0  ok',
-      '000000000002  0.000 TND   8.222 TND               0              3       0.000         0.500                  0               12,000                   0             1,250,000  DIFFERENT',
+      'Account         Charged  From usage  Requests rated  Requests used  GB-h rated  GB-h sampled  S3 requests rated  S3 requests counted  SQS requests rated  SQS requests counted  Recipients rated  Recipients sent',
+      '000000000001  1.234 TND   1.234 TND           1,500          1,500   1,500.000     1,500.000                  0                    0                   0                     0                 0                0  ok',
+      '000000000002  0.000 TND   8.222 TND               0              3       0.000         0.500                  0               12,000                   0             1,250,000                 0                0  DIFFERENT',
       '',
       '1 of 2 accounts differs.',
     ]);

@@ -56,6 +56,7 @@ import { Caches1793331976259 } from './1793331976259-Caches';
 import { CacheMeasures1793333328301 } from './1793333328301-CacheMeasures';
 import { EmailIdentities1793336364006 } from './1793336364006-EmailIdentities';
 import { EmailMessages1793340758436 } from './1793340758436-EmailMessages';
+import { EmailBilling1793345460517 } from './1793345460517-EmailBilling';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -121,4 +122,5 @@ export const MIGRATIONS: Array<new () => object> = [
   CacheMeasures1793333328301,
   EmailIdentities1793336364006,
   EmailMessages1793340758436,
+  EmailBilling1793345460517,
 ];

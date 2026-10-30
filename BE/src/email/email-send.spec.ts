@@ -3,9 +3,10 @@
  * name or none, in lower case; simple content made into MIME, a subject in
  * another alphabet encoded, both bodies as alternatives, no Bcc in it, its
  * Message-ID the message's; headers the request may add, and those it may not;
- * a raw message's sender and recipients from its header, its Bcc taken out.
+ * a raw message's sender and recipients from its header, its Bcc taken out;
+ * what its attachments weigh, as SES bills them.
  */
-import { addressesOf, composeSimple, headerOf, headerProblem, rawParties, returnPathOf, senderOf, withoutBcc } from './email-send';
+import { addressesOf, attachmentBytesOf, composeSimple, headerOf, headerProblem, rawParties, returnPathOf, senderOf, withoutBcc } from './email-send';
 
 const ID = '3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b';
 
@@ -65,5 +66,46 @@ describe("SendEmail's message (L1, ADR 0012)", () => {
 
   it('gives a message a return path that names it', () => {
     expect(returnPathOf(ID, 'bounces.mail.shop.example.tn')).toBe(`b-${ID}@bounces.mail.shop.example.tn`);
+  });
+
+  it("weighs a message's attachments as sent, nested ones and files named as RFC 2231 writes them, and nothing else", async () => {
+    const raw = [
+      'From: orders@shop.example.tn',
+      'To: client@example.tn',
+      'Subject: Receipt',
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="outer"',
+      '',
+      '--outer',
+      'Content-Type: multipart/alternative; boundary="inner"',
+      '',
+      '--inner',
+      'Content-Type: text/plain',
+      '',
+      'Thank you.',
+      '--inner',
+      'Content-Type: text/html',
+      '',
+      '<p>Thank you.</p>',
+      '--inner--',
+      '--outer',
+      'Content-Type: application/pdf; name="receipt.pdf"',
+      'Content-Disposition: attachment; filename="receipt.pdf"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      'JVBERi0xLjQK',
+      '--outer',
+      'Content-Type: image/png',
+      "Content-Disposition: inline; filename*=UTF-8''logo%20v2.png",
+      'Content-Transfer-Encoding: base64',
+      '',
+      'iVBORw0KGgo=',
+      '--outer--',
+      '',
+    ].join('\r\n');
+    const simple = await composeSimple({ from: 'orders@shop.example.tn', to: ['client@example.tn'], cc: [], replyTo: [], subject: 'Hello', text: 'Merci', html: '<p>Merci</p>', headers: [] }, ID, 'email.ffunc.cloud');
+
+    expect(attachmentBytesOf(Buffer.from(raw))).toBe('JVBERi0xLjQK'.length + 'iVBORw0KGgo='.length);
+    expect([attachmentBytesOf(simple), attachmentBytesOf(Buffer.from('Subject: Hello\r\n\r\nNo parts at all'))]).toEqual([0, 0]);
   });
 });

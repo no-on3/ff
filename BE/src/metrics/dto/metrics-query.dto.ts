@@ -101,6 +101,35 @@ class CacheMetricSeries {
   @ApiProperty({ type: CacheCountSeries, description: 'Keys it let go past its memory, the least recently used first' }) Evictions: CacheCountSeries;
 }
 
+class EmailCountSeries {
+  @ApiProperty({ type: [Number], description: "The hour's recipients, each counted in its message's hour; 0 for an hour without one" }) Sum: number[];
+}
+
+class EmailRateSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: 'A fraction, as SES gives it: over the 14 days that end with the hour; null without a recipient reached in them' })
+  Average: Array<number | null>;
+}
+
+class EmailMetricSeries {
+  @ApiProperty({ type: EmailCountSeries, description: 'Sent, each recipient one' }) Send: EmailCountSeries;
+  @ApiProperty({ type: EmailCountSeries, description: 'Taken by the receiving side, and not bounced since: complained of too' }) Delivery: EmailCountSeries;
+  @ApiProperty({ type: EmailCountSeries, description: 'Bounced, or kept off by the suppression list' }) Bounce: EmailCountSeries;
+  @ApiProperty({ type: EmailCountSeries, description: 'Complained of' }) Complaint: EmailCountSeries;
+  @ApiProperty({ type: EmailRateSeries, name: 'Reputation.BounceRate', description: 'Its recipients reached that bounced for good, as the enforcement judges it' })
+  'Reputation.BounceRate': EmailRateSeries;
+  @ApiProperty({ type: EmailRateSeries, name: 'Reputation.ComplaintRate', description: 'Its recipients reached that complained' })
+  'Reputation.ComplaintRate': EmailRateSeries;
+}
+
+/** The account's mail's metrics: a point an hour of the window, oldest first. */
+export class EmailMetricsView {
+  @ApiProperty({ example: 3600 }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each hour's start" }) timestamps: Date[];
+  @ApiProperty({ type: EmailMetricSeries }) metrics: EmailMetricSeries;
+}
+
 /** A cache's metrics: a point an hour of the window, oldest first. */
 export class CacheMetricsView {
   @ApiProperty({ example: 3600 }) period: number;

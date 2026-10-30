@@ -1,4 +1,4 @@
-import { headerOf } from './email-send';
+import { headerOf, headerParameter, mimeParts } from './email-send';
 import { identityKey } from './email-names';
 
 /**
@@ -29,29 +29,6 @@ export interface Report {
 
 const VERP = /\bb-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})@/i;
 
-/** A header field's value's parameter, such as a Content-Type's boundary or report-type. */
-function parameter(value: string, name: string): string | null {
-  const match = new RegExp(`;\\s*${name}\\s*=\\s*(?:"([^"]*)"|([^;\\s]+))`, 'i').exec(value);
-  return match ? (match[1] ?? match[2]) : null;
-}
-
-/** A MIME message's parts, each its header fields and its body, split by its boundary. */
-function partsOf(raw: Buffer): Array<{ fields: Array<{ name: string; value: string }>; body: Buffer }> {
-  const { fields, end } = headerOf(raw);
-  const boundary = parameter(fields.find((field) => field.name === 'content-type')?.value ?? '', 'boundary');
-  if (!boundary) return [];
-  const text = raw.subarray(end).toString('latin1');
-  const delimiter = `--${boundary}`;
-  return text
-    .split(new RegExp(`\\r?\\n?${delimiter.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?:--)?[ \\t]*\\r?\\n?`))
-    .slice(1, -1)
-    .map((part) => {
-      const buffer = Buffer.from(part, 'latin1');
-      const header = headerOf(buffer);
-      return { fields: header.fields, body: buffer.subarray(header.end) };
-    });
-}
-
 /** The field groups of a status report's body, each a group's fields by their names in lower case. */
 function groupsOf(body: Buffer): Array<Map<string, string>> {
   return body
@@ -74,8 +51,8 @@ export function readReport(raw: Buffer): Report {
   const to = ['delivered-to', 'x-original-to', 'to'].map(header).find((value) => value !== undefined && VERP.test(value));
   const messageId = VERP.exec(to ?? raw.toString('latin1'))?.[1]?.toLowerCase() ?? null;
   const contentType = header('content-type') ?? '';
-  const reportType = /^multipart\/report/i.test(contentType) ? parameter(contentType, 'report-type')?.toLowerCase() : undefined;
-  const parts = partsOf(raw);
+  const reportType = /^multipart\/report/i.test(contentType) ? headerParameter(contentType, 'report-type')?.toLowerCase() : undefined;
+  const parts = mimeParts(raw);
   const typeOf = (part: (typeof parts)[number]) => (part.fields.find((field) => field.name === 'content-type')?.value ?? '').split(';')[0].trim().toLowerCase();
 
   if (reportType === 'delivery-status') {

@@ -65,6 +65,7 @@ const SEND_REFUSALS: Record<SendRefusalKind, (message: string) => SesError> = {
   rejected: messageRejected,
   paused: sendingPaused,
   suspended: accountSuspended,
+  credit: sendingPaused,
   daily: limitExceeded,
   rate: tooManyRequests,
   unavailable: sendingPaused,

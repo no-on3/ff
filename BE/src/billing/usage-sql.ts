@@ -27,16 +27,17 @@ export const SAMPLE_SUMS = [
   `sum(GREATEST("instances" - "min_instances", 0)::bigint * "memory_mb" * 60000) AS "reservedMbMs"`,
 ].join(', ');
 
-/** A database's, bucket's, queue's or cache's rated hours with one book, summed, as RESOURCE_SUMS selects them. */
+/** A database's, bucket's, queue's or cache's rated hours with one book, or a domain's or address's mail, summed, as RESOURCE_SUMS selects them. */
 export interface ResourceRow {
   resourceId: string;
-  kind: 'database' | 'bucket' | 'queue' | 'cache';
+  kind: 'database' | 'bucket' | 'queue' | 'cache' | 'email';
   priceBookId: string;
   byteHours: string;
   hours: string;
   tier1: string;
   tier2: string;
   requests: string;
+  bytes: string;
 }
 
 /** Over resource_usage_hourly, grouped by "resource_id", "kind" and "price_book_id": the hourly rating's sums and the statement's alike. */
@@ -49,6 +50,7 @@ export const RESOURCE_SUMS = [
   `sum("tier1_requests")::text AS "tier1"`,
   `sum("tier2_requests")::text AS "tier2"`,
   `sum("requests")::text AS "requests"`,
+  `sum("bytes")::text AS "bytes"`,
 ].join(', ');
 
 /** The same, as the rater takes them. */
@@ -60,4 +62,12 @@ export const resourceUsage = (row: ResourceRow): ResourceUsage => ({
   tier1Requests: BigInt(row.tier1),
   tier2Requests: BigInt(row.tier2),
   requests: BigInt(row.requests),
+  bytes: BigInt(row.bytes),
 });
+
+/**
+ * Mail's resource in resource_usage_hourly, one for each domain or address an
+ * account sends from (ADR 0012): a UUID of its own, made of the account and
+ * the identity, as the hourly rating and the month's estimate both name it.
+ */
+export const EMAIL_RESOURCE_ID = `md5('email:' || "account_id" || ':' || "identity")::uuid`;

@@ -495,6 +495,23 @@ export interface CacheUsage {
   cost: string | null;
 }
 
+/** A domain's or an address's mail in GET /usage, as the API's EmailUsageView names its fields: contract.test.ts checks them. */
+export const EMAIL_USAGE_FIELDS = ['resourceId', 'identity', 'deleted', 'recipients', 'attachmentBytes', 'cost'] as const satisfies ReadonlyArray<keyof EmailUsage>;
+/** The mail one of the account's domains or addresses sent in the month, as SES bills it. */
+export interface EmailUsage {
+  /** Its line in the bill. */
+  resourceId: string;
+  identity: string;
+  /** The domain or address was deleted since: its usage stays. */
+  deleted: boolean;
+  /** Its messages' recipients, each one, a suppressed one too. */
+  recipients: number;
+  /** Its messages' attachments, each recipient's copy, in bytes. */
+  attachmentBytes: number;
+  /** null without a price book. */
+  cost: string | null;
+}
+
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
@@ -509,6 +526,8 @@ export interface MonthlyUsage {
   queues: QueueUsage[];
   /** Each of its caches measured in the month, the most GB-hours first. */
   caches: CacheUsage[];
+  /** Each domain or address its mail went from in the month, the most recipients first. */
+  email: EmailUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */
   estimate: UsageEstimate | null;
@@ -1250,6 +1269,123 @@ export const cachesApi = {
   /** Its memory used, connections, hits, misses and evictions, a point an hour; the last 60 hours by default. */
   metrics: (name: string, params: { start?: string; end?: string } = {}) => api.get<CacheMetrics>(`/caches/${name}/metrics`, { params }),
 };
+
+/** Where a domain's or an address's proof is, as SES v2's VerificationStatus names it (ADR 0012). */
+export type IdentityStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'TEMPORARY_FAILURE';
+
+/** A record a domain publishes, and what it is for. */
+export interface MailRecord {
+  purpose: 'DKIM' | 'MAIL_FROM' | 'SPF' | 'DMARC';
+  type: 'TXT' | 'MX';
+  name: string;
+  value: string;
+}
+
+/** A domain or an address the account sends mail from, as the API's EmailIdentityView names its fields. */
+export interface EmailIdentity {
+  identity: string;
+  type: 'DOMAIN' | 'EMAIL_ADDRESS';
+  status: IdentityStatus;
+  sendingEnabled: boolean;
+  /** A domain's DKIM selector: its record is at <selector>._domainkey.<domain>. */
+  dkimSelector: string | null;
+  /** A domain's own return path, where its bounces come back once its MX record is FF's. */
+  mailFromDomain: string | null;
+  mailFromVerified: boolean;
+  /** The records a domain publishes; none for an address. */
+  records: MailRecord[];
+  verifiedAt: string | null;
+  createdAt: string;
+}
+
+/** The account's sending, as SES v2's GetAccount says it. */
+export interface EmailAccount {
+  sandbox: boolean;
+  sendingEnabled: boolean;
+  enforcementStatus: 'HEALTHY' | 'PROBATION' | 'SHUTDOWN';
+  max24HourSend: number;
+  maxSendRate: number;
+  sentLast24Hours: number;
+}
+
+export type SuppressionReason = 'BOUNCE' | 'COMPLAINT';
+
+/** An address on the account's suppression list: no mail of the account goes to it. */
+export interface Suppression {
+  address: string;
+  reason: SuppressionReason;
+  /** The message whose bounce or complaint put it there; null when the account did. */
+  messageId: string | null;
+  feedback: string | null;
+  updatedAt: string;
+}
+
+export type EmailRecipientStatus = 'QUEUED' | 'SENT' | 'SUPPRESSED' | 'BOUNCED' | 'COMPLAINED' | 'FAILED';
+
+export interface EmailRecipient {
+  address: string;
+  status: EmailRecipientStatus;
+  diagnostic: string | null;
+}
+
+/** A message the account sent, through the SES endpoint or the API, and what became of each recipient. */
+export interface EmailMessage {
+  messageId: string;
+  from: string;
+  identity: string;
+  status: 'QUEUED' | 'SENT' | 'FAILED';
+  recipients: EmailRecipient[];
+  sizeBytes: number;
+  createdAt: string;
+  sentAt: string | null;
+}
+
+/** A message to send, as SendEmail takes a simple one. */
+export interface SendEmail {
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  replyTo?: string[];
+  subject: string;
+  text?: string;
+  html?: string;
+}
+
+/** Customers' mail (ADR 0012): the domains and addresses it goes from, the account's sending, its messages, its suppression list. */
+export const emailApi = {
+  identities: () => api.get<EmailIdentity[]>('/email/identities'),
+  addIdentity: (identity: string) => api.post<EmailIdentity>('/email/identities', { identity }),
+  /** A domain's records looked up now; an address's link e-mailed again. */
+  verifyIdentity: (identity: string) => api.post<EmailIdentity>(`/email/identities/${encodeURIComponent(identity)}/verify`),
+  removeIdentity: (identity: string) => api.delete(`/email/identities/${encodeURIComponent(identity)}`),
+  account: () => api.get<EmailAccount>('/email/account'),
+  suppressions: () => api.get<{ suppressions: Suppression[]; next: string | null }>('/email/suppressions'),
+  suppress: (address: string, reason: SuppressionReason) => api.put<Suppression>(`/email/suppressions/${encodeURIComponent(address)}`, { reason }),
+  unsuppress: (address: string) => api.delete(`/email/suppressions/${encodeURIComponent(address)}`),
+  messages: (limit = 20) => api.get<{ messages: EmailMessage[] }>('/email/messages', { params: { limit } }),
+  send: (message: SendEmail) => api.post<{ messageId: string }>('/email/messages', message),
+  metrics: (params: { start?: string; end?: string } = {}) => api.get<EmailMetrics>('/email/metrics', { params }),
+};
+
+/**
+ * GET /email/metrics: a point an hour, oldest first, as CloudWatch names SES's: each hour's recipients, counted in their
+ * message's hour; the reputation rates, fractions, over the 14 days that end with each hour, null without a recipient reached.
+ */
+export interface EmailMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: {
+    Send: { Sum: number[] };
+    Delivery: { Sum: number[] };
+    Bounce: { Sum: number[] };
+    Complaint: { Sum: number[] };
+    'Reputation.BounceRate': { Average: Array<number | null> };
+    'Reputation.ComplaintRate': { Average: Array<number | null> };
+  };
+}
 
 /** GET /caches/:name/metrics: a point an hour, oldest first, as CloudWatch names ElastiCache's; null for an hour it wasn't sampled in. */
 export interface CacheMetrics {

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { AccountAuditEntry, accountsApi, invoicesApi, paymentsApi, plansApi } from '../api';
+import { AccountAuditEntry, accountsApi, emailApi, invoicesApi, paymentsApi, plansApi } from '../api';
 import DataTable, { Column } from '../components/DataTable';
 import GrantDialog from '../components/GrantDialog';
 import ReasonDialog from '../components/ReasonDialog';
@@ -26,6 +26,7 @@ import {
 } from '../lib/accounts';
 import { actionLabel, describeAction } from '../lib/audit';
 import { GrantRequest, chargesLabel, creditStateLabel, grantNotice } from '../lib/credits';
+import { AccountEmail, EmailChange, emailChangeDialog, enforcementLabel, identityLabel, quotaLabel } from '../lib/email';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
 import { balanceNote, formatMoney } from '../lib/money';
 import { AdminInvoice, invoiceLabel } from '../lib/invoices';
@@ -118,6 +119,84 @@ const AccountInvoices: React.FC<{ accountId: string }> = ({ accountId }) => {
       <Link to={`/invoices?accountId=${accountId}`} className="text-sm text-blue-700 hover:underline">
         {invoices.more ? 'All its invoices' : 'On the Invoices page'}, to download them or issue a credit note →
       </Link>
+    </>
+  );
+};
+
+/**
+ * The account's mail (ADR 0012): its sandbox, its sending's switch, its
+ * standing after its bounces and complaints, its quotas and its identities;
+ * each change asked for with a reason, which its owners get by e-mail.
+ */
+const AccountMail: React.FC<{ accountId: string; accountName: string; onChanged: () => void }> = ({ accountId, accountName, onChanged }) => {
+  const [mail, setMail] = useState<AccountEmail | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [pending, setPending] = useState<EmailChange | null>(null);
+
+  useEffect(() => {
+    emailApi.get(accountId).then(
+      ({ data }) => setMail(data),
+      (error) => setFailure(apiErrorMessage(error)),
+    );
+  }, [accountId]);
+
+  if (failure) return <ErrorState message={failure} />;
+  if (!mail) return <Loading />;
+  const dialog = pending ? emailChangeDialog(pending, accountName) : null;
+  const confirm = async (reason: string) => {
+    if (!pending) return;
+    try {
+      const { data } = await emailApi.change(accountId, pending, reason);
+      setMail(data);
+      setPending(null);
+      onChanged();
+    } catch (error) {
+      throw new Error(apiErrorMessage(error));
+    }
+  };
+  const button = (label: string, change: EmailChange) => (
+    <button type="button" className="btn btn-secondary" onClick={() => setPending(change)}>
+      {label}
+    </button>
+  );
+  return (
+    <>
+      <dl className="card grid gap-3 sm:grid-cols-2">
+        <Fact label="Sandbox">
+          <span className="flex flex-wrap items-center gap-3">
+            {mail.sandbox ? 'In it: mail only to what it proved' : 'Out: mail to any address'}
+            {button(mail.sandbox ? 'Let it out' : 'Put it back', { productionAccess: mail.sandbox })}
+          </span>
+        </Fact>
+        <Fact label="Sending">
+          <span className="flex flex-wrap items-center gap-3">
+            {mail.sendingEnabled ? 'On' : 'Paused'}
+            {button(mail.sendingEnabled ? 'Pause' : 'Turn on', { sendingEnabled: !mail.sendingEnabled })}
+          </span>
+        </Fact>
+        <Fact label="Standing">
+          <span className="flex flex-wrap items-center gap-3">
+            {enforcementLabel(mail.enforcementStatus)}
+            {mail.enforcementStatus !== 'HEALTHY' && button('Clear', { enforcementStatus: 'HEALTHY' })}
+          </span>
+        </Fact>
+        <Fact label="Quota">{quotaLabel(mail)}</Fact>
+        {mail.reason && <Fact label="Last changed">{`${mail.updatedAt ? whenUtc(mail.updatedAt) : ''}: ${mail.reason}`}</Fact>}
+      </dl>
+      {mail.identities.length === 0 ? (
+        <EmptyState>No domain or address to send from.</EmptyState>
+      ) : (
+        <ul className="list-disc pl-5 text-sm">
+          {mail.identities.map((identity) => (
+            <li key={identity.identity}>{identityLabel(identity)}</li>
+          ))}
+        </ul>
+      )}
+      {dialog && (
+        <ReasonDialog title={dialog.title} confirmLabel={dialog.confirmLabel} onConfirm={confirm} onCancel={() => setPending(null)}>
+          <p>{dialog.body}</p>
+        </ReasonDialog>
+      )}
     </>
   );
 };
@@ -459,6 +538,19 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
             rows={view.queues.map((q) => [q.name, queueMessagesLabel(q.messages), formatBytes(q.sizeBytes), q.deadLetterQueue ?? '–', whenUtc(q.createdAt)])}
           />
         )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Mail</h2>
+        <AccountMail
+          accountId={account.id}
+          accountName={account.name}
+          onChanged={() => {
+            setNotice('Saved: the owners got an e-mail.');
+            setAuditPaging(firstPage());
+            setChanges((n) => n + 1);
+          }}
+        />
       </section>
 
       <section className="space-y-3">

@@ -5,7 +5,9 @@ import {
   BucketMetricsView,
   CacheMetricsView,
   DatabaseMetricsView,
+  EmailMetricsView,
   InstancesRow,
+  REPUTATION_DAYS,
   MetricsView,
   MetricsWindow,
   PeriodRow,
@@ -14,6 +16,7 @@ import {
   bucketMetricsView,
   cacheMetricsView,
   databaseMetricsView,
+  emailMetricsView,
   metricsView,
   queueMetricsView,
   siteMetricsView,
@@ -211,6 +214,40 @@ export class CustomerMetricsService {
         hits: count(row.hits),
         misses: count(row.misses),
         evictions: count(row.evictions),
+      })),
+    );
+  }
+
+  /**
+   * The account's mail's, a point an hour, from its messages' recipients
+   * (ADR 0012): the window's hours, and the 14 days before it that its
+   * reputation is judged on. Messages are kept 30 days, so an hour before that
+   * has none.
+   */
+  async emailMetrics(accountId: string, window: MetricsWindow): Promise<EmailMetricsView> {
+    const rows = await this.dataSource.query<Array<Record<string, string>>>(
+      `SELECT floor(extract(epoch FROM m."created_at") / $3)::bigint * $3 AS "bucket",
+              count(*) AS "send",
+              count(*) FILTER (WHERE r->>'status' IN ('SENT', 'COMPLAINED')) AS "delivery",
+              count(*) FILTER (WHERE r->>'status' IN ('BOUNCED', 'SUPPRESSED')) AS "bounce",
+              count(*) FILTER (WHERE r->>'status' = 'COMPLAINED') AS "complaint",
+              count(*) FILTER (WHERE r->>'status' IN ('SENT', 'BOUNCED', 'COMPLAINED')) AS "reached",
+              count(*) FILTER (WHERE r->>'status' = 'BOUNCED' AND r->>'permanent' = 'true') AS "hard"
+         FROM "email_messages" m, jsonb_array_elements(m."recipients") r
+        WHERE m."account_id" = $4 AND m."created_at" >= $1::timestamptz - make_interval(days => $5) AND m."created_at" < $2
+        GROUP BY 1`,
+      [window.start, window.end, window.period, accountId, REPUTATION_DAYS],
+    );
+    return emailMetricsView(
+      window,
+      rows.map((row) => ({
+        bucket: Number(row.bucket),
+        send: Number(row.send),
+        delivery: Number(row.delivery),
+        bounce: Number(row.bounce),
+        complaint: Number(row.complaint),
+        reached: Number(row.reached),
+        hardBounces: Number(row.hard),
       })),
     );
   }

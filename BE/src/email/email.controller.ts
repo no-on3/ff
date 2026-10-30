@@ -57,6 +57,7 @@ const REFUSALS: Record<SendRefusalKind, (message: string) => HttpException> = {
   rejected: (message) => new BadRequestException(message),
   paused: (message) => new ForbiddenException(message),
   suspended: (message) => new ForbiddenException(message),
+  credit: (message) => new HttpException(message, HttpStatus.PAYMENT_REQUIRED),
   daily: (message) => new HttpException(message, HttpStatus.TOO_MANY_REQUESTS),
   rate: (message) => new HttpException(message, HttpStatus.TOO_MANY_REQUESTS),
   unavailable: (message) => new ServiceUnavailableException(message),
@@ -198,6 +199,7 @@ export class EmailController {
   })
   @ApiResponse({ status: 201, type: SentEmailView })
   @ApiResponse({ status: 400, description: 'Not a message SES takes, or from or to an identity the account has not proved' })
+  @ApiResponse({ status: 402, description: 'The account is out of credit: sending waits for credit' })
   @ApiResponse({ status: 403, description: "The account's sending is paused or stopped" })
   @ApiResponse({ status: 429, description: "Past the plan's quota a day, or its rate a second" })
   @ApiResponse({ status: 503, description: "FF has no server of customers' mail here" })

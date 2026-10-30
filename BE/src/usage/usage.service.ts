@@ -7,9 +7,10 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { PLATFORM_LIMITS } from '../plans/plan-limits';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
-import { BucketMonth, CacheMonth, DatabaseMonth, QueueMonth, UsageAmountsView, UsageMonth } from './usage.dto';
+import { BucketMonth, CacheMonth, DatabaseMonth, EmailMonth, QueueMonth, UsageAmountsView, UsageMonth } from './usage.dto';
 import { Decimal } from '../billing/decimal';
 import { BYTES_PER_GB, gbMonths, hoursIn } from '../billing/rating';
+import { EMAIL_RESOURCE_ID } from '../billing/usage-sql';
 import { coldStartSeconds, invocationSeconds, invocations } from '../monitoring/operator-metrics';
 
 /** The outcomes of a call that ran, measured by the runtime. */
@@ -47,7 +48,8 @@ const amounts = (row: UsageRow): UsageAmountsView => ({
 
 /**
  * The tables partitioned by month, written once and never changed: usage records, capacity samples, customers'
- * databases', buckets', queues' and caches' samples, buckets' and queues' request counts, and functions' asynchronous calls'.
+ * databases', buckets', queues' and caches' samples, buckets' and queues' request counts, functions' asynchronous
+ * calls', and mail's billing records.
  */
 const MONTHLY_TABLES = [
   'usage_records',
@@ -59,6 +61,7 @@ const MONTHLY_TABLES = [
   'queue_samples',
   'async_event_counts',
   'cache_samples',
+  'email_sends',
 ];
 
 /**
@@ -327,6 +330,30 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
       messagesSent: Number(row.sent),
       messagesReceived: Number(row.received),
     }));
+  }
+
+  /**
+   * An account's mail in a month by the UTC calendar (ADR 0012), from its
+   * messages' billing records: by the domain or address it went from, its
+   * recipients and its attachments, each recipient's copy, as SES bills them.
+   * The most recipients first.
+   */
+  async monthlyEmail(accountId: string, month: string): Promise<EmailMonth[]> {
+    const [year, number] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(year, number - 1, 1));
+    const to = new Date(Date.UTC(year, number, 1));
+    const rows = await this.records.manager.query<Array<{ id: string; identity: string; deleted: boolean; recipients: string; bytes: string }>>(
+      `SELECT s."id", s."identity", NOT EXISTS (SELECT 1 FROM "email_identities" i WHERE i."account_id" = s."account_id" AND i."identity" = s."identity") AS "deleted",
+              s."recipients", s."bytes"
+         FROM (SELECT ${EMAIL_RESOURCE_ID} AS "id", "account_id", "identity", sum("recipients")::text AS "recipients",
+                      sum("attachment_bytes"::bigint * "recipients")::text AS "bytes"
+                 FROM "email_sends"
+                WHERE "account_id" = $1 AND "sent_at" >= $2 AND "sent_at" < $3
+                GROUP BY "account_id", "identity") s
+        ORDER BY s."recipients"::bigint DESC, s."identity"`,
+      [accountId, from, to],
+    );
+    return rows.map((row) => ({ resourceId: row.id, identity: row.identity, deleted: row.deleted, recipients: Number(row.recipients), attachmentBytes: Number(row.bytes) }));
   }
 
   /**

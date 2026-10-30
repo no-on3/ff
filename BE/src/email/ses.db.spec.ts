@@ -19,6 +19,7 @@ import { request as httpRequest } from 'node:http';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
+import { CreditService } from '../billing/credit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
@@ -159,7 +160,7 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
     identities = new EmailIdentitiesService(db.dataSource.getRepository(EmailIdentity), plans, encryption, mail, audit, resolver, config);
     const suppressions = new EmailSuppressionsService(db.dataSource.getRepository(EmailSuppression), audit);
     const account = new EmailAccountService(plans, db.dataSource.getRepository(EmailSending));
-    const messages = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick: () => undefined } as unknown as EmailSender, config);
+    const messages = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick: () => undefined } as unknown as EmailSender, { admit: async () => undefined } as unknown as CreditService, config);
     frontDoor = new SesFrontDoor(directory, new SesOperations(identities, suppressions, account, messages), identities);
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
   });

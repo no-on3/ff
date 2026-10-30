@@ -340,6 +340,36 @@ run('metrics (L2)', () => {
     await expect(metrics.forCache(A, 'm-theirs', hours('2026-10-01T08:00:00Z', '2026-10-01T11:00:00Z'))).rejects.toThrow(new NotFoundException('The account has no cache m-theirs'));
   });
 
+  it("gives the account's mail an hour at a time from its messages, each recipient one, and its reputation over the 14 days before each hour's end, no other account's", async () => {
+    const messageOf = (accountId: string, createdAt: string, recipients: Array<{ status: string; permanent?: boolean }>) =>
+      query(
+        `INSERT INTO email_messages (id, account_id, identity, from_address, return_path, recipients, recipient_count, size_bytes, status, created_at)
+         VALUES (gen_random_uuid(), $1, 'shop.example.tn', 'orders@shop.example.tn', 'b-0@bounces.mail.ff.test', $2, $3, 1000, 'SENT', $4)`,
+        [accountId, JSON.stringify(recipients.map((recipient, index) => ({ address: `r${index}@example.tn`, ...recipient }))), recipients.length, createdAt],
+      );
+    const sent = (n: number) => Array.from({ length: n }, () => ({ status: 'SENT' }));
+    // 08:10: two taken, one bounced for good, one kept off by the suppression list. 09:30: one complained of, one still queued.
+    await messageOf(A, '2026-10-01T08:10:00Z', [...sent(2), { status: 'BOUNCED', permanent: true }, { status: 'SUPPRESSED' }]);
+    await messageOf(A, '2026-10-01T09:30:00Z', [{ status: 'COMPLAINED' }, { status: 'QUEUED' }]);
+    // Six days before, six taken; 21 days before, ten bounced, too long ago to count.
+    await messageOf(A, '2026-09-25T12:00:00Z', sent(6));
+    await messageOf(A, '2026-09-10T12:00:00Z', Array.from({ length: 10 }, () => ({ status: 'BOUNCED', permanent: true })));
+    await messageOf(B, '2026-10-01T08:20:00Z', Array.from({ length: 3 }, () => ({ status: 'BOUNCED', permanent: true })));
+
+    const view = await metrics.emailMetrics(A, { start: new Date('2026-10-01T08:00:00Z'), end: new Date('2026-10-01T10:00:00Z'), period: 3600 });
+
+    expect(view.metrics).toEqual({
+      Send: { Sum: [4, 2] },
+      Delivery: { Sum: [2, 1] },
+      Bounce: { Sum: [2, 0] },
+      Complaint: { Sum: [0, 1] },
+      // By 09:00, 9 recipients reached in 14 days, 1 bounced for good; by 10:00, 10, and 1 complaint.
+      'Reputation.BounceRate': { Average: [0.111111, 0.1] },
+      'Reputation.ComplaintRate': { Average: [0, 0.1] },
+    });
+    expect(view.timestamps).toEqual([new Date('2026-10-01T08:00:00Z'), new Date('2026-10-01T09:00:00Z')]);
+  });
+
   it("answers another account's function, and one that doesn't exist, with 404", async () => {
     await expect(metrics.forFunction(B, f1.id, WINDOW)).rejects.toThrow(new NotFoundException(`Function with ID ${f1.id} not found`));
     await expect(metrics.forFunction(A, g.id, WINDOW)).rejects.toThrow(NotFoundException);

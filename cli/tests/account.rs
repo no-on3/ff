@@ -264,3 +264,25 @@ fn metrics_of_the_account_and_a_wrong_period() {
         .code(2)
         .stderr(predicate::str::contains("a period is 60, 300 or 3600 seconds"));
 }
+
+#[test]
+fn usage_shows_the_mail_after_the_caches_by_the_domain_or_address_it_went_from_as_ses_bills_it() {
+    let mut month = usage();
+    month["email"] = json!([
+        { "resourceId": "e1", "identity": "shop.example.tn", "deleted": false, "recipients": 1250, "attachmentBytes": 52_428_800, "cost": "0.376" },
+        { "resourceId": "e2", "identity": "ana@example.tn", "deleted": true, "recipients": 3, "attachmentBytes": 0, "cost": "0.001" }
+    ]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "SENT FROM                 RECIPIENTS  ATTACHMENTS  COST\n\
+             shop.example.tn           1250        50 MB        0.376\n\
+             ana@example.tn (deleted)  3           -            0.001\nestimated cost:"
+        ),
+        "{text}"
+    );
+}

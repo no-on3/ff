@@ -17,6 +17,7 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'account.plan', label: 'Account moved to a plan' },
   { value: 'account.egress', label: 'Internet egress changed' },
   { value: 'account.storage', label: 'Databases, buckets and queues turned off or on' },
+  { value: 'account.email', label: "Account's mail changed" },
   { value: 'payment.record', label: 'Bank transfer recorded' },
   { value: 'payment.withholding', label: 'Withholding certificate added' },
   { value: 'payment.cancel', label: 'Pro-forma cancelled' },
@@ -37,6 +38,7 @@ export const OPERATOR_ACTIONS: Array<{ value: string; label: string }> = [
 /** What FF does on its own, as an account's audit log names it, with what the dashboard calls each. */
 export const FF_ACTIONS: Array<{ value: string; label: string }> = [
   { value: 'account.data_delete', label: "Account's functions, history and logs deleted" },
+  { value: 'email.sending.enforce', label: "Account's mail reviewed or stopped, past its bounce or complaint rate" },
 ];
 
 /** One operator action, as GET /admin/audit-log gives it. */
@@ -91,6 +93,10 @@ const ACCOUNT_FIELDS: Record<string, { label: string; value?: (value: unknown) =
   planId: { label: 'Plan' },
   internetEgress: { label: 'Internet egress', value: (value) => (value === true ? 'on' : value === false ? 'off' : shown(value)) },
   storageEnabled: { label: 'Databases, buckets and queues', value: (value) => (value === true ? 'on' : value === false ? 'off' : shown(value)) },
+  // An account's mail (ADR 0012): out of the sandbox, its switch, its standing after a review.
+  productionAccess: { label: 'Mail', value: (value) => (value === true ? 'out of the sandbox' : value === false ? 'in the sandbox' : shown(value)) },
+  sendingEnabled: { label: 'Sending', value: (value) => (value === true ? 'on' : value === false ? 'paused' : shown(value)) },
+  enforcementStatus: { label: "Mail's standing" },
 };
 
 /** A plan's limits by name (P-73); its quota in one line. A plan's name changes too. */

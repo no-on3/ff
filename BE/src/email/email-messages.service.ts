@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { Repository } from 'typeorm';
+import { InsufficientCreditException } from '../billing/credit-policy';
+import { CreditService } from '../billing/credit.service';
 import type { EmailSettings } from '../config/configuration';
 import { PlansService } from '../plans/plans.service';
 import { EmailAccountService } from './email-account.service';
@@ -10,7 +12,7 @@ import { EmailIdentitiesService } from './email-identities.service';
 import { EmailIdentity, EmailIdentityStatus, EmailIdentityType } from './email-identity.entity';
 import { EmailMessage, EmailMessageStatus, MessageRecipient } from './email-message.entity';
 import { domainOf } from './email-names';
-import { MAX_MESSAGE_BYTES, MAX_RECIPIENTS, addressesOf, composeSimple, headerProblem, rawParties, returnPathOf, senderOf, withoutBcc } from './email-send';
+import { MAX_MESSAGE_BYTES, MAX_RECIPIENTS, addressesOf, attachmentBytesOf, composeSimple, headerProblem, rawParties, returnPathOf, senderOf, withoutBcc } from './email-send';
 import { EmailSender } from './email-sender.service';
 import { EmailSuppressionsService } from './email-suppressions.service';
 import { mailFromDomain } from './mail-domain';
@@ -18,7 +20,7 @@ import { mailFromDomain } from './mail-domain';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Why a message wasn't taken: each kind one of SES's errors at the SES endpoint, and an HTTP status in FF's API. */
-export type SendRefusalKind = 'invalid' | 'rejected' | 'paused' | 'suspended' | 'daily' | 'rate' | 'unavailable';
+export type SendRefusalKind = 'invalid' | 'rejected' | 'paused' | 'suspended' | 'credit' | 'daily' | 'rate' | 'unavailable';
 
 export class SendRefusal extends Error {
   constructor(
@@ -63,6 +65,7 @@ export class EmailMessagesService {
     private readonly account: EmailAccountService,
     private readonly plans: PlansService,
     private readonly sender: EmailSender,
+    private readonly credit: CreditService,
     config: ConfigService,
   ) {
     this.settings = config.getOrThrow<EmailSettings>('email');
@@ -94,6 +97,13 @@ export class EmailMessagesService {
     const sending = await this.account.sendingOf(accountId);
     if (!sending.sendingEnabled) throw new SendRefusal('paused', "Sending is paused for this account: FF's operator stopped it, and says why.");
     if (sending.enforcementStatus === 'SHUTDOWN') throw new SendRefusal('suspended', "The account's sending is stopped: its bounces or complaints went past what SES allows, and FF's operator reviews it.");
+    // Mail is billed: without credit it waits, as an upload to a bucket and a queue's send do.
+    try {
+      await this.credit.admit(accountId);
+    } catch (error) {
+      if (error instanceof InsufficientCreditException) throw new SendRefusal('credit', 'The account is out of credit: its identities and messages are read, and sending waits for credit.');
+      throw error;
+    }
     // The sender's identity, its address or its domain, proved; in the sandbox, each recipient's too.
     const names = [from, domainOf(from), ...(sending.productionAccess ? [] : recipients.flatMap((recipient) => [recipient, domainOf(recipient)]))];
     const known = await this.identities.findAll(accountId, names);
@@ -140,6 +150,11 @@ export class EmailMessagesService {
         status: queued ? EmailMessageStatus.QUEUED : EmailMessageStatus.SENT,
         sentAt: queued ? null : new Date(now),
       });
+      // Its billing record, at the same time as the message, which outlives it.
+      await manager.query(
+        `INSERT INTO "email_sends" ("message_id", "sent_at", "account_id", "identity", "recipients", "attachment_bytes") VALUES ($1, now(), $2, $3, $4, $5)`,
+        [id, accountId, identity.identity, recipients.length, attachmentBytesOf(message)],
+      );
     });
     if (queued) this.sender.kick();
     return id;

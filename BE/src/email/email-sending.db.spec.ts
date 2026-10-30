@@ -21,6 +21,8 @@ import { AddressInfo, Server, Socket, createServer } from 'node:net';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
+import { InsufficientCreditException } from '../billing/credit-policy';
+import { CreditService } from '../billing/credit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
@@ -310,6 +312,18 @@ run("customers' messages, sent and come back, in FF's database (L2)", () => {
   } as unknown as MailService;
   const resolver: MailResolver = { txt: async () => [], mx: async () => [] };
   const kick = jest.fn();
+  // The account's credit, as the credit service judges it: enough, until a test says it isn't.
+  let creditless = false;
+  const credit = {
+    admit: async () => {
+      if (!creditless) return;
+      throw new InsufficientCreditException(
+        { currency: 'TND', exponent: 3, balanceMinor: -40_000n, belowBufferSince: new Date('2026-10-17T10:33:00Z') },
+        { bufferMinor: 1000n, graceMs: 24 * 3_600_000, shadow: false },
+        { state: 'stopped', invokesStopAt: new Date('2026-10-18T10:33:00Z') },
+      );
+    },
+  } as unknown as CreditService;
   let db: ScratchDatabase;
   let identities: EmailIdentitiesService;
   let suppressions: EmailSuppressionsService;
@@ -375,7 +389,7 @@ run("customers' messages, sent and come back, in FF's database (L2)", () => {
     suppressions = new EmailSuppressionsService(db.dataSource.getRepository(EmailSuppression), audit);
     account = new EmailAccountService(plans, db.dataSource.getRepository(EmailSending));
     // Each round is the test's to run: the queue is kicked, and nothing more.
-    messages = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick } as unknown as EmailSender, config);
+    messages = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick } as unknown as EmailSender, credit, config);
     sender = new EmailSender(db.dataSource.getRepository(EmailMessage), identities, config);
     second = new EmailSender(db.dataSource.getRepository(EmailMessage), identities, config);
     sender.open();
@@ -407,6 +421,7 @@ run("customers' messages, sent and come back, in FF's database (L2)", () => {
     agent.waiting.clear();
     sent.length = 0;
     kick.mockClear();
+    creditless = false;
   });
 
   describe('a message taken', () => {
@@ -473,6 +488,41 @@ run("customers' messages, sent and come back, in FF's database (L2)", () => {
       expect([taken.to, /^Bcc:/im.test(taken.data), /^Message-ID: <raw-1@shop\.example\.tn>\r$/m.test(taken.data)]).toEqual([['ana@elsewhere.tn', 'audit@shop.example.tn'], false, true]);
       expect(dkimOf(taken.data, shopKey)).toMatchObject({ d: 'shop.example.tn', body: true, signature: true });
     });
+
+    it("leaves a billing record as SES bills it, its recipients and its attachments' weight as sent, which nothing changes or deletes", async () => {
+      const raw = Buffer.from(
+        [
+          'From: orders@shop.example.tn',
+          'To: ana@elsewhere.tn',
+          'Cc: audit@shop.example.tn',
+          'Subject: Your receipt',
+          'MIME-Version: 1.0',
+          'Content-Type: multipart/mixed; boundary="part"',
+          '',
+          '--part',
+          'Content-Type: text/plain',
+          '',
+          'Thank you.',
+          '--part',
+          'Content-Type: application/pdf',
+          'Content-Disposition: attachment; filename="receipt.pdf"',
+          'Content-Transfer-Encoding: base64',
+          '',
+          'JVBERi0xLjQK',
+          '--part--',
+          '',
+        ].join('\r\n'),
+      );
+
+      const id = await messages.send(ACCOUNT, { to: [], cc: [], bcc: [], replyTo: [], content: { raw } });
+
+      expect(await query('SELECT account_id AS "accountId", identity, recipients, attachment_bytes AS "attachmentBytes" FROM email_sends WHERE message_id = $1', [id])).toEqual([
+        { accountId: ACCOUNT, identity: 'shop.example.tn', recipients: 2, attachmentBytes: 'JVBERi0xLjQK'.length },
+      ]);
+      await expect(query('UPDATE email_sends SET recipients = 0 WHERE message_id = $1', [id])).rejects.toThrow();
+      await expect(query('DELETE FROM email_sends WHERE message_id = $1', [id])).rejects.toThrow();
+      await sender.drain();
+    });
   });
 
   describe('a message refused', () => {
@@ -514,9 +564,26 @@ run("customers' messages, sent and come back, in FF's database (L2)", () => {
       expect(await outcome(messages.send(ACCOUNT, simple('orders@shop.example.tn', ['ana@elsewhere.tn'])))).toMatch(/^suspended: The account's sending is stopped/);
     });
 
+    it('when the account is out of credit: nothing is queued, billed or counted against its quotas', async () => {
+      // Billing records stay, being append-only: the test counts what it adds.
+      const counts = () =>
+        query<Array<{ messages: number; billed: number }>>(`SELECT (SELECT count(*)::int FROM email_messages WHERE account_id = $1) AS "messages", (SELECT count(*)::int FROM email_sends WHERE account_id = $1) AS "billed"`, [ACCOUNT]);
+      const [before] = await counts();
+      creditless = true;
+      expect(await outcome(messages.send(ACCOUNT, simple('orders@shop.example.tn', ['buyer@shop.example.tn'])))).toBe(
+        'credit: The account is out of credit: its identities and messages are read, and sending waits for credit.',
+      );
+      expect(await counts()).toEqual([before]);
+      expect(kick).not.toHaveBeenCalled();
+      expect((await account.state(ACCOUNT)).sentLast24Hours).toBe(0);
+
+      creditless = false;
+      expect(await outcome(messages.send(ACCOUNT, simple('orders@shop.example.tn', ['buyer@shop.example.tn'])))).toBe('taken');
+    });
+
     it("when FF has no server of customers' mail: nothing is queued", async () => {
       const without = new ConfigService({ email: { ...config.getOrThrow('email'), server: null }, ses: config.getOrThrow('ses') });
-      const nowhere = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick } as unknown as EmailSender, without);
+      const nowhere = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick } as unknown as EmailSender, credit, without);
 
       expect(await outcome(nowhere.send(ACCOUNT, simple('orders@shop.example.tn', ['ana@elsewhere.tn'])))).toMatch(/^unavailable: Sending is paused: FF has no server of customers' mail here/);
       expect(kick).not.toHaveBeenCalled();
@@ -656,7 +723,7 @@ run("customers' messages, sent and come back, in FF's database (L2)", () => {
   });
 
   it('is kicked at once once queued: a round hands it over without waiting for the next second', async () => {
-    const kicked = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, sender, config);
+    const kicked = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, sender, credit, config);
 
     const id = await kicked.send(ACCOUNT, simple('orders@shop.example.tn', ['ana@elsewhere.tn']));
 

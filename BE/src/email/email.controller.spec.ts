@@ -204,7 +204,7 @@ describe('/email (L1)', () => {
 
   it("answers the service's refusals each with its status, in SES's words", async () => {
     const message = { from: 'orders@shop.example.tn', to: ['ana@shop.example.tn'], subject: 'Hi', text: 'x' };
-    const statuses: Record<SendRefusalKind, number> = { invalid: 400, rejected: 400, paused: 403, suspended: 403, daily: 429, rate: 429, unavailable: 503 };
+    const statuses: Record<SendRefusalKind, number> = { invalid: 400, rejected: 400, paused: 403, suspended: 403, credit: 402, daily: 429, rate: 429, unavailable: 503 };
 
     for (const [kind, status] of Object.entries(statuses) as Array<[SendRefusalKind, number]>) {
       messages.send.mockRejectedValueOnce(new SendRefusal(kind, `refused: ${kind}`));

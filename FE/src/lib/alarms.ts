@@ -42,6 +42,12 @@ export const STATISTICS = {
   CacheHits: ['Sum'],
   CacheMisses: ['Sum'],
   Evictions: ['Sum'],
+  Send: ['Sum'],
+  Delivery: ['Sum'],
+  Bounce: ['Sum'],
+  Complaint: ['Sum'],
+  'Reputation.BounceRate': ['Average'],
+  'Reputation.ComplaintRate': ['Average'],
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
 } as const;
@@ -80,6 +86,8 @@ export const QUEUE_METRICS: readonly Metric[] = [
 ];
 /** A customer's cache's, an hour at a time, as CloudWatch names ElastiCache's: what its keys use, its connections, and its hits, misses and evictions. */
 export const CACHE_METRICS: readonly Metric[] = ['BytesUsedForCache', 'CurrConnections', 'CacheHits', 'CacheMisses', 'Evictions'];
+/** The account's mail's, an hour at a time, as CloudWatch names SES's: its recipients sent, taken, bounced and complained of, and its reputation, a fraction. */
+export const EMAIL_METRICS: readonly Metric[] = ['Send', 'Delivery', 'Bounce', 'Complaint', 'Reputation.BounceRate', 'Reputation.ComplaintRate'];
 
 /** Each metric's unit, as the threshold is written. */
 export const UNITS: Record<Metric, string> = {
@@ -122,6 +130,12 @@ export const UNITS: Record<Metric, string> = {
   CacheHits: 'reads',
   CacheMisses: 'reads',
   Evictions: 'keys',
+  Send: 'recipients',
+  Delivery: 'recipients',
+  Bounce: 'recipients',
+  Complaint: 'recipients',
+  'Reputation.BounceRate': 'of the recipients reached (0.05 is 5%)',
+  'Reputation.ComplaintRate': 'of the recipients reached (0.001 is 0.1%)',
   Balance: 'TND',
   MonthToDateCharges: 'TND',
 };
@@ -223,7 +237,7 @@ export const formFromAlarm = (alarm: Alarm): AlarmForm => ({
   webhookUrls: alarm.actions.webhookUrls.join('\n'),
 });
 
-/** The metrics a scope offers: a function's calls, durations and instances; the account's too, and its money; a database's, a bucket's, a queue's and a cache's their own. */
+/** The metrics a scope offers: a function's calls, durations and instances; the account's too, its money and its mail; a database's, a bucket's, a queue's and a cache's their own. */
 export const metricsFor = (functionId: string, databaseId = '', bucketName = '', queueName = '', cacheName = ''): Metric[] =>
   cacheName
     ? [...CACHE_METRICS]
@@ -235,10 +249,11 @@ export const metricsFor = (functionId: string, databaseId = '', bucketName = '',
           ? [...DATABASE_METRICS]
           : METRICS.filter(
               (metric) =>
-                ![DATABASE_METRICS, BUCKET_METRICS, QUEUE_METRICS, CACHE_METRICS].some((others) => others.includes(metric)) && !(functionId && BILLING_METRICS.includes(metric)),
+                ![DATABASE_METRICS, BUCKET_METRICS, QUEUE_METRICS, CACHE_METRICS].some((others) => others.includes(metric)) &&
+                !(functionId && (BILLING_METRICS.includes(metric) || EMAIL_METRICS.includes(metric))),
             );
 
-/** The form once the metric changes: a statistic it has; for the money the account's, one datapoint; for a database's or a cache's, an hour a period; for a bucket's, a queue's or a cache's, it alone. */
+/** The form once the metric changes: a statistic it has; for the money the account's, one datapoint; for a database's, a cache's or the mail's, an hour a period; for a bucket's, a queue's or a cache's, it alone. */
 export function withMetric(form: AlarmForm, metric: Metric): AlarmForm {
   const statistics = STATISTICS[metric] as readonly string[];
   const next = { ...form, metric, statistic: statistics.includes(form.statistic) ? form.statistic : statistics[0] };
@@ -246,6 +261,7 @@ export function withMetric(form: AlarmForm, metric: Metric): AlarmForm {
   if (BUCKET_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '', queueName: '', cacheName: '' };
   if (QUEUE_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '', bucketName: '', cacheName: '' };
   if (CACHE_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '', bucketName: '', queueName: '', period: 3600 };
+  if (EMAIL_METRICS.includes(metric)) return { ...next, functionId: '', databaseId: '', bucketName: '', queueName: '', cacheName: '', period: 3600 };
   return DATABASE_METRICS.includes(metric)
     ? { ...next, functionId: '', bucketName: '', queueName: '', cacheName: '', period: 3600 }
     : { ...next, bucketName: '', queueName: '', cacheName: '' };
@@ -292,6 +308,10 @@ export function formProblem(form: AlarmForm): string | null {
   } else if (CACHE_METRICS.includes(form.metric)) {
     if (!form.cacheName) return `${form.metric} is a cache's: choose the cache it watches`;
     if (form.period !== 3600) return "A cache's metrics have a point an hour: the period is an hour";
+    if (n > 24) return 'The periods judged look back more than a day: take fewer';
+  } else if (EMAIL_METRICS.includes(form.metric)) {
+    if (form.functionId || form.databaseId || form.bucketName || form.queueName || form.cacheName) return `${form.metric} is the account's mail's: it watches the account`;
+    if (form.period !== 3600) return "Mail's metrics have a point an hour: the period is an hour";
     if (n > 24) return 'The periods judged look back more than a day: take fewer';
   } else if (BUCKET_METRICS.includes(form.metric) && !form.bucketName) {
     return `${form.metric} is a bucket's: choose the bucket it watches`;
