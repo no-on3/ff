@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 import { Logger } from '@nestjs/common';
-import { MAX_POINTS, MetricsWindow, bucketMetricsView, databaseMetricsView, metricsView, metricsWindow, queueMetricsView } from './customer-metrics';
+import { MAX_POINTS, MetricsWindow, bucketMetricsView, databaseMetricsView, metricsView, metricsWindow, queueMetricsView, siteMetricsView } from './customer-metrics';
 import { MAX_HELD, RefusedInvocationsService } from './refused-invocations.service';
 
 const NOW = new Date('2026-10-19T10:07:30Z');
@@ -83,6 +83,33 @@ describe('bucketMetricsView', () => {
         '5xxErrors': { Sum: [0, 0, 0, 1] },
         BytesDownloaded: { Sum: [0, 0, 0, 9_000] },
         BytesUploaded: { Sum: [0, 0, 0, 3_000] },
+      },
+    });
+  });
+});
+
+describe('siteMetricsView', () => {
+  it("gives a point per period, oldest first: the site's visits and their bytes, zeros when quiet; the shares that failed, in percent, null without a visit", () => {
+    const window: MetricsWindow = { start: new Date('2026-10-30T09:00:00Z'), end: new Date('2026-10-30T09:15:00Z'), period: 300 };
+    const at = (iso: string) => new Date(iso).getTime() / 1000;
+
+    const view = siteMetricsView(window, [
+      { bucket: at('2026-10-30T09:00:00Z'), requests: 3, bytesOut: 12_000, errors4xx: 1, errors5xx: 0 },
+      { bucket: at('2026-10-30T09:10:00Z'), requests: 8, bytesOut: 40_000, errors4xx: 2, errors5xx: 2 },
+    ]);
+
+    expect(view).toEqual({
+      period: 300,
+      start: window.start,
+      end: window.end,
+      timestamps: ['09:00', '09:05', '09:10'].map((time) => new Date(`2026-10-30T${time}:00Z`)),
+      metrics: {
+        Requests: { Sum: [3, 0, 8] },
+        BytesDownloaded: { Sum: [12_000, 0, 40_000] },
+        // As CloudFront's: a third of the visits, to the thousandth of a percent.
+        '4xxErrorRate': { Average: [33.333, null, 25] },
+        '5xxErrorRate': { Average: [0, null, 25] },
+        TotalErrorRate: { Average: [33.333, null, 50] },
       },
     });
   });

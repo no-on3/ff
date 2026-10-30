@@ -14,6 +14,7 @@ import { Page, PageHeader } from './Page';
 import { Callout, Panel } from './Panel';
 import StatusPill from './StatusPill';
 import { BucketNotifications } from './BucketNotifications';
+import { BucketSite } from './BucketSite';
 
 /** The hours the page reads: the last day's, a point an hour. */
 const HOURS = 24;
@@ -254,6 +255,7 @@ const BucketDetail: React.FC = () => {
               </div>
             )}
           </Panel>
+          <BucketSite bucket={bucket} mayChange={writer && account.status === 'active'} onChange={() => void load()} />
           <BucketNotifications bucketName={bucket.name} mayChange={writer && account.status === 'active'} />
         </div>
         <BucketAlarms bucketName={bucket.name} mayChange={writer && account.status === 'active'} />

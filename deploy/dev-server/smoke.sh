@@ -195,6 +195,10 @@ bucket="smoke-$run-files"
 check "a bucket" 201 "$(api "$customer" POST /buckets "{\"name\": \"$bucket\"}")"
 check "at its own host, S3's refusal of an unsigned request: the edge's certificate for it made on demand" 403 \
   "$(at "$bucket.s3.$domain" "https://$bucket.s3.$domain/")"
+check "made a site, at its own host under the sites' domain" "200 https://$bucket.site.$domain" \
+  "$(api "$customer" PUT "/buckets/$bucket/website" '{"indexDocument": {"suffix": "index.html"}}') $(jq -r .url "$work/page")"
+check "which answers through the proxy, S3's page for a file it hasn't, the edge's certificate for it made on demand" "404 NoSuchKey" \
+  "$(at "$bucket.site.$domain" "https://$bucket.site.$domain/") $(grep -oE 'Code: [A-Za-z]+' "$work/page" | head -1 | sed 's/Code: //')"
 queue="smoke-$run"
 check "a queue" 201 "$(api "$customer" POST /queues "{\"name\": \"$queue\"}")"
 api "$customer" POST "/queues/$queue/messages" '{"body": "{\"order\": 42}"}' >/dev/null

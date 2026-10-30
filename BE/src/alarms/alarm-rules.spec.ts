@@ -5,8 +5,8 @@
  * evaluator runs against PostgreSQL in alarms.db.spec.ts.
  */
 import { alarmMail } from './alarm-mail';
-import { AlarmRule, alarmProblem, bucketDatapointsOf, databaseDatapointsOf, datapointsOf, evaluate, evaluationWindow, notifies, queueDatapointsOf, stateReason } from './alarm-rules';
-import { bucketMetricsView, databaseMetricsView, queueMetricsView, type MetricsView } from '../metrics/customer-metrics';
+import { AlarmRule, alarmProblem, bucketDatapointsOf, databaseDatapointsOf, datapointsOf, evaluate, evaluationWindow, notifies, queueDatapointsOf, siteDatapointsOf, stateReason } from './alarm-rules';
+import { bucketMetricsView, databaseMetricsView, queueMetricsView, siteMetricsView, type MetricsView } from '../metrics/customer-metrics';
 
 const RULE: AlarmRule = {
   functionId: '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f',
@@ -106,7 +106,7 @@ describe("an alarm on a customer's bucket", () => {
       'A databaseId goes with DatabaseConnections and VolumeBytesUsed only',
       'BucketSizeBytes has the statistic Average, not Maximum',
       'GetRequests has the statistic Sum, not Average',
-      "A bucketName goes with a bucket's metrics only: BucketSizeBytes, NumberOfObjects, AllRequests, GetRequests, PutRequests, 4xxErrors, 5xxErrors, BytesDownloaded, BytesUploaded",
+      "A bucketName goes with a bucket's metrics only: BucketSizeBytes, NumberOfObjects, AllRequests, GetRequests, PutRequests, 4xxErrors, 5xxErrors, BytesDownloaded, BytesUploaded, Requests, 4xxErrorRate, 5xxErrorRate, TotalErrorRate",
     ]);
   });
 
@@ -128,6 +128,30 @@ describe("an alarm on a customer's bucket", () => {
       [0, 0, 9_000],
     ]);
     expect(() => bucketDatapointsOf(view, 'Errors', 'Sum')).toThrow("Errors Sum isn't a bucket's metric");
+  });
+
+  it("watches its site's visits, their Sum, and the shares that failed, their Average, as CloudFront's are named", () => {
+    expect([
+      alarmProblem({ ...held, metric: 'Requests', statistic: 'Sum', period: 300 }),
+      alarmProblem({ ...held, metric: 'TotalErrorRate', statistic: 'Average', period: 300 }),
+      alarmProblem({ ...held, metric: '5xxErrorRate', statistic: 'Sum', period: 300 }),
+    ]).toEqual([null, null, '5xxErrorRate has the statistic Average, not Sum']);
+  });
+
+  it("reads its datapoints from the site's metrics: its visits every period, a share missing in a period without a visit", () => {
+    const window = { start: new Date('2026-10-30T09:00:00Z'), end: new Date('2026-10-30T09:15:00Z'), period: 300 as const };
+    const nine = Date.parse('2026-10-30T09:00:00Z') / 1000;
+    const view = siteMetricsView(window, [
+      { bucket: nine, requests: 4, bytesOut: 4_000, errors4xx: 1, errors5xx: 1 },
+      { bucket: nine + 600, requests: 10, bytesOut: 9_000, errors4xx: 0, errors5xx: 0 },
+    ]);
+
+    expect([siteDatapointsOf(view, 'Requests', 'Sum'), siteDatapointsOf(view, 'TotalErrorRate', 'Average'), siteDatapointsOf(view, '5xxErrorRate', 'Average')]).toEqual([
+      [4, 0, 10],
+      [50, null, 0],
+      [25, null, 0],
+    ]);
+    expect(() => siteDatapointsOf(view, 'AllRequests', 'Sum')).toThrow("AllRequests Sum isn't a site's metric");
   });
 });
 
@@ -153,7 +177,7 @@ describe("an alarm on a customer's queue", () => {
     ]).toEqual([
       "ApproximateNumberOfMessagesVisible is a queue's: the alarm names a queueName, and no function, database or bucket",
       "ApproximateNumberOfMessagesVisible is a queue's: the alarm names a queueName, and no function, database or bucket",
-      "A bucketName goes with a bucket's metrics only: BucketSizeBytes, NumberOfObjects, AllRequests, GetRequests, PutRequests, 4xxErrors, 5xxErrors, BytesDownloaded, BytesUploaded",
+      "A bucketName goes with a bucket's metrics only: BucketSizeBytes, NumberOfObjects, AllRequests, GetRequests, PutRequests, 4xxErrors, 5xxErrors, BytesDownloaded, BytesUploaded, Requests, 4xxErrorRate, 5xxErrorRate, TotalErrorRate",
       'ApproximateAgeOfOldestMessage has the statistic Maximum, not Average',
       'NumberOfMessagesSent has the statistic Sum, not Maximum',
       "A queueName goes with a queue's metrics only: ApproximateNumberOfMessagesVisible, ApproximateNumberOfMessagesNotVisible, ApproximateNumberOfMessagesDelayed, ApproximateAgeOfOldestMessage, NumberOfMessagesSent, NumberOfMessagesReceived, NumberOfMessagesDeleted, NumberOfEmptyReceives, SentMessageSize",

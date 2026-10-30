@@ -259,6 +259,61 @@ export function bucketMetricsView(window: MetricsWindow, hours: BucketHourRow[],
   return view;
 }
 
+/** A site's metrics, as CloudWatch names a CloudFront distribution's: its visits and their bytes, each period's Sum; the shares of them that failed, in percent. */
+export const SITE_METRICS = ['Requests', 'BytesDownloaded', '4xxErrorRate', '5xxErrorRate', 'TotalErrorRate'] as const;
+export type SiteMetric = (typeof SITE_METRICS)[number];
+/** Of them, the shares, each period's Average. */
+export const SITE_RATES = ['4xxErrorRate', '5xxErrorRate', 'TotalErrorRate'] as const;
+export type SiteRate = (typeof SITE_RATES)[number];
+
+/**
+ * A bucket's site's metrics, as CloudWatch names a CloudFront distribution's
+ * (ADR 0011), from the website server's counts by the minute: its visits
+ * (Requests) and the bytes they sent (BytesDownloaded), each period's Sum, a
+ * quiet period's 0; and the share of the visits answered 4xx, 5xx and either,
+ * in percent, each period's Average, null in a period without a visit. The
+ * bucket's own metrics count its site's visits among its requests.
+ */
+export interface SiteMetricsView {
+  period: Period;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: { Requests: { Sum: number[] }; BytesDownloaded: { Sum: number[] } } & Record<SiteRate, { Average: Array<number | null> }>;
+}
+
+/** A period's visits to a site, as the query sums them; a quiet period has no row. */
+export interface SitePeriodRow {
+  bucket: number;
+  requests: number;
+  bytesOut: number;
+  errors4xx: number;
+  errors5xx: number;
+}
+
+/** The series of the window, a point per period: zeros where quiet, the shares null where there was no visit. */
+export function siteMetricsView(window: MetricsWindow, periods: SitePeriodRow[]): SiteMetricsView {
+  const byPeriod = new Map(periods.map((row) => [row.bucket, row]));
+  const view: SiteMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: { Requests: { Sum: [] }, BytesDownloaded: { Sum: [] }, '4xxErrorRate': { Average: [] }, '5xxErrorRate': { Average: [] }, TotalErrorRate: { Average: [] } },
+  };
+  const share = (part: number, all: number) => (all === 0 ? null : round3((100 * part) / all));
+  for (let start = window.start.getTime() / 1000; start < window.end.getTime() / 1000; start += window.period) {
+    const { requests = 0, bytesOut = 0, errors4xx = 0, errors5xx = 0 } = byPeriod.get(start) ?? {};
+    view.timestamps.push(new Date(start * 1000));
+    view.metrics.Requests.Sum.push(requests);
+    view.metrics.BytesDownloaded.Sum.push(bytesOut);
+    view.metrics['4xxErrorRate'].Average.push(share(errors4xx, requests));
+    view.metrics['5xxErrorRate'].Average.push(share(errors5xx, requests));
+    view.metrics.TotalErrorRate.Average.push(share(errors4xx + errors5xx, requests));
+  }
+  return view;
+}
+
 /** A queue's approximate counts, sampled each minute: each period's most and its mean over its minutes, as CloudWatch's Maximum and Average. */
 export const QUEUE_GAUGES = ['ApproximateNumberOfMessagesVisible', 'ApproximateNumberOfMessagesNotVisible', 'ApproximateNumberOfMessagesDelayed'] as const;
 export type QueueGauge = (typeof QUEUE_GAUGES)[number];

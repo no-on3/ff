@@ -57,3 +57,30 @@ export class CustomDomainView {
   @ApiProperty()
   createdAt: Date;
 }
+
+/** A customer's own domain for a bucket's site, as the API answers it. */
+export class SiteDomainView {
+  @ApiProperty({ example: 'www.shop.tn' })
+  domain: string;
+
+  @ApiProperty({ example: 'shop', description: 'The bucket whose site it serves' })
+  bucket: string;
+
+  @ApiProperty({ enum: DomainStatus, description: 'pending until the DNS proves it; verified, the site answers there' })
+  status: DomainStatus;
+
+  @ApiProperty({ type: DomainRecordsView, description: "For a subdomain, a CNAME to the site's host; for any domain, the TXT record with the edge's addresses" })
+  records: DomainRecordsView;
+
+  @ApiProperty({ nullable: true, type: Date, description: 'Its last check' })
+  checkedAt: Date | null;
+
+  @ApiProperty({ nullable: true, type: String, description: 'What its last check found wrong' })
+  checkError: string | null;
+
+  @ApiProperty({ nullable: true, type: Date })
+  verifiedAt: Date | null;
+
+  @ApiProperty()
+  createdAt: Date;
+}

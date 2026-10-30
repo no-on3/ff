@@ -113,6 +113,27 @@ export class BucketMetricsView {
   @ApiProperty({ type: BucketMetricSeries }) metrics: BucketMetricSeries;
 }
 
+class SiteShareSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "The period's share of the site's visits, in percent; null in a period without a visit" }) Average: Array<number | null>;
+}
+
+class SiteMetricSeries {
+  @ApiProperty({ type: BucketRequestSeries, description: "The site's visits that the website server answered" }) Requests: BucketRequestSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'The bytes of the bodies it sent them' }) BytesDownloaded: BucketRequestSeries;
+  @ApiProperty({ type: SiteShareSeries, description: 'The share of them answered 4xx' }) '4xxErrorRate': SiteShareSeries;
+  @ApiProperty({ type: SiteShareSeries, description: 'The share of them answered 5xx' }) '5xxErrorRate': SiteShareSeries;
+  @ApiProperty({ type: SiteShareSeries, description: 'The share of them answered 4xx or 5xx' }) TotalErrorRate: SiteShareSeries;
+}
+
+/** GET /buckets/:name/website/metrics: a site's visits, as CloudWatch names a CloudFront distribution's metrics. */
+export class SiteMetricsView {
+  @ApiProperty({ enum: PERIODS }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each period's start" }) timestamps: Date[];
+  @ApiProperty({ type: SiteMetricSeries }) metrics: SiteMetricSeries;
+}
+
 class QueueGaugeSeries {
   @ApiProperty({ type: [Number], description: "The most of the period's minutes; 0 where the queue was empty" }) Maximum: number[];
   @ApiProperty({ type: [Number], description: "The mean over the period's minutes, a minute without a sample counting 0" }) Average: number[];

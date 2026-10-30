@@ -96,6 +96,33 @@ if [ "$sqs_base_host" != "$sqs_host" ]; then
 fi
 echo "queues at $sqs_host, with a certificate of its own"
 
+echo "== buckets' sites"
+# The edge's sites' domain must be the host of the backend's FF_WEBSITE_BASE, which each site's address is under, or
+# visitors would reach nothing; a wildcard certificate needs the same TSIG key as function URLs'.
+website_base="$(setting FF_WEBSITE_BASE)"
+website_domain="$(setting FF_WEBSITE_DOMAIN)"
+website_tls="$(setting FF_WEBSITE_TLS)"
+website_base_host="${website_base#*://}"
+website_base_host="${website_base_host%%[:/]*}"
+if [ "$website_base_host" != "$website_domain" ]; then
+  echo "the edge's FF_WEBSITE_DOMAIN ($website_domain) must be the host of the backend's FF_WEBSITE_BASE ($website_base)" >&2
+  exit 1
+fi
+case "$website_tls" in
+  wildcard)
+    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep -q . || {
+      echo "FF_WEBSITE_TLS=wildcard needs the Secret ff-edge-dns with FF_DNS_TSIG_KEY, as FF_FUNCTION_URL_TLS=wildcard does; or choose on-demand" >&2
+      exit 1
+    }
+    echo "sites under $website_domain, with one certificate for them all, through DNS"
+    ;;
+  on-demand) echo "sites under $website_domain, with a certificate per site, on demand, out of the same 50 a week" ;;
+  *)
+    echo "the edge's FF_WEBSITE_TLS must be wildcard or on-demand, not '$website_tls'" >&2
+    exit 1
+    ;;
+esac
+
 echo "== the code registry"
 # Packages' code images: the registry's two users, from the Secret ff-code-registry, and the backend's password for
 # its own (deploy/k8s/README.md, "The code registry").

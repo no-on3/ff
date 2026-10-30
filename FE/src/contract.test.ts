@@ -41,6 +41,7 @@ import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
 import eventSourceDtoSource from '../../BE/src/event-sources/dto/event-source.dto.ts?raw';
 import bucketNotificationsDtoSource from '../../BE/src/storage/dto/notifications.dto.ts?raw';
 import bucketNotificationsSource from '../../BE/src/storage/bucket-notifications.ts?raw';
+import websiteDtoSource from '../../BE/src/storage/dto/website.dto.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
@@ -55,6 +56,7 @@ import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
 import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES } from './lib/event-sources';
 import { EVENT_TYPES as NOTIFICATION_EVENTS } from './lib/bucket-notifications';
+import { SITE_DOMAIN_FIELDS, SITE_METRICS, WEBSITE_FIELDS } from './lib/sites';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { ENDPOINTS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
@@ -454,6 +456,15 @@ describe("a function URL's own domain", () => {
   });
 });
 
+describe("a bucket's site (ADR 0011)", () => {
+  it("has the API's fields, its website configuration's and its own domains', so the panel reads each one there is", () => {
+    const view = websiteDtoSource.slice(websiteDtoSource.indexOf('export class WebsiteView {'));
+
+    expect([...view.slice(0, view.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1])).toEqual([...WEBSITE_FIELDS]);
+    expect(dtoFields(customDomainDtoSource, 'export class SiteDomainView {')).toEqual([...SITE_DOMAIN_FIELDS]);
+  });
+});
+
 describe("a customer's database (ADR 0008)", () => {
   it("has the API's fields, statuses and name rule, so its pages read each one there is and the form refuses what the API would", () => {
     const statuses = databaseEntitySource.slice(databaseEntitySource.indexOf('export enum DatabaseStatus'));
@@ -536,6 +547,9 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
     expect(dtoFields(metricsDtoSource, 'class BucketMetricSeries {')).toEqual(['BucketSizeBytes', 'NumberOfObjects', ...BUCKET_REQUEST_METRICS]);
     expect(dtoFields(metricsDtoSource, 'class BucketStorageSeries {')).toEqual(['Average']);
     expect(dtoFields(metricsDtoSource, 'class BucketRequestSeries {')).toEqual(['Sum']);
+    // A site's, as CloudWatch names a CloudFront distribution's.
+    expect(dtoFields(metricsDtoSource, 'class SiteMetricSeries {')).toEqual([...SITE_METRICS]);
+    expect(dtoFields(metricsDtoSource, 'class SiteShareSeries {')).toEqual(['Average']);
     expect(dtoFields(usageDtoSource, 'export class BucketUsageView {')).toEqual([...BUCKET_USAGE_FIELDS]);
     expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('buckets');
   });

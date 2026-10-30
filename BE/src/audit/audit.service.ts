@@ -62,6 +62,8 @@ export type AuditAction =
   | 'bucket.notifications'
   // A bucket's website configuration, set whole or removed, through the S3 front door or FF's API: it makes the bucket a site.
   | 'bucket.website'
+  // A deploy's own key to a bucket, for an hour: `ff sites deploy` signs its uploads with it.
+  | 'bucket.deploy_key'
   | 'storage_key.create'
   | 'storage_key.delete'
   // A customer's queue, made, changed, purged and deleted through FF's API or the SQS endpoint's (ADR 0010).

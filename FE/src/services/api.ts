@@ -3,6 +3,7 @@ import { config } from '../config';
 import { requestHeaders } from '../lib/session';
 import type { AuthType, FunctionUrl, UrlCors } from '../lib/function-url';
 import type { CustomDomain } from '../lib/custom-domains';
+import type { SiteDomain, SiteMetrics, Website, WebsiteBody } from '../lib/sites';
 import type { Schedule } from '../lib/schedules';
 
 const api = axios.create({
@@ -1221,6 +1222,22 @@ export const bucketsApi = {
   notifications: (name: string) => api.get<NotificationConfiguration>(`/buckets/${name}/notifications`),
   /** Replaced whole, as S3's PutBucketNotificationConfiguration: a destination by its ARN or its name. */
   setNotifications: (name: string, configuration: NotificationConfigurationBody) => api.put<NotificationConfiguration>(`/buckets/${name}/notifications`, configuration),
+};
+
+/** A bucket's site: its website configuration, as S3's in its JSON names, and the site's own domains. */
+export const sitesApi = {
+  /** 404 when the bucket is no site. */
+  get: (bucket: string) => api.get<Website>(`/buckets/${bucket}/website`),
+  /** Replaced whole, as S3's PutBucketWebsite: the bucket a site from now on. */
+  put: (bucket: string, website: WebsiteBody) => api.put<Website>(`/buckets/${bucket}/website`, website),
+  /** No longer a site: its files kept, private again. */
+  remove: (bucket: string) => api.delete(`/buckets/${bucket}/website`),
+  domains: (bucket: string) => api.get<SiteDomain[]>(`/buckets/${bucket}/website/domains`),
+  addDomain: (bucket: string, domain: string) => api.post<SiteDomain>(`/buckets/${bucket}/website/domains`, { domain }),
+  verifyDomain: (bucket: string, domain: string) => api.post<SiteDomain>(`/buckets/${bucket}/website/domains/${encodeURIComponent(domain)}/verify`),
+  removeDomain: (bucket: string, domain: string) => api.delete(`/buckets/${bucket}/website/domains/${encodeURIComponent(domain)}`),
+  /** Its visits, a point per period: a minute, five or an hour; a bucket no longer a site still has its past ones. */
+  metrics: (bucket: string, params: { start?: string; end?: string; period?: 60 | 300 | 3600 } = {}) => api.get<SiteMetrics>(`/buckets/${bucket}/website/metrics`, { params }),
 };
 
 /** A configuration's key filter, as S3's JSON names it: a prefix, a suffix. */

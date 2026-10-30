@@ -12,9 +12,9 @@ The server has its own rules ([`/data/proxy/README.md`](#its-files) on the serve
 
 | | Production ([`deploy/k8s`](../k8s/README.md)) | This server |
 |---|---|---|
-| The internet's TLS | The edge's, from Let's Encrypt | The server's proxy's: Let's Encrypt's for the six fixed names, its own authority's for function URLs and buckets |
+| The internet's TLS | The edge's, from Let's Encrypt | The server's proxy's: Let's Encrypt's for the six fixed names, its own authority's for function URLs, buckets and sites |
 | The edge's certificates | Let's Encrypt | Its own authority (`local_certs`), which the proxy checks it against |
-| Function URLs and buckets | A wildcard certificate each, by DNS | A wildcard each, from the proxy's own authority, whose root your browser must trust |
+| Function URLs, buckets and sites | A wildcard certificate each, by DNS | A wildcard each, from the proxy's own authority, whose root your browser must trust |
 | Customers' own domains | Certificates on demand, at the edge | Not routed: the proxy sends FF's names alone |
 | PostgreSQL and S3 | Servers of their own, backed up to a second site | Containers beside the cluster, no backup |
 | Mail | A mail server | Mailpit: every e-mail kept on the server, none sent |
@@ -45,7 +45,7 @@ The admin app and Keycloak's administration answer only the address the server s
 
 ## Reaching it
 
-FF's names are under `dev.ffunc.cloud`, in OVH's DNS: `api`, `console`, `admin`, `login`, `s3` and `sqs`, and the wildcards `*.fn` and `*.s3`, each an A record to the server's address. None has an AAAA record: the proxy gets IPv6 callers through Docker's relay, which hides their address, and the admin app answers by address. The domain is `k8s/edge.env`'s, from which `server.sh` and `smoke.sh` take it.
+FF's names are under `dev.ffunc.cloud`, in OVH's DNS: `api`, `console`, `admin`, `login`, `s3` and `sqs`, and the wildcards `*.fn`, `*.s3` and `*.site`, each an A record to the server's address. None has an AAAA record: the proxy gets IPv6 callers through Docker's relay, which hides their address, and the admin app answers by address. The domain is `k8s/edge.env`'s, from which `server.sh` and `smoke.sh` take it.
 
 1. **The proxy's root,** for function URLs and buckets, which your browser and your system must trust: `ssh next 'sudo docker compose --project-directory /data/proxy exec -T caddy cat /data/caddy/pki/authorities/local/root.crt' > ff-dev-root.crt`. It is the one that already signs the other projects' certificates for the server's address. The six fixed names need nothing: their certificates are Let's Encrypt's.
 2. **The console,** `https://console.dev.ffunc.cloud`: sign up, confirm the address from the e-mail in Mailpit, and ask for an account.
@@ -53,9 +53,9 @@ FF's names are under `dev.ffunc.cloud`, in OVH's DNS: `api`, `console`, `admin`,
 4. **Mail:** `ssh -L 8026:127.0.0.1:8026 next`, then `http://localhost:8026`.
 5. **The `ff` command:** `FF_ENDPOINT=https://api.dev.ffunc.cloud`, with an API key made in the console (the [getting-started guide](../../docs/getting-started.md)). The API's certificate is Let's Encrypt's; calling a function at its URL takes the proxy's root among your system's.
 
-## Function URLs' and buckets' certificates
+## Function URLs', buckets' and sites' certificates
 
-They come from the proxy's own authority: one certificate for `*.fn.dev.ffunc.cloud`, one for `*.s3.dev.ffunc.cloud`. Let's Encrypt's would need more of the proxy, which every project shares: either a DNS module in its Caddy, for DNS-01, with an OVH key that can change every record of `ffunc.cloud`, kept on this server; or certificates on demand, one per host, asking FF's backend which hosts are FF's, which takes a line in the proxy's main file (`on_demand_tls`). That choice is yours (the [decision log](../../docs/decisions.md)'s questions).
+They come from the proxy's own authority: one certificate for `*.fn.dev.ffunc.cloud`, one for `*.s3.dev.ffunc.cloud`, one for `*.site.dev.ffunc.cloud`. Let's Encrypt's would need more of the proxy, which every project shares: either a DNS module in its Caddy, for DNS-01, with an OVH key that can change every record of `ffunc.cloud`, kept on this server; or certificates on demand, one per host, asking FF's backend which hosts are FF's, which takes a line in the proxy's main file (`on_demand_tls`). That choice is yours (the [decision log](../../docs/decisions.md)'s questions).
 
 ## Its files
 

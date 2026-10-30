@@ -4,7 +4,7 @@ import { Principal } from '../auth/principal';
 import { RequireScope } from '../auth/route-rules';
 import { CustomerMetricsService } from './customer-metrics.service';
 import { DATABASE_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
-import { BucketMetricsView, DatabaseMetricsView, MetricsQuery, MetricsView, QueueMetricsView } from './dto/metrics-query.dto';
+import { BucketMetricsView, DatabaseMetricsView, MetricsQuery, MetricsView, QueueMetricsView, SiteMetricsView } from './dto/metrics-query.dto';
 
 /** A window the request names, or 400 saying why it can't be. */
 function windowOf(query: MetricsQuery): MetricsWindow {
@@ -65,6 +65,19 @@ export class MetricsController {
   @ApiResponse({ status: 404, description: 'No such bucket in the account' })
   forBucket(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
     return this.metrics.forBucket(principal.accountId, name, windowOf(query));
+  }
+
+  @Get('buckets/:name/website/metrics')
+  @RequireScope('metrics:read')
+  @ApiOperation({
+    summary: "A bucket's site's visits, as CloudWatch names a CloudFront distribution's metrics: a point per period",
+    description:
+      "From the website server's counts by the minute: Requests and BytesDownloaded, each period's Sum; 4xxErrorRate, 5xxErrorRate and TotalErrorRate, the share of the visits answered 4xx, 5xx or either, in percent, each period's Average, null in a period without a visit. The bucket's own metrics count these visits among its requests.",
+  })
+  @ApiResponse({ status: 200, type: SiteMetricsView })
+  @ApiResponse({ status: 404, description: 'No such bucket in the account' })
+  forSite(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
+    return this.metrics.forSite(principal.accountId, name, windowOf(query));
   }
 
   @Get('queues/:name/metrics')

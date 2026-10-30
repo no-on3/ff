@@ -341,7 +341,7 @@ for name in api console admin login s3 sqs; do
     sleep 3
   done
 done
-# Then as a browser that trusts the system's roots and the proxy's own, which signs function URLs' and buckets'.
+# Then as a browser that trusts the system's roots and the proxy's own, which signs function URLs', buckets' and sites'.
 { cat /etc/ssl/certs/ca-certificates.crt
   docker compose --project-directory "$proxy" exec -T caddy cat /data/caddy/pki/authorities/local/root.crt; } >"$work/roots.pem"
 passed=0
@@ -364,10 +364,10 @@ check "the login: the realm's issuer is the public address" "200 https://login.$
 check "the admin app and Keycloak's administration refuse an address not allowed: this machine's" "403 403" \
   "$(at "admin.$domain" /) $(at "login.$domain" /admin/master/console/)"
 check "buckets' S3 endpoint: S3's refusal of an unsigned request" 403 "$(at "s3.$domain" /)"
-# A host under the function domain or the S3 endpoint that is no URL and no bucket: the edge gets no certificate for
-# it, as the backend says no, so the proxy has nothing to give but its own 502.
-check "a host that is no function URL, or no bucket, gets nothing from the edge" "502 502" \
-  "$(at "nothing-$(hex 4).fn.$domain" /) $(at "nobody-$(hex 4).s3.$domain" /)"
+# A host under the function domain, the S3 endpoint or the sites' domain that is no URL, no bucket and no site: the
+# edge gets no certificate for it, as the backend says no, so the proxy has nothing to give but its own 502.
+check "a host that is no function URL, no bucket or no site gets nothing from the edge" "502 502 502" \
+  "$(at "nothing-$(hex 4).fn.$domain" /) $(at "nobody-$(hex 4).s3.$domain" /) $(at "nosite-$(hex 4).site.$domain" /)"
 check "queues' SQS endpoint: SQS's refusal of an unsigned request" "true" \
   "$(code="$(at "sqs.$domain" / -X POST)"; [ "${code:0:1}" = 4 ] && echo true || echo "false ($code)")"
 echo "server.sh: $passed checks passed; FF $version is up at https://console.$domain"

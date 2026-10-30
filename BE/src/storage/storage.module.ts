@@ -15,6 +15,7 @@ import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket } from './bucket.entity';
 import { BucketsController } from './buckets.controller';
 import { BucketsService } from './buckets.service';
+import { DeployKeysController } from './deploy-keys.controller';
 import { FunctionKeys } from './function-keys.service';
 import { S3FrontDoor } from './front-door';
 import { SiteTransfer } from './site-transfer.service';
@@ -39,7 +40,7 @@ import { WebsiteServer } from './website-server';
 @Module({
   // A notification's destinations are the account's functions and queues, looked up by their rows.
   imports: [TypeOrmModule.forFeature([Bucket, StorageKey, StorageRequestCount, Account, Function, Queue]), EncryptionModule, AuditModule, PlansModule, BillingModule, NotificationsModule],
-  controllers: [BucketsController, StorageKeysController],
+  controllers: [BucketsController, StorageKeysController, DeployKeysController],
   providers: [StorageDirectory, StorageRequestCountsService, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketSamplesService, BucketEvents, BucketNotificationsService, BucketWebsitesService, SiteTransfer, WebsiteServer],
   exports: [StorageDirectory, S3FrontDoor, BucketsService, FunctionKeys, BucketEvents, WebsiteServer],
 })

@@ -230,6 +230,33 @@ run('metrics (L2)', () => {
     await expect(metrics.forBucket(A, 'm-nobody', periods)).rejects.toThrow(NotFoundException);
   });
 
+  it("gives a site's visits, the website server's counts alone, and the shares of them that failed, by its bucket's name, and no other account's", async () => {
+    const [{ id: shop }] = await query<Array<{ id: string }>>(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, 'm-shop', 'ff-00000000000000000000000f') RETURNING id`, [A]);
+    const [{ id: theirs }] = await query<Array<{ id: string }>>(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, 'm-their-shop', 'ff-000000000000000000000010') RETURNING id`, [B]);
+    const counted = (bucketId: string, accountId: string, minute: string, kind: string, requests: number, errors4xx: number, errors5xx: number, bytesOut: number) =>
+      query(
+        `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
+         VALUES ($1, $2, $3, gen_random_uuid(), $4, 'm', $5, $5, 0, $6, $7, 0, $8)`,
+        [bucketId, minute, kind, accountId, requests, errors4xx, errors5xx, bytesOut],
+      );
+    await counted(shop, A, '2026-10-01T09:00:00Z', 'website', 6, 1, 0, 60_000);
+    await counted(shop, A, '2026-10-01T09:03:00Z', 'website', 2, 0, 1, 1_000); // another minute of the period, written apart
+    await counted(shop, A, '2026-10-01T09:01:00Z', 'tier2', 40, 40, 0, 1); // its S3 API's, never the site's
+    await counted(theirs, B, '2026-10-01T09:01:00Z', 'website', 50, 0, 0, 1);
+    const periods: MetricsWindow = { start: new Date('2026-10-01T09:00:00Z'), end: new Date('2026-10-01T09:10:00Z'), period: 300 };
+
+    const view = await metrics.forSite(A, 'm-shop', periods);
+
+    expect(view.metrics).toEqual({
+      Requests: { Sum: [8, 0] },
+      BytesDownloaded: { Sum: [61_000, 0] },
+      '4xxErrorRate': { Average: [12.5, null] },
+      '5xxErrorRate': { Average: [12.5, null] },
+      TotalErrorRate: { Average: [25, null] },
+    });
+    await expect(metrics.forSite(A, 'm-their-shop', periods)).rejects.toThrow(new NotFoundException('The account has no bucket m-their-shop'));
+  });
+
   it("samples each queue holding a message each minute, as SQS's approximate counts, and gives its metrics by its name, with its requests' counts, no other account's", async () => {
     const queues = new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue));
     const made = async (accountId: string, name: string) => (await queues.create(accountId, name, {}, { limit: 10, name: 'Beta' }, 'tn-tunis-1')).queue;

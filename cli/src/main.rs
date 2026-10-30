@@ -8,9 +8,11 @@ mod config;
 mod error;
 mod local;
 mod local_url;
+mod md5;
 mod output;
 mod package;
 mod progress;
+mod s3;
 mod table;
 
 use std::process::ExitCode;

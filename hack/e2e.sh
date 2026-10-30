@@ -1307,6 +1307,22 @@ check "  ... the store's ETag, so that a browser that has the file gets 304, and
 $(curl -s -o "$work/part" -w '%{http_code}' -H 'Range: bytes=0-6' "$site_url/assets/app-3c9d.js") $(cat "$work/part")"
 check "a path that climbs out of the site refused, never another bucket's file; a POST refused" "400 InvalidURI|405 MethodNotAllowed" \
   "$(page /../e2e-photos/x --path-as-is)|$(page / -X POST)"
+# at_domain's page: its status and its title, or the error's code, as page says them.
+domain_page() { echo "$(at_domain "$@") $(grep -oE '<title>[^<]*|Code: [A-Za-z]+' "$work/url-body" | head -1 | sed 's/<title>//; s/Code: //')"; }
+added="$(http POST /buckets/e2e-site/website/domains '{"domain": "Docs.E2E-Customer.tn"}')"
+check "a domain of the customer's for the site, added pending, with the CNAME to make: to the site's host" "201 docs.e2e-customer.tn pending e2e-site.site.localhost" \
+  "$(status) $(jq -r '"\(.domain) \(.status) \(.records.cname[0].value)"' <<<"$added")"
+check "before it is proved, the site doesn't answer there" 404 "$(at_domain docs.e2e-customer.tn)"
+zone 4 "docs IN CNAME e2e-site.site.localhost."
+for _ in $(seq 1 30); do
+  http POST /buckets/e2e-site/website/domains/docs.e2e-customer.tn/verify >/dev/null
+  [ "$(jq -r .status "$work/body")" = verified ] && break
+  sleep 1
+done
+check "once its CNAME is made, the check proves it, and the site answers there as at its own host" "verified 200 e2e docs|404 e2e missing" \
+  "$(jq -r .status "$work/body") $(domain_page docs.e2e-customer.tn /docs/)|$(domain_page docs.e2e-customer.tn /no/such/page)"
+check "the edge may get certificates for it, and for the site's own host; not for a bucket that is no site" "200 200 404" \
+  "$(asked docs.e2e-customer.tn) $(asked e2e-site.site.localhost) $(asked e2e-photos.site.localhost)"
 http PUT /buckets/e2e-site/website '{"indexDocument": {"suffix": "index.html"}, "errorDocument": {"key": "404.html"}, "singlePageApp": true}' >/dev/null
 check "FF's API makes it a single-page app's: its routes get its index with 200" "200 true 200 e2e shop" "$(status) $(jq -r .singlePageApp "$work/body") $(page /orders/42)"
 check "the audit log names each change: the CLI's under its key, the API's" "bucket.website access_key:$queue_key_id bucket.website" \
@@ -1321,7 +1337,12 @@ site_visits() { env_q "SELECT coalesce(sum(requests), 0) || ' ' || coalesce(sum(
 for _ in $(seq 70); do [ "$(site_visits | cut -d' ' -f1)" -ge 12 ] && break; sleep 1; done
 check "the site's visits counted in its minutes once written, apart from S3's requests, with what they sent" "true true" \
   "$(site_visits | awk '{ print ($1 >= 12 && $2 >= 10) ? "true" : "false", ($3 > 0) ? "true" : "false" }')"
+since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
+check "its metrics, as CloudWatch names a CloudFront distribution's: the visits and their bytes, and a share of them answered 4xx" "true true true" \
+  "$(http GET "/buckets/e2e-site/website/metrics?period=3600&start=$since" | jq -r '"\([.metrics.Requests.Sum[]] | add >= 12) \([.metrics.BytesDownloaded.Sum[]] | add > 0) \([.metrics."4xxErrorRate".Average[] | select(. != null)] | max > 0)"')"
 http DELETE "/buckets/e2e-site?force=true" >/dev/null
+check "the site's domain gone with its bucket: it answers nothing there" "404 0" \
+  "$(at_domain docs.e2e-customer.tn) $(env_q "SELECT count(*) FROM custom_domains WHERE domain = 'docs.e2e-customer.tn'")"
 since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
 for _ in $(seq 90); do [ "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq '[.metrics.NumberOfMessagesSent.Sum[]] | add')" = 2 ] && break; sleep 1; done
 check "its metrics, as CloudWatch names SQS's: the two messages sampled waiting, the two sent as counted, three bytes each at most" "2 2 3" \

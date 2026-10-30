@@ -23,14 +23,15 @@ pub struct FunctionUrl {
     pub created_at: String,
 }
 
+/// A domain of the account's, a function URL's or a site's, as the API answers it.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Domain {
-    domain: String,
-    status: String,
+pub struct Domain {
+    pub domain: String,
+    pub status: String,
     records: Records,
-    checked_at: Option<String>,
-    check_error: Option<String>,
+    pub checked_at: Option<String>,
+    pub check_error: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -170,7 +171,7 @@ pub fn disable(name: &str, yes: bool, context: &Context) -> Result<(), Error> {
 }
 
 /// The records to make at the domain's DNS provider: one way or the other.
-fn records_text(domain: &Domain) -> String {
+pub fn records_text(domain: &Domain) -> String {
     let line = |record: &Record| format!("  {} {} {}", record.kind, record.name, record.value);
     let mut lines = vec![format!("{}: {}", domain.domain, domain.status)];
     if domain.status != "verified" {
@@ -246,7 +247,7 @@ pub fn domains_remove(name: &str, domain: &str, yes: bool, context: &Context) ->
 
 /// A domain in a path: its letters, digits, dots and hyphens need no escaping; anything else is
 /// percent-encoded, which the API then refuses as no domain.
-fn encode(domain: &str) -> String {
+pub fn encode(domain: &str) -> String {
     domain
         .bytes()
         .map(|byte| {

@@ -29,10 +29,11 @@ describe("a customer's domain, as an account may give it", () => {
     ['a number for its last label', 'shop.example.123', 'A domain ends with a name, not a number'],
     ['the function domain', 'fn.example.tn', "fn.example.tn is under fn.example.tn, where FF's own URLs are"],
     ['a name under it', 'x.fn.example.tn', "x.fn.example.tn is under fn.example.tn, where FF's own URLs are"],
+    ['a name under the sites\' domain', 'shop.site.example.tn', "shop.site.example.tn is under site.example.tn, where FF's own sites are"],
     ['a name no authority certifies', 'shop.local', 'shop.local is under .local, which no certificate authority certifies'],
     ['nothing', ' ', 'A domain has 1 to 253 characters'],
   ])('refuses %s', (_case, domain, problem) => {
-    expect(domainProblem(domain, 'fn.example.tn')).toBe(problem);
+    expect(domainProblem(domain, 'fn.example.tn', { sitesDomain: 'site.example.tn' })).toBe(problem);
   });
 
   it('takes names under .test in development, where a test zone has them', () => {

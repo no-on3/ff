@@ -60,8 +60,24 @@ describe('the alarm form', () => {
     const errors = { ...emptyForm('', '', 'photos'), name: 'Store errors' };
 
     expect(errors).toMatchObject({ functionId: '', databaseId: '', bucketName: 'photos', metric: '5xxErrors', statistic: 'Sum', period: 300 });
-    expect(metricsFor('', '', 'photos')).toEqual(['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded']);
+    expect(metricsFor('', '', 'photos')).toEqual([
+      'BucketSizeBytes',
+      'NumberOfObjects',
+      'AllRequests',
+      'GetRequests',
+      'PutRequests',
+      '4xxErrors',
+      '5xxErrors',
+      'BytesDownloaded',
+      'BytesUploaded',
+      'Requests',
+      '4xxErrorRate',
+      '5xxErrorRate',
+      'TotalErrorRate',
+    ]);
     expect(metricsFor('')).not.toContain('BucketSizeBytes');
+    // Its site's, as CloudFront's are named: a share of its visits, in percent.
+    expect(withMetric(errors, 'TotalErrorRate')).toMatchObject({ bucketName: 'photos', statistic: 'Average' });
     expect(toBody(errors)).toMatchObject({ functionId: null, databaseId: null, bucketName: 'photos', metric: '5xxErrors', period: 300 });
     expect(withMetric(errors, 'BucketSizeBytes')).toMatchObject({ bucketName: 'photos', statistic: 'Average' });
     expect([formProblem(errors), formProblem({ ...errors, bucketName: '' })]).toEqual([null, "5xxErrors is a bucket's: choose the bucket it watches"]);

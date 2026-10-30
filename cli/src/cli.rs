@@ -193,6 +193,10 @@ pub enum Command {
     #[command(subcommand)]
     Buckets(BucketsCommand),
 
+    /// The account's sites: a bucket's files, public at its own address, as S3's website hosting serves them
+    #[command(subcommand)]
+    Sites(SitesCommand),
+
     /// The account's queues, as Amazon SQS's standard queues, which AWS's SDKs and CLI reach with a key of
     /// `ff buckets keys create`
     #[command(subcommand)]
@@ -667,6 +671,114 @@ pub enum BucketsCommand {
         /// Remove them all, after asking
         #[arg(long)]
         clear: bool,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SitesCommand {
+    /// Upload a built site's folder to a bucket, as its site: the files that changed, each typed and cached by its
+    /// name, then the bucket's files the folder hasn't deleted; the bucket made a site if it isn't one
+    Deploy {
+        /// The bucket's name
+        bucket: String,
+
+        /// The built site's folder, such as ./dist; names starting with a dot are left out, .well-known apart
+        folder: PathBuf,
+
+        /// A single-page app's: a path with no file answers the index document, with 200, for the app's own routes
+        #[arg(long, conflicts_with = "no_spa")]
+        spa: bool,
+
+        /// No longer a single-page app's: a path with no file answers the error document, with 404
+        #[arg(long)]
+        no_spa: bool,
+
+        /// The file a folder's path answers [default: the site's, else index.html]
+        #[arg(long, value_name = "NAME")]
+        index_document: Option<String>,
+
+        /// The page a path with no file answers, with 404 [default: the site's, else the folder's 404.html]
+        #[arg(long, value_name = "KEY")]
+        error_document: Option<String>,
+
+        /// Keep the bucket's files the folder hasn't: delete none
+        #[arg(long)]
+        keep: bool,
+    },
+
+    /// Show a bucket's site: its address and its settings
+    Get {
+        /// The bucket's name
+        bucket: String,
+    },
+
+    /// Make a bucket no site: its address stops answering, its files are kept, private again
+    Remove {
+        /// The bucket's name
+        bucket: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Show a site's visits, as CloudWatch names a CloudFront distribution's metrics: its requests, the bytes sent
+    /// and the share that failed, a row per period
+    Metrics {
+        /// The bucket's name
+        bucket: String,
+
+        /// Seconds per row
+        #[arg(long, default_value_t = 60, value_parser = period)]
+        period: u32,
+
+        /// How far back: 30m, 6h, 2d
+        #[arg(long, default_value = "1h")]
+        since: String,
+    },
+
+    /// The site's own domains, proved by DNS
+    #[command(subcommand)]
+    Domains(SiteDomainsCommand),
+}
+
+#[derive(Subcommand)]
+pub enum SiteDomainsCommand {
+    /// List the site's domains, verified or not
+    List {
+        /// The bucket's name
+        bucket: String,
+    },
+
+    /// Add a domain of the account's, and show the DNS records that prove it
+    Add {
+        /// The bucket's name
+        bucket: String,
+
+        /// The domain, such as www.shop.tn
+        domain: String,
+    },
+
+    /// Check the domain's DNS records again
+    Verify {
+        /// The bucket's name
+        bucket: String,
+
+        /// The domain
+        domain: String,
+    },
+
+    /// Remove a domain: the site stops answering there at once
+    Remove {
+        /// The bucket's name
+        bucket: String,
+
+        /// The domain
+        domain: String,
 
         /// Don't ask first: a script must say it
         #[arg(long, short)]

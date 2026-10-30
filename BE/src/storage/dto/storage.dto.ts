@@ -110,6 +110,27 @@ export class StorageKeyView {
   lastUsedAt: Date | null;
 }
 
+/** The answer to POST /buckets/:name/website/deploy-keys: a key to the bucket alone, for an hour, its secret shown this once. */
+export class CreatedDeployKey {
+  @ApiProperty({ example: 'shop' })
+  bucket: string;
+
+  @ApiProperty({ example: 'AKFF0123456789ABCDEF', description: 'AWS_ACCESS_KEY_ID' })
+  accessKeyId: string;
+
+  @ApiProperty({ example: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', description: 'AWS_SECRET_ACCESS_KEY: shown once, FF keeps it sealed' })
+  secretAccessKey: string;
+
+  @ApiProperty({ description: 'When it stops working: an hour after it was made' })
+  expiresAt: Date;
+
+  @ApiProperty({ example: 'https://s3.ffunc.cloud', description: 'The S3 endpoint it signs for' })
+  endpoint: string;
+
+  @ApiProperty({ example: 'tn-tunis-1' })
+  region: string;
+}
+
 /** The answer to POST /storage-keys: the only time its secret is shown. */
 export class CreatedStorageKey extends StorageKeyView {
   @ApiProperty({ example: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', description: 'The secret access key, AWS_SECRET_ACCESS_KEY: shown once, FF keeps it sealed' })

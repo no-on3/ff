@@ -1,4 +1,4 @@
-import type { BucketMetricsView, BucketRequestMetric, DatabaseMetricsView, MetricsView, QueueMetricsView } from '../metrics/customer-metrics';
+import type { BucketMetricsView, BucketRequestMetric, DatabaseMetricsView, MetricsView, QueueMetricsView, SiteMetricsView } from '../metrics/customer-metrics';
 import { DATABASE_PERIOD } from '../metrics/customer-metrics';
 
 /**
@@ -35,6 +35,11 @@ export const STATISTICS = {
   '5xxErrors': ['Sum'],
   BytesDownloaded: ['Sum'],
   BytesUploaded: ['Sum'],
+  // A bucket's site's, as CloudWatch names a CloudFront distribution's: its visits, and the share of them that failed, in percent.
+  Requests: ['Sum'],
+  '4xxErrorRate': ['Average'],
+  '5xxErrorRate': ['Average'],
+  TotalErrorRate: ['Average'],
   // A customer's queue's, as CloudWatch names SQS's: its messages, sampled each minute, and its requests.
   ApproximateNumberOfMessagesVisible: ['Maximum', 'Average'],
   ApproximateNumberOfMessagesNotVisible: ['Maximum', 'Average'],
@@ -57,8 +62,21 @@ export const ALL_STATISTICS = [...new Set(Object.values(STATISTICS).flat())] as 
 export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharges'];
 /** A database's: the alarm names it, and judges hours. */
 export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
-/** A bucket's: the alarm names it. */
-export const BUCKET_METRICS: readonly Metric[] = ['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'];
+/** A bucket's site's: the alarm names the bucket. */
+export const SITE_ALARM_METRICS: readonly Metric[] = ['Requests', '4xxErrorRate', '5xxErrorRate', 'TotalErrorRate'];
+/** A bucket's, its site's among them: the alarm names it. */
+export const BUCKET_METRICS: readonly Metric[] = [
+  'BucketSizeBytes',
+  'NumberOfObjects',
+  'AllRequests',
+  'GetRequests',
+  'PutRequests',
+  '4xxErrors',
+  '5xxErrors',
+  'BytesDownloaded',
+  'BytesUploaded',
+  ...SITE_ALARM_METRICS,
+];
 /** A queue's: the alarm names it. */
 export const QUEUE_METRICS: readonly Metric[] = [
   'ApproximateNumberOfMessagesVisible',
@@ -209,6 +227,13 @@ export function bucketDatapointsOf(view: BucketMetricsView, metric: Metric, stat
   const requests = BUCKET_METRICS.includes(metric) ? view.metrics[metric as BucketRequestMetric] : undefined;
   if (!requests || statistic !== 'Sum') throw new Error(`${metric} ${statistic} isn't a bucket's metric`);
   return requests.Sum;
+}
+
+/** A site's metric's datapoints, oldest first: its visits every period, a quiet one's 0; a share null where there was no visit. */
+export function siteDatapointsOf(view: SiteMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
+  if (metric === 'Requests' && statistic === 'Sum') return view.metrics.Requests.Sum;
+  if ((metric === '4xxErrorRate' || metric === '5xxErrorRate' || metric === 'TotalErrorRate') && statistic === 'Average') return view.metrics[metric].Average;
+  throw new Error(`${metric} ${statistic} isn't a site's metric`);
 }
 
 /** A queue's metric's datapoints, oldest first: its messages and their age every period, an empty queue's 0; the size of messages sent null where none was. */

@@ -20,7 +20,9 @@
 # in ff usage, then deleted; ff buckets: one made, a key whose secret ff prints once as the
 # variables AWS's tools read, the AWS CLI uploading with them alone, what the bucket held at its
 # measure and its month in ff usage, the export kit's s3-sync.sh copying it out to a folder and on
-# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; ff queues: a queue made
+# to another bucket as to AWS S3, the bucket emptied when told, the key revoked; ff sites: a built folder deployed
+# with a deploy's own key, visited as a single-page app, deployed again changed, its visits in its metrics, a domain of
+# the customer's added, the bucket no site again; ff queues: a queue made
 # with its attributes and a dead-letter queue by name, a message sent by ff and received by the AWS CLI
 # with a key naming that queue alone, received again by ff until the third receive moves it to the
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
@@ -67,12 +69,15 @@ storage_port="$(free_port)"
 # Queues' SQS endpoint on a third, at http://localhost:<port>, which the AWS CLI reaches with a key of the account's,
 # and functions with their own at the cluster's gateway.
 sqs_port="$(free_port)"
+# Buckets' sites on a fourth, each at http://<bucket>.site.localhost:<port>, which curl takes to this machine.
+website_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
   FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
-  FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32" "${e2e_data_db_env[@]}")
+  FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port" "${e2e_data_db_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -625,6 +630,58 @@ ff buckets keys revoke "$key_id" --yes
 # The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
 refused="$(aws_with_key s3 ls 2>&1 || true)"
 check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
+
+echo "== a site, with ff sites: a built folder deployed with a deploy's own key, visited, deployed again changed"
+site_url="http://cli-site.site.localhost:$website_port"
+# visit <path> [curl options…]: the site's answer, its status and its page's title.
+visit() {
+  local path="$1"
+  shift
+  curl -s -o "$work/page.html" -w '%{http_code}' "$@" "$site_url$path"
+  printf ' %s' "$(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$work/page.html")"
+}
+ff buckets create cli-site
+rm -rf "$work/dist"
+mkdir -p "$work/dist/assets" "$work/dist/.git"
+printf '<!doctype html><title>cli shop</title>' >"$work/dist/index.html"
+printf '<!doctype html><title>cli missing</title>' >"$work/dist/404.html"
+printf 'console.log("cli")' >"$work/dist/assets/app-3c9d1a2b.js"
+printf 'never served' >"$work/dist/.git/config"
+ff sites deploy cli-site "$work/dist" --spa --output json
+check "ff sites deploy uploads the folder but its dot files, pages last, and makes the bucket a single-page app's site" \
+  "0 assets/app-3c9d1a2b.js,404.html,index.html true $site_url" \
+  "$(code) $(out | jq -r '"\(.uploaded | join(",")) \(.singlePageApp) \(.url)"')"
+check "the site answers its index, an app's route with it, each file typed and cached by its name" \
+  "200 cli shop|200 cli shop|text/javascript; charset=utf-8 public, max-age=31536000, immutable|no-cache" \
+  "$(visit /)|$(visit /orders/42)|$(curl -s -o /dev/null -w '%{content_type}' "$site_url/assets/app-3c9d1a2b.js") \
+$(curl -sI "$site_url/assets/app-3c9d1a2b.js" | tr -d '\r' | sed -n 's/^cache-control: //Ip')|$(curl -sI "$site_url/" | tr -d '\r' | sed -n 's/^cache-control: //Ip')"
+check "  ... with a key of its own, never one of the account's keys" "0 0" \
+  "$(ff buckets keys list --output json; code) $(out | jq '[.[] | select(.buckets == ["cli-site"])] | length')"
+rm "$work/dist/assets/app-3c9d1a2b.js"
+printf '<!doctype html><title>cli shop, again</title>' >"$work/dist/index.html"
+ff sites deploy cli-site "$work/dist" --output json
+check "ff sites deploy again sends what changed alone, deletes what the folder hasn't, and keeps the site's settings" \
+  "0 index.html 1 assets/app-3c9d1a2b.js true|200 cli shop, again" \
+  "$(code) $(out | jq -r '"\(.uploaded | join(",")) \(.unchanged) \(.deleted | join(",")) \(.singlePageApp)"')|$(visit /orders/42)"
+ff sites get cli-site
+check "ff sites get says its address and settings" "0 $site_url yes" \
+  "$(code) $(out | sed -n 1p) $(out | sed -n 's/^single-page app *\(yes\).*/\1/p')"
+ff sites domains add cli-site www.cli-shop.tn
+check "ff sites domains add gives the CNAME to the site's host that proves it" "0 true" \
+  "$(code) $(out | grep -q 'CNAME www.cli-shop.tn cli-site.site.localhost' && echo true || echo false)"
+ff sites domains remove cli-site www.cli-shop.tn --yes
+check "  ... and remove takes it away" "0 0" "$(code) $("$ff_bin" sites domains list cli-site --output json | jq length)"
+# Each minute, the website server writes the minutes that are over: these within two.
+for _ in $(seq 150); do [ "$("$ff_bin" sites metrics cli-site --period 3600 --since 1h --output json | jq '[.metrics.Requests.Sum[]] | add // 0')" -ge 4 ] && break; sleep 1; done
+ff sites metrics cli-site --period 3600 --since 1h --output json
+check "ff sites metrics counts its visits once their minute is written, as CloudFront names them" "0 true" \
+  "$(code) $(out | jq '([.metrics.Requests.Sum[]] | add >= 4) and ([.metrics.BytesDownloaded.Sum[]] | add > 0)')"
+ff sites remove cli-site --yes
+check "ff sites remove makes it no site: its address answers 404" "0 404" "$(code) $(curl -s -o /dev/null -w '%{http_code}' "$site_url/")"
+ff sites deploy cli-site "$work/dist" --output json
+check "  ... its files kept: a deploy finds them unchanged, and makes it a site again, no single-page app's unless told" "0 0 2 false" \
+  "$(code) $(out | jq -r '"\(.uploaded | length) \(.unchanged) \(.singlePageApp)"')"
+ff buckets delete cli-site --force --yes
 
 echo "== queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
 ff queues create cli-orders.fifo

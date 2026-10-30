@@ -24,6 +24,10 @@ export const STATISTICS = {
   '5xxErrors': ['Sum'],
   BytesDownloaded: ['Sum'],
   BytesUploaded: ['Sum'],
+  Requests: ['Sum'],
+  '4xxErrorRate': ['Average'],
+  '5xxErrorRate': ['Average'],
+  TotalErrorRate: ['Average'],
   ApproximateNumberOfMessagesVisible: ['Maximum', 'Average'],
   ApproximateNumberOfMessagesNotVisible: ['Maximum', 'Average'],
   ApproximateNumberOfMessagesDelayed: ['Maximum', 'Average'],
@@ -42,8 +46,21 @@ export const METRICS = Object.keys(STATISTICS) as Metric[];
 export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharges'];
 /** A customer's database's, an hour at a time: alarms on them are made on the database's page. */
 export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
-/** A customer's bucket's, as CloudWatch names S3's: what it holds, and its requests. */
-export const BUCKET_METRICS: readonly Metric[] = ['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'];
+/** A bucket's site's, as CloudWatch names a CloudFront distribution's: its visits, and the share of them that failed. */
+export const SITE_ALARM_METRICS: readonly Metric[] = ['Requests', '4xxErrorRate', '5xxErrorRate', 'TotalErrorRate'];
+/** A customer's bucket's, as CloudWatch names S3's: what it holds, and its requests; then its site's. */
+export const BUCKET_METRICS: readonly Metric[] = [
+  'BucketSizeBytes',
+  'NumberOfObjects',
+  'AllRequests',
+  'GetRequests',
+  'PutRequests',
+  '4xxErrors',
+  '5xxErrors',
+  'BytesDownloaded',
+  'BytesUploaded',
+  ...SITE_ALARM_METRICS,
+];
 /** A customer's queue's, as CloudWatch names SQS's: its messages, their age and size, and its requests. */
 export const QUEUE_METRICS: readonly Metric[] = [
   'ApproximateNumberOfMessagesVisible',
@@ -80,6 +97,10 @@ export const UNITS: Record<Metric, string> = {
   '5xxErrors': 'requests',
   BytesDownloaded: 'bytes',
   BytesUploaded: 'bytes',
+  Requests: 'visits',
+  '4xxErrorRate': '%',
+  '5xxErrorRate': '%',
+  TotalErrorRate: '%',
   ApproximateNumberOfMessagesVisible: 'messages',
   ApproximateNumberOfMessagesNotVisible: 'messages',
   ApproximateNumberOfMessagesDelayed: 'messages',

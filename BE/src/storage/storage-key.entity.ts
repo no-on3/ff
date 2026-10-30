@@ -8,7 +8,8 @@ import { Sealed } from '../encryption/envelope';
  * sealed rather than hashed, for this key alone. It reaches all the account's
  * buckets and queues, or, naming some, those alone, read-write or read-only.
  * A function's own key names its function, which has one that works at most.
- * A revoked key keeps its row, so that its ID is never another's.
+ * A deploy's own key reaches one bucket for an hour. A revoked or expired key
+ * keeps its row, so that its ID is never another's.
  */
 @Entity('storage_keys')
 @Index(['accountId'])
@@ -49,4 +50,8 @@ export class StorageKey {
 
   @Column({ type: 'timestamptz', nullable: true })
   revokedAt: Date | null;
+
+  /** When a deploy's key stops working; null for a key that works until revoked. */
+  @Column({ type: 'timestamptz', nullable: true })
+  expiresAt: Date | null;
 }

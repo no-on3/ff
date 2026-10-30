@@ -15,6 +15,7 @@ import {
   DATABASE_METRICS,
   Evaluation,
   QUEUE_METRICS,
+  SITE_ALARM_METRICS,
   bucketDatapointsOf,
   databaseDatapointsOf,
   datapointsOf,
@@ -22,6 +23,7 @@ import {
   evaluationWindow,
   notifies,
   queueDatapointsOf,
+  siteDatapointsOf,
   stateReason,
 } from './alarm-rules';
 import { alarmChanges, alarmEvaluations } from '../monitoring/operator-metrics';
@@ -108,7 +110,7 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
       .find({ where: { id: In(rows.map((row) => row.id)) }, relations: { account: true, function: true, database: true, bucket: true, queue: true } });
   }
 
-  /** The alarm's datapoints, oldest first: its periods' values, a database's hours, a bucket's or a queue's periods, or the account's money as it is. */
+  /** The alarm's datapoints, oldest first: its periods' values, a database's hours, a bucket's, its site's or a queue's periods, or the account's money as it is. */
   private async datapoints(alarm: Alarm, now: Date): Promise<Array<number | null>> {
     if (BILLING_METRICS.includes(alarm.metric)) {
       const view = await this.billing.balance(alarm.accountId, now);
@@ -118,6 +120,9 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
     const window = { ...evaluationWindow(alarm, now, settleSeconds), period: alarm.period as Period };
     if (DATABASE_METRICS.includes(alarm.metric)) {
       return databaseDatapointsOf(await this.metrics.forDatabase(alarm.accountId, alarm.databaseId as string, window), alarm.metric, alarm.statistic);
+    }
+    if (SITE_ALARM_METRICS.includes(alarm.metric)) {
+      return siteDatapointsOf(await this.metrics.siteMetrics(alarm.accountId, alarm.bucketId as string, window), alarm.metric, alarm.statistic);
     }
     if (BUCKET_METRICS.includes(alarm.metric)) {
       return bucketDatapointsOf(await this.metrics.bucketMetrics(alarm.accountId, alarm.bucketId as string, window), alarm.metric, alarm.statistic);

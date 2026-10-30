@@ -362,6 +362,32 @@ run('alarms (L2)', () => {
       expect((await stateOf(failing.id)).state).toBe('OK');
     });
 
+    it("fires on a site's share of failed visits from the website server's counts alone, and a quiet period after it is missing data", async () => {
+      const shop = await bucket(A, 'shop');
+      const [{ id }] = await query<Array<{ id: string }>>(`SELECT id FROM buckets WHERE name = $1`, [shop]);
+      const failing = await alarms.create(
+        A,
+        alarm({ name: 'Site errors', functionId: null, bucketName: shop, metric: 'TotalErrorRate', statistic: 'Average', period: 60, threshold: 10, actions: { email: false, webhookUrls: [] } }),
+      );
+      const counted = (kind: string, requests: number, errors4xx: number) =>
+        query(
+          `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
+           VALUES ($1, '2026-10-20T15:00:00Z', $4, gen_random_uuid(), $2, $3, $5, $5, 0, $6, 0, 0, 0)`,
+          [id, A, shop, kind, requests, errors4xx],
+        );
+      await counted('website', 8, 2);
+      await counted('tier2', 100, 0); // its S3 API's requests, never the site's
+
+      await evaluator.tick(new Date('2026-10-20T15:01:05Z'));
+      expect([(await stateOf(failing.id)).state, (await stateOf(failing.id)).stateReason]).toEqual([
+        'ALARM',
+        '1 of the last 1 period(s) of 60 s breaching TotalErrorRate Average > 10 (1 needed); latest 25',
+      ]);
+
+      await evaluator.tick(new Date('2026-10-20T15:02:05Z'));
+      expect((await stateOf(failing.id)).state).toBe('INSUFFICIENT_DATA');
+    });
+
     it("fires on a queue's messages from its minute samples, the e-mail naming the queue, and recovers once a minute finds it empty", async () => {
       const dead = await queue(A, 'orders-dlq');
       const waiting = await alarms.create(

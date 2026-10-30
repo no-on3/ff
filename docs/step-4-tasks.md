@@ -29,10 +29,10 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 - [x] **W-02** The website configuration and the website server:
   - [x] part 1: a bucket's website configuration through the S3 front door (S3's XML) and FF's API (`/buckets/:name/website`), its single-page setting;
   - [x] part 2: the website server, on a port of the backend's own: index and error documents, single-page apps, `ETag` and 304, ranges, content types, counted as a bucket's reads, the plan's monthly limit on bytes out.
-- [ ] **W-03** Addresses, domains, the console and `ff`:
-  - [ ] part 1: `<bucket>.site.<domain>` at the edge, its certificates, a customer's own domain for a site;
-  - [ ] part 2: the console's site panel on a bucket's page; `ff sites deploy` and `ff sites domains`;
-  - [ ] part 3: sites' metrics as CloudFront names them, and alarms on them.
+- [x] **W-03** Addresses, domains, the console and `ff`:
+  - [x] part 1: `<bucket>.site.<domain>` at the edge, its certificates, a customer's own domain for a site;
+  - [x] part 2: the console's site panel on a bucket's page; `ff sites deploy` and `ff sites domains`;
+  - [x] part 3: sites' metrics as CloudFront names them, and alarms on them.
 - [ ] **Deploy 1:** sites on the development server, at `*.site.dev.ffunc.cloud` (one DNS record more).
 
 ### Phase 2: caches

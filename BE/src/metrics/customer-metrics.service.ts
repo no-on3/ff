@@ -9,10 +9,12 @@ import {
   MetricsWindow,
   PeriodRow,
   QueueMetricsView,
+  SiteMetricsView,
   bucketMetricsView,
   databaseMetricsView,
   metricsView,
   queueMetricsView,
+  siteMetricsView,
 } from './customer-metrics';
 
 /** A call that ran: measured by the runtime, and so in the duration's statistics. */
@@ -114,6 +116,35 @@ export class CustomerMetricsService {
         '5xxErrors': Number(row['5xxErrors']),
         BytesDownloaded: Number(row.BytesDownloaded),
         BytesUploaded: Number(row.BytesUploaded),
+      })),
+    );
+  }
+
+  /** A bucket's site's, by the bucket's name, for its own account only: a bucket no longer a site still has its past visits. */
+  async forSite(accountId: string, name: string, window: MetricsWindow): Promise<SiteMetricsView> {
+    const [found] = await this.dataSource.query<Array<{ id: string }>>('SELECT "id" FROM "buckets" WHERE "name" = $1 AND "account_id" = $2', [name, accountId]);
+    if (!found) throw new NotFoundException(`The account has no bucket ${name}`);
+    return this.siteMetrics(accountId, found.id, window);
+  }
+
+  /** A bucket's site's, by the bucket's ID, as an alarm names it: the website server's counts of its visits alone. */
+  async siteMetrics(accountId: string, bucketId: string, window: MetricsWindow): Promise<SiteMetricsView> {
+    const periods = await this.dataSource.query<Array<Record<string, string>>>(
+      `SELECT floor(extract(epoch FROM "minute") / $3)::bigint * $3 AS "bucket", sum("requests")::text AS "requests", sum("bytes_out")::text AS "bytes_out",
+              sum("errors4xx")::text AS "errors4xx", sum("errors5xx")::text AS "errors5xx"
+         FROM "storage_request_counts"
+        WHERE "minute" >= $1 AND "minute" < $2 AND "account_id" = $4 AND "bucket_id" = $5 AND "class" = 'website'
+        GROUP BY 1`,
+      [window.start, window.end, window.period, accountId, bucketId],
+    );
+    return siteMetricsView(
+      window,
+      periods.map((row) => ({
+        bucket: Number(row.bucket),
+        requests: Number(row.requests),
+        bytesOut: Number(row.bytes_out),
+        errors4xx: Number(row.errors4xx),
+        errors5xx: Number(row.errors5xx),
       })),
     );
   }

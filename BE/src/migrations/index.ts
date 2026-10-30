@@ -50,6 +50,8 @@ import { QueueBilling1792816013937 } from './1792816013937-QueueBilling';
 import { QueueMetrics1792820562033 } from './1792820562033-QueueMetrics';
 import { BucketWebsites1793323284403 } from './1793323284403-BucketWebsites';
 import { SiteTransfer1793323792268 } from './1793323792268-SiteTransfer';
+import { SiteDomains1793324361034 } from './1793324361034-SiteDomains';
+import { DeployKeys1793326500000 } from './1793326500000-DeployKeys';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -109,4 +111,6 @@ export const MIGRATIONS: Array<new () => object> = [
   QueueMetrics1792820562033,
   BucketWebsites1793323284403,
   SiteTransfer1793323792268,
+  SiteDomains1793324361034,
+  DeployKeys1793326500000,
 ];
