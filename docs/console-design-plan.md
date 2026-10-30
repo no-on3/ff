@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Direction A chosen by you on 2026-10-22 (the [decision log](decisions.md), decision 22), from two previews of the functions page. **Built the same day,** W-00 to W-06, on the branch `feat/console-redesign`; not merged into `master` yet |
+| **Status** | Direction A chosen by you on 2026-10-22 (the [decision log](decisions.md), decision 22), from two previews of the functions page. **Built the same day,** W-00 to W-06, on the branch `feat/console-redesign`; merged into `master` on 2026-10-23 (`7d26ca4`) |
 | **Goal** | The console (`FE/`) looks like a calm, exact tool that people trust with their code and their money, and stands apart from the black-and-green look of most developer tools |
 | **Scope** | The console only, with no change to the API. The admin app keeps its look until its own turn; the login pages are Keycloak's |
 
