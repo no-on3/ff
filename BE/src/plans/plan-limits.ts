@@ -61,6 +61,8 @@ export const planLimitsSchema = z.strictObject({
   storageRequestsPerSecond: positive,
   /** The largest object one PutObject may send, in MB: S3's own limit is 5 GB. */
   maxObjectMb: positive,
+  /** What the account's sites may send out in a month, in GB, all its buckets' together: past it, they answer 403 until the next. */
+  siteTransferGbPerMonth: positive,
   /** Customers' queues, the account's together (ADR 0010). */
   queues: z.number().int().min(0),
   /** The queues one function may read in batches: its event source mappings. */

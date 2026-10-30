@@ -411,11 +411,12 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
           <EmptyState>No bucket.</EmptyState>
         ) : (
           <Table
-            head={['Name', 'In the store', 'Status', 'Size', 'Objects', 'Measured', 'Created']}
+            head={['Name', 'In the store', 'Status', 'Site', 'Size', 'Objects', 'Measured', 'Created']}
             rows={view.buckets.map((b) => [
               b.name,
               <span className="font-mono text-xs">{b.storeName}</span>,
               b.status,
+              b.site ? 'public site' : 'private',
               formatMegabytes(b.sizeBytes),
               b.objects === null ? '–' : b.objects.toLocaleString('en-US'),
               b.measuredAt ? whenUtc(b.measuredAt) : 'not yet',

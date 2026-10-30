@@ -39,6 +39,7 @@ const production: Env = {
   FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
   FF_STORAGE_BASE: 'https://s3.ff.example',
   FF_SQS_BASE: 'https://sqs.ff.example',
+  FF_WEBSITE_BASE: 'https://site.ff.example',
   FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
 

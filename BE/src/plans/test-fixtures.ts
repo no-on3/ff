@@ -25,6 +25,7 @@ export const BETA_LIMITS: PlanLimits = {
   bucketStorageMb: 5120,
   storageRequestsPerSecond: 100,
   maxObjectMb: 5120,
+  siteTransferGbPerMonth: 10,
   queues: 10,
   eventSourceMappingsPerFunction: 5,
   queueRequestsPerSecond: 100,

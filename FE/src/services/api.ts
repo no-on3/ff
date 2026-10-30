@@ -732,6 +732,7 @@ export interface PlanLimits {
   storageRequestsPerSecond: number;
   /** The largest object one PutObject may send, in MB. */
   maxObjectMb: number;
+  siteTransferGbPerMonth: number;
   /** Customers' queues, all together. */
   queues: number;
   /** The queues one function may read in batches. */
@@ -1147,7 +1148,7 @@ export const databasesApi = {
 };
 
 /** A bucket's fields, as the API's BucketView names them: contract.test.ts checks them. */
-export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
+export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
 
 /** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
 export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'queues', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
@@ -1167,6 +1168,8 @@ export interface Bucket {
   objects: number | null;
   /** The hour of that measure. */
   measuredAt: string | null;
+  /** Its site's address, public to read, once its website configuration is set; null for none. */
+  siteUrl: string | null;
   createdAt: string;
 }
 

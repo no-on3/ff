@@ -157,6 +157,7 @@ export class AdminBucketView {
   @ApiProperty({ nullable: true, type: Number, example: 161_480_253, description: 'Bytes at its last hourly measure; null before its first' }) sizeBytes: number | null;
   @ApiProperty({ nullable: true, type: Number, example: 1_204, description: 'Its objects then' }) objects: number | null;
   @ApiProperty({ nullable: true, type: Date, description: 'The hour of its last measure' }) measuredAt: Date | null;
+  @ApiProperty({ description: 'Whether its website configuration makes it a site, its files public to read' }) site: boolean;
   @ApiProperty() createdAt: Date;
 }
 

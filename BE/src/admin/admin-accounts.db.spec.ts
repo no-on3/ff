@@ -158,7 +158,7 @@ run('accounts, for operators (L2, P-71)', () => {
             : [],
       } as never,
       // Its buckets' rows and samples are read from the database itself; nothing here makes or empties a bucket in the store.
-      new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } })),
+      new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' } })),
       new CustomerQueues(ds, ds.getRepository(Queue)),
       new QueueStore(ds, { count: () => undefined } as never),
     );
@@ -518,11 +518,11 @@ run('accounts, for operators (L2, P-71)', () => {
     ]);
   });
 
-  it("shows the account's buckets on its page, their names in the store, what each held at its last measure, and how full they are together", async () => {
+  it("shows the account's buckets on its page, their names in the store, what each held at its last measure, which are public sites, and how full they are together", async () => {
     const id = await account({ status: AccountStatus.ACTIVE });
     const [{ id: photos }] = await query<Array<{ id: string }>>(
-      `INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456a', '2026-10-20T10:00:00Z') RETURNING id`,
-      [id, `photos-${id}`],
+      `INSERT INTO buckets (account_id, name, store_name, created_at, website) VALUES ($1, $2, 'ff-0123456789abcdef0123456a', '2026-10-20T10:00:00Z', $3) RETURNING id`,
+      [id, `photos-${id}`, JSON.stringify({ indexDocument: 'index.html', errorDocument: null, singlePageApp: false })],
     );
     await query(`INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456b', '2026-10-21T10:00:00Z')`, [id, `zz-new-${id}`]);
     await query(`SELECT ff_ensure_month_partition('bucket_samples', '2026-10-01')`);
@@ -534,8 +534,8 @@ run('accounts, for operators (L2, P-71)', () => {
     const page = await service.detail(id);
 
     expect(page.buckets).toEqual([
-      { name: `photos-${id}`, storeName: 'ff-0123456789abcdef0123456a', status: 'active', sizeBytes: 161_480_253, objects: 1_204, measuredAt: new Date('2026-10-22T09:00:00Z'), createdAt: new Date('2026-10-20T10:00:00Z') },
-      { name: `zz-new-${id}`, storeName: 'ff-0123456789abcdef0123456b', status: 'active', sizeBytes: null, objects: null, measuredAt: null, createdAt: new Date('2026-10-21T10:00:00Z') },
+      { name: `photos-${id}`, storeName: 'ff-0123456789abcdef0123456a', status: 'active', sizeBytes: 161_480_253, objects: 1_204, measuredAt: new Date('2026-10-22T09:00:00Z'), site: true, createdAt: new Date('2026-10-20T10:00:00Z') },
+      { name: `zz-new-${id}`, storeName: 'ff-0123456789abcdef0123456b', status: 'active', sizeBytes: null, objects: null, measuredAt: null, site: false, createdAt: new Date('2026-10-21T10:00:00Z') },
     ]);
     expect(page.account.bucketStorageNotice).toBe(80);
   });

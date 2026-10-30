@@ -310,8 +310,12 @@ check "  ... which A's function is mapped to, disabled: nothing reads the messag
 as_a POST /queues '{"name": "l5-events-a"}' >/dev/null
 as_a PUT /buckets/l5-photos-a/notifications "{\"queueConfigurations\": [{\"id\": \"l5\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
 check "  ... and A's bucket sends its deletions' events to a queue of A's" "200 l5" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
+as_a PUT /buckets/l5-photos-a/website '{"indexDocument": {"suffix": "index.html"}}' >/dev/null
+check "  ... and is a site" "200 index.html" "$(status) $(jq -r '.indexDocument.suffix' "$work/body")"
 # notified_by <as_…> <bucket>: the IDs of the bucket's notification configurations, as its own account reads them.
 notified_by() { "$1" GET "/buckets/$2/notifications" | jq -r '[.queueConfigurations[].id] | join(",")'; }
+# site_of <as_…> <bucket>: the index document of the bucket's site, as its own account reads it.
+site_of() { "$1" GET "/buckets/$2/website" | jq -r '.indexDocument.suffix'; }
 # kept_by <as_…> <queue>: the queue's name and its messages that can be received, as its own account reads them.
 kept_by() { "$1" GET "/queues/$2" | jq -r '"\(.name) \(.messages.available)"'; }
 # queue_body <route>: a body each queue route takes, so that only the queue's owner decides its answer.
@@ -571,6 +575,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B gets 404 for A's bucket's notifications" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
       check "  ... which A still has, as it set them" "l5 200" "$(notified_by as_a l5-photos-a) $(status)"
       ;;
+    "GET /buckets/{name}/website" | "PUT /buckets/{name}/website" | "DELETE /buckets/{name}/website")
+      as_b "$method" /buckets/l5-photos-a/website "$([ "$method" = PUT ] && echo '{"indexDocument": {"suffix": "stolen.html"}}' || true)" >/dev/null
+      check "$route: B gets 404 for A's bucket's site" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
+      check "  ... which A still has, as it set it" "index.html 200" "$(site_of as_a l5-photos-a) $(status)"
+      ;;
     "GET /buckets/{name}/metrics")
       as_b GET /buckets/l5-photos-a/metrics >/dev/null
       check "$route: B gets 404 for A's bucket's metrics" '404 The account has no bucket l5-photos-a' "$(status) $(message)"
@@ -758,6 +767,11 @@ check "B's key can neither read nor set A's bucket's notifications, which A stil
   "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-notification-configuration --bucket l5-photos-a) \
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-notification-configuration --bucket l5-photos-a --notification-configuration '{}') \
 $(notified_by as_a l5-photos-a)"
+check "B's key can neither read, set nor remove A's bucket's site, which A still has" "refused AccessDenied refused AccessDenied refused AccessDenied index.html" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-website --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-website --bucket l5-photos-a --website-configuration '{"IndexDocument": {"Suffix": "stolen.html"}}') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-website --bucket l5-photos-a) \
+$(site_of as_a l5-photos-a)"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
 
@@ -898,6 +912,8 @@ check "  ... which its function is mapped to, disabled" 201 "$(status)"
 as_user_1 POST /queues '{"name": "l5-events-1"}' >/dev/null
 as_user_1 PUT /buckets/l5-photos-1/notifications "{\"queueConfigurations\": [{\"id\": \"l5-one\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_1:l5-events-1\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
 check "  ... and its bucket sends its deletions' events to a queue of its own" "200 l5-one" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
+as_user_1 PUT /buckets/l5-photos-1/website '{"indexDocument": {"suffix": "index.html"}, "singlePageApp": true}' >/dev/null
+check "  ... and is a single-page app's site" "200 true" "$(status) $(jq -r .singlePageApp "$work/body")"
 key_1_s3="$(as_user_1 POST /storage-keys '{}')"
 check "  ... and an access key to it" 201 "$(status)"
 key_1_s3_id="$(jq -r .id <<<"$key_1_s3")"
@@ -1057,6 +1073,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 "$method" /buckets/l5-photos-1/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
       check "$route: account 2 gets 404 for account 1's bucket's notifications" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
       check "  ... which account 1 still has, as it set them" "l5-one 200" "$(notified_by as_user_1 l5-photos-1) $(status)"
+      ;;
+    "GET /buckets/{name}/website" | "PUT /buckets/{name}/website" | "DELETE /buckets/{name}/website")
+      as_user_2 "$method" /buckets/l5-photos-1/website "$([ "$method" = PUT ] && echo '{"indexDocument": {"suffix": "stolen.html"}}' || true)" >/dev/null
+      check "$route: account 2 gets 404 for account 1's bucket's site" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
+      check "  ... which account 1 still has, as it set it" "index.html 200" "$(site_of as_user_1 l5-photos-1) $(status)"
       ;;
     "GET /buckets/{name}/metrics")
       as_user_2 GET /buckets/l5-photos-1/metrics >/dev/null
@@ -1347,7 +1368,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create queue.create event_source.create queue.create bucket.notifications storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

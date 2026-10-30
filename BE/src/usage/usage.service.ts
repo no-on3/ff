@@ -263,7 +263,7 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
                          (array_agg("size_bytes" ORDER BY "hour" DESC))[1] AS "size_bytes", (array_agg("objects" ORDER BY "hour" DESC))[1] AS "objects"
                     FROM "bucket_samples" WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3 GROUP BY "bucket_id"),
             r AS (SELECT "bucket_id", max("name") AS "name", coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0) AS "tier1",
-                         coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0) AS "tier2", sum("bytes_out") AS "bytes_out", sum("bytes_in") AS "bytes_in"
+                         coalesce(sum("requests") FILTER (WHERE "class" IN ('tier2', 'website')), 0) AS "tier2", sum("bytes_out") AS "bytes_out", sum("bytes_in") AS "bytes_in"
                     FROM "storage_request_counts" WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3 GROUP BY "bucket_id")
        SELECT coalesce(s."bucket_id", r."bucket_id") AS "id", coalesce(s."name", r."name") AS "name", b."id" IS NULL AS "deleted",
               coalesce(s."hours", 0) AS "hours", coalesce(s."byte_hours", 0)::text AS "byte_hours", coalesce(s."size_bytes", 0)::text AS "size_bytes",

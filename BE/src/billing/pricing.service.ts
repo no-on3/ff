@@ -187,7 +187,7 @@ export class PricingService {
          FROM (SELECT "bucket_id", sum("size_bytes")::text AS "byteHours", count(*)::text AS "hours" FROM "bucket_samples"
                 WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3 GROUP BY "bucket_id") s
          FULL JOIN (SELECT "bucket_id", coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0)::text AS "tier1",
-                           coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0)::text AS "tier2"
+                           coalesce(sum("requests") FILTER (WHERE "class" IN ('tier2', 'website')), 0)::text AS "tier2"
                       FROM "storage_request_counts" WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3 AND "class" <> 'free'
                      GROUP BY "bucket_id") r
            ON r."bucket_id" = s."bucket_id"`,

@@ -11,6 +11,7 @@ import { BucketView, CreateBucketDto } from './dto/storage.dto';
 import { StorageKey } from './storage-key.entity';
 import { newStoreName } from './storage-names';
 import { StoreBuckets } from './store-buckets';
+import { siteUrl } from './website';
 
 /** A bucket as FF's operators see it: its name in the store too, and its last hourly measure, null before the first. */
 export interface MeasuredBucket {
@@ -21,6 +22,8 @@ export interface MeasuredBucket {
   objects: number | null;
   /** The hour of its last measure. */
   measuredAt: Date | null;
+  /** Whether its website configuration makes it a site. */
+  site: boolean;
   createdAt: Date;
 }
 
@@ -40,6 +43,8 @@ export class BucketsService {
   private readonly logger = new Logger(BucketsService.name);
   private readonly endpoint: URL;
   private readonly region: string;
+  /** Where sites live: each at <bucket>.<its host>. */
+  private readonly sites: URL;
 
   constructor(
     @InjectRepository(Bucket) private readonly buckets: Repository<Bucket>,
@@ -50,6 +55,7 @@ export class BucketsService {
   ) {
     this.endpoint = new URL(config.getOrThrow<string>('storage.base'));
     this.region = config.getOrThrow<string>('storage.region');
+    this.sites = new URL(config.getOrThrow<string>('website.base'));
   }
 
   /** The account's buckets, by name, each with what it held at its last hourly measure. */
@@ -66,9 +72,9 @@ export class BucketsService {
   /** The account's buckets, or the one named, as FF's operators see them too: their names in the store, and what each held at its last hourly measure. */
   async measured(accountId: string, name?: string): Promise<MeasuredBucket[]> {
     const rows = await this.buckets.manager.query<
-      Array<{ name: string; store_name: string; status: BucketStatus; created_at: Date; size_bytes: string | null; objects: string | null; hour: Date | null }>
+      Array<{ name: string; store_name: string; status: BucketStatus; created_at: Date; size_bytes: string | null; objects: string | null; hour: Date | null; site: boolean }>
     >(
-      `SELECT b."name", b."store_name", b."status", b."created_at", s."size_bytes"::text, s."objects"::text, s."hour"
+      `SELECT b."name", b."store_name", b."status", b."created_at", s."size_bytes"::text, s."objects"::text, s."hour", b."website" IS NOT NULL AS "site"
          FROM "buckets" b
          LEFT JOIN LATERAL (SELECT "size_bytes", "objects", "hour" FROM "bucket_samples" WHERE "bucket_id" = b."id" ORDER BY "hour" DESC LIMIT 1) s ON true
         WHERE b."account_id" = $1 AND ($2::text IS NULL OR b."name" = $2)
@@ -82,6 +88,7 @@ export class BucketsService {
       sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),
       objects: row.objects === null ? null : Number(row.objects),
       measuredAt: row.hour,
+      site: row.site,
       createdAt: row.created_at,
     }));
   }
@@ -169,7 +176,7 @@ export class BucketsService {
   }
 
   /** A bucket as the API answers it; a new one has no measure yet. */
-  private view(row: Pick<Bucket, 'name' | 'status' | 'createdAt'> & Partial<Pick<MeasuredBucket, 'sizeBytes' | 'objects' | 'measuredAt'>>): BucketView {
+  private view(row: Pick<Bucket, 'name' | 'status' | 'createdAt'> & Partial<Pick<MeasuredBucket, 'sizeBytes' | 'objects' | 'measuredAt' | 'site'>>): BucketView {
     const url = new URL(this.endpoint);
     url.hostname = `${row.name}.${this.endpoint.hostname}`;
     return {
@@ -181,6 +188,7 @@ export class BucketsService {
       sizeBytes: row.sizeBytes ?? null,
       objects: row.objects ?? null,
       measuredAt: row.measuredAt ?? null,
+      siteUrl: row.site ? siteUrl(this.sites, row.name) : null,
       createdAt: row.createdAt,
     };
   }

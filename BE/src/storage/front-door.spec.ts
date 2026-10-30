@@ -1,15 +1,18 @@
 import {
   CopyObjectCommand,
+  DeleteBucketWebsiteCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetBucketLocationCommand,
   GetBucketNotificationConfigurationCommand,
+  GetBucketWebsiteCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListBucketsCommand,
   ListObjectsV2Command,
   PutBucketNotificationConfigurationCommand,
   PutBucketPolicyCommand,
+  PutBucketWebsiteCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -26,13 +29,15 @@ import { PlansService } from '../plans/plans.service';
 import { plan } from '../plans/test-fixtures';
 import { BucketEvent, BucketEvents } from './bucket-events';
 import { NotificationRule } from './bucket-notifications';
-import { BucketNotificationsService } from './bucket-notifications.service';
+import { BucketNotificationsService, ChangedBy } from './bucket-notifications.service';
+import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
 import { RequestSignature, checkSignature, readSignature, signedForStore } from './sigv4';
 import { ActiveKey, StorageDirectory } from './storage-directory.service';
 import { StorageRequestCountsService } from './storage-request-counts.service';
+import { WebsiteConfiguration } from './website';
 
 const STORE_KEY = 'storekey';
 const STORE_SECRET = 'store-secret';
@@ -159,6 +164,9 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   const notifications = { keep: async (bucket: Bucket, rules: NotificationRule[], options: unknown) => void kept.push([bucket, rules, options]) } as unknown as BucketNotificationsService;
   const published: BucketEvent[] = [];
   const bucketEvents = { publish: async (event: BucketEvent) => void published.push(event) } as unknown as BucketEvents;
+  /** What the buckets' website configurations got: each kept, or removed, and by whom. */
+  const keptWebsites: Array<[string, WebsiteConfiguration | null, ChangedBy]> = [];
+  const websites = { keep: async (bucket: Bucket, website: WebsiteConfiguration | null, by: ChangedBy) => void keptWebsites.push([bucket.name, website, by]) } as unknown as BucketWebsitesService;
   const client = (key: ActiveKey = KEY, secret = key.secret) =>
     new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: secret }, maxAttempts: 1 });
   /** The SDK's error for a refused call: its name and status. */
@@ -179,7 +187,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
       objectStore: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
-    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents);
+    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites);
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 
@@ -194,6 +202,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     hits.clear();
     kept.length = 0;
     published.length = 0;
+    keptWebsites.length = 0;
   });
 
   it("puts a string, its SHA-256 and CRC-32 checked, and the store gets the object under its own name, FF's signature, no checksum", async () => {
@@ -208,6 +217,16 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     expect(seen[0].headers.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=storekey\//);
     expect(Object.keys(seen[0].headers).filter((name) => /checksum/.test(name))).toEqual([]);
     expect(counted).toEqual([expect.objectContaining({ bucketName: 'photos', class: 'tier1', method: 'PUT', status: 200, bytesIn: 12, bytesOut: 0 })]);
+  });
+
+  it("stores an object sent without a type as S3 does, binary/octet-stream, and a copy keeping its source's metadata as it is", async () => {
+    await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'untyped.css', Body: 'body {}' }));
+    await client().send(new CopyObjectCommand({ Bucket: 'photos', Key: 'copy.css', CopySource: 'photos/untyped.css' }));
+    await client().send(new CopyObjectCommand({ Bucket: 'photos', Key: 'replaced.css', CopySource: 'photos/untyped.css', MetadataDirective: 'REPLACE' }));
+
+    // The SDK sends a body without a type as application/octet-stream itself; a request with none at all, as the copy that
+    // replaces its metadata here, would have the store guess one from the bytes, which a site would serve: text/plain for a style sheet.
+    expect(seen.map((request) => request.headers['content-type'])).toEqual(['application/octet-stream', undefined, 'binary/octet-stream']);
   });
 
   it("puts a stream as the SDK sends one, aws-chunked with a trailing CRC-32, and the store gets the data alone, whole", async () => {
@@ -421,6 +440,70 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
 
     expect(await Promise.all(asked.map((domain) => frontDoor.allowsCertificate(domain)))).toEqual([true, true, false, false, false, true]);
   });
+  describe("a bucket's website configuration, as S3's", () => {
+    const photos = BUCKETS[0];
+
+    afterEach(() => {
+      photos.website = null;
+    });
+
+    it("keeps PutBucketWebsite's index and error documents under the key, the single-page setting as it was, counted as a PUT; the store never hears of it", async () => {
+      photos.website = { indexDocument: 'old.html', errorDocument: null, singlePageApp: true };
+
+      await client().send(new PutBucketWebsiteCommand({ Bucket: 'photos', WebsiteConfiguration: { IndexDocument: { Suffix: 'index.html' }, ErrorDocument: { Key: 'errors/404.html' } } }));
+
+      expect(keptWebsites).toEqual([
+        [
+          'photos',
+          { indexDocument: 'index.html', errorDocument: 'errors/404.html', singlePageApp: true },
+          { actor: { id: `access_key:${KEY.id}`, label: `access key ${KEY.id}` }, ip: '127.0.0.1', requestId: expect.any(String) },
+        ],
+      ]);
+      expect(counted.map((request) => [request.bucketName, request.class, request.status])).toEqual([['photos', 'tier1', 200]]);
+      expect(seen).toEqual([]);
+    });
+
+    it("refuses what FF's sites don't do yet, and an index document with a slash, as S3 refuses them; a read-only key may change nothing", async () => {
+      const put = (WebsiteConfiguration: ConstructorParameters<typeof PutBucketWebsiteCommand>[0]['WebsiteConfiguration'], key = KEY) =>
+        refused(client(key).send(new PutBucketWebsiteCommand({ Bucket: 'photos', WebsiteConfiguration })));
+
+      expect(await put({ RedirectAllRequestsTo: { HostName: 'example.tn' } })).toBe('501 NotImplemented');
+      expect(await put({ IndexDocument: { Suffix: 'index.html' }, RoutingRules: [{ Redirect: { ReplaceKeyWith: 'b' } }] })).toBe('501 NotImplemented');
+      expect(await put({ IndexDocument: { Suffix: 'pages/index.html' } })).toBe('400 InvalidArgument');
+      expect(await put({ ErrorDocument: { Key: '404.html' } })).toBe('400 InvalidArgument');
+      expect(await put({ IndexDocument: { Suffix: 'index.html' } }, READ_ONLY)).toBe('403 AccessDenied');
+      expect(await refused(client(READ_ONLY).send(new DeleteBucketWebsiteCommand({ Bucket: 'photos' })))).toBe('403 AccessDenied');
+      expect(await put({ IndexDocument: { Suffix: 'index.html' } }, OTHERS)).toBe('403 AccessDenied');
+      expect(keptWebsites).toEqual([]);
+    });
+
+    it("answers GetBucketWebsite in S3's XML, which AWS's SDK reads, and S3's NoSuchWebsiteConfiguration for a bucket that is no site", async () => {
+      expect(await refused(client().send(new GetBucketWebsiteCommand({ Bucket: 'photos' })))).toBe('404 NoSuchWebsiteConfiguration');
+
+      photos.website = { indexDocument: 'index.html', errorDocument: '404 & gone.html', singlePageApp: false };
+      const got = await client().send(new GetBucketWebsiteCommand({ Bucket: 'photos' }));
+
+      expect([got.IndexDocument, got.ErrorDocument]).toEqual([{ Suffix: 'index.html' }, { Key: '404 & gone.html' }]);
+      expect(got.RedirectAllRequestsTo).toBeUndefined();
+      expect(await refused(client(READ_ONLY).send(new GetBucketWebsiteCommand({ Bucket: 'photos' })))).toBe('accepted');
+      expect(seen).toEqual([]);
+    });
+
+    it('removes it with DeleteBucketWebsite, 204, under the key; a bucket that is no site has nothing to remove', async () => {
+      await client().send(new DeleteBucketWebsiteCommand({ Bucket: 'photos' }));
+      expect(keptWebsites).toEqual([]);
+
+      photos.website = { indexDocument: 'index.html', errorDocument: null, singlePageApp: false };
+      await client().send(new DeleteBucketWebsiteCommand({ Bucket: 'photos' }));
+
+      expect(keptWebsites.map(([name, website, by]) => [name, website, by.actor?.id])).toEqual([['photos', null, `access_key:${KEY.id}`]]);
+      expect(counted.map((request) => [request.class, request.status])).toEqual([
+        ['free', 204],
+        ['free', 204],
+      ]);
+    });
+  });
+
   describe("a bucket's notifications, as S3's", () => {
     const FUNCTION_ARN = `arn:aws:lambda:tn-tunis-1:${KEY.accountId}:function:thumbnails`;
     const QUEUE_ARN = `arn:aws:sqs:tn-tunis-1:${KEY.accountId}:uploads`;

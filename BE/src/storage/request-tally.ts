@@ -1,11 +1,18 @@
 import { RequestClass } from './s3-requests';
 
+/**
+ * How a bucket's request counts: by S3's classes, or as a site's (a GET of the
+ * second class, counted apart for the site's own measures and the plan's
+ * monthly limit on what sites send out).
+ */
+export type CountedClass = RequestClass | 'website';
+
 /** One request answered in a bucket, as it counts. */
 export interface CountedRequest {
   bucketId: string;
   accountId: string;
   bucketName: string;
-  class: RequestClass;
+  class: CountedClass;
   method: string;
   status: number;
   bytesIn: number;
@@ -17,7 +24,7 @@ export interface CountedRequest {
 export interface TalliedMinute {
   bucketId: string;
   minute: Date;
-  class: RequestClass;
+  class: CountedClass;
   accountId: string;
   name: string;
   requests: number;

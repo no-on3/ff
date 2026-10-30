@@ -130,11 +130,13 @@ export interface AccountBucket {
   objects: number | null;
   /** The hour of its last measure. */
   measuredAt: string | null;
+  /** Whether its website configuration makes it a site, its files public to read. */
+  site: boolean;
   createdAt: string;
 }
 
 /** The fields the API gives for each of them. */
-export const BUCKET_FIELDS = ['name', 'storeName', 'status', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const;
+export const BUCKET_FIELDS = ['name', 'storeName', 'status', 'sizeBytes', 'objects', 'measuredAt', 'site', 'createdAt'] as const;
 
 /** One of the account's queues: its messages counted now, what they hold, and where its dead letters go. */
 export interface AccountQueue {

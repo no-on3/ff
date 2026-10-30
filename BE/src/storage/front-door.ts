@@ -16,7 +16,8 @@ import { countStorageRequest } from '../plans/rate-limits';
 import { ChunkedBodyReader, ExpectedChecksum, PlainBodyChecker, STREAMING_SIGNED, STREAMING_SIGNED_TRAILER, STREAMING_UNSIGNED_TRAILER, isStreaming } from './aws-chunked';
 import { BucketEvents } from './bucket-events';
 import { nextSequencer, ruleFor, rulesFromXml, rulesXml, s3EventRecord } from './bucket-notifications';
-import { BucketNotificationsService } from './bucket-notifications.service';
+import { BucketNotificationsService, ChangedBy } from './bucket-notifications.service';
+import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket } from './bucket.entity';
 import { CHECKSUM_ALGORITHMS, isChecksumAlgorithm } from './checksums';
 import { fullBuckets } from './bucket-storage';
@@ -27,6 +28,7 @@ import { StoreClient } from './store-client';
 import { reachesBucket } from './key-reach';
 import { ActiveKey, StorageDirectory } from './storage-directory.service';
 import { StorageRequestCountsService } from './storage-request-counts.service';
+import { noSuchWebsiteConfiguration, websiteFromXml, websiteXml } from './website';
 import { listBucketsDocument, locationDocument, replacing } from './xml';
 import { MalformedXml, childText, childrenNamed, readXml } from './xml-reader';
 
@@ -41,6 +43,12 @@ const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 /** The request's headers the store gets: the object's own, and the conditions. Never the client's signature, nor its checksums, which the front door checks. */
 const FORWARDED =
   /^(content-type|content-md5|content-language|content-disposition|cache-control|expires|range|if-match|if-none-match|if-modified-since|if-unmodified-since|x-amz-meta-[!-~]+|x-amz-copy-source-range|x-amz-copy-source-if-(match|none-match|modified-since|unmodified-since)|x-amz-metadata-directive)$/;
+
+/** The writes that make an object of the request's own type: a copy only when it replaces the source's metadata. */
+const TYPED_WRITES = new Set(['PutObject', 'CreateMultipartUpload', 'CopyObject']);
+
+/** What S3 stores an object as, when its upload gives no type; the store would guess one from its bytes instead. */
+const S3_DEFAULT_TYPE = 'binary/octet-stream';
 
 /** The store's answer headers the client gets. */
 const ANSWERED = /^(content-type|content-length|content-range|content-encoding|content-language|content-disposition|cache-control|expires|etag|last-modified|accept-ranges|x-amz-meta-[!-~]+|x-amz-mp-parts-count)$/;
@@ -198,6 +206,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
     private readonly notifications: BucketNotificationsService,
     private readonly bucketEvents: BucketEvents,
+    private readonly websites: BucketWebsitesService,
   ) {
     const base = new URL(config.getOrThrow<string>('storage.base'));
     this.host = base.hostname;
@@ -332,6 +341,18 @@ export class S3FrontDoor implements OnModuleDestroy {
     // A bucket's notifications are set whatever its room or the account's credit, as other settings are.
     if (operation.name === 'GetBucketNotificationConfiguration') return this.document(exchange, 200, rulesXml(bucket.notifications ?? []));
     if (operation.name === 'PutBucketNotificationConfiguration') return this.putNotifications(exchange, signature, chain, key, bucket, operation, plan);
+    // So is its website configuration, which makes it a site.
+    if (operation.name === 'GetBucketWebsite') {
+      if (!bucket.website) throw noSuchWebsiteConfiguration();
+      return this.document(exchange, 200, websiteXml(bucket.website));
+    }
+    if (operation.name === 'PutBucketWebsite') return this.putWebsite(exchange, signature, chain, key, bucket, operation, plan);
+    if (operation.name === 'DeleteBucketWebsite') {
+      if (bucket.website) await this.websites.keep(bucket, null, this.changedBy(exchange, key));
+      exchange.response.writeHead(204, { 'x-amz-request-id': exchange.id });
+      exchange.response.end();
+      return 204;
+    }
     // Full buckets, or no credit, and uploads wait for room or for credit; reads, and deletes that make room and lower the bill, go on.
     if (operation.writes && operation.class === 'tier1') {
       if (bucketsFull) throw accountProblem(fullBuckets(plan.limits.bucketStorageMb, plan.name));
@@ -406,6 +427,9 @@ export class S3FrontDoor implements OnModuleDestroy {
     if (encodings.length) headers['content-encoding'] = encodings.join(',');
     const copySource = single(request.headers['x-amz-copy-source']);
     if (copySource !== undefined) headers['x-amz-copy-source'] = await this.copySource(copySource, key);
+    // An object sent without a type is S3's default, as on S3: a site's server then types it by its name.
+    const keepsSourceType = operation.name === 'CopyObject' && headers['x-amz-metadata-directive']?.toUpperCase() !== 'REPLACE';
+    if (TYPED_WRITES.has(operation.name) && headers['content-type'] === undefined && !keepsSourceType) headers['content-type'] = S3_DEFAULT_TYPE;
 
     const body = method === 'PUT' || method === 'POST' ? this.body(exchange, signature, chain, operation, headers, plan) : null;
     // Let in: now the client may send its body.
@@ -447,11 +471,27 @@ export class S3FrontDoor implements OnModuleDestroy {
     const document = await readWhole(stages, MAX_DOCUMENT_BYTES);
     await this.notifications.keep(bucket, rulesFromXml(document.toString('utf8')), {
       skipDestinationValidation: single(exchange.request.headers['x-amz-skip-destination-validation'])?.toLowerCase() === 'true',
-      changedBy: { actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` }, ip: exchange.request.socket.remoteAddress, requestId: exchange.id },
+      changedBy: this.changedBy(exchange, key),
     });
     exchange.response.writeHead(200, { 'x-amz-request-id': exchange.id, 'content-length': 0 });
     exchange.response.end();
     return 200;
+  }
+
+  /** PutBucketWebsite: its document read whole, the body's checks on the way, and kept as S3 keeps one, under the key. */
+  private async putWebsite(exchange: Exchange, signature: RequestSignature, chain: SigningChain, key: ActiveKey, bucket: Bucket, operation: S3Operation, plan: PlanView): Promise<number> {
+    const stages = this.body(exchange, signature, chain, operation, {}, plan);
+    if (exchange.expectsContinue) exchange.response.writeContinue();
+    const document = await readWhole(stages, MAX_DOCUMENT_BYTES);
+    await this.websites.keep(bucket, websiteFromXml(document.toString('utf8'), bucket.website), this.changedBy(exchange, key));
+    exchange.response.writeHead(200, { 'x-amz-request-id': exchange.id, 'content-length': 0 });
+    exchange.response.end();
+    return 200;
+  }
+
+  /** Who changed a bucket's settings through the front door: the access key, from the caller's address. */
+  private changedBy(exchange: Exchange, key: ActiveKey): ChangedBy {
+    return { actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` }, ip: exchange.request.socket.remoteAddress, requestId: exchange.id };
   }
 
   /**

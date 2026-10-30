@@ -60,6 +60,8 @@ export type AuditAction =
   | 'bucket.delete'
   // A bucket's notification configuration, set whole, through the S3 front door or FF's API.
   | 'bucket.notifications'
+  // A bucket's website configuration, set whole or removed, through the S3 front door or FF's API: it makes the bucket a site.
+  | 'bucket.website'
   | 'storage_key.create'
   | 'storage_key.delete'
   // A customer's queue, made, changed, purged and deleted through FF's API or the SQS endpoint's (ADR 0010).

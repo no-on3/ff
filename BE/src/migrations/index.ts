@@ -48,6 +48,8 @@ import { EventSourceMappings1792803225587 } from './1792803225587-EventSourceMap
 import { BucketNotifications1792810703773 } from './1792810703773-BucketNotifications';
 import { QueueBilling1792816013937 } from './1792816013937-QueueBilling';
 import { QueueMetrics1792820562033 } from './1792820562033-QueueMetrics';
+import { BucketWebsites1793323284403 } from './1793323284403-BucketWebsites';
+import { SiteTransfer1793323792268 } from './1793323792268-SiteTransfer';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -105,4 +107,6 @@ export const MIGRATIONS: Array<new () => object> = [
   BucketNotifications1792810703773,
   QueueBilling1792816013937,
   QueueMetrics1792820562033,
+  BucketWebsites1793323284403,
+  SiteTransfer1793323792268,
 ];

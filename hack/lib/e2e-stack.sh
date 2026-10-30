@@ -45,6 +45,8 @@ e2e_base_env=(
   FF_STORAGE_PORT=0
   # Nor queues' SQS endpoint, for the same reason.
   FF_SQS_PORT=0
+  # Nor buckets' sites: a test that visits them gives a free port, and the base to match.
+  FF_WEBSITE_PORT=0
   # Nor functions' own keys to buckets, nor customers' databases, whichever a developer's BE/.env names: a test that
   # uses them gives its own after these (the cluster's gateway; e2e_data_db's server).
   FF_STORAGE_FUNCTION_ENDPOINT= FF_STORAGE_FUNCTION_CIDRS=

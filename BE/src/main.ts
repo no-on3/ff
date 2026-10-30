@@ -11,6 +11,7 @@ import { assertSchemaUpToDate } from './database/schema-check';
 import { FunctionUrlGateway } from './function-urls/function-url.gateway';
 import { SqsFrontDoor } from './queues/sqs-front-door';
 import { S3FrontDoor } from './storage/front-door';
+import { WebsiteServer } from './storage/website-server';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -50,6 +51,13 @@ async function bootstrap() {
   if (sqsPort > 0) {
     await app.get(SqsFrontDoor).listen(sqsPort);
     new Logger('Bootstrap').log(`Queues' SQS requests are answered on port ${sqsPort}, at ${configService.getOrThrow<string>('sqs.base')}`);
+  }
+
+  // And buckets' sites, on a port of their own, which the edge reaches (0: none).
+  const websitePort = configService.getOrThrow<number>('website.port');
+  if (websitePort > 0) {
+    await app.get(WebsiteServer).listen(websitePort);
+    new Logger('Bootstrap').log(`Buckets' sites are answered on port ${websitePort}, each at <bucket>.${new URL(configService.getOrThrow<string>('website.base')).host}`);
   }
 }
 

@@ -39,6 +39,13 @@ describe('the operation a request is', () => {
     expect(of('POST', bucket, 'delete&x-id=DeleteObjects')).toBe('DeleteObjects free writes');
   });
 
+  it("the bucket's website configuration: set and read as S3 bills a PUT and a GET, removed for free, as a DELETE", () => {
+    expect(of('PUT', bucket, 'website')).toBe('PutBucketWebsite tier1 writes');
+    expect(of('GET', bucket, 'website')).toBe('GetBucketWebsite tier2');
+    expect(of('DELETE', bucket, 'website')).toBe('DeleteBucketWebsite free writes');
+    expect(of('GET', bucket, 'website&policy')).toBe('NotImplemented tier2');
+  });
+
   it("an object's: put, copy, get, head, delete, and a multipart upload's every step", () => {
     expect(of('PUT', object, 'x-id=PutObject')).toBe('PutObject tier1 writes');
     expect(of('PUT', object, '', { 'x-amz-copy-source': '/photos/b.jpg' })).toBe('CopyObject tier1 writes');

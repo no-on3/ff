@@ -65,8 +65,9 @@ env=(
   -e K8S_TOKEN_FILE=/etc/ff/kube/token -e K8S_CA_FILE=/etc/ff/kube/ca.crt
   -v "$work/token:/etc/ff/kube/token:ro" -v "$work/ca.crt:/etc/ff/kube/ca.crt:ro"
   # Production's addresses are https, and every function's code comes from the code registry, never reached here.
-  -e FF_FUNCTION_URL_BASE=https://fn.ff.test -e FF_STORAGE_BASE=https://s3.ff.test -e FF_SQS_BASE=https://sqs.ff.test -e FF_CODE_REGISTRY=http://127.0.0.1:1
-  -e FF_FUNCTION_URL_PORT="$url_port" -e FF_STORAGE_PORT="$storage_port" -e FF_SQS_PORT="$sqs_port"
+  -e FF_FUNCTION_URL_BASE=https://fn.ff.test -e FF_STORAGE_BASE=https://s3.ff.test -e FF_SQS_BASE=https://sqs.ff.test -e FF_WEBSITE_BASE=https://site.ff.test
+  -e FF_CODE_REGISTRY=http://127.0.0.1:1
+  -e FF_FUNCTION_URL_PORT="$url_port" -e FF_STORAGE_PORT="$storage_port" -e FF_SQS_PORT="$sqs_port" -e FF_WEBSITE_PORT=0
   -e FF_ENCRYPTION_KEYS_FILE=/etc/ff/keys/keys -v "$work/encryption-keys:/etc/ff/keys/keys:ro"
 )
 # Host networking: the database's and the cluster's ports are this machine's.

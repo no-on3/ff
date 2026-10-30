@@ -121,6 +121,8 @@ url_port="$(free_port)"
 storage_port="$(free_port)"
 # Queues' SQS endpoint on a third, at http://localhost:<port>; functions reach it at the cluster's gateway.
 sqs_port="$(free_port)"
+# Buckets' sites on a fourth, each at http://<bucket>.site.localhost:<port>, which curl takes to this machine.
+website_port="$(free_port)"
 # Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
 dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
@@ -130,6 +132,7 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
   FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port"
   FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
@@ -921,6 +924,7 @@ check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \
   "$(aws_ff s3api head-object --bucket e2e-photos --key cli/big.bin --query ContentLength --output text) $(cmp -s "$work/big.bin" "$work/big.out"; echo $?)"
 aws_ff s3api get-object --bucket e2e-photos --key cli/big.bin --range bytes=0-9 "$work/range.out" >/dev/null
 check "aws: a range" "$(head -c 10 "$work/big.bin" | od -An -tx1 | tr -d ' \n')" "$(od -An -tx1 "$work/range.out" | tr -d ' \n')"
+rm -rf "$work/site" "$work/site-back"
 mkdir -p "$work/site/css" "$work/site-back"
 printf '<h1>Ahlan</h1>' >"$work/site/index.html"
 printf 'body {}' >"$work/site/css/main.css"
@@ -1263,9 +1267,61 @@ check "the audit log names the change, under the CLI's key" "bucket.notification
   "$(env_q "SELECT action || ' ' || actor FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-notify' AND action = 'bucket.notifications' ORDER BY at DESC LIMIT 1")"
 http DELETE "/functions/$upload_fn" >/dev/null
 http DELETE "/buckets/e2e-notify?force=true" >/dev/null
+
+echo "== buckets' sites, as S3's website endpoint answers them: a built site synced with the AWS CLI, then visited"
+site_url="http://e2e-site.site.localhost:$website_port"
+# page <path> [curl options…]: the site's answer to a browser, its status and the error's code, as S3's error page says
+# it under its own title, or else its page's title.
+page() {
+  local path=$1 code
+  shift
+  curl -s -o "$work/page.html" -w '%{http_code}' "$@" "$site_url$path"
+  code="$(grep -oE 'Code: [A-Za-z]+' "$work/page.html" | head -1 | sed 's/Code: //')"
+  echo " ${code:-$(grep -oE '<title>[^<]*' "$work/page.html" | head -1 | sed 's/<title>//')}"
+}
+http POST /buckets '{"name": "e2e-site"}' >/dev/null
+# A built site of its own, apart from the folder the S3 checks above synced.
+rm -rf "$work/www"
+mkdir -p "$work/www/assets" "$work/www/docs"
+printf '<!doctype html><title>e2e shop</title>' >"$work/www/index.html"
+printf '<!doctype html><title>e2e docs</title>' >"$work/www/docs/index.html"
+printf '<!doctype html><title>e2e missing</title>' >"$work/www/404.html"
+printf 'console.log("e2e")' >"$work/www/assets/app-3c9d.js"
+s3n s3 sync "$work/www" s3://e2e-site --only-show-errors
+printf 'body { color: navy }' >"$work/untyped.css"
+s3n s3api put-object --bucket e2e-site --key untyped.css --body "$work/untyped.css" >/dev/null
+check "a bucket is no site before its website configuration" "404 NoSuchWebsiteConfiguration" "$(page /)"
+s3n s3 website s3://e2e-site --index-document index.html --error-document 404.html
+check "the AWS CLI makes it a site, as S3's; FF's API reads the same, with its address" "index.html 404.html index.html $site_url false" \
+  "$(s3n s3api get-bucket-website --bucket e2e-site | jq -r '"\(.IndexDocument.Suffix) \(.ErrorDocument.Key)"') \
+$(http GET /buckets/e2e-site/website | jq -r '"\(.indexDocument.suffix) \(.url) \(.singlePageApp)"')"
+check "a browser gets its index, a folder's, a folder named without its slash redirected, a missing page its error document with 404" \
+  "200 e2e shop|200 e2e docs|302 $site_url/docs/|404 e2e missing" \
+  "$(page /)|$(page /docs/)|$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$site_url/docs")|$(page /no/such/page)"
+check "an asset as the CLI typed it, a file uploaded without a type typed by its name, neither ever sniffed" "javascript text/css; charset=utf-8 nosniff" \
+  "$(curl -s -o /dev/null -w '%{content_type}' "$site_url/assets/app-3c9d.js" | grep -o javascript) $(curl -s -o /dev/null -w '%{content_type}' "$site_url/untyped.css") \
+$(curl -sI "$site_url/" | tr -d '\r' | sed -n 's/^x-content-type-options: //Ip')"
+etag="$(curl -sI "$site_url/assets/app-3c9d.js" | tr -d '\r' | sed -n 's/^etag: //Ip')"
+check "  ... the store's ETag, so that a browser that has the file gets 304, and a range 206" "304 206 console" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: $etag" "$site_url/assets/app-3c9d.js") \
+$(curl -s -o "$work/part" -w '%{http_code}' -H 'Range: bytes=0-6' "$site_url/assets/app-3c9d.js") $(cat "$work/part")"
+check "a path that climbs out of the site refused, never another bucket's file; a POST refused" "400 InvalidURI|405 MethodNotAllowed" \
+  "$(page /../e2e-photos/x --path-as-is)|$(page / -X POST)"
+http PUT /buckets/e2e-site/website '{"indexDocument": {"suffix": "index.html"}, "errorDocument": {"key": "404.html"}, "singlePageApp": true}' >/dev/null
+check "FF's API makes it a single-page app's: its routes get its index with 200" "200 true 200 e2e shop" "$(status) $(jq -r .singlePageApp "$work/body") $(page /orders/42)"
+check "the audit log names each change: the CLI's under its key, the API's" "bucket.website access_key:$queue_key_id bucket.website" \
+  "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-site' AND action = 'bucket.website'")"
+s3n s3api delete-bucket-website --bucket e2e-site
+check "DeleteBucketWebsite makes it no site again, its files kept" "404 NoSuchWebsiteConfiguration 5" \
+  "$(page /) $(s3n s3 ls s3://e2e-site --recursive | wc -l)"
 for _ in $(seq 150); do [ "$(http GET "/alarms/$waiting_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
 check "the alarm fires once a minute has sampled the two messages waiting, naming the queue" "ALARM e2e-waiting true" \
   "$(http GET "/alarms/$waiting_alarm" | jq -r '"\(.state) \(.queueName) \(.stateReason | test("breaching ApproximateNumberOfMessagesVisible Maximum > 1"))"')"
+site_visits() { env_q "SELECT coalesce(sum(requests), 0) || ' ' || coalesce(sum(gets), 0) || ' ' || coalesce(sum(bytes_out), 0) FROM storage_request_counts WHERE name = 'e2e-site' AND class = 'website'"; }
+for _ in $(seq 70); do [ "$(site_visits | cut -d' ' -f1)" -ge 12 ] && break; sleep 1; done
+check "the site's visits counted in its minutes once written, apart from S3's requests, with what they sent" "true true" \
+  "$(site_visits | awk '{ print ($1 >= 12 && $2 >= 10) ? "true" : "false", ($3 > 0) ? "true" : "false" }')"
+http DELETE "/buckets/e2e-site?force=true" >/dev/null
 since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
 for _ in $(seq 90); do [ "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq '[.metrics.NumberOfMessagesSent.Sum[]] | add')" = 2 ] && break; sleep 1; done
 check "its metrics, as CloudWatch names SQS's: the two messages sampled waiting, the two sent as counted, three bytes each at most" "2 2 3" \

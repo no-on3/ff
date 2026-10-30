@@ -165,7 +165,7 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
          FROM (SELECT "bucket_id", "account_id", "name", "size_bytes" FROM "bucket_samples" WHERE "hour" = $1) s
          FULL JOIN (SELECT "bucket_id", max("account_id") AS "account_id", max("name") AS "name",
                            coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0) AS "tier1",
-                           coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0) AS "tier2"
+                           coalesce(sum("requests") FILTER (WHERE "class" IN ('tier2', 'website')), 0) AS "tier2"
                       FROM "storage_request_counts" WHERE "minute" >= $1 AND "minute" < $3 GROUP BY "bucket_id") r
            ON r."bucket_id" = s."bucket_id"
         WHERE s."bucket_id" IS NOT NULL OR r."tier1" > 0 OR r."tier2" > 0

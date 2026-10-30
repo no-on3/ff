@@ -52,6 +52,9 @@ export class BucketView {
   @ApiProperty({ nullable: true, type: Date, description: 'The hour of its last measure; the next comes within the next hour' })
   measuredAt: Date | null;
 
+  @ApiProperty({ nullable: true, type: String, example: 'https://photos.site.ffunc.cloud', description: "Its site's address, public to read, once its website configuration is set; null for none" })
+  siteUrl: string | null;
+
   @ApiProperty()
   createdAt: Date;
 }

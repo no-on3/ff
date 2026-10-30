@@ -52,6 +52,8 @@ export const DEV_FUNCTION_URL_BASE = 'http://fn.localhost:3001';
 export const DEV_STORAGE_BASE = 'http://s3.localhost:3002';
 /** Queues' SQS endpoint in development, which a queue's URL begins with: AWS's SDKs reach a queue at its URL. */
 export const DEV_SQS_BASE = 'http://localhost:3003';
+/** Sites in development: http://<bucket>.site.localhost:3004/, which every browser takes to this machine. */
+export const DEV_WEBSITE_BASE = 'http://site.localhost:3004';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
@@ -279,6 +281,11 @@ const storageBase = {
   test: functionUrlBase.test,
   expected: 'an origin whose host has a dot, such as https://s3.example.tn, at which a bucket is https://s3.example.tn/<bucket> and https://<bucket>.s3.example.tn',
 };
+/** Where sites live: a scheme, a host under which each site is <bucket>.<host>, and a port if any; no path. */
+const websiteBase = {
+  test: functionUrlBase.test,
+  expected: "an origin whose host has a dot, such as https://site.example.tn, under which a bucket's site is https://<bucket>.site.example.tn/",
+};
 /** Queues' SQS endpoint: a scheme, a host and a port if any; no path. A queue's URL is <endpoint>/<account>/<name>. */
 const sqsBase = {
   test: (v: string) => {
@@ -459,6 +466,9 @@ const appShape = {
   // ff-system, on FF_SQS_PORT, as when the backend runs in the cluster).
   FF_SQS_FUNCTION_ENDPOINT: optionalText(functionSqsEndpoint),
   FF_SQS_FUNCTION_CIDRS: list(cidr),
+  // Sites: the port of the server that answers buckets' websites, apart from the API's (0: none), and where they live.
+  FF_WEBSITE_PORT: integer(3004, 0, 65535),
+  FF_WEBSITE_BASE: text(DEV_WEBSITE_BASE, websiteBase),
   // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
   // servers that check domains' records (none: the system's).
   FF_EDGE_ADDRESSES: list(ipAddress),
@@ -629,6 +639,9 @@ function appRules(env: AppEnv): string[] {
     }
     if (!env.FF_SQS_BASE.startsWith('https://')) {
       problems.push("FF_SQS_BASE must be an https:// origin when NODE_ENV=production, such as https://sqs.example.tn: queues' requests carry customers' messages");
+    }
+    if (!env.FF_WEBSITE_BASE.startsWith('https://')) {
+      problems.push('FF_WEBSITE_BASE must be an https:// origin when NODE_ENV=production, such as https://site.example.tn: sites are served over TLS');
     }
     if (!env.FF_STORAGE_BASE.startsWith('https://')) {
       problems.push("FF_STORAGE_BASE must be an https:// origin when NODE_ENV=production, such as https://s3.example.tn: buckets' requests carry customers' files");
@@ -885,6 +898,11 @@ export default function configuration(env: Env = process.env) {
       region: parsed.FF_REGION,
       // Where functions reach it with their own keys, inside the cluster; '': their pods get no AWS_ENDPOINT_URL_SQS.
       functionEndpoint: parsed.FF_SQS_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
+    },
+    // Buckets' sites: the server that answers them, and the origin under which each is <bucket>.<host>.
+    website: {
+      port: parsed.FF_WEBSITE_PORT,
+      base: parsed.FF_WEBSITE_BASE.replace(/\/$/, ''),
     },
     // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
     codeImages: {

@@ -68,6 +68,7 @@ const KEY_QUEUES = migrationNames.find((name) => name.startsWith('KeyQueues')) a
 const EVENT_SOURCE_MAPPINGS = migrationNames.find((name) => name.startsWith('EventSourceMappings')) as string;
 const BUCKET_NOTIFICATIONS = migrationNames.find((name) => name.startsWith('BucketNotifications')) as string;
 const QUEUE_BILLING = migrationNames.find((name) => name.startsWith('QueueBilling')) as string;
+const BUCKET_WEBSITES = migrationNames.find((name) => name.startsWith('BucketWebsites')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -661,6 +662,33 @@ run('database schema (L2, real PostgreSQL)', () => {
       // The alarms the code before it doesn't know go; the others stay.
       expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Errors' }]);
       expect(await dataSource.query(`SELECT to_regclass('queue_samples') AS s, to_regclass('async_event_counts') AS c`)).toEqual([{ s: null, c: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the sites' migration counts their requests in a class of their own, gives every plan its monthly limit, and reverts dropping the sites' minutes alone", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: bucket }] = await dataSource.query(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, 'shop', 'ff-000000000000000000000001') RETURNING id`, [ACCOUNT]);
+      const counted = (kind: string) =>
+        dataSource.query(
+          `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
+           VALUES ($1, date_trunc('minute', now()), $2, gen_random_uuid(), $3, 'shop', 1, 1, 0, 0, 0, 0, 100)`,
+          [bucket, kind, ACCOUNT],
+        );
+      await counted('tier2');
+      await counted('website');
+      await expect(counted('cdn')).rejects.toThrow(/violates check constraint/);
+      expect((await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`))[0].limits.siteTransferGbPerMonth).toBe(10);
+
+      await migrateDownTo(dataSource, BUCKET_WEBSITES);
+
+      expect(await dataSource.query(`SELECT class FROM storage_request_counts`)).toEqual([{ class: 'tier2' }]);
+      await expect(counted('website')).rejects.toThrow(/violates check constraint/);
+      await expect(dataSource.query(`DELETE FROM storage_request_counts`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect((await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`))[0].limits.siteTransferGbPerMonth).toBeUndefined();
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
