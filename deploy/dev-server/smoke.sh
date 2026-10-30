@@ -292,8 +292,9 @@ subject="Smoke $run"
 check "an e-mail from it, to it, as the sandbox allows" 201 "$(api "$customer" POST /email/messages \
   "$(jq -cn --arg from "$sender" --arg subject "$subject" '{from: $from, to: [$from], subject: $subject, text: "The development server smoke test"}')")"
 message=""
+# Found by its sender: FF's own e-mails about the account, its approval among them, name it too.
 for _ in $(seq 1 60); do
-  message="$(mailpit search "subject:\"$subject\"" | jq -r '.messages[0].ID // empty')"
+  message="$(mailpit search "from:$sender" | jq -r '.messages[0].ID // empty')"
   [ -n "$message" ] && break
   sleep 1
 done
