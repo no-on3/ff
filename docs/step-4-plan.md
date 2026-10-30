@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed on 2026-10-24 with step 3's close (the [step-3 plan](step-3-plan.md), Q-10), checked against the code the same day by a read-only survey (§1). **Waiting for you:** the eleven choices of §9, each with a recommendation. Nothing of it is built until you confirm them. |
+| **Status** | Proposed on 2026-10-24 with step 3's close (the [step-3 plan](step-3-plan.md), Q-10), checked against the code the same day by a read-only survey (§1). **Confirmed on 2026-10-30,** each of §9's eleven choices as it recommended, when you asked to build step 4 without stopping (the [decision log](decisions.md), 40 to 50). **Started on 2026-10-30,** on the branch `feat/step-4`, made from `master` (`82d66ba`); its [task list](step-4-tasks.md) keeps the order and what is left, this plan's progress log (§11) the evidence. |
 | **Goal** | Step 4 of [What to build next](what-to-build-next.md) (§7): a customer moves a whole app to FF. Its built frontend as a static site, at an address of FF's or the customer's own domain; the e-mail the app sends, through an API shaped like AWS SES's; and a cache that speaks Valkey's protocol (Redis's), as AWS ElastiCache gives one. Each in AWS's shape, so that the way out stays open |
 | **Parent plans** | [What to build next](what-to-build-next.md) §7 (static sites, e-mail from apps, a cache) and §9.4 (cache rules in the edge first); the [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): §4.10 (its own mail server, or a local SMTP provider), §9.2 (no foreign service for e-mail), §10 (port 25 closed to functions); the [client-readiness plan](client-readiness-plan.md)'s D5 (FF's own counters in Valkey once the backend runs more than one copy) |
 | **Builds on** | The [step-2 plan](step-2-plan.md): buckets, the S3 front door, the account's and functions' keys, hourly measures, and the server of customers' databases kept apart from the cluster; the [step-1 plan](step-1-plan.md): function URLs' own domains and the edge's certificates; the step-3 plan: the queue, which carries the mail to send |
@@ -40,7 +40,7 @@ Checked against the code on 2026-10-24, at the end of step 3 (`feat/step-3`).
 
 ## 3. Decisions
 
-Proposed; §9 lists the choices to confirm.
+§9's choices, taken as recommended; where W-01's spikes or the building change a decision, the decision says so.
 
 ### D1. A site is a bucket with S3's website configuration
 - S3's `PutBucketWebsite`, `GetBucketWebsite` and `DeleteBucketWebsite`, at the S3 front door in S3's XML and in FF's API in its JSON names: the index document (`index.html`), the error document (`404.html`), and one setting of FF's, as CloudFront's custom error responses give it: an unknown path answers the index document with 200, for single-page apps. Routing rules and redirects: later.
@@ -176,9 +176,9 @@ As step 3's: a commit for each task or part; L1 to L5 for what each part touches
 | Certificates on demand run into Let's Encrypt's 50 a week | A wildcard for `*.site.<domain>` once decision 17 is answered |
 | A cache's process per account costs too much memory on one server | Measured by W-01; the plan's sizes set from it |
 
-## 9. Choices for you to confirm
+## 9. Choices made
 
-Each with what it means and a recommendation:
+**Taken as recommended on 2026-10-30** (the [decision log](decisions.md), 40 to 50), when you asked to build step 4 without stopping. Each with what it means and its recommendation:
 
 1. **A site's shape:** S3's website hosting on a bucket, files sent with `aws s3 sync` or `ff sites deploy`, or a site of its own with deploys and rollbacks, as Netlify has. **Recommended: S3's,** the way out kept, the most reused; deploys can come on top.
 2. **Single-page apps:** an unknown path answers `index.html` with 200, as CloudFront's custom error response does, or a 404 with the error document, as S3 alone does. **Recommended: a site's setting,** on when `ff sites deploy --spa` says so.
@@ -209,7 +209,7 @@ E-mail's days depend most on §9's sixth choice and on the sending server's IP.
 
 | Task | Status | Commits | Notes |
 |---|---|---|---|
-| W-00 The plan and the baseline | ⏳ Waiting for your choices (§9) | | |
+| W-00 The plan and the baseline | ✅ Done | the next row's commit names it | • **The plan,** proposed with step 3's close, confirmed on 2026-10-30 with each of §9's eleven choices as it recommended, when you asked to build step 4 without stopping (the [decision log](decisions.md), 40 to 50), and started the same day on `feat/step-4`, made from `master` at `82d66ba`; its [task list](step-4-tasks.md) keeps the order and what is left.<br>• **The baseline,** this branch at `82d66ba`, every stage of `hack/ci.sh` but the platform's own cluster: L1 143 suites / 2,070 tests; L2 44 suites / 476 tests, `migration:check` over 50 migrations; L3 31 checks, 2 skipped (the customers' database server's, not started); L4 363; L5 871; the CLI's end-to-end suite 204; the platform's images 28, its manifests 24; `hack/ci.sh static`; the console 28 files / 383 tests; the admin app 17 files / 143 tests; the CLI 260 tests. The platform's end-to-end suite, which makes a cluster of its own, is left to GitHub's run.<br>• **Found on the way:** an L1 test of the S3 front door's (a body that isn't what its digest says) waited 100 ms for the store to see its request closed, too short on a busy machine: it waits up to 5 seconds now; `hack/ci.sh` takes `FF_CI_JOBS`, the most test workers and Rust jobs at once, for a machine shared with other work; L4's and L5's PostgreSQL ports were another project's here, so this run gave them others (`FF_E2E_PG_PORT`, `FF_E2E_TENANCY_PG_PORT`).<br>• **Docs:** the decision log (40 to 50; the step-4 question gone from the open ones), What to build next, the docs' index, this plan (its status, §9), the task list |
 | W-01 Spikes and ADRs 0011 to 0013 | ⏳ Planned | | |
 | W-02 The website configuration and the website server | ⏳ Planned | | |
 | W-03 Addresses, domains, the console and `ff` | ⏳ Planned | | |

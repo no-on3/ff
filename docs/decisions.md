@@ -5,6 +5,43 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-10-30: step 4 started, its eleven choices as recommended
+
+You said: "read docs/step-4-plan.md and docs/what-to-build-next.md, extract what's not done yet, create a dedicated tasks list for it, and then start working on it and don't stop until you are finished. You can deploy to server". The list is the [step-4 task list](step-4-tasks.md). Building without stopping meant answering the [step-4 plan](step-4-plan.md)'s §9 without asking: each of its eleven choices is taken as the plan recommended it. Any of them can still change; each says below what changing it would touch. The branch `feat/step-4` was made from `master` at `82d66ba`.
+
+### Step 4: the whole app runs here
+
+**40. A site is a bucket with S3's website configuration,** its files sent with `aws s3 sync` or `ff sites deploy`. ✅ Taken as recommended. The way out stays S3 and CloudFront, and buckets' measures, limits and bills serve sites as they are. Deploys with rollbacks, as Netlify has, can come on top later.
+- **Still to change:** W-02 and W-03.
+
+**41. Single-page apps: an unknown path answers the index document with 200,** as CloudFront's custom error response does, a site's own setting, on with `ff sites deploy --spa`. ✅ Taken as recommended. Off, a site answers as S3 alone does: the error document, with 404.
+- **Still to change:** W-02.
+
+**42. Sites live under FF's domain, at `<bucket>.site.ffunc.cloud`,** as function URLs live under `fn.ffunc.cloud`; on the development server, `<bucket>.site.dev.ffunc.cloud`. ✅ Taken as recommended. A domain of its own for customers' content (sites and function URLs), so that a phishing page on one never marks FF's own domain, as GitHub keeps `github.io` apart from `github.com`, is a question for before the public launch: added at the end of this log.
+- **Still to change:** W-03; one DNS record on the development server.
+
+**43. The bytes sites send out are counted, not billed,** as decision 12 says of all bytes out, with a limit a month per plan to protect the server: 10 GB on beta. ✅ Taken as recommended.
+- **Still to change:** W-02.
+
+**44. E-mail's interface: SES v2's API first,** so that AWS's SDKs work with only the endpoint changed and the quotas sit in one place; SMTP, with a password made from a key as SES makes it, later. ✅ Taken as recommended.
+- **Still to change:** W-06 and W-07.
+
+**45. The server that sends customers' mail: a Postfix of its own,** the backend signing each message with the customer's DKIM key, never FF's own relay, so that one customer's spam can't stop FF's own mail. ✅ Taken as recommended. Postal does more, with more to run.
+- **Still to change:** W-07; in production, a server and an IP address of its own, checked against block lists first (the plan's §8).
+
+**46. The sandbox, as SES's:** a new account sends only to addresses it proved, 200 a day, until an operator lifts it in the admin app. ✅ Taken as recommended.
+- **Still to change:** W-07 and W-08.
+
+**47. A cache is a Valkey process of its own,** its memory the plan's, on a server of customers' caches; never one Valkey shared by every account, where one account could fill the memory of all. ✅ Taken as recommended.
+- **Still to change:** W-04.
+
+**48. A cache keeps nothing on disk:** it is a cache, said plainly in the docs; a restart empties it. ✅ Taken as recommended.
+- **Still to change:** W-04 and W-09.
+
+**49. The order: sites, then caches, then e-mail.** ✅ Taken as recommended. Sites are the smallest and reuse the most; e-mail has the most risk, and its server's IP address the most to check.
+
+**50. FF's own counters (its rate limits) stay in the backend's memory** in this step; in Valkey once the backend runs more than one copy, as the client-readiness plan says. ✅ Taken as recommended.
+
 ## 2026-10-24, later: FF's domain is ffunc.cloud, and its repository on GitHub
 
 You said: "I bought ffunc.cloud, i want to use instead", then made its records for the development server at OVH; and: "i also created an empty git repository: https://github.com/no-on3/ff so everything can be automated".
@@ -260,7 +297,7 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
-| The step-4 plan's eleven choices, each with a recommendation: static sites' shape and address, the bytes they send out, e-mail's interface and the server that sends it, the sandbox, caches' isolation and persistence, the order, and FF's own counters | [Step-4 plan](step-4-plan.md) §9 | Step 4: static sites, e-mail from apps, a cache; nothing of it is built before |
+| A domain of its own for customers' content, sites and function URLs, so that a phishing page on one never marks `ffunc.cloud` itself, as GitHub keeps `github.io` apart from `github.com`; or both under `ffunc.cloud`, as now | This log, 42 | The public launch: the names customers' sites and function URLs get, and their certificates |
 | GitHub's minutes, now that the repository is private: GitHub Free gives it 2,000 a month, and the workflow may take up to 170 per push to `master` and 45 a night. Public again, where they are free; the nightly run weekly; or the cluster's stage on demand alone | This log, 39 | Whether CI keeps running all month |
 | How the development server updates: by itself, pulling each commit of `master` whose tests passed on GitHub (recommended: GitHub then holds no key to the server; a private repository takes a read-only deploy key of the server's own, and a token that reads the workflow's results), or by GitHub, through a key to the server | This log, 39 | Deploys without anyone running `install.sh` |
 | Function URLs' and buckets' certificates on the development server: the proxy's own authority, as now (recommended); Let's Encrypt's by DNS-01, through an OVH key that can change every record of `ffunc.cloud`, kept on the server other projects share; or one per host on demand, through a line in the shared proxy's main file | [`deploy/dev-server`](../deploy/dev-server/README.md) | Whether a browser that doesn't trust the proxy's root can call a function at its URL |

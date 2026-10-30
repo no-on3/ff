@@ -18,8 +18,10 @@
 #             Docker, the images run as the cluster runs them, and the platform's manifests
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
-# Each stage stops at its first failure, naming the step. Heavy steps run one at a time.
+# Each stage stops at its first failure, naming the step. Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test
+# runners' and Rust's parallelism at n, for a machine others share; unset, each tool takes its own default.
 #   hack/ci.sh <stage> [<stage> ...]
+#   FF_CI_JOBS=2 hack/ci.sh unit
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
@@ -32,6 +34,12 @@ SEAWEEDFS_IMAGE=chrislusf/seaweedfs:4.48
 ACTIONLINT_IMAGE=rhysd/actionlint:1.7.12
 ci_dir="$repo/hack/.ci"
 mkdir -p "$ci_dir"
+# The console's and the admin app's Vitest, then cargo's builds and test threads, at most FF_CI_JOBS at once.
+vitest_jobs=()
+if [ -n "${FF_CI_JOBS:-}" ]; then
+  vitest_jobs=(-- "--maxWorkers=$FF_CI_JOBS")
+  export CARGO_BUILD_JOBS="$FF_CI_JOBS" RUST_TEST_THREADS="$FF_CI_JOBS"
+fi
 # The ff command's Rust, where hack/install-tools.sh put it because the machine had none recent enough.
 if [ -x "$repo/hack/.rust/cargo/bin/cargo" ]; then
   export PATH="$repo/hack/.rust/cargo/bin:$PATH" RUSTUP_HOME="$repo/hack/.rust/rustup" CARGO_HOME="$repo/hack/.rust/cargo"
@@ -100,8 +108,8 @@ stage_static() {
 stage_unit() {
   "$repo/hack/check-resources.sh"
   step "backend: L1" in_dir BE npx jest --maxWorkers=2
-  step "console: unit tests" in_dir FE npm test
-  step "admin app: unit tests" in_dir admin npm test
+  step "console: unit tests" in_dir FE npm test "${vitest_jobs[@]}"
+  step "admin app: unit tests" in_dir admin npm test "${vitest_jobs[@]}"
   step "Node.js runtime: protocol tests" in_dir runtimes/nodejs npm test
   step "Python runtime: protocol tests" in_dir runtimes/python python3 -m unittest discover -s tests
   step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked

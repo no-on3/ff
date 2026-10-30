@@ -394,7 +394,8 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
 
     expect(answer.status).toBe(400);
     expect(answer.body).toContain('<Code>BadDigest</Code>');
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The store sees its request closed a moment after the client has its answer: later on a busy machine.
+    for (const deadline = Date.now() + 5_000; seen.length === 0 && Date.now() < deadline; ) await new Promise((resolve) => setTimeout(resolve, 10));
     expect(seen.map((request) => [request.method, request.complete])).toEqual([['PUT', false]]);
   });
 
