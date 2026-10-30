@@ -14,9 +14,3 @@ BE body-parser GHSA-27r3-jxmh-p828 2026-11-05
 # nowhere: nothing reaches it. Fixed in 2.5.0 (2026-10-22), two weeks old on 2026-11-05: an override in
 # BE/package.json then, until Nest pins it.
 BE multer GHSA-q7qp-rjg7-q26m 2026-11-05
-
-# zod 4.6.5: memory exhausted while validating an oversized collection with constraints. The backend validates with
-# it its own configuration, what operators set (platform settings, price books, plan limits), and one customer's
-# request, an owner's shares for the low-balance e-mails: a list the body's limit, 100 KB, keeps under some 50,000
-# numbers. Fixed in 4.6.6 (2026-10-11), two weeks old on 2026-10-25: updated then.
-BE zod GHSA-mrhx-c7xc-m3w5 2026-10-25

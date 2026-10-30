@@ -16,11 +16,6 @@ vulnerabilities:
     statement: >-
       multer 2.4.0, which @nestjs/platform-express 12.1.2 pins, in the backend's image: a denial of service through an asynchronous file filter still pending when the request ends. Multer only runs behind Nest's file interceptors, which the backend uses nowhere: nothing reaches it. Fixed in 2.5.0 (2026-10-22), two weeks old on 2026-11-05: an override in BE/package.json then. .npmauditignore accepts the same advisory, GHSA-q7qp-rjg7-q26m.
     expired_at: 2026-11-05
-  - id: CVE-2023-54404
-    paths: [app/node_modules/zod/package.json]
-    statement: >-
-      zod 4.6.5, in the backend's image: memory exhausted while validating an oversized array. The backend validates with it its own configuration, what operators set, and one customer's request, an owner's shares for the low-balance e-mails, a list the body's 100 KB keep under some 50,000 numbers. Fixed in 4.6.6 (2026-10-11), two weeks old on 2026-10-25: updated then. .npmauditignore accepts the same advisory, GHSA-mrhx-c7xc-m3w5.
-    expired_at: 2026-10-25
   - id: CVE-2026-111943
     paths: [usr/local/bin/wal-g]
     statement: >-
