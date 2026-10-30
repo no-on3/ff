@@ -5,9 +5,8 @@
 # docker0's), which the cluster's pods reach and the internet doesn't; Mailpit's pages on the loopback alone, through
 # SSH. Customers' servers are on a network of their own, each at a fixed address there: Docker sends a connection to
 # docker0's address on to that one, which is the address the cluster's firewall sees, and functions' NetworkPolicy
-# opens (server.sh). Their images are built on each run without BuildKit's provenance attestation, which names each
-# build: with it, the same files would make a new image each time, and Compose would start each server again, every
-# customer's cache emptied and every session on their databases ended.
+# opens (server.sh). server.sh builds their images itself, so that an install starts none of them again when nothing
+# of theirs changed (it says why).
 name: ff
 
 services:
@@ -59,9 +58,7 @@ services:
   # Customers' databases (deploy/data-db), its certificate from a CA it makes at its first start, for its name and
   # the address functions and the backend reach it at.
   data-db:
-    build:
-      context: src/deploy/data-db
-      provenance: false
+    build: src/deploy/data-db
     image: ff-data-db:dev-server
     restart: unless-stopped
     environment:
@@ -86,9 +83,7 @@ services:
   # its first start. Its agent answers without the token too, with a refusal: that is its health here, and server.sh
   # checks it with the token.
   cache:
-    build:
-      context: src/deploy/cache
-      provenance: false
+    build: src/deploy/cache
     image: ff-cache:dev-server
     restart: unless-stopped
     environment:
@@ -113,9 +108,7 @@ services:
   # instead of its recipients' servers, and FF's agent, which gives back what bounced. The backend reaches it from
   # the pods' network, which the cluster puts behind its own address on this network, the gateway's.
   customer-mail:
-    build:
-      context: src/deploy/mail
-      provenance: false
+    build: src/deploy/mail
     image: ff-mail:dev-server
     restart: unless-stopped
     environment:

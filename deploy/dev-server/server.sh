@@ -108,7 +108,13 @@ FF_CACHE_AGENT_TOKEN_SHA256=$(sha256sum <"$secrets/cache-agent-token" | cut -d' 
 FF_MAIL_AGENT_TOKEN_SHA256=$(sha256sum <"$secrets/mail-agent-token" | cut -d' ' -f1)"
 write_if_changed "$home/.env" "$env_file" 0600 || true
 chown deploy:deploy "$home/.env"
-"${compose[@]}" up -d --build --wait --quiet-pull >"$work/compose.log" 2>&1 ||
+# Customers' servers' images, without BuildKit's provenance attestation, which names each build: with it, the same
+# files make a new image each time, and Compose would start each server again, every customer's cache emptied and
+# every session on their databases ended. This server's Compose (2.40) doesn't pass on its own `provenance: false`.
+for name in data-db cache mail; do
+  docker build -q --provenance=false -t "ff-$name:dev-server" "$src/deploy/$name" >/dev/null
+done
+"${compose[@]}" up -d --no-build --wait --quiet-pull >"$work/compose.log" 2>&1 ||
   { tail -20 "$work/compose.log" >&2; fail "the services beside the cluster didn't start"; }
 # The backend's and Keycloak's databases, each with its user: made once, their passwords set each run. The SQL,
 # passwords and all, goes on psql's stdin, never its command line.
