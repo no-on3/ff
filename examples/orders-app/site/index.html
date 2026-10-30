@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orders</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Orders</h1>
+    <form id="order">
+      <label>Item <input name="item" required maxlength="100"></label>
+      <label>Quantity <input name="quantity" type="number" min="1" value="1" required></label>
+      <label>E-mail for the receipt <input name="email" type="email" placeholder="optional"></label>
+      <button>Order</button>
+    </form>
+    <p id="said" role="status"></p>
+    <h2>The latest</h2>
+    <table>
+      <thead><tr><th>#</th><th>Item</th><th>Quantity</th><th>When</th></tr></thead>
+      <tbody id="orders"></tbody>
+    </table>
+  </main>
+</body>
+</html>

@@ -1,17 +1,22 @@
-// A small app on FF, as it would run on AWS Lambda: orders taken at a web address and kept in PostgreSQL, each
-// order's receipt made in the background and kept in a bucket, and a report each night. One package, three functions:
+// A small app on FF, as it would run on AWS Lambda: its page a site (site/, ff sites deploy), orders taken at a web
+// address and kept in PostgreSQL, the latest listed from a cache, each order's receipt made in the background, kept in
+// a bucket and e-mailed, and a report each night. One package, three functions:
 //   orders-api       handler index.http      its function URL: POST /orders, GET /orders, GET /orders/<id>/receipt
 //   orders-receipts  handler index.receipts  reads the queue of new orders (ff event-sources add): each one's receipt
 //   orders-nightly   handler index.nightly   a schedule, cron(0 2 * * ? *): yesterday's orders counted, those older
 //                                            than 90 days removed, with their receipts
-// orders-api and orders-nightly read DATABASE_URL, a secret (ff db create orders --secret-for orders-api). A new
-// order goes to the queue RECEIPTS_QUEUE names, for orders-receipts to write its receipt to the bucket RECEIPTS_BUCKET
-// names, where orders-api reads it back; without the queue, orders-api writes it itself, and without the bucket,
-// orders go without receipts. The
-// key, region and endpoints are the function's own, in its environment, as AWS Lambda gives a function its role's:
-// new S3Client({}) and new SQSClient({}) need nothing more, on FF as on AWS.
+// orders-api and orders-nightly read DATABASE_URL, a secret (ff db create orders --secret-for orders-api), and
+// REDIS_URL, another (ff caches create orders-cache --secret-for orders-api): the latest orders are kept there a
+// minute, and a new order clears them; without it, the list is read from the database each time. A new order goes to
+// the queue RECEIPTS_QUEUE names, for orders-receipts to write its receipt to the bucket RECEIPTS_BUCKET names, where
+// orders-api reads it back, and to e-mail it from the address RECEIPTS_FROM names when the order gives an address;
+// without the queue, orders-api does both itself, and without the bucket, orders go without receipts. The key, region
+// and endpoints are the function's own, in its environment, as AWS Lambda gives a function its role's:
+// new S3Client({}), new SQSClient({}) and new SESv2Client({}) need nothing more, on FF as on AWS.
 const { Pool } = require('pg');
+const { createClient } = require('@redis/client');
 const { DeleteObjectsCommand, GetObjectCommand, PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
+const { SESv2Client, SendEmailCommand } = require('@aws-sdk/client-sesv2');
 const { GetQueueUrlCommand, SendMessageCommand, SQSClient } = require('@aws-sdk/client-sqs');
 
 // One connection per instance, made at its first call and kept for the calls after, as an
@@ -20,24 +25,111 @@ let pool;
 let ready;
 let s3;
 let sqs;
+let ses;
 let queueUrl;
+let cache;
 
 function database() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not set: ff secrets set <function> DATABASE_URL');
   pool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 3000 });
-  ready ??= pool.query(`CREATE TABLE IF NOT EXISTS orders (
-    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    item text NOT NULL,
-    quantity integer NOT NULL CHECK (quantity > 0),
-    created_at timestamptz NOT NULL DEFAULT now())`);
+  ready ??= pool
+    .query(`CREATE TABLE IF NOT EXISTS orders (
+      id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      item text NOT NULL,
+      quantity integer NOT NULL CHECK (quantity > 0),
+      email text,
+      created_at timestamptz NOT NULL DEFAULT now())`)
+    // A table made before orders had an address gets the column.
+    .then(() => pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS email text'));
   return ready.then(() => pool);
+}
+
+// The cache, connected at an instance's first use; null without REDIS_URL, or when it can't be reached, so that the
+// app reads its database instead. rediss:// is TLS, the server's certificate checked.
+function connectCache() {
+  const client = createClient({ url: process.env.REDIS_URL, disableOfflineQueue: true, socket: { connectTimeout: 3000 } });
+  // An error without a listener would end the instance: a lost connection is logged, and the client connects again.
+  client.on('error', (error) => console.error(`cache: ${error.message}`));
+  return client.connect();
+}
+
+async function cached() {
+  if (!process.env.REDIS_URL) return null;
+  cache ??= connectCache();
+  try {
+    return await cache;
+  } catch (error) {
+    cache = undefined;
+    console.error(`cache: can't connect: ${error.message}`);
+    return null;
+  }
+}
+
+// The latest orders, from the cache when it has them, else from the database, kept a minute; and where they came
+// from, for the answer's X-Cache. A cache that fails is logged and passed by.
+const LATEST = 'orders:latest';
+async function latestOrders(db) {
+  const client = await cached();
+  if (client) {
+    try {
+      const kept = await client.get(LATEST);
+      if (kept !== null) return { rows: JSON.parse(kept), from: 'hit' };
+    } catch (error) {
+      console.error(`cache: ${error.message}`);
+    }
+  }
+  const { rows } = await db.query('SELECT id, item, quantity, created_at FROM orders ORDER BY id DESC LIMIT 20');
+  if (!client) return { rows, from: 'none' };
+  try {
+    await client.set(LATEST, JSON.stringify(rows), { expiration: { type: 'EX', value: 60 } });
+  } catch (error) {
+    console.error(`cache: ${error.message}`);
+  }
+  return { rows, from: 'miss' };
+}
+
+// Orders changed: the list kept is no longer the latest.
+async function forgetLatest() {
+  const client = await cached();
+  if (!client) return;
+  try {
+    await client.del(LATEST);
+  } catch (error) {
+    console.error(`cache: ${error.message}`);
+  }
 }
 
 const bucket = () => process.env.RECEIPTS_BUCKET;
 const queue = () => process.env.RECEIPTS_QUEUE;
 const receiptKey = (id) => `receipts/${id}.txt`;
 const receipt = (order) => `Order ${order.id}\n${order.quantity} × ${order.item}\n${new Date(order.created_at).toISOString()}\n`;
-const answer = (statusCode, body) => ({ statusCode, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+const answer = (statusCode, body, headers = {}) => ({ statusCode, headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+const ADDRESS = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// The order's receipt e-mailed, as SES sends it, from RECEIPTS_FROM to the address the order gave; false when there is
+// nothing to send. In SES's sandbox, and FF's, the account must have proved both addresses, or their domains.
+async function mailReceipt(order) {
+  if (!process.env.RECEIPTS_FROM || !order.email) return false;
+  ses ??= new SESv2Client({});
+  await ses.send(
+    new SendEmailCommand({
+      FromEmailAddress: process.env.RECEIPTS_FROM,
+      Destination: { ToAddresses: [order.email] },
+      Content: { Simple: { Subject: { Data: `Your receipt, order ${order.id}` }, Body: { Text: { Data: receipt(order) } } } },
+    }),
+  );
+  return true;
+}
+
+// A receipt that can't be e-mailed is logged, its order and its receipt kept: a refusal of SES's doesn't change on a retry.
+async function tryMailReceipt(order) {
+  try {
+    return await mailReceipt(order);
+  } catch (error) {
+    console.error(`order ${order.id}: its receipt could not be e-mailed: ${error.name}: ${error.message}`);
+    return false;
+  }
+}
 
 // AWS Lambda's event for function URLs in, the response out.
 exports.http = async (event) => {
@@ -51,14 +143,19 @@ exports.http = async (event) => {
     } catch {
       return answer(400, { message: 'The body must be JSON' });
     }
-    if (typeof order?.item !== 'string' || order.item === '' || !Number.isInteger(order.quantity) || order.quantity < 1) {
-      return answer(400, { message: 'An order is {"item": "<what>", "quantity": <a whole number above 0>}' });
+    const email = order?.email ?? null;
+    if (
+      typeof order?.item !== 'string' || order.item === '' || !Number.isInteger(order.quantity) || order.quantity < 1 ||
+      (email !== null && (typeof email !== 'string' || email.length > 254 || !ADDRESS.test(email)))
+    ) {
+      return answer(400, { message: 'An order is {"item": "<what>", "quantity": <a whole number above 0>}, and "email": "<an address>" for its receipt' });
     }
     const { rows } = await db.query(
-      'INSERT INTO orders (item, quantity) VALUES ($1, $2) RETURNING id, item, quantity, created_at',
-      [order.item, order.quantity],
+      'INSERT INTO orders (item, quantity, email) VALUES ($1, $2, $3) RETURNING id, item, quantity, email, created_at',
+      [order.item, order.quantity, email],
     );
     const made = rows[0];
+    await forgetLatest();
     // The order is kept first: a receipt that can't be asked for, or written, leaves it, said in the answer and the log.
     if (queue()) {
       sqs ??= new SQSClient({});
@@ -78,15 +175,16 @@ exports.http = async (event) => {
       await s3.send(
         new PutObjectCommand({ Bucket: bucket(), Key: receiptKey(made.id), Body: receipt(made), ContentType: 'text/plain; charset=utf-8' }),
       );
-      return answer(201, { ...made, receipt: `s3://${bucket()}/${receiptKey(made.id)}` });
     } catch (error) {
       console.error(`order ${made.id}: its receipt could not be written: ${error.name}: ${error.message}`);
       return answer(201, { ...made, receipt: null });
     }
+    return answer(201, { ...made, receipt: `s3://${bucket()}/${receiptKey(made.id)}`, emailed: await tryMailReceipt(made) });
   }
+  // The latest orders, without the addresses they gave: the site lists them for anyone.
   if (method === 'GET' && path === '/orders') {
-    const { rows } = await db.query('SELECT id, item, quantity, created_at FROM orders ORDER BY id DESC LIMIT 20');
-    return answer(200, rows);
+    const { rows, from } = await latestOrders(db);
+    return answer(200, rows, { 'x-cache': from });
   }
   const wanted = method === 'GET' && /^\/orders\/([0-9]+)\/receipt$/.exec(path);
   if (wanted) {
@@ -104,23 +202,26 @@ exports.http = async (event) => {
 };
 
 // SQS's event in, as Lambda gives it to a function that reads a queue: each record a new order, whose receipt goes to
-// the bucket. A receipt that can't be written names its message in batchItemFailures, so that it alone comes back
-// once the queue's visibility timeout ends, and goes to the queue's dead-letter queue if it never can. A message
-// received twice writes the same receipt again.
+// the bucket, then to the order's address. A receipt that can't be written names its message in batchItemFailures,
+// so that it alone comes back once the queue's visibility timeout ends, and goes to the queue's dead-letter queue if
+// it never can. A message received twice writes the same receipt again, and e-mails it again.
 exports.receipts = async (event) => {
   if (!bucket()) throw new Error('RECEIPTS_BUCKET is not set: ff env set <function> RECEIPTS_BUCKET=<name>');
   s3 ??= new S3Client({});
   const batchItemFailures = [];
   for (const record of event.Records) {
+    let order;
     try {
-      const order = JSON.parse(record.body);
+      order = JSON.parse(record.body);
       await s3.send(
         new PutObjectCommand({ Bucket: bucket(), Key: receiptKey(order.id), Body: receipt(order), ContentType: 'text/plain; charset=utf-8' }),
       );
     } catch (error) {
       console.error(`message ${record.messageId}: its receipt could not be written: ${error.name}: ${error.message}`);
       batchItemFailures.push({ itemIdentifier: record.messageId });
+      continue;
     }
+    await tryMailReceipt(order);
   }
   return { batchItemFailures };
 };
@@ -147,6 +248,7 @@ exports.nightly = async (event) => {
       receipts += deleted.Deleted?.length ?? 0;
     }
   }
+  if (removed.rowCount > 0) await forgetLatest();
   const report = { day: new Date(end.getTime() - 86_400_000).toISOString().slice(0, 10), ...rows[0], removed: removed.rowCount, receipts };
   console.log(`report ${JSON.stringify(report)}`);
   return report;

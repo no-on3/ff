@@ -7,8 +7,8 @@
 #             tables and npm audit's checker, how-it-works.html's script, every shell script parsed, and the CI
 #             workflow linted
 #   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the cache
-#             and mail servers' agents', the ff command's and its binary's (L1, L2), the alert rules' and the
-#             log collector's filter (these two in their own images)
+#             and mail servers' agents', the small app's handlers, the ff command's and its binary's (L1, L2),
+#             the alert rules' and the log collector's filter (these two in their own images)
 #   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own,
 #             with servers of customers' databases and caches, and a store for buckets
 #   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit, but those
@@ -129,6 +129,7 @@ stage_unit() {
   step "Python runtime: protocol tests" in_dir runtimes/python python3 -m unittest discover -s tests
   step "the cache server's agent: unit tests" node --test deploy/cache/agent.test.mjs
   step "the mail server's agent: unit tests" node --test deploy/mail/agent.test.mjs
+  step "the small app: its handlers, their clients stubbed" node --test examples/orders-app/test/handlers.test.js
   step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked
   step "alert rules and dashboards" hack/k8s/test-monitoring-rules.sh
   step "log collector: configuration and filter" hack/k8s/test-logging-filter.sh

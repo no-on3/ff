@@ -187,3 +187,5 @@ hack/.data-services-spike/
 hack/.cache/
 # hack/ci.sh: its work files, the scanner's database and the SBOMs
 hack/.ci/
+# The small app's page's API address, written at its deploy.
+examples/orders-app/site/config.json

@@ -28,9 +28,10 @@
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
 # CLI, its metrics, the queue deleted and the other account seeing none, its month in ff usage; the getting-started
 # guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
-# each one put in a queue with the function's own key, read by a function that writes its receipt to a
-# bucket, read back by a GET and by the AWS CLI, both gone after the night 90 days on, called without
-# waiting as its schedule calls it; and ff local, in
+# the latest kept in FF's cache, each one put in a queue with the function's own key, read by a function
+# that writes its receipt to a bucket and e-mails it through the SES endpoint from an address proved by its
+# link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called
+# without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
@@ -57,6 +58,10 @@ cluster_gateway="$(docker network inspect "k3d-$FF_CLUSTER_NAME" --format '{{ran
 # Customers' databases (ADR 0008): the run's own server, on 10.199.3.0/24, which no other run uses.
 data_db_address=10.199.3.10
 e2e_data_db 10.199.3.0/24 "$data_db_address"
+# Customers' caches and mail (ADR 0013, 0012): the run's own servers, beside it, the mail handed to a stand-in for
+# recipients' servers, which keeps it.
+e2e_cache 10.199.3.11
+e2e_mail 10.199.3.12 10.199.3.13
 
 echo "== ff and the backend"
 (cd "$FF_REPO_ROOT/cli" && cargo build --release --locked -q)
@@ -71,13 +76,19 @@ storage_port="$(free_port)"
 sqs_port="$(free_port)"
 # Buckets' sites on a fourth, each at http://<bucket>.site.localhost:<port>, which curl takes to this machine.
 website_port="$(free_port)"
+# Mail's SES endpoint on a fifth, at http://localhost:<port>, which functions reach with their own keys at the
+# cluster's gateway; FF's own mail, the links that prove addresses among it, goes to the backend's log.
+ses_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a"
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port"
   FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
   FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32"
-  FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port" "${e2e_data_db_env[@]}")
+  FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port"
+  FF_SES_PORT="$ses_port" FF_SES_BASE="http://localhost:$ses_port"
+  FF_SES_FUNCTION_ENDPOINT="http://$cluster_gateway:$ses_port" FF_SES_FUNCTION_CIDRS="$cluster_gateway/32"
+  "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}")
 e2e_migrate "${be_env[@]}"
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 
@@ -831,10 +842,11 @@ ff buckets delete cli-drop --force --yes
 ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
 
-echo "== the small app on FF alone, as the guide walks through it: its orders in FF's database, each one's receipt made through a queue"
-# In account A, whose functions don't reach the internet: FF's database, the S3 front door and the SQS endpoint, they do.
+echo "== the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
+# In account A, whose functions don't reach the internet: FF's database and cache, the S3 front door, the SQS and SES
+# endpoints, they do.
 ff deploy "$app" --name shop-api --handler index.http
-check "examples/orders-app, the S3 and SQS clients among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
+check "examples/orders-app, the Valkey, S3, SQS and SES clients among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
   "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
 ff deploy "$app" --name shop-receipts --handler index.receipts
 ff deploy "$app" --name shop-nightly --handler index.nightly
@@ -851,8 +863,27 @@ check "a bucket for the receipts and a queue of new orders, named in the functio
 ff event-sources add cli-new-orders shop-receipts --report-batch-item-failures
 check "shop-receipts reads the queue, naming the messages it fails" "0 true" \
   "$(code) $(out | grep -q '^shop-receipts reads the queue cli-new-orders: .*the answer naming the messages that failed' && echo true || echo false)"
+ff caches create cli-orders --secret-for shop-api --secret-for shop-nightly --output json
+check "ff caches create: the app's cache, its address the API's and the night's REDIS_URL" "0 active shop-api,shop-nightly" \
+  "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
+cache_url="$(out | jq -r .url)"
+# The receipts' sender and their recipient, each proved by the link FF e-mails it: the account is in the sandbox.
+# No SMTP server for FF's own mail here: the backend writes the e-mail to its log before it answers, so the newest
+# link there is the address just added.
+follow_link() {
+  local token
+  token="$(grep -oE '/verify\?token=[A-Za-z0-9_-]{32}' "$work/backend.log" | tail -1 | cut -d= -f2)"
+  curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ses_port/verify?token=$token"
+}
+ff email add orders@shop-cli.tn
+sender_proved="$(follow_link)"
+ff email add buyer@shop-cli.tn
+check "the receipts' sender and their recipient, each proved by its link" "200 200 SUCCESS SUCCESS" \
+  "$sender_proved $(follow_link) $("$ff_bin" email identities --output json | jq -r '[.[].status] | join(" ")')"
+ff env set shop-receipts RECEIPTS_BUCKET=cli-receipts RECEIPTS_FROM=orders@shop-cli.tn
 ff url enable shop-api --auth none
-ff invoke shop-api --http POST /orders --data '{"item": "bsissa", "quantity": 4}'
+shop_url="$(out | grep -oE 'http://[a-z0-9]+\.fn\.localhost:[0-9]+' | head -1)"
+ff invoke shop-api --http POST /orders --data '{"item": "bsissa", "quantity": 4, "email": "buyer@shop-cli.tn"}'
 check "a POST writes the order to FF's database, then puts it in the queue with the function's own key" \
   "0 HTTP 201 bsissa 4 queued" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
 order_day="$(out | tail -1 | jq -r '.created_at[0:10]')"
@@ -869,6 +900,35 @@ for _ in $(seq 30); do
 done
 ff history shop-receipts --output json
 check "  ... as a call of SQS's event, the queue then empty" "sqs COMPLETED 0" "$(out | jq -r '.invocations[0] | "\(.source) \(.status)"') $(held)"
+# The receipt e-mailed by shop-receipts with SES's client and the function's own key, handed to the stand-in; read
+# as a mail client reads it, its text decoded (its "×" is quoted-printable on the way).
+for _ in $(seq 30); do
+  [ "$("$ff_bin" email messages --output json | jq -r '.[0].recipients[0].status // empty')" = SENT ] && [ "$(received_count)" -ge 1 ] && break
+  sleep 1
+done
+check "  ... then e-mails it from the proved sender, through FF's SES endpoint, as SES sends it" "SENT orders@shop-cli.tn buyer@shop-cli.tn true" \
+  "$("$ff_bin" email messages --output json | jq -r '.[0] | "\(.recipients[0].status) \(.from) \(.recipients[0].address)"') \
+$(received 1 | python3 -c 'import email, email.policy, sys
+mail = email.message_from_bytes(sys.stdin.buffer.read(), policy=email.policy.default)
+print(str(mail["subject"] == "Your receipt, order 1" and "4 × bsissa" in mail.get_body(("plain",)).get_content()).lower())')"
+# The latest orders from the cache: read from the database once, then kept a minute; a new order clears them.
+latest() { curl -s -o /dev/null -D - "$shop_url/orders" | tr -d '\r' | sed -n 's/^x-cache: //Ip'; }
+check "the latest orders read from the database, then from the cache, over TLS, with the address its secret gives" "miss hit" "$(latest) $(latest)"
+ttl="$(cache_cli "$cache_url" TTL orders:latest)"
+check "  ... the list kept there a minute, as the customer's own client sees it" "true" "$([ "$ttl" -gt 0 ] 2>/dev/null && [ "$ttl" -le 60 ] && echo true || echo false)"
+# Its page: site/ deployed as a site of a bucket of its own, the API's address in config.json beside it, and the
+# function URL letting the page's origin in.
+cp -r "$app/site" "$work/shop-site"
+printf '{"api": "%s"}\n' "$shop_url" >"$work/shop-site/config.json"
+ff buckets create cli-shop-site
+ff sites deploy cli-shop-site "$work/shop-site"
+site_origin="http://cli-shop-site.site.localhost:$website_port"
+check "the app's page deployed as a site of its own bucket" "0 $site_origin" "$(code) $(out | tail -1)"
+check "  ... a browser gets the page, and the API's address beside it" "200 Orders $shop_url" \
+  "$(curl -s -o "$work/shop-page.html" -w '%{http_code}' "$site_origin/") $(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$work/shop-page.html") $(curl -s "$site_origin/config.json" | jq -r .api)"
+ff url enable shop-api --auth none --cors-origin "$site_origin" --cors-method GET --cors-method POST --cors-header content-type
+check "  ... and the function URL lets the page's origin in, as a browser's preflight asks" "$site_origin" \
+  "$(curl -s -o /dev/null -D - -X OPTIONS "$shop_url/orders" -H "Origin: $site_origin" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
 # The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
 ff buckets keys create --bucket cli-receipts --read-only
 out | grep '^export AWS_' >"$work/receipts.env"
@@ -876,7 +936,9 @@ receipts_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/receipts.env")"
 aws_receipts() { (set -a; . "$work/receipts.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
 check "the AWS CLI reads that receipt in the account's bucket, as the function wrote it" "Order 1" "$(aws_receipts s3 cp s3://cli-receipts/receipts/1.txt - 2>/dev/null | head -1)"
 # The night 91 days after the order's day, called without waiting as its schedule calls it: the order is older than
-# 90 days, so it goes, its receipt with it.
+# 90 days, so it goes, its receipt with it, and the latest orders, just kept in the cache again, are cleared there.
+latest >/dev/null
+kept="$(latest)"
 jq --arg time "$(date -u -d "$order_day + 91 days" +%Y-%m-%dT02:00:00Z)" '.time = $time' "$app/events/scheduled.json" >"$work/night.json"
 ff invoke shop-nightly --async --data "@$work/night.json" --raw
 night_id="$(out)"
@@ -888,10 +950,15 @@ for _ in $(seq 30); do
 done
 check "the night 91 days on, called without waiting, removes the order and its receipt, which the bucket no longer has" "async 1 1 0" \
   "$night $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
+check "  ... and clears the latest orders, which the cache had" "hit miss" "$kept $(latest)"
 ff buckets keys revoke "$receipts_key" --yes
 ff queues delete cli-new-orders --yes
 check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
 ff buckets delete cli-receipts --force --yes
+ff buckets delete cli-shop-site --force --yes
+ff caches delete cli-orders --yes
+ff email delete orders@shop-cli.tn --yes
+ff email delete buyer@shop-cli.tn --yes
 ff db delete shop --yes
 ff delete shop-nightly --yes
 ff delete shop-receipts --yes

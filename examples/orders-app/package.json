@@ -1,10 +1,12 @@
 {
   "name": "orders-app",
   "private": true,
-  "description": "A small app on FF: orders taken at a function's URL into PostgreSQL, each order's receipt made through a queue into a bucket, and a nightly report",
+  "description": "A small app on FF: its page a site, orders taken at a function's URL into PostgreSQL, the latest listed from a cache, each order's receipt made through a queue into a bucket and e-mailed, and a nightly report",
   "dependencies": {
     "@aws-sdk/client-s3": "3.1156.0",
+    "@aws-sdk/client-sesv2": "3.1156.0",
     "@aws-sdk/client-sqs": "3.1156.0",
+    "@redis/client": "6.3.0",
     "pg": "8.23.1"
   }
 }

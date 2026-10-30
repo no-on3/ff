@@ -1,3 +1,7 @@
 # What the functions need is index.js and its libraries.
 README.md
 events/
+# The page is a site of its own (ff sites deploy), not the functions'.
+site/
+# Its handlers' tests, run where it is written (node --test test/).
+test/

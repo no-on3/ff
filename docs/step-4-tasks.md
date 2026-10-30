@@ -9,7 +9,7 @@
 ## 1. What the two documents leave undone
 
 1. **Step 4, the whole app runs here** (What to build next §7; the step-4 plan): static sites, e-mail from apps, a cache. Nothing of it was built: its plan waited for its eleven choices. **This list builds it,** tasks W-00 to W-10 below.
-2. **Step 5, the way out** (What to build next §8): the Lambda API with AWS's request signing, versions and aliases, Terraform modules, the export kit (`ff export`, `ff doctor`, a cost estimate), SAM events. It has no plan yet; step 4's last task writes it (W-10), as each step's close wrote the next one's plan. Building it waits for you to confirm that plan's choices, as every step's did.
+2. **Step 5, the way out** (What to build next §8): the Lambda API with AWS's request signing, versions and aliases, Terraform modules, the export kit (`ff export`, `ff doctor`, a cost estimate), SAM events. It has no plan yet; step 4's last task writes it (W-10), as each step's close wrote the next one's plan: the [step-5 plan](step-5-plan.md), its choices waiting for you. Building it waits for you to confirm that plan's choices, as every step's did.
 3. **Further out** (What to build next §9 and §12's rows 6 to 10): always-on services, container functions, login for apps, topics, SMS, the e-invoicing API, DNS hosting and the rest. A direction, not a plan: each gets its own plan when you pick it, ordered by what the pilot customers ask for.
 4. **Your questions** (the decision log's last table): GitHub's minutes, how the development server updates, certificates. Answers only you can give; nothing here depends on them.
 
@@ -56,5 +56,5 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 
 ### Phase 4: close
 - [x] **W-09** Documentation: the guide's three sections, `how-it-works.html`'s scenarios, a page in French for each service, the export kit's three pages, ADRs 0011 to 0013 as built.
-- [ ] **W-10** The step closed: the small app's frontend as a site, a receipt e-mailed, its order list in a cache; the guide and `hack/cli-e2e.sh` walk through it; What to build next marks step 4 done; step 5's plan.
+- [x] **W-10** The step closed: the small app's frontend as a site, a receipt e-mailed, its order list in a cache; the guide and `hack/cli-e2e.sh` walk through it; What to build next marks step 4 done; step 5's plan.
 - [ ] **Deploy 2:** step 4 on the development server.
