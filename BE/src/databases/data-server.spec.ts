@@ -1,3 +1,9 @@
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as tls from 'node:tls';
 import { Pool } from 'pg';
 import { DataDbSettings } from '../config/configuration';
 import { PostgresDataServer } from './data-server';
@@ -113,5 +119,66 @@ describe("customers' database server, the statements it is sent (ADR 0008)", () 
     await expect(new PostgresDataServer(SETTINGS, failing).create(NAME, VERIFIER, 10)).rejects.toThrow('lost');
 
     expect(released).toEqual([true]);
+  });
+});
+
+
+describe("customers' database server, reached over TLS at its address", () => {
+  let dir: string;
+  const servers: net.Server[] = [];
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-data-server-'));
+  });
+  afterAll(async () => {
+    await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A stand-in for the server, its certificate for these names alone (its own CA): it takes PostgreSQL's request for
+   * TLS, makes the handshake, then ends the connection where a server would ask for the password. Its port, and the
+   * certificate, which the backend gets as the server's CA.
+   */
+  async function standIn(names: string): Promise<{ port: number; ca: string }> {
+    const key = path.join(dir, `${names}.key`);
+    const cert = path.join(dir, `${names}.crt`);
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', key, '-out', cert,
+      '-days', '1', '-subj', '/CN=data-db', '-addext', `subjectAltName=${names}`], { stdio: 'ignore' });
+    const options = { key: fs.readFileSync(key), cert: fs.readFileSync(cert) };
+    const server = net.createServer((socket) => {
+      socket.once('data', () => {
+        socket.write('S');
+        const secure = new tls.TLSSocket(socket, { isServer: true, ...options });
+        secure.on('secure', () => secure.destroy());
+        secure.on('error', () => socket.destroy());
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { port: (server.address() as net.AddressInfo).port, ca: options.cert.toString() };
+  }
+
+  /** What becomes of the backend's first statement, the server reached at 127.0.0.1. */
+  async function firstStatement(names: string): Promise<string> {
+    const { port, ca } = await standIn(names);
+    const server = new PostgresDataServer({ ...SETTINGS, adminHost: '127.0.0.1', port, ca });
+    const outcome = await server.create(NAME, VERIFIER, 10).then(
+      () => 'done',
+      (error: Error) => error.message,
+    );
+    await server.close();
+    return outcome;
+  }
+
+  it('checks its certificate for that address, as the backend reached it: past the handshake', async () => {
+    const outcome = await firstStatement('IP:127.0.0.1');
+
+    expect(outcome).not.toMatch(/altnames/);
+    expect(outcome).toMatch(/Connection terminated/);
+  });
+
+  it('refuses a certificate for another address', async () => {
+    await expect(firstStatement('IP:127.0.0.2')).resolves.toMatch(/does not match certificate's altnames: IP: 127\.0\.0\.1 is not in the cert's list/);
   });
 });
