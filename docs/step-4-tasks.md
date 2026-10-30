@@ -19,11 +19,11 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 
 ### Phase 0: groundwork
 - [x] **W-00** The plan confirmed (its choices in the decision log), the branch, the baseline's test counts.
-- [ ] **W-01** Four spikes, then ADRs 0011 (sites), 0012 (mail) and 0013 (caches):
-  - [ ] a bucket's files served to a browser through the backend, measured (a site's first load, many small files at once);
-  - [ ] AWS's SDKs and CLI against a minimal SES v2 endpoint, with only the endpoint changed;
-  - [ ] a message signed with a domain's DKIM key by the backend, sent through a Postfix, its signature checked at the other end;
-  - [ ] Valkey, a process for each cache: its memory and start time, TLS with a password.
+- [x] **W-01** Four spikes, then ADRs 0011 (sites), 0012 (mail) and 0013 (caches):
+  - [x] a bucket's files served to a browser through the backend, measured (a site's first load, many small files at once);
+  - [x] AWS's SDKs and CLI against a minimal SES v2 endpoint, with only the endpoint changed;
+  - [x] a message signed with a domain's DKIM key by the backend, sent through a Postfix, its signature checked at the other end;
+  - [x] Valkey, a process for each cache: its memory and start time, TLS with a password.
 
 ### Phase 1: static sites
 - [ ] **W-02** The website configuration and the website server:

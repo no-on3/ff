@@ -174,6 +174,10 @@ hack/.cli-e2e/
 hack/.code-delivery-spike/
 # hack/spikes/queue: pgmq's release, the SDKs, the dumps (step 3's spike)
 hack/.spike-queue/
+# hack/spikes/sites, mail and cache: the files, SDKs, images' work and results of step 4's spikes
+hack/.spike-sites/
+hack/.spike-mail/
+hack/.spike-cache/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/
