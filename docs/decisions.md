@@ -7,36 +7,45 @@
 
 ## 2026-10-30: step 4 started, its eleven choices as recommended
 
-You said: "read docs/step-4-plan.md and docs/what-to-build-next.md, extract what's not done yet, create a dedicated tasks list for it, and then start working on it and don't stop until you are finished. You can deploy to server". The list is the [step-4 task list](step-4-tasks.md). Building without stopping meant answering the [step-4 plan](step-4-plan.md)'s §9 without asking: each of its eleven choices is taken as the plan recommended it. Any of them can still change; each says below what changing it would touch. The branch `feat/step-4` was made from `master` at `82d66ba`.
+You said: "read docs/step-4-plan.md and docs/what-to-build-next.md, extract what's not done yet, create a dedicated tasks list for it, and then start working on it and don't stop until you are finished. You can deploy to server". The list is the [step-4 task list](step-4-tasks.md). Building without stopping meant answering the [step-4 plan](step-4-plan.md)'s §9 without asking: each of its eleven choices is taken as the plan recommended it. Any of them can still change; each says below what changing it would touch. The branch `feat/step-4` was made from `master` at `82d66ba`. The step was done the same day, W-00 to W-10, and installed on the development server (Deploy 2).
 
 ### Step 4: the whole app runs here
 
 **40. A site is a bucket with S3's website configuration,** its files sent with `aws s3 sync` or `ff sites deploy`. ✅ Taken as recommended. The way out stays S3 and CloudFront, and buckets' measures, limits and bills serve sites as they are. Deploys with rollbacks, as Netlify has, can come on top later.
-- **Still to change:** W-02 and W-03.
+- **Changed already:** W-02 (`6dc2371`): S3's website configuration at the S3 front door, in S3's XML, and in FF's API, and the website server, which answers as S3's website endpoint does; W-03 (`0eef134`): `ff sites deploy`, which sends only what changed with a deploy's own key, and the console's site panel.
+- **Still to change:** nothing.
 
 **41. Single-page apps: an unknown path answers the index document with 200,** as CloudFront's custom error response does, a site's own setting, on with `ff sites deploy --spa`. ✅ Taken as recommended. Off, a site answers as S3 alone does: the error document, with 404.
-- **Still to change:** W-02.
+- **Changed already:** W-02 (`6dc2371`): a site's `singlePageApp`, with which the website server answers an unknown path with the index document and 200; W-03 (`0eef134`): `ff sites deploy --spa`.
+- **Still to change:** nothing.
 
 **42. Sites live under FF's domain, at `<bucket>.site.ffunc.cloud`,** as function URLs live under `fn.ffunc.cloud`; on the development server, `<bucket>.site.dev.ffunc.cloud`. ✅ Taken as recommended. A domain of its own for customers' content (sites and function URLs), so that a phishing page on one never marks FF's own domain, as GitHub keeps `github.io` apart from `github.com`, is a question for before the public launch: added at the end of this log.
-- **Still to change:** W-03; one DNS record on the development server.
+- **Changed already:** W-03 (`0eef134`): `<bucket>.site.<domain>` at the edge, its certificates made on demand, and a customer's own domain for a site; on the development server, the record `*.site.dev`, made by you on 2026-10-30, and a site there, which the smoke test visits (Deploy 2).
+- **Still to change:** nothing in this step; a domain of its own for customers' content, before the public launch (the questions at the end).
 
 **43. The bytes sites send out are counted, not billed,** as decision 12 says of all bytes out, with a limit a month per plan to protect the server: 10 GB on beta. ✅ Taken as recommended.
-- **Still to change:** W-02.
+- **Changed already:** W-02 (`6dc2371`): a site's bytes counted, never billed, against the plan's `siteTransferGbPerMonth`, 10 GB on beta, past which the account's sites answer 403 until the month's end; each visit billed as a request of S3's second class, as a `GET` is.
+- **Still to change:** nothing.
 
 **44. E-mail's interface: SES v2's API first,** so that AWS's SDKs work with only the endpoint changed and the quotas sit in one place; SMTP, with a password made from a key as SES makes it, later. ✅ Taken as recommended.
-- **Still to change:** W-06 and W-07.
+- **Changed already:** W-06 (`0a8bba0`): SES v2's API at an endpoint of its own, `email.<domain>`, signed for `ses` with the account's keys or a function's: identities, the account, the suppression list; W-07 (`3599ead`): `SendEmail`, simple and raw.
+- **Still to change:** nothing in this step; SMTP later, as this decision says.
 
 **45. The server that sends customers' mail: a Postfix of its own,** the backend signing each message with the customer's DKIM key, never FF's own relay, so that one customer's spam can't stop FF's own mail. ✅ Taken as recommended. Postal does more, with more to run.
-- **Still to change:** W-07; in production, a server and an IP address of its own, checked against block lists first (the plan's §8).
+- **Changed already:** W-07 (`3599ead`): `deploy/mail/`, Postfix 3.11 and FF's agent, the backend signing each message with its domain's DKIM key, what bounced and the complaints read back; on the development server, beside the cluster, its mail handed to Mailpit, none sent (Deploy 2).
+- **Still to change:** in production, a server and an IP address of its own, checked against block lists first (the plan's §8).
 
 **46. The sandbox, as SES's:** a new account sends only to addresses it proved, 200 a day, until an operator lifts it in the admin app. ✅ Taken as recommended.
-- **Still to change:** W-07 and W-08.
+- **Changed already:** W-07 (`3599ead`): in the sandbox, mail to what the account proved alone, within the plan's 200 a day and 1 a second (W-06's `emailsPerDay` and `emailsPerSecond`); W-08 (`b4ff421`): the admin app's account page, where an operator lets an account out of the sandbox or puts it back, with a reason, in the account's audit log and an e-mail to its owners.
+- **Still to change:** nothing.
 
 **47. A cache is a Valkey process of its own,** its memory the plan's, on a server of customers' caches; never one Valkey shared by every account, where one account could fill the memory of all. ✅ Taken as recommended.
-- **Still to change:** W-04.
+- **Changed already:** W-04 (`7b40ee9`): `deploy/cache/`, Valkey 9.1.2 and FF's agent, each cache a process of its own under a user of its own, with the plan's memory, and `/caches` in FF's API; on the development server, beside the cluster (Deploy 2).
+- **Still to change:** nothing.
 
 **48. A cache keeps nothing on disk:** it is a cache, said plainly in the docs; a restart empties it. ✅ Taken as recommended.
-- **Still to change:** W-04 and W-09.
+- **Changed already:** W-04 (`7b40ee9`): a cache's keys in memory alone, nothing on disk; W-09 (`de6622d`): ADR 0013 as built and the French page on caches say that a restarted cache starts empty. An update of the development server no longer starts customers' caches again when nothing of theirs changed (Deploy 2, `e787d6d`).
+- **Still to change:** nothing.
 
 **49. The order: sites, then caches, then e-mail.** ✅ Taken as recommended. Sites are the smallest and reuse the most; e-mail has the most risk, and its server's IP address the most to check.
 

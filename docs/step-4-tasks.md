@@ -33,7 +33,7 @@ Each task, or part of one, is one commit with its tests and its documents, as th
   - [x] part 1: `<bucket>.site.<domain>` at the edge, its certificates, a customer's own domain for a site;
   - [x] part 2: the console's site panel on a bucket's page; `ff sites deploy` and `ff sites domains`;
   - [x] part 3: sites' metrics as CloudFront names them, and alarms on them.
-- [ ] **Deploy 1:** sites on the development server, at `*.site.dev.ffunc.cloud` (one DNS record more): with Deploy 2, its record made.
+- [x] **Deploy 1:** sites on the development server, at `*.site.dev.ffunc.cloud` (one DNS record more): done with Deploy 2, the record made by you on 2026-10-30.
 
 ### Phase 2: caches
 - [x] **W-04** The server of customers' caches, and the API:
@@ -57,4 +57,4 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 ### Phase 4: close
 - [x] **W-09** Documentation: the guide's three sections, `how-it-works.html`'s scenarios, a page in French for each service, the export kit's three pages, ADRs 0011 to 0013 as built.
 - [x] **W-10** The step closed: the small app's frontend as a site, a receipt e-mailed, its order list in a cache; the guide and `hack/cli-e2e.sh` walk through it; What to build next marks step 4 done; step 5's plan.
-- [ ] **Deploy 2:** step 4 on the development server: its cache and mail servers and the smoke test's new checks ready, the DNS records made; the install comes next.
+- [x] **Deploy 2:** step 4 on the development server: its cache and mail servers beside the cluster, the DNS records made, installed on 2026-10-30 at `e787d6d`, the smoke test's 21 checks passed.
