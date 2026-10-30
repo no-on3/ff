@@ -74,7 +74,7 @@ You asked, with step 3 done, for four things: the step-3 migrations on your deve
 
 **35, done: Caddy rebuilt.** ✅ Your answer. The three images that carry Caddy now build it themselves, 2.11.7 with Go 1.26.9 and x/net v0.60.0, which fix its release's three advisories (`3d1635a`). A newer one of Go's (CVE-2026-111943, crypto/x509) needs Go 1.26.10, released 2026-10-19: accepted until 2026-11-02, when it is two weeks old.
 - **Found on the way** (`d4eaa94`): the security stage hadn't passed since 2026-10-21. Gitleaks' nine findings were made-up test values, now listed. npm audit found new advisories in the backend's dependencies whose fixes are under two weeks old: `.npmauditignore` now accepts such an advisory for a while, as `.trivyignore.yaml` does for images, and the API refuses compressed bodies, which closes body-parser's.
-- **Changed already:** zod 4.6.7 in the backend on 2026-10-30, with step 4's merge, its exception having ended on 2026-10-25.
+- **Changed already:** zod 4.6.7 in the backend on 2026-10-30, with step 4's merge, its exception having ended on 2026-10-25; and the same day, go-jose v4.1.6 in the three images' Caddy, whose v4.1.5 a new advisory names (CVE-2026-116587, a denial of service through a JWK's RSA parameters), its fix two weeks old since 2026-10-28.
 - **Still to change:** each fix once it is two weeks old, when its exception expires and the security stage says so: Go 1.26.10 for Caddy on 2026-11-02, body-parser 2.4.0 and multer 2.5.0 on 2026-11-05.
 
 **36, done: step 3 is in `master`.** ✅ Your answer. Merged on 2026-10-24 (`2a381f4`), without a checkout, as step 2 was: `master` had not moved, so no file changed, and your dev servers saw nothing.
