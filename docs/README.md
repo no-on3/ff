@@ -31,7 +31,7 @@
 | [ADR 0012](adr/0012-customer-mail.md) | Step 4's e-mail from apps: SES v2's API as AWS's SDKs and CLI speak it (paths signed escaped twice, both ways to list identities), each message signed with the customer's DKIM key by the backend and sent by a Postfix of customers' own, bounces back by VERP; the sandbox, quotas, the suppression list, port 25 closed (accepted on 2026-10-30) |
 | [ADR 0013](adr/0013-caches.md) | Step 4's caches: a Valkey process for each, on a server apart, its memory the plan's, TLS and a password kept as its SHA-256, the commands a customer may not run, an agent's user of FF's that suspends; measured by the spike (accepted on 2026-10-30) |
 | [Backup drills](backup-drills.md) | The record of each monthly restore drill |
-| [En français](fr/README.md) | For FF's customers, a page per service in French: [databases](fr/bases-de-donnees.md), as AWS RDS gives them, [files in buckets](fr/compartiments.md), as AWS S3 gives them, and [queues and background work](fr/files-d-attente.md), as AWS SQS and Lambda's asynchronous invoke give them |
+| [En français](fr/README.md) | For FF's customers, a page per service in French: [databases](fr/bases-de-donnees.md), as AWS RDS gives them, [files in buckets](fr/compartiments.md), as AWS S3 gives them, [queues and background work](fr/files-d-attente.md), as AWS SQS and Lambda's asynchronous invoke give them, [static sites](fr/sites.md), as S3 and CloudFront serve them, [mail from apps](fr/courrier.md), as Amazon SES sends it, and [caches](fr/caches.md), as Amazon ElastiCache gives them |
 
 Elsewhere in the repository:
 - [`runtimes/nodejs`](../runtimes/nodejs/README.md) and [`runtimes/python`](../runtimes/python/README.md): the function runtimes, their protocol and their handler contracts;

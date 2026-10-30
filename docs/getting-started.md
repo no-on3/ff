@@ -136,6 +136,18 @@ hack/k8s/data-db-up.sh            # about 2 minutes the first time: it builds it
 - Functions reach it whatever their account's internet access: their NetworkPolicy opens its address on port 5432, and nothing else of that network. Node.js functions trust its certificate through `NODE_EXTRA_CA_CERTS`, which FF sets to the CA it mounts in their pods; a Python driver finds the CA at `/etc/ff/data-db/ca.crt`.
 - `hack/k8s/data-db-up.sh psql` opens `psql` in it as its superuser; `hack/k8s/data-db-up.sh down` stops it, and `down --volumes` deletes its data too, as `docker compose down -v` does.
 
+**11. Customers' caches (optional).** Each cache is a Valkey process of its own, on a server of customers' caches apart from FF's ([ADR 0013](adr/0013-caches.md)). In development it is `docker-compose.yml`'s `cache`, Valkey 9.1 with FF's agent, on the database server's network (at 10.199.0.11), which the cluster's node joins. The script builds and starts it, copies the CA of its certificate to `hack/.cache-server/ca.crt`, and prints the `FF_CACHE_*` lines for `BE/.env`; restart the backend after adding them. Without them, FF has no caches.
+
+```bash
+hack/k8s/cache-up.sh              # down stops it, its caches kept; down --volumes deletes them
+```
+
+**12. Customers' mail (optional).** Customers' mail goes out through a Postfix of their own, never FF's ([ADR 0012](adr/0012-customer-mail.md)). In development it is `docker-compose.yml`'s `mail`, with FF's agent, on the same network, which hands every message to Mailpit (http://localhost:58025) instead of its recipients' servers, so that nothing leaves this machine. The script builds and starts both, copies the CA of the server's certificate to `hack/.mail-server/ca.crt`, and prints the `FF_EMAIL_*` lines for `BE/.env`; restart the backend after adding them. Without them, the SES endpoint takes identities and keeps the suppression list, but sends nothing: `SendEmail` answers `SendingPausedException`, saying why.
+
+```bash
+hack/k8s/mail-up.sh               # down stops it; down --volumes deletes what came back unread
+```
+
 **Check the whole setup** with the end-to-end test. It uses its own compose project, ports, and backend, so it can run next to your dev stack. It takes about 3 minutes and needs 3.5 GB of free memory.
 
 ```bash
@@ -655,6 +667,86 @@ aws s3api get-bucket-notification-configuration --bucket photos
 `GET /buckets/<name>/notifications` answers the configuration in S3's JSON names (`lambdaFunctionConfigurations`, `queueConfigurations`, each with its `id`, ARN, `events` and `filter.key.filterRules`), and `PUT` replaces it whole, a destination by its ARN or by its name, kept as its ARN; `{}` removes it. Every member reads it; owners and developers set it, with `storage:read` and `storage:write` for an API key, and the audit log names each `bucket.notifications`, an SDK's under its access key.
 
 **In the console,** a bucket's page has "Notifications": each configuration in words (its events, the keys it names, where they go) and its ID; owners and developers add one, the account's functions and queues offered, or remove one. **With `ff`,** `ff buckets notify photos thumbnails --prefix images/` has the bucket run a function for its new objects (`--queue removals --event 's3:ObjectRemoved:*'` sends its deletions to a queue; `--suffix`, `--id`), `ff buckets notifications photos` lists them, `--remove <id>` takes one away, and `--clear` all of them, after asking.
+
+### A static site
+
+A bucket's files served as a website, as S3's website hosting serves them with CloudFront in front ([ADR 0011](adr/0011-static-sites.md)): public to read at the site's address alone, its S3 API still signed. The backend serves sites on a port of its own, `FF_WEBSITE_PORT` (3004), each at `<bucket>.` and the host of `FF_WEBSITE_BASE`: `http://shop.site.localhost:3004` in development, where browsers and curl take `*.localhost` to this machine, and `https://shop.site.<domain>` behind the edge in production. A built frontend goes up with `ff sites deploy`:
+
+```bash
+ff buckets create shop
+ff sites deploy shop ./dist --spa              # a Vite app's built folder
+# ./dist deployed to shop, made a site: 14 files uploaded, 0 files unchanged, 0 files deleted
+# http://shop.site.localhost:3004
+curl -s http://shop.site.localhost:3004/orders/42 | head -3   # a route of the app: its index.html, with 200
+ff sites get shop                              # its address and settings
+ff sites metrics shop --since 1h               # its visits, as CloudFront's metrics name them
+```
+
+**A deploy** asks the API for a key of its own (`POST /buckets/<name>/website/deploy-keys`: the bucket alone, read-write, for an hour, never listed or counted with the account's two keys), lists the bucket, and uploads the files whose MD5 isn't the stored ETag, assets first and pages last, so that a page never names an asset not there yet. Each file is typed by its name, from the website server's own table, and cached a year (`immutable`) when its name carries a hash, as bundlers name assets, `no-cache` otherwise. It deletes the bucket's files the folder hasn't, unless `--keep`, revokes its key, and makes the bucket a site when it isn't one: `index.html` its index document and the folder's `404.html` its error document unless `--index-document` and `--error-document` say otherwise; `--spa` for a single-page app. `ff` signs the uploads itself: no AWS CLI needed. `aws s3 sync ./dist s3://shop` works too, with one of the account's keys, as for any bucket; the site serves what the bucket holds.
+
+**The website configuration** is S3's: `PutBucketWebsite`, `GetBucketWebsite` and `DeleteBucketWebsite` at the S3 front door, in S3's XML (`aws s3 website s3://shop --index-document index.html --error-document 404.html`), or `PUT`, `GET` and `DELETE /buckets/<name>/website` in FF's API, in S3's JSON names, with one setting of FF's that S3's XML can't say, as CloudFront's custom error responses give it: `{"indexDocument": {"suffix": "index.html"}, "errorDocument": {"key": "404.html"}, "singlePageApp": true}`. Redirects and routing rules answer `NotImplemented`. A read-only key changes nothing; owners and developers change it; the audit log names each `bucket.website`. `ff sites remove shop` (`DELETE …/website`) makes the bucket no site again: its address answers 404 at once, its files kept, private.
+
+**What a visitor gets:** `GET` and `HEAD` alone (anything else 405); a folder's path answers its index document, a folder named without its slash is redirected to it (302), a path with no file answers the error document with 404, or, a single-page app's, the index document with 200. The browser's `If-None-Match`, `If-Modified-Since` and `Range` go to the store, so that a file it has answers 304 and a range 206; the type the file was uploaded with, or one by its name when it says nothing; `X-Content-Type-Options: nosniff` on every answer; no cookie. A path with a `.` or `..` segment, however escaped, answers 400 before the store is asked: nothing outside the bucket is ever read.
+
+**Your own domain** for a site is proved as a function URL's is: `ff sites domains add shop www.shop.tn` (`POST /buckets/<name>/website/domains`) says the records to make, a CNAME to the site's host, or a TXT record and the edge's addresses, and `ff sites domains verify shop www.shop.tn` checks them once they are made. Once proved, the site answers there too, with a certificate the edge makes on demand. The plan's custom domains count a site's and function URLs' together: 5 on beta.
+
+**Counted, billed and limited:** each visit counts in its bucket's minute, in a class of its own (`website`), billed as S3's GETs, with what it sent; the bucket's storage is billed as any bucket's. The bytes sites send are counted, not billed ([decision 12](decisions.md)), within the plan's limit: past 10 GB a month together on beta, the account's sites answer 403, saying so, until the month's end. A suspended account's sites, and those whose storage FF turned off, answer 403; without credit they still answer, as reads do. `GET /buckets/<name>/website/metrics` gives `Requests` and `BytesDownloaded` (Sum), `4xxErrorRate`, `5xxErrorRate` and `TotalErrorRate` (Average, in percent), as CloudWatch names a CloudFront distribution's; an alarm on `Requests` or a rate names the bucket. The console's bucket page has the site's panel: its address, its settings, the deploy command and the AWS CLI's, its last day's visits, its domains.
+
+**The way out:** an S3 bucket behind CloudFront, its files uploaded again from the built folder with the same cache headers, and a template of the pieces together: [`cli/templates/export/data/s3-website.md`](../cli/templates/export/data/s3-website.md), which `ff export` will put in its kit. In French: [Sites statiques](fr/sites.md).
+
+### E-mail from apps
+
+Mail from an app's code, as Amazon SES v2 sends it ([ADR 0012](adr/0012-customer-mail.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers SES v2's REST API on a port of its own, `FF_SES_PORT` (3005), at `FF_SES_BASE` (`http://localhost:3005`; `https://email.<domain>` behind the edge in production), signed with AWS Signature Version 4 for the service `ses` by one of the account's access keys, a read-only one only reading. It serves `CreateEmailIdentity`, `GetEmailIdentity`, `ListEmailIdentities`, `DeleteEmailIdentity`, `SendEmail` (simple and raw), `GetAccount`, and the suppression list's `PutSuppressedDestination`, `GetSuppressedDestination`, `ListSuppressedDestinations` and `DeleteSuppressedDestination`; anything else answers `NotImplemented`. Sending needs the server of customers' mail (setup's step 12).
+
+```bash
+ff email add shop.example.tn                   # the records to publish at its DNS, printed:
+# FOR              TYPE  NAME                                   VALUE
+# DKIM             TXT   ff3c9a2e1b._domainkey.shop.example.tn  v=DKIM1; k=rsa; p=MIIB…
+# MAIL FROM        MX    bounces.mail.shop.example.tn           10 mail.localhost
+# SPF              TXT   bounces.mail.shop.example.tn           v=spf1 a:mail.localhost -all
+# DMARC (advised)  TXT   _dmarc.shop.example.tn                 v=DMARC1; p=none;
+ff email verify shop.example.tn                # looks now, rather than in the minute
+ff email add me@example.tn                     # an address, for the sandbox: FF e-mails it a link
+ff email send --from orders@shop.example.tn --to me@example.tn --subject Hello --text 'From FF'
+ff email messages                              # what became of each recipient
+```
+
+**A domain** gets a DKIM key of FF's, RSA of 2,048 bits, sealed as secrets are, under a selector of its own (`ff` and 8 hexadecimal characters), as SES's "bring your own DKIM" would take one, and four records to publish: the key's TXT, which proves the domain; its return path's MX and SPF, `bounces.mail.<domain>`, which bring its bounces back to FF's server; and a DMARC policy that only reports, advised. FF looks them up every minute for 72 hours, then gives up (`FAILED`; `ff email verify` tries again); once proved, once a day, its mail refused while its record is gone. Until its MX is found, its bounces come back through FF's own return path (`FF_EMAIL_BOUNCE_DOMAIN`). **An address** is proved by the link FF e-mails it, for the sandbox, where every recipient must be proved too. The plan counts domains: 2 on beta, addresses free. The console's E-mail page lists them, each with its records and what each is for; `GET`, `POST /email/identities`, `GET`, `DELETE /email/identities/<identity>` and `POST /email/identities/<identity>/verify` in FF's API.
+
+**Sending,** `SendEmail` at the SES endpoint or `POST /email/messages` in FF's API (`ff email send`), from an address the account proved or one at a domain it proved, whose DKIM key signs it; 50 recipients and 10 MB at most; each recipient counting against the plan's quotas, 200 a day and 1 a second on beta, as SES counts them. The message is queued in FF's database and answered with its ID at once; the backend hands it to the server of customers' mail over SMTP with STARTTLS, signed with the domain's key, its envelope's sender `b-<message ID>@bounces.mail.<domain>`. A server that refuses for now is tried again 30 s, 2, 10 and 30 minutes later, then hourly, for a day; one that refuses for good fails it, and `ff email messages` (`GET /email/messages`) says each recipient's fate in the receiving server's words: sent, bounced, failed, complained of, or kept off by the suppression list. Messages are kept 30 days.
+
+**From a function,** nothing to set: its pods get its own key, the region and `AWS_ENDPOINT_URL_SESV2`, as they get the S3 front door's and the SQS endpoint's, so that `new SESv2Client({})` (`@aws-sdk/client-sesv2` in the function's package) and `boto3.client("sesv2")` work as they are. The backend gives functions the endpoint only when it knows where they reach it: `FF_SES_FUNCTION_ENDPOINT` and `FF_SES_FUNCTION_CIDRS`, with the development cluster the same gateway as for buckets (`http://172.18.0.1:3005`). **Port 25 is closed to every function,** whatever its internet access, so that no code sends around the quotas; 465 and 587 stay open, to a mail service of the customer's own, as on AWS.
+
+**Reputation, as SES keeps it:** a new account is in the sandbox, as on SES: it sends only to the addresses and domains it proved, until FF's operator lets it out in the admin app, once the account says what it sends. A bounce for good, or a complaint, puts the address on the account's suppression list, which no mail of the account's reaches again (`ff email suppressions`, `GET`, `PUT`, `DELETE /email/suppressions/<address>`). Over the last 14 days, of 100 recipients at least, past 5% of bounces for good or 0.1% of complaints the account is reviewed, past 10% or 0.5% its sending stops, as SES's do, and FF's operator is told; only the operator turns it on again. `ff email account` (`GET /email/account`, SES's `GetAccount`) says where the account stands: in the sandbox or not, on or paused, its standing, what it sent of its quotas in the last 24 hours. Every member reads the account's mail; owners and developers add identities and send; an API key needs `email:read` and `email:write`. The audit log names each `email.identity.create`, `email.identity.verify`, `email.identity.delete`, `email.suppression.put`, `email.suppression.delete`, the operator's `account.email`, and the review's `email.sending.enforce`.
+
+**Billed as SES bills:** each message's recipients, a suppressed one too, at 0.10 US$ a thousand, and its attachments at 0.12 US$ a GB, SES's prices in the book's dinars, with no free tier. `GET /usage` gives each domain's and address's month, its CSV a line each (`attachment_bytes`), the statement a table of them. Without credit, the account's sends wait for credit (`SendingPausedException`; 402 in FF's API), its identities and messages read as ever; a suspended account's are refused; a closed account's mail goes at its data deletion date, its domains' keys with it. `GET /email/metrics` gives a point an hour, as CloudWatch names SES's: `Send`, `Delivery`, `Bounce` and `Complaint` (Sum), and `Reputation.BounceRate` and `Reputation.ComplaintRate` (Average), the shares of the last 14 days' recipients; an alarm on them watches the account's mail.
+
+**The way out:** SES with the same domains, its own DKIM keys published beside FF's so that both sign while you move, the suppression list copied, and the code unchanged but its endpoint: [`cli/templates/export/data/ses.md`](../cli/templates/export/data/ses.md). In French: [Le courrier de vos applications](fr/courrier.md).
+
+### A cache
+
+A Valkey server of its own for each cache, as Amazon ElastiCache for Valkey gives them ([ADR 0013](adr/0013-caches.md)): on a server of customers' caches apart from the cluster (setup's step 11), its memory the plan's, with the least recently used keys going past it, nothing on disk, TLS and a password. Any Redis or Valkey client reaches it.
+
+```bash
+ff caches create sessions --secret-for orders-api       # the console's Caches page does the same
+# sessions made: its address, shown this once (FF keeps no copy; `ff caches password sessions` makes a new one):
+# rediss://default:Hq7v…@10.199.0.11:6400
+# REDIS_URL set on orders-api
+redis-cli --tls --cacert hack/.cache-server/ca.crt -u 'rediss://default:Hq7v…@10.199.0.11:6400' PING
+ff caches get sessions                                  # its memory used, its connections
+```
+
+**Its address,** `rediss://default:<password>@<host>:<port>`, is in the answer that makes the cache (`POST /caches`, `{"name": "sessions"}`) and never again: FF keeps the password's SHA-256 alone. `ff caches password sessions` (`POST /caches/<name>/password`) makes a new one, shown once too; the connections under way keep theirs, as an ElastiCache AUTH token's rotation does. `--secret-for` sets the address as a secret of the functions named, `REDIS_URL` unless `--secret-name` says otherwise. A cache's name is ElastiCache's (1 to 40 lower-case letters, digits and hyphens, a letter first), the account's once; on the server it is a process of its own under a name of FF's, `fc-` and 24 characters, its port the first free one of `FF_CACHE_PORTS` (6400 to 6999). The plan sets how many and their memory: one cache of 64 MB on beta.
+
+**What it runs:** every command but those that would change the server, write to its disk or reach another (`CONFIG`, `DEBUG`, `MODULE`, `ACL` but `ACL WHOAMI`, `SAVE`, `BGSAVE`, `SHUTDOWN`, `REPLICAOF`, `MIGRATE`, `CLUSTER` and the like). Nothing is kept on disk: a process that starts again, or a server moved, starts empty. Keep in a database what must outlive it.
+
+**Functions reach it whatever their account's internet access:** one rule of their NetworkPolicy opens the server's ports. Its certificate is a public CA's in production; in development, functions trust the server's CA with the database server's, in the one file `NODE_EXTRA_CA_CERTS` names, and from this machine `--cacert hack/.cache-server/ca.crt` checks it. `createClient({ url: process.env.REDIS_URL })` with node-redis, or `redis.from_url(os.environ["REDIS_URL"])` in Python, the library in the function's package.
+
+**Measured every hour, billed as ElastiCache bills a node:** each hour, FF's agent on the server gives the backend the cache's memory, what its keys use, its connections, its hits, misses and evictions, into `cache_samples`. Each hour measured is billed by the GB-hour of the cache's memory, at ElastiCache for Valkey's price in the book's dinars (`cache.t4g.micro`'s, 0.0256 US$ a GB-hour), with no free tier; an hour the server never answers in isn't billed. `GET /usage`, the console's Usage page and `ff usage` show each cache's month. `GET /caches/<name>/metrics` gives a point an hour, as CloudWatch names ElastiCache's: `BytesUsedForCache` and `CurrConnections`, `CacheHits`, `CacheMisses` and `Evictions`; an alarm on them names the cache (`cacheName`). Every member reads the account's caches; owners and developers make, change and delete them; an API key needs `caches:read` and `caches:write`. The audit log names each `cache.create`, `cache.password` and `cache.delete`.
+
+**Suspended, out of credit, closed:** a suspended account's caches refuse its user and end its connections, their keys kept until it is active again; without credit, they go on, as databases do; a closed account's are deleted at its data deletion date. `ff caches delete sessions` (`DELETE /caches/<name>`) deletes one, with its keys.
+
+**The way out:** ElastiCache for Valkey with encryption in transit and an AUTH token, the same eviction, its address in the functions' environment on AWS Lambda; the keys aren't copied, a cache being a cache: [`cli/templates/export/data/elasticache.md`](../cli/templates/export/data/elasticache.md). In French: [Des caches](fr/caches.md).
 
 ### A small app, end to end
 

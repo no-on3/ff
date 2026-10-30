@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-4 plan](../step-4-plan.md)'s D1 to D3, and its choices (its §9), confirmed on 2026-10-30; how a bucket's files reach browsers, measured by W-01's spike the same day |
 | **Date** | 2026-10-30 |
-| **Implementation** | Step-4 plan: decisions D1 to D3; tasks W-02 and W-03 |
+| **Implementation** | Step-4 plan: decisions D1 to D3; tasks W-02 and W-03. As built: W-02 and W-03 (below); W-09 documented it: the guide's "A static site", `how-it-works.html`'s scenario of it, the page in French, and the export kit's [`data/s3-website.md`](../../cli/templates/export/data/s3-website.md) |
 | **Related** | [ADR 0009](0009-buckets.md) (buckets, the S3 front door); [What to build next](../what-to-build-next.md) §7; the spike, [`hack/spikes/sites`](../../hack/spikes/sites/README.md) |
 
 ## Context
@@ -51,3 +51,27 @@ A site's requests are counted as its bucket's reads, of their own class (`websit
 `https://<bucket>.site.<domain>/`: buckets' names are unique across FF and have no dots, so each makes a host. The edge's certificate for them as for function URLs and buckets: one for `*.site.<domain>` through DNS where FF's DNS allows it (the decision log, 17), else one per site on demand, once the backend says the bucket is a site.
 
 A customer's own domain for a site is proved as a function URL's is, a CNAME to the site's host or a TXT record with the edge's addresses, and its certificate made on demand; a domain serves a function's URL or a site, one in an account, and the plan's custom domains count both.
+
+### As built (W-02): the configuration and the server
+
+- **The configuration** (decision 1), in a column of the bucket's own (the migration `BucketWebsites`): `PutBucketWebsite`, `GetBucketWebsite` and `DeleteBucketWebsite` at the S3 front door in S3's XML, counted as a PUT, a GET and a free DELETE; `PUT`, `GET` and `DELETE /buckets/:name/website` in FF's API, in S3's JSON names and FF's `singlePageApp`, which S3's XML can't say, so that `PutBucketWebsite` keeps it as it was. S3's refusals in its words; redirects and routing rules answer `NotImplemented`. A read-only key changes nothing; the audit log names each `bucket.website`.
+- **The server** (decision 2): `WebsiteServer` on `FF_WEBSITE_PORT` (3004; 0 for none), answering `<bucket>.<the sites' host>` (`FF_WEBSITE_BASE`), and the bucket the function URL gateway names for a customer's own domain. Anything but `GET` and `HEAD` answers 405 with `Allow`. A folder named without its slash is redirected with its query kept; a path with no file answers the error document with 404, the index document with 200 for a single-page app, else S3's own error page. The browser's conditions and ranges go to the store, which answers 304, 206, 412 and 416 itself. A path with a dot segment, however escaped, or a control character, answers 400 `InvalidURI` before the store is asked. A suspended account's sites, and those whose storage FF turned off, answer 403; without credit they answer, as reads do.
+- **Counted and limited:** each visit in its bucket's minute, in the class `website` (the migration `SiteTransfer`), billed as S3's second class, its bytes out counted, not billed (the decision log, 12). The plan's `siteTransferGbPerMonth`, 10 on beta, read from the written minutes at most once a minute with what the process sent since: past it, the account's sites answer 403, saying so, until the month's end, a minute or two late, never early.
+
+### As built (W-03): addresses, domains, the console and `ff`
+
+- **Addresses** (decision 3): the edge answers `*.site.<domain>` (`FF_WEBSITE_DOMAIN`) with the website server's port, its certificates on demand; its `/tls/allowed` says yes to `<bucket>.site.<domain>` for a bucket that is a site, and to a site's verified domain, no to any other. A customer's domain names a function or a bucket (`custom_domains.bucket_id`, the migration `SiteDomains`), `/buckets/:name/website/domains` as a function URL's are, the plan's `customDomains` counting both; a domain under FF's own sites' host is refused.
+- **Deploys:** `ff sites deploy <bucket> <folder>` with a deploy's own key (`POST /buckets/:name/website/deploy-keys`: the bucket alone, read-write, an hour, never listed or counted with the account's two keys; the migration `DeployKeys`): the files whose MD5 isn't the stored ETag, assets first and pages last, each typed by its name from the website server's own table and cached a year (`immutable`) when its name carries a hash, `no-cache` otherwise; the bucket's files the folder hasn't deleted, unless `--keep`; the key revoked; the bucket made a site when it isn't one. Signed by `ff` itself, no AWS CLI needed. `ff sites get|remove|domains|metrics`, and the console's site panel on a bucket's page.
+- **Metrics and alarms:** `GET /buckets/:name/website/metrics`, as CloudWatch names a CloudFront distribution's: `Requests` and `BytesDownloaded` (Sum), `4xxErrorRate`, `5xxErrorRate` and `TotalErrorRate` (Average, in percent, none in a period without a visit); alarms on `Requests` and the three rates name the bucket. A bucket's own metrics count its site's visits among its requests.
+
+## Consequences
+
+- The backend's fourth front door, in its one process: a site's traffic shares it with the API, the S3 front door and the SQS endpoint. The same code can run as a deployment of its own once sites need it (the plan's §8).
+- A public site per bucket at an address under FF's domain: a phishing page there marks `ffunc.cloud`, which a domain of its own for customers' content, before the public launch, would keep apart (the decision log, 42).
+- What the build leaves for later, each said above: redirects and routing rules; a wildcard certificate for `*.site.<domain>` until FF's DNS allows one (the decision log, 17), certificates on demand until then, within Let's Encrypt's limits; deploys with rollbacks, as Amplify Hosting or Netlify keep them; the bytes sites send billed, rather than counted with a limit.
+
+## Alternatives considered
+
+- **Caddy's file server, or a CDN in front:** Caddy would need a module to read the store under FF's names, and couldn't check the account or count the visits (decision 2); a CDN is a service more, for traffic a beta doesn't have.
+- **A site of its own, with deploys and rollbacks, as Netlify has:** set aside for S3's shape, which keeps the way out (S3 with CloudFront) and reuses buckets' measures, limits and bills (the plan's §9, 1). Deploys can come on top.
+- **Bucket policies or ACLs to make a bucket public:** S3's way, with its "Block public access"; the website configuration is the one switch instead, and a bucket's S3 API stays signed.

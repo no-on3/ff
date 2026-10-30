@@ -329,7 +329,7 @@
 <section id="overview">
   <div class="wrap">
     <h2>Overview</h2>
-    <p class="lead">You send code to the backend, inline or as a package with its libraries. The backend makes inline code a package of one file, keeps the package's zip in S3, and makes the package an image, which it pushes to the code registry. It keeps the function's record in PostgreSQL, and a copy of inline code in S3, then asks Kubernetes for your tenant's namespace and guardrails, a Service, and a Deployment whose pods mount that image. Kubernetes starts a pod from the runtime image; the node pulls the code image and mounts it read-only at <code>/var/task</code>, and the runtime loads your code once and reports ready. On each invocation the backend forwards your input to the pod, the runtime calls <code>handler(event, context)</code> in a worker, and the result travels back and is recorded with its duration. Idle functions are scaled to zero and start again on the next call. Work that runs later waits in PostgreSQL, in one table of messages: a call that doesn't wait, a queue's messages that AWS's SDKs send, a file's event; the backend's own workers take it from there, as the simulator's three scenarios of background work show. Click a component for details.</p>
+    <p class="lead">You send code to the backend, inline or as a package with its libraries. The backend makes inline code a package of one file, keeps the package's zip in S3, and makes the package an image, which it pushes to the code registry. It keeps the function's record in PostgreSQL, and a copy of inline code in S3, then asks Kubernetes for your tenant's namespace and guardrails, a Service, and a Deployment whose pods mount that image. Kubernetes starts a pod from the runtime image; the node pulls the code image and mounts it read-only at <code>/var/task</code>, and the runtime loads your code once and reports ready. On each invocation the backend forwards your input to the pod, the runtime calls <code>handler(event, context)</code> in a worker, and the result travels back and is recorded with its duration. Idle functions are scaled to zero and start again on the next call. Work that runs later waits in PostgreSQL, in one table of messages: a call that doesn't wait, a queue's messages that AWS's SDKs send, a file's event; the backend's own workers take it from there, as the simulator's three scenarios of background work show. A bucket can be a site, its files served to browsers by the backend's website server; customers' mail goes out through a Postfix of their own, each message signed by the backend with its domain's key; and each cache is a Valkey process of its own on a server apart: a scenario each. Click a component for details.</p>
     <div class="grid2">
       <div class="card pad scrollx"><div id="archBig"></div></div>
       <div class="card pad arch-info" id="archInfo" aria-live="polite"></div>
@@ -542,6 +542,10 @@
           <tr><td>Queues, as Amazon SQS: the endpoint on its own port and its signature, the operations FF's API shares with it, the messages' table, and the NOTIFY that ends a long poll</td><td><code>BE/src/queues/sqs-front-door.ts</code>, <code>sqs-signature.ts</code>, <code>sqs-operations.ts</code>, <code>customer-queues.ts</code>, <code>queue-events.ts</code>, <code>queues.controller.ts</code>, and the migrations <code>…-CustomerQueues.ts</code> and <code>…-AsyncNotify.ts</code></td></tr>
           <tr><td>Functions reading queues: Lambda's event source mappings, the poller, SQS's event and the partial batch response</td><td><code>BE/src/event-sources/event-sources.service.ts</code>, <code>event-source-poller.ts</code>, <code>sqs-event.ts</code></td></tr>
           <tr><td>Buckets' notifications: S3's configuration, its record of an event, and the event's delivery to a function or a queue</td><td><code>BE/src/storage/bucket-notifications.ts</code>, <code>bucket-notifications.service.ts</code>, <code>bucket-events.ts</code>, <code>front-door.ts</code> <code>notify()</code>, <code>BE/src/queues/bucket-event-delivery.ts</code></td></tr>
+          <tr><td>Sites: a bucket's website configuration in S3's XML and FF's API, the website server on its own port, the files' types, a deploy's own key, a site's own domains, and the bytes sites send each month</td><td><code>BE/src/storage/website.ts</code>, <code>bucket-websites.service.ts</code>, <code>website-server.ts</code>, <code>content-types.ts</code>, <code>site-transfer.service.ts</code>, <code>storage-keys.service.ts</code> <code>createDeployKey()</code>, <code>BE/src/function-urls/site-domains.controller.ts</code>; <code>cli/src/commands/sites.rs</code>; the console's panel: <code>FE/src/components/BucketSite.tsx</code></td></tr>
+          <tr><td>Mail, as Amazon SES v2: the endpoint on its own port and its signature, identities with their DKIM keys and records, their proof through the DNS, the account's sending, the suppression list</td><td><code>BE/src/email/ses-front-door.ts</code>, <code>ses-signature.ts</code>, <code>ses-operations.ts</code>, <code>email-identities.service.ts</code>, <code>mail-domain.ts</code>, <code>email-account.service.ts</code>, <code>email-suppressions.service.ts</code>, <code>email.controller.ts</code></td></tr>
+          <tr><td>Mail sent: the queue of messages, the sandbox and the quotas, the DKIM signature and the hand-over to the server of customers' mail, what comes back, the reputation's review, and each message's billing record</td><td><code>BE/src/email/email-messages.service.ts</code>, <code>email-send.ts</code>, <code>email-sender.service.ts</code>, <code>email-bounces.service.ts</code>, <code>email-reports.ts</code>, <code>email-send.entity.ts</code>; the server and its agent: <code>deploy/mail/</code>; the operator's switch: <code>BE/src/admin/admin-email.service.ts</code></td></tr>
+          <tr><td>Caches: the API, the plan's limits, the server's ports, the agent that runs each cache's process, the hourly measures and their metrics</td><td><code>BE/src/caches/caches.service.ts</code>, <code>cache-server.ts</code>, <code>cache-samples.service.ts</code>, <code>cache-names.ts</code>; the server and its agent: <code>deploy/cache/agent.mjs</code></td></tr>
           <tr><td>Queues' requests counted and billed as SQS bills them, their minute samples, and the calls that don't wait counted for Lambda's metrics</td><td><code>BE/src/queues/queue-request-counts.service.ts</code>, <code>queue-tally.ts</code>, <code>queue-samples.service.ts</code>, <code>async-event-counts.service.ts</code></td></tr>
           <tr><td>Function URLs: their configuration, the gateway on its own port, the event, the answer, CORS</td><td><code>BE/src/function-urls/function-urls.service.ts</code>, <code>function-url.gateway.ts</code>, <code>url-event.ts</code>, <code>url-response.ts</code>, <code>url-cors.ts</code>, <code>url-address.ts</code>; the shared call: <code>functions.service.ts</code> <code>call()</code>; the shared rate: <code>BE/src/plans/rate-limits.ts</code> <code>countInvocation()</code>; the console's tab: <code>FE/src/components/FunctionUrl.tsx</code>, <code>FunctionUrlDomains.tsx</code>, <code>FE/src/lib/function-url.ts</code>, <code>custom-domains.ts</code></td></tr>
           <tr><td>Token checks, the global guard</td><td><code>BE/src/auth/auth.guard.ts</code>, <code>token-verifier.ts</code></td></tr>
@@ -730,8 +734,13 @@ const LANES = {
   datadb: { label: 'Databases', sub: 'PostgreSQL 18', color: '--c-data', map: 'datadb' },
   front:  { label: 'S3 front door', sub: 'backend :3002', color: '--c-front', map: 'api' },
   sqs:    { label: 'SQS endpoint', sub: 'backend :3003', color: '--c-front', map: 'api' },
+  web:    { label: 'Website server', sub: 'backend :3004', color: '--c-front', map: 'api' },
+  ses:    { label: 'SES endpoint', sub: 'backend :3005', color: '--c-front', map: 'api' },
+  cache:  { label: 'Caches\' server', sub: 'Valkey 9.1 · agent', color: '--c-data', map: 'cachesrv' },
+  mail:   { label: 'Mail server', sub: 'Postfix · agent', color: '--c-data', map: 'mailsrv' },
+  mx:     { label: 'Recipient\'s server', sub: 'its MX', color: '--c-user', map: 'user' },
 };
-const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'registry', 'datadb', 'k8sapi', 'ns', 'guard', 'service', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
+const MAP_IDS = ['user', 'idp', 'api', 'db', 's3', 'registry', 'datadb', 'cachesrv', 'mailsrv', 'k8sapi', 'ns', 'guard', 'service', 'deployment', 'pod-box', 'pod', 'worker', 'node', 'logstore'];
 
 const K = 'Kubernetes · ' + NS;
 const EMPTY = {
@@ -1558,6 +1567,214 @@ const SCENARIOS = [
     ],
   },
   {
+    id: 'site', title: 'A site, as S3 and CloudFront serve one',
+    lanes: ['user', 'api', 'db', 'front', 's3', 'web'],
+    summary: 'ff sites deploy shop ./dist --spa: a key of the deploy\'s own, to that bucket alone for an hour; the files whose content changed uploaded through the S3 front door, signed by ff itself, each typed and cached by its name, the pages last; the key revoked and the bucket made a site. A browser then asks the website server, the backend\'s fourth front door, for a route of the single-page app: the server finds the bucket by the host\'s first label, checks its account, reads the store under FF\'s name, answers the index document with 200, and counts the visit among the bucket\'s reads, as CloudFront\'s metrics count it.',
+    state: {
+      'PostgreSQL': { 'buckets': null, 'storage_keys': null, 'storage_request_counts': null },
+      'S3 (customers\' buckets)': { 'bucket': null, 'object': null },
+    },
+    initial: {
+      'PostgreSQL.buckets': 'shop · ff-5c1e8a3d9b7f2e4a6c0d1b3e · active · no site',
+      'S3 (customers\' buckets).bucket': 'ff-5c1e8a3d9b7f2e4a6c0d1b3e · empty',
+    },
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'GET /buckets/shop/website · 404', title: 'Is the bucket a site already?',
+        text: 'ff sites deploy reads the folder first: a name that is no UTF-8, or a folder without a file, stops it before any call; names starting with a dot are left out, .well-known apart. Then the bucket\'s website configuration: none, so this deploy makes it a site, index.html its index document, the folder\'s 404.html its error document, and, with --spa, a single-page app\'s.',
+        code: 'cli/src/commands/sites.rs deploy() · BE/src/storage/buckets.controller.ts · bucket-websites.service.ts get()',
+        msg: [{ kind: 'http', first: 'GET /buckets/shop/website HTTP/1.1', headers: { host: 'localhost:3000', 'user-agent': 'ff-cli/0.1.0' } }, { kind: 'http', first: 'HTTP/1.1 404 Not Found', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { statusCode: 404, message: 'The bucket "shop" is no site: it has no website configuration', error: 'Not Found' } }] },
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /buckets/shop/website/deploy-keys', title: 'A key of the deploy\'s own',
+        text: 'To the bucket alone, read-write, for an hour, as an STS session lasts by default: never listed or counted with the account\'s two keys, and its secret in this answer only. Owners and developers deploy, and an API key with storage:write. The audit log names bucket.deploy_key, with the key\'s ID and when it ends.',
+        code: 'BE/src/storage/deploy-keys.controller.ts · storage-keys.service.ts createDeployKey()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { bucket: 'shop', accessKeyId: 'AKFF6M3QJ8XWT2RZ5N4D', secretAccessKey: 'q9Zt…', expiresAt: '2026-10-30T09:12:04.318Z', endpoint: 'http://s3.localhost:3002', region: 'tn-tunis-1' } },
+        set: { 'PostgreSQL.storage_keys': 'AKFF6M3QJ8XWT2RZ5N4D · shop · read-write · until 09:12 · sealed' } },
+      { from: 'user', to: 'front', kind: 'req', label: 'GET /shop?list-type=2&max-keys=1000', title: 'What the bucket holds, each file\'s ETag',
+        text: 'ListObjectsV2, signed by ff itself with that key: AWS Signature Version 4 for s3, no AWS CLI needed. A file whose MD5 is the stored ETag is unchanged, and isn\'t sent again; the bucket is empty, so every file goes up.',
+        code: 'cli/src/s3.rs BucketClient::list() authorization() · BE/src/storage/front-door.ts',
+        msg: { kind: 'http', first: 'GET /shop?list-type=2&max-keys=1000 HTTP/1.1', headers: { host: 's3.localhost:3002', 'x-amz-date': '20261030T081204Z', 'x-amz-content-sha256': '<SHA-256 of the empty body>', authorization: 'AWS4-HMAC-SHA256 Credential=AKFF6M3QJ8XWT2RZ5N4D/20261030/tn-tunis-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=…' } } },
+      { from: 'user', to: 'front', kind: 'req', label: 'PUT /shop/assets/index-3c9d7a1f.js · immutable', title: 'The assets first, each typed and cached by its name',
+        text: 'Its type from the same table as the website server\'s, by the file\'s extension; a name that carries a hash, as bundlers name assets, is cached a year and never asked again (immutable), since a new build names its new assets anew. The pages go last, so that a page never names an asset that isn\'t there yet.',
+        code: 'cli/src/commands/sites.rs upload() content_type() cache_control() is_hashed() · cli/src/s3.rs BucketClient::put()',
+        msg: { kind: 'http', first: 'PUT /shop/assets/index-3c9d7a1f.js HTTP/1.1', headers: { host: 's3.localhost:3002', 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=31536000, immutable', 'x-amz-content-sha256': '<its SHA-256>', authorization: 'AWS4-HMAC-SHA256 Credential=AKFF6M3QJ8XWT2RZ5N4D/…, Signature=…' }, body: '<148,213 bytes>' } },
+      { from: 'front', to: 's3', kind: 'req', label: 'PUT /ff-5c1e…/assets/index-3c9d7a1f.js', title: 'Into the store, under FF\'s name',
+        text: 'The front door checks the deploy\'s key as any key: unrevoked, within its hour, the bucket the one it names, the account active and its storage on, credit for an upload. The body streams through, its SHA-256 and MD5 checked on the way, and the type and cache header ff gave it are stored with it.',
+        code: 'BE/src/storage/front-door.ts forward() · storage-directory.service.ts',
+        msg: { kind: 'http', first: 'PUT /ff-5c1e8a3d9b7f2e4a6c0d1b3e/assets/index-3c9d7a1f.js HTTP/1.1', headers: { host: 'localhost:9003', 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=31536000, immutable', authorization: S3_SIGNED } },
+        set: { 'S3 (customers\' buckets).bucket': 'ff-5c1e8a3d9b7f2e4a6c0d1b3e · 13 objects', 'S3 (customers\' buckets).object': 'assets/index-3c9d7a1f.js · text/javascript · immutable' } },
+      { from: 'user', to: 'front', kind: 'req', label: 'PUT /shop/index.html · no-cache', title: 'The pages last, asked again at every visit',
+        text: 'index.html and 404.html, no-cache: a browser keeps them, and asks again each time with their ETag, so that a deploy shows at the next visit. Then ff deletes the bucket\'s files the folder hasn\'t, unless --keep: none, the bucket was empty.',
+        code: 'cli/src/commands/sites.rs upload() · cli/src/s3.rs BucketClient::put()',
+        msg: { kind: 'http', first: 'PUT /shop/index.html HTTP/1.1', headers: { host: 's3.localhost:3002', 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache', authorization: 'AWS4-HMAC-SHA256 Credential=AKFF6M3QJ8XWT2RZ5N4D/…, Signature=…' }, body: '<!doctype html>…<script type="module" src="/assets/index-3c9d7a1f.js"><\/script>…' },
+        set: { 'S3 (customers\' buckets).bucket': 'ff-5c1e8a3d9b7f2e4a6c0d1b3e · 14 objects', 'S3 (customers\' buckets).object': 'index.html · text/html · no-cache' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'DELETE …/deploy-keys/AKFF6M3Q… · PUT /buckets/shop/website', title: 'The key revoked, the bucket a site',
+        text: 'The deploy\'s key stops at once, its hour unused. Then the website configuration, in S3\'s JSON names, with FF\'s singlePageApp, which S3\'s XML can\'t say, as CloudFront\'s custom error responses give it. PutBucketWebsite through the S3 front door, in S3\'s XML, sets the same; redirects and routing rules answer NotImplemented.',
+        code: 'storage-keys.service.ts revokeDeployKey() · buckets.controller.ts · bucket-websites.service.ts put() keep() · website.ts websiteFromJson() checkWebsite()',
+        msg: { kind: 'http', first: 'PUT /buckets/shop/website HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json' }, body: { indexDocument: { suffix: 'index.html' }, errorDocument: { key: '404.html' }, singlePageApp: true } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE buckets SET website · audit bucket.website', title: 'Public to read at its address alone',
+        text: 'The configuration in the bucket\'s own column: with one, its files are a site, public to read at the site\'s address; the S3 API stays signed, and no bucket policy or ACL exists to make it public any other way. The edge may now get a certificate for shop.site.<domain>, as the website server says yes when asked.',
+        code: 'bucket-websites.service.ts keep() · bucket.entity.ts website · website-server.ts allowsCertificate()',
+        msg: { kind: 'sql', text: "UPDATE \"storage_keys\" SET \"revoked_at\" = now() WHERE \"id\" = 'AKFF6M3QJ8XWT2RZ5N4D';\nUPDATE \"buckets\" SET \"website\" = '{\"indexDocument\":\"index.html\",\"errorDocument\":\"404.html\",\"singlePageApp\":true}' WHERE \"id\" = '…';\nINSERT INTO \"audit_log\" (\"account_id\", \"action\", \"resource\", …) VALUES ('000000000001', 'bucket.website', 'bucket:shop', …);" },
+        set: { 'PostgreSQL.storage_keys': 'AKFF6M3QJ8XWT2RZ5N4D · revoked', 'PostgreSQL.buckets': 'shop · ff-5c1e8a3d9b7f2e4a6c0d1b3e · active · a site, a single-page app' } },
+      { from: 'api', to: 'user', kind: 'res', label: '200 · http://shop.site.localhost:3004', title: 'Its address',
+        text: 'ff prints what it did and where: ./dist deployed to shop, made a site: 14 files uploaded, 0 files unchanged, 0 files deleted. In production the address is https://shop.site.<domain>, behind the edge; a customer\'s own domain, proved by its CNAME, answers the same.',
+        code: 'bucket-websites.service.ts view() · website.ts siteUrl() · cli/src/commands/sites.rs deploy()',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { indexDocument: { suffix: 'index.html' }, errorDocument: { key: '404.html' }, singlePageApp: true, url: 'http://shop.site.localhost:3004' } } },
+      { from: 'user', to: 'web', kind: 'req', label: 'GET /orders/42 · host shop.site.localhost', title: 'A visitor opens a route of the app',
+        text: 'A browser, anonymous: the website server, the backend\'s fourth front door, on a port of its own (FF_WEBSITE_PORT, 3004). GET and HEAD alone; anything else is 405 with Allow. The bucket is the host\'s first label under the sites\' host; a customer\'s own domain comes through the function URL gateway, which names the bucket. A path with a . or .. segment, however escaped, answers 400 InvalidURI before the store is asked.',
+        code: 'BE/src/storage/website-server.ts serve() bucketNameOf() keyOf()',
+        msg: { kind: 'http', first: 'GET /orders/42 HTTP/1.1', headers: { host: 'shop.site.localhost:3004', accept: 'text/html,application/xhtml+xml,*/*;q=0.8', 'user-agent': 'Mozilla/5.0 …' } } },
+      { from: 'web', to: 'db', kind: 'req', label: 'the bucket and its account, cached', title: 'The site\'s account, checked at every visit',
+        text: 'The bucket by its name, its website configuration with it, and its account, through the same directory the S3 front door reads: active, its storage on, and within the plan\'s bytes a month for its sites together, 10 GB on beta, read from the written minutes at most once a minute. A suspended account\'s sites answer 403; without credit they answer, as reads do.',
+        code: 'website-server.ts answer() admit() · storage-directory.service.ts bucket() account() · site-transfer.service.ts sentThisMonth()',
+        msg: { kind: 'sql', text: "SELECT sum(\"bytes_out\")::text AS \"bytes\" FROM \"storage_request_counts\"\n WHERE \"account_id\" = '000000000001' AND \"class\" = 'website' AND \"minute\" >= '2026-10-01T00:00:00Z';" } },
+      { from: 'web', to: 's3', kind: 'req', label: 'GET orders/42 · 404 · HEAD orders/42/index.html · 404 · GET index.html', title: 'No such file: the index document, for a single-page app',
+        text: 'The store under FF\'s name for the bucket, signed with FF\'s own key. No file orders/42, and no folder of that name with an index document, which a plain site would redirect to with its slash (302), as S3\'s website endpoint does; so the single-page app\'s index document answers, its router showing the order. A plain site would answer its error document with 404. The browser\'s If-None-Match and Range go to the store with the request, which answers 304 and 206 itself.',
+        code: 'website-server.ts answer() fromStore()',
+        msg: { kind: 'http', first: 'GET /ff-5c1e8a3d9b7f2e4a6c0d1b3e/index.html HTTP/1.1', headers: { host: 'localhost:9003', authorization: S3_SIGNED } } },
+      { from: 'web', to: 'user', kind: 'res', label: '200 index.html · no-cache · nosniff', title: 'The page, as the store keeps it',
+        text: 'The type it was uploaded with, else one by its name when it says nothing (binary/octet-stream); its ETag and Last-Modified; its cache header; X-Content-Type-Options: nosniff on every answer, so that no file is run as what it isn\'t; no cookie. Its assets follow, each a visit of its own, kept a year by the browser.',
+        code: 'website-server.ts relay() · BE/src/storage/content-types.ts',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'text/html; charset=utf-8', 'content-length': '612', etag: '"9b2d…"', 'last-modified': 'Fri, 30 Oct 2026 08:12:05 GMT', 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff', 'x-amz-request-id': '7F3A9C2E1B5D4068' }, body: '<!doctype html>…' } },
+      { from: 'web', to: 'db', kind: 'req', label: 'each minute: INSERT storage_request_counts · website', title: 'Counted as the bucket\'s reads, as CloudFront\'s requests',
+        text: 'Each visit in its bucket\'s minute, in a class of its own, website, with what it sent; written once the minute is over, at the timer\'s next turn, as the S3 front door writes its own. The hourly rating bills them as S3\'s GETs, and their bytes out are counted, not billed (decision 12), within the plan\'s monthly limit. GET /buckets/shop/website/metrics gives Requests, BytesDownloaded and the 4xx, 5xx and total error rates, as CloudWatch names a distribution\'s, which alarms watch; the bucket\'s own metrics count them among its requests.',
+        code: 'BE/src/storage/storage-request-counts.service.ts count() flush() · BE/src/metrics/customer-metrics.service.ts · BE/src/billing/hourly-rating.service.ts',
+        msg: { kind: 'sql', text: "INSERT INTO \"storage_request_counts\" (\"bucket_id\", \"minute\", \"class\", \"writer\", \"account_id\", \"name\", \"requests\", \"gets\", \"puts\", \"errors4xx\", \"errors5xx\", \"bytes_in\", \"bytes_out\")\nVALUES ('…', '2026-10-30T08:13:00Z', 'website', '…', '000000000001', 'shop', 3, 3, 0, 0, 0, 0, 149437);" },
+        set: { 'PostgreSQL.storage_request_counts': 'shop · 08:13 · website · 3 requests · 149,437 bytes out' } },
+    ],
+  },
+  {
+    id: 'email', title: 'Mail sent, as Amazon SES sends it',
+    lanes: ['user', 'api', 'db', 'ses', 'worker', 'mail', 'mx'],
+    summary: 'ff email add shop.example.tn: FF makes the domain\'s DKIM key and gives its records; once they are published, the DNS proves it. A function then calls SendEmail with AWS\'s SDK, as on AWS: the backend\'s SES endpoint checks the signature, the sender and the sandbox, counts each recipient against the plan\'s quotas, queues the message with its billing record, and answers its ID. The backend signs it with the domain\'s key and hands it to a Postfix of customers\' own, which delivers it; a bounce for good comes back to the message\'s own return path, and the address goes on the account\'s suppression list.',
+    state: {
+      'PostgreSQL': { 'email_identities': null, 'email_messages': null, 'email_sends': null, 'email_suppressions': null },
+      'Mail server': { 'queue': null, 'bounces': null },
+    },
+    initial: {
+      'PostgreSQL.functions': 'orders-api · zip · index.http · ACTIVE · AWS_ENDPOINT_URL_SESV2 set',
+      'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'index.js loaded · idle',
+    },
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /email/identities · {"identity":"shop.example.tn"}', title: 'ff email add: a domain to send from',
+        text: 'The name checked by ff as the API checks it before any call, a domain or an address, lower-cased and its final dot dropped. CreateEmailIdentity at the SES endpoint does the same. The plan counts domains, 2 on beta; addresses are free, for the sandbox.',
+        code: 'cli/src/commands/email.rs add() checked_identity() · BE/src/email/email.controller.ts · email-names.ts',
+        msg: { kind: 'http', first: 'POST /email/identities HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { identity: 'shop.example.tn' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'an RSA key, sealed · INSERT email_identities', title: 'A DKIM key of FF\'s, and the records to publish',
+        text: 'RSA of 2,048 bits, made by the backend and sealed as secrets are, under a selector of its own, ff and 8 hexadecimal characters, as SES\'s own DKIM brought in (SigningAttributesOrigin EXTERNAL). Four records to publish: the key\'s TXT, which proves the domain; its return path\'s MX and SPF, bounces.mail.shop.example.tn, to the server of customers\' mail; a DMARC policy that only reports, advised. The audit log names email.identity.create.',
+        code: 'BE/src/email/email-identities.service.ts create() · email-identity.entity.ts · mail-domain.ts',
+        msg: { kind: 'sql', text: "INSERT INTO \"email_identities\" (\"account_id\", \"identity\", \"type\", \"status\", \"dkim_selector\", \"dkim_private_key\", …)\nVALUES ('000000000001', 'shop.example.tn', 'DOMAIN', 'PENDING', 'ff3c9a2e1b', '{\"v\":1,\"kid\":…,\"data\":…}', …);" },
+        set: { 'PostgreSQL.email_identities': 'shop.example.tn · DOMAIN · PENDING · selector ff3c9a2e1b' } },
+      { from: 'api', to: 'api', kind: 'int', label: 'each minute, for 72 hours: TXT ff3c9a2e1b._domainkey', title: 'Proved through the DNS',
+        text: 'Once the records are published, the minute\'s check finds the key\'s TXT record, as the customer\'s own resolvers would, through FF_DOMAIN_RESOLVERS: the domain is proved (SUCCESS), and its return path once its MX is found; until then its bounces come back through FF\'s own. Without the record in 72 hours, FAILED; once proved, checked once a day, its mail refused while the record is gone.',
+        code: 'email-identities.service.ts checkDue() check() · mail-domain.ts NodeMailResolver',
+        set: { 'PostgreSQL.email_identities': 'shop.example.tn · DOMAIN · SUCCESS · its MX found' } },
+      { from: 'worker', to: 'ses', kind: 'req', label: 'POST /v2/email/outbound-emails · SendEmail', title: 'The function sends its receipt, with AWS\'s SDK',
+        text: 'new SESv2Client({}) found the function\'s own key, the region and AWS_ENDPOINT_URL_SESV2 in its environment, as an SDK finds a Lambda role\'s: the code is the one that runs on AWS. The SES endpoint, a port of the backend\'s own (FF_SES_PORT, 3005), checks Signature Version 4 for the service ses, the path escaped twice as AWS\'s clients sign it, the key unrevoked and its account active.',
+        code: 'BE/src/storage/function-keys.service.ts credentialsFor() · BE/src/email/ses-front-door.ts serve() answer() · ses-signature.ts · ses-operations.ts run() sendEmail()',
+        msg: { kind: 'http', first: 'POST /v2/email/outbound-emails HTTP/1.1', headers: { host: '172.18.0.1:3005', 'content-type': 'application/json', 'x-amz-date': '20261030T083004Z', authorization: 'AWS4-HMAC-SHA256 Credential=AKFF…/20261030/tn-tunis-1/ses/aws4_request, SignedHeaders=…, Signature=…' }, body: { FromEmailAddress: 'orders@shop.example.tn', Destination: { ToAddresses: ['ana@example.tn'] }, Content: { Simple: { Subject: { Data: 'Your receipt, order 1' }, Body: { Text: { Data: '2 × harissa' } } } } } } },
+      { from: 'ses', to: 'db', kind: 'req', label: 'lock the account · the quotas · INSERT email_messages, email_sends', title: 'Checked, counted, queued and recorded for the bill',
+        text: 'The sender an address the account proved or one at a domain it proved; in the sandbox, every recipient proved too; the account\'s sending on, not stopped by its review, and its credit enough. Under a lock on the account, each recipient counts against the plan\'s quotas, 200 a day and 1 a second on beta, a suppressed one too, as SES counts them; the suppression list\'s addresses kept off. The message, composed and at most 10 MB, is queued with its billing record in the same transaction: its identity, its recipients, its attachments\' bytes.',
+        code: 'BE/src/email/email-messages.service.ts send() · email-send.ts composeSimple() attachmentBytesOf() · email-send.entity.ts',
+        msg: { kind: 'sql', text: "SELECT \"id\" FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;\nINSERT INTO \"email_messages\" (\"id\", \"account_id\", \"identity\", \"from_address\", \"return_path\", \"recipients\", \"recipient_count\", \"size_bytes\", \"raw\", \"status\", …)\nVALUES ('5b0e…', '000000000001', 'shop.example.tn', 'orders@shop.example.tn', 'b-5b0e…@bounces.mail.shop.example.tn', '[{\"address\":\"ana@example.tn\",\"status\":\"QUEUED\"}]', 1, 1184, <the message>, 'QUEUED', …);\nINSERT INTO \"email_sends\" (\"message_id\", \"sent_at\", \"account_id\", \"identity\", \"recipients\", \"attachment_bytes\") VALUES ('5b0e…', now(), '000000000001', 'shop.example.tn', 1, 0);" },
+        set: { 'PostgreSQL.email_messages': '5b0e… · QUEUED · ana@example.tn', 'PostgreSQL.email_sends': '5b0e… · shop.example.tn · 1 recipient' } },
+      { from: 'ses', to: 'worker', kind: 'res', label: '200 {"MessageId":"5b0e…"}', title: 'Answered at once, as SES answers',
+        text: 'The message ID, before any server has seen the message; what became of it is GET /email/messages\'s, ff email messages\'s and the console\'s E-mail page\'s to say. A refusal answers in SES\'s words: MessageRejected for an identity not proved, LimitExceededException past the day, TooManyRequestsException past the second, SendingPausedException when the account\'s sending is paused or waits for credit.',
+        code: 'ses-operations.ts sendEmail() SEND_REFUSALS · BE/src/email/ses-error.ts',
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json', 'x-amzn-RequestId': 'c41d…' }, body: { MessageId: '5b0e7c2a-9d14-4f3b-8e61-2a7c9d0f4b18' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE email_messages … FOR UPDATE SKIP LOCKED', title: 'The sender takes it, with a lease',
+        text: 'Each second, the backend\'s sender claims the messages due, oldest first, as step 3\'s queue claims its own: a lease, so that two backends never send one twice, and a crash hands it on. A refusal for now is tried again 30 s, 2, 10 and 30 minutes later, then hourly, for a day.',
+        code: 'BE/src/email/email-sender.service.ts round() backoffMs()',
+        set: { 'PostgreSQL.email_messages': '5b0e… · QUEUED · leased to this backend' } },
+      { from: 'api', to: 'mail', kind: 'req', label: 'SMTP · STARTTLS · MAIL FROM b-5b0e…@bounces.mail…', title: 'Signed with the domain\'s key, handed to the server of customers\' mail',
+        text: 'Its DKIM signature by the domain\'s own key, the selector ff3c9a2e1b, so that the receiving server checks it against the TXT record; never FF\'s own relay, so that one customer\'s mail can\'t stop FF\'s. Over SMTP with STARTTLS required and the server\'s certificate checked. The envelope\'s sender names the message (VERP): a bounce says whose message it was without anything to read.',
+        code: 'email-sender.service.ts deliver() dkimOf() · email-send.ts returnPathOf() · deploy/mail/',
+        msg: { kind: 'ipc', title: 'SMTP, from the backend to the server of customers\' mail', body: 'EHLO ff-backend\nSTARTTLS\nMAIL FROM:<b-5b0e7c2a-9d14-4f3b-8e61-2a7c9d0f4b18@bounces.mail.shop.example.tn>\nRCPT TO:<ana@example.tn>\nDATA\nDKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=shop.example.tn; s=ff3c9a2e1b; h=from:to:subject:date:message-id; bh=…; b=…\nFrom: orders@shop.example.tn\nTo: ana@example.tn\nSubject: Your receipt, order 1\n…\n250 2.0.0 Ok: queued as 4ZkQ1R' },
+        set: { 'Mail server.queue': '4ZkQ1R · to ana@example.tn', 'PostgreSQL.email_messages': '5b0e… · SENT · handed over' } },
+      { from: 'mail', to: 'mx', kind: 'req', label: 'SMTP to example.tn\'s MX', title: 'Postfix delivers it',
+        text: 'From a server and an address of customers\' mail\'s own, apart from FF\'s. A message waits a day at most. In development every message goes to Mailpit instead, so that nothing leaves the machine.',
+        code: 'deploy/mail/entrypoint.sh · deploy/mail/Dockerfile',
+        msg: { kind: 'ipc', title: 'Postfix\'s log', body: 'postfix/smtp: 4ZkQ1R: to=<ana@example.tn>, relay=mx.example.tn[…]:25, status=bounced (host mx.example.tn said: 550 5.1.1 <ana@example.tn>: user unknown)' },
+        set: { 'Mail server.queue': 'empty' } },
+      { from: 'mx', to: 'mail', kind: 'res', label: 'a bounce to b-5b0e…@bounces.mail.shop.example.tn', title: 'A bounce for good comes back to its own return path',
+        text: 'The receiving server knows no ana: its report, a DSN, goes to the envelope\'s sender, whose domain\'s MX is the server of customers\' mail, which takes what comes for every return-path domain into one Maildir, and refuses everything else from the internet. A complaint, an ARF report from a mailbox provider, comes back the same way.',
+        code: 'deploy/mail/entrypoint.sh · deploy/mail/agent.mjs',
+        set: { 'Mail server.bounces': '1 report · for b-5b0e…' } },
+      { from: 'api', to: 'mail', kind: 'req', label: 'GET /bounces · DELETE /bounces/:id', title: 'Every 10 seconds, the backend reads what came back',
+        text: 'From FF\'s agent on the server, over HTTPS on port 6391, to a token whose SHA-256 alone the agent has. The report names its message by its return path; a permanent failure (5.x.x) is a bounce for good, a temporary one isn\'t. Once applied, the report is deleted on the server.',
+        code: 'BE/src/email/email-bounces.service.ts poll() apply() · email-reports.ts readReport() · deploy/mail/agent.mjs',
+        set: { 'Mail server.bounces': 'empty' } },
+      { from: 'api', to: 'db', kind: 'req', label: 'UPDATE email_messages · INSERT email_suppressions · the review', title: 'On the suppression list, and the account\'s rates reviewed',
+        text: 'The recipient BOUNCED, for good, with the server\'s words; the address on the account\'s suppression list with the message\'s ID, which no mail of the account\'s reaches again. Then the last 14 days: of 100 recipients at least, past 5% of bounces for good or 0.1% of complaints the account is reviewed, past 10% or 0.5% stopped, as SES\'s are, the operator told. GET /email/metrics counts the hour\'s Send, Delivery, Bounce and Complaint, and the two reputation rates, which alarms watch; the hourly rating bills the recipients at SES\'s price.',
+        code: 'email-bounces.service.ts apply() review() enforcementOf() · email-suppressions.service.ts put() · BE/src/metrics/customer-metrics.ts emailMetricsView()',
+        msg: { kind: 'sql', text: "UPDATE \"email_messages\" SET \"recipients\" = '[{\"address\":\"ana@example.tn\",\"status\":\"BOUNCED\",\"permanent\":true,\"diagnostic\":\"550 5.1.1 <ana@example.tn>: user unknown\"}]' WHERE \"id\" = '5b0e…';\nINSERT INTO \"email_suppressions\" (\"account_id\", \"address\", \"reason\", \"message_id\", \"feedback\") VALUES ('000000000001', 'ana@example.tn', 'BOUNCE', '5b0e…', '550 5.1.1 …');" },
+        set: { 'PostgreSQL.email_messages': '5b0e… · ana@example.tn BOUNCED, for good', 'PostgreSQL.email_suppressions': 'ana@example.tn · BOUNCE · from 5b0e…' } },
+    ],
+  },
+  {
+    id: 'cache', title: 'A cache, as ElastiCache gives one',
+    lanes: ['user', 'api', 'db', 'cache', 'k8s', 'pod', 'worker'],
+    summary: 'ff caches create sessions --secret-for orders-api: the backend gives the cache a port of the server\'s range and the plan\'s memory, and FF\'s agent on the server of customers\' caches starts a Valkey process of its own, TLS only, its customer\'s user known by its password\'s SHA-256; the address comes back once, and becomes the function\'s REDIS_URL; the function reaches it over TLS whatever its account\'s internet access; every hour the backend measures it, and its memory is billed by the GB-hour, as ElastiCache bills a node.',
+    state: {
+      'PostgreSQL': { 'caches': null, 'cache_samples': null, 'resource_usage_hourly': null },
+      'Caches\' server': { 'process': null, 'keys': null },
+      [K]: { 'Secret': null },
+    },
+    initial: {
+      'PostgreSQL.functions': 'orders-api · zip · index.http · ACTIVE',
+      [K + '.Namespace']: NS, [K + '.NetworkPolicy']: 'ff-default-deny · DNS · the customers\' database server on 5432',
+      [K + '.Deployment']: 'replicas 1 · ready 1/1', [K + '.Pod']: 'Running · Ready',
+      'Runtime.main process': 'listening on :8080 · /readyz 200', 'Runtime.worker': 'index.js loaded · idle',
+    },
+    steps: [
+      { from: 'user', to: 'api', kind: 'req', label: 'POST /caches · {"name":"sessions"}', title: 'ff caches create asks for a cache',
+        text: 'The name is ElastiCache\'s, held to its rule by ff before it calls and by the backend: 1 to 40 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last. ff looked orders-api up first, so that a function that isn\'t there stops it before anything is made. The console\'s Caches page sends the same.',
+        code: 'cli/src/commands/caches.rs create() · BE/src/caches/caches.controller.ts · cache-names.ts cacheNameProblem()',
+        msg: { kind: 'http', first: 'POST /caches HTTP/1.1', headers: { host: 'localhost:3000', 'content-type': 'application/json', 'user-agent': 'ff-cli/0.1.0' }, body: { name: 'sessions' } } },
+      { from: 'api', to: 'db', kind: 'req', label: 'lock the account · count · the first free port · INSERT caches', title: 'Within the plan, a port of the server\'s range',
+        text: 'The account\'s row locked and its caches counted against the plan\'s, one on beta; the first port of FF_CACHE_PORTS (6400 to 6999) no cache has, under a lock every new cache takes. The row keeps the plan\'s memory, 64 MB on beta, the password\'s SHA-256 alone, and a name of FF\'s for the server, fc- and 24 hexadecimal characters, which says nothing of whose it is.',
+        code: 'BE/src/caches/caches.service.ts create() · cache-names.ts newServerName() · cache.entity.ts',
+        msg: { kind: 'sql', text: "SELECT \"id\" FROM \"accounts\" WHERE \"id\" = '000000000001' FOR UPDATE;\nSELECT count(*) FROM \"caches\" WHERE \"account_id\" = '000000000001';\nSELECT pg_advisory_xact_lock(hashtext('caches.port'));\nSELECT min(p)::int AS port FROM generate_series(6400, 6999) AS p WHERE NOT EXISTS (SELECT 1 FROM caches WHERE port = p);\nINSERT INTO \"caches\" (\"account_id\", \"name\", \"server_name\", \"port\", \"memory_mb\", \"password_sha256\", \"status\")\nVALUES ('000000000001', 'sessions', 'fc-8d1b4e7a2c9f3e5d6a0b1c2d', 6400, 64, '5e88…', 'creating');" },
+        set: { 'PostgreSQL.caches': 'sessions · fc-8d1b4e7a2c9f3e5d6a0b1c2d · :6400 · 64 MB · creating' } },
+      { from: 'api', to: 'cache', kind: 'req', label: 'PUT /caches/fc-8d1b… · port, memory, SHA-256', title: 'FF\'s agent starts a Valkey process of its own',
+        text: 'Over HTTPS on port 6390, to a token whose SHA-256 alone the agent has. The agent keeps the cache\'s description on disk, writes its settings and its ACL file, and starts valkey-server under a user of its own, again whenever it stops. The customer\'s user, default, runs every command but those that would change the server, write to its disk or reach another; FF\'s own user, ff-agent, reads its measures and turns the customer off and on, never a key. It answers over TLS about 2 s after it starts.',
+        code: 'BE/src/caches/cache-server.ts put() · deploy/cache/agent.mjs valkeyConf() usersAcl()',
+        msg: { kind: 'ipc', title: 'The settings and the ACL file the agent writes', body: 'port 0\ntls-port 6400\ntls-cert-file /var/lib/ff-cache/tls/server.crt\ntls-auth-clients no\naclfile /var/lib/ff-cache/caches/fc-8d1b…/users.acl\nmaxmemory 64mb\nmaxmemory-policy allkeys-lru\nsave ""\nappendonly no\nenable-debug-command no\nenable-module-command no\n\nuser default on #5e88… ~* &* +@all -config -debug -module -acl +acl|whoami -save -bgsave … -migrate -failover -cluster\nuser ff-agent on #… resetkeys -@all +info +ping +client|kill +client|list +acl|setuser' },
+        set: { 'Caches\' server.process': 'valkey-server fc-8d1b… · :6400 TLS · 64 MB, allkeys-lru · nothing on disk' } },
+      { from: 'api', to: 'k8s', kind: 'req', label: 'apply NetworkPolicy · the caches\' ports', title: 'Its functions reach it at once',
+        text: 'The account\'s NetworkPolicy, written again: the caches\' server on its range of ports, whatever the account\'s internet access, as the databases\' server on 5432. Functions trust its certificate with the database server\'s, in one file: a public CA\'s in production, the server\'s own CA in development.',
+        code: 'caches.service.ts openPolicy() · BE/src/orchestrator/kubernetes/manifests.ts networkPolicyManifest() dataDbCaSecretManifest()',
+        set: { [K + '.NetworkPolicy']: 'ff-default-deny · DNS · the databases\' server on 5432 · the caches\' on 6400–6999' } },
+      { from: 'api', to: 'user', kind: 'res', label: '201 · its address, this once', title: 'Its password, shown once',
+        text: 'rediss://default:<password>@<host>:6400, in this answer only: FF keeps the password\'s SHA-256 alone. ff caches password sessions makes a new one, shown once too; the connections under way keep theirs, as an ElastiCache AUTH token\'s rotation does. The audit log names cache.create.',
+        code: 'caches.service.ts create() withPassword() · cli/src/commands/caches.rs shown_once()',
+        msg: { kind: 'http', first: 'HTTP/1.1 201 Created', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { name: 'sessions', status: 'active', host: 'cache.ffunc.cloud', port: 6400, address: 'rediss://default@cache.ffunc.cloud:6400', memoryMb: 64, bytesUsedForCache: null, currConnections: null, engine: 'Valkey 9.1', passwordSetAt: '2026-10-30T08:40:02.114Z', createdAt: '2026-10-30T08:40:00.861Z', password: 'Hq7v…', url: 'rediss://default:Hq7v…@cache.ffunc.cloud:6400' } },
+        set: { 'PostgreSQL.caches': 'sessions · fc-8d1b4e7a2c9f3e5d6a0b1c2d · :6400 · 64 MB · active' } },
+      { from: 'user', to: 'api', kind: 'req', label: 'PATCH /functions/:id/secrets · REDIS_URL', title: '--secret-for: the address, the function\'s secret',
+        text: 'ff sets it as orders-api\'s REDIS_URL, unless --secret-name says another, through ff secrets\' route: sealed in PostgreSQL, written to a Kubernetes Secret, and the function rolled out to read it from its environment.',
+        code: 'cli/src/commands/caches.rs create() · BE/src/functions/functions.service.ts change() · manifests.ts environmentSecretManifest()',
+        set: { 'PostgreSQL.functions': 'orders-api · ACTIVE · secrets: REDIS_URL (sealed)', [K + '.Secret']: 'fn-a71c…-env-2 · REDIS_URL' } },
+      { from: 'pod', to: 'worker', kind: 'req', label: 'http(event, context)', title: 'A call comes in',
+        text: 'Through the function\'s URL or an invoke, as any call: the code reads its cache before its database.',
+        code: 'functions.service.ts call() · kubernetes.orchestrator.ts invoke()' },
+      { from: 'worker', to: 'cache', kind: 'req', label: 'TLS · AUTH default … · GET orders:latest', title: 'The function reads its cache, over TLS',
+        text: 'createClient({ url: process.env.REDIS_URL }), node-redis in the function\'s package: rediss:// is TLS, the server\'s certificate checked, then AUTH with the address\'s user and password, which the server checks against the SHA-256 in its ACL file. A miss, the first time; the code reads its database, then keeps the answer a minute.',
+        code: 'deploy/cache/agent.mjs usersAcl() · manifests.ts dataDbCaSecretManifest() (NODE_EXTRA_CA_CERTS)',
+        msg: { kind: 'ipc', title: 'What the client and the server say', body: 'AUTH default Hq7v…\n+OK\nGET orders:latest\n(nil)\nSET orders:latest "[{\\"id\\":1,\\"item\\":\\"harissa\\",…}]" EX 60\n+OK' },
+        set: { 'Caches\' server.keys': 'orders:latest · 60 s' } },
+      { from: 'worker', to: 'pod', kind: 'res', label: 'the answer', title: 'Answered, as any call',
+        text: 'Billed as any call; the cache\'s own bill is its memory, by the hour, whatever it holds.',
+        code: 'functions.service.ts finish()' },
+      { from: 'api', to: 'cache', kind: 'req', label: 'each hour: GET /caches · INFO', title: 'Measured every hour, through the agent',
+        text: 'Each minute, under PostgreSQL\'s advisory lock, the backend measures each cache it hasn\'t measured yet in the hour: the agent asks each process for its INFO as ff-agent, its memory used by keys, its connections, its hits, misses and evictions since it started, and when it started.',
+        code: 'BE/src/caches/cache-samples.service.ts sampleDue() · cache-server.ts use() · deploy/cache/agent.mjs',
+        msg: { kind: 'ipc', title: 'GET /caches (the agent\'s answer)', body: [{ name: 'fc-8d1b4e7a2c9f3e5d6a0b1c2d', port: 6400, memoryMb: 64, enabled: true, running: true, measures: { bytesUsedForCache: 1104832, currConnections: 1, cacheHits: 0, cacheMisses: 1, evictions: 0, uptimeSeconds: 1198 } }] } },
+      { from: 'api', to: 'db', kind: 'req', label: 'INSERT cache_samples · resource_usage_hourly', title: 'Billed by the GB-hour of its memory',
+        text: 'The hour\'s sample, written once, in a partition per month; the hourly rating adds the hour: its memory, 64 MB, for an hour, at ElastiCache for Valkey\'s cache.t4g.micro price per GB-hour in dinars, no free tier; an hour the server never answers in isn\'t billed. GET /caches/sessions/metrics gives BytesUsedForCache, CurrConnections, CacheHits, CacheMisses and Evictions an hour a point, as CloudWatch names ElastiCache\'s, which alarms watch.',
+        code: 'cache-samples.service.ts sampleDue() · BE/src/billing/hourly-rating.service.ts · rating.ts',
+        set: { 'PostgreSQL.cache_samples': 'sessions · 08:00 · 1.1 MB used of 64 · 1 connection', 'PostgreSQL.resource_usage_hourly': 'sessions · 08:00 · cache · 64 MB for an hour' } },
+    ],
+  },
+  {
     id: 'cold', title: 'Cold start from zero', lanes: ['user', 'api', 'db', 'k8s', 'node', 'pod', 'worker'],
     summary: 'The same invocation after the function was scaled to zero. The backend scales it back to one instance, waits for the pod, then invokes. Measured: 7–10 s at 128 MB.',
     initial: activeState(FN, PKG_V1, 'code.ts', { [K + '.Deployment']: 'replicas 0 · ready 0/0', [K + '.Pod']: null, 'Runtime.main process': null, 'Runtime.worker': null }),
@@ -1948,11 +2165,11 @@ const SCENARIOS = [
       { from: 'api', to: 'user', kind: 'res', label: '200 · functions, totals, estimate', title: 'The month, as JSON',
         text: 'Requests billed are successes, errors and timeouts (D7); throttled, failed and lost calls come apart, unbilled. gbSeconds is a string, as AWS\'s Cost Explorer gives its amounts, so no float rounds it. Each function\'s cost is before the free tier; the estimate takes the free tier off the total. Nothing is charged yet: prepaid credit comes with P-31.',
         code: 'usage/usage.controller.ts get()',
-        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { month: '2026-10', functions: [{ functionId: FN, functionName: 'hello', deleted: false, requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1, cost: '0.000' }], databases: [], totals: { requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1 }, estimate: { currency: 'TND', usage: '0.000', freeTier: '0.000', volumeTiers: '0.000', monthlyFee: '0.000', total: '0.000', pricedFrom: '2026-10-01T00:00:00.000Z', priceBooks: ['0c9e…'] } } } },
+        msg: { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'application/json; charset=utf-8' }, body: { month: '2026-10', functions: [{ functionId: FN, functionName: 'hello', deleted: false, requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1, cost: '0.000' }], databases: [], buckets: [], queues: [], caches: [], email: [], totals: { requests: 4, billedMs: 3016, gbSeconds: '0.752', throttled: 0, platformErrors: 0, lost: 1 }, estimate: { currency: 'TND', usage: '0.000', freeTier: '0.000', volumeTiers: '0.000', monthlyFee: '0.000', total: '0.000', pricedFrom: '2026-10-01T00:00:00.000Z', priceBooks: ['0c9e…'] } } } },
       { from: 'user', to: 'api', kind: 'req', label: 'Accept: text/csv', title: 'Or as CSV, for a spreadsheet',
-        text: 'The same query, written as a download: a line per function, then one per database, each its kind\'s columns, no total line for a spreadsheet to count twice. A name a spreadsheet would run as a formula (=, +, -, @) gets a leading apostrophe.',
+        text: 'The same query, written as a download: a line per function, then one per database, bucket, queue, cache and identity\'s mail, each its kind\'s columns, no total line for a spreadsheet to count twice. A name a spreadsheet would run as a formula (=, +, -, @) gets a leading apostrophe.',
         code: 'usage/usage-csv.ts usageCsv()',
-        msg: [{ kind: 'http', first: 'GET /usage?month=2026-10 HTTP/1.1', headers: { accept: 'text/csv' } }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="ff-usage-000000000001-2026-10.csv"' }, body: 'kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,throttled,platform_errors,lost,cost\r\nfunction,' + FN + ',hello,false,4,3016,0.752,,0,0,1,0.000' }] },
+        msg: [{ kind: 'http', first: 'GET /usage?month=2026-10 HTTP/1.1', headers: { accept: 'text/csv' } }, { kind: 'http', first: 'HTTP/1.1 200 OK', headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="ff-usage-000000000001-2026-10.csv"' }, body: 'kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,attachment_bytes,throttled,platform_errors,lost,cost\r\nfunction,' + FN + ',hello,false,4,3016,0.752,,,,,,,0,0,1,0.000' }] },
     ],
   },
   {
@@ -2483,7 +2700,7 @@ const SCENARIOS = [
 const ARCH_INFO = {
   user: ['You', 'The console (React, on :5199), Swagger UI on /api, or curl; as FF\'s operator, the admin dashboard (admin/, on :5198), whose /admin routes take only an operator\'s token issued to ff-admin. Everything goes through the backend\'s REST API; nothing talks to the cluster directly.', 'FE/src · admin/src · docs/getting-started.md'],
   idp: ['Keycloak', 'Logs users in and signs them up, for the realm ff (development: localhost:8180). Users with the realm role ff-operator also give a one-time password (P-70). The console gets its tokens from it with the authorization code flow and PKCE; the backend checks each access token against the realm\'s public keys, which it fetches once and caches.', 'deploy/keycloak/ff-realm.json · FE/src/auth/oidc.ts · BE/src/auth/token-verifier.ts'],
-  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL and the packages\' zips in S3, makes each package\'s code image and pushes it to the code registry, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, its CapacityService samples every function\'s ready instances 5 s into every minute; its NotificationWorker sends the e-mails and webhooks due every 10 s; and its AlarmEvaluator judges every alarm every minute. On a port of its own, :3002, it is the S3 front door (ADR 0009): AWS\'s SDKs and CLI reach customers\' buckets there, each request\'s signature checked with one of the account\'s access keys, its account and plan, before it streams to the store; its BucketSamplesService measures every bucket each hour.', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator · BE/src/storage'],
+  api: ['Backend API', 'NestJS on :3000. It validates requests, resolves the tenant, keeps the records in PostgreSQL and the packages\' zips in S3, makes each package\'s code image and pushes it to the code registry, and drives Kubernetes. Its MetricsService runs the per-minute metrics tick, the autoscaler, and the idle sweep; its UsageService marks lost calls every minute and creates the monthly partitions ahead of time, its CapacityService samples every function\'s ready instances 5 s into every minute; its NotificationWorker sends the e-mails and webhooks due every 10 s; and its AlarmEvaluator judges every alarm every minute. On a port of its own, :3002, it is the S3 front door (ADR 0009): AWS\'s SDKs and CLI reach customers\' buckets there, each request\'s signature checked with one of the account\'s access keys, its account and plan, before it streams to the store; its BucketSamplesService measures every bucket each hour. Three more ports of its own, each behind the edge: :3003, the SQS endpoint (ADR 0010); :3004, the website server, which serves buckets that are sites to browsers (ADR 0011); :3005, the SES endpoint, which takes customers\' mail and hands it, signed with their domains\' DKIM keys, to the server of customers\' mail (ADR 0012).', 'BE/src/functions · BE/src/metrics · BE/src/usage · BE/src/orchestrator · BE/src/storage · BE/src/queues · BE/src/email · BE/src/caches'],
   db: ['PostgreSQL', 'The records: accounts, their plans, users and memberships, invitations and API keys; functions, with their invocations and metrics; and tables written once and never changed: the audit log, the usage records and the capacity samples, the last two with a partition per month; the price books; and the money: the ledger, the hourly charges, the payments and the invoices. In development it comes from docker compose, on localhost:5432 (database serverless_platform).', 'BE/src/**/entities'],
   s3: ['S3 storage (SeaweedFS)', 'The bucket functions holds each package\'s zip, uploaded or made of inline code, from which its code image is made; a copy of each inline function\'s code; the withholding certificates operators add to bank transfers (P-35), and the PDFs of the invoices issued (P-36). Customers\' buckets are there too, each under a name of FF\'s, ff- and 24 hexadecimal characters, reached only through the backend\'s S3 front door, never directly; the store\'s own redundancy keeps them, and no copy goes to the second site. Any S3-compatible store works; development uses SeaweedFS from docker compose, on localhost:9003.', 'BE/src/object-store · BE/src/storage/store-buckets.ts'],
   k8sapi: ['Kubernetes API server', 'k3s in development (the k3d cluster ff-dev). The backend authenticates as the ServiceAccount ff-system/ff-controller. RBAC limits what it may do, and the admission policy ff-controller-scope limits where: only in ff-t-* namespaces that it manages, for writes and for calls through a Service\'s proxy, which only development grants.', 'deploy/k8s/base · deploy/k8s/dev'],
@@ -2497,6 +2714,8 @@ const ARCH_INFO = {
   worker: ['Worker: your handler', 'Loads your code once and runs handler(event, context) for each invocation. It is replaced after a timeout, an out-of-memory error, or a crash.', 'runtimes/nodejs/src/worker.ts · runtimes/python/ff_runtime/worker.py'],
   node: ['Node: scheduler, kubelet, containerd', 'Places pods, starts containers from the runtime images, pulls each function\'s code image from the code registry, once per node, mounts it read-only at /var/task, and probes /readyz and /healthz.', 'manifests.ts deploymentManifest() (the code volume, the probes)'],
   datadb: ['Customers\' databases', 'A PostgreSQL 18 server of its own, apart from FF\'s (ADR 0008): per database, a user that owns it, both named ff_ and 24 hexadecimal characters. The backend makes them with its own role there, ff_admin, never a superuser, measures each every hour, and turns one read-only past its plan\'s storage. Functions reach it on port 5432 with their account\'s internet access off; developers from their machines; TLS only, SCRAM passwords. It archives its WAL to the second site with WAL-G, 7 days of point-in-time recovery. In development, docker compose\'s data-db, at 10.199.0.10 on a network of its own.', 'deploy/data-db · BE/src/databases'],
+  cachesrv: ['Customers\' caches', 'A server of its own, apart from the cluster (ADR 0013): a Valkey 9.1 process for each cache, under a user of its own, its memory the plan\'s with the least recently used keys going past it, nothing on disk, TLS alone on its port, the customer\'s user known by its password\'s SHA-256. FF\'s agent, on port 6390 over HTTPS, writes each cache\'s settings and ACL file, starts its process and again when it stops, turns the customer\'s user off and on for suspension, and gives the backend each hour\'s measures. Functions reach its ports whatever their account\'s internet access, developers from their machines. In development, docker compose\'s cache, at 10.199.0.11.', 'deploy/cache · BE/src/caches'],
+  mailsrv: ['Customers\' mail', 'A Postfix 3.11 of customers\' own, on a server and an address apart from FF\'s own mail (ADR 0012): it relays only what the backend hands it over SMTP with STARTTLS, each message signed with its domain\'s DKIM key, and takes back what comes for every return-path domain, bounces.mail.<domain>, into one Maildir; everything else from the internet is refused. FF\'s agent, on port 6391 over HTTPS, starts it and gives the backend what came back. Functions never reach it: their mail goes through the SES endpoint, and port 25 is closed to them. In development, docker compose\'s mail, at 10.199.0.12, which hands every message to Mailpit.', 'deploy/mail · BE/src/email'],
   logstore: ['Log store: VictoriaLogs', 'In ff-system, it keeps every function\'s log lines for 31 days, after their instance is gone; each account reads its plan\'s window (14 days on beta). Fluent Bit, on every node, reads the function containers\' logs and adds each line\'s account, function, pod, stream and call, within 2,000 lines and 1 MiB a second per account. Only the collector and the backend reach it; in development the backend queries it through the API server\'s Service proxy.', 'deploy/k8s/logging · BE/src/orchestrator/kubernetes/log-store.ts'],
 };
 
@@ -2652,10 +2871,10 @@ const svgLink = (d, label, lx, ly, anchor) => '<g class="arch-link"><path d="' +
 
 /* ---------- architecture maps ---------- */
 function archBig() {
-  return '<svg class="diagram" viewBox="0 0 1000 626" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL, S3, the code registry and the server of customers\' databases, and the Kubernetes cluster with the tenant namespace and the log store">' +
+  return '<svg class="diagram" viewBox="0 0 1000 692" role="img" aria-label="Architecture: you and Keycloak, the backend with PostgreSQL, S3, the code registry and the servers of customers\' databases, caches and mail, and the Kubernetes cluster with the tenant namespace and the log store">' +
     '<defs>' + arrowDefs('arch-arrow', '--muted') + '</defs>' +
-    svgGroup(208, 20, 300, 590, 'Your machine or server') +
-    svgGroup(560, 20, 428, 590, 'Kubernetes cluster (k3s)') +
+    svgGroup(208, 20, 300, 664, 'Your machine or server') +
+    svgGroup(560, 20, 428, 664, 'Kubernetes cluster (k3s)') +
     svgZone('ns', 578, 138, 392, 300, 'Namespace ff-t-27d6fbbe5c7d (dev account)', 'end') +
     svgBox('user', 16, 136, 150, 76, 'You', 'console · curl') +
     svgBox('idp', 16, 252, 150, 64, 'Keycloak', 'login · realm ff') +
@@ -2668,6 +2887,8 @@ function archBig() {
     svgBox('s3', 372, 344, 118, 72, 'S3 storage', 'zips · buckets') +
     svgBox('registry', 226, 456, 264, 60, 'Code registry', 'ff-code/<account> · an image per package') +
     svgBox('datadb', 226, 536, 264, 58, 'Customers\' databases', 'PostgreSQL 18 · a server of its own · TLS') +
+    svgBox('cachesrv', 226, 606, 128, 58, 'Customers\' caches', 'Valkey · TLS') +
+    svgBox('mailsrv', 362, 606, 128, 58, 'Customers\' mail', 'Postfix · DKIM') +
     svgBox('k8sapi', 578, 52, 392, 56, 'Kubernetes API server', 'RBAC · admission policy ff-controller-scope') +
     svgBox('guard', 668, 168, 286, 44, 'Guardrails', 'ResourceQuota · LimitRange · NetworkPolicy') +
     svgBox('service', 594, 224, 178, 46, 'Service', 'fn-<id> · ClusterIP :8080') +
@@ -2684,6 +2905,8 @@ function archBig() {
     svgLink('M428,296 L428,342', 'S3 API', 436, 324, 'start') +
     svgLink('M358,296 L358,454', 'push', 362, 440, 'start') +
     svgLink('M226,291 L216,291 L216,565 L224,565', '', 0, 0) +
+    svgLink('M216,565 L216,635 L224,635', '', 0, 0) +
+    svgLink('M216,635 L216,674 L426,674 L426,666', '', 0, 0) +
     svgLink('M578,506 L540,506 L540,580 L492,580', '5432', 516, 572) +
     svgLink('M578,486 L492,486', 'pull', 535, 478) +
     svgLink('M490,80 L576,80', 'HTTPS', 534, 72) +
@@ -2698,7 +2921,7 @@ function archBig() {
 }
 function archMini() {
   const o = { inert: true };
-  return '<svg class="diagram" viewBox="0 0 420 474" role="img" aria-label="Where this step happens">' +
+  return '<svg class="diagram" viewBox="0 0 420 520" role="img" aria-label="Where this step happens">' +
     svgBox('user', 10, 10, 100, 40, 'You', '', o) +
     svgBox('idp', 10, 60, 100, 36, 'Keycloak', '', o) +
     svgBox('api', 120, 10, 290, 40, 'Backend API', '', o) +
@@ -2716,6 +2939,8 @@ function archMini() {
     svgBox('node', 10, 336, 400, 38, 'Node: scheduler · kubelet', '', o) +
     svgBox('logstore', 10, 382, 400, 38, 'Log store (VictoriaLogs)', '', o) +
     svgBox('datadb', 10, 428, 400, 38, 'Customers\' databases (PostgreSQL 18)', '', o) +
+    svgBox('cachesrv', 10, 474, 196, 38, 'Caches (Valkey)', '', o) +
+    svgBox('mailsrv', 214, 474, 196, 38, 'Mail (Postfix)', '', o) +
     '</svg>';
 }
 function mountArchBig() {

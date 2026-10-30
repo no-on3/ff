@@ -55,6 +55,6 @@ Each task, or part of one, is one commit with its tests and its documents, as th
   - [x] part 2: the bill (the kind `email`, its price), metrics as SES names them, alarms.
 
 ### Phase 4: close
-- [ ] **W-09** Documentation: the guide's three sections, `how-it-works.html`'s scenarios, a page in French for each service, the export kit's three pages, ADRs 0011 to 0013 as built.
+- [x] **W-09** Documentation: the guide's three sections, `how-it-works.html`'s scenarios, a page in French for each service, the export kit's three pages, ADRs 0011 to 0013 as built.
 - [ ] **W-10** The step closed: the small app's frontend as a site, a receipt e-mailed, its order list in a cache; the guide and `hack/cli-e2e.sh` walk through it; What to build next marks step 4 done; step 5's plan.
 - [ ] **Deploy 2:** step 4 on the development server.
