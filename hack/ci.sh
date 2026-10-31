@@ -325,8 +325,10 @@ rust_stable() { # the ff command's lints and tests with Rust's newest stable rel
 tools_spike() { # the Lambda spike's flows with the latest, compared with the pinned ones' recordings; the spike's output in a log
   local dir="$ci_dir/tools"
   rm -rf "$dir/recordings"
+  # The newest tools in a directory of their own: the pinned ones in hack/bin stay the other stages', on a laptop too.
   if ! (set -a && source "$dir/latest.env" && set +a &&
-    SPIKE_WORK="$dir/spike" SPIKE_RECORDINGS="$dir/recordings" "$repo/hack/spikes/lambda/run.sh") >"$dir/spike.log" 2>&1; then
+    FF_TOOLS_BIN="$dir/bin" FF_SAM_DIR="$dir/sam" SPIKE_WORK="$dir/spike" SPIKE_RECORDINGS="$dir/recordings" \
+      "$repo/hack/spikes/lambda/run.sh") >"$dir/spike.log" 2>&1; then
     echo "the spike's run failed (hack/.ci/tools/spike.log):" >&2
     tail -20 "$dir/spike.log" >&2
     return 1

@@ -20,7 +20,8 @@ mkdir -p "$work"
 
 # The clients, pinned: the CLI and the SDKs at the versions hack/e2e.sh uses for S3 and SQS; others through the
 # environment, as the nightly's tools job gives the latest, OpenTofu's, Terraform's, the provider's and the SAM CLI's
-# through hack/install-tools.sh's own variables.
+# through hack/install-tools.sh's own variables, and where it installs them (FF_TOOLS_BIN, FF_SAM_DIR).
+tools_bin="${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}"
 AWS_CLI_VERSION="${AWS_CLI_VERSION:-2.34.32}"
 SDK_VERSION="${SDK_VERSION:-3.1156.0}"
 BOTO3_VERSION="${BOTO3_VERSION:-1.43.118}"
@@ -156,7 +157,7 @@ tf_flow() { # <tofu|terraform>
   rm -rf "$dir" && mkdir -p "$dir" && cp "$here/terraform/main.tf" "$dir/"
   # Another version of the provider than the one main.tf names: AWS_PROVIDER_VERSION, as hack/install-tools.sh takes it.
   if [ -n "${AWS_PROVIDER_VERSION:-}" ]; then sed -i "s/version = \"[0-9.]*\"/version = \"$AWS_PROVIDER_VERSION\"/" "$dir/main.tf"; fi
-  local tf=("$FF_REPO_ROOT/hack/bin/$1" "-chdir=$dir") vars=(-var "endpoint=$endpoint" -var "name=spike-$1" -var "code=$work/code.zip")
+  local tf=("$tools_bin/$1" "-chdir=$dir") vars=(-var "endpoint=$endpoint" -var "name=spike-$1" -var "code=$work/code.zip")
   export TF_CLI_CONFIG_FILE="$FF_REPO_ROOT/hack/.terraform/cli.tfrc" TF_IN_AUTOMATION=1 CHECKPOINT_DISABLE=1 TF_LOG=DEBUG TF_LOG_PATH="$dir/debug.log"
   tf_step "$1 init" "${tf[@]}" init -input=false -no-color
   tf_step "$1 apply" "${tf[@]}" apply -input=false -no-color -auto-approve "${vars[@]}"
@@ -167,7 +168,7 @@ tf_flow() { # <tofu|terraform>
 
 # The SAM CLI on sam/template.yaml, in a copy: its build's output, and any call it makes to AWS, which the endpoint records.
 sam_flow() {
-  local dir="$work/sam" sam=("$FF_REPO_ROOT/hack/bin/sam")
+  local dir="$work/sam" sam=("$tools_bin/sam")
   rm -rf "$dir" && cp -r "$here/sam" "$dir"
   export SAM_CLI_TELEMETRY=0 AWS_ENDPOINT_URL="$endpoint"
   tf_step "sam validate --lint, FF's region" "${sam[@]}" validate --lint --template "$dir/template.yaml" --region "$AWS_REGION"

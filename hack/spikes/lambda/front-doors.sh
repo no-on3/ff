@@ -55,7 +55,7 @@ step() {
   local flow=$1 name=$2 dir="$work/$1" started status=0
   shift 2
   started="$(date +%s%3N)"
-  TF_LOG_PATH="$dir/$name.log" "$FF_REPO_ROOT/hack/bin/tofu" "-chdir=$dir" "$@" -input=false -no-color >"$dir/$name.out" 2>&1 || status=$?
+  TF_LOG_PATH="$dir/$name.log" "${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/tofu" "-chdir=$dir" "$@" -input=false -no-color >"$dir/$name.out" 2>&1 || status=$?
   python3 "$here/provider_log.py" "$dir/$name.log" >"$dir/$name.requests.tsv"
   jq -cn --arg flow "$flow" --arg step "$name" --argjson status "$status" --argjson ms "$(($(date +%s%3N) - started))" \
     --arg errors "$(grep -A3 '^Error: ' "$dir/$name.out" | grep -vE '^(--|\s*)$' | head -40 || true)" \

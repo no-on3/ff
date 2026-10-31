@@ -10,6 +10,8 @@
 # pinned to a release at least two weeks old when chosen. Idempotent: tools
 # already at the pinned version are left alone, and so is a Rust at least as
 # recent where there is no rustup to pin it with. Nothing is installed system-wide.
+# FF_TOOLS_BIN and FF_SAM_DIR put the binaries and the SAM CLI elsewhere, as the nightly's newest tools go into a
+# directory of their own, so that the pinned ones the other stages use stay as they are.
 #   hack/install-tools.sh [kubectl] [k3d] [rust]     (all three without an argument)
 #   hack/install-tools.sh tofu terraform aws-provider sam, or aws for the four
 set -euo pipefail
@@ -29,7 +31,8 @@ declare -A SAM_SHA256S=(
   [1.169.0-linux-amd64]=3e921832e9fb39a6563380afc9855eac6dab163238ef3b2bec4a5ba223e4be8b
   [1.169.0-linux-arm64]=a11352c4288a32cd75bb21eb9eb2cd7f23eb59384aa1224497e8de9862290d33
 )
-bin_dir="$repo_root/hack/bin"
+bin_dir="${FF_TOOLS_BIN:-$repo_root/hack/bin}"
+sam_dir="${FF_SAM_DIR:-$repo_root/hack/.sam}"
 mkdir -p "$bin_dir"
 
 case "$(uname -s)" in
@@ -221,11 +224,16 @@ install_sam() {
   curl -fsSL --retry 3 -o "$tmp/$asset" "https://github.com/aws/aws-sam-cli/releases/download/v$SAM_VERSION/$asset"
   verify "$tmp/$asset" "$expected"
   unzip_to "$tmp/$asset" "$tmp/sam"
-  "$tmp/sam/install" --install-dir "$repo_root/hack/.sam" --bin-dir "$bin_dir" --update >/dev/null
-  echo "installed the SAM CLI $SAM_VERSION in hack/.sam, cfn-lint $(sam_cfn_lint_version) inside it (sha256 verified)"
+  "$tmp/sam/install" --install-dir "$sam_dir" --bin-dir "$bin_dir" --update >/dev/null
+  # The installer leaves its link to the current version where it was when the version asked for is one it installed
+  # before, as when a laptop goes back from the nightly's newest to the pinned one: the link is this version's.
+  ln -sfn "$sam_dir/$SAM_VERSION" "$sam_dir/current"
+  SAM_CLI_TELEMETRY=0 "$bin_dir/sam" --version 2>/dev/null | grep -x "SAM CLI, version $SAM_VERSION" >/dev/null ||
+    { echo "the SAM CLI in $bin_dir isn't $SAM_VERSION after its install" >&2; return 1; }
+  echo "installed the SAM CLI $SAM_VERSION in ${sam_dir#"$repo_root/"}, cfn-lint $(sam_cfn_lint_version) inside it (sha256 verified)"
 }
 sam_cfn_lint_version() { # the cfn-lint the SAM CLI's installer brought, by its package's metadata
-  find "$repo_root/hack/.sam" -maxdepth 6 -type d -name 'cfn_lint-*.dist-info' 2>/dev/null | head -1 | sed 's/.*cfn_lint-\(.*\)\.dist-info/\1/'
+  find "$sam_dir/$SAM_VERSION" -maxdepth 6 -type d -name 'cfn_lint-*.dist-info' 2>/dev/null | head -1 | sed 's/.*cfn_lint-\(.*\)\.dist-info/\1/'
 }
 
 [ $# -gt 0 ] || set -- kubectl k3d rust
