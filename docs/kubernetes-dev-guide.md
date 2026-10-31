@@ -131,6 +131,21 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
 
+### When a run fails
+
+Every suite goes on after a failed check and lists each one at its end, with its section and the time it failed (UTC): one run reports all its failures, not the first. A failure later in the same section is marked as after the one above, since it often follows from it. A failure that leaves nothing after it able to pass, such as the backend not starting, stops the run, and the list says where; so does a command that fails under `set -e`, with its line. `FF_FAIL_FAST=1 hack/e2e.sh` stops at the first failed check instead. Every suite shares this, through `hack/lib/checks.sh`, which `hack/test-checks.sh` tests.
+
+A failed suite leaves behind, in `hack/.ci/failure/<suite>/` (`hack/lib/evidence.sh`):
+
+- `pods.txt` and `events.txt`: every pod of the cluster at the moment of the failure, and its recent events: probes failing, containers restarted, killed or out of memory;
+- `namespaces/<namespace>/`: the run's namespaces' pods described, and each one's log, with the log before a restart;
+- `containers/`: the k3d node's own log since the run started (the kubelet's and k3s's lines), and the run's other containers';
+- `compose.log` and `logs/`: the compose services', and the suite's own logs, the backend's whole.
+
+Read the backend's log at the failed check's time. `hack/.ci/report.md` lists the pipeline's steps with their seconds, then the failed checks. On GitHub the report is the job's summary, and both are the job's artifact `failure-<job>`, kept 7 days: `gh run download <run id> -n failure-cluster`.
+
+To run what a GitHub runner runs, nothing of this machine's own left over (`hack/bin`, `hack/.kube`, a cluster made before), check out the commit beside this one and run the job's stages there: `git worktree add /tmp/ff-fresh HEAD && cd /tmp/ff-fresh && hack/ci.sh deps platform`. Remove it after with `git worktree remove --force /tmp/ff-fresh`.
+
 ## Sandboxing with gVisor
 
 Optional in development, required in production. With `K8S_RUNTIME_CLASS=gvisor`, every function pod runs in [gVisor](https://gvisor.dev), a user-space kernel that answers the pod's system calls. Tenant code then never talks to the node's kernel directly. This adds a layer on top of the default isolation (non-root, read-only root filesystem, no capabilities, seccomp `RuntimeDefault`, a NetworkPolicy and quota per tenant), for untrusted code. To switch it off in development, unset the variable. Functions pick up the change at their next deploy or update.

@@ -36,6 +36,15 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: hack/ci.sh deps static
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        with:
+          name: failure-${{ github.job }}
+          path: |
+            hack/.ci/failure/
+            hack/.ci/report.md
+          retention-days: 7
+          if-no-files-found: ignore
 
   unit:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',unit,') }}
@@ -50,6 +59,15 @@ jobs:
         with:
           python-version: '3.13' # the Python runtime's
       - run: hack/ci.sh deps unit
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        with:
+          name: failure-${{ github.job }}
+          path: |
+            hack/.ci/failure/
+            hack/.ci/report.md
+          retention-days: 7
+          if-no-files-found: ignore
 
   db:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',db,') }}
@@ -61,6 +79,15 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: hack/ci.sh deps db
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        with:
+          name: failure-${{ github.job }}
+          path: |
+            hack/.ci/failure/
+            hack/.ci/report.md
+          retention-days: 7
+          if-no-files-found: ignore
 
   security:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',security,') }}
@@ -74,6 +101,15 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: hack/ci.sh deps security
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        with:
+          name: failure-${{ github.job }}
+          path: |
+            hack/.ci/failure/
+            hack/.ci/report.md
+          retention-days: 7
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -95,6 +131,15 @@ jobs:
       # The images and the cluster need more room than a runner leaves free (hack/check-resources.sh).
       - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - run: hack/ci.sh deps cluster
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        with:
+          name: failure-${{ github.job }}
+          path: |
+            hack/.ci/failure/
+            hack/.ci/report.md
+          retention-days: 7
+          if-no-files-found: ignore
 
   platform:
     if: >-
@@ -109,6 +154,15 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - run: hack/ci.sh deps platform
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        with:
+          name: failure-${{ github.job }}
+          path: |
+            hack/.ci/failure/
+            hack/.ci/report.md
+          retention-days: 7
+          if-no-files-found: ignore
 
   # A red nightly opens an issue, or comments on the one open, and a green one closes it (hack/lib/nightly-issue.sh):
   # GitHub itself e-mails only whoever last changed this file.

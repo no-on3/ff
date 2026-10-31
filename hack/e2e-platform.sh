@@ -25,6 +25,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 source "$FF_REPO_ROOT/hack/lib/checks.sh"
+source "$FF_REPO_ROOT/hack/lib/evidence.sh"
 cluster=ff-platform-e2e
 prefix=ff-platform-e2e
 https_port="${FF_E2E_PLATFORM_HTTPS_PORT:-58443}"
@@ -44,6 +45,12 @@ cleanup() {
     # A 500 from the API leaves its reason in the backend's log only, and the backend's pod is running.
     echo "--- the backend's last lines" >&2
     kubectl -n ff-system logs deployment/ff-backend --tail=40 >&2 2>/dev/null || true
+    local evidence
+    evidence="$(evidence_start e2e-platform)"
+    evidence_cluster "$evidence"
+    evidence_containers "$evidence" "k3d-$cluster-server-0" "$prefix-postgres" "$prefix-s3" "$prefix-mailpit" "$prefix-dns"
+    evidence_logs "$evidence" "$work"
+    evidence_done "$evidence" e2e-platform
   fi
   k3d cluster delete "$cluster" >/dev/null 2>&1 || true
   rm -f "$FF_KUBE_DIR/$cluster.kubeconfig"

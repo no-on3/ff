@@ -13,12 +13,15 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 source "$FF_REPO_ROOT/hack/lib/checks.sh"
+source "$FF_REPO_ROOT/hack/lib/evidence.sh"
 tag="${FF_IMAGE_TAG:-test}"
 prefix="ff-images-$$"
 
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 work="$(mktemp -d)"
 on_exit 'docker rm -f "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin" >/dev/null 2>&1 || true; rm -rf "$work"'
+# Added after, so run first: the containers' logs while they are still there.
+on_exit '[ "$checks_status" -eq 0 ] || { evidence="$(evidence_start images)"; evidence_containers "$evidence" "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin"; evidence_done "$evidence" images; }'
 free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
 size() { docker image inspect "$1" --format '{{.Size}}' | awk '{ printf "%d MB", $1 / 1e6 }'; }
 # The hardening every platform container gets in the cluster.

@@ -43,6 +43,8 @@ steps_rows="$ci_dir/report-steps.md"
 export FF_CHECKS_REPORT="$ci_dir/report-checks.md"
 : >"$steps_rows"
 : >"$FF_CHECKS_REPORT"
+# What failed suites leave behind (hack/lib/evidence.sh): this run's alone.
+rm -rf "$ci_dir/failure"
 ci_failed_step=''
 ci_stages=''
 ci_outcome=''
@@ -64,6 +66,7 @@ ci_exit() {
   } >"$report"
   # On GitHub, the job's summary page.
   [ -z "${GITHUB_STEP_SUMMARY:-}" ] || cat "$report" >>"$GITHUB_STEP_SUMMARY"
+  [ ! -d "$ci_dir/failure" ] || echo "what the failed suites left behind: hack/.ci/failure/; the failed checks: hack/.ci/report.md" >&2
 }
 trap ci_exit EXIT
 # The console's and the admin app's Vitest, then cargo's builds and test threads, at most FF_CI_JOBS at once.
@@ -292,6 +295,7 @@ runtime_images() { # the tags the backend runs, which the cluster tests import
 stage_cluster() {
   step "the runtime images, built" runtime_images
   step "the dev cluster, made or reused" hack/k8s/cluster-up.sh
+  step "what a failed run leaves behind, collected from the cluster" hack/test-evidence.sh
   step "L3: the Kubernetes driver on the cluster" hack/k8s/test-it.sh
   step "L4: the stack through the API" hack/e2e.sh
   step "L5: every route as another account" hack/e2e-tenancy.sh

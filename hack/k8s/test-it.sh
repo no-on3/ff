@@ -5,6 +5,7 @@
 # goes to the development registry, which it makes sure runs.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+started_at="$(date -u +%FT%TZ)"
 
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 "$FF_REPO_ROOT/hack/k8s/load-images.sh"
@@ -43,4 +44,14 @@ else
   echo "no log pipeline: its suite is skipped (hack/k8s/logging-up.sh installs it)"
 fi
 cd "$FF_REPO_ROOT/BE"
-npm run test:it -- "$@"
+status=0
+npm run test:it -- "$@" || status=$?
+if [ "$status" -ne 0 ]; then
+  source "$FF_REPO_ROOT/hack/lib/evidence.sh"
+  evidence_started_at="$started_at"
+  evidence="$(evidence_start l3)"
+  evidence_cluster "$evidence" ff-system ff-logging
+  evidence_containers "$evidence" "k3d-$FF_CLUSTER_NAME-server-0"
+  evidence_done "$evidence" "L3 (hack/k8s/test-it.sh)"
+fi
+exit "$status"
