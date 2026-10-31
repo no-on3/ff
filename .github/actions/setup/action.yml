@@ -1,9 +1,9 @@
 # Each job's setup, after its checkout: Node.js at the images' version, with npm's downloads kept between runs, and,
 # for a job that builds the ff command, Cargo's downloads and its build, each such job's own, since clippy's, the
-# tests' and the release's builds differ; for a job that builds images or runs a cluster, the room they need. Pinned
-# as the workflow's actions are.
+# tests' and the release's builds differ; for the ff suite, the AWS tools it checks an export with; for a job that
+# builds images or runs a cluster, the room they need. Pinned as the workflow's actions are.
 name: setup
-description: Node.js with npm's cache, Cargo's cache for a job that builds ff, and room for images
+description: Node.js with npm's cache, Cargo's cache for a job that builds ff, the ff suite's AWS tools, and room for images
 inputs:
   lockfiles:
     description: The npm lockfiles the job's stages install from, one per line; none for a job that installs nothing
@@ -13,6 +13,9 @@ inputs:
     default: ''
   room:
     description: Whether the job builds images or runs a cluster, which need more room than a runner leaves free
+    default: 'false'
+  aws-tools:
+    description: Whether the job checks an export with the SAM CLI and OpenTofu, which hack/install-tools.sh installs
     default: 'false'
 runs:
   using: composite
@@ -43,3 +46,14 @@ runs:
           cli/target
         key: cargo-${{ inputs.cargo }}-${{ hashFiles('cli/rust-toolchain.toml') }}-${{ hashFiles('cli/Cargo.lock', 'cli/Cargo.toml') }}
         restore-keys: cargo-${{ inputs.cargo }}-${{ hashFiles('cli/rust-toolchain.toml') }}-
+    # The SAM CLI, OpenTofu and AWS's provider, 480 MB together, as hack/install-tools.sh pins them: keyed by that
+    # script, which installs them again only when a version it pins changes, and then is kept under its new key.
+    - if: inputs.aws-tools == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          hack/bin/tofu
+          hack/bin/sam
+          hack/.sam
+          hack/.terraform/mirror
+        key: aws-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/install-tools.sh') }}

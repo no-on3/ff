@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # FF's pipeline, one stage per job, the same here as on the CI server (.github/workflows/ci.yml calls it):
 #   deps      what the stages after it use: npm ci in the backend, the console, the admin app and the Node.js
-#             runtime, and the ff command's Rust (hack/install-tools.sh), each for the stages that need it; alone,
-#             all of them (CI only: locally, the installed dependencies are used as they are)
+#             runtime, the ff command's Rust, and the SAM CLI, OpenTofu and AWS's provider the ff suite checks an
+#             export with (hack/install-tools.sh), each for the stages that need it; alone, all of them (CI only:
+#             locally, the installed dependencies are used as they are)
 #   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
 #             tables, npm audit's checker, the nightly run's issue, the docs-only rule and the suites' checks against
 #             stand-ins, how-it-works.html's script, every shell script parsed, the CI workflow linted, and secrets
@@ -21,7 +22,7 @@
 #     l3      the Kubernetes driver (L3)
 #     l4      the stack through the API (L4)
 #     l5      every route as another account (L5)
-#     cli     the ff command on the stack and in Docker
+#     cli     the ff command on the stack and in Docker, its export checked by the SAM CLI and OpenTofu
 #     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
 #   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last push's) and the lockfiles,
 #             checked again with the day's advisories, for an image or a package unchanged since its push: nightly
@@ -94,11 +95,12 @@ free_ports() {
   return 1
 }
 
-# What each stage uses that deps installs: the directories npm ci runs in, and the ff command's Rust. A stage that runs
-# the backend here needs its packages; the images build in Docker with their own, and npm audit reads the lockfiles.
+# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, and the AWS tools the
+# ff suite checks an export with. A stage that runs the backend here needs its packages; the images build in Docker
+# with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
   [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust" [db]=BE [security]=''
-  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
 stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[images]}"
 stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
@@ -111,6 +113,7 @@ stage_deps() {
     case "$uses" in *" $dir "*) prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund ;; esac
   done
   case "$uses" in *" rust "*) prepare "Rust for the ff command" hack/install-tools.sh rust ;; esac
+  case "$uses" in *" aws "*) prepare "the SAM CLI, OpenTofu and AWS's provider, pinned and checked" hack/install-tools.sh tofu aws-provider sam ;; esac
 }
 
 # The page's one script, which a syntax error stops entirely (and with it every scenario).

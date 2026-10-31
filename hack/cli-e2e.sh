@@ -31,13 +31,14 @@
 # the latest kept in FF's cache, each one put in a queue with the function's own key, read by a function
 # that writes its receipt to a bucket and e-mails it through the SES endpoint from an address proved by its
 # link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called
-# without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; and ff local, in
-# Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
+# without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; the account exported
+# to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's role what its keys used; and
+# ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
 # time) is started in its section and read a few sections on, in a section of its own (schedules_ran, databases_used,
-# buckets_used, sites_counted, queues_counted), so that its minute passes while the sections between run: what it
-# checks is the same, a real minute of the product's, and a section run alone waits as long as before.
+# buckets_used, sites_counted, queues_counted, small_app_exported), so that its minute passes while the sections between
+# run: what it checks is the same, a real minute of the product's, and a section run alone waits as long as before.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster. Its sections run alone
 # too, with what they need (hack/lib/sections.sh): --list names them, --only and --from choose. --keep removes
 # nothing on exit, for a look and for the next run, which --reuse runs against the same stack (hack/lib/e2e-stack.sh
@@ -1009,17 +1010,6 @@ check "the night 91 days on, called without waiting, removes the order and its r
   "$night $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
 check "  ... and clears the latest orders, which the cache had" "hit miss" "$kept $(latest)"
 ff buckets keys revoke "$receipts_key" --yes
-ff queues delete cli-new-orders --yes
-check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
-ff buckets delete cli-receipts --force --yes
-ff buckets delete cli-shop-site --force --yes
-ff caches delete cli-orders --yes
-ff email delete orders@shop-cli.tn --yes
-ff email delete buyer@shop-cli.tn --yes
-ff db delete shop --yes
-ff delete shop-nightly --yes
-ff delete shop-receipts --yes
-ff delete shop-api --yes
 }
 section_def small_app section_small_app small_app_db buckets budget=195
 
@@ -1081,6 +1071,59 @@ check "ff usage lists the queue's month after the buckets, deleted since: its re
   "$(code) $(out | grep -E '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' >/dev/null && echo true || echo false)"
 }
 section_def queues_counted section_queues_counted queues budget=5
+
+section_small_app_exported() {
+section "the small app exported to AWS, minutes after: ff export's template and terraform/, which the SAM CLI and OpenTofu take, each function's role what its keys used; then the app removed"
+# Its keys' uses are written at the minute's turn: by now the small app's; run alone, they are waited for, as long as
+# before.
+receipts_id="$("$ff_bin" get shop-receipts --output json | jq -r .id)"
+for _ in $(seq 75); do
+  curl -s "$api/functions/$receipts_id/key-uses" | jq -e '.uses | any(.operation == "SendEmail")' >/dev/null && break
+  sleep 1
+done
+kit="$work/shop-to-aws"
+rm -rf "$kit"
+ff export "$kit" --output json
+check "ff export writes the account's kit: the template, terraform/, each function's zip and the runbook" "0 true" \
+  "$(code) $(for file in template.yaml terraform/functions.tf terraform/terraform.tfvars.example code/shop-api.zip code/shop-receipts.zip MIGRATION.md; do
+    [ -s "$kit/$file" ] || { echo false; exit; }; done; echo true)"
+# A function's resource in the template, up to the next one.
+resource_of() { awk -v id="  $1:" '$0 == id { on = 1; next } on && /^  [A-Za-z]/ { exit } on' "$kit/template.yaml"; }
+check "  ... shop-receipts's role writes the receipts and sends from the proved address, as its keys did, and neither reads the bucket nor sends to the queue" "true true false" \
+  "$(resource_of ShopReceiptsFunction | grep -A1 -- '- S3WritePolicy:' | grep 'BucketName: !Ref CliReceiptsBucketName' >/dev/null && echo true || echo false) \
+$(resource_of ShopReceiptsFunction | grep -A1 -- '- ses:SendEmail' | grep -F 'identity/orders@shop-cli.tn' >/dev/null && echo true || echo false) \
+$(resource_of ShopReceiptsFunction | grep -E 'S3ReadPolicy|S3CrudPolicy|SQSSendMessagePolicy' >/dev/null && echo true || echo false)"
+check "  ... shop-api's sends to the queue of new orders, which it can't read, and reads the receipts" "true false true" \
+  "$(resource_of ShopApiFunction | grep -A1 -- '- SQSSendMessagePolicy:' | grep 'QueueName: !GetAtt CliNewOrdersQueue.QueueName' >/dev/null && echo true || echo false) \
+$(resource_of ShopApiFunction | grep -- '- SQSPollerPolicy:' >/dev/null && echo true || echo false) \
+$(resource_of ShopApiFunction | grep -A1 -- '- S3ReadPolicy:' | grep 'BucketName: !Ref CliReceiptsBucketName' >/dev/null && echo true || echo false)"
+# The tools AWS's users check a template and Terraform with, as hack/install-tools.sh pins them, the provider from
+# its mirror; the region any, as nothing here reaches AWS.
+tool() { local code=0; "$@" >"$work/out" 2>"$work/err" || code=$?; echo "$code" >"$work/code"; }
+tool env -C "$kit" SAM_CLI_TELEMETRY=0 "$FF_REPO_ROOT/hack/bin/sam" validate --lint --region eu-west-3
+check "  ... the template, which sam validate --lint takes, cfn-lint inside it" "0 true" \
+  "$(code) $(out | grep 'is a valid SAM Template' >/dev/null && echo true || echo false)"
+tofu=(env TF_CLI_CONFIG_FILE="$FF_REPO_ROOT/hack/.terraform/cli.tfrc" TF_IN_AUTOMATION=1 "$FF_REPO_ROOT/hack/bin/tofu" -chdir="$kit/terraform")
+tool "${tofu[@]}" fmt -check
+formatted="$(code)"
+tool "${tofu[@]}" init -input=false -no-color
+initialized="$(code)"
+tool "${tofu[@]}" validate -no-color
+check "  ... terraform/, which tofu fmt leaves as it is, and tofu init and validate take" "0 0 0 Success! The configuration is valid." \
+  "$formatted $initialized $(code) $(out | head -1)"
+ff queues delete cli-new-orders --yes
+check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
+ff buckets delete cli-receipts --force --yes
+ff buckets delete cli-shop-site --force --yes
+ff caches delete cli-orders --yes
+ff email delete orders@shop-cli.tn --yes
+ff email delete buyer@shop-cli.tn --yes
+ff db delete shop --yes
+ff delete shop-nightly --yes
+ff delete shop-receipts --yes
+ff delete shop-api --yes
+}
+section_def small_app_exported section_small_app_exported small_app budget=120
 
 section_account() {
 section "the account: who, its plan, what it used and owes, how its functions ran"
