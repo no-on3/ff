@@ -466,7 +466,7 @@ curl -s -X POST "$FF/databases" -H 'content-type: application/json' -d '{"name":
 
 **Deleting it** (`ff db delete orders`, `DELETE /databases/<id>`) ends its sessions and drops it and its user, with its data. A suspended account's users can't log in until it is active again; a closed account's databases go at its data deletion date, with the rest of its data. Every member reads the account's databases; owners and developers make, change and delete them; an API key needs `databases:read` and `databases:write`. The audit log names each `database.create`, `database.password` and `database.delete`.
 
-**Backups and the way out:** the server is backed up as FF's own is, to a second site, 7 days of point-in-time recovery. An owner asks FF for a database as it was at a moment of those 7 days, from the e-mail address FF knows them by; it comes back as a new database of the account's, as RDS restores to a new instance, by the runbook in [`deploy/backup`](../deploy/backup/README.md), which the monthly drill runs. To move a database to AWS RDS, `pg_dump` and `pg_restore`, the writes stopped for the copy: [`cli/templates/export/data/postgres.md`](../cli/templates/export/data/postgres.md), which `ff export` will put in its kit. Logical replication, which moves one without stopping them, needs what the server doesn't give customers today: a user with `REPLICATION`, and `wal_level` at `logical`. In French: [Bases de données](fr/bases-de-donnees.md).
+**Backups and the way out:** the server is backed up as FF's own is, to a second site, 7 days of point-in-time recovery. An owner asks FF for a database as it was at a moment of those 7 days, from the e-mail address FF knows them by; it comes back as a new database of the account's, as RDS restores to a new instance, by the runbook in [`deploy/backup`](../deploy/backup/README.md), which the monthly drill runs. To move a database to AWS RDS, `pg_dump` and `pg_restore`, the writes stopped for the copy: [`cli/templates/export/data/postgres.md`](../cli/templates/export/data/postgres.md), which `ff export` puts in its kit, the account's databases named at its top. Logical replication, which moves one without stopping them, needs what the server doesn't give customers today: a user with `REPLICATION`, and `wal_level` at `logical`. In French: [Bases de données](fr/bases-de-donnees.md).
 
 ### Files in buckets
 
@@ -522,7 +522,7 @@ In production the backend runs in the cluster, and functions reach its pods thro
 
 **What each key uses:** the S3 front door, the SQS endpoint and the SES endpoint note, once a day, which bucket, queue or e-mail identity each key reached and by which of the service's operations (`GetObject`, `SendMessage`, `SendEmail`), with the first and the last day it did, a function's keys under the function. The export to AWS, `ff export`, makes each function's IAM role of these, allowing what the function used alone: SAM's policy templates where it did what one is for, each on its one bucket or queue, such as `SQSSendMessagePolicy` for a queue it sends to, which can't read it, and statements for the rest; a closed account's go with its data.
 
-**Backups and the way out:** no bucket is copied to the second site ([decision 11](decisions.md)). The store's own redundancy keeps the files through a failed disk, as S3's does, but not through a file deleted or replaced by mistake, since FF keeps no versions of them, nor through the loss of the store. Keep your own copy of the files that matter: `aws s3 sync s3://photos ./photos`, with one of the account's keys in the environment, which is what the first half of [`cli/templates/export/data/s3-sync.sh`](../cli/templates/export/data/s3-sync.sh) does. To move a bucket to AWS S3, the same script then copies that folder to a bucket on S3 with the AWS CLI's own settings, FF's variables dropped first; run again, it copies only what changed, and `--delete-gone` deletes what FF no longer has. `ff export` will put it in its kit. Then point the code at S3 (on AWS Lambda, a role and no endpoint) and delete the bucket on FF. In French: [Fichiers dans des compartiments](fr/compartiments.md).
+**Backups and the way out:** no bucket is copied to the second site ([decision 11](decisions.md)). The store's own redundancy keeps the files through a failed disk, as S3's does, but not through a file deleted or replaced by mistake, since FF keeps no versions of them, nor through the loss of the store. Keep your own copy of the files that matter: `aws s3 sync s3://photos ./photos`, with one of the account's keys in the environment, which is what the first half of [`cli/templates/export/data/s3-sync.sh`](../cli/templates/export/data/s3-sync.sh) does. To move a bucket to AWS S3, the same script then copies that folder to a bucket on S3 with the AWS CLI's own settings, FF's variables dropped first; run again, it copies only what changed, and `--delete-gone` deletes what FF no longer has. `ff export` puts it in its kit, `data/s3-sync.sh`. Then point the code at S3 (on AWS Lambda, a role and no endpoint) and delete the bucket on FF. In French: [Fichiers dans des compartiments](fr/compartiments.md).
 
 ```bash
 eval "$(ff buckets keys create --read-only | grep '^export ')"
@@ -696,7 +696,7 @@ ff sites metrics shop --since 1h               # its visits, as CloudFront's met
 
 **Counted, billed and limited:** each visit counts in its bucket's minute, in a class of its own (`website`), billed as S3's GETs, with what it sent; the bucket's storage is billed as any bucket's. The bytes sites send are counted, not billed ([decision 12](decisions.md)), within the plan's limit: past 10 GB a month together on beta, the account's sites answer 403, saying so, until the month's end. A suspended account's sites, and those whose storage FF turned off, answer 403; without credit they still answer, as reads do. `GET /buckets/<name>/website/metrics` gives `Requests` and `BytesDownloaded` (Sum), `4xxErrorRate`, `5xxErrorRate` and `TotalErrorRate` (Average, in percent), as CloudWatch names a CloudFront distribution's; an alarm on `Requests` or a rate names the bucket. The console's bucket page has the site's panel: its address, its settings, the deploy command and the AWS CLI's, its last day's visits, its domains.
 
-**The way out:** an S3 bucket behind CloudFront, its files uploaded again from the built folder with the same cache headers, and a template of the pieces together: [`cli/templates/export/data/s3-website.md`](../cli/templates/export/data/s3-website.md), which `ff export` will put in its kit. In French: [Sites statiques](fr/sites.md).
+**The way out:** an S3 bucket behind CloudFront, its files uploaded again from the built folder with the same cache headers, and a template of the pieces together: [`cli/templates/export/data/s3-website.md`](../cli/templates/export/data/s3-website.md), which `ff export` puts in its kit. In French: [Sites statiques](fr/sites.md).
 
 ### E-mail from apps
 
@@ -823,7 +823,9 @@ ff history orders-nightly                                     # the run, "asynch
 ff logs orders-nightly                                        # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
 ```
 
-The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself, without waiting, as `--async` does: a run that fails is retried a minute, then two minutes later, as Lambda retries it, and `ff async-config orders-nightly --on-failure <a queue's ARN>` keeps the record of one that fails for good. `ff schedule list orders-nightly` says how the last run went. `hack/cli-e2e.sh` runs this walkthrough end to end. Afterwards:
+The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself, without waiting, as `--async` does: a run that fails is retried a minute, then two minutes later, as Lambda retries it, and `ff async-config orders-nightly --on-failure <a queue's ARN>` keeps the record of one that fails for good. `ff schedule list orders-nightly` says how the last run went. `hack/cli-e2e.sh` runs this walkthrough end to end.
+
+**Its way to AWS,** before you delete it: `ff export ../orders-to-aws` writes what moving it needs, as [Moving to AWS](#moving-to-aws-ff-export) says: its three functions, `orders-receipts`'s role writing the receipts to `shop-receipts` and sending from `orders@example.tn` alone, as its keys did, and the API's sending to `new-orders`, which it can't read; the queue, the buckets, and the runbook that moves the database, the files, the cache and the mail first. Afterwards:
 
 ```bash
 ff delete orders-nightly --yes && ff delete orders-receipts --yes && ff delete orders-api --yes
@@ -846,6 +848,30 @@ hack/k8s/app-database.sh down                               # afterwards: the da
 ```
 
 **In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: `ff package` writes its zip, the function's role gives the clients their credentials, and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
+
+### Moving to AWS: ff export
+
+FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's, its mail SES's: an account moves to AWS with its code as it is. `ff export` writes what the move needs in a new folder, from the account's own resources, with `functions:read` and the other services' reads:
+
+```bash
+ff export ./to-aws                                            # every function, queue and bucket of the account
+ff export ./to-aws --functions orders-api,orders-receipts     # those, with the queues and the buckets they call, read or use
+ff export ./to-aws --with-values                              # the functions' variables' values in the template, not parameters
+```
+
+| In the folder | What it holds |
+|---|---|
+| `template.yaml` | An AWS SAM template: each function with its role, its URL, its schedules, the queues it reads and its settings for calls that don't wait; the queues; the buckets, with their events, each one's name a parameter, S3's names being everyone's |
+| `template-before-copy.yaml` | The same without the buckets' events, for the first deploy, so that copying their files calls nothing |
+| `terraform/` | The same for OpenTofu or Terraform with AWS's provider, and `terraform.tfvars.example`, its values to fill; use it or the template, not both |
+| `code/` | Each function's zip as Lambda runs it, inline TypeScript as the JavaScript FF ran |
+| `secrets.template.env` | The values the template takes and the export doesn't write, a line each: the functions' variables, unless `--with-values`, and their secrets, which FF never shows back |
+| `data/` | How each kind of resource the account has moves, a page each, the account's names at its top: the functions (`lambda.md`, with your domains in front of a function URL), the databases, the caches, the mail, the queues, the sites, and `s3-sync.sh` for the buckets' files |
+| `MIGRATION.md` | The account's runbook, in the order that works: the data, then the queues, then the functions, each still served by FF until its callers move; and what the template changes on the way or leaves to you |
+
+**Each function's role** allows what its keys used on FF, which FF notes once a day for each bucket, queue and mail identity, by the service's operation (`GetObject`, `SendMessage`, `SendEmail`): SAM's policy templates where the function did what one is for, each on its one bucket or queue (`S3ReadPolicy` for a bucket it read, `SQSSendMessagePolicy` for a queue it sent to, which it then can't read, `SQSPollerPolicy` for one it received from), and statements for the rest, such as `ses:SendEmail` on the identity it sends as. In `terraform/`, the same, action by action. A use FF never saw, such as a monthly job's that hasn't run since FF began noting, AWS refuses with `AccessDenied` until the function's `Policies` allow it: `MIGRATION.md` says the days the uses span.
+
+**Check it before you deploy:** `sam validate --lint --region <your region>` in the folder; with Terraform, `tofu init && tofu validate` in `terraform/`. Then `MIGRATION.md`, step by step: the schedules stay off at AWS (`ScheduleState`, or `schedule_state` in `terraform.tfvars`) until FF's are disabled, so that none runs on both, and FF serves each caller until it moves. In French: [Partir vers AWS](fr/partir-vers-aws.md).
 
 ## 4. Look inside the cluster
 

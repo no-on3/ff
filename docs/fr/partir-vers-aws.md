@@ -1,0 +1,25 @@
+# Partir vers AWS, avec `ff export`
+
+Les fonctions de FF sont celles d'AWS Lambda, ses compartiments ceux de S3, ses files celles de SQS, son courrier celui de SES : un compte part vers AWS avec son code tel qu'il est. `ff export` écrit ce qu'il faut pour partir dans un nouveau dossier, à partir des ressources du compte, avec la lecture des fonctions (`functions:read`) et celle des autres services :
+
+```bash
+ff export ./vers-aws                                          # toutes les fonctions, files et compartiments du compte
+ff export ./vers-aws --functions orders-api,orders-receipts   # celles-ci, avec les files et les compartiments qu'elles appellent, lisent ou utilisent
+ff export ./vers-aws --with-values                            # les valeurs des variables dans le modèle, plutôt qu'en paramètres
+```
+
+| Dans le dossier | Ce qu'il contient |
+|---|---|
+| `template.yaml` | Un modèle AWS SAM : chaque fonction avec son rôle, son adresse, ses planifications, les files qu'elle lit et ses réglages d'appel sans attente ; les files ; les compartiments et leurs notifications, le nom de chacun un paramètre, ceux de S3 étant à tout le monde |
+| `template-before-copy.yaml` | Le même sans les notifications des compartiments, pour le premier déploiement, afin que la copie de leurs fichiers n'appelle rien |
+| `terraform/` | La même chose pour OpenTofu ou Terraform, avec le fournisseur AWS, et `terraform.tfvars.example`, ses valeurs à remplir : l'un ou le modèle, pas les deux |
+| `code/` | Le zip de chaque fonction, tel que Lambda l'exécute ; le TypeScript en ligne, comme le JavaScript que FF a exécuté |
+| `secrets.template.env` | Les valeurs que le modèle prend et que l'export n'écrit pas, une ligne chacune : les variables des fonctions, sauf avec `--with-values`, et leurs secrets, que FF ne montre jamais |
+| `data/` | Comment part chaque sorte de ressource du compte, une page chacune, en anglais, avec les noms du compte en tête : les fonctions (`lambda.md`, vos domaines devant l'adresse d'une fonction compris), les bases de données, les caches, le courrier, les files, les sites, et `s3-sync.sh` pour les fichiers des compartiments |
+| `MIGRATION.md` | Le déroulé du départ, dans l'ordre qui marche : les données, puis les files, puis les fonctions, chacune servie par FF jusqu'à ce que ses appelants partent ; et ce que le modèle change en route ou vous laisse |
+
+**Le rôle de chaque fonction** permet ce que ses clés ont utilisé sur FF, que FF note une fois par jour pour chaque compartiment, file et identité de courrier, opération par opération (`GetObject`, `SendMessage`, `SendEmail`) : les modèles de politique de SAM là où la fonction a fait ce pour quoi l'un est fait, chacun sur son compartiment ou sa file (`S3ReadPolicy` pour un compartiment qu'elle a lu, `SQSSendMessagePolicy` pour une file où elle a envoyé, qu'elle ne peut alors pas lire, `SQSPollerPolicy` pour une file qu'elle a lue), et des déclarations pour le reste, comme `ses:SendEmail` sur l'identité depuis laquelle elle envoie. Dans `terraform/`, la même chose, action par action. Un usage que FF n'a jamais vu, comme celui d'une tâche mensuelle qui n'a pas tourné depuis que FF note, AWS le refuse (`AccessDenied`) tant que les `Policies` de la fonction ne le permettent pas : `MIGRATION.md` dit les jours que couvrent les usages.
+
+**Vérifiez avant de déployer :** `sam validate --lint --region <votre région>` dans le dossier ; avec Terraform, `tofu init && tofu validate` dans `terraform/`. Puis `MIGRATION.md`, étape par étape : les planifications restent éteintes chez AWS (`ScheduleState`, ou `schedule_state` dans `terraform.tfvars`) jusqu'à ce que celles de FF le soient, pour qu'aucune ne tourne des deux côtés, et FF sert chaque appelant jusqu'à son départ.
+
+La documentation de référence, en anglais : [Moving to AWS](../getting-started.md#moving-to-aws-ff-export).
