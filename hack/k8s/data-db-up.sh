@@ -16,7 +16,7 @@ out="$FF_REPO_ROOT/hack/.data-db"
 
 container() { "${compose[@]}" ps -q data-db 2>/dev/null; }
 network() { docker container inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$(container)"; }
-joined() { docker container inspect -f '{{json .NetworkSettings.Networks}}' "$node" | grep -q "\"$(network)\""; }
+joined() { docker container inspect -f '{{json .NetworkSettings.Networks}}' "$node" | grep "\"$(network)\"" >/dev/null; }
 
 case "${1:-up}" in
   up)
@@ -26,7 +26,7 @@ case "${1:-up}" in
       joined || docker network connect --gw-priority -1 "$(network)" "$node"
       # The cluster's own network keeps the default route: a default route on the data network would send it all there.
       gateway="$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' "k3d-$FF_CLUSTER_NAME")"
-      docker exec "$node" ip route show default | grep -q "via $gateway " ||
+      docker exec "$node" ip route show default | grep "via $gateway " >/dev/null ||
         { echo "the node's default route left the cluster's network: docker network disconnect $(network) $node" >&2; exit 1; }
     else
       echo "no cluster $FF_CLUSTER_NAME: functions can't reach the server until hack/k8s/cluster-up.sh, then this again" >&2

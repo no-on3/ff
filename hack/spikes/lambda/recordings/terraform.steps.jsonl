@@ -1,0 +1,4 @@
+{"step":"terraform init","ok":true,"ms":15419}
+{"step":"terraform apply","ok":true,"ms":22715}
+{"step":"terraform plan, nothing to change","ok":true,"ms":10469}
+{"step":"terraform destroy","ok":true,"ms":25307}

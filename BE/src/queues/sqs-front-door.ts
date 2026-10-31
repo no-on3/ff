@@ -8,6 +8,7 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
+import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
 import { countQueueRequest } from '../plans/rate-limits';
 import { originForm } from '../storage/front-door';
@@ -91,15 +92,9 @@ export class SqsFrontDoor implements OnModuleDestroy {
   /** Starts answering on the port; main.ts calls it once the API listens. Port 0 takes any free one, as the tests do. */
   async listen(port: number, host?: string): Promise<AddressInfo> {
     const server = createServer((request, response) => void this.serve(request, response));
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, host, () => {
-        server.off('error', reject);
-        resolve();
-      });
-    });
+    const address = await listenHttp(server, port, host);
     this.server = server;
-    return server.address() as AddressInfo;
+    return address;
   }
 
   /** Stops taking requests, ends the long polls, and waits for those under way. */
@@ -108,7 +103,7 @@ export class SqsFrontDoor implements OnModuleDestroy {
     this.server = undefined;
     this.stopping = true;
     for (const poll of this.polls) poll.abort();
-    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) await closeHttp(server);
   }
 
   /** Answers one request; never throws, as nothing would catch it. */

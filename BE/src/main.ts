@@ -1,11 +1,13 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import type { Server } from 'node:http';
 import { WinstonModule } from 'nest-winston';
 import { DataSource } from 'typeorm';
 import { configureApp } from './app-setup';
 import { AppModule } from './app.module';
 import { describeError } from './common/describe-error';
+import { keepIdleConnections } from './common/http-server';
 import { logFormat, winstonConfig } from './config/winston.config';
 import { assertSchemaUpToDate } from './database/schema-check';
 import { SesFrontDoor } from './email/ses-front-door';
@@ -27,8 +29,9 @@ async function bootstrap() {
 
   configureApp(app, configService);
 
-  // Start the server
+  // Start the server, its idle connections kept longer than the edge's proxy keeps its own.
   const port = configService.getOrThrow<number>('port');
+  keepIdleConnections(app.getHttpServer() as Server);
   await app.listen(port);
   // Through the logger: in production every line of the log is one JSON object.
   new Logger('Bootstrap').log(`Application is running on: ${await app.getUrl()}`);

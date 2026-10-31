@@ -1,0 +1,8 @@
+# The toolchain ff is built, linted and tested with, on a laptop and on the CI server alike: rustup reads this file
+# in cli/ and installs the toolchain on first use, so that a newer Rust's lints can't fail a push that changed none
+# of the code. hack/install-tools.sh and hack/build-cli.sh's image take the version from here; RUSTUP_TOOLCHAIN=stable
+# tries the newest. cli/Cargo.toml's rust-version is the least the crate builds with.
+[toolchain]
+channel = "1.91.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

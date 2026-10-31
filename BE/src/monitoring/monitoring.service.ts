@@ -7,6 +7,7 @@ import { PricingService } from '../billing/pricing.service';
 import { HOUR_MS } from '../billing/rating-hours';
 import { reconcile, reconciled } from '../billing/reconciliation';
 import { describeError } from '../common/describe-error';
+import { closeHttp, listenHttp } from '../common/http-server';
 import { alarmLagSeconds, databaseDiskBytes, databaseSizeBytes, deliveriesPending, ratingLagSeconds, reconciliationMismatches, registry } from './operator-metrics';
 
 /** Seconds from `then` to `now`: 0 when there is no `then`, or it is still to come. */
@@ -39,10 +40,7 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
     if (!metricsPort) return;
     const server = createServer((request, response) => void this.serve(request, response));
     try {
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(metricsPort, metricsHost, () => resolve());
-      });
+      await listenHttp(server, metricsPort, metricsHost);
     } catch (error) {
       // The API serves all the same: Prometheus sees the target down, which its own alert reports.
       this.logger.error(`The operator's metrics are not served: ${metricsHost}:${metricsPort} cannot be listened on: ${describeError(error)}`);
@@ -54,7 +52,7 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    await new Promise((resolve) => (this.server ? this.server.close(resolve) : resolve(undefined)));
+    if (this.server) await closeHttp(this.server);
     await this.reconciling;
   }
 

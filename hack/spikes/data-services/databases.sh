@@ -192,7 +192,7 @@ make_database "$b" "$b_password" >/dev/null
 note ""
 note "Names: \`$a\` and \`$b\`, the same for the user and its database, \`ff_\` and 24 random hexadecimal characters."
 for password in "$a_password" "$admin_password"; do
-  if docker logs "$name" 2>&1 | grep -qF "$password"; then
+  if docker logs "$name" 2>&1 | grep -F "$password" >/dev/null; then
     note "- **The password is in the server's log** (log_statement=ddl): FAIL"
     fails=$((fails + 1))
   fi

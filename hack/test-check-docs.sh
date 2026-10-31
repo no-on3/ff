@@ -5,11 +5,8 @@
 set -euo pipefail
 checker="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-docs.py"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-passed=0
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else echo "  FAIL $1 (expected '$2', got '$3')"; exit 1; fi
-}
+source "$(dirname "${BASH_SOURCE[0]}")/lib/checks.sh"
+on_exit 'rm -rf "$work"'
 problems() { python3 "$checker" "$work/$1" | grep -v '^docs:' | sed "s|^$work/||" || true; }
 fence='```'
 
@@ -31,4 +28,4 @@ check "a row with a cell too many" "table.md:3: table row has 3 cells, header ha
 printf '%s\n' 'See [the guide](missing.md#part) and [the site](https://example.tn) and [above](#top).' >"$work/link.md"
 check "a relative link to nothing, and only that one" "link.md:1: broken relative link -> missing.md#part" "$(problems link.md)"
 
-echo "check-docs: $passed checks passed"
+checks_done check-docs

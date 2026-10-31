@@ -1,0 +1,30 @@
+{"step":"create-function","ok":true,"ms":21,"result":"Pending"}
+{"step":"invoke while pending","ok":false,"ms":5,"shown":"ResourceConflictException: The operation cannot be performed at this time. The function is currently in the following state: Pending","status":409,"attempts":1}
+{"step":"wait function-active-v2","ok":true,"ms":5028,"result":"SUCCESS"}
+{"step":"invoke, with the log tail","ok":true,"ms":5,"result":{"status":200,"payload":"{\"echo\":{\"hello\":\"spike\"},\"version\":\"$LATEST\"}","logLines":4}}
+{"step":"invoke, asynchronously","ok":true,"ms":6,"result":202}
+{"step":"update-function-code, 6 MB","ok":true,"ms":49,"result":"InProgress"}
+{"step":"update-function-configuration during the update","ok":false,"ms":3,"shown":"ResourceConflictException: The operation cannot be performed at this time. An update is in progress for resource: arn:aws:lambda:tn-tunis-1:123456789012:function:spike-sdk","status":409,"attempts":1}
+{"step":"wait function-updated-v2","ok":true,"ms":2890,"result":"SUCCESS"}
+{"step":"update-function-configuration","ok":true,"ms":7,"result":"InProgress"}
+{"step":"wait function-updated-v2, again","ok":true,"ms":2687,"result":"SUCCESS"}
+{"step":"publish-version","ok":true,"ms":5,"result":"1"}
+{"step":"create-alias","ok":true,"ms":4,"result":"arn:aws:lambda:tn-tunis-1:123456789012:function:spike-sdk:live"}
+{"step":"invoke the alias","ok":true,"ms":4,"result":"1"}
+{"step":"invoke by the alias ARN","ok":true,"ms":4,"result":"1"}
+{"step":"create-function-url-config","ok":true,"ms":4,"result":"https://b13a81ab18044bb9b1650a11cd306d03.lambda-url.tn-tunis-1.on.aws/"}
+{"step":"add-permission","ok":true,"ms":2,"result":"added"}
+{"step":"create-event-source-mapping","ok":true,"ms":3,"result":"Creating"}
+{"step":"put-function-event-invoke-config","ok":true,"ms":4,"result":1}
+{"step":"put-function-concurrency","ok":true,"ms":3,"result":5}
+{"step":"tag-resource","ok":true,"ms":4,"result":"tagged"}
+{"step":"untag-resource","ok":true,"ms":4,"result":"untagged"}
+{"step":"list-tags","ok":true,"ms":4,"result":{"team":"spike"}}
+{"step":"reads","ok":true,"ms":25,"result":"Active"}
+{"step":"update-alias, weighted","ok":true,"ms":1,"result":"1"}
+{"step":"update-event-source-mapping while creating","ok":false,"ms":3,"shown":"ResourceConflictException: The resource you requested is currently in use by another operation. Please try again later.","status":409,"attempts":1}
+{"step":"update-function-url-config","ok":true,"ms":1,"result":"AWS_IAM"}
+{"step":"update-function-event-invoke-config","ok":true,"ms":2,"result":600}
+{"step":"a later operation: list-layers","ok":false,"ms":2,"shown":"UnknownOperationException: FF doesn't offer this operation of Lambda's API yet: GET /2018-10-31/layers. It comes in a later step.","status":400,"attempts":1}
+{"step":"a missing function: get-function","ok":false,"ms":1,"shown":"ResourceNotFoundException: Function not found: arn:aws:lambda:tn-tunis-1:123456789012:function:no-such-function","status":404,"attempts":1}
+{"step":"deletes","ok":true,"ms":8,"result":"deleted"}

@@ -7,6 +7,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { describeError } from '../common/describe-error';
+import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
 import { Bucket } from './bucket.entity';
 import { servedContentType } from './content-types';
@@ -129,22 +130,16 @@ export class WebsiteServer implements OnModuleDestroy {
     // A visitor's connection idle for 2 minutes goes; a large file may take longer to send than Node.js's default.
     server.requestTimeout = 0;
     server.setTimeout(120_000);
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, host, () => {
-        server.off('error', reject);
-        resolve();
-      });
-    });
+    const address = await listenHttp(server, port, host);
     this.server = server;
-    return server.address() as AddressInfo;
+    return address;
   }
 
   /** Stops taking requests, and waits for those under way. */
   async onModuleDestroy(): Promise<void> {
     const server = this.server;
     this.server = undefined;
-    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) await closeHttp(server);
     this.store.close();
   }
 

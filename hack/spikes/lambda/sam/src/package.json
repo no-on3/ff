@@ -1,0 +1,9 @@
+{
+  "name": "spike-orders",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}

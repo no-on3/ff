@@ -24,7 +24,7 @@ url() {
   echo "postgres://app:$password@$address:5432/app"
 }
 
-joined() { docker container inspect -f '{{json .NetworkSettings.Networks}}' "$node" | grep -q "\"$name\""; }
+joined() { docker container inspect -f '{{json .NetworkSettings.Networks}}' "$node" | grep "\"$name\"" >/dev/null; }
 
 case "${1:-}" in
   up)
@@ -41,10 +41,10 @@ case "${1:-}" in
     joined || docker network connect --gw-priority -1 "$name" "$node"
     # Up to 90 s: a first start runs initdb, slow on a machine short of memory with a cluster and a test run on it.
     for _ in $(seq 1 180); do
-      docker exec "$name" pg_isready -q -U app -d app && break
+      docker exec "$name" pg_isready -h 127.0.0.1 -q -U app -d app && break
       sleep 0.5
     done
-    docker exec "$name" pg_isready -q -U app -d app || { echo "$name didn't start: docker logs $name" >&2; exit 1; }
+    docker exec "$name" pg_isready -h 127.0.0.1 -q -U app -d app || { echo "$name didn't start: docker logs $name" >&2; exit 1; }
     url
     ;;
   psql)

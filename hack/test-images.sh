@@ -12,22 +12,22 @@
 #   hack/test-images.sh
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
+source "$FF_REPO_ROOT/hack/lib/checks.sh"
+source "$FF_REPO_ROOT/hack/lib/evidence.sh"
 tag="${FF_IMAGE_TAG:-test}"
 prefix="ff-images-$$"
 
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 work="$(mktemp -d)"
-trap 'docker rm -f "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
-passed=0
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else echo "  FAIL $1 (expected '$2', got '$3')"; exit 1; fi
-}
+on_exit 'docker rm -f "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin" >/dev/null 2>&1 || true; rm -rf "$work"'
+# Added after, so run first: the containers' logs while they are still there.
+on_exit '[ "$checks_status" -eq 0 ] || { evidence="$(evidence_start images)"; evidence_containers "$evidence" "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin"; evidence_done "$evidence" images; }'
 free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
 size() { docker image inspect "$1" --format '{{.Size}}' | awk '{ printf "%d MB", $1 / 1e6 }'; }
 # The hardening every platform container gets in the cluster.
 hardened=(--read-only --tmpfs /tmp:rw,size=64m --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1)
 
-echo "== the backend"
+section "the backend"
 docker build -q -t "ff-backend:$tag" "$FF_REPO_ROOT/BE" >/dev/null
 echo "  built ff-backend:$tag ($(size "ff-backend:$tag"))"
 check "it runs as the numeric user 10001, Node.js 24.21.0" "10001:10001 v24.21.0" \
@@ -37,7 +37,7 @@ check "with its production dependencies only: no TypeScript, no ts-node, no Jest
 
 pg_port="$(free_port)"
 docker run -d --name "$prefix-db" -e POSTGRES_PASSWORD=images-test-password -e POSTGRES_DB=ff -p "127.0.0.1:$pg_port:5432" postgres:15-alpine >/dev/null
-for _ in $(seq 1 60); do docker exec "$prefix-db" pg_isready -U postgres -d ff >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 60); do docker exec "$prefix-db" pg_isready -h 127.0.0.1 -U postgres -d ff >/dev/null 2>&1 && break; sleep 1; done
 port="$(free_port)"
 metrics_port="$(free_port)"
 # Function URLs', buckets', queues' and mail's ports too: with host networking, a development backend here may hold the defaults.
@@ -98,11 +98,11 @@ check "it has no package manager: npm, npx, corepack and yarn removed" none \
 check "and ready: its database and the cluster answer" '200 {"database":"ok","kubernetes":"ok"}' \
   "$(curl -s -o "$work/ready" -w '%{http_code}' "$api/readyz") $(jq -c .checks "$work/ready")"
 check "each answer names its request" true \
-  "$(curl -s -D - -o /dev/null "$api/healthz" | tr -d '\r' | grep -qiE '^x-ff-request-id: [0-9a-f-]{36}$' && echo true || echo false)"
+  "$(curl -s -D - -o /dev/null "$api/healthz" | tr -d '\r' | grep -iE '^x-ff-request-id: [0-9a-f-]{36}$' >/dev/null && echo true || echo false)"
 check "the API's documents are off in production" "404 404" \
   "$(curl -s -o /dev/null -w '%{http_code}' "$api/api") $(curl -s -o /dev/null -w '%{http_code}' "$api/api-json")"
-check "its metrics, on their own port" true \
-  "$(curl -s "http://127.0.0.1:$metrics_port/metrics" | grep -q '^ff_backend_process_resident_memory_bytes ' && echo true || echo false)"
+check "its metrics, on their own port" "200 true" \
+  "$(curl -s -o "$work/metrics" -w '%{http_code}' "http://127.0.0.1:$metrics_port/metrics") $(grep -q '^ff_backend_process_resident_memory_bytes ' "$work/metrics" && echo true || echo false)"
 check "queues' SQS endpoint, on its own port, refuses a request with no signature as SQS does" "403 com.amazonaws.sqs#MissingAuthenticationToken" \
   "$(curl -s -o "$work/sqs" -w '%{http_code}' -X POST -H 'Content-Type: application/x-amz-json-1.0' -H 'X-Amz-Target: AmazonSQS.ListQueues' -d '{}' "http://127.0.0.1:$sqs_port/") $(jq -r .__type "$work/sqs")"
 check "mail's SES endpoint, on its own port, refuses a request with no signature as SES does" "403 MissingAuthenticationTokenException" \
@@ -116,7 +116,7 @@ print(str(bool(lines) and all(isinstance(json.loads(line), dict) for line in lin
 # static <name> <directory> <client>: builds the app with its URLs baked in, runs it hardened, and checks it.
 static() {
   local name=$1 dir=$2 client=$3 url port asset refused=0
-  echo "== the $name"
+  section "the $name"
   docker build -q -t "ff-$name:$tag" --build-arg VITE_API_URL=https://api.ff.test \
     --build-arg VITE_OIDC_AUTHORITY=https://login.ff.test/realms/ff "$FF_REPO_ROOT/$dir" >/dev/null
   echo "  built ff-$name:$tag ($(size "ff-$name:$tag"))"
@@ -133,7 +133,7 @@ static() {
   check "the app, never cached, with the security headers, and no Server header" "true no-cache nosniff DENY false" \
     "$(grep -q '<div id="root">' "$work/$name-index.html" && echo true || echo false) $(tr -d '\r' <"$work/$name-headers" | awk -F': ' 'tolower($1) == "cache-control" {printf "%s", $2}') $(tr -d '\r' <"$work/$name-headers" | awk -F': ' 'tolower($1) == "x-content-type-options" {printf "%s", $2}') $(tr -d '\r' <"$work/$name-headers" | awk -F': ' 'tolower($1) == "x-frame-options" {printf "%s", $2}') $(grep -qi '^server:' "$work/$name-headers" && echo true || echo false)"
   check "a path of the app's router gets the app" true \
-    "$(curl -s "$url/accounts/000000000001?tab=usage" | grep -q '<div id="root">' && echo true || echo false)"
+    "$(curl -s "$url/accounts/000000000001?tab=usage" | grep '<div id="root">' >/dev/null && echo true || echo false)"
   asset="$(grep -o '/assets/index-[^"]*\.js' "$work/$name-index.html" | head -1)"
   check "its bundle has the API, the login and the client baked in" "true true true" \
     "$(curl -s "$url$asset" >"$work/$name.js"; for needle in https://api.ff.test https://login.ff.test/realms/ff "$client"; do grep -q "$needle" "$work/$name.js" && printf 'true ' || printf 'false '; done | sed 's/ $//')"
@@ -146,4 +146,4 @@ static() {
 static console FE ff-console
 static admin admin ff-admin
 
-echo "images: $passed checks passed"
+checks_done images

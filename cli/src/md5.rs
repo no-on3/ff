@@ -33,9 +33,9 @@ pub fn digest(data: &[u8]) -> [u8; 16] {
         message.push(0);
     }
     message.extend_from_slice(&((data.len() as u64).wrapping_mul(8)).to_le_bytes());
-    for block in message.chunks_exact(64) {
-        let words: Vec<u32> =
-            block.chunks_exact(4).map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]])).collect();
+    // The padding makes the message whole blocks of 64 bytes: nothing is left over.
+    for block in message.as_chunks::<64>().0 {
+        let words: Vec<u32> = block.as_chunks::<4>().0.iter().map(|word| u32::from_le_bytes(*word)).collect();
         let [mut a, mut b, mut c, mut d] = state;
         for i in 0..64 {
             let (f, g) = match i / 16 {

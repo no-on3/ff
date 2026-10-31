@@ -48,7 +48,7 @@ docker run -d --name "$name" --user "$(id -u):$(id -g)" --network host --memory 
   grafana/grafana:13.2.3 >/dev/null
 for _ in $(seq 1 90); do
   curl -sf "http://127.0.0.1:$port/api/health" >/dev/null && break
-  docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null | grep -q true || { docker logs --tail 20 "$name" >&2; exit 1; }
+  docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null | grep true >/dev/null || { docker logs --tail 20 "$name" >&2; exit 1; }
   sleep 1
 done
 curl -sf "http://127.0.0.1:$port/api/health" >/dev/null || { docker logs --tail 20 "$name" >&2; exit 1; }

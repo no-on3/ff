@@ -8,20 +8,9 @@
 # Exits non-zero on the first summary with failures. Cleans up after itself.
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+source "$FF_REPO_ROOT/hack/lib/checks.sh"
 
 sa="system:serviceaccount:ff-system:ff-controller"
-passed=0
-failed=0
-
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then
-    echo "  ok   $1"
-    passed=$((passed + 1))
-  else
-    echo "  FAIL $1 (expected '$2', got '$3')"
-    failed=$((failed + 1))
-  fi
-}
 can() { kubectl auth can-i "$@" --as="$sa" 2>/dev/null || true; }
 as_sa() { kubectl --kubeconfig="$FF_SA_KUBECONFIG" "$@"; }
 # "allowed" if the command succeeds, "denied" if the policy rejected it.
@@ -36,7 +25,7 @@ forbidden() {
 }
 # For calls that fail further on anyway (a Service without pods): did the policy let them through?
 policy() {
-  if "$@" 2>&1 | grep -q "ff-controller may only manage"; then echo denied; else echo "passed the policy"; fi
+  if "$@" 2>&1 | grep "ff-controller may only manage" >/dev/null; then echo denied; else echo "passed the policy"; fi
 }
 # can-i until it answers $1 (RBAC changes take a moment to reach the authorizer).
 can_until() {
@@ -55,8 +44,10 @@ cleanup() {
   kubectl -n default delete secret ff-vap-test --ignore-not-found >/dev/null 2>&1
   kubectl apply -k "$FF_REPO_ROOT/deploy/k8s/dev" >/dev/null 2>&1 # restores the dev overlay's binding
 }
-trap cleanup EXIT
+on_exit cleanup
 cleanup
+# A run just before left its namespaces terminating: content can't go in one until it is gone.
+kubectl wait --for=delete namespace/ff-t-rbactest namespace/ff-t-rogue namespace/rogue-ns --timeout=120s >/dev/null 2>&1 || true
 
 echo "cluster:"
 check "node is Ready" True "$(kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}')"
@@ -136,5 +127,4 @@ check "deleting the managed namespace is allowed" allowed \
 check "users other than ff-controller are unaffected" allowed \
   "$(outcome kubectl -n default create configmap ff-vap-test --from-literal=a=b)"
 
-echo "rbac/admission: $passed passed, $failed failed"
-[ "$failed" -eq 0 ]
+checks_done rbac/admission

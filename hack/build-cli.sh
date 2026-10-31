@@ -7,8 +7,9 @@
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The toolchain the CLI is tested with, Alpine's, for musl; pinned to a release at least two weeks old when chosen.
-RUST_IMAGE="${RUST_IMAGE:-rust:1.91.0-alpine3.22}"
+# The toolchain the CLI is tested with, cli/rust-toolchain.toml's, in Alpine's image, for musl; Alpine pinned to a
+# release at least two weeks old when chosen.
+RUST_IMAGE="${RUST_IMAGE:-rust:$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/cli/rust-toolchain.toml")-alpine3.22}"
 target=x86_64-unknown-linux-musl
 dist="$repo/cli/target/dist"
 binary="ff-linux-x86_64"
@@ -17,7 +18,7 @@ binary="ff-linux-x86_64"
 commit="$(git -C "$repo" rev-parse --short=12 HEAD)"
 mkdir -p "$dist"
 
-if [ "${1:-}" != --container ] && rustup target list --installed 2>/dev/null | grep -qx "$target" && command -v musl-gcc >/dev/null; then
+if [ "${1:-}" != --container ] && rustup target list --installed 2>/dev/null | grep -x "$target" >/dev/null && command -v musl-gcc >/dev/null; then
   echo "== building here, for $target"
   (cd "$repo/cli" && FF_BUILD_COMMIT="$commit" cargo build --release --locked --target "$target")
 else
@@ -33,6 +34,6 @@ fi
 
 cp "${built:-$repo/cli/target}/$target/release/ff" "$dist/$binary"
 (cd "$dist" && sha256sum "$binary" >"$binary.sha256")
-file "$dist/$binary" | grep -q 'static' || { echo "$dist/$binary isn't static" >&2; exit 1; }
+file "$dist/$binary" | grep 'static' >/dev/null || { echo "$dist/$binary isn't static" >&2; exit 1; }
 echo "== $dist/$binary ($(du -h "$dist/$binary" | cut -f1)), sha256 $(cut -d' ' -f1 "$dist/$binary.sha256")"
 "$dist/$binary" version --verbose

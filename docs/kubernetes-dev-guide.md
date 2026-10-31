@@ -25,7 +25,9 @@ hack/check-resources.sh            # thresholds: MIN_DOCKER_DISK_GB, MIN_REPO_DI
 ## Tools
 
 ```bash
-hack/install-tools.sh              # kubectl v1.37.1 + k3d v5.9.0 into hack/bin/, SHA-256 verified
+hack/install-tools.sh              # kubectl v1.37.1 + k3d v5.9.0 into hack/bin/, SHA-256 verified, and the ff command's Rust
+hack/install-tools.sh aws          # OpenTofu 1.13.1, Terraform 1.16.6, its AWS provider 6.69.1 and the SAM CLI 1.169.0 (cfn-lint
+                                   # 1.53.3 inside it), for the tests of AWS's way in and out: about 330 MB, SHA-256 verified
 ```
 
 Nothing is installed system-wide, and `~/.kube/config` is never touched. To use the tools and the cluster in your shell (bash or zsh):
@@ -130,6 +132,21 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 14. the balance check (P-33): shadow mode off, no buffer and no grace period; a wallet run below zero, an invoke refused with 402 and nothing recorded; a top-up, and invokes accepted again at once.
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
+
+### When a run fails
+
+Every suite goes on after a failed check and lists each one at its end, with its section and the time it failed (UTC): one run reports all its failures, not the first. A failure later in the same section is marked as after the one above, since it often follows from it. A failure that leaves nothing after it able to pass, such as the backend not starting, stops the run, and the list says where; so does a command that fails under `set -e`, with its line. `FF_FAIL_FAST=1 hack/e2e.sh` stops at the first failed check instead. A check never pipes into `grep -q`: the suites run under `pipefail`, and `grep -q`'s exit at its first match fails a writer still writing, so a match reads as none on some runs only (the images' test failed 2 nights of 4 that way); `… | grep pattern >/dev/null` reads everything, and `hack/ci.sh static` refuses the pipe. A suite waits for a fresh PostgreSQL over TCP (`pg_isready -h 127.0.0.1`): its image's first start runs a server on the socket alone, then restarts it, and a check on the socket can pass in between; `static` refuses that too. Every suite shares this, through `hack/lib/checks.sh`, which `hack/test-checks.sh` tests. `hack/ci.sh` does the same with its steps: a failed one is named and the next one runs, but for a step the ones after it need, such as the dev cluster's start (`hack/lib/ci-steps.sh`).
+
+A failed suite leaves behind, in `hack/.ci/failure/<suite>/` (`hack/lib/evidence.sh`):
+
+- `pods.txt` and `events.txt`: every pod of the cluster at the moment of the failure, and its recent events: probes failing, containers restarted, killed or out of memory;
+- `namespaces/<namespace>/`: the run's namespaces' pods described, and each one's log, with the log before a restart;
+- `containers/`: the k3d node's own log since the run started (the kubelet's and k3s's lines), and the run's other containers';
+- `compose.log` and `logs/`: the compose services', and the suite's own logs, the backend's whole.
+
+Read the backend's log at the failed check's time. `hack/.ci/report.md` lists the pipeline's steps with their seconds, then the failed checks. On GitHub the report is the job's summary, and both are the job's artifact `failure-<job>`, each of the cluster's stages by its own name and the images' test in `failure-security`, after the scans, kept 7 days: `gh run download <run id> -n failure-l4`.
+
+To run what a GitHub runner runs, nothing of this machine's own left over (`hack/bin`, `hack/.kube`, a cluster made before), check out the commit beside this one and run the job's stages there: `git worktree add /tmp/ff-fresh HEAD && cd /tmp/ff-fresh && hack/ci.sh deps platform`. Remove it after with `git worktree remove --force /tmp/ff-fresh`.
 
 ## Sandboxing with gVisor
 

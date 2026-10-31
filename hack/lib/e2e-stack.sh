@@ -11,6 +11,8 @@
 # it started, deletes the namespaces listed in e2e_namespaces, and removes the
 # compose project with its volumes; the cluster too if e2e_teardown is true.
 
+source "$FF_REPO_ROOT/hack/lib/checks.sh"
+source "$FF_REPO_ROOT/hack/lib/evidence.sh"
 work="$FF_REPO_ROOT/hack/.$E2E_NAME"
 # With the "auth", "data", "cache", "mail" and "mail-test" profiles, so that cleaning up also removes Keycloak, Mailpit,
 # the data, cache and mail servers and the mail's receiver when they ran.
@@ -23,7 +25,6 @@ e2e_containers=()
 # Commands that undo what a test set up beside the stack, such as an app's database: run on exit, first.
 e2e_cleanups=()
 e2e_teardown=false
-passed=0
 mkdir -p "$work"
 : >"$work/ports-given"
 
@@ -150,7 +151,16 @@ e2e_dns() {
 }
 
 e2e_cleanup() {
-  local status=$? pid ns command
+  local status=$checks_status pid ns command evidence
+  # What the failed run leaves behind, before anything below removes it.
+  if [ "$status" -ne 0 ]; then
+    evidence="$(evidence_start "$E2E_NAME")"
+    evidence_cluster "$evidence" "${e2e_namespaces[@]}" ff-system ff-logging
+    evidence_containers "$evidence" "k3d-$FF_CLUSTER_NAME-server-0" "${e2e_containers[@]}"
+    evidence_compose "$evidence" "${compose[@]}"
+    evidence_logs "$evidence" "$work"
+    evidence_done "$evidence" "$E2E_NAME"
+  fi
   for command in "${e2e_cleanups[@]}"; do
     eval "$command" >/dev/null 2>&1 || true
   done
@@ -171,20 +181,8 @@ e2e_cleanup() {
     tail -20 "$work/backend.log" >&2 2>/dev/null || true
   fi
 }
-trap e2e_cleanup EXIT
+on_exit e2e_cleanup
 
-fail() {
-  echo "  FAIL $1" >&2
-  exit 1
-}
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then
-    echo "  ok   $1"
-    passed=$((passed + 1))
-  else
-    fail "$1 (expected '$2', got '$3')"
-  fi
-}
 # http_at <base URL> <method> <path> [json-body] [curl option...]: prints the body;
 # the status code goes to $work/status. Extra options are passed to curl, e.g. -H 'x: y'.
 http_at() {
@@ -216,15 +214,15 @@ tenant_namespace() { printf 'ff-t-%s' "$(printf %s "$1" | sha256sum | cut -c1-12
 
 # e2e_dependencies [service...]: PostgreSQL and S3, and the services named (keycloak, mailpit).
 e2e_dependencies() {
-  echo "== resources"
+  section "resources"
   MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3500}" "$FF_REPO_ROOT/hack/check-resources.sh"
-  echo "== dependencies (compose project $E2E_PROJECT)"
+  section "dependencies (compose project $E2E_PROJECT)"
   "${compose[@]}" up -d --wait postgres s3 "$@" >/dev/null 2>&1 || fail "compose dependencies did not become healthy"
   echo "  postgres on 127.0.0.1:$FF_PG_PORT, s3 on 127.0.0.1:$FF_S3_PORT${1:+, and $*}"
 }
 
 e2e_cluster() {
-  echo "== cluster"
+  section "cluster"
   k3d cluster get "$FF_CLUSTER_NAME" >/dev/null 2>&1 || "$FF_REPO_ROOT/hack/k8s/cluster-up.sh" >/dev/null
   "$FF_REPO_ROOT/hack/k8s/mint-token.sh" >/dev/null
   # The logs API and the load errors read the log store (P-43): a cluster made before it gets it now.

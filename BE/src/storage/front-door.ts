@@ -10,6 +10,7 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
+import { closeHttp, listenHttp } from '../common/http-server';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { countStorageRequest } from '../plans/rate-limits';
@@ -228,22 +229,16 @@ export class S3FrontDoor implements OnModuleDestroy {
     // Uploads of gigabytes take longer than Node.js's default 5 minutes; a connection silent for 2 minutes goes.
     server.requestTimeout = 0;
     server.setTimeout(120_000);
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, host, () => {
-        server.off('error', reject);
-        resolve();
-      });
-    });
+    const address = await listenHttp(server, port, host);
     this.server = server;
-    return server.address() as AddressInfo;
+    return address;
   }
 
   /** Stops taking requests, and waits for those under way. */
   async onModuleDestroy(): Promise<void> {
     const server = this.server;
     this.server = undefined;
-    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) await closeHttp(server);
     // Events of writes the store took, still being sent: a stop waits for them rather than lose them.
     await this.notified();
     this.store.close();

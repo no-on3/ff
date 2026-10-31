@@ -167,8 +167,10 @@ hack/.data-db/
 hack/.cache-server/
 # hack/k8s/mail-up.sh: the development mail server's CA, for the backend
 hack/.mail-server/
-# hack/install-tools.sh: Rust, where the machine has none recent enough
+# hack/install-tools.sh: Rust, where the machine has none recent enough; Terraform's AWS provider; the SAM CLI
 hack/.rust/
+hack/.terraform/
+hack/.sam/
 *.kubeconfig
 
 # End-to-end test work files (K-08)
@@ -182,6 +184,9 @@ hack/.spike-queue/
 hack/.spike-sites/
 hack/.spike-mail/
 hack/.spike-cache/
+# hack/spikes/lambda: the SDKs, the functions' code, each client's steps and requests, and Terraform's against FF's front doors (step 5's spike)
+hack/.spike-lambda/
+hack/.spike-lambda-tf/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/

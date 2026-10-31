@@ -25,18 +25,15 @@
 #   hack/k8s/test-platform-manifests.sh
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+source "$FF_REPO_ROOT/hack/lib/checks.sh"
 platform="$FF_REPO_ROOT/deploy/k8s/platform"
 work="$(mktemp -d)"
 edge_test="ff-edge-proxies-$$" # the edge behind a proxy: a container and its network, both by this name
-trap 'rm -rf "$work"; docker rm -f "$edge_test" >/dev/null 2>&1 || true; docker network rm "$edge_test" >/dev/null 2>&1 || true' EXIT
-passed=0
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else echo "  FAIL $1 (expected '$2', got '$3')"; exit 1; fi
-}
+on_exit 'rm -rf "$work"; docker rm -f "$edge_test" >/dev/null 2>&1 || true; docker network rm "$edge_test" >/dev/null 2>&1 || true'
 # The platform, and the mirror to the second site (deploy/k8s/backup), which runs beside it.
 { kubectl kustomize "$platform"; echo ---; kubectl kustomize "$FF_REPO_ROOT/deploy/k8s/backup"; } >"$work/platform.yaml"
 
-echo "== the pods"
+section "the pods"
 python3 - "$work/platform.yaml" >"$work/pods.txt" <<'PY'
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
@@ -91,7 +88,7 @@ PY
 check "every workload hardened: non-root, no capability, no escalation, seccomp, read-only root but Keycloak's, limits, probes, the backend's API token an hour long and no other, the files it may read readable" \
   "8" "$(cat "$work/pods.txt")"
 
-echo "== credentials"
+section "credentials"
 # The backend's token reads ConfigMaps and pods' specs across the cluster, but no Secret (deploy/k8s/README.md,
 # "Cluster-wide reads"): so a credential goes in a Secret, never in what that token can read.
 python3 - "$work/platform.yaml" >"$work/credentials.txt" <<'PY'
@@ -135,7 +132,7 @@ print('\n'.join(problems) or 'none')
 PY
 check "credentials only in Secrets: none in a ConfigMap, an environment value or a command line" none "$(cat "$work/credentials.txt")"
 
-echo "== who reaches whom"
+section "who reaches whom"
 python3 - "$work/platform.yaml" >"$work/policies.txt" <<'PY'
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
@@ -164,7 +161,7 @@ print('\n'.join(problems) or 'none')
 PY
 check "every workload behind a NetworkPolicy of its own, ff-system denying the rest, every Service selecting pods" none "$(cat "$work/policies.txt")"
 
-echo "== the settings"
+section "the settings"
 # The backend's own configuration reads backend.env with the Secret's keys: accepted, but for what an overlay must give.
 (cd "$FF_REPO_ROOT/BE" && [ -f dist/config/configuration.js ] || npm run build >/dev/null)
 problems="$(cd "$FF_REPO_ROOT/BE" && node -e "
@@ -191,7 +188,7 @@ print(f"{mount['mountPath']}/keys" if mount.get('readOnly') else 'writable')
 PY
 )"
 
-echo "== function URLs"
+section "function URLs"
 # The edge serves the function domain, the host of the addresses the backend gives; it reaches the backend's port
 # for them through the Service, as do its questions before a certificate on demand; nothing else reaches that port.
 check "the edge's function domain is the host of the backend's FF_FUNCTION_URL_BASE" "fn.example.tn fn.example.tn" \
@@ -214,7 +211,7 @@ check "the edge sends them there, function URLs' hosts and customers' own domain
   "ask http://ff-backend.ff-system.svc.cluster.local:$url_port/tls/allowed 2" \
   "$(grep -oE 'ask http://[^ ]+' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$url_port$" "$platform/edge/Caddyfile")"
 
-echo "== buckets' S3 front door"
+section "buckets' S3 front door"
 # The edge serves the backend's S3 endpoint and each bucket's host under it, on the backend's port for them, which
 # nothing else reaches; certificates on demand are asked at function URLs' port, the edge's one address for them all.
 check "the edge's storage host is the host of the backend's FF_STORAGE_BASE" "s3.example.tn s3.example.tn" \
@@ -266,7 +263,7 @@ check "functions' address for it: the Service ff-storage's fixed one, on that po
 check "the edge sends both of its hosts there" "1 1" \
   "$(grep -c '^{\$FF_STORAGE_HOST}, \*\.{\$FF_STORAGE_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$storage_port$" "$platform/edge/Caddyfile")"
 
-echo "== queues' SQS endpoint"
+section "queues' SQS endpoint"
 # The edge serves the backend's SQS endpoint, one host, on the backend's port for it; functions reach that port at
 # ff-storage's address too, where the queues' URLs they are answered begin.
 check "the edge's SQS host is the host of the backend's FF_SQS_BASE" "sqs.example.tn sqs.example.tn" \
@@ -279,7 +276,7 @@ check "functions' address for it: the Service ff-storage's fixed one, on that po
 check "the edge sends its host there" "1 1" \
   "$(grep -c '^{\$FF_SQS_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$sqs_port$" "$platform/edge/Caddyfile")"
 
-echo "== customers' mail's SES endpoint"
+section "customers' mail's SES endpoint"
 # The edge serves the backend's SES endpoint, one host, on the backend's port for it; functions reach that port at
 # ff-storage's address too. The mail server's names are public ones, as production requires.
 check "the edge's SES host is the host of the backend's FF_SES_BASE" "email.example.tn email.example.tn" \
@@ -294,7 +291,7 @@ check "the edge sends its host there" "1 1" \
 check "the mail server and FF's own return path by public names" "mail.example.tn bounces.mail.example.tn" \
   "$(sed -n 's/^FF_EMAIL_MAIL_HOST=//p' "$platform/backend.env") $(sed -n 's/^FF_EMAIL_BOUNCE_DOMAIN=//p' "$platform/backend.env")"
 
-echo "== buckets' sites"
+section "buckets' sites"
 # The edge serves every host under the sites' domain on the backend's port for sites, which nothing else reaches; a
 # customer's own domain for a site reaches the function URL gateway, as every other host does, which hands it on.
 check "the edge's sites' domain is the host of the backend's FF_WEBSITE_BASE" "site.example.tn site.example.tn" \
@@ -305,7 +302,7 @@ check "the edge sends their hosts there, compressed" "1 1 1" \
   "$(grep -c '^\*\.{\$FF_WEBSITE_DOMAIN} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$website_port$" "$platform/edge/Caddyfile") \
 $(sed -n '/^\*\.{\$FF_WEBSITE_DOMAIN} {$/,/^}/p' "$platform/edge/Caddyfile" | grep -c '^	import common$')"
 
-echo "== the edge"
+section "the edge"
 docker build -q -t ff-edge:test "$FF_REPO_ROOT/deploy/edge" >/dev/null
 check "its image: Caddy 2.11.7 with the RFC 2136 DNS module, as the numeric user 65532" "v2.11.7 1 65532:65532" \
   "$(docker run --rm ff-edge:test caddy version | cut -d' ' -f1) $(docker run --rm ff-edge:test caddy list-modules | grep -c '^dns.providers.rfc2136$') $(docker image inspect ff-edge:test --format '{{.Config.User}}')"
@@ -343,7 +340,7 @@ check "behind a proxy, the allowlist believes X-Forwarded-For from FF_EDGE_TRUST
   "$untrusted $(admin_status 198.51.100.7) $(admin_status 203.0.113.9) $(admin_status) $(admin_status '198.51.100.7, 203.0.113.9')"
 docker rm -f "$edge_test" >/dev/null
 
-echo "== the code registry"
+section "the code registry"
 # Zot's own check of its settings, in the image the Deployment pins, its storage and its users' file where the
 # Deployment mounts them. A ghcr.io image: pulled without the caller's Docker logins, which ghcr.io may refuse.
 read -r zot_image registry_checks < <(python3 - "$work/platform.yaml" "$platform/code-registry/config.json" <<'PY'
@@ -388,7 +385,7 @@ print('backend-only' if only and peers else 'open', ','.join(map(str, ports)), u
 PY
 )"
 
-echo "== the cluster's API"
+section "the cluster's API"
 # A server dry run writes nothing, and refuses an unknown field. The dev cluster has no ff-edge: its objects are
 # tried in ff-system, which it has.
 python3 - "$work/platform.yaml" "$work/validate.yaml" <<'PY'
@@ -403,4 +400,4 @@ check "every object valid for the API's schemas, no field unknown (a server dry 
   "$(kubectl apply --dry-run=server --validate=strict -f "$work/validate.yaml" >"$work/dry-run.log" 2>&1; echo $?)"
 grep -iE 'error|unknown' "$work/dry-run.log" | head -5 || true
 
-echo "platform manifests: $passed checks passed"
+checks_done "platform manifests"

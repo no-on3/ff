@@ -475,6 +475,12 @@ const server = http.createServer((req, res) => {
   }
 });
 
+// An idle connection stays open longer than the clients that pool connections keep theirs: the cluster API's service
+// proxy keeps its own 90 seconds and ignores the Keep-Alive hint. A runtime that closes first races the proxy's next
+// call on that connection, which then fails as "error trying to reach service: EOF". Node.js's default is 5 seconds;
+// shutdown() exits once drained, so the longer wait never holds a pod.
+server.keepAliveTimeout = 130_000;
+
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;

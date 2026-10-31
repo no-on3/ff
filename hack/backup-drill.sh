@@ -30,22 +30,18 @@ cleanup() {
   docker network rm "$network" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
-trap cleanup EXIT
-passed=0
-fail() { echo "  FAIL $1" >&2; exit 1; }
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else fail "$1 (expected '$2', got '$3')"; fi
-}
+source "$repo/hack/lib/checks.sh"
+on_exit cleanup
 random() { head -c 18 /dev/urandom | base64 | tr -d '/+=\n'; }
 "$repo/hack/check-resources.sh"
 
-echo "== images"
+section "images"
 docker build -q -t ff-postgres-walg:drill "$repo/deploy/backup/postgres-walg" >/dev/null
 docker build -q -t ff-data-db:drill "$repo/deploy/data-db" >/dev/null
 docker build -q -t ff-backend:drill "$repo/BE" >/dev/null
 echo "  ff-postgres-walg (PostgreSQL 15.19, WAL-G 3.0.9), ff-data-db (PostgreSQL 18.6, WAL-G 3.0.9) and ff-backend built"
 
-echo "== two sites"
+section "two sites"
 docker network create "$network" >/dev/null
 s3_key="drill$(random | cut -c1-10)" s3_secret="$(random)"
 cat >"$work/s3.json" <<JSON
@@ -71,7 +67,7 @@ rclone() { rclone_run rclone "$@"; }
 for _ in $(seq 1 60); do rclone mkdir site:ff-backups >/dev/null 2>&1 && rclone mkdir primary:functions >/dev/null 2>&1 && break; sleep 1; done
 check "a primary bucket and the second site's" "functions ff-backups" "$(rclone lsd primary: | awk '{print $NF}') $(rclone lsd site: | awk '{print $NF}')"
 
-echo "== the primary PostgreSQL, archiving to the second site"
+section "the primary PostgreSQL, archiving to the second site"
 pg_password="$(random)"
 walg_key="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 walg=(-e WALG_S3_PREFIX=s3://ff-backups/postgres -e AWS_ENDPOINT=http://site:8333 -e AWS_REGION=us-east-1 -e AWS_S3_FORCE_PATH_STYLE=true
@@ -82,7 +78,7 @@ docker run -d --name "$prefix-primary" --network "$network" --network-alias prim
 # psql_on <container> <database> <sql>: one value, or rows, as the drill reads them.
 psql_on() { docker exec "$1" psql -U postgres -d "$2" -v ON_ERROR_STOP=1 -qtA -c "$3"; }
 for _ in $(seq 1 60); do
-  [ "$(docker exec "$prefix-primary" pg_isready -U postgres -d ff 2>/dev/null)" ] && psql_on "$prefix-primary" ff 'SELECT 1' >/dev/null 2>&1 && break
+  [ "$(docker exec "$prefix-primary" pg_isready -h 127.0.0.1 -U postgres -d ff 2>/dev/null)" ] && psql_on "$prefix-primary" ff 'SELECT 1' >/dev/null 2>&1 && break
   sleep 1
 done
 check "it archives every segment, at least every 5 minutes" "on wal-g wal-push %p 5min" \
@@ -96,7 +92,7 @@ migrations="$(psql_on "$prefix-primary" ff 'SELECT count(*) FROM migrations')"
 check "FF's schema, made by its migrations, and Keycloak's database beside it" "true ff" \
   "$([ "$migrations" -gt 10 ] && echo true || echo false) $(psql_on "$prefix-primary" keycloak 'SELECT name FROM realm')"
 
-echo "== a base backup, then rows before and after the target time"
+section "a base backup, then rows before and after the target time"
 docker exec -u postgres "${walg[@]}" "$prefix-primary" wal-g backup-push /var/lib/postgresql/data >"$work/backup.log" 2>&1 || { tail -20 "$work/backup.log"; fail "the base backup failed"; }
 check "a base backup at the second site" 1 "$(docker exec -u postgres "${walg[@]}" "$prefix-primary" wal-g backup-list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')"
 # credit <account> <millimes> <key>: a balanced ledger transaction, as a transfer received writes it.
@@ -131,7 +127,7 @@ rclone cat --max-size 100M --include '*' site:ff-backups/postgres >"$work/site.b
 check "the second site holds no row readable without the key: neither an account nor a ledger key" "0 true" \
   "$(grep -ac 'Drill 90000000000\|drill:before\|drill:after' "$work/site.bin" || true) $([ -s "$work/site.bin" ] && echo true || echo false)"
 
-echo "== the restore, to the target time ($target)"
+section "the restore, to the target time ($target)"
 restore_started="$(date +%s)"
 docker run --rm -u postgres "${walg[@]}" --network "$network" -v "$prefix-restored-data:/var/lib/postgresql/data" ff-postgres-walg:drill \
   bash -c "wal-g backup-fetch /var/lib/postgresql/data LATEST && touch /var/lib/postgresql/data/recovery.signal &&
@@ -153,7 +149,7 @@ check "Keycloak's database: the same point in time" "before ff" "$(psql_on "$pre
 check "the restored server archives too: its configuration came with the backup" "on" "$(psql_on "$prefix-restored" ff 'SHOW archive_mode')"
 check "within the 4 hours promised: $restore_seconds s here" true "$([ "$restore_seconds" -lt 14400 ] && echo true || echo false)"
 
-echo "== the customers' server, archiving to the second site under a prefix and a key of its own"
+section "the customers' server, archiving to the second site under a prefix and a key of its own"
 data_admin_password="$(random)"
 data_walg=(-e WALG_S3_PREFIX=s3://ff-backups/data-db -e AWS_ENDPOINT=http://site:8333 -e AWS_REGION=us-east-1 -e AWS_S3_FORCE_PATH_STYLE=true
   -e AWS_ACCESS_KEY_ID="$s3_key" -e AWS_SECRET_ACCESS_KEY="$s3_secret" -e WALG_LIBSODIUM_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -218,7 +214,7 @@ rclone cat --max-size 100M --include '*' site:ff-backups/data-db >"$work/data-si
 check "the second site holds none of their rows readable without the key" "0 true" \
   "$(grep -ac "$marker" "$work/data-site.bin" || true) $([ -s "$work/data-site.bin" ] && echo true || echo false)"
 
-echo "== one customer's database, to the target time ($data_target), as the runbook brings it back"
+section "one customer's database, to the target time ($data_target), as the runbook brings it back"
 one_started="$(date +%s)"
 docker run --rm "${data_walg[@]}" --network "$network" -v "$prefix-scratch-data:/var/lib/postgresql" --entrypoint bash ff-data-db:drill -c "
   mkdir -p '$data_pgdata' && chmod 700 '$data_pgdata' && wal-g backup-fetch '$data_pgdata' LATEST && touch '$data_pgdata/recovery.signal' &&
@@ -255,7 +251,7 @@ docker rm -f "$prefix-scratch" >/dev/null
 docker volume rm "$prefix-scratch-data" >/dev/null
 echo "  one database back in $one_seconds s, from the fetch to the copy; the scratch server deleted"
 
-echo "== the bucket's legal records"
+section "the bucket's legal records"
 mkdir -p "$work/records/invoices/2026" "$work/records/withholding-certificates"
 head -c 40000 /dev/urandom >"$work/records/invoices/2026/FAC-2026-000001.pdf"
 head -c 30000 /dev/urandom >"$work/records/withholding-certificates/payment-1.pdf"
@@ -281,7 +277,7 @@ rclone copy site:ff-backups/s3/invoices primary:functions/invoices >/dev/null
 rclone copy primary:functions/invoices/2026/FAC-2026-000001.pdf /work/restored >/dev/null
 check "and comes back from it, byte for byte" "$(sha256sum <"$work/records/invoices/2026/FAC-2026-000001.pdf")" "$(sha256sum <"$work/restored/FAC-2026-000001.pdf")"
 
-echo "== functions' packages"
+section "functions' packages"
 mkdir -p "$work/packages/packages/111111111111" "$work/packages/packages/222222222222"
 for zip in 111111111111/a 111111111111/b 111111111111/c 222222222222/d; do head -c 20000 /dev/urandom >"$work/packages/packages/$zip.zip"; done
 rclone copy /work/packages primary:functions >/dev/null
@@ -308,7 +304,9 @@ check "and they come back from it, byte for byte" 0 "$(rclone check site:ff-back
 sleep 1
 check "the next run finds nothing to delete" "packages copied to the second site, 0 deleted there" "$(mirror | grep -o 'packages copied to the second site, [0-9]* deleted there')"
 
-echo "backup drill: $passed checks passed; restored to the target in $restore_seconds s, one customer's database in $one_seconds s"
+# Before the record: a drill with a failed check fails here, and is never recorded as passed.
+checks_done "backup drill"
+echo "backup drill: restored to the target in $restore_seconds s, one customer's database in $one_seconds s"
 if $record; then
   printf '| %s | %s | PostgreSQL 15.19 with WAL-G 3.0.9, both databases to a target time; one customer'"'"'s database from PostgreSQL 18.6 with WAL-G 3.0.9 to a target time; the legal records and the packages with rclone 1.75.1 | %s s; one database %s s | %s checks passed |\n' \
     "$(date -u +%Y-%m-%d)" "$(git -C "$repo" rev-parse --short HEAD)" "$restore_seconds" "$one_seconds" "$passed" >>"$repo/docs/backup-drills.md"

@@ -1,0 +1,51 @@
+{"step":"create-function","ok":true,"ms":1454,"result":"Pending"}
+{"step":"invoke while pending","ok":false,"ms":1187,"shown":"\naws: [ERROR]: An error occurred (ResourceConflictException) when calling the Invoke operation: The operation cannot be performed at this time. The function is currently in the following state: Pending\n\nAdditional error details:\nType: User","paced":true}
+{"step":"wait function-active-v2","ok":true,"ms":2198,"result":""}
+{"step":"invoke, with the log tail","ok":true,"ms":1180,"result":"200"}
+{"step":"invoke, asynchronously","ok":true,"ms":1180,"result":"{\n    \"StatusCode\": 202\n}"}
+{"step":"update-function-code, 6 MB","ok":true,"ms":1239,"result":"InProgress"}
+{"step":"update-function-configuration during the update","ok":false,"ms":1194,"shown":"\naws: [ERROR]: An error occurred (ResourceConflictException) when calling the UpdateFunctionConfiguration operation: The operation cannot be performed at this time. An update is in progress for resource: arn:aws:lambda:tn-tunis-1:123456789012:function:spike-cli\n\nAdditional error details:\nType: User","paced":true}
+{"step":"wait function-updated-v2","ok":true,"ms":1203,"result":""}
+{"step":"update-function-configuration","ok":true,"ms":1179,"result":"InProgress"}
+{"step":"wait function-updated-v2, again","ok":true,"ms":2533,"result":""}
+{"step":"publish-version","ok":true,"ms":1210,"result":"1"}
+{"step":"create-alias","ok":true,"ms":1230,"result":"arn:aws:lambda:tn-tunis-1:123456789012:function:spike-cli:live"}
+{"step":"invoke the alias","ok":true,"ms":1216,"result":"\"1\""}
+{"step":"invoke by the alias ARN","ok":true,"ms":1183,"result":"\"1\""}
+{"step":"create-function-url-config","ok":true,"ms":1212,"result":"https://9d07b8a5bb5c4fa29a78ff6b619e0553.lambda-url.tn-tunis-1.on.aws/"}
+{"step":"add-permission","ok":true,"ms":1227,"result":"{\n    \"Statement\": \"{\\\"Sid\\\":\\\"url\\\",\\\"Effect\\\":\\\"Allow\\\",\\\"Principal\\\":\\\"*\\\",\\\"Action\\\":\\\"lambda:InvokeFunctionUrl\\\",\\\"Resource\\\":\\\"arn:aws:lambda:tn-tunis-1:123456789012:function:spike-cli\\\",\\\"Condi"}
+{"step":"create-event-source-mapping","ok":true,"result":"bc54479e-4600-42c8-87a5-f67aa19112f7"}
+{"step":"put-function-event-invoke-config","ok":true,"ms":1503,"result":"{\n    \"LastModified\": \"2026-10-31T05:14:20.967000+00:00\",\n    \"FunctionArn\": \"arn:aws:lambda:tn-tunis-1:123456789012:function:spike-cli:$LATEST\",\n    \"MaximumRetryAttempts\": 1,\n    \"DestinationConfig\""}
+{"step":"put-function-concurrency","ok":true,"ms":1555,"result":"{\n    \"ReservedConcurrentExecutions\": 5\n}"}
+{"step":"tag-resource","ok":true,"ms":1367,"result":""}
+{"step":"untag-resource","ok":true,"ms":1203,"result":""}
+{"step":"list-tags","ok":true,"ms":1363,"result":"{\n    \"Tags\": {\n        \"team\": \"spike\"\n    }\n}"}
+{"step":"reads: get-function","ok":true,"ms":1437,"result":"Active"}
+{"step":"reads: get-function-configuration of 1","ok":true,"ms":1393,"result":"1"}
+{"step":"reads: list-functions","ok":true,"ms":1371,"result":"1"}
+{"step":"reads: list-versions-by-function","ok":true,"ms":1382,"result":"2"}
+{"step":"reads: list-aliases","ok":true,"ms":1337,"result":"1"}
+{"step":"reads: get-alias","ok":true,"ms":1164,"result":"1"}
+{"step":"reads: get-policy","ok":true,"ms":1140,"result":"{\"Version\":\"2012-10-17\",\"Id\":\"default\",\"Statement\":[{\"Sid\":\"url\",\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"lambda:InvokeFunctionUrl\",\"Resource\":\"arn:aws:lambda:tn-tunis-1:123456789012:function:spike-"}
+{"step":"reads: get-function-url-config","ok":true,"ms":1224,"result":"NONE"}
+{"step":"reads: list-function-url-configs","ok":true,"ms":1243,"result":"1"}
+{"step":"reads: list-event-source-mappings","ok":true,"ms":1407,"result":"1"}
+{"step":"reads: get-event-source-mapping","ok":true,"ms":1291,"result":"Enabled"}
+{"step":"reads: get-function-event-invoke-config","ok":true,"ms":1459,"result":"1"}
+{"step":"reads: list-function-event-invoke-configs","ok":true,"ms":1339,"result":"1"}
+{"step":"reads: get-function-concurrency","ok":true,"ms":1386,"result":"{\n    \"ReservedConcurrentExecutions\": 5\n}"}
+{"step":"reads: get-function-code-signing-config","ok":true,"ms":1346,"result":"{\n    \"CodeSigningConfigArn\": \"\",\n    \"FunctionName\": \"spike-cli\"\n}"}
+{"step":"reads: get-account-settings","ok":true,"ms":1552,"result":"1"}
+{"step":"update-alias, weighted","ok":true,"ms":1761,"result":"1"}
+{"step":"update-event-source-mapping while creating","ok":true,"ms":1608,"result":"Updating","paced":true}
+{"step":"update-function-url-config","ok":true,"ms":1744,"result":"AWS_IAM"}
+{"step":"update-function-event-invoke-config","ok":true,"ms":1317,"result":"{\n    \"LastModified\": \"2026-10-31T05:14:54.635000+00:00\",\n    \"FunctionArn\": \"arn:aws:lambda:tn-tunis-1:123456789012:function:spike-cli:$LATEST\",\n    \"MaximumRetryAttempts\": 1,\n    \"MaximumEventAgeInS"}
+{"step":"a later operation: list-layers","ok":false,"ms":1334,"shown":"\naws: [ERROR]: An error occurred (UnknownOperationException) when calling the ListLayers operation: FF doesn't offer this operation of Lambda's API yet: GET /2018-10-31/layers. It comes in a later step."}
+{"step":"a missing function: get-function","ok":false,"ms":1356,"shown":"\naws: [ERROR]: An error occurred (ResourceNotFoundException) when calling the GetFunction operation: Function not found: arn:aws:lambda:tn-tunis-1:123456789012:function:no-such-function\n\nAdditional error details:\nType: User"}
+{"step":"deletes: delete-function-concurrency","ok":true,"ms":1345,"result":""}
+{"step":"deletes: delete-function-event-invoke-config","ok":true,"ms":1391,"result":""}
+{"step":"deletes: delete-event-source-mapping","ok":true,"ms":1341,"result":"Deleting"}
+{"step":"deletes: remove-permission","ok":true,"ms":1433,"result":""}
+{"step":"deletes: delete-function-url-config","ok":true,"ms":1271,"result":""}
+{"step":"deletes: delete-alias","ok":true,"ms":1439,"result":""}
+{"step":"deletes: delete-function","ok":true,"ms":1279,"result":"{\n    \"StatusCode\": 204\n}"}

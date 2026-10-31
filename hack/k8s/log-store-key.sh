@@ -7,7 +7,6 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-mkdir -p "$FF_KUBE_DIR"
 # mktemp makes the file readable by its owner alone; the key never goes through a command line.
 tmp="$(mktemp "$FF_KUBE_DIR/.victoria-logs-delete-key.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT

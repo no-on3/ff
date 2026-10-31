@@ -63,7 +63,7 @@ e2e_data_db 10.199.3.0/24 "$data_db_address"
 e2e_cache 10.199.3.11
 e2e_mail 10.199.3.12 10.199.3.13
 
-echo "== ff and the backend"
+section "ff and the backend"
 (cd "$FF_REPO_ROOT/cli" && cargo build --release --locked -q)
 ff_bin="$FF_REPO_ROOT/cli/target/release/ff"
 e2e_build
@@ -119,7 +119,7 @@ for example in hello.ts hello.py; do
   name="cli-${example/./-}"
   runtime=nodejs
   [ "${example##*.}" = py ] && runtime=python
-  echo "== $example, as $name"
+  section "$example, as $name"
   ff deploy "$FF_REPO_ROOT/examples/$example" --name "$name"
   check "deploy creates it, live" "0 created $name ($runtime, 128 MB, 5 s): ACTIVE" "$(code) $(out | sed 's/ in [0-9.]* s$//')"
   ff invoke "$name" --data '{"name": "Tunis"}'
@@ -130,7 +130,7 @@ for example in hello.ts hello.py; do
   found=false
   for _ in $(seq 1 30); do
     ff logs "$name" --request-id "$request_id"
-    if out | grep -q ' greeting Tunis$'; then
+    if out | grep ' greeting Tunis$' >/dev/null; then
       found=true
       break
     fi
@@ -196,7 +196,7 @@ for example in hello.ts hello.py; do
   check "and it is gone" 3 "$(code)"
 done
 
-echo "== failures"
+section "failures"
 ff deploy "$FF_REPO_ROOT/examples/hello.py" --name cli-raises
 ff invoke cli-raises --data '{"name": "error"}'
 raised_id="$(err | sed -n 's/^request ID: //p')"
@@ -245,7 +245,7 @@ check "and another account none of them" "0 No function yet: \`ff deploy <file>\
 for name in cli-raises cli-slow cli-broken; do ff delete "$name" --yes; done
 check "the last one deleted" "0 deleted cli-broken" "$(code) $(out)"
 
-echo "== environment variables: --env, ff env, and on this machine"
+section "environment variables: --env, ff env, and on this machine"
 printf 'import os\n\ndef handler(event, context):\n    return {"greeting": os.environ.get("GREETING", "none"), "token": os.environ.get("TOKEN", "none")}\n' >"$work/env-reader.py"
 ff deploy "$work/env-reader.py" --name cli-env --env GREETING=Ahlan
 check "deploy --env makes a function with its variable" "0 created" "$(code) $(out | cut -d' ' -f1)"
@@ -266,24 +266,24 @@ check "ff local invoke --env gives the run its variables" "0 Local" "$(code) $(o
 ff local invoke "$work/env-reader.py" --env FUNCTION_TIMEOUT=1
 check "and refuses the names the runtime sets itself, as the API does" "2 error: FUNCTION_TIMEOUT is reserved: AWS Lambda or FF's runtime sets it" "$(code) $(err)"
 
-echo "== secrets: set from stdin, read by the function only"
+section "secrets: set from stdin, read by the function only"
 printf 'import os\n\ndef handler(event, context):\n    return {"password": os.environ.get("DB_PASSWORD", "none")}\n' >"$work/secret-reader.py"
 ff deploy "$work/secret-reader.py" --name cli-secrets
 echo "hunter2-$account_a" | ff secrets set cli-secrets DB_PASSWORD
 check "ff secrets set takes the value from stdin, and says nothing of it" "0 false" \
-  "$(code) $(cat "$work/out" "$work/err" | grep -q "hunter2" && echo true || echo false)"
+  "$(code) $(cat "$work/out" "$work/err" | grep "hunter2" >/dev/null && echo true || echo false)"
 ff invoke cli-secrets --raw
 check "the function reads it, once the command has answered" "0 hunter2-$account_a" "$(code) $(out | jq -r .password)"
 ff secrets list cli-secrets
 check "ff secrets list names it, and when it was set" "0 DB_PASSWORD" "$(code) $(out | sed -n 2p | awk '{ print $1 }')"
 ff get cli-secrets --output json
-check "and ff get shows no value of it" "0 false" "$(code) $(out | grep -q hunter2 && echo true || echo false)"
+check "and ff get shows no value of it" "0 false" "$(code) $(out | grep hunter2 >/dev/null && echo true || echo false)"
 ff secrets unset cli-secrets DB_PASSWORD
 ff invoke cli-secrets --raw
 check "ff secrets unset removes it" "0 none" "$(code) $(out | jq -r .password)"
 ff delete cli-secrets --yes
 
-echo "== a function's URL: ff url, ff invoke --http, ff domains"
+section "a function's URL: ff url, ff invoke --http, ff domains"
 printf '%s\n' 'export async function handler(event: { rawPath: string; queryStringParameters?: Record<string, string> }) {' \
   '  return { statusCode: 200, headers: { "content-type": "text/plain" }, body: `Ahlan ${event.queryStringParameters?.name ?? "world"} at ${event.rawPath}` };' \
   '}' >"$work/web.ts"
@@ -303,7 +303,7 @@ check "ff url show says its address and who may call it" "0 $address callers nee
   "$(code) $(out | head -1) $(out | sed -n 2p | cut -d';' -f1)"
 ff domains add cli-url shop.cli-e2e.test
 check "ff domains add says the records that prove it" "0 shop.cli-e2e.test: pending true" \
-  "$(code) $(out | head -1) $(out | grep -q "CNAME shop.cli-e2e.test ${address:7:32}.fn.localhost" && echo true || echo false)"
+  "$(code) $(out | head -1) $(out | grep "CNAME shop.cli-e2e.test ${address:7:32}.fn.localhost" >/dev/null && echo true || echo false)"
 ff domains verify cli-url shop.cli-e2e.test
 check "which, until they exist, leave it pending" "0 shop.cli-e2e.test: pending" "$(code) $(out | head -1)"
 ff domains list cli-url --output json
@@ -315,11 +315,11 @@ ff invoke cli-url --http GET /
 check "after which ff invoke --http has nowhere to call" "3 error: cli-url has no URL: \`ff url enable cli-url --auth none|key\` gives it one" "$(code) $(err)"
 ff delete cli-url --yes
 
-echo "== schedules: ff schedule set, its run, list, disable, remove"
+section "schedules: ff schedule set, its run, list, disable, remove"
 ff deploy "$FF_REPO_ROOT/examples/hello.py" --name cli-sched
 ff schedule set cli-sched "rate(1 minute)" --input '{"name": "Schedule"}'
 check "ff schedule set makes it, and says its next runs" "0 cli-sched's schedule schedule made: rate(1 minute), with its own input true" \
-  "$(code) $(out | head -1) $(out | sed -n 2p | grep -qE '^next runs \(UTC\): [0-9-]+ [0-9:]+, ' && echo true || echo false)"
+  "$(code) $(out | head -1) $(out | sed -n 2p | grep -E '^next runs \(UTC\): [0-9-]+ [0-9:]+, ' >/dev/null && echo true || echo false)"
 ff schedule set cli-sched "rate(5 minute)"
 check "a wrong expression is said in the API's words, and nothing changes" "3 error: rate(5 minute) must be rate(5 minutes): the unit is plural above 1" "$(code) $(err | head -1)"
 # Its first run comes a minute after it was made, then the scheduler's tick within 5 s.
@@ -343,7 +343,7 @@ ff schedule list cli-sched
 check "ff schedule remove takes it away" "0 cli-sched has no schedule: \`ff schedule set cli-sched \"rate(1 hour)\"\` makes one" "$(code) $(out)"
 ff delete cli-sched --yes
 
-echo "== ff init: a new function's folder, run locally, then deployed"
+section "ff init: a new function's folder, run locally, then deployed"
 for runtime in python nodejs; do
   name="cli-init-$runtime"
   (cd "$work" && rm -rf "$name" && "$ff_bin" init "$name" --runtime "$runtime" >"$work/out" 2>"$work/err")
@@ -360,7 +360,7 @@ for runtime in python nodejs; do
   ff delete "$name" --yes
 done
 
-echo "== packages: a folder with its libraries, packaged, uploaded once, deployed"
+section "packages: a folder with its libraries, packaged, uploaded once, deployed"
 # npm and pip fetch the libraries: this part needs the network, or their caches.
 node_pkg="$work/cli-pkg-node"
 rm -rf "$node_pkg" && mkdir -p "$node_pkg/lib"
@@ -375,7 +375,7 @@ echo 'DB_PASSWORD=hunter2' >"$node_pkg/.env"
 ff deploy "$node_pkg"
 check "deploy of a folder installs its npm library, uploads its package, and makes it live" \
   "0 created cli-pkg-node (nodejs, 128 MB, 5 s): ACTIVE uploaded" "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//') $(out | tail -1 | awk '{ print $NF }')"
-check "leaving out its .env, and saying so" true "$(err | grep -q '^warning: not packaged: .env, which usually hold secrets' && echo true || echo false)"
+check "leaving out its .env, and saying so" true "$(err | grep '^warning: not packaged: .env, which usually hold secrets' >/dev/null && echo true || echo false)"
 ff invoke cli-pkg-node --data '{"ms": 90000, "name": "Tunis"}'
 check "it answers through its library and its own module" "0 2m Hello Tunis" "$(code) $(out | sed '$d' | jq -r '"\(.took) \(.greeting)"')"
 ff package "$node_pkg" --output json
@@ -395,7 +395,7 @@ check "and back uploads nothing: the account has that package" "0 which the acco
 ff deploy "$FF_REPO_ROOT/examples/hello.ts" --name cli-pkg-node
 check "a file deployed over it makes it inline code again, with inline code's handler, saying so" \
   "0 changed: code, handler true" \
-  "$(code) $(out | sed 's/.*, changed/changed/') $(err | grep -q '^warning: cli-pkg-node ran a package: it becomes inline code, .*hello.ts alone, its handler function.handler$' && echo true || echo false)"
+  "$(code) $(out | sed 's/.*, changed/changed/') $(err | grep '^warning: cli-pkg-node ran a package: it becomes inline code, .*hello.ts alone, its handler function.handler$' >/dev/null && echo true || echo false)"
 ff invoke cli-pkg-node --data '{"name": "Inline"}'
 check "which answers" "0 Hello Inline" "$(code) $(out | sed '$d' | jq -r .message)"
 ff delete cli-pkg-node --yes
@@ -419,7 +419,7 @@ check "it answers through requests, its handler AWS Lambda's default" "0 2.32.5 
   "$(code) $(out | sed '$d' | jq -r '"\(.requests) \(.url)"') $("$ff_bin" get cli-pkg-requests --output json | jq -r .handler)"
 ff package "$requests_pkg" --container --zip "$work/requests-container.zip"
 check "ff package --container installs them in the runtime's base, in Docker" "0 true" \
-  "$(code) $(python3 -I -m zipfile -l "$work/requests-container.zip" | grep -q '^requests/__init__.py ' && echo true || echo false)"
+  "$(code) $(python3 -I -m zipfile -l "$work/requests-container.zip" | grep '^requests/__init__.py ' >/dev/null && echo true || echo false)"
 ff delete cli-pkg-requests --yes
 
 numpy_pkg="$work/cli-pkg-numpy"
@@ -469,7 +469,7 @@ check "the runtime imports it from the package, at /var/task" "0 7 created file:
   "$(code) $(out | sed '$d' | jq -r '"\(.order) \(.status) \(.module)"')"
 ff package "$esm_pkg" --zip "$work/esm.zip"
 check "what .ffignore names isn't in the package" "0 true false" \
-  "$(code) $(python3 -I -m zipfile -l "$work/esm.zip" | grep -q '^src/handlers/orders.js ' && echo true || echo false) $(python3 -I -m zipfile -l "$work/esm.zip" | grep -q '^test/' && echo true || echo false)"
+  "$(code) $(python3 -I -m zipfile -l "$work/esm.zip" | grep '^src/handlers/orders.js ' >/dev/null && echo true || echo false) $(python3 -I -m zipfile -l "$work/esm.zip" | grep '^test/' >/dev/null && echo true || echo false)"
 ff delete cli-pkg-esm --yes
 
 ts_pkg="$work/cli-pkg-ts"
@@ -484,7 +484,7 @@ EOF
 ff package "$ts_pkg" --compile --zip "$work/ts.zip" --output json
 ts_sha="$(out | jq -r .codeSha256)"
 check "ff package --compile makes it JavaScript for AWS Lambda: its tsc's output, no TypeScript, no build tools" "0 true 0" \
-  "$(code) $(python3 -I -m zipfile -l "$work/ts.zip" | grep -q '^dist/index.js ' && echo true || echo false) $(python3 -I -m zipfile -l "$work/ts.zip" | grep -cE '^[^ ]+\.ts |^node_modules/typescript/')"
+  "$(code) $(python3 -I -m zipfile -l "$work/ts.zip" | grep '^dist/index.js ' >/dev/null && echo true || echo false) $(python3 -I -m zipfile -l "$work/ts.zip" | grep -cE '^[^ ]+\.ts |^node_modules/typescript/')"
 rm -rf "$work/ts-built" && mkdir -p "$work/ts-built" && python3 -I -m zipfile -e "$work/ts.zip" "$work/ts-built"
 ff deploy "$work/ts-built" --name cli-pkg-ts --no-build --handler dist/index.handler --output json
 check "that zip's files, deployed as they are with --no-build, are the same package" "0 created $ts_sha" \
@@ -493,7 +493,7 @@ ff invoke cli-pkg-ts --data '{"ms": 60000}'
 check "and run on FF as they would on Lambda" "0 1m" "$(code) $(out | sed '$d' | jq -r .took)"
 ff delete cli-pkg-ts --yes
 
-echo "== the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
+section "the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
 # The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own. No
 # bucket is named, so its orders go without receipts.
 export FF_APP_DB_NAME="$E2E_PROJECT-app-db" FF_APP_DB_SUBNET=198.18.1.0/24 FF_APP_DB_ADDRESS=198.18.1.10
@@ -532,7 +532,7 @@ check "the same folder, a second function with the other handler: its package, t
 printf '%s\n' "$database_url" | ff secrets set orders-nightly DATABASE_URL --profile c
 ff schedule set orders-nightly "cron(0 2 * * ? *)" --profile c
 check "a schedule at 02:00 UTC every night" "0 orders-nightly's schedule schedule made: cron(0 2 * * ? *), with EventBridge's Scheduled Event true" \
-  "$(code) $(out | head -1) $(out | sed -n 2p | grep -qE '^next runs \(UTC\): [0-9-]+ 02:00' && echo true || echo false)"
+  "$(code) $(out | head -1) $(out | sed -n 2p | grep -E '^next runs \(UTC\): [0-9-]+ 02:00' >/dev/null && echo true || echo false)"
 # Its next run's event, now: EventBridge's Scheduled Event for 02:00 after the day the order was made.
 order_day="$(app_db -c "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') FROM orders")"
 jq --arg time "$(date -u -d "$order_day + 1 day" +%Y-%m-%dT02:00:00Z)" '.time = $time' "$app/events/scheduled.json" >"$work/scheduled.json"
@@ -541,12 +541,12 @@ check "which reports the day's order from the database" "0 $order_day 1 2 0" "$(
 ff delete orders-nightly --yes --profile c
 ff delete orders-api --yes --profile c
 
-echo "== a customer's database, with ff db: a function's secret, written by the app with its account's internet access off"
+section "a customer's database, with ff db: a function's secret, written by the app with its account's internet access off"
 ff deploy "$app" --name cli-db-orders --handler index.http
 check "the same app in account A, whose functions don't reach the internet" "0 created cli-db-orders (nodejs, 128 MB, 5 s): ACTIVE" \
   "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
 ff db create Orders
-check "ff db create refuses a name RDS wouldn't take, before calling" "2 true" "$(code) $(err | grep -q "can't be a database's name" && echo true || echo false)"
+check "ff db create refuses a name RDS wouldn't take, before calling" "2 true" "$(code) $(err | grep "can't be a database's name" >/dev/null && echo true || echo false)"
 ff db create cli-orders --secret-for cli-db-orders --output json
 db_conn="$(out | jq -r .connectionString)"
 check "ff db create makes it, its connection string once, and sets it as the function's DATABASE_URL" "0 active cli-db-orders:DATABASE_URL true" \
@@ -560,27 +560,27 @@ ff db list
 check "ff db list shows it available, its storage and sessions" "0 cli-orders available" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
 ff db get cli-orders --output json
 check "ff db get gives how to reach it, without its password" "0 $data_db_address false" \
-  "$(code) $(out | jq -r .host) $(out | grep -q "$(jq -rn --arg s "$db_conn" '$s | capture(":(?<p>[^:@]+)@").p')" && echo true || echo false)"
+  "$(code) $(out | jq -r .host) $(out | grep "$(jq -rn --arg s "$db_conn" '$s | capture(":(?<p>[^:@]+)@").p')" >/dev/null && echo true || echo false)"
 ff db password cli-orders --secret-for cli-db-orders --output json
 new_conn="$(out | jq -r .connectionString)"
 check "ff db password: the old string opens no session, the new one does, and the function has it" "0 true 1" \
-  "$(code) $( (data_db_psql "$db_conn" 'select 1' || true) | grep -q 'password authentication failed' && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
+  "$(code) $( (data_db_psql "$db_conn" 'select 1' || true) | grep 'password authentication failed' >/dev/null && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
 ff invoke cli-db-orders --http POST /orders --data '{"item": "bambalouni", "quantity": 1}'
 check "  ... which writes again through its new secret" "0 HTTP 201 2" "$(code) $(out | head -1) $(data_db_psql "$new_conn" 'select count(*) from orders')"
 # Each minute, the backend measures every database not measured yet in the hour: this one within a minute.
 for _ in $(seq 75); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.databases | map(.name) | index("cli-orders")' >/dev/null && break; sleep 1; done
 ff usage
-check "ff usage lists its month after the functions" "0 true" "$(code) $(out | grep -qE '^cli-orders +[0-9]+ +[0-9.]+ +[0-9.]+$' && echo true || echo false)"
+check "ff usage lists its month after the functions" "0 true" "$(code) $(out | grep -E '^cli-orders +[0-9]+ +[0-9.]+ +[0-9.]+$' >/dev/null && echo true || echo false)"
 ff db delete cli-orders
-check "ff db delete asks first, a script saying --yes" "2 true" "$(code) $(err | grep -q 'ff db delete asks first' && echo true || echo false)"
+check "ff db delete asks first, a script saying --yes" "2 true" "$(code) $(err | grep 'ff db delete asks first' >/dev/null && echo true || echo false)"
 ff db delete cli-orders --yes
 check "ff db delete drops it, with its data, its user gone" "0 deleted the database cli-orders, with its data 0" \
   "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
 ff delete cli-db-orders --yes
 
-echo "== buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
+section "buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
 ff buckets create My.Photos
-check "ff buckets create refuses a name AWS wouldn't take, before calling" "2 true" "$(code) $(err | grep -q "can't be a bucket's name" && echo true || echo false)"
+check "ff buckets create refuses a name AWS wouldn't take, before calling" "2 true" "$(code) $(err | grep "can't be a bucket's name" >/dev/null && echo true || echo false)"
 ff buckets create cli-photos
 check "ff buckets create makes it, and says where AWS's tools reach it" "0 cli-photos made http://cli-photos.s3.localhost:$storage_port" \
   "$(code) $(out | head -1) $(out | sed -n 3p | awk '{ print $2 }')"
@@ -604,16 +604,16 @@ check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its 
   "$uploaded $(aws_with_key s3 cp s3://cli-photos/hello.txt - 2>/dev/null)"
 ff buckets keys list
 check "ff buckets keys list names what it reaches, never its secret" "0 $key_id cli-photos false" \
-  "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep -q "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" && echo true || echo false)"
+  "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" >/dev/null && echo true || echo false)"
 # Each minute, the backend measures every bucket not measured yet in the hour: this one within a minute.
 for _ in $(seq 75); do "$ff_bin" buckets get cli-photos --output json 2>/dev/null | jq -e '.measuredAt != null' >/dev/null && break; sleep 1; done
 ff buckets get cli-photos
-check "ff buckets get says what it held at its last measure" "0 true" "$(code) $(out | grep -qE '^held +[0-9.]+ MB, [01] objects?, as measured at ' && echo true || echo false)"
+check "ff buckets get says what it held at its last measure" "0 true" "$(code) $(out | grep -E '^held +[0-9.]+ MB, [01] objects?, as measured at ' >/dev/null && echo true || echo false)"
 # Its month: the requests the front door counted, by S3's classes, and the bytes they sent out, once their minute is written.
 for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.buckets[] | select(.name == "cli-photos" and .tier1Requests > 0 and .tier2Requests > 0)' >/dev/null && break; sleep 1; done
 ff usage
 check "ff usage lists its month after the databases: GB-months, each class's requests, what it sent out" "0 true true" \
-  "$(code) $(out | grep -qE '^cli-photos +[0-9.]+ +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+ [MG]B +[0-9.]+$' && echo true || echo false) $("$ff_bin" usage --output json | jq '.buckets[] | select(.name == "cli-photos") | .bytesDownloaded > 0')"
+  "$(code) $(out | grep -E '^cli-photos +[0-9.]+ +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+ [MG]B +[0-9.]+$' >/dev/null && echo true || echo false) $("$ff_bin" usage --output json | jq '.buckets[] | select(.name == "cli-photos") | .bytesDownloaded > 0')"
 # The export kit's way out to AWS S3, both halves: the bucket to a folder with the key's variables, then the folder to
 # "S3", here another bucket behind an AWS CLI profile whose key reaches that one alone, so that a second half still
 # holding FF's variables would be refused there. The script calls the AWS CLI by name: the one above.
@@ -634,7 +634,7 @@ check "the export kit's s3-sync.sh copies the bucket to a folder, then to S3 wit
   "$synced $(cat "$work/backup/hello.txt" 2>/dev/null) $(as_s3 "${aws_cli[@]}" s3 cp s3://cli-photos-out/hello.txt - 2>/dev/null)"
 ff buckets delete cli-photos-out --force --yes
 ff buckets delete cli-photos --yes
-check "ff buckets delete leaves a bucket with files, in the API's words, exit 3" "3 true" "$(code) $(err | grep -q "isn't empty" && echo true || echo false)"
+check "ff buckets delete leaves a bucket with files, in the API's words, exit 3" "3 true" "$(code) $(err | grep "isn't empty" >/dev/null && echo true || echo false)"
 ff buckets delete cli-photos --force --yes
 check "  ... and --force deletes them first" "0 deleted the bucket cli-photos, with its files" "$(code) $(out)"
 ff buckets keys revoke "$key_id" --yes
@@ -642,7 +642,7 @@ ff buckets keys revoke "$key_id" --yes
 refused="$(aws_with_key s3 ls 2>&1 || true)"
 check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
 
-echo "== a site, with ff sites: a built folder deployed with a deploy's own key, visited, deployed again changed"
+section "a site, with ff sites: a built folder deployed with a deploy's own key, visited, deployed again changed"
 site_url="http://cli-site.site.localhost:$website_port"
 # visit <path> [curl options…]: the site's answer, its status and its page's title.
 visit() {
@@ -679,7 +679,7 @@ check "ff sites get says its address and settings" "0 $site_url yes" \
   "$(code) $(out | sed -n 1p) $(out | sed -n 's/^single-page app *\(yes\).*/\1/p')"
 ff sites domains add cli-site www.cli-shop.tn
 check "ff sites domains add gives the CNAME to the site's host that proves it" "0 true" \
-  "$(code) $(out | grep -q 'CNAME www.cli-shop.tn cli-site.site.localhost' && echo true || echo false)"
+  "$(code) $(out | grep 'CNAME www.cli-shop.tn cli-site.site.localhost' >/dev/null && echo true || echo false)"
 ff sites domains remove cli-site www.cli-shop.tn --yes
 check "  ... and remove takes it away" "0 0" "$(code) $("$ff_bin" sites domains list cli-site --output json | jq length)"
 # Each minute, the website server writes the minutes that are over: these within two.
@@ -694,9 +694,9 @@ check "  ... its files kept: a deploy finds them unchanged, and makes it a site 
   "$(code) $(out | jq -r '"\(.uploaded | length) \(.unchanged) \(.singlePageApp)"')"
 ff buckets delete cli-site --force --yes
 
-echo "== queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
+section "queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
 ff queues create cli-orders.fifo
-check "ff queues create refuses a FIFO queue's name before calling" "2 true" "$(code) $(err | grep -q 'FIFO queues come later' && echo true || echo false)"
+check "ff queues create refuses a FIFO queue's name before calling" "2 true" "$(code) $(err | grep 'FIFO queues come later' >/dev/null && echo true || echo false)"
 ff queues create cli-orders-dlq
 ff queues create cli-orders --visibility-timeout 2s --retention 1d --dead-letter-queue cli-orders-dlq --max-receive-count 2
 check "ff queues create makes it, and says where AWS's tools reach it" "0 cli-orders made http://localhost:$sqs_port/$account_a/cli-orders" \
@@ -705,7 +705,7 @@ ff queues get cli-orders --output json
 check "  ... with its attributes, its dead-letter queue by the ARN of the queue named" "0 2 86400 2 cli-orders-dlq" \
   "$(code) $(out | jq -r '"\(.visibilityTimeout) \(.messageRetentionPeriod) \(.redrivePolicy.maxReceiveCount) \(.redrivePolicy.deadLetterTargetArn | split(":")[5])"')"
 ff queues send cli-orders '{"order": 1}' --attribute item=bsissa
-check "ff queues send sends a message, an attribute with it" "0 true" "$(code) $(out | grep -qE '^sent [0-9a-f-]{36} to cli-orders$' && echo true || echo false)"
+check "ff queues send sends a message, an attribute with it" "0 true" "$(code) $(out | grep -E '^sent [0-9a-f-]{36} to cli-orders$' >/dev/null && echo true || echo false)"
 ff buckets keys create --queue cli-orders
 check "a key for that queue alone gives the SQS endpoint among its six variables" "0 6 http://localhost:$sqs_port" \
   "$(code) $(out | grep -c '^export AWS_') $(out | sed -n 's/^export AWS_ENDPOINT_URL_SQS=//p')"
@@ -735,13 +735,13 @@ ff queues send cli-orders two --delay 1m
 ff queues list --output json
 check "ff queues list counts a queue's messages, one delayed" "0 1 1" "$(code) $(out | jq -r '.[] | select(.name == "cli-orders") | "\(.messages.available) \(.messages.delayed)"')"
 ff queues purge cli-orders
-check "ff queues purge asks first, and a script must say --yes" "2 true" "$(code) $(err | grep -q 'say --yes' && echo true || echo false)"
+check "ff queues purge asks first, and a script must say --yes" "2 true" "$(code) $(err | grep 'say --yes' >/dev/null && echo true || echo false)"
 ff queues purge cli-orders --yes
 check "  ... and deletes every message" "0 deleted every message of cli-orders 0" \
   "$(code) $(out) $("$ff_bin" queues get cli-orders --output json | jq '.messages.available + .messages.delayed')"
 ff queues set cli-orders --retention 1h --no-dead-letter-queue
 check "ff queues set changes what it is given, and removes the dead-letter queue" "0 cli-orders changed true" \
-  "$(code) $(out | head -1) $(out | grep -q '^dead letters  *none' && echo true || echo false)"
+  "$(code) $(out | head -1) $(out | grep '^dead letters  *none' >/dev/null && echo true || echo false)"
 check "  ... as the AWS CLI sees it" "3600" \
   "$(aws_sqs get-queue-attributes --queue-url "$queue_url" --attribute-names MessageRetentionPeriod 2>/dev/null | jq -r .Attributes.MessageRetentionPeriod)"
 ff queues list --profile b
@@ -750,20 +750,20 @@ check "the other account has none of them" "0 The account has no queue: \`ff que
 for _ in $(seq 150); do "$ff_bin" queues metrics cli-orders --output json 2>/dev/null | jq -e '[.metrics.NumberOfMessagesSent.Sum[]] | add >= 3' >/dev/null && break; sleep 1; done
 ff queues metrics cli-orders --period 300
 check "ff queues metrics shows a row each five minutes, SQS's metrics as CloudWatch names them: the messages sent, received and deleted" "0 true true" \
-  "$(code) $(out | head -1 | grep -qE '^TIME \(UTC\) +WAITING +IN FLIGHT +OLDEST +SENT +RECEIVED +DELETED +EMPTY$' && echo true || echo false) $(out | tail -1 | grep -qE '^cli-orders for [0-9hm ]+, a point each 5m: sent ([3-9]|[1-9][0-9]+), received [1-9][0-9]*, deleted [0-9]+, empty receives [1-9][0-9]*; at most [0-9]+ waiting$' && echo true || echo false)"
+  "$(code) $(out | head -1 | grep -E '^TIME \(UTC\) +WAITING +IN FLIGHT +OLDEST +SENT +RECEIVED +DELETED +EMPTY$' >/dev/null && echo true || echo false) $(out | tail -1 | grep -E '^cli-orders for [0-9hm ]+, a point each 5m: sent ([3-9]|[1-9][0-9]+), received [1-9][0-9]*, deleted [0-9]+, empty receives [1-9][0-9]*; at most [0-9]+ waiting$' >/dev/null && echo true || echo false)"
 ff queues delete cli-orders --yes
 check "ff queues delete deletes it" "0 deleted the queue cli-orders" "$(code) $(out)"
 ff queues get cli-orders
-check "  ... which then isn't there, in the API's words, exit 3" '3 true' "$(code) $(err | grep -q 'no queue named "cli-orders"' && echo true || echo false)"
+check "  ... which then isn't there, in the API's words, exit 3" '3 true' "$(code) $(err | grep 'no queue named "cli-orders"' >/dev/null && echo true || echo false)"
 ff queues delete cli-orders-dlq --yes
 # Its requests are counted a minute at a time: in ff usage within two, deleted and all.
 for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.queues[] | select(.name == "cli-orders" and .deleted and .messagesSent >= 3)' >/dev/null && break; sleep 1; done
 ff usage
 check "ff usage lists the queue's month after the buckets, deleted since: its requests as SQS bills them, the messages sent and received" "0 true" \
-  "$(code) $(out | grep -qE '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' && echo true || echo false)"
+  "$(code) $(out | grep -E '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' >/dev/null && echo true || echo false)"
 ff buckets keys revoke "$queue_key" --yes
 
-echo "== functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"
+section "functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"
 # As a function written for Lambda answers: the messages it couldn't handle, by their IDs.
 cat >"$work/reader.ts" <<'TS'
 export const handler = async (event: { Records: Array<{ messageId: string; body: string }> }) => ({
@@ -774,10 +774,10 @@ ff deploy "$work/reader.ts" --name cli-reader --timeout 3
 ff queues create cli-work --visibility-timeout 5
 ff event-sources add cli-work cli-reader --batching-window 1s --report-batch-item-failures
 check "ff event-sources add has the function read the queue, and says how" "0 true" \
-  "$(code) $(out | grep -q '^cli-reader reads the queue cli-work: batches of 10 at most, a window of 1 second, the answer naming the messages that failed' && echo true || echo false)"
+  "$(code) $(out | grep '^cli-reader reads the queue cli-work: batches of 10 at most, a window of 1 second, the answer naming the messages that failed' >/dev/null && echo true || echo false)"
 mapping_id="$(out | grep -oE '\([0-9a-f-]{36}\)$' | tr -d '()')"
 ff event-sources add cli-work cli-reader
-check "  ... once: again, the API's words name the mapping there is, exit 3" "3 true" "$(code) $(err | grep -q "UUID $mapping_id" && echo true || echo false)"
+check "  ... once: again, the API's words name the mapping there is, exit 3" "3 true" "$(code) $(err | grep "UUID $mapping_id" >/dev/null && echo true || echo false)"
 ff queues send cli-work done
 ff queues send cli-work fail
 reader_calls() { "$ff_bin" history cli-reader --output json | jq '[.invocations[] | select(.source == "sqs")] | length'; }
@@ -791,7 +791,7 @@ ff event-sources list --queue cli-work
 check "ff event-sources list shows it, by the queue's and the function's names" "0 $mapping_id cli-work cli-reader Enabled" \
   "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $8 }')"
 ff event-sources update "$mapping_id" --disable
-check "ff event-sources update --disable stops its reads" "0 true" "$(code) $(out | grep -q 'disabled: nothing read' && echo true || echo false)"
+check "ff event-sources update --disable stops its reads" "0 true" "$(code) $(out | grep 'disabled: nothing read' >/dev/null && echo true || echo false)"
 ff queues receive cli-work --wait 15s --output json
 check "  ... the message the function failed still there, received again once its visibility timeout ended" '0 fail true' \
   "$(code) $(out | jq -r '.[0] | "\(.body) \(.receiveCount >= 2)"')"
@@ -801,7 +801,7 @@ check "ff event-sources remove removes it, the queue's messages staying" "0 remo
 ff delete cli-reader --yes
 ff queues delete cli-work --yes
 
-echo "== a bucket's notifications, with ff buckets notify: an upload with the AWS CLI runs a function with S3's event, a deletion goes to a queue"
+section "a bucket's notifications, with ff buckets notify: an upload with the AWS CLI runs a function with S3's event, a deletion goes to a queue"
 # As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
 cat >"$work/on-upload.ts" <<'TS'
 export const handler = async (event: { Records: Array<{ s3: { object: { key: string } } }> }) => ({
@@ -813,12 +813,12 @@ ff buckets create cli-drop
 ff queues create cli-drop-events
 ff buckets notify cli-drop cli-on-upload --prefix in/ --id uploads
 check "ff buckets notify has the bucket run a function for its uploads, by its name, and says what it sends" "0 true" \
-  "$(code) $(out | grep -qE '^uploads +s3:ObjectCreated:\* +prefix in/ +function cli-on-upload$' && echo true || echo false)"
+  "$(code) $(out | grep -E '^uploads +s3:ObjectCreated:\* +prefix in/ +function cli-on-upload$' >/dev/null && echo true || echo false)"
 ff buckets notify cli-drop --queue cli-drop-events --event 's3:ObjectRemoved:*' --id removals
 check "  ... and its deletions go to a queue, both now listed" "0 uploads,removals" \
   "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
 ff buckets notify cli-drop cli-on-upload --id again
-check "  ... a configuration one event could match twice refused, in S3's words, exit 3" "3 true" "$(code) $(err | grep -q 'Configuration is ambiguously defined' && echo true || echo false)"
+check "  ... a configuration one event could match twice refused, in S3's words, exit 3" "3 true" "$(code) $(err | grep 'Configuration is ambiguously defined' >/dev/null && echo true || echo false)"
 ff buckets keys create --bucket cli-drop
 out | grep '^export AWS_' >"$work/drop.env"
 drop_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/drop.env")"
@@ -842,7 +842,7 @@ ff buckets delete cli-drop --force --yes
 ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
 
-echo "== the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
+section "the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
 # In account A, whose functions don't reach the internet: FF's database and cache, the S3 front door, the SQS and SES
 # endpoints, they do.
 ff deploy "$app" --name shop-api --handler index.http
@@ -862,7 +862,7 @@ ff env list shop-receipts
 check "a bucket for the receipts and a queue of new orders, named in the functions' variables" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
 ff event-sources add cli-new-orders shop-receipts --report-batch-item-failures
 check "shop-receipts reads the queue, naming the messages it fails" "0 true" \
-  "$(code) $(out | grep -q '^shop-receipts reads the queue cli-new-orders: .*the answer naming the messages that failed' && echo true || echo false)"
+  "$(code) $(out | grep '^shop-receipts reads the queue cli-new-orders: .*the answer naming the messages that failed' >/dev/null && echo true || echo false)"
 ff caches create cli-orders --secret-for shop-api --secret-for shop-nightly --output json
 check "ff caches create: the app's cache, its address the API's and the night's REDIS_URL" "0 active shop-api,shop-nightly" \
   "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
@@ -964,17 +964,17 @@ ff delete shop-nightly --yes
 ff delete shop-receipts --yes
 ff delete shop-api --yes
 
-echo "== the account: who, its plan, what it used and owes, how its functions ran"
+section "the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts
 check "ff accounts lists account A, current" "0 * $account_a" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
 ff account
 check "ff account says its plan, and that its functions don't reach the internet, as beta's" "0 Beta true" \
-  "$(code) $(out | sed -n 's/^plan *\([A-Za-z]*\):.*/\1/p') $(out | grep -q '^internet     off' && echo true || echo false)"
+  "$(code) $(out | sed -n 's/^plan *\([A-Za-z]*\):.*/\1/p') $(out | grep '^internet     off' >/dev/null && echo true || echo false)"
 ff usage --output json
 check "ff usage counts this month's calls of the functions deleted since, by name, the asynchronous one among them" "0 5 true" \
   "$(code) $(out | jq -r '.functions[] | select(.functionName == "cli-hello-ts") | .requests') $(out | jq -r '[.functions[] | select(.functionName == "cli-hello-ts") | .deleted] | first')"
 ff usage --csv
-check "and gives the API's CSV" "0 true" "$(code) $(out | head -1 | grep -q 'requests' && echo true || echo false)"
+check "and gives the API's CSV" "0 true" "$(code) $(out | head -1 | grep 'requests' >/dev/null && echo true || echo false)"
 ff balance --output json
 check "ff balance says the balance, in dinars" "0 TND" "$(code) $(out | jq -r .currency)"
 ff metrics --since 2h --output json
@@ -983,17 +983,17 @@ check "ff metrics counts the account's invocations of the last two hours" "0 tru
 for _ in $(seq 150); do "$ff_bin" metrics --since 2h --output json 2>/dev/null | jq -e '([.metrics.AsyncEventsReceived[]] | add >= 2) and ([.metrics.AsyncEventsDropped[]] | add >= 1)' >/dev/null && break; sleep 1; done
 ff metrics --since 2h --period 3600
 check "  ... and its calls that didn't wait, as Lambda's metrics count them, cli-raises's dropped among them" "0 true" \
-  "$(code) $(out | tail -1 | grep -qE '; calls without waiting: ([2-9]|[1-9][0-9]+) kept, [1-9][0-9]* dropped' && echo true || echo false)"
+  "$(code) $(out | tail -1 | grep -E '; calls without waiting: ([2-9]|[1-9][0-9]+) kept, [1-9][0-9]* dropped' >/dev/null && echo true || echo false)"
 
-echo "== ff local: on this machine, in Docker, as production runs it"
+section "ff local: on this machine, in Docker, as production runs it"
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }
 for example in hello.ts hello.py; do
   ff local invoke "$FF_REPO_ROOT/examples/$example" --data '{"name": "Local"}'
   check "local invoke of $example answers, in its runtime image, and says how it went" "0 Hello Local true" \
-    "$(code) $(out | sed '$d' | jq -r .message) $(out | tail -1 | grep -qE '^request [0-9a-f-]{36} · [0-9.]+ ms · [0-9.]+ MB, on this machine$' && echo true || echo false)"
+    "$(code) $(out | sed '$d' | jq -r .message) $(out | tail -1 | grep -E '^request [0-9a-f-]{36} · [0-9.]+ ms · [0-9.]+ MB, on this machine$' >/dev/null && echo true || echo false)"
 done
 check "with the handler's line and the runtime's report in its log" "true true" \
-  "$(err | grep -q '^greeting Local$' && echo true || echo false) $(err | grep -q '^REPORT RequestId: ' && echo true || echo false)"
+  "$(err | grep '^greeting Local$' >/dev/null && echo true || echo false) $(err | grep '^REPORT RequestId: ' >/dev/null && echo true || echo false)"
 ff local invoke "$work/broken.py"
 check "code that fails to load exits 4, with the runtime's reason" "4 error: The function failed to load: Runtime.UserCodeSyntaxError" \
   "$(code) $(err | grep '^error:' | cut -d: -f1-3)"
@@ -1032,4 +1032,4 @@ kill -INT "$starter"
 wait "$starter" 2>/dev/null || true
 check "and Ctrl-C removes its container too" 0 "$(leftover)"
 
-echo "cli-e2e: $passed checks passed"
+checks_done cli-e2e

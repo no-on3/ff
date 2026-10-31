@@ -42,7 +42,7 @@ if [ "$base_host" != "$domain" ]; then
 fi
 case "$tls" in
   wildcard)
-    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep -q . || {
+    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep . >/dev/null || {
       echo "FF_FUNCTION_URL_TLS=wildcard needs the Secret ff-edge-dns with FF_DNS_TSIG_KEY, the TSIG key the edge signs" >&2
       echo "the DNS updates with (deploy/k8s/README.md, \"Function URLs\"); or choose on-demand" >&2
       exit 1
@@ -70,7 +70,7 @@ if [ "$storage_base_host" != "$storage_host" ]; then
 fi
 case "$storage_tls" in
   wildcard)
-    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep -q . || {
+    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep . >/dev/null || {
       echo "FF_STORAGE_TLS=wildcard needs the Secret ff-edge-dns with FF_DNS_TSIG_KEY, as FF_FUNCTION_URL_TLS=wildcard does; or choose on-demand" >&2
       exit 1
     }
@@ -123,7 +123,7 @@ if [ "$website_base_host" != "$website_domain" ]; then
 fi
 case "$website_tls" in
   wildcard)
-    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep -q . || {
+    kubectl -n ff-edge get secret ff-edge-dns -o jsonpath='{.data.FF_DNS_TSIG_KEY}' 2>/dev/null | grep . >/dev/null || {
       echo "FF_WEBSITE_TLS=wildcard needs the Secret ff-edge-dns with FF_DNS_TSIG_KEY, as FF_FUNCTION_URL_TLS=wildcard does; or choose on-demand" >&2
       exit 1
     }
@@ -145,7 +145,7 @@ if [ "$users" != "ff-backend ff-node" ]; then
   echo "(deploy/k8s/README.md, \"The code registry\")" >&2
   exit 1
 fi
-kubectl -n ff-system get secret ff-backend -o jsonpath='{.data.FF_CODE_REGISTRY_PASSWORD}' 2>/dev/null | grep -q . || {
+kubectl -n ff-system get secret ff-backend -o jsonpath='{.data.FF_CODE_REGISTRY_PASSWORD}' 2>/dev/null | grep . >/dev/null || {
   echo "the Secret ff-backend must hold FF_CODE_REGISTRY_PASSWORD, ff-backend's password in the code registry" >&2
   exit 1
 }

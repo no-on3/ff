@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# The nightly run's one issue, so that a red night is seen: GitHub itself e-mails only whoever last changed the
+# workflow, and six red nights in a row went unseen in October 2026. A run with a failed job opens the issue, or
+# comments on the one already open; a green run closes it. .github/workflows/ci.yml's nightly-report job runs it, with:
+#   RESULTS          the jobs' results, the workflow's needs context as JSON: {"<job>": {"result": "success"}, ...}
+#   RUN_ID, RUN_URL  the run, for its failed jobs' logs and its page
+#   GH_TOKEN, GH_REPO  for gh, allowed issues: write and actions: read
+#   hack/lib/nightly-issue.sh
+set -euo pipefail
+title='The nightly run is red'
+day="$(date -u +%F)"
+# A job that timed out or was stopped is as red as one that failed; one skipped by the run's shape is not.
+red="$(jq -r '[to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key] | join(", ")' <<<"$RESULTS")"
+open="$(gh issue list --state open --limit 100 --json number,title | jq -r --arg title "$title" '[.[] | select(.title == $title)][0].number // empty')"
+
+if [ -z "$red" ]; then
+  if [ -n "$open" ]; then
+    gh issue close "$open" --comment "The nightly run of $day passed: $RUN_URL" >/dev/null
+    echo "nightly: green, issue #$open closed"
+  else
+    echo "nightly: green"
+  fi
+  exit 0
+fi
+
+body="$(mktemp)"
+trap 'rm -f "$body"' EXIT
+# hack/ci.sh names the step that failed ("FAILED: <step>"), and the suites each check ("  FAIL <check>"): those lines
+# of the failed jobs' logs, each after its job's name, at most 30. Each job's log is read on its own, from the API: the
+# run's whole log is served only once the run has ended, and this job is part of it.
+failed_logs() {
+  local id name
+  gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=100" | jq -r '.jobs[] | select(.conclusion == "failure") | "\(.id)\t\(.name)"' |
+    while IFS=$'\t' read -r id name; do
+      gh api --allow-escape-sequences "repos/$GH_REPO/actions/jobs/$id/logs" | grep -E 'FAILED: |  FAIL ' |
+        awk -v job="$name" '{ sub(/^[0-9TZ:.-]+ /, ""); print job ": " $0 }' || true
+    done
+}
+reasons="$({ failed_logs 2>/dev/null || true; } | head -30)"
+{
+  echo "The nightly run of $day failed: $red."
+  echo
+  echo "$RUN_URL"
+  if [ -n "$reasons" ]; then
+    echo
+    echo 'What failed, from the logs:'
+    echo
+    echo '```'
+    echo "$reasons"
+    echo '```'
+  fi
+  echo
+  echo 'The next green nightly run closes this issue.'
+} >"$body"
+if [ -n "$open" ]; then
+  gh issue comment "$open" --body-file "$body" >/dev/null
+  echo "nightly: red ($red), issue #$open commented"
+else
+  gh issue create --title "$title" --body-file "$body" >/dev/null
+  echo "nightly: red ($red), issue opened"
+fi

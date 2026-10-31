@@ -47,7 +47,7 @@ git clone <repository-url> ff && cd ff
 hack/check-resources.sh
 ```
 
-**3. Install kubectl and k3d** into `hack/bin/`, with checksums verified.
+**3. Install kubectl and k3d** into `hack/bin/`, with checksums verified. `hack/install-tools.sh aws` adds the AWS tools the tests of AWS's way in and out drive (OpenTofu, Terraform's CLI and its AWS provider, the SAM CLI with cfn-lint): about 330 MB, needed only for those tests.
 
 ```bash
 hack/install-tools.sh
@@ -1380,19 +1380,28 @@ hack/e2e-platform.sh                                     # FF deployed from depl
 hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, the packages, about 2 min
 ```
 
-**The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). Each stage stops at its first failing step and names it:
+**The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). A failed step is named and the next one runs, so that one run names every failed step, the console's linter's and clippy's alike; only a step the ones after it need, such as `npm ci` or the dev cluster's start, stops the run when it fails (`hack/lib/ci-steps.sh`, which `hack/test-ci-steps.sh` tests). A suite in a step goes on after a failed check and lists every one at its end, each with its section and the time it failed, and where the run stopped if a failure left nothing after it able to pass (`hack/lib/checks.sh`, which every suite shares; `FF_FAIL_FAST=1` stops at the first, as before). `hack/.ci/report.md` lists each step with its result and its seconds, then the failed checks; on GitHub it is the job's summary:
 
 ```bash
-hack/ci.sh static            # linters, types, builds, the docs, how-it-works.html's script, the shell scripts, the workflow, about 5 min
+hack/ci.sh static            # linters, types, builds, the docs, how-it-works.html's script, the shell scripts, the workflow, gitleaks, about 5 min
 hack/ci.sh unit              # every unit suite: backend, console, admin app, both runtimes, alert rules, log filter, about 2 min
 hack/ci.sh db                # L2 and the migrations' drift check, on a PostgreSQL 15.19 of its own, about 2 min
-hack/ci.sh security          # gitleaks on every commit, npm audit, and each image scanned by Trivy with its SBOM in hack/.ci/sbom, about 3 min
-hack/ci.sh cluster           # L3, L4, L5, the images and the platform's manifests, on the dev cluster, about 15 min
+hack/ci.sh security          # npm audit, and each image scanned by Trivy with its SBOM in hack/.ci/sbom, about 3 min
+hack/ci.sh cluster           # the five below in a row, on the dev cluster, as a laptop runs them: about 45 min
+hack/ci.sh l3                # L3: the Kubernetes driver on the cluster, about 5 min
+hack/ci.sh l4                # L4: the stack through the API, about 14 min
+hack/ci.sh l5                # L5: every route as another account, about 6 min
+hack/ci.sh cli               # the ff command on the stack and in Docker, about 13 min
+hack/ci.sh images            # the platform's images, run as the cluster runs them, and its manifests without deploying them, about 8 min
+hack/ci.sh advisories        # the last security run's SBOMs and the lockfiles, checked again with the day's advisories: nightly on the CI server, under 1 min
+hack/ci.sh tools             # the latest release of each AWS tool the tests pin, and Rust's stable, tried as the pinned ones run: nightly on the CI server
 hack/ci.sh platform          # hack/e2e-platform.sh: nightly on the CI server, about 15 min
 hack/ci.sh all               # static, unit, db, security and cluster
 ```
 
 `security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet, or whose fix is less than two weeks old, is accepted for a while, with why and until when, and on that date it is reported again: in an image, in `.trivyignore.yaml`, for the one binary it is in; in what a Node.js package ships, in `.npmauditignore`, for that directory and package (`hack/lib/npm-audit.py` reads npm audit's report against it, and `hack/test-npm-audit.sh` tests it). A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
+
+**On GitHub,** a push to `master` and a pull request run every stage but `platform`: the cluster's `l3`, `l4`, `l5` and `cli` at once, each on a runner of its own, so that a push is answered in about 25 minutes, a failure in any of them known within that stage's own time; and `images` in the `security` job, after the scans, on the images they built, which Docker's build cache keeps. Each job installs only what its stages use (`deps`), and keeps npm's downloads and, where it builds the `ff` command, Cargo's and its build between runs (`.github/actions/setup`, each job's setup). A push or a pull request that changes only documents (`docs/` and `*.md` files, but the `ff` command's templates, which it embeds) runs `static` alone, which checks them and every commit's secrets, about 4 minutes in all: a first job, `changes`, compares the commits (`hack/lib/changes.sh`, which `hack/test-changes.sh` tests). The nightly run (02:17 UTC) runs `platform`; `advisories`, which checks the branch's last SBOMs and the lockfiles again with the day's advisories (`hack/lib/last-sboms.sh` fetches them, `hack/test-last-sboms.sh` tests it); and `tools`, which tries the latest release of each tool the tests pin: the AWS CLI, the SDK for JavaScript, boto3, OpenTofu, Terraform and its AWS provider, and the SAM CLI through the Lambda spike's flows, whose requests and steps are compared with the pinned versions' recordings (`hack/spikes/lambda/compare.py`, which `hack/test-tools-compare.sh` tests), and Rust's stable release through the `ff` command's lints and tests. The other jobs ran on the commit when it was pushed, but an image or a package unchanged since can have an advisory published the next day, and a tool a new release. A run started by hand names its jobs: `gh workflow run ci.yml --ref <branch> -f jobs=platform` runs that one alone, `-f jobs=static,unit` those two, `-f jobs=l4,cli` two of the cluster's stages, `cluster` its four, `security` or `images` the job that runs both, `all` every one, and `nightly` what the schedule runs, with its issue. **A red nightly run is seen:** it opens one issue, "The nightly run is red", with the run's page and the lines of the failed jobs' logs that say what failed, or comments on the one already open; the next green nightly closes it (`hack/lib/nightly-issue.sh`, which `hack/test-nightly-issue.sh` tests in `static` against a stand-in `gh`).
 
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 
