@@ -67,6 +67,13 @@ checks_done() { # <suite>: the suite's last line; it fails the run when a check 
   fi
 }
 
+# Ends a run that ran nothing, a list or a usage error: no report, and no cleanup, which would remove a stack kept up.
+checks_quit() { # <status>
+  checks_finished=true
+  checks_exit_commands=()
+  exit "$1"
+}
+
 # Each failure, a line: its time, its section, what failed; a section's later failures marked as after its first,
 # since they often follow from it (an empty ID after a failed create).
 checks_list() {

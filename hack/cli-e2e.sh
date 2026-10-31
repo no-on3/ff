@@ -35,8 +35,10 @@
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster. Its sections run alone
-# too, with what they need (hack/lib/sections.sh): --list names them, --only and --from choose.
-#   hack/cli-e2e.sh [--list | --only <section>[,<section>…] | --from <section>]
+# too, with what they need (hack/lib/sections.sh): --list names them, --only and --from choose. --keep removes
+# nothing on exit, for a look and for the next run, which --reuse runs against the same stack (hack/lib/e2e-stack.sh
+# says what each keeps).
+#   hack/cli-e2e.sh [--teardown | --keep] [--reuse] [--list | --only <section>[,<section>…] | --from <section>]
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-cli-e2e
@@ -46,7 +48,7 @@ export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-59007}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"
-set -- "${sections_rest[@]}"
+e2e_options "${sections_rest[@]}"
 
 be_port="$(free_port)"
 api="http://127.0.0.1:$be_port"

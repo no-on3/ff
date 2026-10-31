@@ -134,13 +134,6 @@ sections_leave() { # <status> <file>
   rm -f "$sections_file.value"
 }
 
-# Ends a run that ran nothing, a list or a usage error: no report, and no cleanup, which would remove a stack kept up.
-sections_quit() { # <status>
-  checks_finished=true
-  checks_exit_commands=()
-  exit "$1"
-}
-
 sections_run() {
   local sections_times="$work/section-times" sections_wanted_ids sections_id sections_need sections_unmet sections_start
   local sections_state sections_status
@@ -155,9 +148,9 @@ sections_run() {
       printf '%-*s %6s  %s%s\n' "$sections_width" "$sections_id" "${sections_last[$sections_id]:+${sections_last[$sections_id]} s}" \
         "$(section_title "$sections_id")" "${sections_needs[$sections_id]:+  (needs: ${sections_needs[$sections_id]})}"
     done
-    sections_quit 0
+    checks_quit 0
   fi
-  sections_wanted_ids="$(sections_wanted)" || sections_quit 2 # a usage error, said above
+  sections_wanted_ids="$(sections_wanted)" || checks_quit 2 # a usage error, said above
   [ -z "$sections_only$sections_from" ] ||
     echo "sections: $(paste -sd' ' <<<"$sections_wanted_ids"), of ${#sections_order[@]}"
   for sections_id in "${!sections_last[@]}"; do sections_seconds[$sections_id]="${sections_last[$sections_id]}"; done

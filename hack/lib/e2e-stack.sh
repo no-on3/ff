@@ -25,6 +25,11 @@ e2e_containers=()
 # Commands that undo what a test set up beside the stack, such as an app's database: run on exit, first.
 e2e_cleanups=()
 e2e_teardown=false
+# A run's stack kept for a look and for the next run (--keep), and a run against it (--reuse): what the kept run left
+# for the next one to remove, its cleanups, backends, namespaces and containers, is written here.
+e2e_keep=false
+e2e_reuse=false
+e2e_kept="$work/kept.sh"
 mkdir -p "$work"
 : >"$work/ports-given"
 
@@ -62,6 +67,14 @@ e2e_base_env=(
   FF_CODE_REGISTRY="http://127.0.0.1:$FF_REGISTRY_PORT" FF_CODE_REGISTRY_PULL="$FF_REGISTRY_NAME:5000"
 )
 
+# e2e_fresh <service> [volume]: on a stack reused (--reuse), the service made anew, its volume with it, so that what
+# the kept run left there, a customer's database, a cache's keys, the mail received, never reaches this run.
+e2e_fresh() {
+  $e2e_reuse || return 0
+  "${compose[@]}" rm -sf "$1" >/dev/null 2>&1 || true
+  [ -z "${2:-}" ] || docker volume rm "${E2E_PROJECT}_$2" >/dev/null 2>&1 || true
+}
+
 # e2e_data_db <subnet> <address>: the server of customers' databases (ADR 0008), the compose project's own, on a Docker
 # network of its own (a /24 no other run uses), which the cluster's node joins at the lowest gateway priority, so that
 # functions reach it; its CA copied to the work directory. Sets e2e_data_db_env, the backend's FF_DATA_DB_* settings,
@@ -69,6 +82,7 @@ e2e_base_env=(
 e2e_data_db() {
   local subnet=$1 address=$2 node="k3d-$FF_CLUSTER_NAME-server-0" network
   e2e_data_subnet=$subnet
+  e2e_fresh data-db data_db
   FF_DATA_DB_SUBNET="$subnet" FF_DATA_DB_ADDRESS="$address" "${compose[@]}" up -d --wait data-db >/dev/null 2>&1 ||
     fail "the data server did not become healthy"
   e2e_data_db_container="$("${compose[@]}" ps -q data-db)"
@@ -86,6 +100,7 @@ e2e_data_db() {
 # e2e_cache_env, the backend's FF_CACHE_* settings, and e2e_cache_container. Call it after e2e_data_db.
 e2e_cache() {
   local address=$1
+  e2e_fresh cache cache
   FF_DATA_DB_SUBNET="$e2e_data_subnet" FF_CACHE_ADDRESS="$address" "${compose[@]}" up -d --wait cache >/dev/null 2>&1 ||
     fail "the cache server did not become healthy"
   e2e_cache_container="$("${compose[@]}" ps -q cache)"
@@ -102,6 +117,8 @@ e2e_cache() {
 # e2e_mail_container and e2e_mail_receiver. Call it after e2e_data_db.
 e2e_mail() {
   local address=$1 receiver=$2
+  e2e_fresh mail mail
+  e2e_fresh mail-receiver
   "${compose[@]}" build -q mail >/dev/null 2>&1 || fail "the mail server's image did not build"
   FF_DATA_DB_SUBNET="$e2e_data_subnet" FF_MAIL_ADDRESS="$address" FF_MAIL_RECEIVER_ADDRESS="$receiver" \
     FF_MAIL_RELAY_FROM="${e2e_data_subnet%.*}.1/32" FF_MAIL_RELAYHOST="$receiver:2525" \
@@ -150,17 +167,30 @@ e2e_dns() {
   e2e_containers+=("$E2E_PROJECT-dns")
 }
 
-e2e_cleanup() {
-  local status=$checks_status pid ns command evidence
-  # What the failed run leaves behind, before anything below removes it.
-  if [ "$status" -ne 0 ]; then
-    evidence="$(evidence_start "$E2E_NAME")"
-    evidence_cluster "$evidence" "${e2e_namespaces[@]}" ff-system ff-logging
-    evidence_containers "$evidence" "k3d-$FF_CLUSTER_NAME-server-0" "${e2e_containers[@]}"
-    evidence_compose "$evidence" "${compose[@]}"
-    evidence_logs "$evidence" "$work"
-    evidence_done "$evidence" "$E2E_NAME"
+# e2e_options <argument…>: a suite's own options: --teardown deletes the cluster at the end; --keep leaves the stack
+# up with the run's backends and namespaces, for a look and for the next run; --reuse runs against a stack kept so.
+# Anything else is refused, and --keep on GitHub, whose runner goes, its stack with it.
+e2e_options() {
+  local option
+  for option in "$@"; do
+    case "$option" in
+      --teardown) e2e_teardown=true ;;
+      --keep) e2e_keep=true ;;
+      --reuse) e2e_reuse=true ;;
+      *) echo "$E2E_NAME: no option $option; its own are --teardown, --keep and --reuse" >&2; checks_quit 2 ;;
+    esac
+  done
+  if $e2e_keep && [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "$E2E_NAME: --keep is a laptop's: a GitHub runner goes, its stack with it" >&2; checks_quit 2
   fi
+  if $e2e_keep && $e2e_teardown; then echo "$E2E_NAME: --keep keeps the cluster that --teardown deletes" >&2; checks_quit 2; fi
+  if $e2e_reuse && [ ! -f "$e2e_kept" ]; then echo "$E2E_NAME: --reuse needs the stack a run with --keep left" >&2; checks_quit 2; fi
+}
+
+# e2e_remove: what a run made beside its compose project: its cleanups run, its backends stopped, its namespaces
+# deleted, its containers removed.
+e2e_remove() {
+  local command pid ns
   for command in "${e2e_cleanups[@]}"; do
     eval "$command" >/dev/null 2>&1 || true
   done
@@ -174,7 +204,39 @@ e2e_cleanup() {
     kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   done
   [ "${#e2e_containers[@]}" -eq 0 ] || docker rm -f "${e2e_containers[@]}" >/dev/null 2>&1 || true
-  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+}
+
+# e2e_remove_kept [--all]: what a run kept with --keep left removed, as its own cleanup would have, in a shell of its
+# own, so that its arrays are its, not this run's; with --all, its compose project too, its volumes with it.
+e2e_remove_kept() {
+  [ -f "$e2e_kept" ] || return 0
+  (
+    # shellcheck source=/dev/null
+    source "$e2e_kept"
+    e2e_remove
+  )
+  [ "${1:-}" != --all ] || "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  rm -f "$e2e_kept"
+}
+
+e2e_cleanup() {
+  local status=$checks_status evidence
+  # What the failed run leaves behind, before anything below removes it.
+  if [ "$status" -ne 0 ]; then
+    evidence="$(evidence_start "$E2E_NAME")"
+    evidence_cluster "$evidence" "${e2e_namespaces[@]}" ff-system ff-logging
+    evidence_containers "$evidence" "k3d-$FF_CLUSTER_NAME-server-0" "${e2e_containers[@]}"
+    evidence_compose "$evidence" "${compose[@]}"
+    evidence_logs "$evidence" "$work"
+    evidence_done "$evidence" "$E2E_NAME"
+  fi
+  if $e2e_keep; then
+    declare -p e2e_cleanups e2e_pids e2e_namespaces e2e_containers | sed 's/^declare -/declare -g/' >"$e2e_kept"
+    echo "$E2E_NAME: the stack is kept, with the run's backends and namespaces: --reuse runs against it, a run without it removes it first" >&2
+  else
+    e2e_remove
+    "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  fi
   if $e2e_teardown; then "$FF_REPO_ROOT/hack/k8s/cluster-down.sh" >/dev/null 2>&1 || true; fi
   if [ "$status" -ne 0 ]; then
     echo "$E2E_NAME: FAILED. Last backend log lines ($work/backend.log):" >&2
@@ -224,12 +286,22 @@ free_port() {
 random_account() { node -e "console.log(String(require('crypto').randomInt(1e12)).padStart(12, '0'))"; }
 tenant_namespace() { printf 'ff-t-%s' "$(printf %s "$1" | sha256sum | cut -c1-12)"; }
 
-# e2e_dependencies [service...]: PostgreSQL and S3, and the services named (keycloak, mailpit).
+# e2e_dependencies [service...]: PostgreSQL and S3, and the services named (keycloak, mailpit). A stack a run kept is
+# reused with --reuse: what that run made beside it removed, FF's database made new, Mailpit's mail gone with its
+# container, Keycloak kept, whose users each run makes its own; without --reuse, a kept stack is removed whole first.
 e2e_dependencies() {
+  local service
   section "resources"
   MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3500}" "$FF_REPO_ROOT/hack/check-resources.sh"
+  if $e2e_reuse; then e2e_remove_kept; else e2e_remove_kept --all; fi
   section "dependencies (compose project $E2E_PROJECT)"
+  for service in "$@"; do [ "$service" != mailpit ] || e2e_fresh mailpit; done
   "${compose[@]}" up -d --wait postgres s3 "$@" >/dev/null 2>&1 || fail "compose dependencies did not become healthy"
+  if $e2e_reuse; then
+    "${compose[@]}" exec -T postgres psql -U postgres -qc 'DROP DATABASE IF EXISTS serverless_platform WITH (FORCE)' \
+      -c 'CREATE DATABASE serverless_platform' >/dev/null 2>&1 || fail "FF's database could not be made new"
+    echo "  reused: what the kept run made beside it removed, FF's database made new"
+  fi
   echo "  postgres on 127.0.0.1:$FF_PG_PORT, s3 on 127.0.0.1:$FF_S3_PORT${1:+, and $*}"
 }
 
@@ -247,12 +319,47 @@ e2e_cluster() {
     docker build -q -t ff-runtime-nodejs:24-v3 "$FF_REPO_ROOT/runtimes/nodejs" >/dev/null
   docker image inspect ff-runtime-python:3.13-v3 >/dev/null 2>&1 ||
     docker build -q -t ff-runtime-python:3.13-v3 "$FF_REPO_ROOT/runtimes/python" >/dev/null
-  "$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v3 ff-runtime-python:3.13-v3 >/dev/null 2>&1
+  # Imported into the node unless it holds these very ones, 16 s saved a run: an image built again, or one the node's
+  # kubelet removed to make room, is imported again.
+  e2e_on_node ff-runtime-nodejs:24-v3 ff-runtime-python:3.13-v3 ||
+    "$FF_REPO_ROOT/hack/k8s/load-images.sh" ff-runtime-nodejs:24-v3 ff-runtime-python:3.13-v3 >/dev/null 2>&1
   echo "  $FF_CLUSTER_NAME ready, runtime images imported"
 }
 
+# e2e_on_node <image…>: whether the cluster's node holds each image as Docker has it, by its ID, which containerd and
+# Docker both take from the image's configuration.
+e2e_on_node() {
+  local node="k3d-$FF_CLUSTER_NAME-server-0" image id
+  for image in "$@"; do
+    id="$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null)" || return 1
+    [ -n "$id" ] && [ "$(docker exec "$node" crictl inspecti -o go-template --template '{{.status.id}}' "docker.io/library/$image" 2>/dev/null)" = "$id" ] ||
+      return 1
+  done
+}
+
+# e2e_build: the backend built, unless the build was made from the very same files: what it was built from, each
+# file's name, time and size, and the build's own time, are kept in the build, which nest empties before it builds;
+# so a change, a file gone, and another build since, a backend's watch mode on this machine among them, each build it
+# again.
 e2e_build() {
+  local record="$FF_REPO_ROOT/BE/dist/.e2e-built-from"
+  if [ -f "$record" ] && [ "$(cat "$record")" = "$(e2e_built_from)" ]; then
+    echo "  the backend's build is its sources' already"
+    return 0
+  fi
   (cd "$FF_REPO_ROOT/BE" && npm run build >/dev/null)
+  e2e_built_from >"$record"
+}
+
+# e2e_built_from: what the backend's build is made from, as one line, and the build's time.
+e2e_built_from() {
+  (
+    cd "$FF_REPO_ROOT/BE"
+    # A file gone is a change too, never a stop: the build that follows says what is missing.
+    { find src package.json package-lock.json tsconfig.json tsconfig.build.json nest-cli.json -type f -printf '%p %T@ %s\n' 2>/dev/null || true; } |
+      sort | sha256sum | cut -d' ' -f1
+    stat -c %Y dist/main.js 2>/dev/null || true
+  ) | paste -sd' '
 }
 
 # e2e_migrate <VAR=value...>: runs the migrations from the build, as a deploy step would.

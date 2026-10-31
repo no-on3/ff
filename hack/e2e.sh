@@ -84,7 +84,9 @@
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
 # gVisor (hack/k8s/gvisor-up.sh installs it). Its sections run alone too, with what
 # they need (hack/lib/sections.sh): --list names them, --only and --from choose.
-#   [K8S_RUNTIME_CLASS=gvisor] hack/e2e.sh [--teardown] [--list | --only <section>[,<section>…] | --from <section>]
+# --keep removes nothing on exit, for a look and for the next run, which --reuse
+# runs against the same stack (hack/lib/e2e-stack.sh says what each keeps).
+#   [K8S_RUNTIME_CLASS=gvisor] hack/e2e.sh [--teardown | --keep] [--reuse] [--list | --only <section>[,<section>…] | --from <section>]
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-e2e
@@ -94,8 +96,7 @@ export FF_S3_PORT="${FF_E2E_S3_PORT:-59003}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"
-set -- "${sections_rest[@]}"
-[ "${1:-}" = "--teardown" ] && e2e_teardown=true
+e2e_options "${sections_rest[@]}"
 
 be_port="${FF_E2E_BE_PORT:-$(free_port)}"
 api="http://127.0.0.1:$be_port"
@@ -154,6 +155,56 @@ fi
 
 # other: a second account, the one development mode's X-FF-Dev-Account header names: neither reaches what the other owns.
 other="$(random_account)"
+
+# as_other <method> <path> [json-body] [curl option...]: http, as the other account.
+as_other() {
+  local method=$1 path=$2 body=${3:-}
+  shift $(($# < 3 ? $# : 3))
+  http_at "$api" "$method" "$path" "$body" -H "X-FF-Dev-Account: $other" "$@"
+}
+
+# client_checks <file> <how many>: each JSON line a check, its detail shown when it fails; then that none is missing.
+client_checks() {
+  local line
+  while IFS= read -r line; do
+    if [ "$(jq -r .want <<<"$line")" = "$(jq -r .got <<<"$line")" ]; then
+      check "$(jq -r '"\(.client): \(.what)"' <<<"$line")" "$(jq -r .want <<<"$line")" "$(jq -r .got <<<"$line")"
+    else
+      fail "$(jq -r '"\(.client): \(.what): wanted \(.want), got \(.got): \(.detail)"' <<<"$line")"
+    fi
+  done <"$1"
+  check "  ... all $2 of them, the client to its end" "$2" "$(wc -l <"$1" | tr -d ' ')"
+}
+
+# package_with <zip> <libraries> <their folder in it> <name=file>...: a function's files and its libraries, deflated.
+package_with() {
+  python3 - "$@" <<'PY'
+import os, sys, zipfile
+target, libraries, folder, *files = sys.argv[1:]
+with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
+    for entry in files:
+        name, path = entry.split('=', 1)
+        archive.write(path, name)
+    for root, dirs, names in os.walk(libraries):
+        dirs[:] = sorted(d for d in dirs if d not in ('__pycache__', '.bin', 'bin'))
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            archive.write(path, os.path.join(folder, os.path.relpath(path, libraries)))
+PY
+}
+
+# function_secret <function> <name>: a value of the environment Secret the function's Deployment reads, as an operator would.
+function_secret() {
+  kubectl -n "$tenant_ns" get secret "$(kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')" \
+    -o jsonpath="{.data.$2}" | base64 -d
+}
+
+# The AWS CLI, path-style as it addresses any endpoint, with the key in its environment and none of this machine's settings.
+aws_ff() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
+  AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "$s3_endpoint" "$@"; }
+
+# outcome <command…>: accepted, or refused with the S3 error's code in its message, as the CLI prints it.
+outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|InvalidArgument)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
 
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
@@ -1009,6 +1060,26 @@ check "  ... its alarm with it; its month's usage kept, as a deleted cache's" "4
 }
 section_def caches section_caches backend
 
+section_keys() {
+section "keys and clients: the other account's access key, and AWS's clients at the versions ADR 0009 measured"
+# The other account's own key, which the sections after it try on what this account owns, and the reverse.
+other_key="$(as_other POST /storage-keys '{}')"
+
+# The clients, pinned to the versions ADR 0009 measured: npm and pip fetch them once, into hack/.cache.
+clients="$FF_REPO_ROOT/hack/.cache/s3-clients"
+if [ ! -d "$clients/node_modules/@aws-sdk/lib-storage" ]; then
+  npm install --prefix "$clients" --no-audit --no-fund --silent @aws-sdk/client-s3@3.1156.0 @aws-sdk/s3-request-presigner@3.1156.0 @aws-sdk/lib-storage@3.1156.0 >/dev/null
+fi
+if [ ! -x "$clients/venv/bin/python" ]; then
+  python3 -m venv "$clients/venv"
+  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.118
+fi
+if [ ! -d "$clients/python/boto3" ]; then
+  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check --target "$clients/python" boto3==1.43.118
+fi
+}
+section_def keys section_keys backend
+
 section_buckets() {
 section "customers' buckets (ADR 0009): the API, then AWS's own clients through the S3 front door"
 made="$(http POST /buckets '{"name": "e2e-photos"}')"
@@ -1023,11 +1094,6 @@ store_s3() { AWS_ACCESS_KEY_ID=ffdevaccesskey AWS_SECRET_ACCESS_KEY=ffdevsecretk
 held() { "$@" >/dev/null 2>&1 && echo held || echo gone; }
 check "the store has it, under a name of FF's that says nothing of whose it is" "true held" \
   "$([[ "$store_name" =~ ^ff-[0-9a-f]{24}$ ]] && echo true || echo false) $(held store_s3 s3api head-bucket --bucket "$store_name")"
-as_other() {
-  local method=$1 path=$2 body=${3:-}
-  shift $(($# < 3 ? $# : 3))
-  http_at "$api" "$method" "$path" "$body" -H "X-FF-Dev-Account: $other" "$@"
-}
 as_other POST /buckets '{"name": "e2e-theirs"}' >/dev/null
 http POST /buckets '{"name": "e2e-theirs"}' >/dev/null
 check "a name is FF's once, whoever asks, as on AWS" "409 The bucket name \"e2e-theirs\" is taken: bucket names are unique across FF, as on AWS" "$(status) $(jq -r .message "$work/body")"
@@ -1054,37 +1120,13 @@ check "two keys at most, as IAM gives a user; listed without their secrets" "409
 check "the secret is sealed in FF's database, never in clear" "0" \
   "$(env_q "SELECT count(*) FROM storage_keys WHERE secret::text LIKE '%' || '$key_secret' || '%'")"
 
-# The clients, pinned to the versions ADR 0009 measured: npm and pip fetch them once, into hack/.cache.
-clients="$FF_REPO_ROOT/hack/.cache/s3-clients"
-if [ ! -d "$clients/node_modules/@aws-sdk/lib-storage" ]; then
-  npm install --prefix "$clients" --no-audit --no-fund --silent @aws-sdk/client-s3@3.1156.0 @aws-sdk/s3-request-presigner@3.1156.0 @aws-sdk/lib-storage@3.1156.0 >/dev/null
-fi
-if [ ! -x "$clients/venv/bin/python" ]; then
-  python3 -m venv "$clients/venv"
-  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.118
-fi
 head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
-# client_checks <file> <how many>: each JSON line a check, its detail shown when it fails; then that none is missing.
-client_checks() {
-  local line
-  while IFS= read -r line; do
-    if [ "$(jq -r .want <<<"$line")" = "$(jq -r .got <<<"$line")" ]; then
-      check "$(jq -r '"\(.client): \(.what)"' <<<"$line")" "$(jq -r .want <<<"$line")" "$(jq -r .got <<<"$line")"
-    else
-      fail "$(jq -r '"\(.client): \(.what): wanted \(.want), got \(.got): \(.detail)"' <<<"$line")"
-    fi
-  done <"$1"
-  check "  ... all $2 of them, the client to its end" "$2" "$(wc -l <"$1" | tr -d ' ')"
-}
 MODULES="$clients/node_modules" ENDPOINT="$s3_endpoint" IP_ENDPOINT="http://127.0.0.1:$storage_port" KEY="$key_id" SECRET="$key_secret" \
   BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" node "$FF_REPO_ROOT/hack/lib/s3-clients/sdk.mjs" >"$work/sdk.jsonl" 2>"$work/sdk.log" || true
 client_checks "$work/sdk.jsonl" 14
 ENDPOINT="$s3_endpoint" KEY="$key_id" SECRET="$key_secret" BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" \
   "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/s3-clients/boto3_checks.py" >"$work/boto3.jsonl" 2>"$work/boto3.log" || true
 client_checks "$work/boto3.jsonl" 11
-# The AWS CLI, path-style as it addresses any endpoint, with the key in its environment and none of this machine's settings.
-aws_ff() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
-  AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "$s3_endpoint" "$@"; }
 aws_ff s3 cp "$work/big.bin" s3://e2e-photos/cli/big.bin --only-show-errors
 aws_ff s3 cp s3://e2e-photos/cli/big.bin "$work/big.out" --only-show-errors
 check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \
@@ -1104,8 +1146,6 @@ expiring="$(aws_ff s3 presign s3://e2e-photos/site/index.html --expires-in 1)"
 sleep 2
 check "aws: a presigned URL, fetched; one past its expiry, AccessDenied" "<h1>Ahlan</h1> 403 AccessDenied" \
   "$(curl -s "$presigned") $(curl -s -o "$work/expired" -w '%{http_code}' "$expiring") $(grep -o '<Code>[^<]*' "$work/expired" | cut -c7-)"
-# outcome <command…>: accepted, or refused with the S3 error's code in its message, as the CLI prints it.
-outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|InvalidArgument)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
 check "aws: a wrong secret, SignatureDoesNotMatch" "refused SignatureDoesNotMatch" "$(AWS_SECRET=wrong-secret outcome aws_ff s3 ls s3://e2e-photos)"
 check "aws: another account's bucket, AccessDenied" "refused AccessDenied" "$(outcome aws_ff s3 ls s3://e2e-theirs)"
 check "a read-only key lists, and writes nothing: AccessDenied" "accepted refused AccessDenied" \
@@ -1114,25 +1154,6 @@ http DELETE "/storage-keys/$ro_id" >/dev/null
 check "a revoked key opens nothing at once: InvalidAccessKeyId" "204 refused InvalidAccessKeyId" "$(status) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos)"
 # Functions as on AWS Lambda with a role: AWS's SDK for JavaScript v3 and boto3 with no setting at all, in packages as
 # npm and pip install them. FF gives the pods a key of the function's own, the region and the front door's address.
-if [ ! -d "$clients/python/boto3" ]; then
-  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check --target "$clients/python" boto3==1.43.118
-fi
-# package_with <zip> <libraries> <their folder in it> <name=file>...: a function's files and its libraries, deflated.
-package_with() {
-  python3 - "$@" <<'PY'
-import os, sys, zipfile
-target, libraries, folder, *files = sys.argv[1:]
-with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
-    for entry in files:
-        name, path = entry.split('=', 1)
-        archive.write(path, name)
-    for root, dirs, names in os.walk(libraries):
-        dirs[:] = sorted(d for d in dirs if d not in ('__pycache__', '.bin', 'bin'))
-        for name in sorted(names):
-            path = os.path.join(root, name)
-            archive.write(path, os.path.join(folder, os.path.relpath(path, libraries)))
-PY
-}
 package_with "$work/s3-node.zip" "$clients/node_modules" node_modules "index.mjs=$FF_REPO_ROOT/hack/lib/s3-clients/functions/index.mjs"
 package_with "$work/s3-python.zip" "$clients/python" '' "function.py=$FF_REPO_ROOT/hack/lib/s3-clients/functions/function.py"
 upload "$work/s3-node.zip" >/dev/null
@@ -1146,11 +1167,6 @@ check "a Python function, boto3.client(\"s3\") as on Lambda: the same" \
   '{"read":"written by a Python function","other":"AccessDenied"}' "$(http POST "/functions/$python_s3/invoke" "$s3_input" | jq -c .output)"
 check "what they wrote is in the bucket, as the account's own key reads it" "written by a Node.js function|written by a Python function" \
   "$(aws_ff s3 cp s3://e2e-photos/from-node.txt - 2>/dev/null)|$(aws_ff s3 cp s3://e2e-photos/from-python.txt - 2>/dev/null)"
-# function_secret <function> <name>: a value of the environment Secret the function's Deployment reads, as an operator would.
-function_secret() {
-  kubectl -n "$tenant_ns" get secret "$(kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')" \
-    -o jsonpath="{.data.$2}" | base64 -d
-}
 fn_key="$(function_secret "$node_s3" AWS_ACCESS_KEY_ID)"
 fn_secret="$(function_secret "$node_s3" AWS_SECRET_ACCESS_KEY)"
 check "its pods get a key of its own, the region and the front door's address inside the cluster, through the Secret; the Deployment holds none" \
@@ -1183,7 +1199,6 @@ check "its hourly measure, within a minute: once in the hour, by its name" "1|e2
   "$(env_q "SELECT count(*), max(name) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")"
 # The plan's storage, an account's buckets together: the other account on a plan of 1 MB, its bucket holding 1.2 MB once
 # a new bucket of its own has it measured, within a minute. Uploads wait for room; reads and deletes go on.
-other_key="$(as_other POST /storage-keys '{}')"
 as_other_s3() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
 head -c 600000 /dev/urandom >"$work/part.bin"
 as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/one.bin --only-show-errors
@@ -1230,7 +1245,7 @@ check "  ... which deletes its files, then the bucket, gone from the store too, 
   "$(status) $(http GET /buckets/e2e-photos >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$store_name") $(http GET "/alarms/$bucket_alarm" >/dev/null; status)"
 http DELETE "/storage-keys/$key_id" >/dev/null
 }
-section_def buckets section_buckets backend
+section_def buckets section_buckets keys
 
 section_queues() {
 section "customers' queues (ADR 0010): AWS's own clients through the SQS endpoint, then functions with no setting"
@@ -1351,7 +1366,7 @@ check "the audit log names each change of a queue, whichever way it came: the CL
   "queue.create access_key:$queue_key_id|queue.create dev|queue.purge dev|queue.delete dev" \
   "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
 }
-section_def queues section_queues buckets
+section_def queues section_queues keys
 
 section_mappings() {
 section "functions reading queues, as Lambda's event source mappings: a batch, a partial batch failure, the dead-letter queue"
@@ -1597,7 +1612,7 @@ check "  ... and taken off" "refused NotFoundException" "$(outcome_ses aws_ses g
 check "the audit log names each change to the domain, the CLI's under its key" "email.identity.create access_key:$mail_key_id email.identity.verify" \
   "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'email-identity:shop.e2e-customer.tn'")"
 }
-section_def mail section_mail buckets url_domain
+section_def mail section_mail keys url_domain
 
 section_mail_sent() {
 section "customers' mail sent (ADR 0012): through the run's mail server, signed with the domain's key, its bounces back"
@@ -1845,7 +1860,7 @@ check "a month without calls is empty, and before the first price book, unpriced
 http GET '/usage?month=2026-13' >/dev/null
 check "a month that is not YYYY-MM is refused" "400 month must be a month as YYYY-MM, such as 2026-10" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 }
-section_def usage section_usage usage_records python databases sites
+section_def usage section_usage usage_records python databases sites buckets
 
 section_priced() {
 section "usage priced (P-30)"

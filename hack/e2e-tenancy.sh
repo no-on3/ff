@@ -56,8 +56,10 @@
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
 # compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
 # removed on exit with the namespaces. Its sections run alone too, with what they
-# need (hack/lib/sections.sh): --list names them, --only and --from choose.
-#   hack/e2e-tenancy.sh [--teardown] [--list | --only <section>[,<section>…] | --from <section>]
+# need (hack/lib/sections.sh): --list names them, --only and --from choose. --keep
+# removes nothing on exit, for a look and for the next run, which --reuse runs
+# against the same stack (hack/lib/e2e-stack.sh says what each keeps).
+#   hack/e2e-tenancy.sh [--teardown | --keep] [--reuse] [--list | --only <section>[,<section>…] | --from <section>]
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-e2e-tenancy
@@ -70,8 +72,7 @@ export FF_MAIL_UI_PORT="${FF_E2E_TENANCY_MAIL_UI_PORT:-58026}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"
-set -- "${sections_rest[@]}"
-[ "${1:-}" = "--teardown" ] && e2e_teardown=true
+e2e_options "${sections_rest[@]}"
 
 account_a="$(random_account)"
 account_b="$(random_account)"

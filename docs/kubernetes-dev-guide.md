@@ -115,6 +115,8 @@ hack/e2e.sh --teardown     # … and delete the cluster afterwards
 hack/e2e.sh --list         # its sections: each one's id, its seconds on the last run, its title, what it needs
 hack/e2e.sh --only queues  # one section, after what it needs: the stack, the backend, buckets (about 6 min)
 hack/e2e.sh --from usage   # a section and every one after it, each after what it needs
+hack/e2e.sh --only queues --keep           # … and the stack left up after it, the run's backend and namespaces with it
+hack/e2e.sh --only queues --reuse --keep   # again, against the stack kept, and kept again
 hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, a function's logs, then the operator's routes, bank transfers, invoices and credit grants, and last, closing an account and deleting its data (about 7 min)
 ```
 
@@ -139,6 +141,10 @@ It checks the Kubernetes side at each step. On exit it removes its compose proje
 ### A section alone
 
 The sections of L4, L5 (`hack/e2e-tenancy.sh`) and the `ff` suite (`hack/cli-e2e.sh`) are functions that `hack/lib/sections.sh` runs in order, the same options in each, each in a subshell of its own, so that one that stops stops alone. What a section leaves, its variables and the functions it defines, reaches the sections after it as if they had run in one shell, and each names the sections it needs after its function (`section_def mappings section_mappings queues`): `--only` and `--from` run those first, so that a section run alone counts the checks it counts in the whole run. A section that needs one that stopped is listed as not run, and the others run; with `FF_FAIL_FAST=1`, the run ends at the first that stops. `--list` reads each section's seconds from the suite's work directory (`hack/.e2e/section-times` for L4), which every run updates. A helper more than one section calls is defined before the first, so that a failure in it is reported at its line in the suite. `hack/test-sections.sh` tests the runner on suites of its own, in `hack/ci.sh static`.
+
+### A stack kept up
+
+`--keep` removes nothing at the end: the compose project, the run's backends, its namespaces and the containers it started stay up, for a look at what a failed check saw (the backend's log, the pods) and for the next run, which `--reuse` runs against. A reused stack keeps what takes long to make and holds nothing a check reads: FF's PostgreSQL and S3 servers, its database made new, Keycloak (L5), whose users each run makes its own, and the cluster. What the kept run made beside them goes first, its backends, namespaces and containers, and the services that hold what a run left are made anew, their volumes with them: the customers' database server, the cache, the mail server and its stand-in receiver, and Mailpit (L5). A run without `--reuse` removes a kept stack whole before it starts, and `--keep` is refused on GitHub, whose runner goes, its stack with it (`hack/lib/e2e-stack.sh`). Any run, kept or not, imports the runtime images into the cluster only when its node lacks these very ones, by their IDs, and builds the backend only when what it is built from changed since its last build: 16 s and 12 s off each run on this machine.
 
 ### When a run fails
 
