@@ -168,8 +168,9 @@ export class PaymentsService {
   async recordTransfer(entry: TransferEntry, reason: string, now = new Date()): Promise<AdminPaymentView> {
     const reference = normalizedReference(entry.reference);
     if (!reference) throw new BadRequestException(`"${entry.reference}" is not a payment reference, such as FF-7KQ2-9MXA`);
-    if (Number.isNaN(Date.parse(`${entry.receivedOn}T00:00:00Z`)) || new Date(`${entry.receivedOn}T00:00:00Z`) > now) {
-      throw new BadRequestException(`receivedOn must be a day that has come, not ${entry.receivedOn}`);
+    // The bank statement's day is Tunisia's, where the next day begins an hour before UTC's.
+    if (Number.isNaN(Date.parse(`${entry.receivedOn}T00:00:00Z`)) || entry.receivedOn > tunisDay(now)) {
+      throw new BadRequestException(`receivedOn must be a day that has come in Tunisia, not ${entry.receivedOn}`);
     }
     const { payment, exponent } = await this.dataSource.transaction(async (manager) => {
       const found = await manager.findOne(Payment, { where: { reference }, lock: { mode: 'pessimistic_write' } });

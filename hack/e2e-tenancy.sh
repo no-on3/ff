@@ -2031,7 +2031,8 @@ found="$(with_token "$operator_token" GET "/admin/payments?reference=$typed")"
 check "the operator finds account 1's pro-forma by its reference, typed from the statement without dashes" "200 $pf_1 pending 59.500 $account_1" \
   "$(status) $(jq -r '[.payments[] | "\(.id) \(.status) \(.total) \(.accountId)"] | join(",")' <<<"$found")"
 before_transfer="$(as_user_1 GET /billing/balance | jq -r .balance)"
-today="$(date -u +%F)"
+# The bank statement's day, in Tunisia, as the backend dates transfers and invoices.
+today="$(TZ=Africa/Tunis date +%F)"
 with_token "$operator_token" POST /admin/bank-transfers "$(transfer 58.000 0.892)" >/dev/null
 check "a transfer that doesn't make the total is refused, naming the amounts" \
   "400 received 58.000 TND and withheld 0.892 TND make 58.892 TND, not the pro-forma's 59.500 TND" "$(status) $(message)"
@@ -2082,8 +2083,10 @@ section_def transfers section_transfers admin signup budget=5
 
 section_invoices() {
 section "invoices (P-36)"
-last_month="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)"
-last_day="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%F)"
+# Last month as the backend's drafts take it, in Tunisia: in the hour before UTC's midnight at a month's end, the next
+# month has begun there.
+last_month="$(TZ=Africa/Tunis date -d "$(TZ=Africa/Tunis date +%Y-%m-01) -1 day" +%Y-%m)"
+last_day="$(TZ=Africa/Tunis date -d "$(TZ=Africa/Tunis date +%Y-%m-01) -1 day" +%F)"
 late="$(as_user_1 POST /billing/pro-formas '{"credit": "20"}')"
 with_token "$operator_token" POST /admin/bank-transfers \
   "$(jq -cn --arg reference "$(jq -r .reference <<<"$late")" --arg on "$last_day" '{reference: $reference, received: "23.800", withheld: "0", receivedOn: $on, reason: "l5: the statement of last month"}')" >/dev/null

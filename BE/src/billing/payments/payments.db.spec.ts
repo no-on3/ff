@@ -235,9 +235,20 @@ run('bank transfers (L2, P-35)', () => {
       await expect(payments.recordTransfer(transfer(proForma.reference, '59.5000'), 'Too fine')).rejects.toThrow('received: "59.5000" is not an amount with 3 decimals at most');
       await expect(payments.recordTransfer(transfer('FF-2222-2222', '59.500'), 'Unknown')).rejects.toThrow('No pro-forma has the reference FF-2222-2222');
       await expect(payments.recordTransfer(transfer('INV-42', '59.500'), 'Not one')).rejects.toThrow('"INV-42" is not a payment reference, such as FF-7KQ2-9MXA');
-      await expect(payments.recordTransfer(transfer(proForma.reference, '59.500', '0', '2099-01-01'), 'Future')).rejects.toThrow('receivedOn must be a day that has come, not 2099-01-01');
+      await expect(payments.recordTransfer(transfer(proForma.reference, '59.500', '0', '2099-01-01'), 'Future')).rejects.toThrow('receivedOn must be a day that has come in Tunisia, not 2099-01-01');
 
       expect([(await payments.proForma(a, proForma.id)).status, await entries(`transfer:${proForma.id}`), await ledger.balance(a, 'TND')]).toEqual(['pending', [], 0n]);
+    });
+
+    it("takes a transfer dated today in Tunisia, where the next day begins an hour before UTC's, and not one dated the day after", async () => {
+      const a = await account();
+      const proForma = await payments.requestProForma(a, '50.000');
+      const lateInUtc = new Date('2026-10-31T23:30:00Z'); // 00:30 on 1 November in Tunisia
+
+      await expect(payments.recordTransfer(transfer(proForma.reference, '59.500', '0', '2026-11-02'), 'Tomorrow', lateInUtc)).rejects.toThrow(
+        'receivedOn must be a day that has come in Tunisia, not 2026-11-02',
+      );
+      expect((await payments.recordTransfer(transfer(proForma.reference, '59.500', '0', '2026-11-01'), 'Today there', lateInUtc)).status).toBe('paid');
     });
 
     it('is recorded once when two operators record it at the same moment', async () => {
