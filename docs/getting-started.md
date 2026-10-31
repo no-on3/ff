@@ -1387,14 +1387,19 @@ hack/ci.sh static            # linters, types, builds, the docs, how-it-works.ht
 hack/ci.sh unit              # every unit suite: backend, console, admin app, both runtimes, alert rules, log filter, about 2 min
 hack/ci.sh db                # L2 and the migrations' drift check, on a PostgreSQL 15.19 of its own, about 2 min
 hack/ci.sh security          # gitleaks on every commit, npm audit, and each image scanned by Trivy with its SBOM in hack/.ci/sbom, about 3 min
-hack/ci.sh cluster           # L3, L4, L5, the images and the platform's manifests, on the dev cluster, about 15 min
+hack/ci.sh cluster           # the five below in a row, on the dev cluster, as a laptop runs them: about 45 min
+hack/ci.sh l3                # L3, and the platform's manifests without deploying them, about 8 min
+hack/ci.sh l4                # L4: the stack through the API, about 14 min
+hack/ci.sh l5                # L5: every route as another account, about 6 min
+hack/ci.sh cli               # the ff command on the stack and in Docker, about 13 min
+hack/ci.sh images            # the platform's images, run as the cluster runs them, about 5 min
 hack/ci.sh platform          # hack/e2e-platform.sh: nightly on the CI server, about 15 min
 hack/ci.sh all               # static, unit, db, security and cluster
 ```
 
 `security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet, or whose fix is less than two weeks old, is accepted for a while, with why and until when, and on that date it is reported again: in an image, in `.trivyignore.yaml`, for the one binary it is in; in what a Node.js package ships, in `.npmauditignore`, for that directory and package (`hack/lib/npm-audit.py` reads npm audit's report against it, and `hack/test-npm-audit.sh` tests it). A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
 
-**On GitHub,** a push to `master` and a pull request run every stage but `platform`, and the nightly run (02:17 UTC) runs them all. A run started by hand names its jobs: `gh workflow run ci.yml --ref <branch> -f jobs=platform` runs that one alone, `-f jobs=static,unit` those two, `all` every one, and `nightly` what the schedule runs, with its issue. **A red nightly run is seen:** it opens one issue, "The nightly run is red", with the run's page and the lines of the failed jobs' logs that say what failed, or comments on the one already open; the next green nightly closes it (`hack/lib/nightly-issue.sh`, which `hack/test-nightly-issue.sh` tests in `static` against a stand-in `gh`).
+**On GitHub,** a push to `master` and a pull request run every stage but `platform`, the cluster's five at once, each on a runner of its own, so that a push is answered in about 22 minutes, a failure in any of them known within that stage's own time; the nightly run (02:17 UTC) runs them all. A run started by hand names its jobs: `gh workflow run ci.yml --ref <branch> -f jobs=platform` runs that one alone, `-f jobs=static,unit` those two, `-f jobs=l4,cli` two of the cluster's stages, `cluster` its five, `all` every one, and `nightly` what the schedule runs, with its issue. **A red nightly run is seen:** it opens one issue, "The nightly run is red", with the run's page and the lines of the failed jobs' logs that say what failed, or comments on the one already open; the next green nightly closes it (`hack/lib/nightly-issue.sh`, which `hack/test-nightly-issue.sh` tests in `static` against a stand-in `gh`).
 
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 

@@ -142,7 +142,7 @@ A failed suite leaves behind, in `hack/.ci/failure/<suite>/` (`hack/lib/evidence
 - `containers/`: the k3d node's own log since the run started (the kubelet's and k3s's lines), and the run's other containers';
 - `compose.log` and `logs/`: the compose services', and the suite's own logs, the backend's whole.
 
-Read the backend's log at the failed check's time. `hack/.ci/report.md` lists the pipeline's steps with their seconds, then the failed checks. On GitHub the report is the job's summary, and both are the job's artifact `failure-<job>`, kept 7 days: `gh run download <run id> -n failure-cluster`.
+Read the backend's log at the failed check's time. `hack/.ci/report.md` lists the pipeline's steps with their seconds, then the failed checks. On GitHub the report is the job's summary, and both are the job's artifact `failure-<job>`, each of the cluster's stages by its own name, kept 7 days: `gh run download <run id> -n failure-l4`.
 
 To run what a GitHub runner runs, nothing of this machine's own left over (`hack/bin`, `hack/.kube`, a cluster made before), check out the commit beside this one and run the job's stages there: `git worktree add /tmp/ff-fresh HEAD && cd /tmp/ff-fresh && hack/ci.sh deps platform`. Remove it after with `git worktree remove --force /tmp/ff-fresh`.
 

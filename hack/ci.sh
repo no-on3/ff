@@ -14,9 +14,13 @@
 #   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit, but those
 #             .npmauditignore accepts until a date), and every image built, scanned (Trivy, but what
 #             .trivyignore.yaml accepts) and listed as an SBOM (CycloneDX), into hack/.ci/sbom
-#   cluster   on the k3d dev cluster (hack/k8s/cluster-up.sh reuses or makes it): the Kubernetes driver (L3),
-#             the stack (L4), every route as another account (L5), the ff command on the stack and in
-#             Docker, the images run as the cluster runs them, and the platform's manifests
+#   cluster   l3, l4, l5, cli and images below, one after the other, as a laptop runs them; GitHub runs each one on a
+#             runner of its own, at once. Each makes or reuses the k3d dev cluster (hack/k8s/cluster-up.sh):
+#     l3      the Kubernetes driver (L3), and the platform's manifests, without deploying them
+#     l4      the stack through the API (L4)
+#     l5      every route as another account (L5)
+#     cli     the ff command on the stack and in Docker
+#     images  the platform's images, run as the cluster runs them
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
 # Each stage stops at its first failing step and names it; a suite in that step reports each of its failed checks,
@@ -292,17 +296,24 @@ runtime_images() { # the tags the backend runs, which the cluster tests import
     docker build -q -t ff-runtime-python:3.13-v3 runtimes/python >/dev/null
 }
 
-stage_cluster() {
+cluster_is_ready=false
+cluster_ready() { # the runtime images and the dev cluster, once a run: every stage below needs them
+  $cluster_is_ready && return 0
   step "the runtime images, built" runtime_images
   step "the dev cluster, made or reused" hack/k8s/cluster-up.sh
+  cluster_is_ready=true
+}
+stage_l3() {
+  cluster_ready
   step "what a failed run leaves behind, collected from the cluster" hack/test-evidence.sh
   step "L3: the Kubernetes driver on the cluster" hack/k8s/test-it.sh
-  step "L4: the stack through the API" hack/e2e.sh
-  step "L5: every route as another account" hack/e2e-tenancy.sh
-  step "the ff command on the stack and in Docker" hack/cli-e2e.sh
-  step "the platform's images, run as the cluster runs them" hack/test-images.sh
   step "the platform's manifests, without deploying them" hack/k8s/test-platform-manifests.sh
 }
+stage_l4() { cluster_ready; step "L4: the stack through the API" hack/e2e.sh; }
+stage_l5() { cluster_ready; step "L5: every route as another account" hack/e2e-tenancy.sh; }
+stage_cli() { cluster_ready; step "the ff command on the stack and in Docker" hack/cli-e2e.sh; }
+stage_images() { cluster_ready; step "the platform's images, run as the cluster runs them" hack/test-images.sh; }
+stage_cluster() { stage_l3; stage_l4; stage_l5; stage_cli; stage_images; }
 
 stage_platform() {
   step "kubectl and k3d, pinned and checked" hack/install-tools.sh
@@ -314,9 +325,9 @@ stage_platform() {
 ci_stages="$*"
 for stage in "$@"; do
   case "$stage" in
-    deps | static | unit | db | security | cluster | platform) "stage_$stage" ;;
+    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | images | platform) "stage_$stage" ;;
     all) stage_static; stage_unit; stage_db; stage_security; stage_cluster ;;
-    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster, platform or all" >&2; exit 2 ;;
+    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), platform or all" >&2; exit 2 ;;
   esac
 done
 ci_outcome=passed
