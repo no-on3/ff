@@ -13,6 +13,7 @@
 
 source "$FF_REPO_ROOT/hack/lib/checks.sh"
 source "$FF_REPO_ROOT/hack/lib/evidence.sh"
+source "$FF_REPO_ROOT/hack/lib/backend-build.sh"
 work="$FF_REPO_ROOT/hack/.$E2E_NAME"
 # With the "auth", "data", "cache", "mail" and "mail-test" profiles, so that cleaning up also removes Keycloak, Mailpit,
 # the data, cache and mail servers and the mail's receiver when they ran.
@@ -344,29 +345,13 @@ e2e_on_node() {
   done
 }
 
-# e2e_build: the backend built, unless the build was made from the very same files: what it was built from, each
-# file's name, time and size, and the build's own time, are kept in the build, which nest empties before it builds;
-# so a change, a file gone, and another build since, a backend's watch mode on this machine among them, each build it
-# again.
+# e2e_build: the backend built, unless BE/dist is the build of its files as they are (hack/lib/backend-build.sh).
 e2e_build() {
-  local record="$FF_REPO_ROOT/BE/dist/.e2e-built-from"
-  if [ -f "$record" ] && [ "$(cat "$record")" = "$(e2e_built_from)" ]; then
+  if backend_built; then
     echo "  the backend's build is its sources' already"
     return 0
   fi
-  (cd "$FF_REPO_ROOT/BE" && npm run build >/dev/null)
-  e2e_built_from >"$record"
-}
-
-# e2e_built_from: what the backend's build is made from, as one line, and the build's time.
-e2e_built_from() {
-  (
-    cd "$FF_REPO_ROOT/BE"
-    # A file gone is a change too, never a stop: the build that follows says what is missing.
-    { find src package.json package-lock.json tsconfig.json tsconfig.build.json nest-cli.json -type f -printf '%p %T@ %s\n' 2>/dev/null || true; } |
-      sort | sha256sum | cut -d' ' -f1
-    stat -c %Y dist/main.js 2>/dev/null || true
-  ) | paste -sd' '
+  backend_build >/dev/null
 }
 
 # e2e_migrate <VAR=value...>: runs the migrations from the build, as a deploy step would.

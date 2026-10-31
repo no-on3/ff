@@ -95,8 +95,10 @@ section_def stack section_stack
 
 section_backend() {
 section "ff and the backend"
-(cd "$FF_REPO_ROOT/cli" && cargo build --release --locked -q)
-ff_bin="$FF_REPO_ROOT/cli/target/release/ff"
+# Release's optimizations without its link-time ones (cli/Cargo.toml's e2e profile), which take most of a build after
+# each commit: the commit is built in, so every commit builds ff again.
+(cd "$FF_REPO_ROOT/cli" && cargo build --profile e2e --locked -q)
+ff_bin="$FF_REPO_ROOT/cli/target/e2e/ff"
 e2e_build
 # Function URLs on a port of their own, each at http://<id>.fn.localhost:<port>/, which ff reaches on 127.0.0.1.
 url_port="$(free_port)"

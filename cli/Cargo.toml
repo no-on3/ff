@@ -36,3 +36,10 @@ tempfile = "3.27"
 lto = true
 codegen-units = 1
 strip = true
+
+# The ff suite's build (hack/cli-e2e.sh): release's, without the optimizations made across the whole program at link
+# time, which take most of a build after each commit (the commit is built in, so every commit builds ff again).
+[profile.e2e]
+inherits = "release"
+lto = false
+codegen-units = 16

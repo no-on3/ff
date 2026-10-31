@@ -54,6 +54,8 @@ mkdir -p "$ci_dir"
 rm -rf "$ci_dir/failure"
 # Each step run, timed and reported, and the run's report written at exit.
 source "$repo/hack/lib/ci-steps.sh"
+# The backend's build, with what it was built from beside it, which the suites read before they build it again.
+source "$repo/hack/lib/backend-build.sh"
 # The console's and the admin app's Vitest, then cargo's builds and test threads, at most FF_CI_JOBS at once.
 vitest_jobs=()
 if [ -n "${FF_CI_JOBS:-}" ]; then
@@ -140,7 +142,7 @@ shell_scripts_parse() {
 stage_static() {
   step "backend: linter" in_dir BE npm run lint
   step "backend: types, tests included" in_dir BE npx tsc --noEmit -p tsconfig.json
-  step "backend: build" in_dir BE npm run build
+  step "backend: build" backend_build
   step "console: linter" in_dir FE npm run lint
   step "console: types and build" in_dir FE npm run build
   step "admin app: linter" in_dir admin npm run lint

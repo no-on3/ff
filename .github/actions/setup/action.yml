@@ -30,8 +30,9 @@ runs:
         node-version: 24.21.0 # the images'
         cache: ${{ inputs.lockfiles != '' && 'npm' || '' }}
         cache-dependency-path: ${{ inputs.lockfiles }}
-    # Keyed by the toolchain and the lockfile: a run whose lockfile changed starts from the last build with the same
-    # toolchain and builds only what changed; a new toolchain starts afresh.
+    # Keyed by the toolchain, the lockfile and the manifest, whose profiles say how ff is built: a run whose lockfile
+    # or manifest changed starts from the last build with the same toolchain and builds only what changed, and is kept
+    # under its own key, as a cache found under its key is never written again; a new toolchain starts afresh.
     - if: inputs.cargo != ''
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -40,5 +41,5 @@ runs:
           ~/.cargo/registry/cache
           ~/.cargo/git/db
           cli/target
-        key: cargo-${{ inputs.cargo }}-${{ hashFiles('cli/rust-toolchain.toml') }}-${{ hashFiles('cli/Cargo.lock') }}
+        key: cargo-${{ inputs.cargo }}-${{ hashFiles('cli/rust-toolchain.toml') }}-${{ hashFiles('cli/Cargo.lock', 'cli/Cargo.toml') }}
         restore-keys: cargo-${{ inputs.cargo }}-${{ hashFiles('cli/rust-toolchain.toml') }}-
