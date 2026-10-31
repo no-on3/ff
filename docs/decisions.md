@@ -63,8 +63,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 - **Still to change:** the merge after T-05.
 
 **67. The nightly run: the platform's suite, and a job that tries the newest versions of the tools the tests pin;** the other jobs run on pushes and pull requests alone. ✅ Your answer: as recommended. It answers 39's question on GitHub's minutes: about 20 minutes a night, 600 a month, where the nightly took about 80 a night repeating every job, 2,400 a month, more than the free 2,000.
-- **Changed already:** T-09's first part: the five jobs a push runs skip on the schedule, and 39 says the measured minutes.
-- **Still to change:** T-09: the tools' job, and the heavy jobs skipped for a push that changes only the docs.
+- **Changed already:** T-09's first part: the five jobs a push runs skip on the schedule, and 39 says the measured minutes; its second, a push that changes only documents runs `static` alone, about 4 minutes, gitleaks among its steps now.
+- **Still to change:** T-09: the tools' job.
 
 ## 2026-10-30: step 4 started, its eleven choices as recommended
 

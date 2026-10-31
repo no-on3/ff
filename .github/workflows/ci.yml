@@ -30,12 +30,32 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
+  # Whether the commits change more than the documents (hack/lib/changes.sh): a push or a pull request that changes
+  # only them runs static alone, which checks them and the history's secrets; a run started by hand, the jobs it names.
+  changes:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # both ends of the comparison
+      - id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: hack/lib/changes.sh "$BASE" "$HEAD" | tee -a "$GITHUB_OUTPUT"
+
   static:
     if: ${{ github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',static,')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks reads the whole history
       - uses: ./.github/actions/setup
         with:
           lockfiles: |
@@ -56,7 +76,8 @@ jobs:
           if-no-files-found: ignore
 
   unit:
-    if: ${{ github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',unit,')) }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',unit,')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -84,7 +105,8 @@ jobs:
           if-no-files-found: ignore
 
   db:
-    if: ${{ github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',db,')) }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',db,')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -105,13 +127,12 @@ jobs:
   # Docker's build cache, where the scans left every layer; at once with static, unit and db, needing none of them.
   security:
     name: security, then the images run
-    if: ${{ github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',security,') || contains(format(',{0},', inputs.jobs), ',images,')) }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',security,') || contains(format(',{0},', inputs.jobs), ',images,')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0 # gitleaks reads the whole history
       - uses: ./.github/actions/setup
         with:
           room: true
@@ -136,9 +157,9 @@ jobs:
   # with images, which runs in security's job here): a failure in one is known within that stage's own time, and every
   # stage's failures are reported.
   cluster:
-    needs: [static, unit, db]
+    needs: [changes, static, unit, db]
     # After the three it needs, or without them when a run started by hand names a stage alone.
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',cluster,') || contains(format(',{0},', inputs.jobs), ',l3,') || contains(format(',{0},', inputs.jobs), ',l4,') || contains(format(',{0},', inputs.jobs), ',l5,') || contains(format(',{0},', inputs.jobs), ',cli,')) }}
+    if: ${{ !cancelled() && needs.static.result != 'failure' && needs.unit.result != 'failure' && needs.db.result != 'failure' && needs.changes.outputs.code != 'false' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',cluster,') || contains(format(',{0},', inputs.jobs), ',l3,') || contains(format(',{0},', inputs.jobs), ',l4,') || contains(format(',{0},', inputs.jobs), ',l5,') || contains(format(',{0},', inputs.jobs), ',cli,')) }}
     name: ${{ matrix.stage }}
     strategy:
       fail-fast: false # every stage's failures, not only the first stage's

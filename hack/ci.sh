@@ -4,16 +4,17 @@
 #             runtime, and the ff command's Rust (hack/install-tools.sh), each for the stages that need it; alone,
 #             all of them (CI only: locally, the installed dependencies are used as they are)
 #   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
-#             tables, npm audit's checker, the nightly run's issue and the suites' checks against stand-ins,
-#             how-it-works.html's script, every shell script parsed, and the CI workflow linted
+#             tables, npm audit's checker, the nightly run's issue, the docs-only rule and the suites' checks against
+#             stand-ins, how-it-works.html's script, every shell script parsed, the CI workflow linted, and secrets
+#             in the history (gitleaks): what a push that changes only documents runs
 #   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the cache
 #             and mail servers' agents', the small app's handlers, the ff command's and its binary's (L1, L2),
 #             the alert rules' and the log collector's filter (these two in their own images)
 #   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own,
 #             with servers of customers' databases and caches, and a store for buckets
-#   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit, but those
-#             .npmauditignore accepts until a date), and every image built, scanned (Trivy, but what
-#             .trivyignore.yaml accepts) and listed as an SBOM (CycloneDX), into hack/.ci/sbom
+#   security  the dependencies' advisories (npm audit, but those .npmauditignore accepts until a date), and every
+#             image built, scanned (Trivy, but what .trivyignore.yaml accepts) and listed as an SBOM (CycloneDX),
+#             into hack/.ci/sbom
 #   cluster   l3, l4, l5, cli and images below, one after the other, as a laptop runs them; GitHub runs l3 to cli
 #             each on a runner of its own, at once, and images after security, in its job, on the images it built.
 #             Each makes or reuses the k3d dev cluster (hack/k8s/cluster-up.sh):
@@ -104,6 +105,16 @@ PY
   [ $? -eq 0 ] && node --check "$ci_dir/how-it-works.js"
 }
 
+# The scanners run as this user: what they write here stays this user's.
+as_me=(--user "$(id -u):$(id -g)")
+
+# Every commit HEAD holds, with gitleaks' own rules; .gitleaksignore lists the findings that aren't secrets. HEAD's
+# history alone, what a push sends: by default gitleaks reads every ref, a laptop's own branches too.
+gitleaks_history() {
+  docker run --rm "${as_me[@]}" -v "$repo:/repo:ro" "$GITLEAKS_IMAGE" git /repo --log-opts='--full-history --diff-filter=tuxdb HEAD' \
+    --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
+}
+
 workflow_lints() { # the CI server's workflow, its run: steps shellchecked
   docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color=false
 }
@@ -137,6 +148,7 @@ stage_static() {
   step "the nightly run's issue, against a stand-in gh" hack/test-nightly-issue.sh
   step "the suites' checks, on suites of their own" hack/test-checks.sh
   step "the pipeline's steps, on runs of their own" hack/test-ci-steps.sh
+  step "a push of documents alone, told from one with code" hack/test-changes.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses
@@ -144,6 +156,7 @@ stage_static() {
   step "shell scripts: no pipe into grep -q, which pipefail turns into a race" no_pipe_into_grep_q
   step "shell scripts and compose files: a fresh PostgreSQL waited for over TCP, not its socket" postgres_waited_over_tcp
   step "the CI workflow (actionlint)" workflow_lints
+  step "no secret in any commit (gitleaks)" gitleaks_history
 }
 
 stage_unit() {
@@ -226,14 +239,6 @@ IMAGES=(
   "ff-mail:ci deploy/mail"
 )
 
-# The scanners run as this user: what they write here stays this user's.
-as_me=(--user "$(id -u):$(id -g)")
-
-gitleaks_history() { # every commit, with gitleaks' own rules; .gitleaksignore lists the findings that aren't secrets
-  docker run --rm "${as_me[@]}" -v "$repo:/repo:ro" "$GITLEAKS_IMAGE" git /repo \
-    --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
-}
-
 npm_audit() { # <directory>: what ships, high and critical advisories, but those .npmauditignore accepts until a date
   local report
   # npm audit exits 1 whenever it reports anything: the checker decides, and fails on a report that isn't one.
@@ -262,7 +267,6 @@ stage_security() {
   "$repo/hack/check-resources.sh"
   mkdir -p "$ci_dir/sbom" "$ci_dir/trivy-cache"
   cp "$repo/.trivyignore.yaml" "$ci_dir/trivyignore.yaml"
-  step "no secret in any commit (gitleaks)" gitleaks_history
   for dir in BE FE admin runtimes/nodejs; do
     step "$dir: no high or critical advisory in what ships, but those accepted until a date (npm audit)" npm_audit "$dir"
   done
