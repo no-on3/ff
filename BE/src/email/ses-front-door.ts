@@ -4,6 +4,7 @@ import { IncomingMessage, Server, ServerResponse, createServer } from 'node:http
 import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { describeError } from '../common/describe-error';
+import { closeHttp, listenHttp } from '../common/http-server';
 import { originForm } from '../storage/front-door';
 import { StorageDirectory } from '../storage/storage-directory.service';
 import { EmailIdentitiesService } from './email-identities.service';
@@ -69,15 +70,9 @@ export class SesFrontDoor implements OnModuleDestroy {
   /** Starts answering on the port; main.ts calls it once the API listens. Port 0 takes any free one, as the tests do. */
   async listen(port: number, host?: string): Promise<AddressInfo> {
     const server = createServer((request, response) => void this.serve(request, response));
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, host, () => {
-        server.off('error', reject);
-        resolve();
-      });
-    });
+    const address = await listenHttp(server, port, host);
     this.server = server;
-    return server.address() as AddressInfo;
+    return address;
   }
 
   /** Stops taking requests, and waits for those under way. */
@@ -85,7 +80,7 @@ export class SesFrontDoor implements OnModuleDestroy {
     const server = this.server;
     this.server = undefined;
     this.stopping = true;
-    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) await closeHttp(server);
   }
 
   /** Answers one request; never throws, as nothing would catch it. */

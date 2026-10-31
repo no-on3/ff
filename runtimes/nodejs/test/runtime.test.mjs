@@ -728,6 +728,30 @@ describe("logs: a call's output comes before its END", () => {
   });
 });
 
+describe('connections', () => {
+  it("answers a call on a connection left idle past Node.js's 5 seconds, as the cluster's proxy reuses them", async () => {
+    const rt = await startRuntime('js-function');
+    await readyz(rt, 200);
+    const socket = net.connect(Number(new URL(rt.base).port), '127.0.0.1');
+    let got = '';
+    socket.on('data', (chunk) => (got += chunk));
+    const healthz = 'GET /healthz HTTP/1.1\r\nHost: runtime\r\n\r\n';
+
+    socket.write(healthz);
+    await sleep(200);
+    assert.match(got, /^HTTP\/1\.1 200 .*\r\nKeep-Alive: timeout=130\r\n/s);
+    got = '';
+    await sleep(6_000);
+    assert.equal(socket.destroyed, false, 'the runtime closed the idle connection');
+    socket.write(healthz);
+    await sleep(200);
+
+    assert.match(got, /^HTTP\/1\.1 200 /);
+    socket.destroy();
+    await rt.stop();
+  });
+});
+
 describe('secrets hygiene', () => {
   it('never writes environment variables to the logs', async () => {
     const sentinel = 's3cr3t-value-7f1d';
