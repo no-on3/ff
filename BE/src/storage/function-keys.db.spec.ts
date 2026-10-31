@@ -7,7 +7,7 @@ import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
-import { AwsEndpoint, awsEndpointsOf } from '../functions/entities/function.entity';
+import { AwsEndpoint, awsEndpointsOf } from '../common/aws-endpoint';
 import { Bucket } from './bucket.entity';
 import { FunctionCredentials, FunctionKeys } from './function-keys.service';
 import { StorageDirectory } from './storage-directory.service';

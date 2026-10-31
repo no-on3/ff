@@ -267,8 +267,15 @@ run('what FF keeps only for a while (L2)', () => {
     const packagesOf = (accountId: string) => count('SELECT count(*)::int AS n FROM packages WHERE account_id = $1', accountId);
     const deletedAt = async (accountId: string) =>
       (await query<Array<{ at: Date | null }>>('SELECT data_deleted_at AS at FROM accounts WHERE id = $1', [accountId]))[0].at;
-    /** A notification delivered to the account, its webhook secret, an alarm, a queue of its own with a message, and its mail: a domain, a message, its sending, an address suppressed. */
+    /**
+     * A notification delivered to the account, its webhook secret, an alarm, a queue of its own with a message, its mail (a domain,
+     * a message, its sending, an address suppressed), and what a key of its used.
+     */
     const notified = async (accountId: string) => {
+      await query(
+        `INSERT INTO key_uses (holder, service, resource, operation, account_id, first_day, last_day) VALUES ('AKFF' || $1::text || 'XXXX', 's3', 'photos', 'GetObject', $1::text, current_date, current_date)`,
+        [accountId],
+      );
       await query(`INSERT INTO email_identities (account_id, identity, type, status, dkim_selector) VALUES ($1, 'shop.example.tn', 'DOMAIN', 'SUCCESS', 'ff0a1b2c3d')`, [accountId]);
       await query(
         `INSERT INTO email_messages (id, account_id, identity, from_address, return_path, recipients, recipient_count, size_bytes, status)
@@ -295,6 +302,7 @@ run('what FF keeps only for a while (L2)', () => {
       await count('SELECT count(*)::int AS n FROM webhook_secrets WHERE account_id = $1', accountId),
       await count('SELECT count(*)::int AS n FROM alarms WHERE account_id = $1', accountId),
       await count('SELECT count(*)::int AS n FROM queues WHERE account_id = $1', accountId),
+      await count('SELECT count(*)::int AS n FROM key_uses WHERE account_id = $1', accountId),
       await count(
         `SELECT ((SELECT count(*) FROM email_identities WHERE account_id = $1) + (SELECT count(*) FROM email_messages WHERE account_id = $1)
                + (SELECT count(*) FROM email_sending WHERE account_id = $1) + (SELECT count(*) FROM email_suppressions WHERE account_id = $1))::int AS n`,
@@ -320,8 +328,8 @@ run('what FF keeps only for a while (L2)', () => {
 
       expect([await functionsOf(due.id), await historyOf(due.id), await recordsOf(due.id)]).toEqual([0, 0, 2]);
       expect([await notificationsOf(due.id), await notificationsOf(later.id)]).toEqual([
-        [0, 0, 0, 0, 0],
-        [1, 1, 1, 1, 4],
+        [0, 0, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1, 4],
       ]);
       expect(removed).toEqual([node.id, python.id]);
       expect(objectStore.deleteCode.mock.calls).toEqual([[`${node.id}/code.ts`], [`${python.id}/code.py`]]);

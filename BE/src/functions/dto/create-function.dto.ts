@@ -5,7 +5,8 @@ import { MaxJsonBytes, MaxUtf8Bytes } from '../../common/byte-limits';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
 import { MAX_CODE_BYTES, MAX_METADATA_BYTES } from '../limits';
 import { CODE_SHA256, CODE_SHA256_RULE, DEFAULT_HANDLER, MAX_HANDLER_LENGTH, handlerSyntaxProblem } from '../code-package';
-import { AWS_ENDPOINTS, AwsEndpoint, EventFormat, Runtime } from '../entities/function.entity';
+import { AWS_ENDPOINTS, AwsEndpoint } from '../../common/aws-endpoint';
+import { EventFormat, Runtime } from '../entities/function.entity';
 import { IsEnvironment, IsSecrets } from '../environment';
 
 /**

@@ -5,6 +5,7 @@ import { EmailAccountService } from './email-account.service';
 import { EmailIdentitiesService, IdentityRefusal } from './email-identities.service';
 import { EmailIdentity, EmailIdentityStatus, EmailIdentityType } from './email-identity.entity';
 import { EmailMessagesService, SendRefusal, SendRefusalKind, SendRequest } from './email-messages.service';
+import { senderOf } from './email-send';
 import { addressProblem, identityKey } from './email-names';
 import { EmailSuppression, SuppressionReason } from './email-suppression.entity';
 import { EmailSuppressionsService } from './email-suppressions.service';
@@ -19,6 +20,8 @@ export interface SesCaller {
   /** Changes are the key's in the audit log. */
   actor: Actor;
   ip?: string;
+  /** What the caller's key used, by SES's name for the operation: the identity it names, a message's sender, or '' for the account's. */
+  used?: (operation: string, resource: string) => void;
 }
 
 /** A request, as the front door read it: its method, its path's segments decoded, its query, and its JSON body. */
@@ -139,6 +142,18 @@ function identityOffset(token: unknown): number {
   return Number(match[1]);
 }
 
+/**
+ * What a request uses of the account's mail, as IAM names SES's resources: the
+ * identity it makes, reads or deletes, a message's sender; '' for the
+ * account's own, its list of identities, its sending and its suppression list.
+ */
+function usedIdentity(operation: string, name: string, input: Record<string, unknown>): string {
+  if (operation === 'SendEmail') return typeof input.FromEmailAddress === 'string' ? (senderOf(input.FromEmailAddress) ?? '') : '';
+  if (operation === 'CreateEmailIdentity') return typeof input.EmailIdentity === 'string' ? identityKey(input.EmailIdentity) : '';
+  if (operation === 'GetEmailIdentity' || operation === 'DeleteEmailIdentity') return identityKey(name);
+  return '';
+}
+
 /** A timestamp of the query, as AWS's clients write one: ISO 8601, or seconds since the epoch. */
 function queryTime(name: string, value: string | null): Date | undefined {
   if (value === null || value === '') return undefined;
@@ -168,6 +183,7 @@ export class SesOperations {
     }
     if (route.writes && caller.readOnly) throw accessDenied(`The access key ${caller.keyId} only reads: ${route.operation} changes the account's mail.`);
     const name = route.name ?? '';
+    caller.used?.(route.operation, usedIdentity(route.operation, name, request.input));
     switch (route.operation) {
       case 'CreateEmailIdentity':
         return this.createIdentity(request.input, caller);

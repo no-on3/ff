@@ -63,13 +63,8 @@ describe('RetentionService', () => {
       steps.push(`mark ${criteria.id}`);
       return { affected: marked };
     });
-    // The account's notification deliveries, webhook secret, alarms, mail and queues, deleted in the transaction that marks it.
-    const managerQuery = jest.fn(
-      async (sql: string, [accountId]: string[]) =>
-        void steps.push(
-          `${/"(email_[a-z]+)"/.exec(sql)?.[1] ?? (/webhook_secrets/.test(sql) ? 'secret' : /alarms/.test(sql) ? 'alarms' : /queues/.test(sql) ? 'queues' : 'deliveries')} ${accountId}`,
-        ),
-    );
+    // The account's notification deliveries, webhook secret, alarms, mail, queues and keys' uses, deleted in the transaction that marks it: each by its table.
+    const managerQuery = jest.fn(async (sql: string, [accountId]: string[]) => void steps.push(`${/^DELETE FROM "([a-z_]+)"/.exec(sql)?.[1] ?? sql} ${accountId}`));
     const manager = { update, query: managerQuery };
     const dataSource = {
       query,
@@ -222,14 +217,15 @@ describe('RetentionService', () => {
         'buckets 300000000001',
         'namespace 300000000001',
         'logs 300000000001',
-        'deliveries 300000000001',
-        'secret 300000000001',
+        'notification_deliveries 300000000001',
+        'webhook_secrets 300000000001',
         'alarms 300000000001',
         'email_messages 300000000001',
         'email_sending 300000000001',
         'email_identities 300000000001',
         'email_suppressions 300000000001',
         'queues 300000000001',
+        'key_uses 300000000001',
         'mark 300000000001',
         'audit account.data_delete 300000000001',
       ]);
@@ -260,14 +256,15 @@ describe('RetentionService', () => {
         'buckets 300000000002',
         'namespace 300000000002',
         'logs 300000000002',
-        'deliveries 300000000002',
-        'secret 300000000002',
+        'notification_deliveries 300000000002',
+        'webhook_secrets 300000000002',
         'alarms 300000000002',
         'email_messages 300000000002',
         'email_sending 300000000002',
         'email_identities 300000000002',
         'email_suppressions 300000000002',
         'queues 300000000002',
+        'key_uses 300000000002',
         'mark 300000000002',
         'audit account.data_delete 300000000002',
       ]);
@@ -288,14 +285,15 @@ describe('RetentionService', () => {
         'buckets 300000000001',
         'namespace 300000000001',
         'logs 300000000001',
-        'deliveries 300000000001',
-        'secret 300000000001',
+        'notification_deliveries 300000000001',
+        'webhook_secrets 300000000001',
         'alarms 300000000001',
         'email_messages 300000000001',
         'email_sending 300000000001',
         'email_identities 300000000001',
         'email_suppressions 300000000001',
         'queues 300000000001',
+        'key_uses 300000000001',
         'mark 300000000001',
       ]);
       expect(audit.record).not.toHaveBeenCalled();

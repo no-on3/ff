@@ -58,6 +58,7 @@ import { EmailIdentities1793336364006 } from './1793336364006-EmailIdentities';
 import { EmailMessages1793340758436 } from './1793340758436-EmailMessages';
 import { EmailBilling1793345460517 } from './1793345460517-EmailBilling';
 import { AwsEndpoints1793470802242 } from './1793470802242-AwsEndpoints';
+import { KeyUses1793472304822 } from './1793472304822-KeyUses';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -125,4 +126,5 @@ export const MIGRATIONS: Array<new () => object> = [
   EmailMessages1793340758436,
   EmailBilling1793345460517,
   AwsEndpoints1793470802242,
+  KeyUses1793472304822,
 ];

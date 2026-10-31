@@ -45,6 +45,7 @@ import { StorageRequestCount } from './storage-request-count.entity';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { WebsiteServer } from './website-server';
 import { testObjectStore, testStoreClient } from '../object-store/test-fixtures';
+import { notedUses } from './test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '730000000001';
@@ -116,6 +117,8 @@ run("buckets' sites, from the S3 front door to a browser (L2)", () => {
       {} as BucketNotificationsService,
       new BucketEvents(),
       websites,
+      // Nor are its keys' uses: the front door's own suite has them.
+      notedUses(),
     );
     const endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
     client = new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: key.secret }, maxAttempts: 1 });

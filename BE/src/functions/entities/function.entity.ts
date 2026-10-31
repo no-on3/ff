@@ -10,6 +10,7 @@ import {
   Index,
 } from 'typeorm';
 import { Account } from '../../accounts/entities/account.entity';
+import { AwsEndpoint, awsEndpointsOf } from '../../common/aws-endpoint';
 import { FunctionInvocation } from './function-invocation.entity';
 
 export enum FunctionStatus {
@@ -32,26 +33,6 @@ export enum Runtime {
 export enum EventFormat {
   LAMBDA = 'lambda',
   WRAPPED = 'wrapped',
-}
-
-/**
- * A service whose endpoint FF gives a function, with its key to its account's
- * buckets, queues and mail (FunctionKeys): named as AWS's configuration names
- * a service's endpoint, its variable being AWS_ENDPOINT_URL_S3, _SQS or _SESV2,
- * which AWS's SDKs read.
- */
-export enum AwsEndpoint {
-  S3 = 's3',
-  SQS = 'sqs',
-  SESV2 = 'sesv2',
-}
-
-/** Every service FF gives a function the endpoint of, in this order: what a function has unless its owner says otherwise. */
-export const AWS_ENDPOINTS: readonly AwsEndpoint[] = Object.values(AwsEndpoint);
-
-/** The services named, in AWS_ENDPOINTS' order, as a function keeps them; every one when none are named. */
-export function awsEndpointsOf(named?: readonly AwsEndpoint[]): AwsEndpoint[] {
-  return AWS_ENDPOINTS.filter((service) => named === undefined || named.includes(service));
 }
 
 /**

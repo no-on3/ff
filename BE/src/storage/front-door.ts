@@ -10,6 +10,7 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
+import { AwsEndpoint } from '../common/aws-endpoint';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
@@ -27,6 +28,7 @@ import { S3Address, S3Operation, addressOf, operationOf } from './s3-requests';
 import { RequestSignature, SigningChain, UNSIGNED_PAYLOAD, checkSignature, decodeEscapes, readSignature } from './sigv4';
 import { StoreClient } from './store-client';
 import { reachesBucket } from './key-reach';
+import { KeyUses } from './key-uses.service';
 import { ActiveKey, StorageDirectory } from './storage-directory.service';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { noSuchWebsiteConfiguration, websiteFromXml, websiteXml } from './website';
@@ -208,6 +210,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     private readonly notifications: BucketNotificationsService,
     private readonly bucketEvents: BucketEvents,
     private readonly websites: BucketWebsitesService,
+    private readonly keyUses: KeyUses,
   ) {
     const base = new URL(config.getOrThrow<string>('storage.base'));
     this.host = base.hostname;
@@ -326,6 +329,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     const operation = operationOf(method, address, query, request.headers);
     if (operation.name === 'NotImplemented') throw notImplemented();
     if (operation.name === 'ListBuckets') {
+      this.used(key, operation.name, '');
       const buckets = (await this.directory.bucketsOf(key.accountId)).filter((bucket) => reachesBucket(key, bucket.name));
       return this.document(exchange, 200, listBucketsDocument(key.accountId, buckets, this.region));
     }
@@ -333,6 +337,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     exchange.bucket = bucket;
     exchange.operation = operation;
     if (operation.writes && key.readOnly) throw accessDenied();
+    this.used(key, operation.name, bucket.name);
     // A bucket's notifications are set whatever its room or the account's credit, as other settings are.
     if (operation.name === 'GetBucketNotificationConfiguration') return this.document(exchange, 200, rulesXml(bucket.notifications ?? []));
     if (operation.name === 'PutBucketNotificationConfiguration') return this.putNotifications(exchange, signature, chain, key, bucket, operation, plan);
@@ -403,7 +408,14 @@ export class S3FrontDoor implements OnModuleDestroy {
     const slash = path.indexOf('/');
     if (slash <= 0 || slash === path.length - 1) throw invalidRequest('The x-amz-copy-source header is not <bucket>/<key>');
     const bucket = await this.bucketFor(decodeEscapes(path.slice(0, slash)), key);
+    // A copy reads its source, as IAM's s3:GetObject on it.
+    this.used(key, 'GetObject', bucket.name);
     return `/${bucket.storeName}/${path.slice(slash + 1)}`;
+  }
+
+  /** What the key used, by S3's name for the operation, noted for the export's roles: a bucket, or '' for the account's. */
+  private used(key: ActiveKey, operation: string, bucket: string): void {
+    this.keyUses.note({ key, service: AwsEndpoint.S3, resource: bucket, operation });
   }
 
   /** The request to the store, its body checked on the way, and the store's answer back. */

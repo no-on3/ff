@@ -31,6 +31,8 @@ import { StorageDirectory } from './storage-directory.service';
 import { BucketEvents } from './bucket-events';
 import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketWebsitesService } from './bucket-websites.service';
+import { KeyUse } from './key-use.entity';
+import { KeyUses } from './key-uses.service';
 import { StorageKey } from './storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey, newStoreName } from './storage-names';
 import { StorageRequestCount } from './storage-request-count.entity';
@@ -50,6 +52,7 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
   let db: ScratchDatabase;
   let frontDoor: S3FrontDoor;
   let counts: StorageRequestCountsService;
+  let keyUses: KeyUses;
   let endpoint: string;
   const photos = { name: `photos-${randomBytes(4).toString('hex')}`, storeName: newStoreName() };
   const theirs = { name: `theirs-${randomBytes(4).toString('hex')}`, storeName: newStoreName() };
@@ -87,6 +90,7 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
     const directory = new StorageDirectory(buckets, db.dataSource.getRepository(StorageKey), encryption);
     await db.dataSource.getRepository(StorageKey).save({ id: key.id, accountId: ACCOUNT, secret: directory.sealSecret(key.id, key.secret) });
     counts = new StorageRequestCountsService(db.dataSource.getRepository(StorageRequestCount));
+    keyUses = new KeyUses(db.dataSource.getRepository(KeyUse));
     // Every account on the beta plan, with credit, and as many requests a second as it sends: the API's checks have their own tests.
     const credit = { admit: async () => undefined } as unknown as CreditService;
     const throttler = { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) };
@@ -101,6 +105,7 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
       {} as BucketNotificationsService,
       new BucketEvents(),
       {} as BucketWebsitesService,
+      keyUses,
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
@@ -206,5 +211,21 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
     ]);
     expect(rows[1].requests).toBeGreaterThanOrEqual(13);
     expect((await db.dataSource.getRepository(StorageKey).findOneByOrFail({ id: key.id })).lastUsedAt).toBeInstanceOf(Date);
+  });
+
+  it("writes what the key used, for the export's roles: the bucket by each of S3's operations, once, today; not another account's bucket", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+
+    await keyUses.flush();
+
+    const rows = await db.dataSource.query<Array<{ holder: string; service: string; resource: string; operation: string; first: string; last: string }>>(
+      `SELECT holder, service, resource, operation, first_day::text AS first, last_day::text AS last FROM key_uses WHERE account_id = $1 ORDER BY operation`,
+      [ACCOUNT],
+    );
+    expect([...new Set(rows.map((row) => `${row.holder} ${row.service} ${row.resource} ${row.first} ${row.last}`))]).toEqual([`${key.id} s3 ${photos.name} ${today} ${today}`]);
+    expect(rows.map((row) => row.operation)).toEqual(
+      expect.arrayContaining(['CompleteMultipartUpload', 'CopyObject', 'CreateMultipartUpload', 'DeleteObject', 'DeleteObjects', 'GetObject', 'HeadObject', 'ListObjectsV2', 'ListParts', 'PutObject', 'UploadPart']),
+    );
+    expect(await db.dataSource.query(`SELECT count(*)::int AS n FROM key_uses WHERE resource = $1`, [theirs.name])).toEqual([{ n: 0 }]);
   });
 });

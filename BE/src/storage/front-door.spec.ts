@@ -36,6 +36,7 @@ import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
 import { RequestSignature, checkSignature, readSignature, signedForStore } from './sigv4';
 import { ActiveKey, StorageDirectory } from './storage-directory.service';
+import { notedUses, useLine } from './test-fixtures';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { WebsiteConfiguration } from './website';
 
@@ -112,6 +113,9 @@ function fakeStore(seen: StoreRequestSeen[]): Server {
         else response.writeHead(200, { 'content-length': object.length, etag: '"etag-1"' }).end();
       } else if (request.method === 'POST') {
         response.writeHead(200, { 'content-type': 'application/xml' }).end('<DeleteResult><Deleted><Key>a.txt</Key></Deleted></DeleteResult>');
+      } else if (request.method === 'DELETE' && key.length) {
+        objects.delete(name);
+        response.writeHead(204).end();
       } else {
         response.writeHead(204).end();
       }
@@ -167,6 +171,8 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   /** What the buckets' website configurations got: each kept, or removed, and by whom. */
   const keptWebsites: Array<[string, WebsiteConfiguration | null, ChangedBy]> = [];
   const websites = { keep: async (bucket: Bucket, website: WebsiteConfiguration | null, by: ChangedBy) => void keptWebsites.push([bucket.name, website, by]) } as unknown as BucketWebsitesService;
+  /** What each key used, as the front door noted it. */
+  const keyUses = notedUses();
   const client = (key: ActiveKey = KEY, secret = key.secret) =>
     new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: secret }, maxAttempts: 1 });
   /** The SDK's error for a refused call: its name and status. */
@@ -187,7 +193,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
       objectStore: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
-    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites);
+    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites, keyUses);
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 
@@ -203,6 +209,27 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     kept.length = 0;
     published.length = 0;
     keptWebsites.length = 0;
+    keyUses.seen.length = 0;
+  });
+
+  it("notes what each key used, by S3's names, for the export's roles: a bucket, a copy's source as a read of it, the account's list, nothing refused", async () => {
+    await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'noted.txt', Body: 'noted' }));
+    await client().send(new CopyObjectCommand({ Bucket: 'exports', Key: 'noted.txt', CopySource: 'photos/noted.txt' }));
+    await client().send(new ListBucketsCommand({}));
+    await client(READ_ONLY).send(new GetObjectCommand({ Bucket: 'photos', Key: 'noted.txt' }));
+    await refused(client(READ_ONLY).send(new PutObjectCommand({ Bucket: 'photos', Key: 'refused.txt', Body: 'no' })));
+    await refused(client(NARROW).send(new GetObjectCommand({ Bucket: 'exports', Key: 'noted.txt' })));
+    await refused(client().send(new GetObjectCommand({ Bucket: 'theirs', Key: 'noted.txt' })));
+
+    expect(keyUses.seen.map(useLine)).toEqual([
+      `${KEY.id} s3 photos PutObject`,
+      `${KEY.id} s3 exports CopyObject`,
+      `${KEY.id} s3 photos GetObject`,
+      `${KEY.id} s3 (the account) ListBuckets`,
+      `${READ_ONLY.id} s3 photos GetObject`,
+    ]);
+    // Nothing left in the buckets that other tests list.
+    for (const Bucket of ['photos', 'exports']) await client().send(new DeleteObjectCommand({ Bucket, Key: 'noted.txt' }));
   });
 
   it("puts a string, its SHA-256 and CRC-32 checked, and the store gets the object under its own name, FF's signature, no checksum", async () => {

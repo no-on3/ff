@@ -1,5 +1,6 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
-import { AwsEndpoint, EventFormat, Runtime } from '../entities/function.entity';
+import { AwsEndpoint } from '../../common/aws-endpoint';
+import { EventFormat, Runtime } from '../entities/function.entity';
 import { CreateFunctionDto } from './create-function.dto';
 import { UpdateFunctionDto } from './update-function.dto';
 import { UpdateSecretsDto } from './secrets.dto';

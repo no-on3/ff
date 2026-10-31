@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, IsNull, QueryFailedError, Repository } from 'typeorm';
-import { AWS_ENDPOINTS, AwsEndpoint } from '../functions/entities/function.entity';
+import { AWS_ENDPOINTS, AwsEndpoint } from '../common/aws-endpoint';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey } from './storage-names';

@@ -3,9 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { IncomingMessage, Server, ServerResponse, createServer } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
+import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { originForm } from '../storage/front-door';
+import { KeyUses } from '../storage/key-uses.service';
 import { StorageDirectory } from '../storage/storage-directory.service';
 import { EmailIdentitiesService } from './email-identities.service';
 import { SesError, accessDenied, badRequest, internalFailure, missingAuthenticationToken, requestTooLarge, unrecognizedClient } from './ses-error';
@@ -65,6 +67,7 @@ export class SesFrontDoor implements OnModuleDestroy {
     private readonly directory: StorageDirectory,
     private readonly operations: SesOperations,
     private readonly identities: EmailIdentitiesService,
+    private readonly keyUses: KeyUses,
   ) {}
 
   /** Starts answering on the port; main.ts calls it once the API listens. Port 0 takes any free one, as the tests do. */
@@ -140,7 +143,14 @@ export class SesFrontDoor implements OnModuleDestroy {
     // The path's segments are matched as sent, each name then decoded, so that an escaped "/" in a name stays in its segment.
     return this.operations.run(
       { method, path: rawPath, query: new URLSearchParams(rawQuery), input },
-      { accountId: key.accountId, keyId: key.id, readOnly: key.readOnly, actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` }, ip: request.socket.remoteAddress },
+      {
+        accountId: key.accountId,
+        keyId: key.id,
+        readOnly: key.readOnly,
+        actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` },
+        ip: request.socket.remoteAddress,
+        used: (operation, identity) => this.keyUses.note({ key, service: AwsEndpoint.SESV2, resource: identity, operation }),
+      },
     );
   }
 

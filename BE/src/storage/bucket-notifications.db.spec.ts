@@ -51,6 +51,7 @@ import { newAccessKeyId, newSecretAccessKey, newStoreName } from './storage-name
 import { StorageRequestCount } from './storage-request-count.entity';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { testObjectStore, testStoreClient } from '../object-store/test-fixtures';
+import { notedUses } from './test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '720000000001';
@@ -146,8 +147,9 @@ run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2
       { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) },
       notifications,
       events,
-      // The bucket is no site: sites have their own suite.
+      // The bucket is no site: sites have their own suite; nor are its keys' uses this suite's.
       {} as BucketWebsitesService,
+      notedUses(),
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
     client = new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: key.secret }, maxAttempts: 1 });

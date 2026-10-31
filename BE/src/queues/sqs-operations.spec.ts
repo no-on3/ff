@@ -346,6 +346,21 @@ describe("SQS's operations on an account's queues", () => {
       expect((await refusal(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(null, ['photos'])))).type).toBe('AccessDenied');
       await expect(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(null))).resolves.toEqual({ QueueUrl: URL_ });
     });
+
+    it("tells the caller what its key used, by SQS's names: a queue it reached, the account's for ListQueues; nothing refused, nor a queue that isn't there", async () => {
+      const { operations } = setup();
+      const used: string[] = [];
+      const noting = (extra: Partial<Caller> = {}) => caller({ used: (operation, queue) => void used.push(`${operation} ${queue || '(the account)'}`), ...extra });
+
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x' }, noting());
+      await operations.run('ReceiveMessage', { QueueUrl: URL_ }, noting({ readOnly: true }));
+      await operations.run('ListQueues', {}, noting());
+      await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x' }, noting({ readOnly: true })));
+      await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x' }, noting({ reach: { buckets: null, queues: ['invoices'] } })));
+      await refusal(operations.run('GetQueueUrl', { QueueName: 'gone' }, noting()));
+
+      expect(used).toEqual(['SendMessage orders', 'ReceiveMessage orders', 'ListQueues (the account)']);
+    });
   });
 
   it('writes each change of a queue in the audit log, as the caller given: made, changed, purged and deleted, but not made again', async () => {

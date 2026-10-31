@@ -198,12 +198,12 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
    * object storage, its row and its history (FunctionsService.remove(), which
    * records each in the audit log); then its packages; then its databases, from
    * customers' database server, and its caches, from customers' cache server;
-   * then its buckets, emptied, and its access keys,
-   * revoked; then its namespace, so
-   * that nothing writes more of its lines; then its lines in the log store. Then, at once, its
-   * queues with their messages, its alarms, notification deliveries and webhook secret, and its mail go, and the account is marked,
-   * with an entry in its audit log, once. Each step may run again, so
-   * a run that failed part way is finished by the next.
+   * then its buckets, emptied, and its access keys, revoked; then its
+   * namespace, so that nothing writes more of its lines; then its lines in the
+   * log store. Then, at once, its queues with their messages, its alarms,
+   * notification deliveries and webhook secret, its mail and what its keys used
+   * go, and the account is marked, with an entry in its audit log, once. Each
+   * step may run again, so a run that failed part way is finished by the next.
    */
   private async deleteAccountData(accountId: string): Promise<void> {
     const functions = await this.dataSource.getRepository(Function).find({ where: { accountId }, order: { createdAt: 'ASC' } });
@@ -227,6 +227,8 @@ export class RetentionService implements OnModuleInit, OnModuleDestroy {
       }
       // Its functions' own went with them; any other goes with its messages.
       await manager.query(`DELETE FROM "queues" WHERE "account_id" = $1`, [accountId]);
+      // What its keys used, which no export reads any more.
+      await manager.query(`DELETE FROM "key_uses" WHERE "account_id" = $1`, [accountId]);
       const marked = await manager.update(Account, { id: accountId, dataDeletedAt: IsNull() }, { dataDeletedAt: new Date() });
       if (!marked.affected) return;
       await this.audit.record(

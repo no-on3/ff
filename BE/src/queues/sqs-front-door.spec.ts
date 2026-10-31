@@ -10,6 +10,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { ActiveKey, StorageDirectory } from '../storage/storage-directory.service';
+import { notedUses, useLine } from '../storage/test-fixtures';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueRequestCounts } from './queue-request-counts.service';
@@ -42,6 +43,8 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
   let throttled: boolean;
   let creditless: boolean;
   const touched: string[] = [];
+  /** What each key used, as the endpoint noted it. */
+  const keyUses = notedUses();
   const queues = {
     find: jest.fn(async (accountId: string, name: string) => (accountId === KEY.accountId && name === 'orders' ? ORDERS : null)),
     send: jest.fn(async () => undefined),
@@ -85,6 +88,7 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
       onePlan(),
       credit,
       throttler,
+      keyUses,
     );
 
   beforeAll(async () => {
@@ -130,11 +134,12 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     });
   }
 
-  it("answers a request signed with the account's key, with its request ID, and writes the key's use down", async () => {
+  it("answers a request signed with the account's key, with its request ID, and writes the key's use down, and what it used", async () => {
     const answer = await client().send(new GetQueueUrlCommand({ QueueName: 'orders' }));
     expect(answer.QueueUrl).toBe(URL_);
     expect(answer.$metadata.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(touched).toContain(KEY.id);
+    expect(keyUses.seen.map(useLine)).toContain(`${KEY.id} sqs orders GetQueueUrl`);
   });
 
   it("answers a queue's URL under functions' own endpoint for a request to its host, inside the cluster, and under FF_SQS_BASE for any other", async () => {

@@ -7,11 +7,13 @@ import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
+import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
 import { countQueueRequest } from '../plans/rate-limits';
 import { originForm } from '../storage/front-door';
+import { KeyUses } from '../storage/key-uses.service';
 import { StorageDirectory } from '../storage/storage-directory.service';
 import { SqsError, accessDenied, internalError, invalidClientTokenId, invalidParameter, missingAuthenticationToken, requestThrottled } from './sqs-error';
 import { Caller, SENDING_OPERATIONS, SqsOperations } from './sqs-operations';
@@ -83,6 +85,7 @@ export class SqsFrontDoor implements OnModuleDestroy {
     private readonly plans: PlansService,
     private readonly credit: CreditService,
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
+    private readonly keyUses: KeyUses,
   ) {
     const sqs = config.getOrThrow<{ base: string; functionEndpoint?: string }>('sqs');
     this.base = sqs.base;
@@ -175,6 +178,7 @@ export class SqsFrontDoor implements OnModuleDestroy {
       // Changes are the key's in the audit log, which a request here doesn't name otherwise.
       actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` },
       ip: request.socket.remoteAddress,
+      used: (sqsOperation, queue) => this.keyUses.note({ key, service: AwsEndpoint.SQS, resource: queue, operation: sqsOperation }),
     });
   }
 

@@ -44,7 +44,8 @@ import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { SecretsView } from './dto/secrets.dto';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
-import { EventFormat, Function, FunctionStatus, PackageType, Runtime, awsEndpointsOf } from './entities/function.entity';
+import { awsEndpointsOf } from '../common/aws-endpoint';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { FunctionUrl } from './entities/function-url.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import {

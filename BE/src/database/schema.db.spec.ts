@@ -1426,6 +1426,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'invoice_lines',
         'invoice_notices',
         'invoices',
+        'key_uses',
         'ledger_accounts',
         'ledger_entries',
         'ledger_transactions',

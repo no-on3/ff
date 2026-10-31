@@ -27,6 +27,8 @@ import { Mail, MailService } from '../mail/mail.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from '../storage/bucket.entity';
 import { StorageDirectory } from '../storage/storage-directory.service';
+import { KeyUse } from '../storage/key-use.entity';
+import { KeyUses } from '../storage/key-uses.service';
 import { StorageKey } from '../storage/storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey } from '../storage/storage-names';
 import { EmailAccountService } from './email-account.service';
@@ -67,6 +69,7 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
   const encryption = new EncryptionService({ getOrThrow: () => [{ id: 'test', key: randomBytes(32) }] } as unknown as ConfigService);
   let db: ScratchDatabase;
   let frontDoor: SesFrontDoor;
+  let keyUses: KeyUses;
   let identities: EmailIdentitiesService;
   let port: number;
   const key = { id: newAccessKeyId(), secret: newSecretAccessKey() };
@@ -161,7 +164,8 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
     const suppressions = new EmailSuppressionsService(db.dataSource.getRepository(EmailSuppression), audit);
     const account = new EmailAccountService(plans, db.dataSource.getRepository(EmailSending));
     const messages = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick: () => undefined } as unknown as EmailSender, { admit: async () => undefined } as unknown as CreditService, config);
-    frontDoor = new SesFrontDoor(directory, new SesOperations(identities, suppressions, account, messages), identities);
+    keyUses = new KeyUses(db.dataSource.getRepository(KeyUse));
+    frontDoor = new SesFrontDoor(directory, new SesOperations(identities, suppressions, account, messages), identities, keyUses);
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
   });
 
@@ -303,6 +307,28 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
       const message = { FromEmailAddress: 'orders@shop.example.tn', Destination: { ToAddresses: ['orders@shop.example.tn'] }, Content: { Simple: { Subject: { Data: 'Hi' }, Body: { Text: { Data: 'Hello' } } } } };
       expect(await ses('POST', '/v2/email/outbound-emails', { input: message })).toMatchObject({ status: 400, error: 'SendingPausedException' });
       expect(await ses('GET', '/v2/email/configuration-sets')).toMatchObject({ status: 501, error: 'NotImplemented' });
+    });
+
+    it("writes what each key used, for the export's roles, by SES's names: the identity made, read or deleted, a message's sender, the account's own; nothing refused", async () => {
+      await keyUses.flush();
+
+      const rows = await db.dataSource.query<Array<{ holder: string; resource: string; operation: string }>>(
+        `SELECT holder, resource, operation FROM key_uses WHERE service = 'sesv2' AND account_id = $1 ORDER BY holder, operation, resource`,
+        [ACCOUNT],
+      );
+      const lines = rows.map((row) => `${row.holder === reader.id ? 'the reader' : row.holder === key.id ? 'the key' : row.holder} ${row.operation} ${row.resource || '(the account)'}`);
+      expect(lines).toEqual(
+        expect.arrayContaining([
+          'the key CreateEmailIdentity shop.example.tn',
+          'the key GetEmailIdentity shop.example.tn',
+          'the key DeleteEmailIdentity news.example.tn',
+          'the key SendEmail orders@shop.example.tn',
+          'the key GetAccount (the account)',
+          'the key PutSuppressedDestination (the account)',
+          'the reader GetAccount (the account)',
+        ]),
+      );
+      expect(lines.filter((line) => line.startsWith('the reader'))).toEqual(['the reader GetAccount (the account)']);
     });
   });
 });
