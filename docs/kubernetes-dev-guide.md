@@ -120,7 +120,7 @@ hack/e2e.sh --only queues --reuse --keep   # again, against the stack kept, and 
 hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, a function's logs, then the operator's routes, bank transfers, invoices and credit grants, and last, closing an account and deleting its data (about 7 min)
 ```
 
-The script starts its own compose project (`ff-e2e`, ports 55432 and 59003, which `FF_E2E_PG_PORT` and `FF_E2E_S3_PORT` move when another program holds one: the suite names it before compose starts), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
+The script starts its own compose project (`ff-e2e`, ports 25432 and 29003, which `FF_E2E_PG_PORT` and `FF_E2E_S3_PORT` move when another program holds one: the suite names it before compose starts; L5 has 25433, 29004, 28180, 21026 and 28026, the `ff` suite 25436 and 29007, each under Linux's range for outgoing connections, 32768 to 60999, where a connection of the machine's can hold a port for a moment and Docker then refuses to publish it, as it once refused L5's Mailpit; a start that fails says compose's own words), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
 1. create (waits for ACTIVE);
 2. invoke;
 3. history (with duration);

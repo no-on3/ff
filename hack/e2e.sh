@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # L4 end-to-end test of the whole stack, driven through the public REST API:
-#   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003), customers' database server (10.199.1.10)
+#   PostgreSQL + S3 (compose project "ff-e2e", ports 25432 / 29003), customers' database server (10.199.1.10)
 #   + the k3d dev cluster + the backend (built, started on a free port).
 # The backend first refuses the new database, then the migrations run from the
 # build, as a deploy step would. Scenario: create → invoke → history → update →
@@ -98,8 +98,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-e2e
 E2E_NAME=e2e
-export FF_PG_PORT="${FF_E2E_PG_PORT:-55432}"
-export FF_S3_PORT="${FF_E2E_S3_PORT:-59003}"
+export FF_PG_PORT="${FF_E2E_PG_PORT:-25432}"
+export FF_S3_PORT="${FF_E2E_S3_PORT:-29003}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"

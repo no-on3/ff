@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # L3 for the ff command: the built binary against the whole stack, as a developer runs it:
-#   PostgreSQL + S3 (compose project "ff-cli-e2e", ports 55436 / 59007) + the k3d dev cluster
+#   PostgreSQL + S3 (compose project "ff-cli-e2e", ports 25436 / 29007) + the k3d dev cluster
 #   + the backend (built, started on a free port in development mode, which acts as the account
 #   a profile names, as hack/e2e.sh's requests do).
 # For examples/hello.ts and examples/hello.py: deploy, invoke, the handler's line in ff logs and
@@ -47,8 +47,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-cli-e2e
 E2E_NAME=cli-e2e
-export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-55436}"
-export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-59007}"
+export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-25436}"
+export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-29007}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"

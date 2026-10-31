@@ -54,7 +54,7 @@
 #     secrets sign. Each account reads and changes only its own.
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
-# compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
+# compose project "ff-e2e-tenancy" (ports 25433 / 29004 / 28180 / 21026 / 28026);
 # removed on exit with the namespaces. Its sections run alone too, with what they
 # need (hack/lib/sections.sh): --list names them, --only and --from choose. --keep
 # removes nothing on exit, for a look and for the next run, which --reuse runs
@@ -64,11 +64,11 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-e2e-tenancy
 E2E_NAME=e2e-tenancy
-export FF_PG_PORT="${FF_E2E_TENANCY_PG_PORT:-55433}"
-export FF_S3_PORT="${FF_E2E_TENANCY_S3_PORT:-59004}"
-export FF_KEYCLOAK_PORT="${FF_E2E_TENANCY_KEYCLOAK_PORT:-58180}"
-export FF_MAIL_SMTP_PORT="${FF_E2E_TENANCY_MAIL_SMTP_PORT:-51026}"
-export FF_MAIL_UI_PORT="${FF_E2E_TENANCY_MAIL_UI_PORT:-58026}"
+export FF_PG_PORT="${FF_E2E_TENANCY_PG_PORT:-25433}"
+export FF_S3_PORT="${FF_E2E_TENANCY_S3_PORT:-29004}"
+export FF_KEYCLOAK_PORT="${FF_E2E_TENANCY_KEYCLOAK_PORT:-28180}"
+export FF_MAIL_SMTP_PORT="${FF_E2E_TENANCY_MAIL_SMTP_PORT:-21026}"
+export FF_MAIL_UI_PORT="${FF_E2E_TENANCY_MAIL_UI_PORT:-28026}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"

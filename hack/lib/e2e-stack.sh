@@ -76,6 +76,15 @@ e2e_fresh() {
   [ -z "${2:-}" ] || docker volume rm "${E2E_PROJECT}_$2" >/dev/null 2>&1 || true
 }
 
+# e2e_up <what> <service...>: compose's `up -d --wait` of the services, its own last words in the failure when one
+# doesn't start, such as Docker's "failed to bind host port 127.0.0.1:58026/tcp: address already in use", which nothing
+# else says.
+e2e_up() {
+  local what=$1 said
+  shift
+  said="$("${compose[@]}" up -d --wait "$@" 2>&1)" || fail "$what did not become healthy: $(tail -n 2 <<<"$said" | tr '\n' ' ')"
+}
+
 # e2e_data_db <subnet> <address>: the server of customers' databases (ADR 0008), the compose project's own, on a Docker
 # network of its own (a /24 no other run uses), which the cluster's node joins at the lowest gateway priority, so that
 # functions reach it; its CA copied to the work directory. Sets e2e_data_db_env, the backend's FF_DATA_DB_* settings,
@@ -84,8 +93,7 @@ e2e_data_db() {
   local subnet=$1 address=$2 node="k3d-$FF_CLUSTER_NAME-server-0" network
   e2e_data_subnet=$subnet
   e2e_fresh data-db data_db
-  FF_DATA_DB_SUBNET="$subnet" FF_DATA_DB_ADDRESS="$address" "${compose[@]}" up -d --wait data-db >/dev/null 2>&1 ||
-    fail "the data server did not become healthy"
+  FF_DATA_DB_SUBNET="$subnet" FF_DATA_DB_ADDRESS="$address" e2e_up "the data server" data-db
   e2e_data_db_container="$("${compose[@]}" ps -q data-db)"
   network="${E2E_PROJECT}_data"
   docker network connect --gw-priority -1 "$network" "$node"
@@ -102,8 +110,7 @@ e2e_data_db() {
 e2e_cache() {
   local address=$1
   e2e_fresh cache cache
-  FF_DATA_DB_SUBNET="$e2e_data_subnet" FF_CACHE_ADDRESS="$address" "${compose[@]}" up -d --wait cache >/dev/null 2>&1 ||
-    fail "the cache server did not become healthy"
+  FF_DATA_DB_SUBNET="$e2e_data_subnet" FF_CACHE_ADDRESS="$address" e2e_up "the cache server" cache
   e2e_cache_container="$("${compose[@]}" ps -q cache)"
   docker cp -q "$e2e_cache_container:/var/lib/ff-cache/tls/ca.crt" "$work/cache-ca.crt"
   e2e_cache_env=(FF_CACHE_HOST="$address" FF_CACHE_PORTS=6400-6999 FF_CACHE_AGENT_URL="https://$address:6390"
@@ -123,7 +130,7 @@ e2e_mail() {
   "${compose[@]}" build -q mail >/dev/null 2>&1 || fail "the mail server's image did not build"
   FF_DATA_DB_SUBNET="$e2e_data_subnet" FF_MAIL_ADDRESS="$address" FF_MAIL_RECEIVER_ADDRESS="$receiver" \
     FF_MAIL_RELAY_FROM="${e2e_data_subnet%.*}.1/32" FF_MAIL_RELAYHOST="$receiver:2525" \
-    "${compose[@]}" up -d --wait mail-receiver mail >/dev/null 2>&1 || fail "the mail server did not become healthy"
+    e2e_up "the mail server" mail-receiver mail
   e2e_mail_container="$("${compose[@]}" ps -q mail)"
   e2e_mail_receiver="$("${compose[@]}" ps -q mail-receiver)"
   docker cp -q "$e2e_mail_container:/var/lib/ff-mail/tls/ca.crt" "$work/mail-ca.crt"
@@ -304,7 +311,7 @@ e2e_dependencies() {
     [ -n "$("${compose[@]}" ps -q "$service" 2>/dev/null)" ] || ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null ||
       fail "127.0.0.1:$port, $E2E_PROJECT's $service, is another program's: the suite's port variable moves it (FF_E2E_PG_PORT and FF_E2E_S3_PORT for L4; FF_E2E_TENANCY_ and FF_CLI_E2E_ for L5's and the ff suite's)"
   done
-  "${compose[@]}" up -d --wait postgres s3 "$@" >/dev/null 2>&1 || fail "compose dependencies did not become healthy"
+  e2e_up "compose dependencies" postgres s3 "$@"
   if $e2e_reuse; then
     "${compose[@]}" exec -T postgres psql -U postgres -qc 'DROP DATABASE IF EXISTS serverless_platform WITH (FORCE)' \
       -c 'CREATE DATABASE serverless_platform' >/dev/null 2>&1 || fail "FF's database could not be made new"
