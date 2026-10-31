@@ -156,6 +156,7 @@ stage_static() {
   step "a push of documents alone, told from one with code" hack/test-changes.sh
   step "the nightly's SBOMs, the branch's last, against a stand-in gh" hack/test-last-sboms.sh
   step "the nightly's latest tools, compared with the pinned ones, on recordings of its own" hack/test-tools-compare.sh
+  step "the resource guard, its limits and the load's off" hack/test-check-resources.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses

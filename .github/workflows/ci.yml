@@ -28,6 +28,10 @@ env:
   # compilation's files would only weigh the cache down, and line tables are enough for a failed test's backtrace.
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # A runner runs one job alone: the load is that job's own steps, the disk's clean-up in the background among them,
+  # and waiting frees nothing. hack/check-resources.sh reports it there without refusing on it, and still checks the
+  # disk and the memory; its limit on the load is for a machine shared with other work, as a laptop is.
+  MAX_LOAD_FACTOR: 'off'
 
 jobs:
   # Whether the commits change more than the documents (hack/lib/changes.sh): a push or a pull request that changes

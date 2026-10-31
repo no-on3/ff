@@ -7,7 +7,9 @@
 #   MIN_DOCKER_DISK_GB   free space on the filesystem holding Docker's data root
 #   MIN_REPO_DISK_GB     free space on the filesystem holding this repository
 #   MIN_MEM_AVAILABLE_MB MemAvailable from /proc/meminfo
-#   MAX_LOAD_FACTOR      1-minute load average must stay below nproc * factor
+#   MAX_LOAD_FACTOR      1-minute load average must stay below nproc * factor; "off" reports the load without
+#                        refusing on it, for a machine that runs one job alone, as a CI runner does, where the
+#                        load is that job's own steps and waiting frees nothing
 set -euo pipefail
 
 MIN_DOCKER_DISK_GB="${MIN_DOCKER_DISK_GB:-6}"
@@ -31,7 +33,6 @@ repo_free="$(free_gb "$repo_root")"
 mem_available_mb="$(awk '/^MemAvailable:/ { printf "%d", $2 / 1024 }' /proc/meminfo)"
 load1="$(cut -d' ' -f1 /proc/loadavg)"
 cpus="$(nproc)"
-max_load="$(awk -v c="$cpus" -v f="$MAX_LOAD_FACTOR" 'BEGIN { print c * f }')"
 
 failures=()
 [ "$docker_free" -ge "$MIN_DOCKER_DISK_GB" ] ||
@@ -40,10 +41,16 @@ failures=()
   failures+=("repository filesystem has ${repo_free}G free, need ${MIN_REPO_DISK_GB}G")
 [ "$mem_available_mb" -ge "$MIN_MEM_AVAILABLE_MB" ] ||
   failures+=("only ${mem_available_mb}MB memory available, need ${MIN_MEM_AVAILABLE_MB}MB")
-awk -v l="$load1" -v m="$max_load" 'BEGIN { exit !(l < m) }' ||
-  failures+=("load average ${load1} is above ${max_load} (${cpus} CPUs x ${MAX_LOAD_FACTOR})")
+load="load ${load1}/${cpus} cpus"
+if [ "$MAX_LOAD_FACTOR" = off ]; then
+  load+=", not checked"
+else
+  max_load="$(awk -v c="$cpus" -v f="$MAX_LOAD_FACTOR" 'BEGIN { print c * f }')"
+  awk -v l="$load1" -v m="$max_load" 'BEGIN { exit !(l < m) }' ||
+    failures+=("load average ${load1} is above ${max_load} (${cpus} CPUs x ${MAX_LOAD_FACTOR})")
+fi
 
-summary="docker-fs ${docker_free}G free | repo-fs ${repo_free}G free | mem ${mem_available_mb}MB available | load ${load1}/${cpus} cpus"
+summary="docker-fs ${docker_free}G free | repo-fs ${repo_free}G free | mem ${mem_available_mb}MB available | ${load}"
 
 if [ "${#failures[@]}" -gt 0 ]; then
   echo "resources: FAIL ($summary)" >&2

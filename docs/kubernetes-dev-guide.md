@@ -16,7 +16,7 @@ FF runs functions on Kubernetes ([ADR 0001](adr/0001-orchestrator-kubernetes.md)
 | Free disk (repository) | about 1 GB | `node_modules`, `hack/bin` (tools; gVisor adds about 200 MB) |
 | Ports | `127.0.0.1:6550` | Kubernetes API |
 
-Every script runs `hack/check-resources.sh` first and stops if the machine is too low on disk, memory, or CPU headroom. Run it yourself before anything heavy:
+Every script runs `hack/check-resources.sh` first and stops if the machine is too low on disk, memory, or CPU headroom. Run it yourself before anything heavy. On GitHub's runners, each a machine of its own for one job, the workflow sets `MAX_LOAD_FACTOR=off`: the load is reported, not refused, since it is the job's own; the disk and the memory are checked there too.
 
 ```bash
 hack/check-resources.sh            # thresholds: MIN_DOCKER_DISK_GB, MIN_REPO_DISK_GB, MIN_MEM_AVAILABLE_MB, MAX_LOAD_FACTOR
