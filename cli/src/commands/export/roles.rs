@@ -44,6 +44,8 @@ pub enum Target {
     /// The bucket's objects, `arn:aws:s3:::<bucket>/*`.
     Objects(String),
     Queue(String),
+    /// A function another's calls' records go to: Terraform's roles allow it, SAM adding it itself.
+    Function(String),
     /// The domain or the address SES sends as.
     Identity(String),
     /// What is the account's own rather than a resource's, such as its list of buckets: `*`.
@@ -199,10 +201,20 @@ fn by_resource<'a>(uses: &'a [KeyUse], service: &str) -> BTreeMap<&'a str, Vec<&
     by
 }
 
-/// The role of a function whose keys used these, its mail sent as the account's proved identities:
-/// the templates by bucket, then by queue; a statement for each bucket's, its objects', each queue's
-/// and each identity's other actions, then the account's own.
+/// The role of a function whose keys used these, for SAM, its mail sent as the account's proved
+/// identities: the templates by bucket, then by queue; a statement for each bucket's, its objects',
+/// each queue's and each identity's other actions, then the account's own.
 pub fn role(uses: &[KeyUse], proved: &[&str]) -> Role {
+    role_with(uses, proved, &S3_TEMPLATES, &SQS_TEMPLATES)
+}
+
+/// The same role in statements alone, each action used on its resource, for Terraform, which has
+/// no policy templates.
+pub fn statements(uses: &[KeyUse], proved: &[&str]) -> Role {
+    role_with(uses, proved, &[], &[])
+}
+
+fn role_with(uses: &[KeyUse], proved: &[&str], s3: &[PolicyTemplate], sqs: &[PolicyTemplate]) -> Role {
     let mut role = Role::default();
     let mut statements: BTreeMap<Target, Vec<String>> = BTreeMap::new();
     let mut allow = |target: Target, action: &str| {
@@ -221,8 +233,7 @@ pub fn role(uses: &[KeyUse], proved: &[&str]) -> Role {
             }
         }
         let used: Vec<&str> = actions.iter().map(|(action, _)| *action).collect();
-        let (templates, allowed) =
-            if bucket.is_empty() { (Vec::new(), Vec::new()) } else { templates_for(&used, &S3_TEMPLATES) };
+        let (templates, allowed) = if bucket.is_empty() { (Vec::new(), Vec::new()) } else { templates_for(&used, s3) };
         role.templates.extend(templates.into_iter().map(|name| Template::Bucket(name, bucket.to_owned())));
         for (action, scope) in actions.into_iter().filter(|(action, _)| !allowed.contains(action)) {
             let target = match scope {
@@ -239,8 +250,7 @@ pub fn role(uses: &[KeyUse], proved: &[&str]) -> Role {
         used.sort_unstable();
         used.dedup();
         let names: Vec<&str> = used.iter().map(String::as_str).collect();
-        let (templates, allowed) =
-            if queue.is_empty() { (Vec::new(), Vec::new()) } else { templates_for(&names, &SQS_TEMPLATES) };
+        let (templates, allowed) = if queue.is_empty() { (Vec::new(), Vec::new()) } else { templates_for(&names, sqs) };
         role.templates.extend(templates.into_iter().map(|name| Template::Queue(name, queue.to_owned())));
         for action in names.into_iter().filter(|action| !allowed.contains(action)) {
             let target = if queue.is_empty() { Target::Account } else { Target::Queue(queue.to_owned()) };
@@ -383,6 +393,30 @@ mod tests {
                 statement(Target::Identity("news@blog.tn".to_owned()), &["ses:SendEmail"]),
                 statement(Target::Identity("shop.tn".to_owned()), &["ses:GetEmailIdentity", "ses:SendEmail"]),
                 statement(Target::Account, &["s3:ListAllMyBuckets", "ses:GetAccount"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_templates_each_action_used_is_a_statement_on_its_resource() {
+        let role = statements(
+            &uses(&[
+                ("s3", "photos", "DeleteObject"),
+                ("s3", "photos", "GetObject"),
+                ("s3", "photos", "ListObjectsV2"),
+                ("s3", "photos", "PutObject"),
+                ("sqs", "orders", "SendMessageBatch"),
+            ]),
+            &[],
+        );
+
+        assert!(role.templates.is_empty());
+        assert_eq!(
+            role.statements,
+            [
+                statement(Target::Bucket("photos".to_owned()), &["s3:ListBucket"]),
+                statement(Target::Objects("photos".to_owned()), &["s3:DeleteObject", "s3:GetObject", "s3:PutObject"]),
+                statement(Target::Queue("orders".to_owned()), &["sqs:SendMessage"]),
             ]
         );
     }

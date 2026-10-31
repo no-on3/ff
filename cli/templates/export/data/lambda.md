@@ -38,6 +38,8 @@ A function's role allows what its key used of the account's buckets, queues and 
 2. **Deploy it,** from this folder: `sam deploy --guided` asks for the stack's name, the region, each parameter (the secrets without echo), and leave to make the functions' roles; it uploads each zip of `code/` to a bucket of its own, then makes the stack. It saves your answers in `samconfig.toml`, the secrets left out; `sam deploy` alone then deploys again.
 3. **Call each function:** `sam remote invoke <its logical ID> --stack-name <stack> --event '{"name": "Tunis"}'`, its log in `sam logs --stack-name <stack> --tail`; a URL with `curl`, its address in the stack's outputs (`sam list stack-outputs --stack-name <stack>`).
 
+**Or with OpenTofu or Terraform:** `terraform/` makes the same functions, each with its role, from AWS's provider; in it, `tofu init`, `tofu validate` and `tofu apply`, its values in `terraform.tfvars`, which `terraform.tfvars.example` lists. Use it or the template, not both. `terraform` takes the same commands.
+
 ## Your domains on a URL
 
 A function URL answers at its own host alone, `<id>.lambda-url.<region>.on.aws`. Your domain reaches it through a CloudFront distribution whose origin is that host, which caches nothing and passes every header but `Host`, as the URL answers its own name only. `url-domain.yaml`, for CloudFormation:

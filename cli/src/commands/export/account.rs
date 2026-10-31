@@ -1,6 +1,8 @@
 //! What an export reads of the account through FF's API: each function with its settings, the
 //! queues and buckets, and the names of the databases, caches and mail it has.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use super::super::buckets::Bucket;
@@ -194,6 +196,24 @@ pub fn read(client: &Client, account: &MeAccount, only: &[String]) -> Result<Acc
 impl Account {
     pub fn queue_named(&self, name: &str) -> Option<&Queue> {
         self.queues.iter().find(|queue| queue.name == name)
+    }
+
+    /// Each queue's visibility timeout where a function reading it has a longer timeout, which AWS
+    /// refuses a mapping for: the longest such timeout, by queue.
+    pub fn raised_visibility(&self) -> BTreeMap<&str, u64> {
+        let mut needed: BTreeMap<&str, u64> = BTreeMap::new();
+        for record in &self.functions {
+            for mapping in &record.event_sources {
+                let Some(queue) = self.queue_named(name_in_arn(&mapping.event_source_arn)) else { continue };
+                let timeout = u64::from(record.function.timeout);
+                if queue.visibility_timeout < timeout
+                    && needed.get(queue.name.as_str()).is_none_or(|longest| *longest < timeout)
+                {
+                    needed.insert(queue.name.as_str(), timeout);
+                }
+            }
+        }
+        needed
     }
 
     /// The buckets that call the functions or that their keys use, and the queues the functions

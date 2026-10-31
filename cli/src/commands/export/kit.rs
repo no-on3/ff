@@ -3,7 +3,8 @@
 
 use super::account::Account;
 use super::roles::seen_between;
-use super::template::{SCHEDULES_STATE, Template};
+use super::template::{Parameter, SCHEDULES_STATE, Template};
+use super::terraform::Terraform;
 use crate::api::types::name_in_arn;
 
 const LAMBDA: &str = include_str!("../../../templates/export/data/lambda.md");
@@ -58,16 +59,31 @@ fn page(text: &str, in_account: &str) -> String {
     format!("{title}\n\n> **In this account:** {in_account}\n{rest}")
 }
 
-/// The kit's files but the code: the template, the values it takes, `data/` and `MIGRATION.md`.
-pub fn files(account: &Account, template: &Template, read_on: &str) -> Vec<File> {
+/// The kit's files but the code: the template, `terraform/`, the values each takes, `data/` and
+/// `MIGRATION.md`.
+pub fn files(account: &Account, template: &Template, terraform: &Terraform, read_on: &str) -> Vec<File> {
     let mut files = vec![File::new("template.yaml", template.text.clone())];
     if let Some(before_copy) = &template.before_copy {
         files.push(File::new("template-before-copy.yaml", before_copy.clone()));
     }
     files.push(File::new("secrets.template.env", secrets(template)));
+    files.extend(terraform.files.iter().map(|(path, text)| File::new(path, text.clone())));
+    files.push(File::new("terraform/terraform.tfvars.example", tfvars(terraform)));
     files.extend(data_pages(account));
     files.push(File::new("MIGRATION.md", migration(account, template, read_on)));
     files
+}
+
+/// Where a value the export doesn't write comes from.
+fn source(parameter: &Parameter) -> String {
+    if parameter.secret {
+        format!(
+            "{}'s secret {}: FF never shows a secret back, so from where you keep it, or a new one",
+            parameter.function, parameter.name
+        )
+    } else {
+        format!("{}'s variable {}: ff env list {} --show", parameter.function, parameter.name, parameter.function)
+    }
 }
 
 /// Each parameter the template takes and the export doesn't fill, a line each, with what it is.
@@ -81,15 +97,22 @@ fn secrets(template: &Template) -> String {
         text.push_str("#\n# None: the functions have no secrets, and their variables are in the template.\n");
     }
     for parameter in &template.parameters {
-        let hint = if parameter.secret {
-            format!(
-                "{}'s secret {}: FF never shows a secret back, so from where you keep it, or a new one",
-                parameter.function, parameter.name
-            )
-        } else {
-            format!("{}'s variable {}: ff env list {} --show", parameter.function, parameter.name, parameter.function)
-        };
-        text.push_str(&format!("#\n# {hint}\n{}=\n", parameter.id));
+        text.push_str(&format!("#\n# {}\n{}=\n", source(parameter), parameter.id));
+    }
+    text
+}
+
+/// The same for `terraform/`, with the region it moves to, as `terraform.tfvars` takes them.
+fn tfvars(terraform: &Terraform) -> String {
+    let mut text = String::from(
+        "# The values terraform/ takes as variables and ff export doesn't write. Copy this file to terraform.tfvars,\n\
+         # keep that one out of every repository, and fill it: tofu and terraform read it in this folder.\n\
+         \n\
+         # The AWS region to move to, such as eu-west-3\n\
+         region = \"\"\n",
+    );
+    for parameter in &terraform.to_fill {
+        text.push_str(&format!("\n# {}\n{} = \"\"\n", source(parameter), parameter.id));
     }
     text
 }
@@ -177,7 +200,8 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
     let mut text = format!(
         "# Moving {} from FF to AWS\n\n\
          `ff export` wrote this folder on {read_on} from FF's account {}: {}. It holds:\n\n\
-         - `template.yaml`, for AWS SAM: the functions with their roles, URLs, schedules, queues read and settings for calls that don't wait, the queues and the buckets with their events;\n",
+         - `template.yaml`, for AWS SAM: the functions with their roles, URLs, schedules, queues read and settings for calls that don't wait, the queues and the buckets with their events;\n\
+         - `terraform/`, the same for OpenTofu or Terraform with AWS's provider, each role action by action, and `terraform.tfvars.example` there, its values to fill;\n",
         account.name,
         account.id,
         held.join(", ")
@@ -229,6 +253,9 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
             "\nEach function's role allows what its keys used of the account's buckets, queues and mail on FF from {first} to {last}, as FF noted each use: one FF didn't see then, such as a monthly job's, AWS refuses with `AccessDenied` until the function's `Policies` allow it.\n"
         ));
     }
+    text.push_str(
+        "\n**Or with OpenTofu or Terraform,** from `terraform/`, which makes the same resources: use it or the template, not both. There, copy `terraform.tfvars.example` to `terraform.tfvars`, outside any repository, and fill it; then `tofu init`, `tofu validate` and `tofu apply`, which make the functions with the schedules and the buckets' events off until `terraform.tfvars` turns them on, as the steps below say. `terraform` takes the same commands.\n",
+    );
     text.push_str("\n## 3. The data\n\n");
     let mut step = 1;
     let mut item = |text: &mut String, line: String| {
@@ -257,7 +284,7 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
     if template.before_copy.is_some() {
         item(
             &mut text,
-            "**The buckets' events,** once their files are copied: `sam deploy --template-file template.yaml` adds them, so that the copy called nothing.".to_owned(),
+            "**The buckets' events,** once their files are copied: `sam deploy --template-file template.yaml` adds them, so that the copy called nothing (with Terraform, `bucket_events = true` in `terraform.tfvars`, then `tofu apply`).".to_owned(),
         );
     }
     if !sites.is_empty() {
@@ -353,7 +380,7 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
     }
     if account.functions.iter().any(|record| record.schedules.iter().any(|schedule| schedule.enabled)) {
         text.push_str(&format!(
-            "\nOnce FF's schedules are disabled, `sam deploy --parameter-overrides {SCHEDULES_STATE}=ENABLED` turns AWS's on, so that each run happens once.\n"
+            "\nOnce FF's schedules are disabled, `sam deploy --parameter-overrides {SCHEDULES_STATE}=ENABLED` turns AWS's on, so that each run happens once (with Terraform, `schedule_state = \"ENABLED\"` in `terraform.tfvars`, then `tofu apply`).\n"
         ));
     }
     text.push_str(
@@ -369,6 +396,7 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
 mod tests {
     use super::super::fixtures::shop;
     use super::super::template::template;
+    use super::super::terraform::terraform;
     use super::*;
 
     fn text<'a>(files: &'a [File], path: &str) -> &'a str {
@@ -378,7 +406,7 @@ mod tests {
     #[test]
     fn the_kit_has_a_page_for_each_kind_of_resource_the_account_has_its_names_under_the_title() {
         let account = shop();
-        let files = files(&account, &template(&account, false, ""), "2026-10-31");
+        let files = files(&account, &template(&account, false, ""), &terraform(&account, false, ""), "2026-10-31");
 
         let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
         assert_eq!(
@@ -387,6 +415,13 @@ mod tests {
                 "template.yaml",
                 "template-before-copy.yaml",
                 "secrets.template.env",
+                "terraform/main.tf",
+                "terraform/variables.tf",
+                "terraform/functions.tf",
+                "terraform/queues.tf",
+                "terraform/buckets.tf",
+                "terraform/outputs.tf",
+                "terraform/terraform.tfvars.example",
                 "data/lambda.md",
                 "data/postgres.md",
                 "data/elasticache.md",
@@ -415,11 +450,22 @@ mod tests {
         empty.databases.clear();
         empty.caches.clear();
         empty.identities.clear();
-        let paths: Vec<String> = super::files(&empty, &template(&empty, false, ""), "2026-10-31")
-            .into_iter()
-            .map(|file| file.path)
-            .collect();
-        assert_eq!(paths, ["template.yaml", "secrets.template.env", "MIGRATION.md"]);
+        let paths: Vec<String> =
+            super::files(&empty, &template(&empty, false, ""), &terraform(&empty, false, ""), "2026-10-31")
+                .into_iter()
+                .map(|file| file.path)
+                .collect();
+        assert_eq!(
+            paths,
+            [
+                "template.yaml",
+                "secrets.template.env",
+                "terraform/main.tf",
+                "terraform/variables.tf",
+                "terraform/terraform.tfvars.example",
+                "MIGRATION.md"
+            ]
+        );
     }
 
     #[test]
@@ -436,6 +482,15 @@ mod tests {
         assert_eq!(
             values.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
             ["SendReceiptsDatabaseUrl="]
+        );
+        // Terraform's the same, by its names, and the region it moves to.
+        let values = tfvars(&terraform(&account, false, ""));
+        assert!(values.ends_with(
+            "\n# send-receipts's secret DATABASE_URL: FF never shows a secret back, so from where you keep it, or a new one\nsend_receipts_database_url = \"\"\n"
+        ), "{values}");
+        assert_eq!(
+            values.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).collect::<Vec<_>>(),
+            ["region = \"\"", "send_receipts_log_level = \"\"", "send_receipts_database_url = \"\""]
         );
     }
 
@@ -456,6 +511,9 @@ mod tests {
             "- **send-receipts**: its URL's callers from https://abc.fn.ff.tn/ to the address in the stack's output `SendReceiptsUrl`; `api.shop.tn` through CloudFront, as `data/lambda.md` says; `ff schedule disable send-receipts nightly`; reads `orders` on AWS once the senders send there.",
             "`sam deploy --parameter-overrides ScheduleState=ENABLED` turns AWS's on",
             "Each function's role allows what its keys used of the account's buckets, queues and mail on FF from 2026-10-21 to 2026-10-31",
+            "**Or with OpenTofu or Terraform,** from `terraform/`",
+            "(with Terraform, `bucket_events = true` in `terraform.tfvars`, then `tofu apply`)",
+            "(with Terraform, `schedule_state = \"ENABLED\"` in `terraform.tfvars`, then `tofu apply`)",
         ] {
             assert!(runbook.contains(line), "{line:?} in:\n{runbook}");
         }

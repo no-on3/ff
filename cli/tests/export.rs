@@ -156,6 +156,17 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
         assert!(template.contains(line), "{line:?} in:\n{template}");
     }
     assert!(!read("template-before-copy.yaml").contains("QueueConfigurations"));
+    let functions = read("terraform/functions.tf");
+    for line in [
+        "resource \"aws_lambda_function\" \"send_receipts\" {\n",
+        "  filename         = \"${path.module}/../code/send-receipts.zip\"\n",
+        "= aws_sqs_queue.orders.arn\n",
+        "    actions   = [\"sqs:DeleteMessage\", \"sqs:GetQueueAttributes\", \"sqs:ReceiveMessage\", \"sqs:SendMessage\"]\n",
+    ] {
+        assert!(functions.contains(line), "{line:?} in:\n{functions}");
+    }
+    assert!(read("terraform/buckets.tf").contains("  count  = var.bucket_events ? 1 : 0\n"));
+    assert!(read("terraform/terraform.tfvars.example").contains("\nsend_receipts_database_url = \"\"\n"));
     assert_eq!(
         read("secrets.template.env").lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
         ["SendReceiptsLogLevel=", "SendReceiptsDatabaseUrl="]

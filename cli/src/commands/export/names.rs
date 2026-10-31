@@ -1,5 +1,6 @@
 //! The names an export gives what it declares: CloudFormation's logical IDs, of letters and digits
-//! alone, each once in a template; and a function's name on Lambda, by Lambda's rule.
+//! alone, each once in a template; Terraform's names, each once a type; and a function's name on
+//! Lambda, by Lambda's rule.
 
 use std::collections::HashSet;
 
@@ -39,6 +40,37 @@ pub fn words(name: &str) -> String {
             })
         })
         .collect()
+}
+
+/// The names Terraform's files have given, each once for its type of resource, data source, variable
+/// or output.
+#[derive(Default)]
+pub struct ResourceNames {
+    taken: HashSet<(String, String)>,
+}
+
+impl ResourceNames {
+    /// A name of the name's words, in small letters joined by `_`: `send-receipts` is
+    /// `send_receipts`; another of the same type and words gets `_2` after it, and one that begins
+    /// with a digit `_` before it, as a name of Terraform's begins with a letter or `_`.
+    pub fn give(&mut self, kind: &str, name: &str) -> String {
+        let words: Vec<String> = name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let mut base = words.join("_");
+        if !base.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            base.insert(0, '_');
+        }
+        let mut given = base.clone();
+        let mut next = 2;
+        while !self.taken.insert((kind.to_owned(), given.clone())) {
+            given = format!("{base}_{next}");
+            next += 1;
+        }
+        given
+    }
 }
 
 /// Each function's name on Lambda, in the order given: its own, as every name made since FF took
@@ -87,6 +119,20 @@ mod tests {
         assert_eq!(ids.give("send-receipts DATABASE_URL", ""), "SendReceiptsDatabaseUrl");
         assert_eq!(ids.give("2fa", "Function"), "2faFunction");
         assert_eq!(ids.give("été", "Function"), "TFunction");
+    }
+
+    #[test]
+    fn a_terraform_name_is_the_names_words_in_small_letters_once_a_type() {
+        let mut names = ResourceNames::default();
+
+        assert_eq!(names.give("aws_lambda_function", "send-receipts"), "send_receipts");
+        assert_eq!(names.give("aws_iam_role", "send-receipts"), "send_receipts");
+        assert_eq!(names.give("aws_lambda_function", "send_receipts"), "send_receipts_2");
+        assert_eq!(names.give("aws_lambda_function", "Send.Receipts"), "send_receipts_3");
+        assert_eq!(names.give("aws_lambda_function", "report.v1"), "report_v1");
+        assert_eq!(names.give("variable", "send-receipts DATABASE_URL"), "send_receipts_database_url");
+        assert_eq!(names.give("aws_lambda_function", "2fa"), "_2fa");
+        assert_eq!(names.give("aws_lambda_function", "été"), "t");
     }
 
     #[test]

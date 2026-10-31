@@ -1,14 +1,17 @@
 //! `ff export <folder>`: what a move to AWS needs, written in a new folder from the account's own
-//! resources: a SAM template, each function's code as Lambda runs it, the values the template takes,
-//! a page of `data/` for each kind of resource the account has, and `MIGRATION.md`, its runbook.
+//! resources: a SAM template and the same for Terraform, each function's code as Lambda runs it, the
+//! values each takes, a page of `data/` for each kind of resource the account has, and
+//! `MIGRATION.md`, its runbook.
 
 mod account;
 #[cfg(test)]
 mod fixtures;
+mod hcl;
 mod kit;
 mod names;
 mod roles;
 mod template;
+mod terraform;
 mod yaml;
 
 use std::path::Path;
@@ -79,6 +82,7 @@ pub fn run(args: ExportArgs, context: &Context) -> Result<(), Error> {
         read.id
     );
     let template = template::template(&read, args.with_values, &header);
+    let terraform = terraform::terraform(&read, args.with_values, &header);
     let mut files = Vec::new();
     for (record, exported) in read.functions.iter().zip(&template.functions) {
         let progress = Progress::start(context.out, &format!("downloading {}'s code", record.function.name));
@@ -91,7 +95,7 @@ pub fn run(args: ExportArgs, context: &Context) -> Result<(), Error> {
         write(&args.folder, &exported.code, &zip, false)?;
         files.push(exported.code.clone());
     }
-    for file in kit::files(&read, &template, &read_on) {
+    for file in kit::files(&read, &template, &terraform, &read_on) {
         write(&args.folder, &file.path, file.text.as_bytes(), file.executable)?;
         files.push(file.path);
     }

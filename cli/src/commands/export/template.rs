@@ -2,7 +2,7 @@
 //! events and settings for calls that don't wait; the queues; the buckets. What AWS takes otherwise
 //! than FF has it is written as AWS takes it, and said in the notes `MIGRATION.md` lists.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
@@ -14,7 +14,7 @@ use super::yaml::Yaml;
 use crate::api::types::name_in_arn;
 
 /// The instances a function runs at most unless its owner says otherwise: no cap to carry to AWS.
-const DEFAULT_MAX_INSTANCES: u32 = 3;
+pub const DEFAULT_MAX_INSTANCES: u32 = 3;
 /// The parameter that turns the schedules on at AWS, off until the move, so that none runs twice.
 pub const SCHEDULES_STATE: &str = "ScheduleState";
 
@@ -487,9 +487,15 @@ impl<'a> Builder<'a> {
                 }
             }
             Target::Queue(queue) => self.queue_arn(queue),
-            Target::Identity(identity) => {
-                Yaml::sub(format!("arn:aws:ses:${{AWS::Region}}:${{AWS::AccountId}}:identity/{identity}"))
-            }
+            // `${!` is a `${` that `!Sub` leaves as it is, which an address may hold.
+            Target::Identity(identity) => Yaml::sub(format!(
+                "arn:aws:ses:${{AWS::Region}}:${{AWS::AccountId}}:identity/{}",
+                identity.replace("${", "${!")
+            )),
+            Target::Function(function) => Yaml::sub(format!(
+                "arn:aws:lambda:${{AWS::Region}}:${{AWS::AccountId}}:function:{}",
+                self.functions.get(function.as_str()).map_or(function.as_str(), |(_, lambda_name)| lambda_name)
+            )),
             Target::Account => Yaml::from("*"),
         }
     }
@@ -624,25 +630,11 @@ impl<'a> Builder<'a> {
         events
     }
 
-    /// Each queue's visibility timeout where a function reading it has a longer timeout, which AWS
-    /// refuses a mapping for: the longest such timeout, said in the notes.
-    fn visibility_needed(&mut self) -> HashMap<&'a str, u64> {
+    /// The queues' visibility timeouts raised to their readers', said in the notes.
+    fn visibility_needed(&mut self) -> BTreeMap<&'a str, u64> {
         let account = self.account;
-        let mut needed: HashMap<&str, u64> = HashMap::new();
-        for record in &account.functions {
-            for mapping in &record.event_sources {
-                let Some(queue) = account.queue_named(name_in_arn(&mapping.event_source_arn)) else { continue };
-                let timeout = u64::from(record.function.timeout);
-                if queue.visibility_timeout < timeout
-                    && needed.get(queue.name.as_str()).is_none_or(|longest| *longest < timeout)
-                {
-                    needed.insert(queue.name.as_str(), timeout);
-                }
-            }
-        }
-        let mut raised: Vec<_> = needed.iter().collect();
-        raised.sort();
-        for (name, timeout) in raised {
+        let needed = account.raised_visibility();
+        for (name, timeout) in &needed {
             let queue = account.queue_named(name).expect("a queue of the account");
             self.notes.push(format!(
                 "The queue **{name}** hides a message it gives for {} s on FF, less than its readers' timeout: {timeout} s in the template, as AWS refuses a mapping to a function with a longer timeout than its queue's.",
