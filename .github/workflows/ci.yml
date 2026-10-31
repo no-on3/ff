@@ -1,7 +1,8 @@
 # FF's pipeline: each job one stage of hack/ci.sh, which runs the same commands on a laptop. GitHub runs it, and
 # so does a self-hosted Gitea with Gitea Actions, which reads this directory when it has no .gitea/workflows.
 # Actions are pinned to the commit of a release at least two weeks old when chosen; Node.js to the images' version,
-# in .github/actions/setup, each job's setup, with its caches.
+# in .github/actions/setup, each job's setup, with its caches. Each upload of an artifact has 5 minutes: on 2026-10-31
+# one hung until its job's own limit, 39 minutes later, and GitHub kept none of that job's log.
 name: ci
 
 on:
@@ -71,6 +72,7 @@ jobs:
       - run: hack/ci.sh deps static
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        timeout-minutes: 5
         with:
           name: failure-${{ github.job }}
           path: |
@@ -100,6 +102,7 @@ jobs:
       - run: hack/ci.sh deps unit
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        timeout-minutes: 5
         with:
           name: failure-${{ github.job }}
           path: |
@@ -119,6 +122,7 @@ jobs:
       - run: hack/ci.sh deps db
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        timeout-minutes: 5
         with:
           name: failure-${{ github.job }}
           path: |
@@ -143,6 +147,7 @@ jobs:
       - run: hack/ci.sh deps security images
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        timeout-minutes: 5
         with:
           name: failure-${{ github.job }}
           path: |
@@ -152,6 +157,7 @@ jobs:
           if-no-files-found: ignore
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
+        timeout-minutes: 5
         with:
           name: sbom
           path: hack/.ci/sbom/
@@ -197,6 +203,7 @@ jobs:
         run: hack/ci.sh deps ${{ matrix.stage }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() && steps.wanted.outputs.run == 'true' # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        timeout-minutes: 5
         with:
           name: failure-${{ matrix.stage }}
           path: |
@@ -220,6 +227,7 @@ jobs:
       - run: hack/ci.sh deps platform
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
+        timeout-minutes: 5
         with:
           name: failure-${{ github.job }}
           path: |
@@ -251,6 +259,7 @@ jobs:
       - run: hack/ci.sh deps advisories
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # the report of its steps
+        timeout-minutes: 5
         with:
           name: failure-${{ github.job }}
           path: hack/.ci/report.md
@@ -275,6 +284,7 @@ jobs:
           GH_TOKEN: ${{ github.token }} # the tools' releases on GitHub
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # the versions tried, the spike's log and what each tool sent, and the report of its steps
+        timeout-minutes: 5
         with:
           name: failure-${{ github.job }}
           path: |
