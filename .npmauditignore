@@ -14,3 +14,10 @@ BE body-parser GHSA-27r3-jxmh-p828 2026-11-05
 # nowhere: nothing reaches it. Fixed in 2.5.0 (2026-10-22), two weeks old on 2026-11-05: an override in
 # BE/package.json then, until Nest pins it.
 BE multer GHSA-q7qp-rjg7-q26m 2026-11-05
+
+# follow-redirects 1.16.1, through axios 1.20.0, in the console and the admin app: credentials kept across a redirect
+# to another site. It is axios's adapter for Node.js's http, which axios's "browser" field swaps for nothing, so
+# neither app's build carries it (no line of it in dist/assets): nothing reaches it. Fixed in 1.16.2 (2026-10-25),
+# two weeks old on 2026-11-08: updated then.
+FE follow-redirects GHSA-mrwp-f3q8-3g9p 2026-11-08
+admin follow-redirects GHSA-mrwp-f3q8-3g9p 2026-11-08
