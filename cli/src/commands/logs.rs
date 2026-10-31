@@ -42,16 +42,12 @@ struct Page {
     next: Option<String>,
 }
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
 /// `--since 15m`: whole seconds back, as the API takes them.
 pub fn since_seconds(text: &str) -> Result<u64, Error> {
     let duration = humantime::parse_duration(text)
-        .map_err(|error| usage(format!("--since takes a duration such as 30s, 15m, 2h or 1d: {error}")))?;
+        .map_err(|error| Error::usage(format!("--since takes a duration such as 30s, 15m, 2h or 1d: {error}")))?;
     match duration.as_secs() {
-        0 => Err(usage("--since must be a second at least")),
+        0 => Err(Error::usage("--since must be a second at least")),
         seconds => Ok(seconds),
     }
 }

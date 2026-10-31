@@ -126,7 +126,7 @@ pub fn enable(name: &str, auth: Option<UrlAuth>, cors: Option<Value>, context: &
     let (url, action) = match existing {
         None => {
             let auth = auth.ok_or_else(|| {
-                Error::new(Kind::Usage, "Say who may call the new address: --auth none (anyone), or --auth key (the account's API keys with functions:invoke)")
+                Error::usage("Say who may call the new address: --auth none (anyone), or --auth key (the account's API keys with functions:invoke)")
             })?;
             let mut body = json!({ "authType": auth_type(auth) });
             if let Some(cors) = cors {
@@ -266,19 +266,18 @@ pub type HttpRequest = (String, String, Vec<(String, String)>);
 pub fn http_request(method: &str, target: &str, headers: &[String]) -> Result<HttpRequest, Error> {
     let method = method.to_ascii_uppercase();
     if !method.bytes().all(|byte| byte.is_ascii_uppercase()) || method.is_empty() {
-        return Err(Error::new(Kind::Usage, format!("--http takes a method, such as GET or POST: {method}")));
+        return Err(Error::usage(format!("--http takes a method, such as GET or POST: {method}")));
     }
     if !target.starts_with('/') {
-        return Err(Error::new(
-            Kind::Usage,
-            format!("--http takes a path after the method, such as /orders?status=new: {target}"),
-        ));
+        return Err(Error::usage(format!(
+            "--http takes a path after the method, such as /orders?status=new: {target}"
+        )));
     }
     let headers = headers
         .iter()
         .map(|header| match header.split_once(':') {
             Some((name, value)) if !name.trim().is_empty() => Ok((name.trim().to_owned(), value.trim().to_owned())),
-            _ => Err(Error::new(Kind::Usage, format!("--header takes \"name: value\": {header}"))),
+            _ => Err(Error::usage(format!("--header takes \"name: value\": {header}"))),
         })
         .collect::<Result<_, _>>()?;
     Ok((method, target.to_owned(), headers))
@@ -334,8 +333,7 @@ pub fn invoke_http(
         request = request.header(header.as_str(), value.as_str());
     }
     let body = data.map(super::invoke::raw_data).transpose()?.unwrap_or_default();
-    let request =
-        request.body(body).map_err(|error| Error::new(Kind::Usage, format!("The request can't be made: {error}")))?;
+    let request = request.body(body).map_err(|error| Error::usage(format!("The request can't be made: {error}")))?;
     let mut response =
         agent.run(request).map_err(|error| Error::new(Kind::Failed, format!("Couldn't reach {address}: {error}")))?;
 

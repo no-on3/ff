@@ -10,7 +10,7 @@ use super::Context;
 use super::db::{SecretSet, secret_name, set_secrets, size};
 use crate::api::types::function_named;
 use crate::api::{Call, Client};
-use crate::error::{Error, Kind};
+use crate::error::Error;
 use crate::table::{table, time};
 
 /// A cache, as `GET /caches` and `GET /caches/:name` answer it.
@@ -63,12 +63,9 @@ fn checked_name(name: &str) -> Result<&str, Error> {
     if is_cache_name(name) {
         Ok(name)
     } else {
-        Err(Error::new(
-            Kind::Usage,
-            format!(
-                "\"{name}\" can't be a cache's name: 1 to 40 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last, as AWS ElastiCache names its clusters"
-            ),
-        ))
+        Err(Error::usage(format!(
+            "\"{name}\" can't be a cache's name: 1 to 40 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last, as AWS ElastiCache names its clusters"
+        )))
     }
 }
 

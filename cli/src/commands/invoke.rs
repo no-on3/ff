@@ -22,13 +22,13 @@ pub fn input_of(data: Option<&str>) -> Result<Option<Value>, Error> {
             let mut text = String::new();
             std::io::stdin()
                 .read_to_string(&mut text)
-                .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read the event from stdin: {error}")))?;
+                .map_err(|error| Error::usage(format!("Couldn't read the event from stdin: {error}")))?;
             (text, "stdin".to_owned())
         }
         _ => match data.strip_prefix('@') {
             Some(path) => {
                 let text = std::fs::read_to_string(path)
-                    .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read {path}: {error}")))?;
+                    .map_err(|error| Error::usage(format!("Couldn't read {path}: {error}")))?;
                 (text, path.to_owned())
             }
             None => (data.to_owned(), "--data".to_owned()),
@@ -36,7 +36,7 @@ pub fn input_of(data: Option<&str>) -> Result<Option<Value>, Error> {
     };
     serde_json::from_str(&text)
         .map(Some)
-        .map_err(|error| Error::new(Kind::Usage, format!("The event in {from} isn't JSON: {error}")))
+        .map_err(|error| Error::usage(format!("The event in {from} isn't JSON: {error}")))
 }
 
 /// A request's body, as given: inline text, `@file`, or `-` for stdin, not necessarily JSON.
@@ -46,13 +46,11 @@ pub fn raw_data(data: &str) -> Result<Vec<u8>, Error> {
             let mut bytes = Vec::new();
             std::io::stdin()
                 .read_to_end(&mut bytes)
-                .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read the body from stdin: {error}")))?;
+                .map_err(|error| Error::usage(format!("Couldn't read the body from stdin: {error}")))?;
             Ok(bytes)
         }
         _ => match data.strip_prefix('@') {
-            Some(path) => {
-                std::fs::read(path).map_err(|error| Error::new(Kind::Usage, format!("Couldn't read {path}: {error}")))
-            }
+            Some(path) => std::fs::read(path).map_err(|error| Error::usage(format!("Couldn't read {path}: {error}"))),
             None => Ok(data.as_bytes().to_vec()),
         },
     }

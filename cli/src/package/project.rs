@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli::Runtime;
-use crate::error::{Error, Kind};
+use crate::error::Error;
 
 /// How a project's libraries come.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,10 +26,6 @@ pub struct Project {
     pub libraries: Libraries,
 }
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
 /// The files at the folder's root whose extensions say a runtime.
 fn root_code(root: &Path) -> (bool, bool) {
     let mut node = false;
@@ -47,16 +43,16 @@ fn root_code(root: &Path) -> (bool, bool) {
 
 /// pyproject.toml's `[project] dependencies`, as PEP 621 writes them.
 fn pyproject_dependencies(file: &Path) -> Result<Vec<String>, Error> {
-    let text =
-        std::fs::read_to_string(file).map_err(|error| usage(format!("Couldn't read {}: {error}", file.display())))?;
+    let text = std::fs::read_to_string(file)
+        .map_err(|error| Error::usage(format!("Couldn't read {}: {error}", file.display())))?;
     let document: toml_edit::DocumentMut =
-        text.parse().map_err(|error| usage(format!("{} isn't TOML ff can read: {error}", file.display())))?;
+        text.parse().map_err(|error| Error::usage(format!("{} isn't TOML ff can read: {error}", file.display())))?;
     let Some(dependencies) = document.get("project").and_then(|project| project.get("dependencies")) else {
         return Ok(Vec::new());
     };
-    let array = dependencies
-        .as_array()
-        .ok_or_else(|| usage(format!("{}: [project] dependencies must be a list of requirements", file.display())))?;
+    let array = dependencies.as_array().ok_or_else(|| {
+        Error::usage(format!("{}: [project] dependencies must be a list of requirements", file.display()))
+    })?;
     Ok(array.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect())
 }
 
@@ -65,7 +61,7 @@ impl Project {
     /// neither, the code at its root does. `--runtime` decides when both could be.
     pub fn detect(root: &Path, runtime: Option<Runtime>) -> Result<Project, Error> {
         if !root.is_dir() {
-            return Err(usage(format!("{} isn't a folder", root.display())));
+            return Err(Error::usage(format!("{} isn't a folder", root.display())));
         }
         let npm = root.join("package.json").is_file();
         let requirements = root.join("requirements.txt").is_file();
@@ -76,7 +72,7 @@ impl Project {
             (None, true, false) => Runtime::Nodejs,
             (None, false, true) => Runtime::Python,
             (None, true, true) => {
-                return Err(usage(format!(
+                return Err(Error::usage(format!(
                     "{} has a package.json and Python's requirements: name the runtime with --runtime",
                     root.display()
                 )));
@@ -85,7 +81,10 @@ impl Project {
                 (true, false) => Runtime::Nodejs,
                 (false, true) => Runtime::Python,
                 _ => {
-                    return Err(usage(format!("Can't tell the runtime of {}: name it with --runtime", root.display())));
+                    return Err(Error::usage(format!(
+                        "Can't tell the runtime of {}: name it with --runtime",
+                        root.display()
+                    )));
                 }
             },
         };
@@ -215,6 +214,7 @@ pub fn build_steps(project: &Project, build: Build) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Kind;
 
     fn folder(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::TempDir::new().unwrap();

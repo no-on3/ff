@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::Context;
 use crate::api::{Call, Client};
-use crate::error::{Error, Kind};
+use crate::error::Error;
 use crate::table::{table, time};
 
 /// A bucket, as `GET /buckets` and `GET /buckets/:name` answer it.
@@ -96,12 +96,9 @@ pub fn checked_name(name: &str) -> Result<&str, Error> {
     if is_bucket_name(name) {
         Ok(name)
     } else {
-        Err(Error::new(
-            Kind::Usage,
-            format!(
-                "\"{name}\" can't be a bucket's name: 3 to 63 lower-case letters, digits and hyphens, a letter or a digit first and last, as AWS names buckets (without dots on FF)"
-            ),
-        ))
+        Err(Error::usage(format!(
+            "\"{name}\" can't be a bucket's name: 3 to 63 lower-case letters, digits and hyphens, a letter or a digit first and last, as AWS names buckets (without dots on FF)"
+        )))
     }
 }
 
@@ -279,10 +276,7 @@ pub fn keys_create(buckets: &[String], queues: &[String], read_only: bool, conte
 
 pub fn keys_revoke(id: &str, yes: bool, context: &Context) -> Result<(), Error> {
     if !is_key_id(id) {
-        return Err(Error::new(
-            Kind::Usage,
-            format!("\"{id}\" is no access key ID of FF's: AKFF and 16 letters and digits"),
-        ));
+        return Err(Error::usage(format!("\"{id}\" is no access key ID of FF's: AKFF and 16 letters and digits")));
     }
     let client = Client::new(&context.settings()?)?;
     if !super::functions::confirmed(

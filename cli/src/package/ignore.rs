@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use crate::error::{Error, Kind};
+use crate::error::Error;
 
 /// Left out of every package, at any depth: version control, editors' and Python's own files,
 /// and ff's: `.ff/` holds the zips `ff package` writes.
@@ -76,17 +76,14 @@ impl Ignore {
         let file = root.join(".ffignore");
         if file.is_file() {
             let text = std::fs::read_to_string(&file)
-                .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read {}: {error}", file.display())))?;
+                .map_err(|error| Error::usage(format!("Couldn't read {}: {error}", file.display())))?;
             for (number, line) in text.lines().enumerate() {
                 if line.starts_with('!') {
-                    return Err(Error::new(
-                        Kind::Usage,
-                        format!(
-                            "{}, line {}: ff doesn't read negated patterns (!): name what to leave out",
-                            file.display(),
-                            number + 1
-                        ),
-                    ));
+                    return Err(Error::usage(format!(
+                        "{}, line {}: ff doesn't read negated patterns (!): name what to leave out",
+                        file.display(),
+                        number + 1
+                    )));
                 }
                 patterns.extend(Pattern::parse(line));
             }

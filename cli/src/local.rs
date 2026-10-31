@@ -44,7 +44,7 @@ impl Code {
     /// The file or folder, by its absolute path, which Docker's mounts need.
     pub fn of(path: &Path) -> Result<Code, Error> {
         let absolute = std::fs::canonicalize(path)
-            .map_err(|error| Error::new(Kind::Usage, format!("Couldn't open {}: {error}", path.display())))?;
+            .map_err(|error| Error::usage(format!("Couldn't open {}: {error}", path.display())))?;
         if absolute.is_dir() {
             return Ok(Code::Folder(absolute));
         }

@@ -79,10 +79,6 @@ struct Received {
     deleted: Option<bool>,
 }
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
 /// SQS's rule for a standard queue's name, as the API's: 1 to 80 letters, digits, hyphens and underscores.
 pub fn is_queue_name(name: &str) -> bool {
     (1..=80).contains(&name.len())
@@ -91,14 +87,14 @@ pub fn is_queue_name(name: &str) -> bool {
 
 pub fn checked_name(name: &str) -> Result<&str, Error> {
     if name.ends_with(".fifo") {
-        return Err(usage(format!(
+        return Err(Error::usage(format!(
             "\"{name}\" is a FIFO queue's name: FF's queues are standard queues, and FIFO queues come later"
         )));
     }
     if is_queue_name(name) {
         Ok(name)
     } else {
-        Err(usage(format!(
+        Err(Error::usage(format!(
             "\"{name}\" can't be a queue's name: 1 to 80 letters, digits, hyphens and underscores, as SQS names queues"
         )))
     }
@@ -139,8 +135,13 @@ fn words(seconds: u64) -> String {
 
 /// A duration flag, in whole seconds from `min` to `max`: a number of seconds, or a duration such as 30s, 15m or 4d.
 pub fn seconds(flag: &str, text: &str, min: u64, max: u64) -> Result<u64, Error> {
-    let refused =
-        || usage(format!("--{flag} takes whole seconds from {} to {}, such as 30s, 15m or 4d", short(min), short(max)));
+    let refused = || {
+        Error::usage(format!(
+            "--{flag} takes whole seconds from {} to {}, such as 30s, 15m or 4d",
+            short(min),
+            short(max)
+        ))
+    };
     let duration = match text.parse::<u64>() {
         Ok(seconds) => Duration::from_secs(seconds),
         Err(_) => humantime::parse_duration(text).map_err(|_| refused())?,
@@ -238,7 +239,7 @@ fn attributes_body(name: &str, args: &QueueAttributeArgs) -> Result<Map<String, 
     if let Some(dead_letter_queue) = &args.dead_letter_queue
         && checked_name(dead_letter_queue)? == name
     {
-        return Err(usage("A queue can't be its own dead-letter queue"));
+        return Err(Error::usage("A queue can't be its own dead-letter queue"));
     }
     Ok(body)
 }
@@ -403,7 +404,7 @@ pub fn set(name: &str, args: &QueueAttributeArgs, no_dead_letter_queue: bool, co
     let name = checked_name(name)?;
     let mut body = attributes_body(name, args)?;
     if body.is_empty() && args.dead_letter_queue.is_none() && !no_dead_letter_queue {
-        return Err(usage(
+        return Err(Error::usage(
             "Say what changes: --visibility-timeout, --retention, --delay, --receive-wait, --max-message-size, \
              --dead-letter-queue or --no-dead-letter-queue",
         ));
@@ -424,7 +425,7 @@ fn message_attributes(attributes: &[String]) -> Result<Map<String, Value>, Error
     let mut map = Map::new();
     for attribute in attributes {
         let Some((key, value)) = attribute.split_once('=').filter(|(key, _)| !key.is_empty()) else {
-            return Err(usage(format!("--attribute takes NAME=VALUE: \"{attribute}\" has no name, or no =")));
+            return Err(Error::usage(format!("--attribute takes NAME=VALUE: \"{attribute}\" has no name, or no =")));
         };
         map.insert(key.to_owned(), json!({ "dataType": "String", "stringValue": value }));
     }
@@ -442,7 +443,7 @@ pub fn send(
     let delay = delay.map(|text| seconds("delay", text, 0, 900)).transpose()?;
     let attributes = message_attributes(attributes)?;
     let text = String::from_utf8(super::invoke::raw_data(body)?)
-        .map_err(|_| usage("A message's body is text, and this one isn't UTF-8: base64 it first"))?;
+        .map_err(|_| Error::usage("A message's body is text, and this one isn't UTF-8: base64 it first"))?;
     let client = Client::new(&context.settings()?)?;
     let mut request = json!({ "body": text });
     if let Some(delay) = delay {
@@ -538,7 +539,7 @@ pub fn is_receipt_handle(handle: &str) -> bool {
 pub fn delete_message(name: &str, receipt_handle: &str, context: &Context) -> Result<(), Error> {
     let name = checked_name(name)?;
     if !is_receipt_handle(receipt_handle) {
-        return Err(usage(format!(
+        return Err(Error::usage(format!(
             "\"{receipt_handle}\" is no receipt handle of FF's: copy one from `ff queues receive`"
         )));
     }
@@ -580,6 +581,7 @@ pub fn delete(name: &str, yes: bool, context: &Context) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend_source::{class_fields, sorted, sorted_keys};
 
     fn attributes() -> QueueAttributeArgs {
         QueueAttributeArgs {
@@ -614,29 +616,7 @@ mod tests {
 
     /// The fields a class of the API's queue DTOs declares, in its order.
     fn api_fields(class: &str) -> Vec<String> {
-        let source = include_str!("../../../BE/src/queues/dto/queue.dto.ts");
-        let start = source.find(&format!("export class {class} ")).unwrap_or_else(|| panic!("no class {class}"));
-        let body = &source[start..];
-        body[..body.find("\n}").unwrap()]
-            .lines()
-            .skip(1)
-            .filter_map(|line| line.strip_prefix("  "))
-            .filter(|line| !line.starts_with(['@', ' ', '}', '/', '*', ')']))
-            .filter_map(|line| line.split([':', '?']).next())
-            .map(str::to_owned)
-            .collect()
-    }
-
-    /// The fields a value of ff's own serializes with, sorted.
-    fn sorted_keys(value: &impl Serialize) -> Vec<String> {
-        let mut keys: Vec<String> = serde_json::to_value(value).unwrap().as_object().unwrap().keys().cloned().collect();
-        keys.sort();
-        keys
-    }
-
-    fn sorted(mut fields: Vec<String>) -> Vec<String> {
-        fields.sort();
-        fields
+        class_fields(include_str!("../../../BE/src/queues/dto/queue.dto.ts"), class)
     }
 
     #[test]

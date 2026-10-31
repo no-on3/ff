@@ -2,6 +2,8 @@
 
 mod api;
 mod auth;
+#[cfg(test)]
+mod backend_source;
 mod cli;
 mod commands;
 mod config;

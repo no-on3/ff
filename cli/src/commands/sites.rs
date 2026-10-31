@@ -154,13 +154,12 @@ struct Deployed {
 /// are left out, `.well-known` apart, as no built site needs `.git` or `.DS_Store` served.
 fn files_of(folder: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
     fn walk(dir: &Path, prefix: &str, files: &mut BTreeMap<String, PathBuf>) -> Result<(), Error> {
-        let entries = fs::read_dir(dir)
-            .map_err(|error| Error::new(Kind::Usage, format!("can't read {}: {error}", dir.display())))?;
+        let entries =
+            fs::read_dir(dir).map_err(|error| Error::usage(format!("can't read {}: {error}", dir.display())))?;
         for entry in entries {
-            let entry =
-                entry.map_err(|error| Error::new(Kind::Usage, format!("can't read {}: {error}", dir.display())))?;
+            let entry = entry.map_err(|error| Error::usage(format!("can't read {}: {error}", dir.display())))?;
             let name = entry.file_name().into_string().map_err(|name| {
-                Error::new(Kind::Usage, format!("{} is no UTF-8 name, which S3's keys are", Path::new(&name).display()))
+                Error::usage(format!("{} is no UTF-8 name, which S3's keys are", Path::new(&name).display()))
             })?;
             if name.starts_with('.') && name != ".well-known" {
                 continue;
@@ -176,21 +175,18 @@ fn files_of(folder: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
         Ok(())
     }
     if !folder.is_dir() {
-        return Err(Error::new(
-            Kind::Usage,
-            format!("{} is no folder: give the built site's, such as ./dist", folder.display()),
-        ));
+        return Err(Error::usage(format!("{} is no folder: give the built site's, such as ./dist", folder.display())));
     }
     let mut files = BTreeMap::new();
     walk(folder, "", &mut files)?;
     if files.is_empty() {
-        return Err(Error::new(Kind::Usage, format!("{} has no file to deploy", folder.display())));
+        return Err(Error::usage(format!("{} has no file to deploy", folder.display())));
     }
     Ok(files)
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, Error> {
-    fs::read(path).map_err(|error| Error::new(Kind::Usage, format!("can't read {}: {error}", path.display())))
+    fs::read(path).map_err(|error| Error::usage(format!("can't read {}: {error}", path.display())))
 }
 
 /// The bucket's website configuration; None when it is no site.

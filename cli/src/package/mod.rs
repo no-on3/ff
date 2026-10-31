@@ -61,10 +61,6 @@ fn failed(message: impl Into<String>) -> Error {
     Error::new(Kind::Failed, message)
 }
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
 /// A folder of the system's temporary one, removed with what it holds when dropped.
 struct Staging(PathBuf);
 
@@ -214,18 +210,18 @@ fn package_json(root: &Path) -> Option<serde_json::Value> {
 /// `--compile` runs the project's own TypeScript compiler on its tsconfig.json.
 fn check_compile(project: &Project) -> Result<(), Error> {
     if project.runtime != Runtime::Nodejs {
-        return Err(usage("--compile is for TypeScript, which runs on Node.js"));
+        return Err(Error::usage("--compile is for TypeScript, which runs on Node.js"));
     }
     let typescript = package_json(&project.root).is_some_and(|package| {
         ["/devDependencies/typescript", "/dependencies/typescript"].iter().any(|at| package.pointer(at).is_some())
     });
     if project.libraries != Libraries::Npm || !typescript {
-        return Err(usage(
+        return Err(Error::usage(
             "--compile runs the project's own TypeScript compiler: add typescript to its package.json's devDependencies",
         ));
     }
     if !project.root.join("tsconfig.json").is_file() {
-        return Err(usage(format!(
+        return Err(Error::usage(format!(
             "--compile runs tsc on the project's tsconfig.json, which {} hasn't",
             project.root.display()
         )));
@@ -414,17 +410,17 @@ pub fn build(root: &Path, options: &Options, out: &Output) -> Result<Package, Er
         ));
     }
     if entries.is_empty() {
-        return Err(usage(format!("{} has no file to package", root.display())));
+        return Err(Error::usage(format!("{} has no file to package", root.display())));
     }
     if entries.len() > MAX_FILES {
-        return Err(usage(format!("The package has {} files: 20,000 at most, as FF takes one", entries.len())));
+        return Err(Error::usage(format!("The package has {} files: 20,000 at most, as FF takes one", entries.len())));
     }
     let mut unpacked = 0;
     for entry in &entries {
         unpacked += std::fs::metadata(&entry.source).map(|metadata| metadata.len()).unwrap_or(0);
     }
     if unpacked > MAX_UNPACKED_BYTES {
-        return Err(usage(format!(
+        return Err(Error::usage(format!(
             "The package is {unpacked} bytes unpacked: 250 MB (262,144,000 bytes) at most, as AWS Lambda takes one"
         )));
     }
@@ -435,7 +431,7 @@ pub fn build(root: &Path, options: &Options, out: &Output) -> Result<Package, Er
     progress.stop();
     let zip = zip.map_err(|error| failed(format!("Couldn't zip the package: {error}")))?;
     if zip.len() as u64 > MAX_ZIP_BYTES {
-        return Err(usage(format!(
+        return Err(Error::usage(format!(
             "The package's zip is {} bytes: 50 MB (52,428,800 bytes) at most, as AWS Lambda takes one uploaded directly",
             zip.len()
         )));

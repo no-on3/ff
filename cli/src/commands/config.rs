@@ -31,13 +31,9 @@ fn target(context: &Context) -> Result<(String, Files), Error> {
             .unwrap_or_else(|| config::DEFAULT_PROFILE.to_owned()),
     };
     if !config::is_profile_name(&profile) {
-        return Err(Error::new(Kind::Usage, format!("FF_PROFILE must be letters, digits, '-' and '_': {profile}")));
+        return Err(Error::usage(format!("FF_PROFILE must be letters, digits, '-' and '_': {profile}")));
     }
     Ok((profile, Files::locate(&env)?))
-}
-
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
 }
 
 fn set(context: &Context, key: ConfigKey, value: &str) -> Result<(), Error> {
@@ -46,15 +42,15 @@ fn set(context: &Context, key: ConfigKey, value: &str) -> Result<(), Error> {
     let value = value.trim();
     let saved = match key {
         ConfigKey::Endpoint => {
-            let endpoint = Endpoint::parse(value).map_err(usage)?;
+            let endpoint = Endpoint::parse(value).map_err(Error::usage)?;
             let allowed = context.connection.allow_http || file.boolean(&profile, "allow_http")?.unwrap_or(false);
-            endpoint.check_tls(allowed).map_err(usage)?;
+            endpoint.check_tls(allowed).map_err(Error::usage)?;
             file.set(&profile, "endpoint", endpoint.as_str());
             serde_json::Value::from(endpoint.as_str())
         }
         ConfigKey::Account | ConfigKey::DevAccount => {
             if !config::is_account_id(value) {
-                return Err(usage(format!("{} must be an account ID, 12 digits: {value}", key.name())));
+                return Err(Error::usage(format!("{} must be an account ID, 12 digits: {value}", key.name())));
             }
             file.set(&profile, key.name(), value);
             serde_json::Value::from(value)
@@ -63,13 +59,13 @@ fn set(context: &Context, key: ConfigKey, value: &str) -> Result<(), Error> {
             let allowed = match value {
                 "true" => true,
                 "false" => false,
-                _ => return Err(usage(format!("allow_http is true or false: {value}"))),
+                _ => return Err(Error::usage(format!("allow_http is true or false: {value}"))),
             };
             file.set(&profile, "allow_http", allowed);
             serde_json::Value::from(allowed)
         }
         ConfigKey::Token => {
-            return Err(usage(
+            return Err(Error::usage(
                 "A token on the command line would stay in your shell's history: `ff config set-token` reads it from a prompt or stdin",
             ));
         }
@@ -168,7 +164,7 @@ fn read_key() -> Result<String, Error> {
 
 fn set_token(context: &Context) -> Result<(), Error> {
     let (profile, files) = target(context)?;
-    let key = Token::api_key(&read_key()?).map_err(usage)?;
+    let key = Token::api_key(&read_key()?).map_err(Error::usage)?;
     let mut file = ProfileFile::read(files.credentials())?;
     file.set(&profile, "token", key.secret());
     file.write(true)?;

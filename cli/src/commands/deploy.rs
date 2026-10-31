@@ -28,10 +28,6 @@ const DEFAULT_TIMEOUT: u32 = 5;
 /// Inline code's handler unless one is named: the API's own default.
 const INLINE_HANDLER: &str = "function.handler";
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
 /// The name a file gives: its own without its extension; for `function.*`, the name of the file
 /// `ff init` makes, its folder's.
 fn file_name(file: &Path) -> String {
@@ -51,7 +47,7 @@ fn checked_name(name: String) -> Result<String, Error> {
     if is_function_name(&name) {
         Ok(name)
     } else {
-        Err(usage(format!(
+        Err(Error::usage(format!(
             "\"{name}\" can't be a function's name: 1 to 64 letters, digits, hyphens or underscores, as on AWS Lambda; name it with --name"
         )))
     }
@@ -70,7 +66,7 @@ pub fn runtime_of(file: &Path, runtime: Option<Runtime>) -> Result<Runtime, Erro
     match file.extension().and_then(|extension| extension.to_str()) {
         Some("ts" | "js" | "cjs") => Ok(Runtime::Nodejs),
         Some("py") => Ok(Runtime::Python),
-        other => Err(usage(format!(
+        other => Err(Error::usage(format!(
             "Can't tell the runtime from {}: .ts, .js and .cjs are nodejs, .py python; or name it with --runtime",
             other
                 .map(|extension| format!("the extension .{extension}"))
@@ -259,18 +255,18 @@ pub fn run(args: DeployArgs, context: &Context) -> Result<(), Error> {
         return run_folder(&args, environment, context);
     }
     if args.build.container || args.build.no_build {
-        return Err(usage(
+        return Err(Error::usage(
             "--container and --no-build are for a folder, which ff packages: a file is deployed as it is",
         ));
     }
     if args.path.extension().is_some_and(|extension| extension == "zip") {
-        return Err(usage(format!(
+        return Err(Error::usage(format!(
             "{} is a zip: ff deploy takes the function's folder, which it packages itself, or its code's one file",
             args.path.display()
         )));
     }
     let code = std::fs::read_to_string(&args.path)
-        .map_err(|error| usage(format!("Couldn't read {} as UTF-8 text: {error}", args.path.display())))?;
+        .map_err(|error| Error::usage(format!("Couldn't read {} as UTF-8 text: {error}", args.path.display())))?;
     let name = name_of(&args.path, args.name.as_deref())?;
     let runtime = runtime_of(&args.path, args.runtime)?;
     let settings = context.settings()?;
@@ -317,7 +313,7 @@ fn run_folder(args: &DeployArgs, environment: Option<env::Variables>, context: &
         (false, default, None) => default,
     }
     .ok_or_else(|| {
-        usage(format!(
+        Error::usage(format!(
             "Can't tell the handler of {}: it has no function.* file, nor {}; name it with --handler, such as src/app.handler",
             args.path.display(),
             match package.runtime {

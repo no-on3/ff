@@ -90,7 +90,7 @@ fn next_runs(client: &Client, expression: &str) -> Result<Vec<String>, Error> {
 
 pub fn set(function: &str, name: &str, changes: ScheduleChanges, context: &Context) -> Result<(), Error> {
     if changes.input.is_some() && changes.no_input {
-        return Err(Error::new(Kind::Usage, "--input and --no-input say opposite things: one or the other"));
+        return Err(Error::usage("--input and --no-input say opposite things: one or the other"));
     }
     let client = Client::new(&context.settings()?)?;
     let found = function_named(&client, function)?;

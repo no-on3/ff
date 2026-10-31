@@ -39,7 +39,7 @@ struct Created {
 pub(super) fn new_folder(folder: &Path, why: &str) -> Result<(), Error> {
     let occupied = std::fs::read_dir(folder).map(|mut entries| entries.next().is_some()).unwrap_or(false);
     if occupied {
-        return Err(Error::new(Kind::Usage, format!("{} already holds files: {why}", folder.display())));
+        return Err(Error::usage(format!("{} already holds files: {why}", folder.display())));
     }
     Ok(())
 }
@@ -47,12 +47,9 @@ pub(super) fn new_folder(folder: &Path, why: &str) -> Result<(), Error> {
 /// Writes the folder, which must not exist yet, or be empty.
 pub fn create(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf>, Error> {
     if !is_function_name(name) {
-        return Err(Error::new(
-            Kind::Usage,
-            format!(
-                "\"{name}\" can't be a function's name: 1 to 64 letters, digits, hyphens or underscores, as on AWS Lambda"
-            ),
-        ));
+        return Err(Error::usage(format!(
+            "\"{name}\" can't be a function's name: 1 to 64 letters, digits, hyphens or underscores, as on AWS Lambda"
+        )));
     }
     new_folder(folder, "ff init makes a new folder")?;
     let failed = |path: &Path, error: std::io::Error| {

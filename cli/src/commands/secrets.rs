@@ -34,11 +34,11 @@ fn names(given: &[String]) -> Result<Vec<String>, Error> {
         .iter()
         .map(|name| {
             if name.contains('=') {
-                Err(Error::new(Kind::Usage, format!("A secret's value doesn't go on the command line, where the shell's history keeps it: `ff secrets set <function> {}` asks for it", name.split('=').next().unwrap_or(name))))
+                Err(Error::usage(format!("A secret's value doesn't go on the command line, where the shell's history keeps it: `ff secrets set <function> {}` asks for it", name.split('=').next().unwrap_or(name))))
             } else if is_variable_name(name) {
                 Ok(name.clone())
             } else {
-                Err(Error::new(Kind::Usage, format!("\"{name}\" can't be a secret's name: a letter, then letters, digits or underscores, two characters at least")))
+                Err(Error::usage(format!("\"{name}\" can't be a secret's name: a letter, then letters, digits or underscores, two characters at least")))
             }
         })
         .collect()
@@ -63,10 +63,7 @@ fn values(names: &[String]) -> Result<BTreeMap<String, String>, Error> {
             .transpose()
             .map_err(|error| Error::new(Kind::Failed, format!("Couldn't read {name}'s value from stdin: {error}")))?
             .ok_or_else(|| {
-                Error::new(
-                    Kind::Usage,
-                    format!("stdin has no line for {name}: a line each, in the order the names come"),
-                )
+                Error::usage(format!("stdin has no line for {name}: a line each, in the order the names come"))
             })?;
         values.insert(name.clone(), value);
     }

@@ -144,7 +144,7 @@ pub fn month(text: &str) -> Result<String, Error> {
     if valid {
         Ok(text.to_owned())
     } else {
-        Err(Error::new(Kind::Usage, format!("--month is a month as YYYY-MM, such as 2026-10: {text}")))
+        Err(Error::usage(format!("--month is a month as YYYY-MM, such as 2026-10: {text}")))
     }
 }
 
@@ -500,7 +500,7 @@ struct Metrics {
 /// A window's start, `since` ago, as the API takes it.
 pub fn start_of(since: &str, now: SystemTime) -> Result<String, Error> {
     let duration = humantime::parse_duration(since)
-        .map_err(|error| Error::new(Kind::Usage, format!("--since takes a duration such as 30m, 6h or 2d: {error}")))?;
+        .map_err(|error| Error::usage(format!("--since takes a duration such as 30m, 6h or 2d: {error}")))?;
     let start = now.checked_sub(duration).unwrap_or(now);
     Ok(humantime::format_rfc3339_seconds(start).to_string())
 }

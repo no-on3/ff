@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use super::Context;
 use crate::api::types::{function_named, name_in_arn};
 use crate::api::{Call, Client};
-use crate::error::{Error, Kind};
+use crate::error::Error;
 use crate::table::{table, time};
 
 /// Lambda's ScalingConfig.
@@ -44,10 +44,6 @@ pub struct Settings<'a> {
     /// Some(Some(n)) for a maximum, Some(None) for none, None to leave it.
     pub max_concurrency: Option<Option<u32>>,
     pub enabled: Option<bool>,
-}
-
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
 }
 
 /// The body the flags give, checked before any call, by Lambda's names.
@@ -139,7 +135,9 @@ fn checked_uuid(uuid: &str) -> Result<&str, Error> {
     if is_uuid(uuid) {
         Ok(uuid)
     } else {
-        Err(usage(format!("\"{uuid}\" is no event source mapping's ID: a UUID, as `ff event-sources list` shows them")))
+        Err(Error::usage(format!(
+            "\"{uuid}\" is no event source mapping's ID: a UUID, as `ff event-sources list` shows them"
+        )))
     }
 }
 
@@ -193,7 +191,7 @@ pub fn update(uuid: &str, settings: &Settings, context: &Context) -> Result<(), 
     let uuid = checked_uuid(uuid)?;
     let body = body_of(settings)?;
     if body.is_empty() {
-        return Err(usage(
+        return Err(Error::usage(
             "Say what changes: --batch-size, --batching-window, --report-batch-item-failures or --no-report-batch-item-failures, \
              --max-concurrency or --no-max-concurrency, --enable or --disable",
         ));
@@ -222,6 +220,7 @@ pub fn remove(uuid: &str, yes: bool, context: &Context) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend_source::{class_fields, sorted, sorted_keys};
 
     fn settings() -> Settings<'static> {
         Settings {
@@ -312,17 +311,6 @@ mod tests {
     #[test]
     fn what_ff_reads_has_the_apis_fields() {
         let source = include_str!("../../../BE/src/event-sources/dto/event-source.dto.ts");
-        let body = &source[source.find("export class EventSourceView {").unwrap()..];
-        let mut fields: Vec<&str> = body[..body.find("\n}").unwrap()]
-            .lines()
-            .filter_map(|line| line.strip_prefix("  "))
-            .filter(|line| !line.starts_with(['@', ' ', '}', '/', '*', ')']))
-            .filter_map(|line| line.split([':', '?']).next())
-            .collect();
-        fields.sort();
-        let mut ours: Vec<String> =
-            serde_json::to_value(mapping()).unwrap().as_object().unwrap().keys().cloned().collect();
-        ours.sort();
-        assert_eq!(ours, fields);
+        assert_eq!(sorted_keys(&mapping()), sorted(class_fields(source, "EventSourceView")));
     }
 }

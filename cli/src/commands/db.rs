@@ -77,12 +77,9 @@ fn checked_name(name: &str) -> Result<&str, Error> {
     if is_database_name(name) {
         Ok(name)
     } else {
-        Err(Error::new(
-            Kind::Usage,
-            format!(
-                "\"{name}\" can't be a database's name: 1 to 63 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last, as AWS RDS names its databases"
-            ),
-        ))
+        Err(Error::usage(format!(
+            "\"{name}\" can't be a database's name: 1 to 63 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last, as AWS RDS names its databases"
+        )))
     }
 }
 
@@ -215,12 +212,9 @@ pub(super) fn secret_name(secret: &str) -> Result<&str, Error> {
     if is_variable_name(secret) {
         Ok(secret)
     } else {
-        Err(Error::new(
-            Kind::Usage,
-            format!(
-                "\"{secret}\" can't be a secret's name: a letter, then letters, digits or underscores, two characters at least"
-            ),
-        ))
+        Err(Error::usage(format!(
+            "\"{secret}\" can't be a secret's name: a letter, then letters, digits or underscores, two characters at least"
+        )))
     }
 }
 

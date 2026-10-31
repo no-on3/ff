@@ -8,19 +8,15 @@ use super::Context;
 use crate::api::types::{function_named, name_in_arn};
 use crate::api::{Call, Client};
 use crate::cli::AsyncConfigArgs;
-use crate::error::{Error, Kind};
-
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
+use crate::error::Error;
 
 /// `--max-age 30m`: whole seconds, from a minute to 6 hours, as Lambda keeps a call.
 pub fn max_age_seconds(text: &str) -> Result<u64, Error> {
     let duration = humantime::parse_duration(text)
-        .map_err(|error| usage(format!("--max-age takes a duration such as 90s, 30m or 6h: {error}")))?;
+        .map_err(|error| Error::usage(format!("--max-age takes a duration such as 90s, 30m or 6h: {error}")))?;
     let seconds = duration.as_secs();
     if duration.subsec_nanos() != 0 || !(60..=21_600).contains(&seconds) {
-        return Err(usage("--max-age must be whole seconds from 1m to 6h, as AWS Lambda keeps a call"));
+        return Err(Error::usage("--max-age must be whole seconds from 1m to 6h, as AWS Lambda keeps a call"));
     }
     Ok(seconds)
 }

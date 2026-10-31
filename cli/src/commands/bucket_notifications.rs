@@ -38,10 +38,6 @@ pub struct NewConfiguration<'a> {
     pub id: Option<&'a str>,
 }
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
 /// One configuration of the API's answer, as `(id, events, filter, destination)` in words.
 fn row_of(configuration: &Value, queue: bool) -> Vec<String> {
     let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
@@ -75,7 +71,7 @@ fn rows(configuration: &Value) -> Vec<Vec<String>> {
 fn configuration_of(new: &NewConfiguration) -> Result<(String, Value), Error> {
     for event in new.events {
         if !EVENT_TYPES.contains(&event.as_str()) {
-            return Err(usage(format!("\"{event}\" is no event a bucket sends: {}", EVENT_TYPES.join(", "))));
+            return Err(Error::usage(format!("\"{event}\" is no event a bucket sends: {}", EVENT_TYPES.join(", "))));
         }
     }
     let events: Vec<&str> = if new.events.is_empty() {
@@ -180,6 +176,7 @@ pub fn clear(bucket: &str, yes: bool, context: &Context) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend_source::listed;
 
     #[test]
     fn a_new_configuration_names_its_destination_and_s3s_events_a_filter_when_given() {
@@ -252,9 +249,6 @@ mod tests {
     #[test]
     fn the_events_are_the_apis() {
         let source = include_str!("../../../BE/src/storage/bucket-notifications.ts");
-        let start = source.find("export const EVENT_TYPES = [").unwrap();
-        let body = &source[start..start + source[start..].find("] as const").unwrap()];
-        let api: Vec<&str> = body.split('\'').skip(1).step_by(2).collect();
-        assert_eq!(api, EVENT_TYPES);
+        assert_eq!(listed(source, "EVENT_TYPES"), EVENT_TYPES);
     }
 }

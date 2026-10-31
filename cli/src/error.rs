@@ -50,6 +50,11 @@ impl Error {
         Error { kind, message: message.into(), status: None, request_id: None, details: None, broken_pipe: false }
     }
 
+    /// A bad argument that clap couldn't see.
+    pub fn usage(message: impl Into<String>) -> Self {
+        Error::new(Kind::Usage, message)
+    }
+
     pub fn exit_code(&self) -> u8 {
         self.kind.exit_code()
     }
