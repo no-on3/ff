@@ -56,7 +56,6 @@ k3d registry create "$registry" --port "127.0.0.1:$registry_port" >/dev/null
 k3d cluster create "$cluster" --image "$FF_K3S_IMAGE" --servers 1 --agents 0 --no-lb \
   --registry-use "$in_cluster" --k3s-arg "--disable=traefik@server:0" --k3s-arg "--disable=metrics-server@server:0" \
   --kubeconfig-update-default=false --kubeconfig-switch-context=false --wait --timeout 180s >/dev/null
-mkdir -p "$FF_KUBE_DIR"
 (umask 077 && k3d kubeconfig get "$cluster" >"$KUBECONFIG")
 kubectl wait --for=condition=Ready node --all --timeout=120s >/dev/null
 node="k3d-$cluster-server-0"

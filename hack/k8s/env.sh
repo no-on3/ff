@@ -27,6 +27,9 @@ export FF_REGISTRY_PORT="${FF_REGISTRY_PORT:-5056}"
 export FF_REGISTRY_IMAGE="${FF_REGISTRY_IMAGE:-registry:3.1.2}"
 
 export FF_KUBE_DIR="$FF_REPO_ROOT/hack/.kube"
+# Made here, once, for every script that writes there (a fresh checkout, as on a CI runner, has none), readable by its
+# owner alone: it holds the clusters' credentials.
+mkdir -p -m 700 "$FF_KUBE_DIR"
 # Admin credentials (cluster setup and debugging only).
 export KUBECONFIG="$FF_KUBE_DIR/$FF_CLUSTER_NAME.kubeconfig"
 # Least-privilege ff-controller credentials: what the backend uses.

@@ -27,7 +27,6 @@ done
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 [ -x "$FF_REPO_ROOT/hack/bin/k3d" ] && [ -x "$FF_REPO_ROOT/hack/bin/kubectl" ] || "$FF_REPO_ROOT/hack/install-tools.sh"
 
-mkdir -p "$FF_KUBE_DIR"
 chmod 700 "$FF_KUBE_DIR"
 
 if k3d cluster get "$FF_CLUSTER_NAME" >/dev/null 2>&1; then

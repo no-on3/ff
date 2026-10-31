@@ -7,7 +7,6 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 umask 077
-mkdir -p "$FF_KUBE_DIR"
 
 kubectl -n ff-system create token ff-controller --duration=24h >"$FF_SA_TOKEN_FILE"
 kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' |
