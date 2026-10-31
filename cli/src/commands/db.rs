@@ -19,16 +19,16 @@ use crate::table::{table, time};
 /// A database, as `GET /databases` and `GET /databases/:id` answer it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Database {
+pub(super) struct Database {
     id: String,
-    name: String,
+    pub(super) name: String,
     status: String,
     host: String,
     port: u16,
     database: String,
     user: String,
     connection_url: String,
-    size_bytes: Option<u64>,
+    pub(super) size_bytes: Option<u64>,
     connections: Option<u32>,
     connection_limit: u32,
     storage_limit_mb: u32,

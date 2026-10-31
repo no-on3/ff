@@ -27,24 +27,24 @@ struct Messages {
 /// Where a queue's messages go after too many receives.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RedrivePolicy {
-    dead_letter_target_arn: String,
-    max_receive_count: u32,
+pub(super) struct RedrivePolicy {
+    pub(super) dead_letter_target_arn: String,
+    pub(super) max_receive_count: u32,
 }
 
 /// A queue, as `GET /queues` and `GET /queues/:name` answer it: SQS's attributes by their names, in seconds and bytes.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Queue {
-    name: String,
+pub(super) struct Queue {
+    pub(super) name: String,
     url: String,
     arn: String,
-    visibility_timeout: u64,
-    message_retention_period: u64,
-    delay_seconds: u64,
-    maximum_message_size: u64,
-    receive_message_wait_time_seconds: u64,
-    redrive_policy: Option<RedrivePolicy>,
+    pub(super) visibility_timeout: u64,
+    pub(super) message_retention_period: u64,
+    pub(super) delay_seconds: u64,
+    pub(super) maximum_message_size: u64,
+    pub(super) receive_message_wait_time_seconds: u64,
+    pub(super) redrive_policy: Option<RedrivePolicy>,
     messages: Messages,
     size_bytes: u64,
     created_at: String,

@@ -100,12 +100,12 @@ pub fn cache_control(key: &str) -> &'static str {
 /// A bucket's website configuration, as the API answers it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Website {
+pub(super) struct Website {
     index_document: Suffix,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error_document: Option<ErrorKey>,
     single_page_app: bool,
-    url: String,
+    pub(super) url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

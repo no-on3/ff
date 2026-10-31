@@ -141,12 +141,22 @@ impl Client {
     /// The call's JSON answer.
     pub fn json<T: DeserializeOwned>(&self, call: &Call) -> Result<T, Error> {
         let (status, body) = self.answer(call)?;
-        serde_json::from_str(&body).map_err(|error| {
+        serde_json::from_slice(&body).map_err(|error| {
             Error::new(
                 Kind::Failed,
                 format!("The API at {} answered {status} with what isn't the JSON expected: {error}", self.endpoint),
             )
         })
+    }
+
+    /// The call's JSON answer, or none for a 404, which says there is none: a function's URL, its
+    /// settings for calls that don't wait.
+    pub fn json_if_any<T: DeserializeOwned>(&self, call: &Call) -> Result<Option<T>, Error> {
+        match self.json(call) {
+            Ok(found) => Ok(Some(found)),
+            Err(error) if error.status == Some(404) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// A stream of Server-Sent Events, as the live tail's, once the API has taken the call.
@@ -157,13 +167,21 @@ impl Client {
             let request_id =
                 response.headers().get("x-ff-request-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
             let body = self.read_body(&mut response)?;
-            return Err(api_error(status, &body, request_id, self.api_key));
+            return Err(api_error(status, &String::from_utf8_lossy(&body), request_id, self.api_key));
         }
         Ok(Events::new(BufReader::new(response.into_body().into_reader())))
     }
 
     /// The call's answer as text, such as CSV.
     pub fn text(&self, call: &Call) -> Result<String, Error> {
+        let (_, body) = self.answer(call)?;
+        String::from_utf8(body).map_err(|error| {
+            Error::new(Kind::Failed, format!("The API at {} answered what isn't text: {error}", self.endpoint))
+        })
+    }
+
+    /// The call's answer as it came, such as a function's zip.
+    pub fn bytes(&self, call: &Call) -> Result<Vec<u8>, Error> {
         self.answer(call).map(|(_, body)| body)
     }
 
@@ -174,7 +192,7 @@ impl Client {
 
     /// A 2xx answer's status and body, or the API's refusal as ff's error. A read refused with
     /// 429 is tried once more after its Retry-After.
-    fn answer(&self, call: &Call) -> Result<(u16, String), Error> {
+    fn answer(&self, call: &Call) -> Result<(u16, Vec<u8>), Error> {
         let mut response = self.send(call)?;
         if response.status() == 429 && call.method.is_read() {
             let wait = retry_after(response.headers().get("retry-after").and_then(|value| value.to_str().ok()));
@@ -188,7 +206,7 @@ impl Client {
             response.headers().get("x-ff-request-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
         let body = self.read_body(&mut response)?;
         if !(200..300).contains(&status) {
-            return Err(api_error(status, &body, request_id, self.api_key));
+            return Err(api_error(status, &String::from_utf8_lossy(&body), request_id, self.api_key));
         }
         Ok((status, body))
     }
@@ -220,9 +238,9 @@ impl Client {
         sent.map_err(|error| self.transport_error(error, call.timeout))
     }
 
-    fn read_body(&self, response: &mut Response<ureq::Body>) -> Result<String, Error> {
-        let mut body = String::new();
-        response.body_mut().as_reader().read_to_string(&mut body).map_err(|error| {
+    fn read_body(&self, response: &mut Response<ureq::Body>) -> Result<Vec<u8>, Error> {
+        let mut body = Vec::new();
+        response.body_mut().as_reader().read_to_end(&mut body).map_err(|error| {
             Error::new(Kind::Failed, format!("The API at {} stopped answering: {error}", self.endpoint))
         })?;
         Ok(body)

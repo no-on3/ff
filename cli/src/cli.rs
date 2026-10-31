@@ -214,6 +214,10 @@ pub enum Command {
     #[command(subcommand)]
     EventSources(EventSourcesCommand),
 
+    /// Write what a move to AWS needs in a new folder: a SAM template of the account's functions, queues and
+    /// buckets, each function's code as Lambda runs it, a page for each kind of resource, and MIGRATION.md
+    Export(ExportArgs),
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -316,6 +320,21 @@ pub struct BuildArgs {
     /// Install nothing: the folder as it is, its node_modules included
     #[arg(long)]
     pub no_build: bool,
+}
+
+#[derive(Args)]
+pub struct ExportArgs {
+    /// The folder to write, new or empty
+    pub folder: PathBuf,
+
+    /// The functions to export, with the queues and buckets that call them or that they send to [default: every one]
+    #[arg(long, value_delimiter = ',', value_name = "NAME,...")]
+    pub functions: Vec<String>,
+
+    /// Write the functions' variables with their values in the template, where they are parameters otherwise; secrets
+    /// stay parameters, FF never showing their values back
+    #[arg(long)]
+    pub with_values: bool,
 }
 
 #[derive(Args)]

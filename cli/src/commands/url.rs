@@ -20,6 +20,9 @@ pub struct FunctionUrl {
     pub function_url: String,
     pub auth_type: String,
     pub cors: Option<Value>,
+    /// `BUFFERED`, or `RESPONSE_STREAM` for a URL that streams its answer.
+    #[serde(default)]
+    pub invoke_mode: Option<String>,
     pub created_at: String,
 }
 
@@ -66,11 +69,7 @@ fn callers(auth_type: &str) -> &'static str {
 
 /// The function's URL, or none: a 404 for its URL is the absence of one.
 fn url_of(client: &Client, id: &str) -> Result<Option<FunctionUrl>, Error> {
-    match client.json::<FunctionUrl>(&Call::get(format!("/functions/{id}/url"))) {
-        Ok(url) => Ok(Some(url)),
-        Err(error) if error.status == Some(404) => Ok(None),
-        Err(error) => Err(error),
-    }
+    client.json_if_any(&Call::get(format!("/functions/{id}/url")))
 }
 
 fn no_url(name: &str) -> Error {

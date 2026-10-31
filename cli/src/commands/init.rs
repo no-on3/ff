@@ -35,6 +35,15 @@ struct Created {
     files: Vec<String>,
 }
 
+/// Refuses a folder that holds files already, for a command that writes a new one, `why` saying so.
+pub(super) fn new_folder(folder: &Path, why: &str) -> Result<(), Error> {
+    let occupied = std::fs::read_dir(folder).map(|mut entries| entries.next().is_some()).unwrap_or(false);
+    if occupied {
+        return Err(Error::new(Kind::Usage, format!("{} already holds files: {why}", folder.display())));
+    }
+    Ok(())
+}
+
 /// Writes the folder, which must not exist yet, or be empty.
 pub fn create(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf>, Error> {
     if !is_function_name(name) {
@@ -45,13 +54,7 @@ pub fn create(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf
             ),
         ));
     }
-    let occupied = std::fs::read_dir(folder).map(|mut entries| entries.next().is_some()).unwrap_or(false);
-    if occupied {
-        return Err(Error::new(
-            Kind::Usage,
-            format!("{} already holds files: ff init makes a new folder", folder.display()),
-        ));
-    }
+    new_folder(folder, "ff init makes a new folder")?;
     let failed = |path: &Path, error: std::io::Error| {
         Error::new(Kind::Failed, format!("Couldn't write {}: {error}", path.display()))
     };

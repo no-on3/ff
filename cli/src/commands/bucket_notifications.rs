@@ -6,6 +6,7 @@
 use serde_json::{Map, Value, json};
 
 use super::Context;
+use crate::api::types::name_in_arn;
 use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
 use crate::table::table;
@@ -41,11 +42,6 @@ fn usage(message: impl Into<String>) -> Error {
     Error::new(Kind::Usage, message)
 }
 
-/// The name an ARN ends with: a function's or a queue's.
-fn name_of(arn: &str) -> &str {
-    arn.rsplit(':').next().unwrap_or(arn)
-}
-
 /// One configuration of the API's answer, as `(id, events, filter, destination)` in words.
 fn row_of(configuration: &Value, queue: bool) -> Vec<String> {
     let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
@@ -61,7 +57,7 @@ fn row_of(configuration: &Value, queue: bool) -> Vec<String> {
         text(&configuration["id"]),
         events.join(","),
         if filter.is_empty() { "every key".to_owned() } else { filter.join(", ") },
-        format!("{} {}", if queue { "queue" } else { "function" }, name_of(&arn)),
+        format!("{} {}", if queue { "queue" } else { "function" }, name_in_arn(&arn)),
     ]
 }
 

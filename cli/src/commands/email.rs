@@ -28,8 +28,8 @@ struct Record {
 /// A domain or an address, as `GET /email/identities` and `GET /email/identities/:identity` answer it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Identity {
-    identity: String,
+pub(super) struct Identity {
+    pub(super) identity: String,
     #[serde(rename = "type")]
     kind: String,
     status: String,

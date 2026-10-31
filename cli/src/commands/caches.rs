@@ -16,8 +16,8 @@ use crate::table::{table, time};
 /// A cache, as `GET /caches` and `GET /caches/:name` answer it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Cache {
-    name: String,
+pub(super) struct Cache {
+    pub(super) name: String,
     status: String,
     host: String,
     port: u16,

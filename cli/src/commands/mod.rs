@@ -12,6 +12,7 @@ mod deploy;
 mod email;
 mod env;
 mod event_sources;
+mod export;
 mod functions;
 mod init;
 mod invoke;
@@ -57,6 +58,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Init { name, runtime } => init::run(&name, runtime, context),
         Command::Deploy(args) => deploy::run(args, context),
         Command::Package(args) => package::run(args, context),
+        Command::Export(args) => export::run(args, context),
         Command::Invoke(args) => invoke::run(args, context),
         Command::AsyncConfig(args) => async_config::run(args, context),
         Command::List => functions::list(context),

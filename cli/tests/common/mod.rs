@@ -84,26 +84,27 @@ impl Request {
 pub struct Reply {
     status: u16,
     headers: Vec<(String, String)>,
-    body: String,
+    body: Vec<u8>,
 }
 
 impl Reply {
     pub fn json(status: u16, body: serde_json::Value) -> Reply {
-        Reply { status, headers: vec![("content-type".into(), "application/json".into())], body: body.to_string() }
+        Reply::bytes(status, "application/json", body.to_string().into_bytes())
     }
 
     /// Text of a media type, such as CSV.
     pub fn text(status: u16, content_type: &str, body: &str) -> Reply {
-        Reply { status, headers: vec![("content-type".into(), content_type.into())], body: body.to_owned() }
+        Reply::bytes(status, content_type, body.as_bytes().to_vec())
+    }
+
+    /// Bytes of a media type, such as a function's zip.
+    pub fn bytes(status: u16, content_type: &str, body: Vec<u8>) -> Reply {
+        Reply { status, headers: vec![("content-type".into(), content_type.into())], body }
     }
 
     /// Server-Sent Events, as the live tail sends them: the stream ends with the reply.
     pub fn events(events: &str) -> Reply {
-        Reply {
-            status: 200,
-            headers: vec![("content-type".into(), "text/event-stream".into())],
-            body: events.to_owned(),
-        }
+        Reply::text(200, "text/event-stream", events)
     }
 
     pub fn header(mut self, name: &str, value: &str) -> Reply {
@@ -200,7 +201,7 @@ fn write_reply(mut stream: TcpStream, reply: &Reply) {
     }
     head.push_str("\r\n");
     let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(reply.body.as_bytes());
+    let _ = stream.write_all(&reply.body);
 }
 
 /// An address where nothing listens.

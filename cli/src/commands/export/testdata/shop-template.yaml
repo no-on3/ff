@@ -1,0 +1,177 @@
+# ff export wrote this on 2026-10-31 from FF's account 123456789012.
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Shop (123456789012), from FF: written by ff export'
+Parameters:
+  ScheduleState:
+    Type: String
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+    Default: DISABLED
+    Description: 'ENABLED once FF''s schedules are off, so that no schedule runs on both: MIGRATION.md says when'
+  PhotosBucketName:
+    Type: String
+    Default: photos
+    Description: 'The bucket photos''s name on S3, which names a bucket for all of S3: FF''s may be taken there'
+  SendReceiptsLogLevel:
+    Type: String
+    Description: 'send-receipts''s variable LOG_LEVEL, which `ff env list send-receipts --show` gives'
+  SendReceiptsDatabaseUrl:
+    Type: String
+    NoEcho: true
+    Description: 'send-receipts''s secret DATABASE_URL'
+Resources:
+  MakeThumbnailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: make-thumbnail
+      CodeUri: code/make-thumbnail.zip
+      Handler: app.handler
+      Runtime: python3.13
+      MemorySize: 512
+      Timeout: 30
+      AutoPublishAlias: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
+      ReservedConcurrentExecutions: 10
+      Events:
+        PhotosThumbnails:
+          Type: S3
+          Properties:
+            Bucket: !Ref PhotosBucket
+            Events:
+              - s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: in/
+                  - Name: suffix
+                    Value: '.jpg'
+  ReportV1Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: report_v1
+      CodeUri: code/report_v1.zip
+      Handler: function.handler
+      Runtime: nodejs24.x
+      MemorySize: 128
+      Timeout: 3
+  SendReceiptsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: send-receipts
+      CodeUri: code/send-receipts.zip
+      Handler: function.handler
+      Runtime: nodejs24.x
+      MemorySize: 256
+      Timeout: 60
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref SendReceiptsLogLevel
+          DATABASE_URL: !Ref SendReceiptsDatabaseUrl
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+        Cors:
+          AllowMethods:
+            - POST
+          AllowOrigins:
+            - https://shop.tn
+          MaxAge: 300
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        DestinationConfig:
+          OnSuccess:
+            Type: Lambda
+            Destination: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:audit'
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt FailedReceiptsQueue.Arn
+      Events:
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+            Input: '{"report":true}'
+            State: !Ref ScheduleState
+        Weekly:
+          Type: Schedule
+          Properties:
+            Schedule: rate(7 days)
+            State: DISABLED
+        OrdersQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrdersQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 2
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 5
+  FailedReceiptsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: failed-receipts
+      VisibilityTimeout: 30
+      MessageRetentionPeriod: 345600
+      DelaySeconds: 0
+      MaximumMessageSize: 1048576
+      ReceiveMessageWaitTimeSeconds: 0
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600
+      DelaySeconds: 0
+      MaximumMessageSize: 1048576
+      ReceiveMessageWaitTimeSeconds: 0
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDlqQueue.Arn
+        maxReceiveCount: 5
+  OrdersDlqQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-dlq
+      VisibilityTimeout: 30
+      MessageRetentionPeriod: 345600
+      DelaySeconds: 0
+      MaximumMessageSize: 1048576
+      ReceiveMessageWaitTimeSeconds: 0
+  PhotosBucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - OrdersQueuePolicy
+    Properties:
+      BucketName: !Ref PhotosBucketName
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectRemoved:Delete
+            Queue: !GetAtt OrdersQueue.Arn
+          - Event: s3:ObjectRemoved:DeleteMarkerCreated
+            Queue: !GetAtt OrdersQueue.Arn
+  OrdersQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref OrdersQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt OrdersQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn:
+                  - !Sub 'arn:aws:s3:::${PhotosBucketName}'
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+Outputs:
+  SendReceiptsUrl:
+    Description: 'send-receipts''s URL'
+    Value: !GetAtt SendReceiptsFunctionUrl.FunctionUrl

@@ -14,7 +14,7 @@ use crate::config::Settings;
 use crate::error::{Error, Kind};
 use crate::table::{table, time};
 
-fn me(client: &Client) -> Result<Me, Error> {
+pub(super) fn me(client: &Client) -> Result<Me, Error> {
     client.json(&Call::get("/me"))
 }
 

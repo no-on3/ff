@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::function_named;
+use crate::api::types::{function_named, name_in_arn};
 use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
 use crate::table::{table, time};
@@ -15,22 +15,22 @@ use crate::table::{table, time};
 /// Lambda's ScalingConfig.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ScalingConfig {
-    maximum_concurrency: u32,
+pub(super) struct ScalingConfig {
+    pub(super) maximum_concurrency: u32,
 }
 
 /// A mapping, as the API answers it, in Lambda's names.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct EventSource {
+pub(super) struct EventSource {
     uuid: String,
-    event_source_arn: String,
+    pub(super) event_source_arn: String,
     function_arn: String,
-    batch_size: u32,
-    maximum_batching_window_in_seconds: u32,
-    function_response_types: Vec<String>,
-    scaling_config: Option<ScalingConfig>,
-    state: String,
+    pub(super) batch_size: u32,
+    pub(super) maximum_batching_window_in_seconds: u32,
+    pub(super) function_response_types: Vec<String>,
+    pub(super) scaling_config: Option<ScalingConfig>,
+    pub(super) state: String,
     state_transition_reason: String,
     last_modified: String,
 }
@@ -48,11 +48,6 @@ pub struct Settings<'a> {
 
 fn usage(message: impl Into<String>) -> Error {
     Error::new(Kind::Usage, message)
-}
-
-/// The name an ARN ends with: a queue's, or a function's.
-fn name_of(arn: &str) -> &str {
-    arn.rsplit(':').next().unwrap_or(arn)
 }
 
 /// The body the flags give, checked before any call, by Lambda's names.
@@ -101,8 +96,8 @@ fn text(mapping: &EventSource) -> String {
     let state = if mapping.state == "Enabled" { "reading" } else { "disabled: nothing read" };
     format!(
         "{} reads the queue {}: batches of {} at most, {window}, {failures}, {concurrency}; {state} ({})",
-        name_of(&mapping.function_arn),
-        name_of(&mapping.event_source_arn),
+        name_in_arn(&mapping.function_arn),
+        name_in_arn(&mapping.event_source_arn),
         mapping.batch_size,
         mapping.uuid
     )
@@ -114,8 +109,8 @@ fn rows(mappings: &[EventSource]) -> String {
         .map(|mapping| {
             vec![
                 mapping.uuid.clone(),
-                name_of(&mapping.event_source_arn).to_owned(),
-                name_of(&mapping.function_arn).to_owned(),
+                name_in_arn(&mapping.event_source_arn).to_owned(),
+                name_in_arn(&mapping.function_arn).to_owned(),
                 mapping.batch_size.to_string(),
                 format!("{}s", mapping.maximum_batching_window_in_seconds),
                 if mapping.function_response_types.is_empty() { "batch" } else { "item" }.to_owned(),
@@ -177,7 +172,7 @@ pub fn list(function: Option<&str>, queue: Option<&str>, context: &Context) -> R
         None => client.json(&Call::get("/event-sources"))?,
     };
     if let Some(queue) = queue {
-        mappings.retain(|mapping| name_of(&mapping.event_source_arn) == queue);
+        mappings.retain(|mapping| name_in_arn(&mapping.event_source_arn) == queue);
     }
     context.out.result(&mappings, || {
         if mappings.is_empty() {

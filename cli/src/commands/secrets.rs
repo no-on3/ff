@@ -19,14 +19,14 @@ use crate::table::{table, time};
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Secret {
-    name: String,
+pub(super) struct Secret {
+    pub(super) name: String,
     updated_at: String,
 }
 
 #[derive(Deserialize, Serialize)]
-struct Secrets {
-    secrets: Vec<Secret>,
+pub(super) struct Secrets {
+    pub(super) secrets: Vec<Secret>,
 }
 
 fn names(given: &[String]) -> Result<Vec<String>, Error> {

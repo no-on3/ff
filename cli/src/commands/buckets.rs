@@ -14,8 +14,8 @@ use crate::table::{table, time};
 /// A bucket, as `GET /buckets` and `GET /buckets/:name` answer it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Bucket {
-    name: String,
+pub(super) struct Bucket {
+    pub(super) name: String,
     status: String,
     region: String,
     endpoint: String,

@@ -198,6 +198,15 @@ pub struct Plan {
     pub limits: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The name in an ARN: a function's, without the version or alias after it; else its last part, a
+/// queue's or a bucket's.
+pub fn name_in_arn(arn: &str) -> &str {
+    match arn.split_once(":function:") {
+        Some((_, rest)) => rest.split(':').next().unwrap_or(rest),
+        None => arn.rsplit(':').next().unwrap_or(arn),
+    }
+}
+
 /// The account's function of that name: `GET /functions?name=`, compared exactly.
 pub fn find(client: &Client, name: &str) -> Result<Option<Function>, Error> {
     let found: Vec<Function> = client.json(&Call::get("/functions").query("name", name))?;

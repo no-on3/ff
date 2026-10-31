@@ -13,13 +13,13 @@ use crate::table::{table, time};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Schedule {
+pub(super) struct Schedule {
     id: String,
-    name: String,
-    description: Option<String>,
-    expression: String,
-    input: Value,
-    enabled: bool,
+    pub(super) name: String,
+    pub(super) description: Option<String>,
+    pub(super) expression: String,
+    pub(super) input: Value,
+    pub(super) enabled: bool,
     next_run_at: Option<String>,
     last_run_at: Option<String>,
     last_request_id: Option<String>,
