@@ -12,6 +12,7 @@
 # Grafana runs on this machine, as in development (hack/k8s/grafana.sh): the 2 GB node has no room for it.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+source "$FF_REPO_ROOT/hack/lib/checks.sh"
 
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 kubectl -n ff-monitoring get statefulset victoria-metrics >/dev/null 2>&1 \
@@ -31,20 +32,7 @@ cleanup() {
   wait 2>/dev/null || true
   rm -rf "$work"
 }
-trap cleanup EXIT
-passed=0
-fail() {
-  echo "  FAIL $1" >&2
-  exit 1
-}
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then
-    echo "  ok   $1"
-    passed=$((passed + 1))
-  else
-    fail "$1 (expected '$2', got '$3')"
-  fi
-}
+on_exit cleanup
 free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
 # forward <variable> <service> <port>: a port-forward on a free local port; the variable gets its URL once it answers.
 forward() {
@@ -65,7 +53,7 @@ grafana_auth="admin:$(cat "$FF_KUBE_DIR/grafana-admin-password")"
 # value <MetricsQL>: the query's one value now, or "none".
 value() { curl -s "$vm/api/v1/query" --data-urlencode "query=$1" | jq -r '.data.result[0].value[1] // "none"'; }
 
-echo "== the stack's permissions"
+section "the stack's permissions"
 # can <service account> <verb> <resource> [namespace] [subresource]: what the API server answers. A subresource is
 # named apart: "nodes/proxy" would be the node named "proxy".
 can() { kubectl auth can-i "$2" "$3" --as="system:serviceaccount:ff-monitoring:$1" ${4:+-n "$4"} ${5:+--subresource="$5"} 2>/dev/null || true; }
@@ -76,10 +64,10 @@ check "it reads the nodes and their kubelet's metrics; no Secret, nor the kubele
 check "kube-state-metrics lists the platform's kinds everywhere, and reads no Secret nor ConfigMap" "yes yes no no" \
   "$(can kube-state-metrics list pods ff-t-000000000000) $(can kube-state-metrics list deployments ff-system) $(can kube-state-metrics list secrets ff-system) $(can kube-state-metrics list configmaps ff-system)"
 
-echo "== the stack's network policies, from an ordinary pod"
+section "the stack's network policies, from an ordinary pod"
 probe_ns="ff-monitoring-probe-$RANDOM"
 kubectl create namespace "$probe_ns" >/dev/null
-trap 'kubectl delete namespace "$probe_ns" --wait=false >/dev/null 2>&1 || true; cleanup' EXIT
+on_exit 'kubectl delete namespace "$probe_ns" --wait=false >/dev/null 2>&1 || true'
 # Each address: open, or refused within 3 s; the API server answering shows that the pod's network works.
 kubectl -n "$probe_ns" run probe --image=ff-runtime-nodejs:24-v3 --image-pull-policy=Never --restart=Never --command -- node -e '
 const net = require("node:net");
@@ -97,7 +85,7 @@ check "it reaches the API server, and none of the stack" "api=open store=refused
   "$(kubectl -n "$probe_ns" logs probe 2>/dev/null | tail -1)"
 kubectl delete namespace "$probe_ns" --wait=false >/dev/null
 
-echo "== L4, its backend's metrics on $host:$port for the store"
+section "L4, its backend's metrics on $host:$port for the store"
 started="$(date +%s)"
 FF_E2E_METRICS_HOST="$host" FF_E2E_METRICS_PORT="$port" "$FF_REPO_ROOT/hack/e2e.sh" >"$work/l4.log" 2>&1 \
   || { tail -20 "$work/l4.log"; fail "L4 failed (its log above)"; }
@@ -114,7 +102,7 @@ grafana="http://127.0.0.1:$grafana_port"
 # Mailpit's earlier mail, such as the backend down before the run, is not this test's.
 curl -s -X DELETE "$mailpit/api/v1/messages" >/dev/null
 
-echo "== the targets"
+section "the targets"
 check "the store scraped the run's backend" true \
   "$([ "$(value "max_over_time(up{job=\"ff-backend\"}[$((ended - started + 60))s])")" = 1 ] && echo true || echo false)"
 targets="$(curl -s "$vm/api/v1/query" --data-urlencode 'query=min by (job) (up{job!="ff-backend"})' | jq -r '[.data.result[] | "\(.metric.job)=\(.value[1])"] | sort | join(" ")')"
@@ -122,7 +110,7 @@ targets="$(curl -s "$vm/api/v1/query" --data-urlencode 'query=min by (job) (up{j
 check "every other target answers" "alertmanager=1 fluent-bit=1 kube-state-metrics=1 kubelet=1 victoria-logs=1 vmalert=1" "$targets"
 check "and the store's own metrics are there" 1 "$(value 'count(vm_free_disk_space_bytes{job="victoria-metrics"})')"
 
-echo "== the run's values"
+section "the run's values"
 window="$((ended - started + 120))s"
 outcomes="$(curl -s "$vm/api/v1/query" --data-urlencode "query=max by (outcome) (max_over_time(ff_invocations_total[$window]))" \
   | jq -r '[.data.result[] | select((.value[1] | tonumber) > 0) | .metric.outcome] | sort | join(" ")')"
@@ -136,7 +124,7 @@ check "its refusals: the rate limit's, and the credit's one" "true 1" \
 $(value "round(sum(max_over_time(ff_invocations_refused_total{reason=\"credit\"}[$window])))")"
 check "its alarm, into ALARM once" 1 "$(value "round(sum(max_over_time(ff_alarm_state_changes_total{state=\"ALARM\"}[$window])))")"
 
-echo "== every panel answers with data, through Grafana"
+section "every panel answers with data, through Grafana"
 python3 - "$grafana" "$grafana_auth" "$((started - 300))000" "$(date +%s)000" <<'PY' >"$work/panels.txt" || { cat "$work/panels.txt"; fail "a panel has no data"; }
 import base64, json, sys, urllib.request
 grafana, auth, start, end = sys.argv[1:]
@@ -172,12 +160,12 @@ check "all of both dashboards' queries, each with data but the cold starts' time
   "$(cat "$FF_REPO_ROOT"/deploy/k8s/monitoring/base/dashboards/*.json | jq -s '[.[].panels[].targets[]] | length') queries, 2 without data as L4 runs" \
   "$(head -1 "$work/panels.txt")"
 
-echo "== the alert rules"
+section "the alert rules"
 rules="$(curl -s "$vmalert/api/v1/rules")"
 check "both groups loaded" "ff-backend ff-cluster" "$(jq -r '[.data.groups[].name] | sort | join(" ")' <<<"$rules")"
 check "every rule evaluated without error" "0" "$(jq '[.data.groups[].rules[] | select((.lastError // "") != "" or .health != "ok")] | length' <<<"$rules")"
 
-echo "== the backend gone: its alert, and its e-mail"
+section "the backend gone: its alert, and its e-mail"
 state=""
 for _ in $(seq 1 60); do
   state="$(curl -s "$vmalert/api/v1/alerts" | jq -r '[.data.alerts[] | select(.name == "FFBackendDown") | .state][0] // "inactive"')"
@@ -195,4 +183,4 @@ check "its e-mail reaches the operator, through Alertmanager: its group and seve
 check "addressed to the operator" "operator@ff.test" \
   "$(curl -s "$mailpit/api/v1/search" --data-urlencode 'query=FFBackendDown' -G | jq -r '[.messages[] | select(.Subject | startswith("[FIRING"))][0].To[0].Address')"
 
-echo "test-monitoring: $passed checks passed"
+checks_done test-monitoring

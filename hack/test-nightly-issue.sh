@@ -6,11 +6,8 @@
 set -euo pipefail
 script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/nightly-issue.sh"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-passed=0
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else echo "  FAIL $1 (expected '$2', got '$3')"; exit 1; fi
-}
+source "$(dirname "${BASH_SOURCE[0]}")/lib/checks.sh"
+on_exit 'rm -rf "$work"'
 
 mkdir "$work/bin"
 cat >"$work/bin/gh" <<'GH'
@@ -64,4 +61,4 @@ echo '[]' >"$work/issues.json"
 check "a green night with no issue open does nothing" "nightly: green|issue list --state open --limit 100 --json number,title" \
   "$(run "$green")|$(cat "$work/calls")"
 
-echo "nightly issue: $passed checks passed"
+checks_done "nightly issue"

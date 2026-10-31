@@ -1380,7 +1380,7 @@ hack/e2e-platform.sh                                     # FF deployed from depl
 hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, the packages, about 2 min
 ```
 
-**The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). Each stage stops at its first failing step and names it:
+**The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). Each stage stops at its first failing step and names it; a suite in that step goes on after a failed check and lists every one at its end, each with its section and the time it failed, and where the run stopped if a failure left nothing after it able to pass (`hack/lib/checks.sh`, which every suite shares; `FF_FAIL_FAST=1` stops at the first, as before). `hack/.ci/report.md` lists each step with its result and its seconds, then the failed checks; on GitHub it is the job's summary:
 
 ```bash
 hack/ci.sh static            # linters, types, builds, the docs, how-it-works.html's script, the shell scripts, the workflow, about 5 min

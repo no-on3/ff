@@ -12,22 +12,19 @@
 #   hack/test-images.sh
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
+source "$FF_REPO_ROOT/hack/lib/checks.sh"
 tag="${FF_IMAGE_TAG:-test}"
 prefix="ff-images-$$"
 
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 work="$(mktemp -d)"
-trap 'docker rm -f "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
-passed=0
-check() { # <description> <expected> <actual>
-  if [ "$2" = "$3" ]; then echo "  ok   $1"; passed=$((passed + 1)); else echo "  FAIL $1 (expected '$2', got '$3')"; exit 1; fi
-}
+on_exit 'docker rm -f "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin" >/dev/null 2>&1 || true; rm -rf "$work"'
 free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
 size() { docker image inspect "$1" --format '{{.Size}}' | awk '{ printf "%d MB", $1 / 1e6 }'; }
 # The hardening every platform container gets in the cluster.
 hardened=(--read-only --tmpfs /tmp:rw,size=64m --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1)
 
-echo "== the backend"
+section "the backend"
 docker build -q -t "ff-backend:$tag" "$FF_REPO_ROOT/BE" >/dev/null
 echo "  built ff-backend:$tag ($(size "ff-backend:$tag"))"
 check "it runs as the numeric user 10001, Node.js 24.21.0" "10001:10001 v24.21.0" \
@@ -116,7 +113,7 @@ print(str(bool(lines) and all(isinstance(json.loads(line), dict) for line in lin
 # static <name> <directory> <client>: builds the app with its URLs baked in, runs it hardened, and checks it.
 static() {
   local name=$1 dir=$2 client=$3 url port asset refused=0
-  echo "== the $name"
+  section "the $name"
   docker build -q -t "ff-$name:$tag" --build-arg VITE_API_URL=https://api.ff.test \
     --build-arg VITE_OIDC_AUTHORITY=https://login.ff.test/realms/ff "$FF_REPO_ROOT/$dir" >/dev/null
   echo "  built ff-$name:$tag ($(size "ff-$name:$tag"))"
@@ -146,4 +143,4 @@ static() {
 static console FE ff-console
 static admin admin ff-admin
 
-echo "images: $passed checks passed"
+checks_done images

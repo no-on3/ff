@@ -63,7 +63,7 @@ e2e_data_db 10.199.3.0/24 "$data_db_address"
 e2e_cache 10.199.3.11
 e2e_mail 10.199.3.12 10.199.3.13
 
-echo "== ff and the backend"
+section "ff and the backend"
 (cd "$FF_REPO_ROOT/cli" && cargo build --release --locked -q)
 ff_bin="$FF_REPO_ROOT/cli/target/release/ff"
 e2e_build
@@ -119,7 +119,7 @@ for example in hello.ts hello.py; do
   name="cli-${example/./-}"
   runtime=nodejs
   [ "${example##*.}" = py ] && runtime=python
-  echo "== $example, as $name"
+  section "$example, as $name"
   ff deploy "$FF_REPO_ROOT/examples/$example" --name "$name"
   check "deploy creates it, live" "0 created $name ($runtime, 128 MB, 5 s): ACTIVE" "$(code) $(out | sed 's/ in [0-9.]* s$//')"
   ff invoke "$name" --data '{"name": "Tunis"}'
@@ -196,7 +196,7 @@ for example in hello.ts hello.py; do
   check "and it is gone" 3 "$(code)"
 done
 
-echo "== failures"
+section "failures"
 ff deploy "$FF_REPO_ROOT/examples/hello.py" --name cli-raises
 ff invoke cli-raises --data '{"name": "error"}'
 raised_id="$(err | sed -n 's/^request ID: //p')"
@@ -245,7 +245,7 @@ check "and another account none of them" "0 No function yet: \`ff deploy <file>\
 for name in cli-raises cli-slow cli-broken; do ff delete "$name" --yes; done
 check "the last one deleted" "0 deleted cli-broken" "$(code) $(out)"
 
-echo "== environment variables: --env, ff env, and on this machine"
+section "environment variables: --env, ff env, and on this machine"
 printf 'import os\n\ndef handler(event, context):\n    return {"greeting": os.environ.get("GREETING", "none"), "token": os.environ.get("TOKEN", "none")}\n' >"$work/env-reader.py"
 ff deploy "$work/env-reader.py" --name cli-env --env GREETING=Ahlan
 check "deploy --env makes a function with its variable" "0 created" "$(code) $(out | cut -d' ' -f1)"
@@ -266,7 +266,7 @@ check "ff local invoke --env gives the run its variables" "0 Local" "$(code) $(o
 ff local invoke "$work/env-reader.py" --env FUNCTION_TIMEOUT=1
 check "and refuses the names the runtime sets itself, as the API does" "2 error: FUNCTION_TIMEOUT is reserved: AWS Lambda or FF's runtime sets it" "$(code) $(err)"
 
-echo "== secrets: set from stdin, read by the function only"
+section "secrets: set from stdin, read by the function only"
 printf 'import os\n\ndef handler(event, context):\n    return {"password": os.environ.get("DB_PASSWORD", "none")}\n' >"$work/secret-reader.py"
 ff deploy "$work/secret-reader.py" --name cli-secrets
 echo "hunter2-$account_a" | ff secrets set cli-secrets DB_PASSWORD
@@ -283,7 +283,7 @@ ff invoke cli-secrets --raw
 check "ff secrets unset removes it" "0 none" "$(code) $(out | jq -r .password)"
 ff delete cli-secrets --yes
 
-echo "== a function's URL: ff url, ff invoke --http, ff domains"
+section "a function's URL: ff url, ff invoke --http, ff domains"
 printf '%s\n' 'export async function handler(event: { rawPath: string; queryStringParameters?: Record<string, string> }) {' \
   '  return { statusCode: 200, headers: { "content-type": "text/plain" }, body: `Ahlan ${event.queryStringParameters?.name ?? "world"} at ${event.rawPath}` };' \
   '}' >"$work/web.ts"
@@ -315,7 +315,7 @@ ff invoke cli-url --http GET /
 check "after which ff invoke --http has nowhere to call" "3 error: cli-url has no URL: \`ff url enable cli-url --auth none|key\` gives it one" "$(code) $(err)"
 ff delete cli-url --yes
 
-echo "== schedules: ff schedule set, its run, list, disable, remove"
+section "schedules: ff schedule set, its run, list, disable, remove"
 ff deploy "$FF_REPO_ROOT/examples/hello.py" --name cli-sched
 ff schedule set cli-sched "rate(1 minute)" --input '{"name": "Schedule"}'
 check "ff schedule set makes it, and says its next runs" "0 cli-sched's schedule schedule made: rate(1 minute), with its own input true" \
@@ -343,7 +343,7 @@ ff schedule list cli-sched
 check "ff schedule remove takes it away" "0 cli-sched has no schedule: \`ff schedule set cli-sched \"rate(1 hour)\"\` makes one" "$(code) $(out)"
 ff delete cli-sched --yes
 
-echo "== ff init: a new function's folder, run locally, then deployed"
+section "ff init: a new function's folder, run locally, then deployed"
 for runtime in python nodejs; do
   name="cli-init-$runtime"
   (cd "$work" && rm -rf "$name" && "$ff_bin" init "$name" --runtime "$runtime" >"$work/out" 2>"$work/err")
@@ -360,7 +360,7 @@ for runtime in python nodejs; do
   ff delete "$name" --yes
 done
 
-echo "== packages: a folder with its libraries, packaged, uploaded once, deployed"
+section "packages: a folder with its libraries, packaged, uploaded once, deployed"
 # npm and pip fetch the libraries: this part needs the network, or their caches.
 node_pkg="$work/cli-pkg-node"
 rm -rf "$node_pkg" && mkdir -p "$node_pkg/lib"
@@ -493,7 +493,7 @@ ff invoke cli-pkg-ts --data '{"ms": 60000}'
 check "and run on FF as they would on Lambda" "0 1m" "$(code) $(out | sed '$d' | jq -r .took)"
 ff delete cli-pkg-ts --yes
 
-echo "== the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
+section "the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
 # The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own. No
 # bucket is named, so its orders go without receipts.
 export FF_APP_DB_NAME="$E2E_PROJECT-app-db" FF_APP_DB_SUBNET=198.18.1.0/24 FF_APP_DB_ADDRESS=198.18.1.10
@@ -541,7 +541,7 @@ check "which reports the day's order from the database" "0 $order_day 1 2 0" "$(
 ff delete orders-nightly --yes --profile c
 ff delete orders-api --yes --profile c
 
-echo "== a customer's database, with ff db: a function's secret, written by the app with its account's internet access off"
+section "a customer's database, with ff db: a function's secret, written by the app with its account's internet access off"
 ff deploy "$app" --name cli-db-orders --handler index.http
 check "the same app in account A, whose functions don't reach the internet" "0 created cli-db-orders (nodejs, 128 MB, 5 s): ACTIVE" \
   "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
@@ -578,7 +578,7 @@ check "ff db delete drops it, with its data, its user gone" "0 deleted the datab
   "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
 ff delete cli-db-orders --yes
 
-echo "== buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
+section "buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
 ff buckets create My.Photos
 check "ff buckets create refuses a name AWS wouldn't take, before calling" "2 true" "$(code) $(err | grep -q "can't be a bucket's name" && echo true || echo false)"
 ff buckets create cli-photos
@@ -642,7 +642,7 @@ ff buckets keys revoke "$key_id" --yes
 refused="$(aws_with_key s3 ls 2>&1 || true)"
 check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
 
-echo "== a site, with ff sites: a built folder deployed with a deploy's own key, visited, deployed again changed"
+section "a site, with ff sites: a built folder deployed with a deploy's own key, visited, deployed again changed"
 site_url="http://cli-site.site.localhost:$website_port"
 # visit <path> [curl options…]: the site's answer, its status and its page's title.
 visit() {
@@ -694,7 +694,7 @@ check "  ... its files kept: a deploy finds them unchanged, and makes it a site 
   "$(code) $(out | jq -r '"\(.uploaded | length) \(.unchanged) \(.singlePageApp)"')"
 ff buckets delete cli-site --force --yes
 
-echo "== queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
+section "queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
 ff queues create cli-orders.fifo
 check "ff queues create refuses a FIFO queue's name before calling" "2 true" "$(code) $(err | grep -q 'FIFO queues come later' && echo true || echo false)"
 ff queues create cli-orders-dlq
@@ -763,7 +763,7 @@ check "ff usage lists the queue's month after the buckets, deleted since: its re
   "$(code) $(out | grep -qE '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' && echo true || echo false)"
 ff buckets keys revoke "$queue_key" --yes
 
-echo "== functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"
+section "functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"
 # As a function written for Lambda answers: the messages it couldn't handle, by their IDs.
 cat >"$work/reader.ts" <<'TS'
 export const handler = async (event: { Records: Array<{ messageId: string; body: string }> }) => ({
@@ -801,7 +801,7 @@ check "ff event-sources remove removes it, the queue's messages staying" "0 remo
 ff delete cli-reader --yes
 ff queues delete cli-work --yes
 
-echo "== a bucket's notifications, with ff buckets notify: an upload with the AWS CLI runs a function with S3's event, a deletion goes to a queue"
+section "a bucket's notifications, with ff buckets notify: an upload with the AWS CLI runs a function with S3's event, a deletion goes to a queue"
 # As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
 cat >"$work/on-upload.ts" <<'TS'
 export const handler = async (event: { Records: Array<{ s3: { object: { key: string } } }> }) => ({
@@ -842,7 +842,7 @@ ff buckets delete cli-drop --force --yes
 ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
 
-echo "== the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
+section "the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
 # In account A, whose functions don't reach the internet: FF's database and cache, the S3 front door, the SQS and SES
 # endpoints, they do.
 ff deploy "$app" --name shop-api --handler index.http
@@ -964,7 +964,7 @@ ff delete shop-nightly --yes
 ff delete shop-receipts --yes
 ff delete shop-api --yes
 
-echo "== the account: who, its plan, what it used and owes, how its functions ran"
+section "the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts
 check "ff accounts lists account A, current" "0 * $account_a" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
 ff account
@@ -985,7 +985,7 @@ ff metrics --since 2h --period 3600
 check "  ... and its calls that didn't wait, as Lambda's metrics count them, cli-raises's dropped among them" "0 true" \
   "$(code) $(out | tail -1 | grep -qE '; calls without waiting: ([2-9]|[1-9][0-9]+) kept, [1-9][0-9]* dropped' && echo true || echo false)"
 
-echo "== ff local: on this machine, in Docker, as production runs it"
+section "ff local: on this machine, in Docker, as production runs it"
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }
 for example in hello.ts hello.py; do
   ff local invoke "$FF_REPO_ROOT/examples/$example" --data '{"name": "Local"}'
@@ -1032,4 +1032,4 @@ kill -INT "$starter"
 wait "$starter" 2>/dev/null || true
 check "and Ctrl-C removes its container too" 0 "$(leftover)"
 
-echo "cli-e2e: $passed checks passed"
+checks_done cli-e2e

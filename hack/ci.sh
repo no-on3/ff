@@ -4,8 +4,8 @@
 #             command where the machine has none recent enough (CI only: locally, the installed
 #             dependencies are used as they are)
 #   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
-#             tables, npm audit's checker and the nightly run's issue against stand-ins, how-it-works.html's
-#             script, every shell script parsed, and the CI workflow linted
+#             tables, npm audit's checker, the nightly run's issue and the suites' checks against stand-ins,
+#             how-it-works.html's script, every shell script parsed, and the CI workflow linted
 #   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the cache
 #             and mail servers' agents', the small app's handlers, the ff command's and its binary's (L1, L2),
 #             the alert rules' and the log collector's filter (these two in their own images)
@@ -19,7 +19,9 @@
 #             Docker, the images run as the cluster runs them, and the platform's manifests
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
-# Each stage stops at its first failure, naming the step. Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test
+# Each stage stops at its first failing step and names it; a suite in that step reports each of its failed checks,
+# not only the first. hack/.ci/report.md lists each step with its result and its seconds, and every failed check, and
+# GitHub shows it as the job's summary. Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test
 # runners' and Rust's parallelism at n, for a machine others share; unset, each tool takes its own default.
 #   hack/ci.sh <stage> [<stage> ...]
 #   FF_CI_JOBS=2 hack/ci.sh unit
@@ -35,6 +37,35 @@ SEAWEEDFS_IMAGE=chrislusf/seaweedfs:4.48
 ACTIONLINT_IMAGE=rhysd/actionlint:1.7.12
 ci_dir="$repo/hack/.ci"
 mkdir -p "$ci_dir"
+# The run's report: each step's row, then the suites' failed checks (hack/lib/checks.sh writes them, as Markdown).
+report="$ci_dir/report.md"
+steps_rows="$ci_dir/report-steps.md"
+export FF_CHECKS_REPORT="$ci_dir/report-checks.md"
+: >"$steps_rows"
+: >"$FF_CHECKS_REPORT"
+ci_failed_step=''
+ci_stages=''
+ci_outcome=''
+# Commands run at exit, whatever the stage: a stage adds what it starts beside the steps (stage_db's containers).
+ci_cleanups=()
+ci_exit() {
+  local status=$? command
+  for command in "${ci_cleanups[@]}"; do eval "$command" || true; done
+  {
+    if [ -n "$ci_failed_step" ]; then echo "## hack/ci.sh ${ci_stages}: failed at \"$ci_failed_step\""; else echo "## hack/ci.sh ${ci_stages}: ${ci_outcome:-stopped, exit status $status}"; fi
+    echo
+    if [ -s "$steps_rows" ]; then
+      echo '| Step | Result | Seconds |'
+      echo '|---|---|---|'
+      cat "$steps_rows"
+      echo
+    fi
+    cat "$FF_CHECKS_REPORT"
+  } >"$report"
+  # On GitHub, the job's summary page.
+  [ -z "${GITHUB_STEP_SUMMARY:-}" ] || cat "$report" >>"$GITHUB_STEP_SUMMARY"
+}
+trap ci_exit EXIT
 # The console's and the admin app's Vitest, then cargo's builds and test threads, at most FF_CI_JOBS at once.
 vitest_jobs=()
 if [ -n "${FF_CI_JOBS:-}" ]; then
@@ -53,8 +84,11 @@ step() { # <name> <command...>: runs one step, timed; stops the stage when it fa
   echo "== $name"
   if "$@"; then
     echo "   ok, $((SECONDS - start)) s"
+    echo "| $name | ok | $((SECONDS - start)) |" >>"$steps_rows"
   else
     echo "FAILED: $name ($((SECONDS - start)) s)" >&2
+    echo "| $name | **FAILED** | $((SECONDS - start)) |" >>"$steps_rows"
+    ci_failed_step="$name"
     exit 1
   fi
 }
@@ -114,6 +148,7 @@ stage_static() {
   step "docs: the checker itself, on documents with one problem each" hack/test-check-docs.sh
   step "npm audit's checker, on reports of each kind" hack/test-npm-audit.sh
   step "the nightly run's issue, against a stand-in gh" hack/test-nightly-issue.sh
+  step "the suites' checks, on suites of their own" hack/test-checks.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses
@@ -143,8 +178,7 @@ stage_db() {
   password="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   admin="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   s3_key="ci$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  # shellcheck disable=SC2064 # the names are fixed now
-  trap "docker rm -f -v $name $data $s3 $cache >/dev/null 2>&1 || true" EXIT
+  ci_cleanups+=("docker rm -f -v $name $data $s3 $cache >/dev/null 2>&1 || true")
   docker run -d --name "$name" -e POSTGRES_PASSWORD="$password" -p 127.0.0.1::5432 "$POSTGRES_IMAGE" >/dev/null
   port="$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')"
   # Customers' database server (ADR 0008), its certificate from a CA of its own, for the suites that make databases.
@@ -184,7 +218,6 @@ stage_db() {
   step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" in_dir BE npm run test:db
   step "migrations: exactly the entities' schema" in_dir BE npm run migration:check
   docker rm -f -v "$name" "$data" "$s3" "$cache" >/dev/null
-  trap - EXIT
 }
 
 # Every image FF builds: the platform's, the runtimes', the edge's, the backup's, and customers' database, cache and
@@ -273,7 +306,8 @@ stage_platform() {
 }
 
 # Without a stage: the header above, its comment lines to the first line of code.
-[ $# -gt 0 ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
+[ $# -gt 0 ] || { trap - EXIT; awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
+ci_stages="$*"
 for stage in "$@"; do
   case "$stage" in
     deps | static | unit | db | security | cluster | platform) "stage_$stage" ;;
@@ -281,4 +315,5 @@ for stage in "$@"; do
     *) echo "unknown stage $stage: deps, static, unit, db, security, cluster, platform or all" >&2; exit 2 ;;
   esac
 done
+ci_outcome=passed
 echo "ci: $* passed"
