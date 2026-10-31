@@ -120,7 +120,7 @@ hack/e2e.sh --only queues --reuse --keep   # again, against the stack kept, and 
 hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, a function's logs, then the operator's routes, bank transfers, invoices and credit grants, and last, closing an account and deleting its data (about 7 min)
 ```
 
-The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
+The script starts its own compose project (`ff-e2e`, ports 55432 and 59003, which `FF_E2E_PG_PORT` and `FF_E2E_S3_PORT` move when another program holds one: the suite names it before compose starts), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
 1. create (waits for ACTIVE);
 2. invoke;
 3. history (with duration);
@@ -141,6 +141,10 @@ It checks the Kubernetes side at each step. On exit it removes its compose proje
 ### A section alone
 
 The sections of L4, L5 (`hack/e2e-tenancy.sh`) and the `ff` suite (`hack/cli-e2e.sh`) are functions that `hack/lib/sections.sh` runs in order, the same options in each, each in a subshell of its own, so that one that stops stops alone. What a section leaves, its variables and the functions it defines, reaches the sections after it as if they had run in one shell, and each names the sections it needs after its function (`section_def mappings section_mappings queues`): `--only` and `--from` run those first, so that a section run alone counts the checks it counts in the whole run. A section that needs one that stopped is listed as not run, and the others run; with `FF_FAIL_FAST=1`, the run ends at the first that stops. `--list` reads each section's seconds from the suite's work directory (`hack/.e2e/section-times` for L4), which every run updates. A helper more than one section calls is defined before the first, so that a failure in it is reported at its line in the suite. `hack/test-sections.sh` tests the runner on suites of its own, in `hack/ci.sh static`.
+
+### A wait on the clock
+
+What the product does on its own clock is started in its section and read a few sections on, in a section of its own that needs it: a schedule's runs, a sample taken each minute, counts written a minute at a time, the reaper's minute. In L4 those are `schedules` and `schedules_ran`, `async` and `async_metrics`, `databases` and `databases_sampled`, `caches` and `caches_sampled`, `sites` and `sites_counted`, and `usage_records` and `usage_lost`, the alarms' section between those last two; in the `ff` suite, `schedules_ran`, `databases_used`, `buckets_used`, `sites_counted` and `queues_counted`. The minute passes while the sections between run, so the waits overlap instead of adding up. The product's intervals stay as they are, and a late section run alone waits as long as its section did. A late section reads what the minute did, not the clock: the schedules' runs of their first minute, by their start (`createdAt`), since they run every minute after; and where a check says "within a minute", a sample's time from the backend's log, which in development has each query with its time (`written_within`). L4's late sections come before `usage_records`, which kills the backend, since its counts of the minute are in its memory until written. A new section that waits on the clock does the same.
 
 ### A stack kept up
 

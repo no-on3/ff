@@ -67,18 +67,24 @@
 # limits, which don't touch other accounts. Then usage records (P-20): one per
 # invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
-# it, which the restarted backend marks LOST without billing it. Then capacity
+# it, which the restarted backend marks LOST without billing it, read after an
+# alarm: a function's error fires it, a quiet minute recovers it, and each
+# change reaches a local webhook receiver, signed. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
 # Then GET /usage (P-22) against the raw records, as JSON and as CSV, the deleted
 # database's, bucket's and queue's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
 # since the first book rated as the backend started, in shadow mode, the balance,
 # and the reconciliation. Then the balance check (P-33): a wallet run below zero,
-# invokes refused with 402, a top-up, and invokes accepted again at once. Then an
-# alarm: a function's error fires it, a quiet minute recovers it, and each
-# change reaches a local webhook receiver, signed. Last, code images the
-# registry lost: a function's layer, made again when the backend restarts, and
-# pulled by a node that had no copy; and a function whose pods named an image
-# the registry never had, rolled out with its package's.
+# invokes refused with 402, a top-up, and invokes accepted again at once. Last,
+# code images the registry lost: a function's layer, made again when the backend
+# restarts, and pulled by a node that had no copy; and a function whose pods
+# named an image the registry never had, rolled out with its package's.
+# What waits on the clock (a schedule's runs, a sample taken each minute, counts
+# written a minute at a time, the reaper's minute) is started in its section and
+# read a few sections on, in a section of its own (schedules_ran, async_metrics,
+# databases_sampled, caches_sampled, sites_counted, usage_lost), so that its
+# minute passes while the sections between run: what it checks is the same, a
+# real minute of the product's, and a section run alone waits as long as before.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -206,6 +212,28 @@ aws_ff() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$key_id}" AWS_SECRET_ACCESS_KEY="${AWS_
 # outcome <command…>: accepted, or refused with the S3 error's code in its message, as the CLI prints it.
 outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|InvalidArgument)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
 
+# written_within <seconds> <table> <id> <since>: true when the backend wrote the table's first row for the id within
+# that many seconds of <since> (seconds since the epoch), else how long after, as its log says: in development, each
+# query with its time. A sample read minutes after it was due is timed there.
+written_within() {
+  python3 - "$work/backend.log" "$@" <<'PY'
+import datetime, json, sys
+log, seconds, table, row, since = sys.argv[1:]
+for line in open(log):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    message = entry.get('message', '')
+    if message.startswith(f'query: INSERT INTO "{table}"') and row in message:
+        after = datetime.datetime.fromisoformat(entry['time'].replace('Z', '+00:00')).timestamp() - float(since)
+        print('true' if after <= float(seconds) else f'{after:.0f} s after')
+        break
+else:
+    print('not in the log')
+PY
+}
+
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
 e2e_dependencies
@@ -272,6 +300,9 @@ check "the migrations run from the build" true \
   "$(grep -q 'executed successfully' "$work/migrations.log" && echo true || echo false)"
 # Alarms evaluated every 5 s, each minute as soon as it is over, and notifications sent every second, to this machine too.
 alarm_env=(FF_ALARM_INTERVAL_SECONDS=5 FF_ALARM_SETTLE_SECONDS=0 FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
+# The cold start the running backend allows a function (K8S_READY_TIMEOUT_SECONDS), which its hourly rating's wait for
+# an hour to settle follows: the default here.
+be_ready_timeout=90
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 check "backend answers on $api" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")"
 }
@@ -366,6 +397,29 @@ http GET "/functions/$id" >/dev/null
 check "the function record is gone" 404 "$(status)"
 }
 section_def scenario section_scenario backend
+
+section_schedules() {
+section "a function on a schedule: its schedules made, their runs checked a few sections on"
+created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-scheduled", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+sched_fn="$(jq -r .id <<<"$created")"
+check "the next runs of an expression, for a preview: five, in UTC" "200 5 true" \
+  "$(http GET '/schedules/next-runs?expression=cron(0%208%20*%20*%20%3F%20*)' >/dev/null; status) $(jq '.runs | length' "$work/body") $(jq '[.runs[] | endswith("T08:00:00.000Z")] | all' "$work/body")"
+http POST "/functions/$sched_fn/schedules" '{"name": "bad", "expression": "rate(5 minute)"}' >/dev/null
+check "an expression EventBridge wouldn't take is refused, saying why" "400 rate(5 minute) must be rate(5 minutes): the unit is plural above 1" "$(status) $(jq -r .message "$work/body")"
+made_at="$(date -u +%s)"
+every="$(http POST "/functions/$sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}')"
+check "a schedule is made, its first run a minute after" "201 true" \
+  "$(status) $(jq --argjson t "$made_at" '(.nextRunAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $t | (. >= 55 and . <= 65)' <<<"$every")"
+http POST "/functions/$sched_fn/schedules" '{"name": "with-input", "expression": "rate(1 minute)", "input": {"report": "daily"}}' >/dev/null
+http POST "/functions/$sched_fn/schedules" '{"name": "off", "expression": "rate(1 minute)", "enabled": false}' >/dev/null
+check "and one with an input of its own, and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
+http PUT "/functions/$sched_fn" '{"eventFormat": "wrapped"}' >/dev/null
+check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
+# A function whose runs fail: each run is an asynchronous call, retried.
+failing_sched_fn="$(http POST /functions "$(jq -n '{name: "e2e-scheduled-fails", runtime: "nodejs", code: "export const handler = async () => { throw new Error(\"the report failed\"); };", memory: 128, timeout: 5}')" | jq -r .id)"
+http POST "/functions/$failing_sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}' >/dev/null
+}
+section_def schedules section_schedules backend
 
 section_python() {
 section "python function"
@@ -765,65 +819,6 @@ http DELETE "/functions/$url_fn" >/dev/null
 }
 section_def url_domain section_url_domain url
 
-section_schedules() {
-section "a function on a schedule"
-created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-scheduled", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
-sched_fn="$(jq -r .id <<<"$created")"
-check "the next runs of an expression, for a preview: five, in UTC" "200 5 true" \
-  "$(http GET '/schedules/next-runs?expression=cron(0%208%20*%20*%20%3F%20*)' >/dev/null; status) $(jq '.runs | length' "$work/body") $(jq '[.runs[] | endswith("T08:00:00.000Z")] | all' "$work/body")"
-http POST "/functions/$sched_fn/schedules" '{"name": "bad", "expression": "rate(5 minute)"}' >/dev/null
-check "an expression EventBridge wouldn't take is refused, saying why" "400 rate(5 minute) must be rate(5 minutes): the unit is plural above 1" "$(status) $(jq -r .message "$work/body")"
-made_at="$(date -u +%s)"
-every="$(http POST "/functions/$sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}')"
-check "a schedule is made, its first run a minute after" "201 true" \
-  "$(status) $(jq --argjson t "$made_at" '(.nextRunAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $t | (. >= 55 and . <= 65)' <<<"$every")"
-http POST "/functions/$sched_fn/schedules" '{"name": "with-input", "expression": "rate(1 minute)", "input": {"report": "daily"}}' >/dev/null
-http POST "/functions/$sched_fn/schedules" '{"name": "off", "expression": "rate(1 minute)", "enabled": false}' >/dev/null
-check "and one with an input of its own, and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
-http PUT "/functions/$sched_fn" '{"eventFormat": "wrapped"}' >/dev/null
-check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
-# A function whose runs fail: each run is an asynchronous call, retried.
-failing_sched_fn="$(http POST /functions "$(jq -n '{name: "e2e-scheduled-fails", runtime: "nodejs", code: "export const handler = async () => { throw new Error(\"the report failed\"); };", memory: 128, timeout: 5}')" | jq -r .id)"
-http POST "/functions/$failing_sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}' >/dev/null
-# Within about 70 s: a minute, and the scheduler's tick, every 5 s.
-for _ in $(seq 1 30); do
-  [ "$(http GET "/functions/$sched_fn/invocations?limit=10" | jq '[.invocations[] | select(.source == "schedule")] | length')" -ge 2 ] && break
-  sleep 5
-done
-history="$(http GET "/functions/$sched_fn/invocations?limit=10")"
-event="$(jq -c '[.invocations[] | select(.source == "schedule" and .input["detail-type"] != null)][0].input' <<<"$history")"
-check "each schedule ran within a minute and a few seconds, as calls of its schedule" 2 "$(jq '[.invocations[] | select(.source == "schedule")] | length' <<<"$history")"
-check "with EventBridge's Scheduled Event: its source, its account, FF's region, the rule's ARN" \
-  "Scheduled Event aws.events $tenant tn-tunis-1 arn:aws:events:tn-tunis-1:$tenant:rule/e2e-scheduled-every-minute true" \
-  "$(jq -r '"\(.["detail-type"]) \(.source) \(.account) \(.region) \(.resources[0]) \(.time | test("^[0-9-]{10}T[0-9:]{8}Z$"))"' <<<"$event")"
-check "or the schedule's own input" '{"report":"daily"}' \
-  "$(jq -c '[.invocations[] | select(.source == "schedule" and .input.report != null)][0].input' <<<"$history")"
-schedules="$(http GET "/functions/$sched_fn/schedules")"
-check "each schedule says how its run went, and which call it was; the disabled one never ran" \
-  "every-minute success true off null with-input success" \
-  "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
-check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM usage_records WHERE function_id = '$sched_fn'")"
-# The attempts of its runs that have ended, or of the one run whose request ID is given.
-sched_attempts() {
-  http GET "/functions/$failing_sched_fn/invocations?limit=10" |
-    jq -r --arg r "${1:-}" '[.invocations[] | select(.status != "RUNNING" and ($r == "" or .requestId == $r))] | sort_by(.attempt) | map("\(.source):\(.attempt):\(.status)") | join(" ")'
-}
-for _ in $(seq 1 20); do [ -n "$(sched_attempts)" ] && break; sleep 1; done
-first_run="$(http GET "/functions/$failing_sched_fn/schedules" | jq -r '.[0] | "\(.lastOutcome) \(.lastRequestId)"')"
-check "a run that fails is the schedule's call, its outcome on the schedule" "schedule:1:ERROR error" "$(sched_attempts) ${first_run% *}"
-# Its retry, a minute after, as an asynchronous call's: cut short in FF's database, so that the run needn't wait.
-for _ in $(seq 1 25); do [ "$(env_q "SELECT attributes->>'settled' FROM queue_messages WHERE message_id = '${first_run#* }'")" = 1 ] && break; sleep 0.2; done
-run_wait="$(env_q "SELECT round(extract(epoch FROM m.visible_at - i.updated_at))::int FROM queue_messages m JOIN function_invocations i ON i.request_id = m.message_id AND i.attempt = 1 WHERE m.message_id = '${first_run#* }'")"
-env_q "UPDATE queue_messages SET visible_at = now() WHERE message_id = '${first_run#* }'" >/dev/null
-for _ in $(seq 1 20); do [[ "$(sched_attempts "${first_run#* }")" == *":2:"* ]] && break; sleep 1; done
-check "  ... retried as an asynchronous call is, a minute after its failure, under the run's request ID" "60 schedule:1:ERROR schedule:2:ERROR" \
-  "$run_wait $(sched_attempts "${first_run#* }")"
-http DELETE "/functions/$failing_sched_fn" >/dev/null
-http DELETE "/functions/$sched_fn" >/dev/null
-check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
-}
-section_def schedules section_schedules backend
-
 section_async() {
 section "asynchronous calls (ADR 0010)"
 async_code='export const handler = async (event: { fail?: boolean }, context: { awsRequestId: string }) => { if (event.fail) throw new Error("asked to fail"); return { got: event, requestId: context.awsRequestId }; };'
@@ -912,22 +907,12 @@ check "one that fails, with no retry, hands it at once its record: RetriesExhaus
 check "  ... after its one attempt" 1 "$(attempts_of "$failed" | jq length)"
 http DELETE "/functions/$async_fn/event-invoke-config" >/dev/null
 check "its settings deleted, it follows Lambda's defaults again" "204 404" "$(status) $(http GET "/functions/$async_fn/event-invoke-config" >/dev/null; status)"
-# Its calls as Lambda's metrics count them, each backend's counts written a minute at a time: within one.
-async_metrics() {
-  http GET "/functions/$async_fn/metrics?period=3600&start=$(date -u -d '-2 hour' +%Y-%m-%dT%H:00:00Z)" |
-    jq -r '"\([.metrics.AsyncEventsReceived[]] | add) \([.metrics.AsyncEventsDropped[]] | add) \([.metrics.DestinationDeliveryFailures[]] | add) \([.metrics.AsyncEventAge.Maximum[] | select(. != null)] | max > 0)"'
-}
-for _ in $(seq 90); do [ "$(async_metrics)" = "5 3 0 true" ] && break; sleep 1; done
-check "its metrics, as Lambda's: the five events kept, the three that ended without success dropped, records to its destination all taken, each attempt's age" \
-  "5 3 0 true" "$(async_metrics)"
-http DELETE "/functions/$records_fn" >/dev/null
-http DELETE "/functions/$async_fn" >/dev/null
-check "deleting the function deletes its queue" 0 "$(env_q "SELECT count(*) FROM queues WHERE function_id = '$async_fn'")"
 }
 section_def async section_async backend
 
 section_databases() {
 section "customers' databases (ADR 0008)"
+db_made_at="$(date -u +%s)"
 made="$(http POST /databases '{"name": "e2e-orders"}')"
 check "a database is made: active, the password and the connection string in the answer, TLS asked" "201 active true true" \
   "$(status) $(jq -r '. as $d | "\($d.status) \($d.connectionString | startswith("postgresql://\($d.user):\($d.password)@")) \($d.connectionString | endswith("?sslmode=require"))"' <<<"$made")"
@@ -970,18 +955,12 @@ probe_fn="$(http POST /functions "$(jq -n --arg code "$probe" '{name: "e2e-data-
 check "a function reaches it, the account's internet access off, and trusts its certificate" '"trusted"' \
   "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg host "$data_db_address" '{input: {host: $host}}')" | jq -c .output)"
 http DELETE "/functions/$probe_fn" >/dev/null
-# Every minute, each database not measured yet in the hour is: a new one within a minute.
-for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM database_samples WHERE database_id = '$db_id'")" = 1 ] && break; sleep 1; done
-check "its hourly sample, within a minute: once in the hour, by its name, its size as the server counts it" "1|e2e-orders|t" \
-  "$(env_q "SELECT count(*), max(name), bool_and(size_bytes > 1000000) FROM database_samples WHERE database_id = '$db_id'")"
-http DELETE "/databases/$db_id" >/dev/null
-check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
-  "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
 }
 section_def databases section_databases backend
 
 section_caches() {
 section "customers' caches (ADR 0013)"
+cache_made_at="$(date -u +%s)"
 made="$(http POST /caches '{"name": "e2e-sessions"}')"
 check "a cache is made: active, Valkey, the plan's 64 MB, its address with its password in the answer, TLS asked" "201 active Valkey 9.1 64 true true" \
   "$(status) $(jq -r '. as $c | "\($c.status) \($c.engine) \($c.memoryMb) \($c.url == "rediss://default:\($c.password)@\($c.host):\($c.port)") \($c.address == "rediss://default@\($c.host):\($c.port)")"' <<<"$made")"
@@ -1032,33 +1011,67 @@ probe_fn="$(http POST /functions "$(jq -n --arg code "$probe" '{name: "e2e-cache
 check "a function reaches it, the account's internet access off, trusts its certificate and logs in with the address" '"trusted, logged in: two croissants"' \
   "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg url "$new_cache_url" '{input: {url: $url}}')" | jq -c .output)"
 http DELETE "/functions/$probe_fn" >/dev/null
-# Every minute, each cache not measured yet in the hour is: a new one within a minute.
-cache_id="$(env_q "SELECT id FROM caches WHERE name = 'e2e-sessions'")"
-for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM cache_samples WHERE cache_id = '$cache_id'")" -ge 1 ] && break; sleep 1; done
-check "its hourly sample, within a minute: by its name, its memory the plan's, what its keys use as its server counts it" "e2e-sessions|64|t" \
-  "$(env_q "SELECT max(name), max(memory_mb), bool_and(bytes_used > 0) FROM cache_samples WHERE cache_id = '$cache_id'")"
-# Its metrics, as CloudWatch names ElastiCache's, a point an hour: this hour and the one before.
-cache_metrics="$(http GET "/caches/e2e-sessions/metrics?start=$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)")"
-check "its metrics, as CloudWatch names ElastiCache's: the memory its keys use as its latest sample says" \
-  "200 3600 $(env_q "SELECT bytes_used FROM cache_samples WHERE cache_id = '$cache_id' ORDER BY hour DESC LIMIT 1")" \
-  "$(status) $(jq -r '"\(.period) \([.metrics.BytesUsedForCache.Maximum[] | select(. != null)] | last)"' <<<"$cache_metrics")"
-check "  ... and none at all for another account's cache, or none" "404 The account has no cache e2e-none" \
-  "$(http GET /caches/e2e-none/metrics >/dev/null; status) $(jq -r .message "$work/body")"
-cache_alarm="$(http POST /alarms '{"name": "e2e-sessions memory", "cacheName": "e2e-sessions", "metric": "BytesUsedForCache", "statistic": "Maximum", "period": 3600, "comparison": "GreaterThanThreshold", "threshold": 60000000, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}')"
-check "an alarm watches its memory, an hour at a time, by its name" "201 e2e-sessions BytesUsedForCache 3600" "$(status) $(jq -r '"\(.cacheName) \(.metric) \(.period)"' <<<"$cache_alarm")"
-# Billed by the hour of its memory, as ElastiCache bills a node: each hour sampled, 64 MB.
-cache_month="$(http GET /usage | jq -c '.caches[] | select(.name == "e2e-sessions")')"
-check "GET /usage has its hours this month, its memory and its GB-hours, 64 MB an hour" "$(env_q "SELECT count(*) FROM cache_samples WHERE cache_id = '$cache_id'") 64 true false" \
-  "$(jq -r '"\(.hours) \(.memoryMb) \((.gbHours | tonumber) == .hours * 0.0625) \(.deleted)"' <<<"$cache_month")"
-http DELETE /caches/e2e-sessions >/dev/null
-check "a cache deleted: 204, then 404, gone from the server with its keys, its address answering no more" "204 404 404 true" \
-  "$(status) $(http GET /caches/e2e-sessions >/dev/null; status) \
-$(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/cache-ca.crt" -H 'Authorization: Bearer ff-cache-dev' "https://$cache_address:6390/caches/$cache_server_name") \
-$(cache_cli "$new_cache_url" PING | grep 'Could not connect' >/dev/null && echo true || echo false)"
-check "  ... its alarm with it; its month's usage kept, as a deleted cache's" "404 true" \
-  "$(http GET "/alarms/$(jq -r .id <<<"$cache_alarm")" >/dev/null; status) $(http GET /usage | jq -r '.caches[] | select(.name == "e2e-sessions") | .deleted')"
 }
 section_def caches section_caches backend
+
+section_schedules_ran() {
+section "a function on a schedule: its runs, once their minute has passed in the sections before"
+# Each schedule runs every minute, so by now once or more: those of the minute after their making are checked, which
+# the scheduler's tick, every 5 s, runs within about 70 s; the next come a minute later, past 100 s.
+first_minute='[.invocations[] | select(.source == "schedule" and ((.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $made) < 100)]'
+# Run alone, it comes before them, and waits as long as before.
+for _ in $(seq 1 30); do
+  [ "$(http GET "/functions/$sched_fn/invocations?limit=100" | jq --argjson made "$made_at" "$first_minute | length")" -ge 2 ] && break
+  sleep 5
+done
+# settled_schedules <function>: its schedules, once none says its run is still running, the next a minute away.
+settled_schedules() {
+  local answer=''
+  for _ in $(seq 1 30); do
+    answer="$(http GET "/functions/$1/schedules")"
+    jq -e 'any(.[]; .lastOutcome == "running")' <<<"$answer" >/dev/null || break
+    sleep 1
+  done
+  echo "$answer"
+}
+# The schedules before the history, so that the history has the call each names.
+schedules="$(settled_schedules "$sched_fn")"
+history="$(http GET "/functions/$sched_fn/invocations?limit=100")"
+first_calls="$(jq -c --argjson made "$made_at" "$first_minute" <<<"$history")"
+event="$(jq -c '[.[] | select(.input["detail-type"] != null)][0].input' <<<"$first_calls")"
+check "each schedule ran within a minute and a few seconds, as calls of its schedule" 2 "$(jq length <<<"$first_calls")"
+check "with EventBridge's Scheduled Event: its source, its account, FF's region, the rule's ARN" \
+  "Scheduled Event aws.events $tenant tn-tunis-1 arn:aws:events:tn-tunis-1:$tenant:rule/e2e-scheduled-every-minute true" \
+  "$(jq -r '"\(.["detail-type"]) \(.source) \(.account) \(.region) \(.resources[0]) \(.time | test("^[0-9-]{10}T[0-9:]{8}Z$"))"' <<<"$event")"
+check "or the schedule's own input" '{"report":"daily"}' "$(jq -c '[.[] | select(.input.report != null)][0].input' <<<"$first_calls")"
+check "each schedule says how its run went, and which call it was; the disabled one never ran" \
+  "every-minute success true off null with-input success" \
+  "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
+first_ids="$(jq -r '.[].requestId' <<<"$first_calls" | sed "s/.*/'&'/" | paste -sd,)"
+check "the usage records bill them as calls" 2 "$(env_q "SELECT count(*) FROM usage_records WHERE function_id = '$sched_fn' AND request_id IN (${first_ids:-NULL})")"
+# run_attempts <request>: the attempts of the failing schedule's run whose request ID is given, ended, the first first.
+run_attempts() {
+  http GET "/functions/$failing_sched_fn/invocations?limit=100" |
+    jq -r --arg r "$1" '[.invocations[] | select(.status != "RUNNING" and .requestId == $r)] | sort_by(.attempt) | map("\(.source):\(.attempt):\(.status)") | join(" ")'
+}
+# Its first run, and the retry of it a minute after its failure, as an asynchronous call's; run alone, both waited for.
+first_run=''
+for _ in $(seq 1 150); do
+  first_run="$(env_q "SELECT request_id FROM function_invocations WHERE function_id = '$failing_sched_fn' AND attempt = 1 ORDER BY created_at LIMIT 1")"
+  [[ -n "$first_run" && "$(run_attempts "$first_run")" == *":2:"* ]] && break
+  sleep 1
+done
+check "a run that fails is the schedule's call, its outcome on the schedule" "schedule:1:ERROR error" \
+  "$(run_attempts "$first_run" | cut -d' ' -f1) $(settled_schedules "$failing_sched_fn" | jq -r '.[0].lastOutcome')"
+# The retry's wait: its start, less the failure's end; the worker claims what is due every second.
+retry_wait="$(env_q "SELECT extract(epoch FROM r.created_at - f.updated_at) FROM function_invocations f JOIN function_invocations r ON r.request_id = f.request_id AND r.attempt = 2 WHERE f.request_id = '$first_run' AND f.attempt = 1")"
+check "  ... retried as an asynchronous call is, a minute after its failure, under the run's request ID" "a minute schedule:1:ERROR schedule:2:ERROR" \
+  "$(awk -v s="${retry_wait:-0}" 'BEGIN { print (s >= 59.5 && s < 65) ? "a minute" : s " s" }') $(run_attempts "$first_run" | cut -d' ' -f1,2)"
+http DELETE "/functions/$failing_sched_fn" >/dev/null
+http DELETE "/functions/$sched_fn" >/dev/null
+check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
+}
+section_def schedules_ran section_schedules_ran schedules
 
 section_keys() {
 section "keys and clients: the other account's access key, and AWS's clients at the versions ADR 0009 measured"
@@ -1120,6 +1133,22 @@ check "two keys at most, as IAM gives a user; listed without their secrets" "409
 check "the secret is sealed in FF's database, never in clear" "0" \
   "$(env_q "SELECT count(*) FROM storage_keys WHERE secret::text LIKE '%' || '$key_secret' || '%'")"
 
+# The plan's storage, an account's buckets together: the other account on a plan of 1 MB, its bucket holding 1.2 MB once
+# a new bucket of its own has it measured, within a minute. Uploads wait for room; reads and deletes go on. Started
+# here, so that its minute passes while AWS's clients run below; their key is this account's, which isn't full.
+as_other_s3() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
+head -c 600000 /dev/urandom >"$work/part.bin"
+as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/one.bin --only-show-errors
+as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/two.bin --only-show-errors
+sql "INSERT INTO plans (id, name, limits) SELECT 'e2e-files', 'E2E files', limits || '{\"bucketStorageMb\": 1}' FROM plans WHERE id = 'beta'"
+sql "UPDATE accounts SET plan_id = 'e2e-files' WHERE id = '$other'"
+storage_notice() { env_q "SELECT coalesce(bucket_storage_notice, 0) FROM accounts WHERE id = '$other'"; }
+as_other POST /buckets '{"name": "e2e-theirs-more"}' >/dev/null
+# An alarm on its 4xx errors, as CloudWatch's on S3's metrics, judging its last three minutes: a file it hasn't, asked
+# for, judged once the clients below have run, its minute passing meanwhile.
+bucket_alarm="$(http POST /alarms '{"name": "e2e-photos 4xx", "bucketName": "e2e-photos", "metric": "4xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 3, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' | jq -r .id)"
+aws_ff s3 cp s3://e2e-photos/no-such-file.txt "$work/none" --only-show-errors 2>/dev/null || true
+
 head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
 MODULES="$clients/node_modules" ENDPOINT="$s3_endpoint" IP_ENDPOINT="http://127.0.0.1:$storage_port" KEY="$key_id" SECRET="$key_secret" \
   BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" node "$FF_REPO_ROOT/hack/lib/s3-clients/sdk.mjs" >"$work/sdk.jsonl" 2>"$work/sdk.log" || true
@@ -1152,6 +1181,21 @@ check "a read-only key lists, and writes nothing: AccessDenied" "accepted refuse
   "$(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos/site/) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 cp "$work/site/index.html" s3://e2e-photos/site/new.html)"
 http DELETE "/storage-keys/$ro_id" >/dev/null
 check "a revoked key opens nothing at once: InvalidAccessKeyId" "204 refused InvalidAccessKeyId" "$(status) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos)"
+# The other account's buckets, measured full while the clients ran; run alone, waited for, as long as before.
+for _ in $(seq 75); do [ "$(storage_notice)" = 100 ] && break; sleep 1; done
+full="$(as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin 2>&1 >/dev/null || true)"
+check "its buckets past the plan's storage together: an upload waits for room, AccountProblem saying why" "100 true true" \
+  "$(storage_notice) $(grep -q AccountProblem <<<"$full" && echo true || echo false) $(grep -q 'its buckets hold the 1 MB its E2E files plan gives them' <<<"$full" && echo true || echo false)"
+check "  ... a read and a delete go on" "accepted accepted" \
+  "$(as_other_s3 outcome aws_ff s3 cp s3://e2e-theirs/one.bin "$work/one.out") $(as_other_s3 outcome aws_ff s3 rm s3://e2e-theirs/two.bin)"
+# A full account is measured every minute: room made, its uploads go in again within one.
+for _ in $(seq 75); do [ "$(storage_notice)" != 100 ] && break; sleep 1; done
+check "  ... and once there is room, within a minute, the upload goes in" "0 accepted" \
+  "$(storage_notice) $(as_other_s3 outcome aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin)"
+sql "UPDATE accounts SET plan_id = 'beta' WHERE id = '$other'"
+for _ in $(seq 150); do [ "$(http GET "/alarms/$bucket_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
+check "an alarm on its 4xx errors fires once the minute is counted, naming the bucket" "ALARM e2e-photos true" \
+  "$(http GET "/alarms/$bucket_alarm" | jq -r '"\(.state) \(.bucketName) \(.stateReason | test("breaching 4xxErrors Sum > 0"))"')"
 # Functions as on AWS Lambda with a role: AWS's SDK for JavaScript v3 and boto3 with no setting at all, in packages as
 # npm and pip install them. FF gives the pods a key of the function's own, the region and the front door's address.
 package_with "$work/s3-node.zip" "$clients/node_modules" node_modules "index.mjs=$FF_REPO_ROOT/hack/lib/s3-clients/functions/index.mjs"
@@ -1185,39 +1229,17 @@ http DELETE "/functions/$node_s3" >/dev/null
 check "a function deleted: its key revoked with it, and refused at once, InvalidAccessKeyId" "200 t refused InvalidAccessKeyId" \
   "$(status) $(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE function_id = '$node_s3'") $(AWS_KEY="$fn_key" AWS_SECRET="$fn_secret" outcome aws_ff s3 ls s3://e2e-photos)"
 http DELETE "/functions/$python_s3" >/dev/null
-sql_e2e() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
-sql_e2e "UPDATE accounts SET status = 'suspended' WHERE id = '$tenant'"
+sql "UPDATE accounts SET status = 'suspended' WHERE id = '$tenant'"
 suspended="$(aws_ff s3 ls s3://e2e-photos 2>&1 >/dev/null || true)"
-sql_e2e "UPDATE accounts SET status = 'active', storage_disabled_at = now(), storage_disabled_reason = 'E2E check' WHERE id = '$tenant'"
+sql "UPDATE accounts SET status = 'active', storage_disabled_at = now(), storage_disabled_reason = 'E2E check' WHERE id = '$tenant'"
 storage_off="$(aws_ff s3 ls s3://e2e-photos 2>&1 >/dev/null || true)"
-sql_e2e "UPDATE accounts SET storage_disabled_at = NULL, storage_disabled_reason = NULL WHERE id = '$tenant'"
+sql "UPDATE accounts SET storage_disabled_at = NULL, storage_disabled_reason = NULL WHERE id = '$tenant'"
 check "a suspended account's keys, and those of an account whose storage FF turned off, AccountProblem, saying why" "true true true" \
   "$(grep -q AccountProblem <<<"$suspended" && echo true || echo false) $(grep -q AccountProblem <<<"$storage_off" && echo true || echo false) $(grep -q 'E2E check' <<<"$storage_off" && echo true || echo false)"
 # Each minute, the buckets not measured yet in the hour are: this one within a minute, whatever its files.
 for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")" = 1 ] && break; sleep 1; done
 check "its hourly measure, within a minute: once in the hour, by its name" "1|e2e-photos" \
   "$(env_q "SELECT count(*), max(name) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")"
-# The plan's storage, an account's buckets together: the other account on a plan of 1 MB, its bucket holding 1.2 MB once
-# a new bucket of its own has it measured, within a minute. Uploads wait for room; reads and deletes go on.
-as_other_s3() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
-head -c 600000 /dev/urandom >"$work/part.bin"
-as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/one.bin --only-show-errors
-as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/two.bin --only-show-errors
-sql_e2e "INSERT INTO plans (id, name, limits) SELECT 'e2e-files', 'E2E files', limits || '{\"bucketStorageMb\": 1}' FROM plans WHERE id = 'beta'"
-sql_e2e "UPDATE accounts SET plan_id = 'e2e-files' WHERE id = '$other'"
-storage_notice() { env_q "SELECT coalesce(bucket_storage_notice, 0) FROM accounts WHERE id = '$other'"; }
-as_other POST /buckets '{"name": "e2e-theirs-more"}' >/dev/null
-for _ in $(seq 75); do [ "$(storage_notice)" = 100 ] && break; sleep 1; done
-full="$(as_other_s3 aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin 2>&1 >/dev/null || true)"
-check "its buckets past the plan's storage together: an upload waits for room, AccountProblem saying why" "100 true true" \
-  "$(storage_notice) $(grep -q AccountProblem <<<"$full" && echo true || echo false) $(grep -q 'its buckets hold the 1 MB its E2E files plan gives them' <<<"$full" && echo true || echo false)"
-check "  ... a read and a delete go on" "accepted accepted" \
-  "$(as_other_s3 outcome aws_ff s3 cp s3://e2e-theirs/one.bin "$work/one.out") $(as_other_s3 outcome aws_ff s3 rm s3://e2e-theirs/two.bin)"
-# A full account is measured every minute: room made, its uploads go in again within one.
-for _ in $(seq 75); do [ "$(storage_notice)" != 100 ] && break; sleep 1; done
-check "  ... and once there is room, within a minute, the upload goes in" "0 accepted" \
-  "$(storage_notice) $(as_other_s3 outcome aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin)"
-sql_e2e "UPDATE accounts SET plan_id = 'beta' WHERE id = '$other'"
 # Each minute, the front door writes the minutes that are over: these within two.
 for _ in $(seq 150); do
   [ "$(env_q "SELECT count(DISTINCT class) FROM storage_request_counts WHERE name = 'e2e-photos'")" = 3 ] && break
@@ -1225,18 +1247,18 @@ for _ in $(seq 150); do
 done
 check "the requests counted by the minute, in AWS's three classes, with their bytes, the 300 MB up and down among them" "3 true true true" \
   "$(env_q "SELECT count(DISTINCT class) || ' ' || (sum(bytes_in) > 314572800) || ' ' || (sum(bytes_out) > 314572800) || ' ' || (sum(errors4xx) > 0) FROM storage_request_counts WHERE name = 'e2e-photos'" | tr -d '\r')"
-# Its metrics, as CloudWatch names S3's: this hour and the one before, a point an hour.
+# Its metrics, as CloudWatch names S3's: this hour and the one before, a point an hour. The minute of its last requests
+# may be written between the two reads: both read again until they agree, which a minute's writing settles.
 since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
-photos_metrics="$(http GET "/buckets/e2e-photos/metrics?period=3600&start=$since")"
+for _ in $(seq 75); do
+  photos_metrics="$(http GET "/buckets/e2e-photos/metrics?period=3600&start=$since")"
+  photos_metered="$(jq -r '"\([.metrics.AllRequests.Sum[]] | add) \([.metrics."4xxErrors".Sum[]] | add) \([.metrics.BytesUploaded.Sum[]] | add) \(.metrics.BucketSizeBytes.Average[-1])"' <<<"$photos_metrics")"
+  photos_counted="$(env_q "SELECT sum(requests) || ' ' || sum(errors4xx) || ' ' || sum(bytes_in) FROM storage_request_counts WHERE bucket_id = '$photos_id' AND minute >= '$since'" | tr -d '\r') $(env_q "SELECT size_bytes FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")"
+  [ "$photos_metered" = "$photos_counted" ] && break
+  sleep 1
+done
 check "its metrics, as CloudWatch names S3's: its requests and their bytes as counted, what it holds as its hour's measure" \
-  "200 $(env_q "SELECT sum(requests) || ' ' || sum(errors4xx) || ' ' || sum(bytes_in) FROM storage_request_counts WHERE bucket_id = '$photos_id' AND minute >= '$since'" | tr -d '\r') $(env_q "SELECT size_bytes FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")" \
-  "$(status) $(jq -r '"\([.metrics.AllRequests.Sum[]] | add) \([.metrics."4xxErrors".Sum[]] | add) \([.metrics.BytesUploaded.Sum[]] | add) \(.metrics.BucketSizeBytes.Average[-1])"' <<<"$photos_metrics")"
-# An alarm on its 4xx errors, as CloudWatch's on S3's metrics, judging its last three minutes: a file it hasn't, asked for.
-bucket_alarm="$(http POST /alarms '{"name": "e2e-photos 4xx", "bucketName": "e2e-photos", "metric": "4xxErrors", "statistic": "Sum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 3, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' | jq -r .id)"
-aws_ff s3 cp s3://e2e-photos/no-such-file.txt "$work/none" --only-show-errors 2>/dev/null || true
-for _ in $(seq 150); do [ "$(http GET "/alarms/$bucket_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
-check "an alarm on its 4xx errors fires once the minute is counted, naming the bucket" "ALARM e2e-photos true" \
-  "$(http GET "/alarms/$bucket_alarm" | jq -r '"\(.state) \(.bucketName) \(.stateReason | test("breaching 4xxErrors Sum > 0"))"')"
+  "200 $photos_counted" "$(status) $photos_metered"
 http DELETE /buckets/e2e-photos >/dev/null
 check "a bucket with files isn't deleted unless asked to empty it" "409 The bucket e2e-photos isn't empty: delete its objects first, or delete it with ?force=true, which deletes them all" \
   "$(status) $(jq -r .message "$work/body")"
@@ -1525,30 +1547,6 @@ check "the audit log names each change: the CLI's under its key, the API's" "buc
 s3n s3api delete-bucket-website --bucket e2e-site
 check "DeleteBucketWebsite makes it no site again, its files kept" "404 NoSuchWebsiteConfiguration 5" \
   "$(page /) $(s3n s3 ls s3://e2e-site --recursive | wc -l)"
-for _ in $(seq 150); do [ "$(http GET "/alarms/$waiting_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
-check "the alarm fires once a minute has sampled the two messages waiting, naming the queue" "ALARM e2e-waiting true" \
-  "$(http GET "/alarms/$waiting_alarm" | jq -r '"\(.state) \(.queueName) \(.stateReason | test("breaching ApproximateNumberOfMessagesVisible Maximum > 1"))"')"
-site_visits() { env_q "SELECT coalesce(sum(requests), 0) || ' ' || coalesce(sum(gets), 0) || ' ' || coalesce(sum(bytes_out), 0) FROM storage_request_counts WHERE name = 'e2e-site' AND class = 'website'"; }
-# Each minute, the website server writes the minutes that are over, as the front door does: the visits within two.
-for _ in $(seq 150); do [ "$(site_visits | cut -d' ' -f1)" -ge 12 ] && break; sleep 1; done
-check "the site's visits counted in its minutes once written, apart from S3's requests, with what they sent" "true true" \
-  "$(site_visits | awk '{ print ($1 >= 12 && $2 >= 10) ? "true" : "false", ($3 > 0) ? "true" : "false" }')"
-since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
-check "its metrics, as CloudWatch names a CloudFront distribution's: the visits and their bytes, and a share of them answered 4xx" "true true true" \
-  "$(http GET "/buckets/e2e-site/website/metrics?period=3600&start=$since" | jq -r '"\([.metrics.Requests.Sum[]] | add >= 12) \([.metrics.BytesDownloaded.Sum[]] | add > 0) \([.metrics."4xxErrorRate".Average[] | select(. != null)] | max > 0)"')"
-http DELETE "/buckets/e2e-site?force=true" >/dev/null
-check "the site's domain gone with its bucket: it answers nothing there" "404 0" \
-  "$(at_domain docs.e2e-customer.tn) $(env_q "SELECT count(*) FROM custom_domains WHERE domain = 'docs.e2e-customer.tn'")"
-since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
-for _ in $(seq 90); do [ "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq '[.metrics.NumberOfMessagesSent.Sum[]] | add')" = 2 ] && break; sleep 1; done
-check "its metrics, as CloudWatch names SQS's: the two messages sampled waiting, the two sent as counted, three bytes each at most" "2 2 3" \
-  "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq -r '"\([.metrics.ApproximateNumberOfMessagesVisible.Maximum[]] | max) \([.metrics.NumberOfMessagesSent.Sum[]] | add) \([.metrics.SentMessageSize.Maximum[] | select(. != null)] | max)"')"
-for queue in e2e-removals e2e-batch e2e-batch-dlq e2e-cli-orders e2e-fn-orders e2e-fn-records e2e-waiting; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
-check "  ... the alarm gone with its queue" 404 "$(http GET "/alarms/$waiting_alarm" >/dev/null; status)"
-as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
-check "the queues deleted, their messages with them" "0 0" \
-  "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"
-http DELETE "/storage-keys/$queue_key_id" >/dev/null
 }
 section_def sites section_sites notifications url_domain
 
@@ -1716,6 +1714,102 @@ check "another account, from the same address, isn't slowed: its own count, and 
 }
 section_def plans section_plans backend
 
+# What the sections above started and the minutes since have done: read here, once those minutes have passed in the
+# sections between, and before the backend is killed (usage_records), whose counts of the minute are in its memory
+# until written.
+section_async_metrics() {
+section "asynchronous calls: their metrics, written a minute at a time, read minutes after"
+# Its calls as Lambda's metrics count them, each backend's counts written a minute at a time: by now, or within
+# one when run alone.
+async_metrics() {
+  http GET "/functions/$async_fn/metrics?period=3600&start=$(date -u -d '-2 hour' +%Y-%m-%dT%H:00:00Z)" |
+    jq -r '"\([.metrics.AsyncEventsReceived[]] | add) \([.metrics.AsyncEventsDropped[]] | add) \([.metrics.DestinationDeliveryFailures[]] | add) \([.metrics.AsyncEventAge.Maximum[] | select(. != null)] | max > 0)"'
+}
+for _ in $(seq 90); do [ "$(async_metrics)" = "5 3 0 true" ] && break; sleep 1; done
+check "its metrics, as Lambda's: the five events kept, the three that ended without success dropped, records to its destination all taken, each attempt's age" \
+  "5 3 0 true" "$(async_metrics)"
+http DELETE "/functions/$records_fn" >/dev/null
+http DELETE "/functions/$async_fn" >/dev/null
+check "deleting the function deletes its queue" 0 "$(env_q "SELECT count(*) FROM queues WHERE function_id = '$async_fn'")"
+}
+section_def async_metrics section_async_metrics async
+
+section_databases_sampled() {
+section "customers' databases: the one made, its hourly sample read minutes after; then deleted"
+# Every minute, each database not measured yet in the hour is: a new one within a minute, the backend's log says when.
+# By now it has been; run alone, it is waited for, as long as before.
+for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM database_samples WHERE database_id = '$db_id'")" -ge 1 ] && break; sleep 1; done
+check "its hourly sample, within a minute: once in the hour, by its name, its size as the server counts it" "1|e2e-orders|t true" \
+  "$(env_q "SELECT count(*), max(name), bool_and(size_bytes > 1000000) FROM database_samples WHERE database_id = '$db_id'
+            AND hour = (SELECT min(hour) FROM database_samples WHERE database_id = '$db_id')") $(written_within 90 database_samples "$db_id" "$db_made_at")"
+http DELETE "/databases/$db_id" >/dev/null
+check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
+  "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
+}
+section_def databases_sampled section_databases_sampled databases
+
+section_caches_sampled() {
+section "customers' caches: the one made, its hourly sample read minutes after, its metrics, alarm and bill; then deleted"
+# Every minute, each cache not measured yet in the hour is: a new one within a minute, the backend's log says when. By
+# now it has been; run alone, it is waited for, as long as before.
+cache_id="$(env_q "SELECT id FROM caches WHERE name = 'e2e-sessions'")"
+for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM cache_samples WHERE cache_id = '$cache_id'")" -ge 1 ] && break; sleep 1; done
+check "its hourly sample, within a minute: by its name, its memory the plan's, what its keys use as its server counts it" "e2e-sessions|64|t true" \
+  "$(env_q "SELECT max(name), max(memory_mb), bool_and(bytes_used > 0) FROM cache_samples WHERE cache_id = '$cache_id'") $(written_within 90 cache_samples "$cache_id" "$cache_made_at")"
+# Its metrics, as CloudWatch names ElastiCache's, a point an hour: this hour and the one before.
+cache_metrics="$(http GET "/caches/e2e-sessions/metrics?start=$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)")"
+check "its metrics, as CloudWatch names ElastiCache's: the memory its keys use as its latest sample says" \
+  "200 3600 $(env_q "SELECT bytes_used FROM cache_samples WHERE cache_id = '$cache_id' ORDER BY hour DESC LIMIT 1")" \
+  "$(status) $(jq -r '"\(.period) \([.metrics.BytesUsedForCache.Maximum[] | select(. != null)] | last)"' <<<"$cache_metrics")"
+check "  ... and none at all for another account's cache, or none" "404 The account has no cache e2e-none" \
+  "$(http GET /caches/e2e-none/metrics >/dev/null; status) $(jq -r .message "$work/body")"
+cache_alarm="$(http POST /alarms '{"name": "e2e-sessions memory", "cacheName": "e2e-sessions", "metric": "BytesUsedForCache", "statistic": "Maximum", "period": 3600, "comparison": "GreaterThanThreshold", "threshold": 60000000, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}')"
+check "an alarm watches its memory, an hour at a time, by its name" "201 e2e-sessions BytesUsedForCache 3600" "$(status) $(jq -r '"\(.cacheName) \(.metric) \(.period)"' <<<"$cache_alarm")"
+# Billed by the hour of its memory, as ElastiCache bills a node: each hour sampled, 64 MB.
+cache_month="$(http GET /usage | jq -c '.caches[] | select(.name == "e2e-sessions")')"
+check "GET /usage has its hours this month, its memory and its GB-hours, 64 MB an hour" "$(env_q "SELECT count(*) FROM cache_samples WHERE cache_id = '$cache_id'") 64 true false" \
+  "$(jq -r '"\(.hours) \(.memoryMb) \((.gbHours | tonumber) == .hours * 0.0625) \(.deleted)"' <<<"$cache_month")"
+http DELETE /caches/e2e-sessions >/dev/null
+check "a cache deleted: 204, then 404, gone from the server with its keys, its address answering no more" "204 404 404 true" \
+  "$(status) $(http GET /caches/e2e-sessions >/dev/null; status) \
+$(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/cache-ca.crt" -H 'Authorization: Bearer ff-cache-dev' "https://$cache_address:6390/caches/$cache_server_name") \
+$(cache_cli "$new_cache_url" PING | grep 'Could not connect' >/dev/null && echo true || echo false)"
+check "  ... its alarm with it; its month's usage kept, as a deleted cache's" "404 true" \
+  "$(http GET "/alarms/$(jq -r .id <<<"$cache_alarm")" >/dev/null; status) $(http GET /usage | jq -r '.caches[] | select(.name == "e2e-sessions") | .deleted')"
+}
+section_def caches_sampled section_caches_sampled caches
+
+section_sites_counted() {
+section "queues and sites, minutes on: the queue's alarm fired, the messages and the visits counted; then all deleted"
+# The two messages the queues' section left waiting, under their alarm, and the site's visits, each sampled or counted
+# a minute at a time: by now they have been; run alone, they are waited for, as long as before.
+for _ in $(seq 150); do [ "$(http GET "/alarms/$waiting_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
+check "the alarm fires once a minute has sampled the two messages waiting, naming the queue" "ALARM e2e-waiting true" \
+  "$(http GET "/alarms/$waiting_alarm" | jq -r '"\(.state) \(.queueName) \(.stateReason | test("breaching ApproximateNumberOfMessagesVisible Maximum > 1"))"')"
+site_visits() { env_q "SELECT coalesce(sum(requests), 0) || ' ' || coalesce(sum(gets), 0) || ' ' || coalesce(sum(bytes_out), 0) FROM storage_request_counts WHERE name = 'e2e-site' AND class = 'website'"; }
+# Each minute, the website server writes the minutes that are over, as the front door does: the visits within two.
+for _ in $(seq 150); do [ "$(site_visits | cut -d' ' -f1)" -ge 12 ] && break; sleep 1; done
+check "the site's visits counted in its minutes once written, apart from S3's requests, with what they sent" "true true" \
+  "$(site_visits | awk '{ print ($1 >= 12 && $2 >= 10) ? "true" : "false", ($3 > 0) ? "true" : "false" }')"
+since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
+check "its metrics, as CloudWatch names a CloudFront distribution's: the visits and their bytes, and a share of them answered 4xx" "true true true" \
+  "$(http GET "/buckets/e2e-site/website/metrics?period=3600&start=$since" | jq -r '"\([.metrics.Requests.Sum[]] | add >= 12) \([.metrics.BytesDownloaded.Sum[]] | add > 0) \([.metrics."4xxErrorRate".Average[] | select(. != null)] | max > 0)"')"
+http DELETE "/buckets/e2e-site?force=true" >/dev/null
+check "the site's domain gone with its bucket: it answers nothing there" "404 0" \
+  "$(at_domain docs.e2e-customer.tn) $(env_q "SELECT count(*) FROM custom_domains WHERE domain = 'docs.e2e-customer.tn'")"
+since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
+for _ in $(seq 90); do [ "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq '[.metrics.NumberOfMessagesSent.Sum[]] | add')" = 2 ] && break; sleep 1; done
+check "its metrics, as CloudWatch names SQS's: the two messages sampled waiting, the two sent as counted, three bytes each at most" "2 2 3" \
+  "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq -r '"\([.metrics.ApproximateNumberOfMessagesVisible.Maximum[]] | max) \([.metrics.NumberOfMessagesSent.Sum[]] | add) \([.metrics.SentMessageSize.Maximum[] | select(. != null)] | max)"')"
+for queue in e2e-removals e2e-batch e2e-batch-dlq e2e-cli-orders e2e-fn-orders e2e-fn-records e2e-waiting; do aws_sqs delete-queue --queue-url "$sqs_endpoint/$tenant/$queue"; done
+check "  ... the alarm gone with its queue" 404 "$(http GET "/alarms/$waiting_alarm" >/dev/null; status)"
+as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
+check "the queues deleted, their messages with them" "0 0" \
+  "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"
+http DELETE "/storage-keys/$queue_key_id" >/dev/null
+}
+section_def sites_counted section_sites_counted sites
+
 section_usage_records() {
 section "usage records (P-20)"
 meter='export async function handler(event: { sleepMs?: number; fail?: boolean }, context: { awsRequestId: string }) {
@@ -1776,155 +1870,14 @@ check "a slow call is running" true "$([ -n "$lost" ] && echo true || echo false
 kill -9 "$be_pid"
 e2e_gone "$be_pid"
 wait "$call_pid" 2>/dev/null || true
-# Restarted at once, as a supervisor would. Its reaper marks the call LOST once the longest a call can
-# take has passed (2 × 3 s + a 1 s cold-start limit + 30 s), at the next run of the minute.
-e2e_start_backend "$work/backend-restarted.log" "$api" "${be_env[@]}" "${alarm_env[@]}" K8S_READY_TIMEOUT_SECONDS=1
+# Restarted at once, as a supervisor would, with a 1 s cold-start limit. Its reaper marks the call LOST once the longest
+# a call can take has passed (2 × 3 s + the 1 s cold-start limit + 30 s), at the next run of the minute: read after the
+# alarms' section, whose minutes pass meanwhile (usage_lost).
+be_ready_timeout=1
+e2e_start_backend "$work/backend-restarted.log" "$api" "${be_env[@]}" "${alarm_env[@]}" K8S_READY_TIMEOUT_SECONDS="$be_ready_timeout"
 restarted_pid="${e2e_pids[${#e2e_pids[@]}-1]}" # the processes started after it come after it
-state=""
-for _ in $(seq 1 120); do
-  state="$(q "SELECT status FROM function_invocations WHERE id = '$lost'")"
-  [ "$state" = LOST ] && break
-  sleep 1
-done
-check "the restarted backend marks the call LOST" LOST "$state"
-check "its record bills nothing" "lost 0 0.000" "$(q "SELECT status, billed_ms, duration_ms FROM usage_records WHERE request_id = '$lost'")"
-check "the history says why" "Lost: the backend restarted during the call, so its answer is unknown. It isn't billed." \
-  "$(http GET "/functions/$meter_id/invocations" | jq -r --arg id "$lost" '.invocations[] | select(.id == $id) | .error')"
-check "one record per invocation, none without one" "5 5" \
-  "$(q "SELECT (SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'), (SELECT count(*) FROM usage_records WHERE function_id = '$meter_id')")"
 }
 section_def usage_records section_usage_records backend
-
-section_capacity() {
-section "capacity samples (P-21)"
-# The backends sampled every minute since the meter function was created: it has had a ready instance since its cold start.
-check "a sample a minute of the warm function: its instances, memory, account and minInstances" "t 1 128 $tenant 0" \
-  "$(q "SELECT count(*) > 0, min(instances), max(memory_mb), max(account_id), max(min_instances) FROM capacity_samples WHERE function_id = '$meter_id'")"
-report="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s capacity:report -- --days 1 2>&1)"
-check "the capacity report shows the account's day: capacity reserved, and capacity billed" true \
-  "$(awk -v account="$tenant" '$2 == account && $3 != "0.000" && $5 != "0.000" { found = 1 } END { print found ? "true" : "false" }' <<<"$report")"
-}
-section_def capacity section_capacity usage_records
-
-section_usage() {
-section "usage API (P-22)"
-month="$(date -u +%Y-%m)"
-billed="status IN ('success', 'error', 'timeout')"
-# Queues' requests are written a minute at a time: the queues sections' are by now, minutes after; waited for all the same.
-for _ in $(seq 75); do
-  [ "$(env_q "SELECT coalesce(sum(received), 0) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")" = 7 ] && break
-  sleep 1
-done
-usage="$(http GET /usage)"
-check "GET /usage answers this month, by the UTC calendar" "200 $month" "$(status) $(jq -r .month <<<"$usage")"
-check "the meter function: requests billed, the lost call apart, billed duration and GB-s, exactly as its records" \
-  "$(q "SELECT count(*) FILTER (WHERE $billed), count(*) FILTER (WHERE status = 'lost'), sum(billed_ms),
-               trim_scale(sum(billed_ms::numeric * memory_mb) / 1024000) FROM usage_records WHERE function_id = '$meter_id'")" \
-  "$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | "\(.requests) \(.lost) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
-check "the account's totals are its records' own sums" \
-  "$(q "SELECT count(*) FILTER (WHERE $billed), sum(billed_ms), trim_scale(sum(billed_ms::numeric * memory_mb) / 1024000)
-          FROM usage_records WHERE account_id = '$tenant' AND started_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'")" \
-  "$(jq -r '.totals | "\(.requests) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
-# Its two calls: handler's, then lambda_handler's.
-check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 2" \
-  "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
-check "the database, deleted earlier, keeps its month: its hours sampled and GB-months, at nothing before the book that prices databases" "true e2e-orders true true 0.000" \
-  "$(jq -r --arg id "$db_id" '.databases[] | select(.databaseId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \((.gbMonths | tonumber) > 0) \(.cost)"' <<<"$usage")"
-photos_requests="$(env_q "SELECT coalesce(sum(requests) FILTER (WHERE class = 'tier1'), 0) || ' ' || coalesce(sum(requests) FILTER (WHERE class = 'tier2'), 0)
-                           FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
-# The bytes its requests sent out and brought in, every request's: its files were uploaded and read, so neither is 0.
-photos_bytes="$(env_q "SELECT coalesce(sum(bytes_out), 0) || ' ' || coalesce(sum(bytes_in), 0) FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
-# Its GB-months as its samples give them: what it held each hour, over the month's hours, 1 GB being 2^30 bytes, to six decimals.
-photos_gb="$(env_q "SELECT trim_scale(round(coalesce(sum(size_bytes), 0)::numeric / 1073741824
-                      / (extract(epoch FROM date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month' - date_trunc('month', now() AT TIME ZONE 'UTC')) / 3600), 6))
-                      FROM bucket_samples WHERE bucket_id = '$photos_id'")"
-check "the bucket, deleted earlier, keeps its month: its hours measured, GB-months, its requests by S3's two classes and its bytes as counted, at nothing before the book that prices buckets" \
-  "true e2e-photos true $photos_gb $photos_requests $photos_bytes true 0.000" \
-  "$(jq -r --arg id "$photos_id" '.buckets[] | select(.bucketId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \(.gbMonths) \(.tier1Requests) \(.tier2Requests) \(.bytesDownloaded) \(.bytesUploaded) \(.bytesDownloaded > 0 and .bytesUploaded > 0) \(.cost)"' <<<"$usage")"
-csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
-check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
-  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,attachment_bytes,throttled,platform_errors,lost,cost|true|true|true" \
-  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -E "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,,0\.000$" >/dev/null && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -E "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,,0\.000$" >/dev/null && echo true || echo false)"
-cli_queue_id="$(env_q "SELECT DISTINCT queue_id FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-cli-orders'")"
-cli_counted="$(env_q "SELECT sum(requests) || ' ' || sum(sent) || ' ' || sum(received) FROM queue_request_counts WHERE queue_id = '$cli_queue_id'")"
-check "the AWS CLI's queue, deleted earlier, keeps its month: its requests as SQS bills them, its messages sent and received, as counted, at nothing before the book that prices queues" \
-  "true e2e-cli-orders $cli_counted 0.000" \
-  "$(jq -r --arg id "$cli_queue_id" '.queues[] | select(.queueId == $id) | "\(.deleted) \(.name) \(.requests) \(.messagesSent) \(.messagesReceived) \(.cost)"' <<<"$usage")"
-check "  ... in the CSV, its requests in the requests column" true \
-  "$(tr -d '\r' <<<"$csv" | grep -E "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,,0\.000$" >/dev/null && echo true || echo false)"
-check "a function's batches counted as received: the five, then the two again; the three handled deleted" "7 3" \
-  "$(env_q "SELECT sum(received) || ' ' || sum(deleted) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")"
-empty="$(http GET '/usage?month=2001-01')"
-check "a month without calls is empty, and before the first price book, unpriced" "200 0 0 null" \
-  "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"
-http GET '/usage?month=2026-13' >/dev/null
-check "a month that is not YYYY-MM is refused" "400 month must be a month as YYYY-MM, such as 2026-10" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
-}
-section_def usage section_usage usage_records python databases sites buckets
-
-section_priced() {
-section "usage priced (P-30)"
-book="$(q "SELECT id FROM price_books ORDER BY valid_from LIMIT 1")"
-check "the month is priced in TND, with the first price book" "TND $book" "$(jq -r '.estimate | "\(.currency) \(.priceBooks | join(","))"' <<<"$usage")"
-check "the meter function's cost: its billed requests and GB-s at the book's prices, rounded to the millime" \
-  "$(q "SELECT round(count(*) * (b.prices->'prices'->>'requestsPerMillion')::numeric / 1000000
-                     + sum(u.billed_ms::numeric * u.memory_mb) / 1024000 * (b.prices->'prices'->'gbSecond'->0->>'price')::numeric, 3)
-          FROM usage_records u, price_books b WHERE u.function_id = '$meter_id' AND u.$billed AND b.id = '$book' GROUP BY b.prices")" \
-  "$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")"
-check "the free tier covers the month: usage, the free tier taking it all off, and nothing to pay" "true 0.000" \
-  "$(jq -r '.estimate | "\((.usage | tonumber) + (.freeTier | tonumber) == 0) \(.total)"' <<<"$usage")"
-check "and the CSV has each function's cost" true \
-  "$(tr -d '\r' <<<"$csv" | grep "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" >/dev/null && echo true || echo false)"
-}
-section_def priced section_priced usage
-
-section_rating() {
-section "the hourly rating (P-32)"
-# As it started, the backend rated every hour since the first book that had settled: ended 33 minutes ago at least.
-balance="$(http GET /billing/balance)"
-rated_until="$(jq -r .ratedUntil <<<"$balance")"
-settled="$(date -u -d "@$(( ($(date -u +%s) - 33 * 60) / 3600 * 3600 ))" +%Y-%m-%dT%H:%M:%S.000Z)"
-previous="$(date -u -d "@$(( ($(date -u +%s) - 33 * 60) / 3600 * 3600 - 3600 ))" +%Y-%m-%dT%H:%M:%S.000Z)"
-check "the balance: nothing charged, in shadow mode, rated up to the last hour settled (or the one before, if one just settled)" "200 0.000 TND true 0.000 true" \
-  "$(status) $(jq -r '"\(.balance) \(.currency) \(.shadowMode) \(.charged)"' <<<"$balance") $([ "$rated_until" = "$settled" ] || [ "$rated_until" = "$previous" ] && echo true || echo false)"
-check "every hour from the first book on rated, once, none skipped, in shadow mode" "t t t t" \
-  "$(q "SELECT count(*) = count(DISTINCT hour), count(*) = extract(epoch FROM max(hour) - min(hour)) / 3600 + 1,
-               min(hour) = (SELECT min(valid_from) FROM price_books), bool_and(shadow) FROM rating_runs")"
-check "no transaction moved the balance: no debit in shadow mode" "200 0" "$(http GET /billing/transactions >/dev/null; status) $(jq '.transactions | length' "$work/body")"
-reconciliation="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s billing:reconcile 2>&1)" || true
-check "the reconciliation runs against the database: nobody used anything in the hours rated" "No account used anything." \
-  "$(tail -1 <<<"$reconciliation")"
-}
-section_def rating section_rating backend
-
-section_balance() {
-section "the balance check (P-33)"
-# As an operator sets them in the admin dashboard (P-70); e2e has no operator, so SQL. No buffer, no grace period.
-sql "INSERT INTO platform_settings (key, value) VALUES ('billingShadowMode', 'false'), ('negativeBuffer', '\"0.000\"'), ('gracePeriodHours', '0')"
-# move <account> <millimes> <kind> <FF's account> <key>: a balanced ledger transaction, as the rating (usage) or a payment (topup) writes it.
-move() {
-  sql "INSERT INTO ledger_accounts (account_id, type, currency) VALUES ('$1', 'wallet', 'TND') ON CONFLICT DO NOTHING;
-       INSERT INTO ledger_accounts (type, currency) VALUES ('$4', 'TND') ON CONFLICT DO NOTHING;
-       WITH t AS (INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('$3', '$5') RETURNING id)
-       INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
-       SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN $2 ELSE -($2) END FROM t, ledger_accounts a
-        WHERE a.currency = 'TND' AND (a.account_id = '$1' OR (a.account_id IS NULL AND a.type = '$4'))"
-}
-move "$tenant" -500 usage revenue "e2e:usage"
-invocations="$(q "SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'")"
-http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
-check "a wallet run below zero, with no buffer and no grace period: invokes answer 402" "402 InsufficientCreditException" \
-  "$(status) $(jq -r .message "$work/body" | cut -d: -f1)"
-check "and the refused call left no invocation" "$invocations" "$(q "SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'")"
-check "the balance says invokes stopped" "200 -0.500 stopped" "$(http GET /billing/balance >/dev/null; status) $(jq -r '"\(.balance) \(.credit.state)"' "$work/body")"
-http GET "/functions/$meter_id" >/dev/null
-check "reads go on" 200 "$(status)"
-move "$tenant" 1000 topup provider_clearing "e2e:topup"
-http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
-check "a top-up lets them in again at once: the ledger's NOTIFY refreshed the backend's cached balance" 201 "$(status)"
-sql "DELETE FROM platform_settings WHERE key IN ('billingShadowMode', 'negativeBuffer', 'gracePeriodHours')"
-}
-section_def balance section_balance usage_records
 
 section_alarms() {
 section "alarms: an error fires an alarm, a quiet minute recovers it, each change told to a webhook"
@@ -1996,6 +1949,159 @@ http DELETE "/functions/$alarmed_id" >/dev/null
 }
 section_def alarms section_alarms backend
 
+section_usage_lost() {
+section "usage records: the call lost, marked LOST by the restarted backend, read once its minute has passed"
+# The reaper's minute has passed in the alarms' section; run alone, it is waited for, as long as before.
+state=""
+for _ in $(seq 1 120); do
+  state="$(q "SELECT status FROM function_invocations WHERE id = '$lost'")"
+  [ "$state" = LOST ] && break
+  sleep 1
+done
+check "the restarted backend marks the call LOST" LOST "$state"
+check "its record bills nothing" "lost 0 0.000" "$(q "SELECT status, billed_ms, duration_ms FROM usage_records WHERE request_id = '$lost'")"
+check "the history says why" "Lost: the backend restarted during the call, so its answer is unknown. It isn't billed." \
+  "$(http GET "/functions/$meter_id/invocations" | jq -r --arg id "$lost" '.invocations[] | select(.id == $id) | .error')"
+check "one record per invocation, none without one" "5 5" \
+  "$(q "SELECT (SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'), (SELECT count(*) FROM usage_records WHERE function_id = '$meter_id')")"
+}
+section_def usage_lost section_usage_lost usage_records
+
+section_capacity() {
+section "capacity samples (P-21)"
+# The backends sampled every minute since the meter function was created: it has had a ready instance since its cold start.
+check "a sample a minute of the warm function: its instances, memory, account and minInstances" "t 1 128 $tenant 0" \
+  "$(q "SELECT count(*) > 0, min(instances), max(memory_mb), max(account_id), max(min_instances) FROM capacity_samples WHERE function_id = '$meter_id'")"
+report="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s capacity:report -- --days 1 2>&1)"
+check "the capacity report shows the account's day: capacity reserved, and capacity billed" true \
+  "$(awk -v account="$tenant" '$2 == account && $3 != "0.000" && $5 != "0.000" { found = 1 } END { print found ? "true" : "false" }' <<<"$report")"
+}
+section_def capacity section_capacity usage_records
+
+section_usage() {
+section "usage API (P-22)"
+month="$(date -u +%Y-%m)"
+billed="status IN ('success', 'error', 'timeout')"
+# Queues' requests are written a minute at a time: the queues sections' are by now, minutes after; waited for all the same.
+for _ in $(seq 75); do
+  [ "$(env_q "SELECT coalesce(sum(received), 0) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")" = 7 ] && break
+  sleep 1
+done
+usage="$(http GET /usage)"
+check "GET /usage answers this month, by the UTC calendar" "200 $month" "$(status) $(jq -r .month <<<"$usage")"
+check "the meter function: requests billed, the lost call apart, billed duration and GB-s, exactly as its records" \
+  "$(q "SELECT count(*) FILTER (WHERE $billed), count(*) FILTER (WHERE status = 'lost'), sum(billed_ms),
+               trim_scale(sum(billed_ms::numeric * memory_mb) / 1024000) FROM usage_records WHERE function_id = '$meter_id'")" \
+  "$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | "\(.requests) \(.lost) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
+check "the account's totals are its records' own sums" \
+  "$(q "SELECT count(*) FILTER (WHERE $billed), sum(billed_ms), trim_scale(sum(billed_ms::numeric * memory_mb) / 1024000)
+          FROM usage_records WHERE account_id = '$tenant' AND started_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'")" \
+  "$(jq -r '.totals | "\(.requests) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
+# Its two calls: handler's, then lambda_handler's.
+check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 2" \
+  "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
+check "the database, deleted earlier, keeps its month: its hours sampled and GB-months, at nothing before the book that prices databases" "true e2e-orders true true 0.000" \
+  "$(jq -r --arg id "$db_id" '.databases[] | select(.databaseId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \((.gbMonths | tonumber) > 0) \(.cost)"' <<<"$usage")"
+photos_requests="$(env_q "SELECT coalesce(sum(requests) FILTER (WHERE class = 'tier1'), 0) || ' ' || coalesce(sum(requests) FILTER (WHERE class = 'tier2'), 0)
+                           FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
+# The bytes its requests sent out and brought in, every request's: its files were uploaded and read, so neither is 0.
+photos_bytes="$(env_q "SELECT coalesce(sum(bytes_out), 0) || ' ' || coalesce(sum(bytes_in), 0) FROM storage_request_counts WHERE bucket_id = '$photos_id'")"
+# Its GB-months as its samples give them: what it held each hour, over the month's hours, 1 GB being 2^30 bytes, to six decimals.
+photos_gb="$(env_q "SELECT trim_scale(round(coalesce(sum(size_bytes), 0)::numeric / 1073741824
+                      / (extract(epoch FROM date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month' - date_trunc('month', now() AT TIME ZONE 'UTC')) / 3600), 6))
+                      FROM bucket_samples WHERE bucket_id = '$photos_id'")"
+check "the bucket, deleted earlier, keeps its month: its hours measured, GB-months, its requests by S3's two classes and its bytes as counted, at nothing before the book that prices buckets" \
+  "true e2e-photos true $photos_gb $photos_requests $photos_bytes true 0.000" \
+  "$(jq -r --arg id "$photos_id" '.buckets[] | select(.bucketId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \(.gbMonths) \(.tier1Requests) \(.tier2Requests) \(.bytesDownloaded) \(.bytesUploaded) \(.bytesDownloaded > 0 and .bytesUploaded > 0) \(.cost)"' <<<"$usage")"
+csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
+check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
+  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,attachment_bytes,throttled,platform_errors,lost,cost|true|true|true" \
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -E "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,,0\.000$" >/dev/null && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -E "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,,0\.000$" >/dev/null && echo true || echo false)"
+cli_queue_id="$(env_q "SELECT DISTINCT queue_id FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-cli-orders'")"
+cli_counted="$(env_q "SELECT sum(requests) || ' ' || sum(sent) || ' ' || sum(received) FROM queue_request_counts WHERE queue_id = '$cli_queue_id'")"
+check "the AWS CLI's queue, deleted earlier, keeps its month: its requests as SQS bills them, its messages sent and received, as counted, at nothing before the book that prices queues" \
+  "true e2e-cli-orders $cli_counted 0.000" \
+  "$(jq -r --arg id "$cli_queue_id" '.queues[] | select(.queueId == $id) | "\(.deleted) \(.name) \(.requests) \(.messagesSent) \(.messagesReceived) \(.cost)"' <<<"$usage")"
+check "  ... in the CSV, its requests in the requests column" true \
+  "$(tr -d '\r' <<<"$csv" | grep -E "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,,0\.000$" >/dev/null && echo true || echo false)"
+check "a function's batches counted as received: the five, then the two again; the three handled deleted" "7 3" \
+  "$(env_q "SELECT sum(received) || ' ' || sum(deleted) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")"
+empty="$(http GET '/usage?month=2001-01')"
+check "a month without calls is empty, and before the first price book, unpriced" "200 0 0 null" \
+  "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"
+http GET '/usage?month=2026-13' >/dev/null
+check "a month that is not YYYY-MM is refused" "400 month must be a month as YYYY-MM, such as 2026-10" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+}
+section_def usage section_usage usage_lost python databases_sampled sites_counted buckets
+
+section_priced() {
+section "usage priced (P-30)"
+book="$(q "SELECT id FROM price_books ORDER BY valid_from LIMIT 1")"
+check "the month is priced in TND, with the first price book" "TND $book" "$(jq -r '.estimate | "\(.currency) \(.priceBooks | join(","))"' <<<"$usage")"
+check "the meter function's cost: its billed requests and GB-s at the book's prices, rounded to the millime" \
+  "$(q "SELECT round(count(*) * (b.prices->'prices'->>'requestsPerMillion')::numeric / 1000000
+                     + sum(u.billed_ms::numeric * u.memory_mb) / 1024000 * (b.prices->'prices'->'gbSecond'->0->>'price')::numeric, 3)
+          FROM usage_records u, price_books b WHERE u.function_id = '$meter_id' AND u.$billed AND b.id = '$book' GROUP BY b.prices")" \
+  "$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")"
+check "the free tier covers the month: usage, the free tier taking it all off, and nothing to pay" "true 0.000" \
+  "$(jq -r '.estimate | "\((.usage | tonumber) + (.freeTier | tonumber) == 0) \(.total)"' <<<"$usage")"
+check "and the CSV has each function's cost" true \
+  "$(tr -d '\r' <<<"$csv" | grep "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" >/dev/null && echo true || echo false)"
+}
+section_def priced section_priced usage
+
+section_rating() {
+section "the hourly rating (P-32)"
+# As it started, and each minute since, the backend rated every hour since the first book that had settled: ended
+# long enough ago that no call in it can still be recorded, two of the platform's longest timeouts (900 s), the cold
+# start it allows, 30 s and a minute. 33 minutes with the default 90 s cold start; 31 min 31 s for the backend
+# usage_records restarted with 1 s, which answers here in a whole run.
+settle=$((2 * 900 + be_ready_timeout + 30 + 60))
+balance="$(http GET /billing/balance)"
+rated_until="$(jq -r .ratedUntil <<<"$balance")"
+settled="$(date -u -d "@$(( ($(date -u +%s) - settle) / 3600 * 3600 ))" +%Y-%m-%dT%H:%M:%S.000Z)"
+previous="$(date -u -d "@$(( ($(date -u +%s) - settle) / 3600 * 3600 - 3600 ))" +%Y-%m-%dT%H:%M:%S.000Z)"
+check "the balance: nothing charged, in shadow mode, rated up to the last hour settled (or the one before, if one just settled)" "200 0.000 TND true 0.000 true" \
+  "$(status) $(jq -r '"\(.balance) \(.currency) \(.shadowMode) \(.charged)"' <<<"$balance") $([ "$rated_until" = "$settled" ] || [ "$rated_until" = "$previous" ] && echo true || echo false)"
+check "every hour from the first book on rated, once, none skipped, in shadow mode" "t t t t" \
+  "$(q "SELECT count(*) = count(DISTINCT hour), count(*) = extract(epoch FROM max(hour) - min(hour)) / 3600 + 1,
+               min(hour) = (SELECT min(valid_from) FROM price_books), bool_and(shadow) FROM rating_runs")"
+check "no transaction moved the balance: no debit in shadow mode" "200 0" "$(http GET /billing/transactions >/dev/null; status) $(jq '.transactions | length' "$work/body")"
+reconciliation="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s billing:reconcile 2>&1)" || true
+check "the reconciliation runs against the database: nobody used anything in the hours rated" "No account used anything." \
+  "$(tail -1 <<<"$reconciliation")"
+}
+section_def rating section_rating backend
+
+section_balance() {
+section "the balance check (P-33)"
+# As an operator sets them in the admin dashboard (P-70); e2e has no operator, so SQL. No buffer, no grace period.
+sql "INSERT INTO platform_settings (key, value) VALUES ('billingShadowMode', 'false'), ('negativeBuffer', '\"0.000\"'), ('gracePeriodHours', '0')"
+# move <account> <millimes> <kind> <FF's account> <key>: a balanced ledger transaction, as the rating (usage) or a payment (topup) writes it.
+move() {
+  sql "INSERT INTO ledger_accounts (account_id, type, currency) VALUES ('$1', 'wallet', 'TND') ON CONFLICT DO NOTHING;
+       INSERT INTO ledger_accounts (type, currency) VALUES ('$4', 'TND') ON CONFLICT DO NOTHING;
+       WITH t AS (INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('$3', '$5') RETURNING id)
+       INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
+       SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN $2 ELSE -($2) END FROM t, ledger_accounts a
+        WHERE a.currency = 'TND' AND (a.account_id = '$1' OR (a.account_id IS NULL AND a.type = '$4'))"
+}
+move "$tenant" -500 usage revenue "e2e:usage"
+invocations="$(q "SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'")"
+http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
+check "a wallet run below zero, with no buffer and no grace period: invokes answer 402" "402 InsufficientCreditException" \
+  "$(status) $(jq -r .message "$work/body" | cut -d: -f1)"
+check "and the refused call left no invocation" "$invocations" "$(q "SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'")"
+check "the balance says invokes stopped" "200 -0.500 stopped" "$(http GET /billing/balance >/dev/null; status) $(jq -r '"\(.balance) \(.credit.state)"' "$work/body")"
+http GET "/functions/$meter_id" >/dev/null
+check "reads go on" 200 "$(status)"
+move "$tenant" 1000 topup provider_clearing "e2e:topup"
+http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
+check "a top-up lets them in again at once: the ledger's NOTIFY refreshed the backend's cached balance" 201 "$(status)"
+sql "DELETE FROM platform_settings WHERE key IN ('billingShadowMode', 'negativeBuffer', 'gracePeriodHours')"
+}
+section_def balance section_balance usage_records
+
 section_monitoring() {
 section "the operator's monitoring: readiness, the metrics on their own port, the log in JSON"
 http GET /readyz >/dev/null
@@ -2064,6 +2170,7 @@ check "the registry lost a layer of the meter function's image; the node has nei
 # Restarted, as the runbook says after losing the registry: the retention job runs at the backend's start.
 kill "$restarted_pid"
 e2e_gone "$restarted_pid"
+be_ready_timeout=90
 e2e_start_backend "$work/backend-restored.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 restored=""
 for _ in $(seq 1 180); do

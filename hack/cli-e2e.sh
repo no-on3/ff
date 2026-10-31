@@ -34,6 +34,10 @@
 # without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
+# What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
+# time) is started in its section and read a few sections on, in a section of its own (schedules_ran, databases_used,
+# buckets_used, sites_counted, queues_counted), so that its minute passes while the sections between run: what it
+# checks is the same, a real minute of the product's, and a section run alone waits as long as before.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster. Its sections run alone
 # too, with what they need (hack/lib/sections.sh): --list names them, --only and --from choose. --keep removes
 # nothing on exit, for a look and for the next run, which --reuse runs against the same stack (hack/lib/e2e-stack.sh
@@ -345,33 +349,14 @@ ff delete cli-url --yes
 section_def url section_url backend
 
 section_schedules() {
-section "schedules: ff schedule set, its run, list, disable, remove"
+section "schedules: ff schedule set, its runs read a few sections on"
 ff deploy "$FF_REPO_ROOT/examples/hello.py" --name cli-sched
+sched_made_at="$(date -u +%s)"
 ff schedule set cli-sched "rate(1 minute)" --input '{"name": "Schedule"}'
 check "ff schedule set makes it, and says its next runs" "0 cli-sched's schedule schedule made: rate(1 minute), with its own input true" \
   "$(code) $(out | head -1) $(out | sed -n 2p | grep -E '^next runs \(UTC\): [0-9-]+ [0-9:]+, ' >/dev/null && echo true || echo false)"
 ff schedule set cli-sched "rate(5 minute)"
 check "a wrong expression is said in the API's words, and nothing changes" "3 error: rate(5 minute) must be rate(5 minutes): the unit is plural above 1" "$(code) $(err | head -1)"
-# Its first run comes a minute after it was made, then the scheduler's tick within 5 s.
-ran=false
-for _ in $(seq 1 30); do
-  ff schedule list cli-sched --output json
-  if [ "$(out | jq -r '.[0].lastOutcome')" = success ]; then
-    ran=true
-    break
-  fi
-  sleep 5
-done
-check "within about 70 s it has run, and ff schedule list says it succeeded" true "$ran"
-ff history cli-sched --output json
-check "the history has the call, as a schedule's, with its input" "schedule $(out | jq -r '.invocations[0].id')" \
-  "$(out | jq -r '.invocations[0].source') $(ff schedule list cli-sched --output json; out | jq -r '.[0].lastRequestId')"
-ff schedule disable cli-sched
-check "ff schedule disable stops its runs" "0 cli-sched's schedule schedule disabled: it doesn't run" "$(code) $(out)"
-ff schedule remove cli-sched
-ff schedule list cli-sched
-check "ff schedule remove takes it away" "0 cli-sched has no schedule: \`ff schedule set cli-sched \"rate(1 hour)\"\` makes one" "$(code) $(out)"
-ff delete cli-sched --yes
 }
 section_def schedules section_schedules backend
 
@@ -531,6 +516,41 @@ ff delete cli-pkg-ts --yes
 }
 section_def packages section_packages init
 
+section_schedules_ran() {
+section "schedules: its runs, list, disable, remove, once their minute has passed in the sections before"
+# Its first run came a minute after it was made, then the scheduler's tick within 5 s; the next a minute after it. By
+# now it has run; run alone, it is waited for, as long as before.
+ran=false
+for _ in $(seq 1 30); do
+  ff schedule list cli-sched --output json
+  if [ "$(out | jq -r '.[0].lastOutcome')" = success ]; then
+    ran=true
+    break
+  fi
+  sleep 5
+done
+ff history cli-sched --output json
+first_run_after="$(out | jq --argjson made "$sched_made_at" '[.invocations[] | select(.source == "schedule") | (.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $made] | min')"
+check "within about 70 s it has run, and ff schedule list says it succeeded" "true true" \
+  "$ran $([ "${first_run_after:-null}" != null ] && [ "$first_run_after" -le 75 ] && echo true || echo "false: $first_run_after s after")"
+ff schedule disable cli-sched
+check "ff schedule disable stops its runs" "0 cli-sched's schedule schedule disabled: it doesn't run" "$(code) $(out)"
+# Disabled, its last run is the history's newest call, once that run has ended.
+for _ in $(seq 1 30); do
+  ff schedule list cli-sched --output json
+  [ "$(out | jq -r '.[0].lastOutcome')" != running ] && break
+  sleep 1
+done
+ff history cli-sched --output json
+check "the history has the call, as a schedule's, with its input" "schedule $(out | jq -r '.invocations[0].id')" \
+  "$(out | jq -r '.invocations[0].source') $(ff schedule list cli-sched --output json; out | jq -r '.[0].lastRequestId')"
+ff schedule remove cli-sched
+ff schedule list cli-sched
+check "ff schedule remove takes it away" "0 cli-sched has no schedule: \`ff schedule set cli-sched \"rate(1 hour)\"\` makes one" "$(code) $(out)"
+ff delete cli-sched --yes
+}
+section_def schedules_ran section_schedules_ran schedules
+
 section_small_app_db() {
 section "the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
 # The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own. No
@@ -609,16 +629,6 @@ check "ff db password: the old string opens no session, the new one does, and th
   "$(code) $( (data_db_psql "$db_conn" 'select 1' || true) | grep 'password authentication failed' >/dev/null && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
 ff invoke cli-db-orders --http POST /orders --data '{"item": "bambalouni", "quantity": 1}'
 check "  ... which writes again through its new secret" "0 HTTP 201 2" "$(code) $(out | head -1) $(data_db_psql "$new_conn" 'select count(*) from orders')"
-# Each minute, the backend measures every database not measured yet in the hour: this one within a minute.
-for _ in $(seq 75); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.databases | map(.name) | index("cli-orders")' >/dev/null && break; sleep 1; done
-ff usage
-check "ff usage lists its month after the functions" "0 true" "$(code) $(out | grep -E '^cli-orders +[0-9]+ +[0-9.]+ +[0-9.]+$' >/dev/null && echo true || echo false)"
-ff db delete cli-orders
-check "ff db delete asks first, a script saying --yes" "2 true" "$(code) $(err | grep 'ff db delete asks first' >/dev/null && echo true || echo false)"
-ff db delete cli-orders --yes
-check "ff db delete drops it, with its data, its user gone" "0 deleted the database cli-orders, with its data 0" \
-  "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
-ff delete cli-db-orders --yes
 }
 section_def databases section_databases small_app_db
 
@@ -650,15 +660,6 @@ check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its 
 ff buckets keys list
 check "ff buckets keys list names what it reaches, never its secret" "0 $key_id cli-photos false" \
   "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" >/dev/null && echo true || echo false)"
-# Each minute, the backend measures every bucket not measured yet in the hour: this one within a minute.
-for _ in $(seq 75); do "$ff_bin" buckets get cli-photos --output json 2>/dev/null | jq -e '.measuredAt != null' >/dev/null && break; sleep 1; done
-ff buckets get cli-photos
-check "ff buckets get says what it held at its last measure" "0 true" "$(code) $(out | grep -E '^held +[0-9.]+ MB, [01] objects?, as measured at ' >/dev/null && echo true || echo false)"
-# Its month: the requests the front door counted, by S3's classes, and the bytes they sent out, once their minute is written.
-for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.buckets[] | select(.name == "cli-photos" and .tier1Requests > 0 and .tier2Requests > 0)' >/dev/null && break; sleep 1; done
-ff usage
-check "ff usage lists its month after the databases: GB-months, each class's requests, what it sent out" "0 true true" \
-  "$(code) $(out | grep -E '^cli-photos +[0-9.]+ +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+ [MG]B +[0-9.]+$' >/dev/null && echo true || echo false) $("$ff_bin" usage --output json | jq '.buckets[] | select(.name == "cli-photos") | .bytesDownloaded > 0')"
 # The export kit's way out to AWS S3, both halves: the bucket to a folder with the key's variables, then the folder to
 # "S3", here another bucket behind an AWS CLI profile whose key reaches that one alone, so that a second half still
 # holding FF's variables would be refused there. The script calls the AWS CLI by name: the one above.
@@ -678,10 +679,6 @@ check "the export kit's s3-sync.sh copies the bucket to a folder, then to S3 wit
   "0 Ahlan from the CLI Ahlan from the CLI" \
   "$synced $(cat "$work/backup/hello.txt" 2>/dev/null) $(as_s3 "${aws_cli[@]}" s3 cp s3://cli-photos-out/hello.txt - 2>/dev/null)"
 ff buckets delete cli-photos-out --force --yes
-ff buckets delete cli-photos --yes
-check "ff buckets delete leaves a bucket with files, in the API's words, exit 3" "3 true" "$(code) $(err | grep "isn't empty" >/dev/null && echo true || echo false)"
-ff buckets delete cli-photos --force --yes
-check "  ... and --force deletes them first" "0 deleted the bucket cli-photos, with its files" "$(code) $(out)"
 ff buckets keys revoke "$key_id" --yes
 # The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
 refused="$(aws_with_key s3 ls 2>&1 || true)"
@@ -730,17 +727,6 @@ check "ff sites domains add gives the CNAME to the site's host that proves it" "
   "$(code) $(out | grep 'CNAME www.cli-shop.tn cli-site.site.localhost' >/dev/null && echo true || echo false)"
 ff sites domains remove cli-site www.cli-shop.tn --yes
 check "  ... and remove takes it away" "0 0" "$(code) $("$ff_bin" sites domains list cli-site --output json | jq length)"
-# Each minute, the website server writes the minutes that are over: these within two.
-for _ in $(seq 150); do [ "$("$ff_bin" sites metrics cli-site --period 3600 --since 1h --output json | jq '[.metrics.Requests.Sum[]] | add // 0')" -ge 4 ] && break; sleep 1; done
-ff sites metrics cli-site --period 3600 --since 1h --output json
-check "ff sites metrics counts its visits once their minute is written, as CloudFront names them" "0 true" \
-  "$(code) $(out | jq '([.metrics.Requests.Sum[]] | add >= 4) and ([.metrics.BytesDownloaded.Sum[]] | add > 0)')"
-ff sites remove cli-site --yes
-check "ff sites remove makes it no site: its address answers 404" "0 404" "$(code) $(curl -s -o /dev/null -w '%{http_code}' "$site_url/")"
-ff sites deploy cli-site "$work/dist" --output json
-check "  ... its files kept: a deploy finds them unchanged, and makes it a site again, no single-page app's unless told" "0 0 2 false" \
-  "$(code) $(out | jq -r '"\(.uploaded | length) \(.unchanged) \(.singlePageApp)"')"
-ff buckets delete cli-site --force --yes
 }
 section_def sites section_sites backend
 
@@ -797,21 +783,7 @@ check "  ... as the AWS CLI sees it" "3600" \
   "$(aws_sqs get-queue-attributes --queue-url "$queue_url" --attribute-names MessageRetentionPeriod 2>/dev/null | jq -r .Attributes.MessageRetentionPeriod)"
 ff queues list --profile b
 check "the other account has none of them" "0 The account has no queue: \`ff queues create <name>\` makes one" "$(code) $(out)"
-# Its requests are counted a minute at a time: in its metrics within two.
-for _ in $(seq 150); do "$ff_bin" queues metrics cli-orders --output json 2>/dev/null | jq -e '[.metrics.NumberOfMessagesSent.Sum[]] | add >= 3' >/dev/null && break; sleep 1; done
-ff queues metrics cli-orders --period 300
-check "ff queues metrics shows a row each five minutes, SQS's metrics as CloudWatch names them: the messages sent, received and deleted" "0 true true" \
-  "$(code) $(out | head -1 | grep -E '^TIME \(UTC\) +WAITING +IN FLIGHT +OLDEST +SENT +RECEIVED +DELETED +EMPTY$' >/dev/null && echo true || echo false) $(out | tail -1 | grep -E '^cli-orders for [0-9hm ]+, a point each 5m: sent ([3-9]|[1-9][0-9]+), received [1-9][0-9]*, deleted [0-9]+, empty receives [1-9][0-9]*; at most [0-9]+ waiting$' >/dev/null && echo true || echo false)"
-ff queues delete cli-orders --yes
-check "ff queues delete deletes it" "0 deleted the queue cli-orders" "$(code) $(out)"
-ff queues get cli-orders
-check "  ... which then isn't there, in the API's words, exit 3" '3 true' "$(code) $(err | grep 'no queue named "cli-orders"' >/dev/null && echo true || echo false)"
-ff queues delete cli-orders-dlq --yes
-# Its requests are counted a minute at a time: in ff usage within two, deleted and all.
-for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.queues[] | select(.name == "cli-orders" and .deleted and .messagesSent >= 3)' >/dev/null && break; sleep 1; done
-ff usage
-check "ff usage lists the queue's month after the buckets, deleted since: its requests as SQS bills them, the messages sent and received" "0 true" \
-  "$(code) $(out | grep -E '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' >/dev/null && echo true || echo false)"
+# Its key's last use is above: revoked now, so that the account's two keys are free for the sections after.
 ff buckets keys revoke "$queue_key" --yes
 }
 section_def queues section_queues buckets
@@ -900,6 +872,22 @@ ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
 }
 section_def notifications section_notifications buckets
+
+section_databases_used() {
+section "a customer's database: its month in ff usage, minutes after it was made; then deleted"
+# Each minute, the backend measures every database not measured yet in the hour: by now this one; run alone, it is
+# waited for, as long as before. Before the small app, which makes the plan's one database.
+for _ in $(seq 75); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.databases | map(.name) | index("cli-orders")' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists its month after the functions" "0 true" "$(code) $(out | grep -E '^cli-orders +[0-9]+ +[0-9.]+ +[0-9.]+$' >/dev/null && echo true || echo false)"
+ff db delete cli-orders
+check "ff db delete asks first, a script saying --yes" "2 true" "$(code) $(err | grep 'ff db delete asks first' >/dev/null && echo true || echo false)"
+ff db delete cli-orders --yes
+check "ff db delete drops it, with its data, its user gone" "0 deleted the database cli-orders, with its data 0" \
+  "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
+ff delete cli-db-orders --yes
+}
+section_def databases_used section_databases_used databases
 
 section_small_app() {
 section "the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
@@ -1025,6 +1013,65 @@ ff delete shop-receipts --yes
 ff delete shop-api --yes
 }
 section_def small_app section_small_app small_app_db buckets
+
+# What the sections above started and the minutes since have done: read here, once those minutes have passed in the
+# sections between.
+section_buckets_used() {
+section "buckets: what the bucket held at its measure, and its month in ff usage, minutes after; then emptied and deleted"
+# Each minute, the backend measures every bucket not measured yet in the hour, and the front door writes the minutes
+# of requests that are over: by now this one's; run alone, they are waited for, as long as before.
+for _ in $(seq 75); do "$ff_bin" buckets get cli-photos --output json 2>/dev/null | jq -e '.measuredAt != null' >/dev/null && break; sleep 1; done
+ff buckets get cli-photos
+check "ff buckets get says what it held at its last measure" "0 true" "$(code) $(out | grep -E '^held +[0-9.]+ MB, [01] objects?, as measured at ' >/dev/null && echo true || echo false)"
+# Its month: the requests the front door counted, by S3's classes, and the bytes they sent out, once their minute is written.
+for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.buckets[] | select(.name == "cli-photos" and .tier1Requests > 0 and .tier2Requests > 0)' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists its month after the databases: GB-months, each class's requests, what it sent out" "0 true true" \
+  "$(code) $(out | grep -E '^cli-photos +[0-9.]+ +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+ [MG]B +[0-9.]+$' >/dev/null && echo true || echo false) $("$ff_bin" usage --output json | jq '.buckets[] | select(.name == "cli-photos") | .bytesDownloaded > 0')"
+ff buckets delete cli-photos --yes
+check "ff buckets delete leaves a bucket with files, in the API's words, exit 3" "3 true" "$(code) $(err | grep "isn't empty" >/dev/null && echo true || echo false)"
+ff buckets delete cli-photos --force --yes
+check "  ... and --force deletes them first" "0 deleted the bucket cli-photos, with its files" "$(code) $(out)"
+}
+section_def buckets_used section_buckets_used buckets
+
+section_sites_counted() {
+section "a site: its visits in ff sites metrics, minutes after; then no site, a site again, and deleted"
+# Each minute, the website server writes the minutes that are over: by now these; run alone, they are waited for, as
+# long as before.
+for _ in $(seq 150); do [ "$("$ff_bin" sites metrics cli-site --period 3600 --since 1h --output json | jq '[.metrics.Requests.Sum[]] | add // 0')" -ge 4 ] && break; sleep 1; done
+ff sites metrics cli-site --period 3600 --since 1h --output json
+check "ff sites metrics counts its visits once their minute is written, as CloudFront names them" "0 true" \
+  "$(code) $(out | jq '([.metrics.Requests.Sum[]] | add >= 4) and ([.metrics.BytesDownloaded.Sum[]] | add > 0)')"
+ff sites remove cli-site --yes
+check "ff sites remove makes it no site: its address answers 404" "0 404" "$(code) $(curl -s -o /dev/null -w '%{http_code}' "$site_url/")"
+ff sites deploy cli-site "$work/dist" --output json
+check "  ... its files kept: a deploy finds them unchanged, and makes it a site again, no single-page app's unless told" "0 0 2 false" \
+  "$(code) $(out | jq -r '"\(.uploaded | length) \(.unchanged) \(.singlePageApp)"')"
+ff buckets delete cli-site --force --yes
+}
+section_def sites_counted section_sites_counted sites
+
+section_queues_counted() {
+section "queues: the queue's metrics, minutes after; then deleted, and its month in ff usage"
+# Its requests are counted a minute at a time: in its metrics by now; run alone, they are waited for, as long as
+# before.
+for _ in $(seq 150); do "$ff_bin" queues metrics cli-orders --output json 2>/dev/null | jq -e '[.metrics.NumberOfMessagesSent.Sum[]] | add >= 3' >/dev/null && break; sleep 1; done
+ff queues metrics cli-orders --period 300
+check "ff queues metrics shows a row each five minutes, SQS's metrics as CloudWatch names them: the messages sent, received and deleted" "0 true true" \
+  "$(code) $(out | head -1 | grep -E '^TIME \(UTC\) +WAITING +IN FLIGHT +OLDEST +SENT +RECEIVED +DELETED +EMPTY$' >/dev/null && echo true || echo false) $(out | tail -1 | grep -E '^cli-orders for [0-9hm ]+, a point each 5m: sent ([3-9]|[1-9][0-9]+), received [1-9][0-9]*, deleted [0-9]+, empty receives [1-9][0-9]*; at most [0-9]+ waiting$' >/dev/null && echo true || echo false)"
+ff queues delete cli-orders --yes
+check "ff queues delete deletes it" "0 deleted the queue cli-orders" "$(code) $(out)"
+ff queues get cli-orders
+check "  ... which then isn't there, in the API's words, exit 3" '3 true' "$(code) $(err | grep 'no queue named "cli-orders"' >/dev/null && echo true || echo false)"
+ff queues delete cli-orders-dlq --yes
+# Its requests are counted a minute at a time: in ff usage within two, deleted and all.
+for _ in $(seq 150); do "$ff_bin" usage --output json 2>/dev/null | jq -e '.queues[] | select(.name == "cli-orders" and .deleted and .messagesSent >= 3)' >/dev/null && break; sleep 1; done
+ff usage
+check "ff usage lists the queue's month after the buckets, deleted since: its requests as SQS bills them, the messages sent and received" "0 true" \
+  "$(code) $(out | grep -E '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' >/dev/null && echo true || echo false)"
+}
+section_def queues_counted section_queues_counted queues
 
 section_account() {
 section "the account: who, its plan, what it used and owes, how its functions ran"

@@ -296,6 +296,13 @@ e2e_dependencies() {
   if $e2e_reuse; then e2e_remove_kept; else e2e_remove_kept --all; fi
   section "dependencies (compose project $E2E_PROJECT)"
   for service in "$@"; do [ "$service" != mailpit ] || e2e_fresh mailpit; done
+  # A port another program holds fails compose's start without saying so: said here, but for this project's own.
+  local port
+  for service in "postgres $FF_PG_PORT" "s3 $FF_S3_PORT"; do
+    port="${service#* }" service="${service%% *}"
+    [ -n "$("${compose[@]}" ps -q "$service" 2>/dev/null)" ] || ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null ||
+      fail "127.0.0.1:$port, $E2E_PROJECT's $service, is another program's: the suite's port variable moves it (FF_E2E_PG_PORT and FF_E2E_S3_PORT for L4; FF_E2E_TENANCY_ and FF_CLI_E2E_ for L5's and the ff suite's)"
+  done
   "${compose[@]}" up -d --wait postgres s3 "$@" >/dev/null 2>&1 || fail "compose dependencies did not become healthy"
   if $e2e_reuse; then
     "${compose[@]}" exec -T postgres psql -U postgres -qc 'DROP DATABASE IF EXISTS serverless_platform WITH (FORCE)' \
