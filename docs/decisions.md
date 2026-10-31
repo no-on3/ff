@@ -5,6 +5,66 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-10-31: step 5 started, its fourteen choices as recommended, and the pipeline's three answers
+
+You said: "start working on the tasks list, one by one, don't spawn too many processes at one time, add that rule to you memory and the project, always think in refactoring mindset too. don't stop until you are finished". The list is the [step-5 task list](step-5-tasks.md): step 5's tasks X-00 to X-15, and the pipeline's T-01 to T-11 (the [step-5 plan](step-5-plan.md)'s D15). Asked the same day, you took each of the step-5 plan's fourteen choices (its §9) as it recommended them, as step 4's were, and answered three questions about GitHub: the branch may be pushed and its workflow run by hand; the pipeline's fixes reach `master` once T-01 to T-05 pass; and the nightly run's shape, the question 39 left open. Any of them can still change; each says below what changing it would touch. The two rules are the first two of the repository's new [`CLAUDE.md`](../CLAUDE.md). The branch `feat/step-5` was made from `master` at `8da3de4`, step 4's merge.
+
+### Step 5: the way out
+
+**51. The order: the export kit first,** with the cost estimate and `ff doctor`, then versions and aliases, keys, Lambda's API, Terraform, SAM. ✅ Your answer: as recommended. The export only reads FF's API as it is, so the promise is kept soonest with the least risk; Lambda's API comes after the versions it must translate.
+- **Changed already:** nothing yet.
+- **Still to change:** X-02 to X-13, in that order.
+
+**52. Lambda's API: the 41 operations that AWS's CLI, its SDKs, Terraform's provider and SAM's resources call,** every other one answering a clear "later" in Lambda's shape, which no client retries. ✅ Your answer: as recommended. The same rule as S3's, SQS's and SES's front doors.
+- **Still to change:** X-01's spike confirms the list; X-09 and X-10 build it.
+
+**53. A change on Lambda's API is answered at once,** `Pending` or `InProgress`, as Lambda answers it and as the tools' waiters expect; FF's own API and the console keep answering once the change is live. ✅ Your answer: as recommended.
+- **Still to change:** X-09.
+
+**54. Runtime names: `nodejs24.x` and `python3.13` alone,** FF's two runtimes; any other name refused, naming the two. ✅ Your answer: as recommended. More versions come with What to build next §9.1.
+- **Still to change:** X-09 and X-12.
+
+**55. An access key names the functions it reaches, or all, at one of three levels: read, invoke, write.** A key made before reaches no function until given some; a function's own key may invoke its account's functions. ✅ Your answer: as recommended. No key gains a right it didn't have; IAM's policy language stays out (What to build next §11).
+- **Still to change:** X-07.
+
+**56. A function's own key lasts 12 hours,** renewed at half its life, the function's pods replaced with the new one before the old ends; no session token. ✅ Your answer: as recommended. It keeps decision 10's promise: a key copied out of a function stops working within hours.
+- **Still to change:** X-08.
+
+**57. Each version that is called runs in pods of its own,** made at its first call and scaled to zero when idle, as `$LATEST` today; an alias can send a share of the calls to a second version. ✅ Your answer: as recommended. Warm instances stay `$LATEST`'s in this step.
+- **Still to change:** X-05.
+
+**58. Lambda's permissions are kept as sent, without effect,** so that Terraform's modules and SAM's templates apply unchanged, and said plainly in the guide, the API's description and by `ff doctor`. ✅ Your answer: as recommended. FF's own rules decide who calls a function.
+- **Still to change:** X-10, X-04 and X-14.
+
+**59. A SAM template is read by `ff deploy`,** which records what it made as a stack in FF, so that the next deploy updates and removes; no CloudFormation endpoint. ✅ Your answer: as recommended. One reader, in one place; the template stays the file `sam deploy` takes on AWS.
+- **Still to change:** X-12.
+
+**60. SAM's web events: `FunctionUrlConfig`, and `HttpApi` events whose routes all go to one function, made its URL;** `Api` events refused, saying why. ✅ Your answer: as recommended. The function gets the same event on both sides; an HTTP router of FF's, as API Gateway, is a product of its own.
+- **Still to change:** X-12 and X-13.
+
+**61. Schedules in Terraform: later,** through EventBridge Scheduler's API if customers ask; in this step, `ff schedule` and SAM's events. ✅ Your answer: as recommended.
+- **Still to change:** nothing in this step.
+
+**62. The cost estimate counts what AWS bills that FF doesn't:** an RDS instance for each database, an ElastiCache node for each cache, cold starts, data out, logs, CloudFront, a NAT gateway, each line with its assumption and a way to leave it out. ✅ Your answer: as recommended. Without them the estimate is far too low for any app with a database.
+- **Still to change:** X-03.
+
+**63. The way out is checked offline in every run** (`sam validate --lint`, cfn-lint, `tofu validate`, Moto), **and on a real AWS account once a month once you have one.** ✅ Your answer: as recommended. Until then the docs say the export is checked offline.
+- **Still to change:** X-02, X-15 and T-10.
+
+**64. Beta's limits: 5 GB of code storage per account, 10 access keys, no count of versions, aliases or stacks;** Lambda's API under the plan's 60 changes a minute, its reads free. ✅ Your answer: as recommended. In the plan like every limit, changed in the admin app.
+- **Still to change:** X-05, X-07 and X-09.
+
+### The pipeline
+
+**65. The pipeline's changes are proven on GitHub, on `feat/step-5`:** the branch pushed, and the workflow started on it by hand (`gh workflow run`) when a pipeline task needs GitHub's proof; `master` untouched until 66. ✅ Your answer: as recommended. A run costs about 80 of the month's 2,000 free minutes until T-04 and T-05 split and cache the jobs: a handful of runs in all.
+- **Still to change:** T-01 to T-05.
+
+**66. The pipeline's fixes reach `master` once T-01 to T-05 pass on the branch's run:** `feat/step-5` merged into `master` and pushed then, so that the nightly run turns green before the step ends; the step's work goes on on the branch, merged again at its end. ✅ Your answer: as recommended.
+- **Still to change:** the merge after T-05.
+
+**67. The nightly run: the platform's suite, and a job that tries the newest versions of the tools the tests pin;** the other jobs run on pushes and pull requests alone. ✅ Your answer: as recommended. It answers 39's question on GitHub's minutes: about 20 minutes a night, 600 a month, where the nightly took about 80 a night repeating every job, 2,400 a month, more than the free 2,000.
+- **Still to change:** T-09: the jobs' `if:`, the tools' job, 39's text with the measured minutes, and the heavy jobs skipped for a push that changes only the docs.
+
 ## 2026-10-30: step 4 started, its eleven choices as recommended
 
 You said: "read docs/step-4-plan.md and docs/what-to-build-next.md, extract what's not done yet, create a dedicated tasks list for it, and then start working on it and don't stop until you are finished. You can deploy to server". The list is the [step-4 task list](step-4-tasks.md). Building without stopping meant answering the [step-4 plan](step-4-plan.md)'s §9 without asking: each of its eleven choices is taken as the plan recommended it. Any of them can still change; each says below what changing it would touch. The branch `feat/step-4` was made from `master` at `82d66ba`. The step was done the same day, W-00 to W-10, and installed on the development server (Deploy 2).
@@ -307,9 +367,7 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
-| Step 5's fourteen choices, each with a recommendation: the order (the export kit first), how much of Lambda's API, how its changes are answered, runtime names, what access keys may do with functions, functions' keys that expire, how a version runs, Lambda's permissions, where a SAM template is read, SAM's web events, schedules in Terraform, what the cost estimate counts, trying the way out on AWS itself, and the limits on beta | [Step-5 plan](step-5-plan.md) §9 | Step 5: nothing of it is built until you confirm them |
 | A domain of its own for customers' content, sites and function URLs, so that a phishing page on one never marks `ffunc.cloud` itself, as GitHub keeps `github.io` apart from `github.com`; or both under `ffunc.cloud`, as now | This log, 42 | The public launch: the names customers' sites and function URLs get, and their certificates |
-| GitHub's minutes, now that the repository is private: GitHub Free gives it 2,000 a month, and the workflow may take up to 170 per push to `master` and 215 a night, its every job, up to about 6,450 a month by the nightly run alone. Public again, where they are free; the nightly run weekly; or the cluster's stage on demand alone | This log, 39 | Whether CI keeps running all month |
 | How the development server updates: by itself, pulling each commit of `master` whose tests passed on GitHub (recommended: GitHub then holds no key to the server; a private repository takes a read-only deploy key of the server's own, and a token that reads the workflow's results), or by GitHub, through a key to the server | This log, 39 | Deploys without anyone running `install.sh` |
 | Function URLs' and buckets' certificates on the development server: the proxy's own authority, as now (recommended); Let's Encrypt's by DNS-01, through an OVH key that can change every record of `ffunc.cloud`, kept on the server other projects share; or one per host on demand, through a line in the shared proxy's main file | [`deploy/dev-server`](../deploy/dev-server/README.md) | Whether a browser that doesn't trust the proxy's root can call a function at its URL |
 | Production's wildcard certificates: the edge's DNS-01 speaks RFC 2136, which OVH's DNS doesn't take: OVH's module in the edge, a DNS server of FF's for the zones of `fn` and `s3`, or one certificate per host on demand | [`deploy/k8s`](../deploy/k8s/README.md); this log, 17 and 38 | Production's install |
